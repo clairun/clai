@@ -1,0 +1,125 @@
+.stack {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 1000;
+  width: min(380px, calc(100vw - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-elevated) 94%, white);
+  box-shadow: var(--shadow-lg);
+}
+
+.toastHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.title {
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: var(--badge-radius);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-dark);
+  border: 1px solid var(--color-warning-border);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status_failed {
+  background: var(--color-critical-bg);
+  color: var(--color-critical-dark);
+  border-color: var(--color-critical-border);
+}
+
+.status_needs_user_input {
+  background: var(--color-info-bg);
+  color: var(--color-info-dark);
+  border-color: var(--color-info-border);
+}
+
+.body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.openButton,
+.dismissButton {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.openButton {
+  border: 1px solid var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-text-on-primary);
+}
+
+.openButton:hover {
+  background: color-mix(in srgb, var(--color-primary) 88%, black);
+}
+
+.dismissButton {
+  border: 1px solid var(--color-border-medium);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+}
+
+.dismissButton:hover {
+  border-color: var(--color-border-strong);
+  color: var(--color-text-primary);
+}
+
+@media (max-width: 640px) {
+  .stack {
+    top: 12px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+}

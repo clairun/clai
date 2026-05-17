@@ -3,6 +3,7 @@ use tauri::Manager;
 use crate::assistant::engine::{bridge_agent_id, AssistantDeps};
 use crate::assistant::tools::inter_agent;
 use crate::assistant::tools::local;
+use crate::assistant::tools::workspace_tasks;
 use crate::mcp::bridge::JsBridge;
 use crate::AppState;
 
@@ -32,6 +33,12 @@ pub async fn execute_tool(
         }
         name if name.starts_with("agent.") => {
             inter_agent::execute(deps, context, name, params).await
+        }
+        "workspace.listAgents"
+        | "workspace.assignTask"
+        | "workspace.getTaskResult"
+        | "workspace.requestUserInput" => {
+            workspace_tasks::execute(deps, context, tool_name, params).await
         }
         _ => execute_external_mcp_tool(deps, context, tool_name, params).await,
     }

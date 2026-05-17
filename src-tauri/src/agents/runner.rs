@@ -418,6 +418,7 @@ async fn ensure_background_session(
         automation_name: Some(agent_config.name.clone()),
         automation_description: Some(agent_config.description.clone()),
         inter_agent_call: None,
+        workspace_agents: Vec::new(),
     };
 
     let existing = find_background_session(

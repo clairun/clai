@@ -172,6 +172,130 @@
   padding-right: 4px;
 }
 
+.attentionPanel {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--color-warning-bg) 54%, var(--color-bg-elevated));
+  box-shadow: var(--shadow-xs);
+}
+
+.attentionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.attentionTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.attentionCount {
+  min-width: 22px;
+  padding: 2px 7px;
+  border-radius: var(--badge-radius);
+  background: var(--color-warning);
+  color: var(--color-text-on-primary);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.attentionList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.attentionItem {
+  min-width: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.attentionItem:hover {
+  border-color: var(--color-warning-border);
+  background: color-mix(in srgb, var(--color-warning-bg) 20%, var(--color-bg-elevated));
+}
+
+.attentionItemHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.attentionWorkspaceTitle,
+.attentionTaskTitle,
+.taskAttentionText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attentionWorkspaceTitle {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.attentionStatus {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: var(--badge-radius);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-dark);
+  border: 1px solid var(--color-warning-border);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.attentionStatus_failed {
+  background: var(--color-critical-bg);
+  color: var(--color-critical-dark);
+  border-color: var(--color-critical-border);
+}
+
+.attentionStatus_needs_user_input {
+  background: var(--color-info-bg);
+  color: var(--color-info-dark);
+  border-color: var(--color-info-border);
+}
+
+.attentionTaskTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.attentionSummary {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--color-text-tertiary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .agentCard {
   position: relative;
   text-align: left;
@@ -349,6 +473,32 @@
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.taskAttentionPreview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+}
+
+.taskAttentionBadge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--color-warning-dark);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.taskAttentionText {
+  min-width: 0;
+  font-size: 11px;
+  color: var(--color-text-secondary);
 }
 
 /* ============================================

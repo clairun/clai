@@ -1,5 +1,6 @@
 import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { getAgents } from '../api/client';
 import { useAssistantStore } from '../assistant';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { useChatManager } from '../contexts/ChatManagerContext';
@@ -7,8 +8,13 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import WorkspaceRenderer from '../workspace/WorkspaceRenderer';
 import { getViewer } from '../workspace/viewers/registry';
 import {
+  acknowledgeWorkspaceTask,
+  assignWorkspaceAgent,
   getWorkspaceSnapshot,
   readWorkspaceFile,
+  setWorkspaceDefaultAgent,
+  submitWorkspaceTaskFeedback,
+  unassignWorkspaceAgent,
 } from '../workspace/client';
 import styles from './Workspace.module.css';
 
@@ -93,6 +99,371 @@ const RUN_STATUS_LABEL = {
   cancelled: 'Cancelled',
 };
 
+const TASK_STATUS_LABEL = {
+  queued: 'Queued',
+  running: 'Running',
+  completed: 'Completed',
+  failed: 'Failed',
+  blocked: 'Blocked',
+  needs_user_input: 'Needs input',
+};
+
+const isTaskAttention = (task) => (
+  (task.status === 'blocked' || task.status === 'failed' || task.status === 'needs_user_input')
+  && !task.attentionAcknowledgedAt
+  && !task.userResponseAt
+);
+
+const WorkspaceAgentsPanel = ({
+  workspaceId,
+  snapshot,
+  onChanged,
+}) => {
+  const assignedAgents = snapshot?.assignedAgents || [];
+  const isManageable = snapshot?.kind !== 'agent' && workspaceId !== DEFAULT_WORKSPACE_ID;
+  const [agents, setAgents] = useState([]);
+  const [selectedAgentId, setSelectedAgentId] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!isManageable) return;
+    let cancelled = false;
+
+    const loadAgents = async () => {
+      try {
+        const result = await getAgents();
+        if (!cancelled) {
+          setAgents(result || []);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(typeof err === 'string' ? err : (err?.message || 'Failed to load agents.'));
+        }
+      }
+    };
+
+    loadAgents();
+    return () => {
+      cancelled = true;
+    };
+  }, [isManageable]);
+
+  const assignedDefinitionIds = useMemo(
+    () => new Set(assignedAgents.map((agent) => agent.agentDefinitionId)),
+    [assignedAgents]
+  );
+
+  const availableAgents = useMemo(
+    () => agents.filter((agent) => !assignedDefinitionIds.has(agent.id)),
+    [agents, assignedDefinitionIds]
+  );
+
+  useEffect(() => {
+    if (!isManageable) return;
+    if (selectedAgentId && availableAgents.some((agent) => agent.id === selectedAgentId)) {
+      return;
+    }
+    setSelectedAgentId(availableAgents[0]?.id || '');
+  }, [availableAgents, isManageable, selectedAgentId]);
+
+  const handleAssign = useCallback(async () => {
+    if (!selectedAgentId || busy) return;
+    setBusy(`assign:${selectedAgentId}`);
+    setError('');
+    try {
+      await assignWorkspaceAgent(workspaceId, selectedAgentId, { role: assignedAgents.length === 0 ? 'manager' : 'member' });
+      await onChanged();
+    } catch (err) {
+      setError(typeof err === 'string' ? err : (err?.message || 'Failed to assign agent.'));
+    } finally {
+      setBusy('');
+    }
+  }, [assignedAgents.length, busy, onChanged, selectedAgentId, workspaceId]);
+
+  const handleSetDefault = useCallback(async (workspaceAgentId) => {
+    if (busy) return;
+    setBusy(`default:${workspaceAgentId}`);
+    setError('');
+    try {
+      await setWorkspaceDefaultAgent(workspaceId, workspaceAgentId);
+      await onChanged();
+    } catch (err) {
+      setError(typeof err === 'string' ? err : (err?.message || 'Failed to update manager.'));
+    } finally {
+      setBusy('');
+    }
+  }, [busy, onChanged, workspaceId]);
+
+  const handleRemove = useCallback(async (workspaceAgentId) => {
+    if (busy) return;
+    setBusy(`remove:${workspaceAgentId}`);
+    setError('');
+    try {
+      await unassignWorkspaceAgent(workspaceAgentId);
+      await onChanged();
+    } catch (err) {
+      setError(typeof err === 'string' ? err : (err?.message || 'Failed to remove agent.'));
+    } finally {
+      setBusy('');
+    }
+  }, [busy, onChanged]);
+
+  if (!isManageable && assignedAgents.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className={styles.agentRoster} aria-label="Workspace agents">
+      <div className={styles.agentRosterHeader}>
+        <div className={styles.agentRosterTitleBlock}>
+          <h2 className={styles.agentRosterTitle}>Workspace Agents</h2>
+          <span className={styles.agentRosterMeta}>{assignedAgents.length} assigned</span>
+        </div>
+        {isManageable && (
+          <div className={styles.agentAssignControls}>
+            <select
+              className={styles.agentSelect}
+              value={selectedAgentId}
+              onChange={(event) => setSelectedAgentId(event.target.value)}
+              disabled={busy || availableAgents.length === 0}
+              aria-label="Agent to assign"
+            >
+              {availableAgents.length === 0 ? (
+                <option value="">All agents assigned</option>
+              ) : null}
+              {availableAgents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className={styles.agentActionPrimary}
+              onClick={handleAssign}
+              disabled={!selectedAgentId || !!busy}
+            >
+              Assign
+            </button>
+          </div>
+        )}
+      </div>
+
+      {error && <div className={styles.agentRosterError}>{error}</div>}
+
+      {assignedAgents.length > 0 ? (
+        <div className={styles.agentRosterList}>
+          {assignedAgents.map((agent) => (
+            <div key={agent.id} className={styles.agentRosterItem}>
+              <div className={styles.agentRosterIdentity}>
+                <div className={styles.agentRosterNameRow}>
+                  <span className={styles.agentRosterName}>{agent.displayName}</span>
+                  {agent.isDefault && <span className={styles.managerBadge}>Manager</span>}
+                </div>
+                {agent.agentDescription && (
+                  <p className={styles.agentRosterDescription}>{agent.agentDescription}</p>
+                )}
+              </div>
+              {isManageable && (
+                <div className={styles.agentRosterActions}>
+                  {!agent.isDefault && (
+                    <button
+                      type="button"
+                      className={styles.agentAction}
+                      onClick={() => handleSetDefault(agent.id)}
+                      disabled={!!busy}
+                    >
+                      Set manager
+                    </button>
+                  )}
+                  {!agent.isDefault && (
+                    <button
+                      type="button"
+                      className={styles.agentActionDanger}
+                      onClick={() => handleRemove(agent.id)}
+                      disabled={!!busy}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className={styles.agentRosterEmpty}>No agents assigned yet.</div>
+      )}
+    </section>
+  );
+};
+
+const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged }) => {
+  const visibleTasks = tasks || [];
+  const [feedbackDrafts, setFeedbackDrafts] = useState({});
+  const [busyTaskId, setBusyTaskId] = useState('');
+  const [error, setError] = useState('');
+
+  const handleAcknowledge = useCallback(async (taskId) => {
+    if (busyTaskId) return;
+    setBusyTaskId(taskId);
+    setError('');
+    try {
+      await acknowledgeWorkspaceTask(workspaceId, taskId);
+      await onChanged();
+    } catch (err) {
+      setError(typeof err === 'string' ? err : (err?.message || 'Failed to acknowledge task.'));
+    } finally {
+      setBusyTaskId('');
+    }
+  }, [busyTaskId, onChanged, workspaceId]);
+
+  const handleSubmitFeedback = useCallback(async (taskId) => {
+    if (busyTaskId) return;
+    const response = (feedbackDrafts[taskId] || '').trim();
+    if (!response) {
+      setError('Feedback cannot be empty.');
+      return;
+    }
+
+    setBusyTaskId(taskId);
+    setError('');
+    try {
+      await submitWorkspaceTaskFeedback(workspaceId, taskId, response);
+      setFeedbackDrafts((current) => ({ ...current, [taskId]: '' }));
+      await onChanged();
+    } catch (err) {
+      setError(typeof err === 'string' ? err : (err?.message || 'Failed to submit feedback.'));
+    } finally {
+      setBusyTaskId('');
+    }
+  }, [busyTaskId, feedbackDrafts, onChanged, workspaceId]);
+
+  return (
+    <section className={styles.taskActivity} aria-label="Workspace task activity">
+      <div className={styles.taskActivityHeader}>
+        <div className={styles.agentRosterTitleBlock}>
+          <h2 className={styles.agentRosterTitle}>Task Activity</h2>
+          <span className={styles.agentRosterMeta}>{visibleTasks.length} recent</span>
+        </div>
+      </div>
+
+      {error && <div className={styles.agentRosterError}>{error}</div>}
+
+      {visibleTasks.length > 0 ? (
+        <div className={styles.taskList}>
+          {visibleTasks.map((task) => {
+            const statusLabel = TASK_STATUS_LABEL[task.status] || task.status;
+            const detail = task.error || task.resultSummary || task.instructions;
+            const needsAttention = isTaskAttention(task);
+            const draft = feedbackDrafts[task.id] || '';
+            return (
+              <div key={task.id} className={styles.taskItem}>
+                <div className={styles.taskMain}>
+                  <div className={styles.taskTitleRow}>
+                    <span className={styles.taskTitle}>{task.title}</span>
+                    <span className={`${styles.taskStatus} ${styles[`taskStatus_${task.status}`] || ''}`}>
+                      {statusLabel}
+                    </span>
+                  </div>
+                  <div className={styles.taskMeta}>
+                    <span>{task.assignedAgentDisplayName}</span>
+                    <span className={styles.metricSeparator}>{'\u00B7'}</span>
+                    <span>{formatRelativeTime(task.updatedAt)}</span>
+                  </div>
+                  {detail && (
+                    <p className={styles.taskSummary}>{detail}</p>
+                  )}
+                  {task.userResponse && (
+                    <p className={styles.taskUserResponse}>
+                      User response: {task.userResponse}
+                    </p>
+                  )}
+                  {needsAttention && task.status === 'needs_user_input' && (
+                    <div className={styles.taskFeedbackBox}>
+                      <textarea
+                        className={styles.taskFeedbackInput}
+                        value={draft}
+                        onChange={(event) => setFeedbackDrafts((current) => ({
+                          ...current,
+                          [task.id]: event.target.value,
+                        }))}
+                        placeholder="Reply for the manager"
+                        rows={3}
+                        disabled={busyTaskId === task.id}
+                      />
+                      <div className={styles.taskActions}>
+                        <button
+                          type="button"
+                          className={styles.taskActionPrimary}
+                          onClick={() => handleSubmitFeedback(task.id)}
+                          disabled={busyTaskId === task.id || !draft.trim()}
+                        >
+                          Submit response
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.taskAction}
+                          onClick={() => handleAcknowledge(task.id)}
+                          disabled={busyTaskId === task.id}
+                        >
+                          Mark reviewed
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {needsAttention && task.status !== 'needs_user_input' && (
+                    <div className={styles.taskActions}>
+                      <button
+                        type="button"
+                        className={styles.taskAction}
+                        onClick={() => handleAcknowledge(task.id)}
+                        disabled={busyTaskId === task.id}
+                      >
+                        Mark reviewed
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className={styles.agentRosterEmpty}>No delegated tasks yet.</div>
+      )}
+    </section>
+  );
+};
+
+const WorkspaceAttentionBanner = ({ tasks }) => {
+  const attentionTasks = (tasks || []).filter(isTaskAttention);
+
+  if (attentionTasks.length === 0) {
+    return null;
+  }
+
+  const primary = attentionTasks[0];
+  const statusLabel = TASK_STATUS_LABEL[primary.status] || primary.status;
+  const detail = primary.error || primary.resultSummary || primary.instructions;
+
+  return (
+    <section className={styles.attentionBanner} aria-label="Workspace attention">
+      <div className={styles.attentionBannerHeader}>
+        <span className={styles.attentionBannerTitle}>
+          {attentionTasks.length} task{attentionTasks.length === 1 ? '' : 's'} need attention
+        </span>
+        <span className={`${styles.taskStatus} ${styles[`taskStatus_${primary.status}`] || ''}`}>
+          {statusLabel}
+        </span>
+      </div>
+      <div className={styles.attentionBannerTask}>{primary.title}</div>
+      {detail && <p className={styles.attentionBannerDetail}>{detail}</p>}
+    </section>
+  );
+};
+
 /**
  * Compact workspace header with breadcrumb navigation, status, and inline metrics.
  */
@@ -100,6 +471,8 @@ const WorkspaceHeader = ({ snapshot, workspaceId, isGenericWorkspace, messages, 
   const isAgent = snapshot?.kind === 'agent';
   const lastRun = getLastRunInfo(snapshot?.runs);
   const nextRunText = formatNextRun(snapshot?.nextRunInSeconds);
+  const assignedAgentCount = snapshot?.assignedAgents?.length || 0;
+  const taskCount = snapshot?.tasks?.length || 0;
 
   return (
     <div className={styles.header}>
@@ -143,6 +516,10 @@ const WorkspaceHeader = ({ snapshot, workspaceId, isGenericWorkspace, messages, 
           </>
         )}
         <span className={styles.metric}>{messages.length} msgs</span>
+        <span className={styles.metricSeparator}>{'\u00B7'}</span>
+        <span className={styles.metric}>{assignedAgentCount} agents</span>
+        <span className={styles.metricSeparator}>{'\u00B7'}</span>
+        <span className={styles.metric}>{taskCount} tasks</span>
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         <span className={styles.metric}>{memories.length} memories</span>
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
@@ -435,6 +812,7 @@ const Workspace = () => {
   const toolCalls = sessionState?.toolCalls || snapshot?.toolCalls || [];
   const streamingText = sessionState?.streamingTextByMessageId || {};
   const isStreaming = sessionState?.isStreaming || false;
+  const tasks = snapshot?.tasks || [];
   const activeEntry = selectedEntry ? entryLookup.get(selectedEntry) : null;
   const isAgent = snapshot?.kind === 'agent';
   const hasContent = memories.length > 0 || artifacts.length > 0;
@@ -460,6 +838,24 @@ const Workspace = () => {
       />
 
       {error && <div className={styles.errorBanner}>{error}</div>}
+
+      <WorkspaceAttentionBanner tasks={tasks} />
+
+      {snapshot && (
+        <WorkspaceAgentsPanel
+          workspaceId={workspaceId}
+          snapshot={snapshot}
+          onChanged={() => loadSnapshot(false)}
+        />
+      )}
+
+      {snapshot && (
+        <WorkspaceTasksPanel
+          workspaceId={workspaceId}
+          tasks={tasks}
+          onChanged={() => loadSnapshot(false)}
+        />
+      )}
 
       {useDesignedLayout ? (
         <WorkspaceRenderer

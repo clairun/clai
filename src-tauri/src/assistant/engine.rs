@@ -408,11 +408,13 @@ pub async fn run_session_turn(
                 run_id: run_id.clone(),
                 tool_call_id: Some(tc.tool_call_id.clone()),
                 tab_id: session.tab_id.clone(),
+                workspace_id: session.context.workspace_id.clone(),
                 space_id: session.context.space_id.clone(),
                 room_id: session.context.room_id.clone(),
                 mcp_server_ids: session.context.mcp_server_ids.clone(),
                 agent_workspace_id: session.context.agent_workspace_id.clone(),
                 automation_id: session.context.automation_id.clone(),
+                workspace_agents: session.context.workspace_agents.clone(),
                 inter_agent_call_depth: input.inter_agent_call_depth,
                 execution: session.context.execution.clone(),
                 notices: notices.clone(),
@@ -525,11 +527,13 @@ pub async fn run_session_turn(
         run_id: run_id.clone(),
         tool_call_id: None,
         tab_id: session.tab_id.clone(),
+        workspace_id: session.context.workspace_id.clone(),
         space_id: session.context.space_id.clone(),
         room_id: session.context.room_id.clone(),
         mcp_server_ids: session.context.mcp_server_ids.clone(),
         agent_workspace_id: session.context.agent_workspace_id.clone(),
         automation_id: session.context.automation_id.clone(),
+        workspace_agents: session.context.workspace_agents.clone(),
         inter_agent_call_depth: input.inter_agent_call_depth,
         execution: session.context.execution.clone(),
         notices,
@@ -651,10 +655,44 @@ fn build_system_prompt(
                 "This is a synchronous inter-agent call. The caller is waiting for your response.\n",
             );
         }
+        RunTrigger::WorkspaceTask => {
+            prompt.push_str(
+                "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked by missing capability, context, permission, or runtime failure, start with `BLOCKED:` and state the specific manager or user action needed. If you specifically need user feedback or approval, start with `NEEDS_USER_INPUT:` and state the decision needed.\n",
+            );
+        }
         RunTrigger::UserMessage | RunTrigger::Retry => {
             prompt.push_str(
                 "This is a user-driven run. Prioritize the user's latest message and use prior context only as support.\n",
             );
+        }
+    }
+
+    if !context.workspace_agents.is_empty() {
+        prompt.push_str("\n## Workspace Team\n");
+        prompt.push_str(
+            "This workspace has assigned agents. The default manager agent receives user messages and is responsible for routing work inside this workspace.\n\
+             Use this roster as workspace-local context. Do not assume agents outside this list are available for collaboration.\n\
+             When task delegation tools are available, assign bounded tasks only to assigned workspace agents. Use `workspace.requestUserInput` when work is blocked on user feedback, approval, or missing information. If delegation tools are not available yet, explain which assigned agent should handle the work and what is blocked.\n\n",
+        );
+        prompt.push_str("Assigned workspace agents:\n");
+        for agent in &context.workspace_agents {
+            let role = if agent.is_default {
+                "manager"
+            } else {
+                agent.role.as_str()
+            };
+            if let Some(description) = agent
+                .description
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                prompt.push_str(&format!(
+                    "- {} ({}) — {}\n",
+                    agent.display_name, role, description
+                ));
+            } else {
+                prompt.push_str(&format!("- {} ({})\n", agent.display_name, role));
+            }
         }
     }
 
@@ -792,7 +830,10 @@ fn build_system_prompt(
                      10. Prune stale entries: if a knowledge entry or checkpoint is no longer relevant, remove it.\n",
                 );
             }
-            RunTrigger::InterAgentCall | RunTrigger::UserMessage | RunTrigger::Retry => {
+            RunTrigger::InterAgentCall
+            | RunTrigger::WorkspaceTask
+            | RunTrigger::UserMessage
+            | RunTrigger::Retry => {
                 prompt.push_str(
                     "### Memory in user-driven runs\n\
                      - Do NOT read memory unless the user's request specifically needs historical context.\n\
@@ -828,6 +869,7 @@ mod tests {
     use super::*;
     use crate::assistant::types::ContentPart;
     use crate::assistant::types::SessionContext;
+    use crate::assistant::types::WorkspaceAgentSummary;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
 
     #[test]
@@ -1003,6 +1045,43 @@ mod tests {
     }
 
     #[test]
+    fn build_system_prompt_includes_workspace_agent_roster() {
+        let context = SessionContext {
+            workspace_agents: vec![
+                WorkspaceAgentSummary {
+                    id: "workspace-agent-manager".to_string(),
+                    agent_definition_id: "manager-definition".to_string(),
+                    display_name: "Manager".to_string(),
+                    role: "manager".to_string(),
+                    is_default: true,
+                    description: Some("Coordinates workspace tasks.".to_string()),
+                },
+                WorkspaceAgentSummary {
+                    id: "workspace-agent-reviewer".to_string(),
+                    agent_definition_id: "reviewer-definition".to_string(),
+                    display_name: "Code Reviewer".to_string(),
+                    role: "member".to_string(),
+                    is_default: false,
+                    description: Some("Reviews source changes.".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(text.contains("## Workspace Team"));
+        assert!(text.contains("The default manager agent receives user messages"));
+        assert!(text.contains("- Manager (manager)"));
+        assert!(text.contains("- Code Reviewer (member)"));
+        assert!(text.contains("Reviews source changes."));
+    }
+
+    #[test]
     fn build_system_prompt_memory_guardrails_present_in_both_modes() {
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
@@ -1062,7 +1141,10 @@ fn build_trigger_message(
              Run the automation {} now and report the current findings.",
             now, automation_name
         )),
-        RunTrigger::InterAgentCall | RunTrigger::UserMessage | RunTrigger::Retry => None,
+        RunTrigger::InterAgentCall
+        | RunTrigger::WorkspaceTask
+        | RunTrigger::UserMessage
+        | RunTrigger::Retry => None,
     }?;
 
     Some(ProviderInputMessage {

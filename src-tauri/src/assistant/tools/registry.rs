@@ -1,3 +1,7 @@
+use crate::assistant::tools::workspace_tasks::{
+    AssignWorkspaceTaskParams, GetWorkspaceTaskResultParams, ListWorkspaceAgentsParams,
+    RequestWorkspaceUserInputParams,
+};
 use crate::assistant::types::{SessionContext, ToolDefinition};
 use crate::config::ExposedAgentTool;
 use crate::config::ShellAccessMode;
@@ -42,6 +46,25 @@ pub fn available_tools(
         tools.push(tool::<UpdateDashboardArtifactParams>(
             "workspace.updateDashboard",
             "Update an existing durable .dashboard.json artifact in the current workspace.",
+        ));
+    }
+
+    if is_workspace_manager_context(context) {
+        tools.push(tool::<ListWorkspaceAgentsParams>(
+            "workspace.listAgents",
+            "List agents assigned to this workspace. Use this before delegating work so tasks are assigned only to workspace-local agents.",
+        ));
+        tools.push(tool::<AssignWorkspaceTaskParams>(
+            "workspace.assignTask",
+            "Assign a bounded task to an agent assigned to this workspace. The task runs asynchronously and returns a task ID to poll with workspace.getTaskResult.",
+        ));
+        tools.push(tool::<GetWorkspaceTaskResultParams>(
+            "workspace.getTaskResult",
+            "Read the current status and result of a workspace-local task by task ID.",
+        ));
+        tools.push(tool::<RequestWorkspaceUserInputParams>(
+            "workspace.requestUserInput",
+            "Create a workspace-visible request for user feedback, approval, or missing information. Use this when work is blocked on a human decision.",
         ));
     }
 
@@ -166,6 +189,17 @@ pub fn available_tools(
     tools.extend(external_tools.iter().cloned());
 
     tools
+}
+
+fn is_workspace_manager_context(context: &SessionContext) -> bool {
+    let Some(current_agent_definition_id) = context.automation_id.as_deref() else {
+        return false;
+    };
+
+    context
+        .workspace_agents
+        .iter()
+        .any(|agent| agent.is_default && agent.agent_definition_id == current_agent_definition_id)
 }
 
 #[derive(Debug, Clone)]

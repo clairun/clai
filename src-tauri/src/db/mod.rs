@@ -607,6 +607,7 @@ async fn migrate_workspaces(pool: &DbPool) -> Result<(), String> {
             kind TEXT NOT NULL DEFAULT 'general',
             title TEXT,
             preferred_provider_connection_id TEXT,
+            default_workspace_agent_id TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         )
@@ -629,6 +630,14 @@ async fn migrate_workspaces(pool: &DbPool) -> Result<(), String> {
             })?;
     }
 
+    // Add default_workspace_agent_id column if missing (agent fleet workspace rosters)
+    if !column_exists(pool, "workspaces", "default_workspace_agent_id").await? {
+        sqlx::query("ALTER TABLE workspaces ADD COLUMN default_workspace_agent_id TEXT")
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to add workspaces.default_workspace_agent_id: {}", e))?;
+    }
+
     sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_workspaces_updated
@@ -638,6 +647,124 @@ async fn migrate_workspaces(pool: &DbPool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to create workspaces index: {}", e))?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS workspace_agents (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            agent_definition_id TEXT NOT NULL,
+            display_name TEXT,
+            role TEXT NOT NULL DEFAULT 'member',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create workspace_agents table: {}", e))?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_workspace_agents_workspace
+        ON workspace_agents(workspace_id)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create workspace_agents workspace index: {}", e))?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_workspace_agents_definition
+        ON workspace_agents(agent_definition_id)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create workspace_agents definition index: {}", e))?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS workspace_tasks (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            created_by_workspace_agent_id TEXT,
+            assigned_to_workspace_agent_id TEXT NOT NULL,
+            assigned_agent_definition_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            instructions TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result_summary TEXT,
+            result_json TEXT,
+            error TEXT,
+            session_id TEXT,
+            run_id TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            completed_at INTEGER,
+            attention_acknowledged_at INTEGER,
+            user_response TEXT,
+            user_response_at INTEGER
+        )
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create workspace_tasks table: {}", e))?;
+
+    for (column, column_type) in [
+        ("attention_acknowledged_at", "INTEGER"),
+        ("user_response", "TEXT"),
+        ("user_response_at", "INTEGER"),
+    ] {
+        if !column_exists(pool, "workspace_tasks", column).await? {
+            sqlx::query(&format!(
+                "ALTER TABLE workspace_tasks ADD COLUMN {} {}",
+                column, column_type
+            ))
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to add workspace_tasks.{}: {}", column, e))?;
+        }
+    }
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_workspace_tasks_workspace
+        ON workspace_tasks(workspace_id, updated_at DESC)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create workspace_tasks workspace index: {}", e))?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_workspace_tasks_assigned_agent
+        ON workspace_tasks(assigned_to_workspace_agent_id, updated_at DESC)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        format!(
+            "Failed to create workspace_tasks assigned-agent index: {}",
+            e
+        )
+    })?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_workspace_tasks_status
+        ON workspace_tasks(workspace_id, status, updated_at DESC)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create workspace_tasks status index: {}", e))?;
 
     Ok(())
 }

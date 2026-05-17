@@ -145,6 +145,437 @@
   flex-shrink: 0;
 }
 
+/* ── Workspace Agents ────────────────────────────────── */
+
+.agentRoster {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
+  flex-shrink: 0;
+}
+
+.agentRosterHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.agentRosterTitleBlock {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agentRosterTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.agentRosterMeta {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.agentAssignControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 260px;
+}
+
+.agentSelect {
+  min-width: 180px;
+  height: 30px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  padding: 0 8px;
+}
+
+.agentAction,
+.agentActionPrimary,
+.agentActionDanger {
+  height: 30px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 10px;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.agentAction:hover,
+.agentActionPrimary:hover {
+  border-color: var(--color-primary-alpha-30);
+  color: var(--color-primary);
+}
+
+.agentActionPrimary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+}
+
+.agentActionPrimary:hover {
+  color: white;
+  background: color-mix(in srgb, var(--color-primary) 88%, black);
+}
+
+.agentActionDanger:hover {
+  border-color: color-mix(in srgb, var(--color-critical) 30%, transparent);
+  color: var(--color-critical);
+}
+
+.agentAction:disabled,
+.agentActionPrimary:disabled,
+.agentActionDanger:disabled,
+.agentSelect:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.agentRosterError {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-critical) 8%, var(--color-bg-elevated));
+  color: var(--color-critical);
+  font-size: 12px;
+}
+
+.agentRosterList {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.agentRosterItem {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+}
+
+.agentRosterIdentity {
+  min-width: 0;
+}
+
+.agentRosterNameRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agentRosterName {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.managerBadge {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-primary-alpha-08);
+  color: var(--color-primary);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.agentRosterDescription {
+  margin: 3px 0 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--color-text-tertiary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.agentRosterActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.agentRosterEmpty {
+  padding: 8px 4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+/* ── Workspace Attention ────────────────────────────── */
+
+.attentionBanner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-warning-bg) 58%, var(--color-bg-elevated));
+  flex-shrink: 0;
+}
+
+.attentionBannerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.attentionBannerTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.attentionBannerTask {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attentionBannerDetail {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-tertiary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── Workspace Task Activity ─────────────────────────── */
+
+.taskActivity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
+  flex-shrink: 0;
+}
+
+.taskActivityHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.taskList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.taskItem {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+}
+
+.taskMain {
+  min-width: 0;
+}
+
+.taskTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.taskTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.taskStatus {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  background: var(--color-overlay-06);
+  color: var(--color-text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.taskStatus_completed {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent);
+}
+
+.taskStatus_running {
+  background: var(--color-primary-alpha-08);
+  color: var(--color-primary);
+}
+
+.taskStatus_queued {
+  background: var(--color-overlay-06);
+  color: var(--color-text-tertiary);
+}
+
+.taskStatus_failed {
+  background: color-mix(in srgb, var(--color-critical) 10%, transparent);
+  color: var(--color-critical);
+}
+
+.taskStatus_blocked,
+.taskStatus_needs_user_input {
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--color-warning);
+}
+
+.taskMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+}
+
+.taskSummary {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.taskUserResponse {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-alpha-08);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.taskFeedbackBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.taskFeedbackInput {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 7px 8px;
+}
+
+.taskFeedbackInput:focus {
+  border-color: var(--color-primary-alpha-30);
+}
+
+.taskActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.taskAction,
+.taskActionPrimary {
+  height: 28px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 10px;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.taskAction:hover,
+.taskActionPrimary:hover {
+  border-color: var(--color-primary-alpha-30);
+  color: var(--color-primary);
+}
+
+.taskActionPrimary {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: white;
+}
+
+.taskActionPrimary:hover {
+  color: white;
+  background: color-mix(in srgb, var(--color-primary) 88%, black);
+}
+
+.taskAction:disabled,
+.taskActionPrimary:disabled,
+.taskFeedbackInput:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 /* ── Chat-First Layout (general workspaces) ──────────── */
 
 .chatFirstContent {
@@ -381,6 +812,37 @@
 
   .header {
     flex-wrap: wrap;
+  }
+
+  .agentRosterHeader,
+  .agentRosterItem {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .agentAssignControls {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .agentSelect {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .agentRosterActions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .taskTitleRow,
+  .taskMeta {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .taskTitle {
+    white-space: normal;
   }
 
   .fallbackContent {

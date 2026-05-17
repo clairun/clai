@@ -6,13 +6,15 @@
 use crate::assistant::repository;
 use crate::assistant::tools::local::agent_workspace_root_for_id;
 use crate::assistant::types::{
-    AssistantMessage, AssistantRun, AssistantSession, SessionContext, SessionKind, ToolInvocation,
+    AssistantMessage, AssistantRun, AssistantSession, ContentPart, MessageRole, SessionContext,
+    SessionKind, ToolInvocation, WorkspaceAgentSummary,
 };
 use crate::config::{AgentConfig, ExecutionCapabilityConfig};
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -107,6 +109,12 @@ pub struct WorkspaceSnapshot {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    #[serde(default)]
+    pub assigned_agents: Vec<WorkspaceAgentResponse>,
+    #[serde(default)]
+    pub tasks: Vec<WorkspaceTaskResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_workspace_agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub root_path: Option<String>,
     #[serde(default)]
@@ -136,6 +144,63 @@ pub struct WorkspaceSnapshot {
     pub interval_minutes: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_run_in_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAgentResponse {
+    pub id: String,
+    pub workspace_id: String,
+    pub agent_definition_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_description: Option<String>,
+    #[serde(default)]
+    pub provider_connection_ids: Vec<String>,
+    #[serde(default)]
+    pub skill_ids: Vec<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskResponse {
+    pub id: String,
+    pub workspace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_workspace_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_display_name: Option<String>,
+    pub assigned_to_workspace_agent_id: String,
+    pub assigned_agent_definition_id: String,
+    pub assigned_agent_display_name: String,
+    pub title: String,
+    pub instructions: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention_acknowledged_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_response_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,6 +240,32 @@ pub struct WorkspaceWriteFileRequest {
     pub workspace_id: String,
     pub path: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAssignAgentRequest {
+    pub workspace_id: String,
+    pub agent_definition_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskActionRequest {
+    pub workspace_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskFeedbackRequest {
+    pub workspace_id: String,
+    pub task_id: String,
+    pub response: String,
 }
 
 #[derive(Debug, Clone)]
@@ -217,6 +308,22 @@ type CommandRow = (
 struct VirtualWorkspaceArtifact {
     entry: WorkspaceFileEntry,
     content: String,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceAgentRow {
+    id: String,
+    workspace_id: String,
+    agent_definition_id: String,
+    display_name: Option<String>,
+    role: String,
+    enabled: bool,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 fn normalize_workspace_id(workspace_id: Option<String>) -> String {
@@ -677,6 +784,399 @@ fn workspace_descriptor_from_agent(
     })
 }
 
+fn normalize_workspace_agent_role(role: Option<String>) -> Result<String, String> {
+    let normalized = role
+        .unwrap_or_else(|| "member".to_string())
+        .trim()
+        .to_ascii_lowercase();
+
+    match normalized.as_str() {
+        "" => Ok("member".to_string()),
+        "member" | "manager" => Ok(normalized),
+        _ => Err("Workspace agent role must be either 'member' or 'manager'.".to_string()),
+    }
+}
+
+fn select_default_agent_definition_id(state: &AppState) -> Result<Option<String>, String> {
+    let config_manager = state
+        .config_manager
+        .lock()
+        .map_err(|error| format!("Lock error: {}", error))?;
+
+    let agents = config_manager.get_agents();
+    Ok(agents
+        .iter()
+        .find(|agent| agent.is_default())
+        .or_else(|| agents.first())
+        .map(|agent| agent.id.clone()))
+}
+
+async fn workspace_default_agent_id(
+    pool: &DbPool,
+    workspace_id: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_scalar("SELECT default_workspace_agent_id FROM workspaces WHERE id = ? LIMIT 1")
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to load workspace default agent: {}", e))
+        .map(|value: Option<Option<String>>| value.flatten())
+}
+
+async fn set_workspace_default_agent_id(
+    pool: &DbPool,
+    workspace_id: &str,
+    workspace_agent_id: Option<&str>,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE workspaces SET default_workspace_agent_id = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(workspace_agent_id)
+    .bind(now_millis())
+    .bind(workspace_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update workspace default agent: {}", e))?;
+
+    Ok(())
+}
+
+async fn load_workspace_agent_rows(
+    pool: &DbPool,
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceAgentRow>, String> {
+    let rows: Vec<(String, String, String, Option<String>, String, i64, i64, i64)> =
+        sqlx::query_as(
+            r#"
+            SELECT id, workspace_id, agent_definition_id, display_name, role, enabled, created_at, updated_at
+            FROM workspace_agents
+            WHERE workspace_id = ?
+            ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, created_at ASC
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to load workspace agents: {}", e))?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                id,
+                workspace_id,
+                agent_definition_id,
+                display_name,
+                role,
+                enabled,
+                created_at,
+                updated_at,
+            )| WorkspaceAgentRow {
+                id,
+                workspace_id,
+                agent_definition_id,
+                display_name,
+                role,
+                enabled: enabled != 0,
+                created_at,
+                updated_at,
+            },
+        )
+        .collect())
+}
+
+fn workspace_agent_response_from_row(
+    row: WorkspaceAgentRow,
+    agent: Option<&AgentConfig>,
+    default_workspace_agent_id: Option<&str>,
+) -> WorkspaceAgentResponse {
+    let display_name = row
+        .display_name
+        .clone()
+        .or_else(|| agent.map(|agent| agent.name.clone()))
+        .unwrap_or_else(|| row.agent_definition_id.clone());
+
+    WorkspaceAgentResponse {
+        id: row.id.clone(),
+        workspace_id: row.workspace_id,
+        agent_definition_id: row.agent_definition_id,
+        display_name,
+        role: row.role,
+        enabled: row.enabled,
+        is_default: default_workspace_agent_id == Some(row.id.as_str()),
+        agent_name: agent.map(|agent| agent.name.clone()),
+        agent_description: agent.map(|agent| agent.description.clone()),
+        provider_connection_ids: agent
+            .map(|agent| agent.provider_connection_ids.clone())
+            .unwrap_or_default(),
+        skill_ids: Vec::new(),
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn concise_agent_description(description: Option<String>) -> Option<String> {
+    let text = description?;
+    let first_line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .to_string();
+
+    const MAX_SUMMARY_CHARS: usize = 240;
+    if first_line.chars().count() <= MAX_SUMMARY_CHARS {
+        return Some(first_line);
+    }
+
+    let mut summary: String = first_line.chars().take(MAX_SUMMARY_CHARS).collect();
+    summary.push_str("...");
+    Some(summary)
+}
+
+async fn list_workspace_agent_responses(
+    pool: &DbPool,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<(Vec<WorkspaceAgentResponse>, Option<String>), String> {
+    let rows = load_workspace_agent_rows(pool, workspace_id).await?;
+    let default_workspace_agent_id = workspace_default_agent_id(pool, workspace_id).await?;
+    let agents_by_id: HashMap<String, AgentConfig> = {
+        let config_manager = state
+            .config_manager
+            .lock()
+            .map_err(|error| format!("Lock error: {}", error))?;
+        config_manager
+            .get_agents()
+            .into_iter()
+            .map(|agent| (agent.id.clone(), agent))
+            .collect()
+    };
+
+    let responses = rows
+        .into_iter()
+        .map(|row| {
+            let agent = agents_by_id.get(&row.agent_definition_id);
+            workspace_agent_response_from_row(row, agent, default_workspace_agent_id.as_deref())
+        })
+        .collect();
+
+    Ok((responses, default_workspace_agent_id))
+}
+
+async fn list_workspace_task_responses(
+    pool: &DbPool,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceTaskResponse>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            task.id,
+            task.workspace_id,
+            task.created_by_workspace_agent_id,
+            creator.display_name AS created_by_display_name,
+            task.assigned_to_workspace_agent_id,
+            task.assigned_agent_definition_id,
+            assigned.display_name AS assigned_display_name,
+            task.title,
+            task.instructions,
+            task.status,
+            task.result_summary,
+            task.error,
+            task.session_id,
+            task.run_id,
+            task.created_at,
+            task.updated_at,
+            task.completed_at,
+            task.attention_acknowledged_at,
+            task.user_response,
+            task.user_response_at
+        FROM workspace_tasks task
+        LEFT JOIN workspace_agents assigned
+            ON assigned.id = task.assigned_to_workspace_agent_id
+        LEFT JOIN workspace_agents creator
+            ON creator.id = task.created_by_workspace_agent_id
+        WHERE task.workspace_id = ?
+        ORDER BY task.updated_at DESC, task.created_at DESC
+        LIMIT 50
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load workspace tasks: {}", e))?;
+
+    let agents_by_id: HashMap<String, AgentConfig> = {
+        let config_manager = state
+            .config_manager
+            .lock()
+            .map_err(|error| format!("Lock error: {}", error))?;
+        config_manager
+            .get_agents()
+            .into_iter()
+            .map(|agent| (agent.id.clone(), agent))
+            .collect()
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let assigned_agent_definition_id: String = row.get("assigned_agent_definition_id");
+            let assigned_display_name: Option<String> = row.get("assigned_display_name");
+            let assigned_agent_display_name = assigned_display_name
+                .or_else(|| {
+                    agents_by_id
+                        .get(&assigned_agent_definition_id)
+                        .map(|agent| agent.name.clone())
+                })
+                .unwrap_or_else(|| assigned_agent_definition_id.clone());
+
+            WorkspaceTaskResponse {
+                id: row.get("id"),
+                workspace_id: row.get("workspace_id"),
+                created_by_workspace_agent_id: row.get("created_by_workspace_agent_id"),
+                created_by_display_name: row.get("created_by_display_name"),
+                assigned_to_workspace_agent_id: row.get("assigned_to_workspace_agent_id"),
+                assigned_agent_definition_id,
+                assigned_agent_display_name,
+                title: row.get("title"),
+                instructions: row.get("instructions"),
+                status: row.get("status"),
+                result_summary: row.get("result_summary"),
+                error: row.get("error"),
+                session_id: row.get("session_id"),
+                run_id: row.get("run_id"),
+                created_at: row.get("created_at"),
+                updated_at: row.get("updated_at"),
+                completed_at: row.get("completed_at"),
+                attention_acknowledged_at: row.get("attention_acknowledged_at"),
+                user_response: row.get("user_response"),
+                user_response_at: row.get("user_response_at"),
+            }
+        })
+        .collect())
+}
+
+async fn workspace_agent_summaries(
+    pool: &DbPool,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceAgentSummary>, String> {
+    let (agents, _) = list_workspace_agent_responses(pool, state, workspace_id).await?;
+
+    Ok(agents
+        .into_iter()
+        .map(|agent| WorkspaceAgentSummary {
+            id: agent.id,
+            agent_definition_id: agent.agent_definition_id,
+            display_name: agent.display_name,
+            role: agent.role,
+            is_default: agent.is_default,
+            description: concise_agent_description(agent.agent_description),
+        })
+        .collect())
+}
+
+fn resolve_workspace_manager_agent(
+    state: &AppState,
+    workspace_agents: &[WorkspaceAgentSummary],
+) -> Result<Option<AgentConfig>, String> {
+    let Some(manager) = workspace_agents
+        .iter()
+        .find(|agent| agent.is_default)
+        .or_else(|| {
+            workspace_agents
+                .iter()
+                .find(|agent| agent.role == "manager")
+        })
+    else {
+        return Ok(None);
+    };
+
+    let config_manager = state
+        .config_manager
+        .lock()
+        .map_err(|error| format!("Lock error: {}", error))?;
+
+    Ok(config_manager.get_agent(&manager.agent_definition_id))
+}
+
+async fn assign_workspace_agent_row(
+    pool: &DbPool,
+    workspace_id: &str,
+    agent_definition_id: &str,
+    display_name: Option<String>,
+    role: &str,
+) -> Result<String, String> {
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM workspace_agents WHERE workspace_id = ? AND agent_definition_id = ? LIMIT 1",
+    )
+    .bind(workspace_id)
+    .bind(agent_definition_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to check workspace agent assignment: {}", e))?;
+
+    if let Some(id) = existing {
+        sqlx::query("UPDATE workspace_agents SET display_name = COALESCE(?, display_name), role = ?, updated_at = ? WHERE id = ?")
+            .bind(display_name)
+            .bind(role)
+            .bind(now_millis())
+            .bind(&id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to update workspace agent assignment: {}", e))?;
+        return Ok(id);
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = now_millis();
+    sqlx::query(
+        r#"
+        INSERT INTO workspace_agents (
+            id, workspace_id, agent_definition_id, display_name, role, enabled, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(workspace_id)
+    .bind(agent_definition_id)
+    .bind(display_name)
+    .bind(role)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to assign agent to workspace: {}", e))?;
+
+    Ok(id)
+}
+
+async fn ensure_workspace_manager_assignment(
+    pool: &DbPool,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<Option<String>, String> {
+    if workspace_default_agent_id(pool, workspace_id)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    let Some(agent_definition_id) = select_default_agent_definition_id(state)? else {
+        return Ok(None);
+    };
+
+    let workspace_agent_id =
+        assign_workspace_agent_row(pool, workspace_id, &agent_definition_id, None, "manager")
+            .await?;
+    set_workspace_default_agent_id(pool, workspace_id, Some(&workspace_agent_id)).await?;
+
+    Ok(Some(workspace_agent_id))
+}
+
 async fn find_workspace_session(
     pool: &DbPool,
     descriptor: &WorkspaceDescriptor,
@@ -702,6 +1202,8 @@ async fn find_workspace_session(
 fn desired_workspace_context(
     descriptor: &WorkspaceDescriptor,
     existing_session: Option<&AssistantSession>,
+    workspace_agents: Vec<WorkspaceAgentSummary>,
+    workspace_manager: Option<&AgentConfig>,
 ) -> SessionContext {
     // For general workspaces, MCP servers are user-managed on the session itself
     // (via workspace_update_session_mcp), so preserve the existing session's MCP
@@ -716,6 +1218,34 @@ fn desired_workspace_context(
         descriptor.selected_mcp_server_ids.clone()
     };
 
+    let execution = if descriptor.agent_id.is_some() {
+        descriptor.execution.clone()
+    } else if let Some(manager) = workspace_manager {
+        manager.execution.clone()
+    } else {
+        descriptor.execution.clone()
+    };
+
+    let automation_id = descriptor
+        .agent_id
+        .clone()
+        .or_else(|| workspace_manager.map(|agent| agent.id.clone()));
+    let agent_workspace_id = descriptor.agent_id.clone().or_else(|| {
+        if descriptor.root_path.is_some() {
+            Some(descriptor.workspace_id.clone())
+        } else {
+            None
+        }
+    });
+    let automation_name = descriptor
+        .automation_name
+        .clone()
+        .or_else(|| workspace_manager.map(|agent| agent.name.clone()));
+    let automation_description = descriptor
+        .automation_description
+        .clone()
+        .or_else(|| workspace_manager.map(|agent| agent.description.clone()));
+
     SessionContext {
         space_id: existing_session.and_then(|session| session.context.space_id.clone()),
         room_id: existing_session.and_then(|session| session.context.room_id.clone()),
@@ -723,15 +1253,16 @@ fn desired_workspace_context(
         tab_id: existing_session.and_then(|session| session.tab_id.clone()),
         tool_scopes: descriptor.tool_scopes.clone(),
         mcp_server_ids,
-        execution: descriptor.execution.clone(),
+        execution,
         netdata_conversation_id: existing_session
             .and_then(|session| session.context.netdata_conversation_id.clone()),
-        automation_id: descriptor.agent_id.clone(),
-        agent_workspace_id: descriptor.agent_id.clone(),
-        automation_name: descriptor.automation_name.clone(),
-        automation_description: descriptor.automation_description.clone(),
+        automation_id,
+        agent_workspace_id,
+        automation_name,
+        automation_description,
         inter_agent_call: existing_session
             .and_then(|session| session.context.inter_agent_call.clone()),
+        workspace_agents,
     }
 }
 
@@ -1118,6 +1649,12 @@ pub async fn workspace_get_snapshot(
     let workspace_state = load_workspace_state_from_pool(pool.inner()).await?;
     let virtual_artifacts = workspace_virtual_artifacts(&descriptor, &workspace_state)?;
     let artifacts = merge_workspace_artifacts(artifacts, virtual_artifacts);
+    let (assigned_agents, default_workspace_agent_id) =
+        list_workspace_agent_responses(pool.inner(), state.inner(), &descriptor.workspace_id)
+            .await?;
+    let tasks =
+        list_workspace_task_responses(pool.inner(), state.inner(), &descriptor.workspace_id)
+            .await?;
 
     // Resolve agent schedule info from config + scheduler
     let (enabled, interval_minutes, next_run_in_seconds) =
@@ -1155,6 +1692,9 @@ pub async fn workspace_get_snapshot(
         kind: descriptor.kind,
         title: descriptor.title,
         agent_id: descriptor.agent_id,
+        assigned_agents,
+        tasks,
+        default_workspace_agent_id,
         root_path: descriptor.root_path.map(|path| path.display().to_string()),
         provider_connection_ids: provider_selection.ids,
         provider_connection_names: provider_selection.names,
@@ -1187,8 +1727,16 @@ pub async fn workspace_get_or_create_session(
         resolve_workspace_provider_selection(pool.inner(), &descriptor).await?;
     let provider_connection_id = provider_selection.preferred_connection_id;
     let existing = find_workspace_session(pool.inner(), &descriptor).await?;
+    let workspace_agents =
+        workspace_agent_summaries(pool.inner(), state.inner(), &descriptor.workspace_id).await?;
+    let workspace_manager = resolve_workspace_manager_agent(state.inner(), &workspace_agents)?;
     let session = if let Some(existing) = existing {
-        let desired_context = desired_workspace_context(&descriptor, Some(&existing));
+        let desired_context = desired_workspace_context(
+            &descriptor,
+            Some(&existing),
+            workspace_agents.clone(),
+            workspace_manager.as_ref(),
+        );
         if existing.title.as_deref() != Some(descriptor.title.as_str())
             || existing.context != desired_context
         {
@@ -1211,7 +1759,12 @@ pub async fn workspace_get_or_create_session(
                     SessionKind::Interactive
                 },
                 title: Some(descriptor.title.clone()),
-                context: desired_workspace_context(&descriptor, None),
+                context: desired_workspace_context(
+                    &descriptor,
+                    None,
+                    workspace_agents,
+                    workspace_manager.as_ref(),
+                ),
             },
         )
         .await?
@@ -1358,6 +1911,9 @@ pub async fn workspace_update_session_mcp(
     let descriptor =
         resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
     let existing = find_workspace_session(pool.inner(), &descriptor).await?;
+    let workspace_agents =
+        workspace_agent_summaries(pool.inner(), state.inner(), &descriptor.workspace_id).await?;
+    let workspace_manager = resolve_workspace_manager_agent(state.inner(), &workspace_agents)?;
 
     let session = if let Some(session) = existing {
         session
@@ -1374,7 +1930,12 @@ pub async fn workspace_update_session_mcp(
                     SessionKind::Interactive
                 },
                 title: Some(descriptor.title.clone()),
-                context: desired_workspace_context(&descriptor, None),
+                context: desired_workspace_context(
+                    &descriptor,
+                    None,
+                    workspace_agents.clone(),
+                    workspace_manager.as_ref(),
+                ),
             },
         )
         .await?
@@ -1382,6 +1943,19 @@ pub async fn workspace_update_session_mcp(
 
     let mut updated = session;
     updated.context.mcp_server_ids = request.mcp_server_ids;
+    updated.context.workspace_agents = workspace_agents;
+    if descriptor.agent_id.is_none() {
+        if let Some(manager) = workspace_manager {
+            updated.context.execution = manager.execution;
+            updated.context.automation_id = Some(manager.id.clone());
+            updated.context.agent_workspace_id = descriptor
+                .root_path
+                .as_ref()
+                .map(|_| descriptor.workspace_id.clone());
+            updated.context.automation_name = Some(manager.name);
+            updated.context.automation_description = Some(manager.description);
+        }
+    }
     updated.updated_at = chrono::Utc::now().timestamp_millis();
     repository::update_session(pool.inner(), &updated).await?;
 
@@ -1419,6 +1993,305 @@ pub async fn workspace_set_provider(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn workspace_list_agents(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<Vec<WorkspaceAgentResponse>, String> {
+    let workspace_id = normalize_workspace_id(Some(workspace_id));
+    let (agents, _) =
+        list_workspace_agent_responses(pool.inner(), state.inner(), &workspace_id).await?;
+    Ok(agents)
+}
+
+#[tauri::command]
+pub async fn workspace_assign_agent(
+    request: WorkspaceAssignAgentRequest,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<WorkspaceAgentResponse, String> {
+    let workspace_id = normalize_workspace_id(Some(request.workspace_id));
+    let agent_definition_id = request.agent_definition_id.trim().to_string();
+    if agent_definition_id.is_empty() {
+        return Err("Agent definition ID is required.".to_string());
+    }
+
+    let role = normalize_workspace_agent_role(request.role)?;
+
+    {
+        let config_manager = state
+            .config_manager
+            .lock()
+            .map_err(|error| format!("Lock error: {}", error))?;
+        if config_manager.get_agent(&agent_definition_id).is_none() {
+            return Err(format!(
+                "Agent definition not found: {}",
+                agent_definition_id
+            ));
+        }
+    }
+
+    let workspace_agent_id = assign_workspace_agent_row(
+        pool.inner(),
+        &workspace_id,
+        &agent_definition_id,
+        request.display_name,
+        &role,
+    )
+    .await?;
+
+    let current_default = workspace_default_agent_id(pool.inner(), &workspace_id).await?;
+    if role == "manager" || current_default.is_none() {
+        let now = now_millis();
+        sqlx::query(
+            "UPDATE workspace_agents SET role = 'member', updated_at = ? WHERE workspace_id = ? AND id != ? AND role = 'manager'",
+        )
+        .bind(now)
+        .bind(&workspace_id)
+        .bind(&workspace_agent_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to update workspace agent roles: {}", e))?;
+        sqlx::query("UPDATE workspace_agents SET role = 'manager', updated_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(&workspace_agent_id)
+            .execute(pool.inner())
+            .await
+            .map_err(|e| format!("Failed to mark workspace agent as manager: {}", e))?;
+        set_workspace_default_agent_id(pool.inner(), &workspace_id, Some(&workspace_agent_id))
+            .await?;
+    }
+
+    let (agents, _) =
+        list_workspace_agent_responses(pool.inner(), state.inner(), &workspace_id).await?;
+    agents
+        .into_iter()
+        .find(|agent| agent.id == workspace_agent_id)
+        .ok_or_else(|| "Workspace agent assignment not found after save.".to_string())
+}
+
+#[tauri::command]
+pub async fn workspace_unassign_agent(
+    workspace_agent_id: String,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT workspace_id, role FROM workspace_agents WHERE id = ? LIMIT 1")
+            .bind(&workspace_agent_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| format!("Failed to load workspace agent assignment: {}", e))?;
+
+    let Some((workspace_id, role)) = row else {
+        return Err(format!(
+            "Workspace agent assignment not found: {}",
+            workspace_agent_id
+        ));
+    };
+
+    if workspace_default_agent_id(pool.inner(), &workspace_id)
+        .await?
+        .as_deref()
+        == Some(workspace_agent_id.as_str())
+        || role == "manager"
+    {
+        return Err(
+            "Cannot remove the workspace manager. Set another agent as manager first.".to_string(),
+        );
+    }
+
+    sqlx::query("DELETE FROM workspace_agents WHERE id = ?")
+        .bind(&workspace_agent_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to unassign workspace agent: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_set_default_agent(
+    workspace_id: String,
+    workspace_agent_id: String,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    let workspace_id = normalize_workspace_id(Some(workspace_id));
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT workspace_id FROM workspace_agents WHERE id = ? LIMIT 1")
+            .bind(&workspace_agent_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| format!("Failed to load workspace agent assignment: {}", e))?;
+
+    let Some((assigned_workspace_id,)) = row else {
+        return Err(format!(
+            "Workspace agent assignment not found: {}",
+            workspace_agent_id
+        ));
+    };
+
+    if assigned_workspace_id != workspace_id {
+        return Err("Workspace agent assignment does not belong to this workspace.".to_string());
+    }
+
+    let now = now_millis();
+    sqlx::query(
+        "UPDATE workspace_agents SET role = 'member', updated_at = ? WHERE workspace_id = ? AND id != ? AND role = 'manager'",
+    )
+    .bind(now)
+    .bind(&workspace_id)
+    .bind(&workspace_agent_id)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to update workspace agent roles: {}", e))?;
+
+    sqlx::query("UPDATE workspace_agents SET role = 'manager', updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(&workspace_agent_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to mark workspace agent as manager: {}", e))?;
+
+    set_workspace_default_agent_id(pool.inner(), &workspace_id, Some(&workspace_agent_id)).await?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_acknowledge_task(
+    request: WorkspaceTaskActionRequest,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    let workspace_id = normalize_workspace_id(Some(request.workspace_id));
+    let now = now_millis();
+    let result = sqlx::query(
+        r#"
+        UPDATE workspace_tasks
+        SET attention_acknowledged_at = ?,
+            updated_at = ?
+        WHERE id = ? AND workspace_id = ?
+        "#,
+    )
+    .bind(now)
+    .bind(now)
+    .bind(&request.task_id)
+    .bind(&workspace_id)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to acknowledge workspace task: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err(format!("Workspace task not found: {}", request.task_id));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn workspace_submit_task_feedback(
+    request: WorkspaceTaskFeedbackRequest,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    let workspace_id = normalize_workspace_id(Some(request.workspace_id));
+    let response = request.response.trim();
+    if response.is_empty() {
+        return Err("Task feedback cannot be empty.".to_string());
+    }
+
+    let current: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id, title, status FROM workspace_tasks WHERE id = ? AND workspace_id = ? LIMIT 1",
+    )
+    .bind(&request.task_id)
+    .bind(&workspace_id)
+    .fetch_optional(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to load workspace task: {}", e))?;
+
+    let Some((task_id, title, status)) = current else {
+        return Err(format!("Workspace task not found: {}", request.task_id));
+    };
+
+    let now = now_millis();
+    let next_status = if status == "needs_user_input" {
+        "completed"
+    } else {
+        status.as_str()
+    };
+    sqlx::query(
+        r#"
+        UPDATE workspace_tasks
+        SET user_response = ?,
+            user_response_at = ?,
+            attention_acknowledged_at = ?,
+            status = ?,
+            updated_at = ?,
+            completed_at = COALESCE(?, completed_at)
+        WHERE id = ? AND workspace_id = ?
+        "#,
+    )
+    .bind(response)
+    .bind(now)
+    .bind(now)
+    .bind(next_status)
+    .bind(now)
+    .bind(if status == "needs_user_input" {
+        Some(now)
+    } else {
+        None
+    })
+    .bind(&task_id)
+    .bind(&workspace_id)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to save workspace task feedback: {}", e))?;
+
+    append_task_feedback_to_manager_session(
+        state.inner(),
+        pool.inner(),
+        &workspace_id,
+        &task_id,
+        &title,
+        response,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn append_task_feedback_to_manager_session(
+    state: &AppState,
+    pool: &DbPool,
+    workspace_id: &str,
+    task_id: &str,
+    title: &str,
+    response: &str,
+) -> Result<(), String> {
+    let descriptor = resolve_workspace_descriptor(state, Some(workspace_id.to_string()))?;
+    let Some(session) = find_workspace_session(pool, &descriptor).await? else {
+        return Ok(());
+    };
+
+    repository::create_message(
+        pool,
+        repository::CreateMessageParams {
+            session_id: session.id,
+            role: MessageRole::User,
+            content: vec![ContentPart::Text {
+                text: format!(
+                    "User feedback for workspace task `{}` ({}):\n\n{}",
+                    title, task_id, response
+                ),
+            }],
+            provider_metadata: None,
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
 // =============================================================================
 // Workspace CRUD — create, list, delete general workspaces
 // =============================================================================
@@ -1435,18 +2308,53 @@ pub struct WorkspaceListEntry {
     pub message_count: i64,
     pub artifact_count: i64,
     pub memory_count: i64,
+    pub running_task_count: i64,
+    pub blocked_task_count: i64,
+    pub failed_task_count: i64,
+    pub needs_user_input_task_count: i64,
+    pub attention_task_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attention_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attention_task_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attention_task_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attention_task_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attention_task_updated_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkspaceTaskAttentionSummary {
+    running_task_count: i64,
+    blocked_task_count: i64,
+    failed_task_count: i64,
+    needs_user_input_task_count: i64,
+    latest_attention_task_id: Option<String>,
+    latest_attention_task_title: Option<String>,
+    latest_attention_task_status: Option<String>,
+    latest_attention_task_summary: Option<String>,
+    latest_attention_task_updated_at: Option<i64>,
+}
+
+impl WorkspaceTaskAttentionSummary {
+    fn attention_task_count(&self) -> i64 {
+        self.blocked_task_count + self.failed_task_count + self.needs_user_input_task_count
+    }
 }
 
 /// Create a new general workspace with a UUID and filesystem root.
 #[tauri::command]
 pub async fn workspace_create(
     title: Option<String>,
+    state: State<'_, AppState>,
     pool: State<'_, DbPool>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = now_millis();
     let display_title = title.unwrap_or_else(|| "New Workspace".to_string());
 
     // Create filesystem root
@@ -1467,6 +2375,8 @@ pub async fn workspace_create(
     .execute(pool.inner())
     .await
     .map_err(|e| format!("Failed to create workspace: {}", e))?;
+
+    ensure_workspace_manager_assignment(pool.inner(), state.inner(), &id).await?;
 
     tracing::info!(workspace_id = %id, title = %display_title, "Created new general workspace");
 
@@ -1521,6 +2431,7 @@ pub async fn workspace_list(
 
     for (id, name, enabled, artifact_count, memory_count, created_at, updated_at) in agent_infos {
         let message_count = count_session_messages(pool.inner(), &id).await;
+        let task_attention = workspace_task_attention_summary(pool.inner(), &id).await?;
         entries.push(WorkspaceListEntry {
             id: id.clone(),
             kind: "agent".to_string(),
@@ -1530,6 +2441,16 @@ pub async fn workspace_list(
             message_count,
             artifact_count,
             memory_count,
+            running_task_count: task_attention.running_task_count,
+            blocked_task_count: task_attention.blocked_task_count,
+            failed_task_count: task_attention.failed_task_count,
+            needs_user_input_task_count: task_attention.needs_user_input_task_count,
+            attention_task_count: task_attention.attention_task_count(),
+            latest_attention_task_id: task_attention.latest_attention_task_id,
+            latest_attention_task_title: task_attention.latest_attention_task_title,
+            latest_attention_task_status: task_attention.latest_attention_task_status,
+            latest_attention_task_summary: task_attention.latest_attention_task_summary,
+            latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
             created_at,
             updated_at,
         });
@@ -1550,6 +2471,7 @@ pub async fn workspace_list(
             .map(|r| count_workspace_files(r))
             .unwrap_or((0, 0));
         let message_count = count_session_messages(pool.inner(), &id).await;
+        let task_attention = workspace_task_attention_summary(pool.inner(), &id).await?;
 
         entries.push(WorkspaceListEntry {
             id,
@@ -1560,6 +2482,16 @@ pub async fn workspace_list(
             message_count,
             artifact_count,
             memory_count,
+            running_task_count: task_attention.running_task_count,
+            blocked_task_count: task_attention.blocked_task_count,
+            failed_task_count: task_attention.failed_task_count,
+            needs_user_input_task_count: task_attention.needs_user_input_task_count,
+            attention_task_count: task_attention.attention_task_count(),
+            latest_attention_task_id: task_attention.latest_attention_task_id,
+            latest_attention_task_title: task_attention.latest_attention_task_title,
+            latest_attention_task_status: task_attention.latest_attention_task_status,
+            latest_attention_task_summary: task_attention.latest_attention_task_summary,
+            latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
             created_at,
             updated_at,
         });
@@ -1609,6 +2541,18 @@ pub async fn workspace_delete(workspace_id: String, pool: State<'_, DbPool>) -> 
         .await
         .map_err(|e| format!("Failed to delete workspace: {}", e))?;
 
+    sqlx::query("DELETE FROM workspace_agents WHERE workspace_id = ?")
+        .bind(&workspace_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to delete workspace agent assignments: {}", e))?;
+
+    sqlx::query("DELETE FROM workspace_tasks WHERE workspace_id = ?")
+        .bind(&workspace_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to delete workspace tasks: {}", e))?;
+
     // Delete filesystem root
     if let Some(root) = agent_workspace_root_for_id(&workspace_id) {
         if root.exists() {
@@ -1642,6 +2586,69 @@ fn count_workspace_files(root: &Path) -> (i64, i64) {
     }
 
     (artifact_count, memory_count)
+}
+
+async fn workspace_task_attention_summary(
+    pool: &DbPool,
+    workspace_id: &str,
+) -> Result<WorkspaceTaskAttentionSummary, String> {
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'blocked' AND attention_acknowledged_at IS NULL AND user_response_at IS NULL THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'failed' AND attention_acknowledged_at IS NULL AND user_response_at IS NULL THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'needs_user_input' AND attention_acknowledged_at IS NULL AND user_response_at IS NULL THEN 1 ELSE 0 END), 0)
+        FROM workspace_tasks
+        WHERE workspace_id = ?
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count workspace task attention: {}", e))?;
+
+    let latest: Option<(String, String, String, Option<String>, Option<String>, i64)> =
+        sqlx::query_as(
+            r#"
+            SELECT id, title, status, result_summary, error, updated_at
+            FROM workspace_tasks
+            WHERE workspace_id = ? AND status IN ('blocked', 'failed', 'needs_user_input')
+                AND attention_acknowledged_at IS NULL
+                AND user_response_at IS NULL
+            ORDER BY
+                CASE status
+                    WHEN 'needs_user_input' THEN 0
+                    WHEN 'blocked' THEN 1
+                    WHEN 'failed' THEN 2
+                    ELSE 3
+                END,
+                updated_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to load latest workspace attention task: {}", e))?;
+
+    let mut summary = WorkspaceTaskAttentionSummary {
+        running_task_count: counts.0,
+        blocked_task_count: counts.1,
+        failed_task_count: counts.2,
+        needs_user_input_task_count: counts.3,
+        ..Default::default()
+    };
+
+    if let Some((id, title, status, result_summary, error, updated_at)) = latest {
+        summary.latest_attention_task_id = Some(id);
+        summary.latest_attention_task_title = Some(title);
+        summary.latest_attention_task_status = Some(status);
+        summary.latest_attention_task_summary = error.or(result_summary);
+        summary.latest_attention_task_updated_at = Some(updated_at);
+    }
+
+    Ok(summary)
 }
 
 fn count_files_recursive(dir: &Path) -> i64 {

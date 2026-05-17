@@ -86,6 +86,7 @@ pub enum RunTrigger {
     Scheduled,
     ManualAutomation,
     InterAgentCall,
+    WorkspaceTask,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,6 +101,18 @@ pub struct InterAgentCallContext {
     pub caller_tool_call_id: Option<String>,
     pub callee_agent_id: String,
     pub exposed_tool_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAgentSummary {
+    pub id: String,
+    pub agent_definition_id: String,
+    pub display_name: String,
+    pub role: String,
+    pub is_default: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -131,6 +144,8 @@ pub struct SessionContext {
     pub automation_description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inter_agent_call: Option<InterAgentCallContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_agents: Vec<WorkspaceAgentSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

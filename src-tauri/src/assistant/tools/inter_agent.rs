@@ -129,6 +129,7 @@ pub async fn execute(
                     callee_agent_id: target_config.id.clone(),
                     exposed_tool_name: target_tool_name.to_string(),
                 }),
+                workspace_agents: Vec::new(),
             },
         },
     )

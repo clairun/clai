@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useFleet } from '../contexts/FleetContext';
 import { useChatManager } from '../contexts/ChatManagerContext';
@@ -75,6 +75,12 @@ const RUN_STATUS_CLASS = {
   running: 'ribbonRunning',
 };
 
+const TASK_STATUS_LABEL = {
+  blocked: 'Blocked',
+  failed: 'Failed',
+  needs_user_input: 'Needs input',
+};
+
 const MiniRibbon = ({ entries }) => {
   if (!entries || entries.length === 0) return null;
 
@@ -133,7 +139,7 @@ const Fleet = () => {
   const [editingAgent, setEditingAgent] = useState(null);
   const [mcpServers, setMcpServers] = useState([]);
   const [providerConnections, setProviderConnections] = useState([]);
-  const [generalWorkspaces, setGeneralWorkspaces] = useState([]);
+  const [workspaces, setWorkspaces] = useState([]);
   const {
     summary,
     agents,
@@ -157,9 +163,9 @@ const Fleet = () => {
   const loadWorkspaces = useCallback(async () => {
     try {
       const all = await listWorkspaces();
-      setGeneralWorkspaces(all.filter((w) => w.kind !== 'agent'));
+      setWorkspaces(all || []);
     } catch {
-      setGeneralWorkspaces([]);
+      setWorkspaces([]);
     }
   }, []);
 
@@ -292,6 +298,18 @@ const Fleet = () => {
   const detailStreamingText = sessionState?.streamingTextByMessageId || EMPTY_STREAMING;
   const detailIsStreaming = sessionState?.isStreaming || false;
   const detailRuns = sessionState?.runs || [];
+  const generalWorkspaces = useMemo(
+    () => workspaces.filter((workspace) => workspace.kind !== 'agent'),
+    [workspaces]
+  );
+  const attentionWorkspaces = useMemo(
+    () => workspaces.filter((workspace) => (workspace.attentionTaskCount || 0) > 0),
+    [workspaces]
+  );
+  const workspaceAttentionById = useMemo(
+    () => new Map(workspaces.map((workspace) => [workspace.id, workspace])),
+    [workspaces]
+  );
 
   return (
     <div className={styles.fleetPage}>
@@ -331,8 +349,49 @@ const Fleet = () => {
 
       <div className={styles.content}>
         <div className={styles.cardGrid}>
+          {attentionWorkspaces.length > 0 && (
+            <section className={styles.attentionPanel} aria-label="Workspace notifications">
+              <div className={styles.attentionHeader}>
+                <span className={styles.attentionTitle}>Needs Attention</span>
+                <span className={styles.attentionCount}>{attentionWorkspaces.length}</span>
+              </div>
+              <div className={styles.attentionList}>
+                {attentionWorkspaces.slice(0, 6).map((workspace) => {
+                  const status = workspace.latestAttentionTaskStatus;
+                  const statusLabel = TASK_STATUS_LABEL[status] || status || 'Task';
+                  return (
+                    <button
+                      key={workspace.id}
+                      type="button"
+                      className={styles.attentionItem}
+                      onClick={() => navigate(`/workspace/${workspace.id}`)}
+                    >
+                      <div className={styles.attentionItemHeader}>
+                        <span className={styles.attentionWorkspaceTitle}>{workspace.title}</span>
+                        <span className={`${styles.attentionStatus} ${styles[`attentionStatus_${status}`] || ''}`}>
+                          {statusLabel}
+                        </span>
+                      </div>
+                      {workspace.latestAttentionTaskTitle && (
+                        <span className={styles.attentionTaskTitle}>
+                          {workspace.latestAttentionTaskTitle}
+                        </span>
+                      )}
+                      {workspace.latestAttentionTaskSummary && (
+                        <span className={styles.attentionSummary}>
+                          {workspace.latestAttentionTaskSummary}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
           {agents.map((agent) => {
             const isSelected = agent.agentId === selectedAgentId;
+            const attention = workspaceAttentionById.get(agent.agentId);
             return (
               <button
                 key={agent.agentId}
@@ -382,6 +441,18 @@ const Fleet = () => {
 
                 {agent.lastError && (
                   <p className={styles.errorPreview}>{agent.lastError}</p>
+                )}
+                {(attention?.attentionTaskCount || 0) > 0 && (
+                  <div className={styles.taskAttentionPreview}>
+                    <span className={styles.taskAttentionBadge}>
+                      {attention.attentionTaskCount} task{attention.attentionTaskCount === 1 ? '' : 's'} need attention
+                    </span>
+                    {attention.latestAttentionTaskTitle && (
+                      <span className={styles.taskAttentionText}>
+                        {attention.latestAttentionTaskTitle}
+                      </span>
+                    )}
+                  </div>
                 )}
               </button>
             );
@@ -435,7 +506,20 @@ const Fleet = () => {
                     <span>{ws.messageCount} msgs</span>
                     <span>{ws.artifactCount} artifacts</span>
                     <span>{ws.memoryCount} memories</span>
+                    {ws.runningTaskCount > 0 && <span>{ws.runningTaskCount} running</span>}
                   </div>
+                  {(ws.attentionTaskCount || 0) > 0 && (
+                    <div className={styles.taskAttentionPreview}>
+                      <span className={styles.taskAttentionBadge}>
+                        {ws.attentionTaskCount} task{ws.attentionTaskCount === 1 ? '' : 's'} need attention
+                      </span>
+                      {ws.latestAttentionTaskTitle && (
+                        <span className={styles.taskAttentionText}>
+                          {ws.latestAttentionTaskTitle}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <div className={styles.workspaceTime}>
                     {formatTimestamp(ws.updatedAt || ws.createdAt)}
                   </div>

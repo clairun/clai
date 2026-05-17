@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { Outlet } from 'react-router-dom';
 import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmulatorWrapper';
 import DesktopChatPanel from '../components/Chat/DesktopChatPanel';
+import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import { CommandProvider } from '../contexts/CommandContext';
 import { TabManagerProvider } from '../contexts/TabManagerContext';
 import { CommandMessagingProvider } from '../contexts/CommandMessagingContext';
@@ -39,6 +40,7 @@ const MainLayout = () => {
                 <ChatManagerProvider>
                   <FleetProvider>
                     <div className={styles.mainLayout}>
+                      <WorkspaceTaskNotifications />
                       <DesktopChatPanel />
                       <TerminalEmulatorWrapper />
                       <div className={styles.contentArea}>
