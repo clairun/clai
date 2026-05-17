@@ -37,9 +37,6 @@ mod db;
 mod mcp;
 mod providers;
 
-// Re-export for agent execution and testing
-pub use mcp::server::McpToolServer;
-
 use std::sync::Mutex;
 
 use agents::SharedScheduler;

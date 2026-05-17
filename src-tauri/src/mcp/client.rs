@@ -20,7 +20,7 @@ use tokio::{
 
 use crate::assistant::auth::McpSecretStorage;
 use crate::assistant::types::ToolDefinition;
-use crate::config::{ClaiConfig, McpServerAuth, McpServerConfig, McpServerIntegrationType};
+use crate::config::{ClaiConfig, McpServerAuth, McpServerConfig};
 
 /// MCP tool discovered from an external server.
 ///
@@ -182,24 +182,6 @@ impl McpClientManager {
         }
 
         tools
-    }
-
-    pub fn has_integration_type(
-        &self,
-        server_ids: &[String],
-        integration_type: McpServerIntegrationType,
-    ) -> bool {
-        server_ids.iter().any(|server_id| {
-            self.servers
-                .get(server_id)
-                .map(|server| {
-                    server.config.enabled
-                        && self
-                            .effective_integration_type(server)
-                            .is_some_and(|candidate| candidate == integration_type)
-                })
-                .unwrap_or(false)
-        })
     }
 
     /// Resolve a stored bearer token for a configured server, if any.
@@ -478,38 +460,6 @@ impl McpClientManager {
                 }))
             }
         }
-    }
-}
-
-impl McpClientManager {
-    fn effective_integration_type(
-        &self,
-        server: &ManagedMcpServer,
-    ) -> Option<McpServerIntegrationType> {
-        if server.config.integration_type != McpServerIntegrationType::Generic {
-            return Some(server.config.integration_type.clone());
-        }
-
-        infer_integration_type_from_tools(&server.discovered_tools)
-    }
-}
-
-fn infer_integration_type_from_tools(
-    tools: &[ExternalMcpToolDefinition],
-) -> Option<McpServerIntegrationType> {
-    let tool_names: std::collections::HashSet<&str> =
-        tools.iter().map(|tool| tool.tool_name.as_str()).collect();
-
-    let looks_like_netdata_cloud = tool_names.contains("get_profile")
-        && tool_names.contains("search_metrics")
-        && (tool_names.contains("get_metric_data")
-            || tool_names.contains("get_anomalous_contexts")
-            || tool_names.contains("trigger_report"));
-
-    if looks_like_netdata_cloud {
-        Some(McpServerIntegrationType::NetdataCloud)
-    } else {
-        None
     }
 }
 

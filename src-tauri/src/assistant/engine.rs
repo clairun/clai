@@ -17,7 +17,6 @@ use crate::assistant::types::{
     ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId, SessionKind,
     ToolCallStatus, ToolInvocationDraft,
 };
-use crate::config::McpServerIntegrationType;
 use crate::db::DbPool;
 use tokio_util::sync::CancellationToken;
 
@@ -121,25 +120,15 @@ pub async fn run_session_turn(
     let adapter = providers::resolve_adapter(&connection.provider_id)?;
 
     // Get available tools for this session's context
-    let (external_tools, dashboard_enabled) = {
+    let external_tools = {
         let state = deps.app.state::<crate::AppState>();
         let mut manager = state.mcp_client_manager.lock().await;
-        let external_tools = manager
+        manager
             .list_tools_for_servers(&session.context.mcp_server_ids)
-            .await;
-        let dashboard_enabled = manager.has_integration_type(
-            &session.context.mcp_server_ids,
-            McpServerIntegrationType::NetdataCloud,
-        );
-        (external_tools, dashboard_enabled)
+            .await
     };
     let callable_agents = resolve_callable_agents(deps, &session.context);
-    let tool_defs = tools::available_tools(
-        &session.context,
-        &external_tools,
-        dashboard_enabled,
-        &callable_agents,
-    );
+    let tool_defs = tools::available_tools(&session.context, &external_tools, &callable_agents);
 
     // Build execution context for tool calls
     let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -353,12 +342,9 @@ pub async fn run_session_turn(
             });
         }
 
-        let updated_message = repository::update_message_content(
-            &deps.pool,
-            &assistant_message.id,
-            &final_content,
-        )
-        .await?;
+        let updated_message =
+            repository::update_message_content(&deps.pool, &assistant_message.id, &final_content)
+                .await?;
 
         let _ = emit_event(
             &deps.app,

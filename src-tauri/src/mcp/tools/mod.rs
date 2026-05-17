@@ -1,30 +1,9 @@
-//! MCP tool definitions and implementations.
+//! MCP tool error types.
 //!
-//! This module contains all tools that can be exposed to AI agents via MCP.
-//!
-//! # Tool Namespaces
-//!
-//! ## Workspace-backed (`workspace.*`)
-//! These tools are defined in Rust but execute via workspace file APIs or
-//! the frontend bridge:
-//! - `workspace.*` - Manage durable workspace artifacts directly
-//!
-//! Older tab/canvas/dashboard tool implementations still exist in this module
-//! as internal compatibility code, but they are no longer part of the public
-//! agent-facing tool surface.
-
-pub mod anomalies;
-pub mod canvas;
-pub mod dashboard;
-pub mod tabs;
-pub mod workspace;
+//! The agent-facing tool surface lives in `assistant::tools`; this module
+//! only retains the shared error enum that other MCP code paths reference.
 
 use serde::{Deserialize, Serialize};
-
-pub use canvas::CanvasTools;
-pub use dashboard::DashboardTools;
-pub use tabs::TabsTools;
-pub use workspace::WorkspaceTools;
 
 // =============================================================================
 // Error Types

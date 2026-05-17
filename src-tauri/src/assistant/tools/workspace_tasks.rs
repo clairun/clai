@@ -479,7 +479,7 @@ fn spawn_task_run(
                 };
                 let summary = latest_assistant_text(&deps.pool, &session_id)
                     .await
-                    .unwrap_or_else(|_| None);
+                    .unwrap_or(None);
                 let status = classify_worker_status(summary.as_deref(), status);
                 let error = run.and_then(|run| run.error);
                 let result_json = summary

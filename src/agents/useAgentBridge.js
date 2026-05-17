@@ -26,11 +26,7 @@ import { getMcpServers } from '../api/client';
 import { useTabManager } from '../contexts/TabManagerContext';
 import { useCommand } from '../contexts/CommandContext';
 import { useWorkspaceStore } from '../stores/workspaceStore';
-import {
-  getWorkspaceSnapshot,
-  readWorkspaceFile,
-  writeWorkspaceFile,
-} from '../workspace/client';
+import { writeWorkspaceFile } from '../workspace/client';
 import {
   initAgentBridge,
   cleanupAgentBridge,
@@ -60,33 +56,6 @@ const getDashboardState = (commandId) => getCommandState(commandId, DEFAULT_DASH
 const getCanvasArtifactPath = (commandId) => `visualizations/canvas-${commandId}.canvas`;
 const getDashboardArtifactPath = (commandId) => `visualizations/dashboard-${commandId}.dashboard.json`;
 
-const normalizeArtifactPath = (kind, inputPath = null) => {
-  const trimmed = typeof inputPath === 'string' ? inputPath.trim() : '';
-  const extension = kind === 'canvas' ? '.canvas' : '.dashboard.json';
-
-  if (!trimmed) {
-    return `visualizations/${kind}-${Date.now()}${extension}`;
-  }
-
-  if (trimmed.endsWith(extension)) {
-    return trimmed;
-  }
-
-  return `${trimmed}${extension}`;
-};
-
-const parseArtifactContent = (viewer, content) => {
-  if (!content || !['canvas', 'dashboard', 'json'].includes(viewer)) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(content);
-  } catch {
-    return null;
-  }
-};
-
 const serializeCanvasArtifact = (state = DEFAULT_CANVAS_STATE) => JSON.stringify({
   nodes: state.nodes || [],
   edges: state.edges || [],
@@ -96,30 +65,6 @@ const serializeDashboardArtifact = (state = DEFAULT_DASHBOARD_STATE) => JSON.str
   elements: state.elements || [],
   timeRange: state.timeRange || state.selectedInterval?.label || DEFAULT_DASHBOARD_STATE.timeRange,
 }, null, 2);
-
-const normalizeCanvasArtifact = (canvas) => {
-  if (!canvas || typeof canvas !== 'object' || Array.isArray(canvas)) {
-    throw new Error('canvas must be an object');
-  }
-
-  return {
-    nodes: Array.isArray(canvas.nodes) ? canvas.nodes : [],
-    edges: Array.isArray(canvas.edges) ? canvas.edges : [],
-  };
-};
-
-const normalizeDashboardArtifact = (dashboard) => {
-  if (!dashboard || typeof dashboard !== 'object' || Array.isArray(dashboard)) {
-    throw new Error('dashboard must be an object');
-  }
-
-  return {
-    elements: Array.isArray(dashboard.elements) ? dashboard.elements : [],
-    timeRange: typeof dashboard.timeRange === 'string' && dashboard.timeRange.trim()
-      ? dashboard.timeRange.trim()
-      : DEFAULT_DASHBOARD_STATE.timeRange,
-  };
-};
 
 const createCanvasNode = (id, type, position, data) => {
   const defaultDimensions = {
@@ -901,131 +846,6 @@ export const useAgentBridge = () => {
       return { commandId: command.id, tileId: targetTileId, reused: false };
     });
 
-    // Register workspace artifact handlers
-    registerToolHandler('workspace.listArtifacts', async (request) => {
-      const workspaceId = request.agentId;
-      if (!workspaceId) {
-        throw new Error('workspace.listArtifacts requires an agent workspace');
-      }
-
-      const snapshot = await getWorkspaceSnapshot(workspaceId);
-      const viewer = typeof request.params?.viewer === 'string' ? request.params.viewer.trim().toLowerCase() : '';
-      const pathPrefix = typeof request.params?.pathPrefix === 'string' ? request.params.pathPrefix.trim() : '';
-      const limit = Number.isFinite(request.params?.limit) ? Math.max(1, Math.floor(request.params.limit)) : 50;
-
-      const artifacts = (snapshot?.artifacts || [])
-        .filter((entry) => (!viewer || entry.viewer === viewer))
-        .filter((entry) => (!pathPrefix || entry.path.startsWith(pathPrefix)))
-        .slice(0, limit)
-        .map((entry) => ({
-          path: entry.path,
-          name: entry.name,
-          viewer: entry.viewer,
-          updatedAt: entry.updatedAt || null,
-          preview: entry.preview || null,
-          size: entry.size || null,
-        }));
-
-      return {
-        count: artifacts.length,
-        artifacts,
-      };
-    });
-
-    registerToolHandler('workspace.readArtifact', async (request) => {
-      const workspaceId = request.agentId;
-      const path = request.params?.path;
-
-      if (!workspaceId) {
-        throw new Error('workspace.readArtifact requires an agent workspace');
-      }
-      if (!path) {
-        throw new Error('path is required');
-      }
-
-      const result = await readWorkspaceFile(workspaceId, path);
-      return {
-        path,
-        viewer: result.viewer,
-        content: result.content,
-        parsed: parseArtifactContent(result.viewer, result.content),
-      };
-    });
-
-    registerToolHandler('workspace.createCanvas', async (request) => {
-      const workspaceId = request.agentId;
-      if (!workspaceId) {
-        throw new Error('workspace.createCanvas requires an agent workspace');
-      }
-
-      const path = normalizeArtifactPath('canvas', request.params?.path);
-      const canvas = normalizeCanvasArtifact(request.params?.canvas);
-      await writeWorkspaceFile(workspaceId, path, JSON.stringify(canvas, null, 2));
-
-      return {
-        path,
-        viewer: 'canvas',
-      };
-    });
-
-    registerToolHandler('workspace.updateCanvas', async (request) => {
-      const workspaceId = request.agentId;
-      const rawPath = request.params?.path;
-
-      if (!workspaceId) {
-        throw new Error('workspace.updateCanvas requires an agent workspace');
-      }
-      if (!rawPath) {
-        throw new Error('path is required');
-      }
-
-      const path = normalizeArtifactPath('canvas', rawPath);
-      const canvas = normalizeCanvasArtifact(request.params?.canvas);
-      await writeWorkspaceFile(workspaceId, path, JSON.stringify(canvas, null, 2));
-
-      return {
-        path,
-        viewer: 'canvas',
-      };
-    });
-
-    registerToolHandler('workspace.createDashboard', async (request) => {
-      const workspaceId = request.agentId;
-      if (!workspaceId) {
-        throw new Error('workspace.createDashboard requires an agent workspace');
-      }
-
-      const path = normalizeArtifactPath('dashboard', request.params?.path);
-      const dashboard = normalizeDashboardArtifact(request.params?.dashboard);
-      await writeWorkspaceFile(workspaceId, path, JSON.stringify(dashboard, null, 2));
-
-      return {
-        path,
-        viewer: 'dashboard',
-      };
-    });
-
-    registerToolHandler('workspace.updateDashboard', async (request) => {
-      const workspaceId = request.agentId;
-      const rawPath = request.params?.path;
-
-      if (!workspaceId) {
-        throw new Error('workspace.updateDashboard requires an agent workspace');
-      }
-      if (!rawPath) {
-        throw new Error('path is required');
-      }
-
-      const path = normalizeArtifactPath('dashboard', rawPath);
-      const dashboard = normalizeDashboardArtifact(request.params?.dashboard);
-      await writeWorkspaceFile(workspaceId, path, JSON.stringify(dashboard, null, 2));
-
-      return {
-        path,
-        viewer: 'dashboard',
-      };
-    });
-
     // Register dashboard tool handlers
     registerToolHandler('dashboard.addChart', async (request) => {
       const { agentId, spaceId, roomId, tabId: fallbackTabId, mcpServerIds: fallbackMcpServerIds = [], params } = request;
@@ -1643,12 +1463,6 @@ export const useAgentBridge = () => {
 
       // Unregister all handlers
       unregisterToolHandler('agent.setup');
-      unregisterToolHandler('workspace.listArtifacts');
-      unregisterToolHandler('workspace.readArtifact');
-      unregisterToolHandler('workspace.createCanvas');
-      unregisterToolHandler('workspace.updateCanvas');
-      unregisterToolHandler('workspace.createDashboard');
-      unregisterToolHandler('workspace.updateDashboard');
       unregisterToolHandler('dashboard.addChart');
       unregisterToolHandler('dashboard.removeChart');
       unregisterToolHandler('dashboard.clearCharts');

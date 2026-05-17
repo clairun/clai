@@ -5,49 +5,14 @@ use crate::assistant::tools::workspace_tasks::{
 use crate::assistant::types::{SessionContext, ToolDefinition};
 use crate::config::ExposedAgentTool;
 use crate::config::ShellAccessMode;
-use crate::mcp::tools::workspace::{
-    CreateCanvasArtifactParams, CreateDashboardArtifactParams, ListArtifactsParams,
-    ReadArtifactParams, UpdateCanvasArtifactParams, UpdateDashboardArtifactParams,
-};
 
 /// Returns all tool definitions available for the given session context.
 pub fn available_tools(
     context: &SessionContext,
     external_tools: &[ToolDefinition],
-    _dashboard_enabled: bool,
     callable_agents: &[CallableAgent],
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![];
-
-    if context.agent_workspace_id.is_some() {
-        tools.push(tool::<ListArtifactsParams>(
-            "workspace.listArtifacts",
-            "List durable artifacts in the current workspace. Use this first to discover existing canvas, dashboard, markdown, and other files before creating duplicates.",
-        ));
-        tools.push(tool::<ReadArtifactParams>(
-            "workspace.readArtifact",
-            "Read a durable workspace artifact by path. Returns the artifact content and parsed JSON when applicable.",
-        ));
-    }
-
-    if context.agent_workspace_id.is_some() {
-        tools.push(tool::<CreateCanvasArtifactParams>(
-            "workspace.createCanvas",
-            "Create a durable .canvas artifact in the current workspace.",
-        ));
-        tools.push(tool::<UpdateCanvasArtifactParams>(
-            "workspace.updateCanvas",
-            "Update an existing durable .canvas artifact in the current workspace.",
-        ));
-        tools.push(tool::<CreateDashboardArtifactParams>(
-            "workspace.createDashboard",
-            "Create a durable .dashboard.json artifact in the current workspace.",
-        ));
-        tools.push(tool::<UpdateDashboardArtifactParams>(
-            "workspace.updateDashboard",
-            "Update an existing durable .dashboard.json artifact in the current workspace.",
-        ));
-    }
 
     if is_workspace_manager_context(context) {
         tools.push(tool::<ListWorkspaceAgentsParams>(

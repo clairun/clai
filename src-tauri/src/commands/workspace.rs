@@ -845,6 +845,7 @@ async fn load_workspace_agent_rows(
     pool: &DbPool,
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(String, String, String, Option<String>, String, i64, i64, i64)> =
         sqlx::query_as(
             r#"
@@ -2608,6 +2609,7 @@ async fn workspace_task_attention_summary(
     .await
     .map_err(|e| format!("Failed to count workspace task attention: {}", e))?;
 
+    #[allow(clippy::type_complexity)]
     let latest: Option<(String, String, String, Option<String>, Option<String>, i64)> =
         sqlx::query_as(
             r#"

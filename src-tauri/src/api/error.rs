@@ -53,6 +53,7 @@ pub struct NetdataErrorResponse {
     pub error_message: Option<String>,
     /// Error code from the API
     #[serde(default)]
+    #[allow(dead_code)]
     pub error_code: Option<String>,
 }
 
@@ -98,6 +99,7 @@ pub struct ErrorDetails {
     /// Human-readable error message
     pub error_message: String,
     /// General error category
+    #[allow(dead_code)]
     pub error_code: ErrorCode,
 }
 
@@ -180,6 +182,7 @@ impl ApiError {
     }
 
     /// Creates an Unauthorized error with default message.
+    #[allow(dead_code)]
     pub fn unauthorized() -> Self {
         ApiError::Unauthorized(ErrorDetails {
             error_msg_key: "ErrUnauthorized".to_string(),

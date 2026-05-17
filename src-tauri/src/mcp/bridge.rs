@@ -101,26 +101,6 @@ pub struct ToolResponse {
     pub error: Option<String>,
 }
 
-/// Streaming update sent from Rust to JS for real-time tool output.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolStreamEvent {
-    /// Tool call ID (correlates with the tool request).
-    pub tool_call_id: String,
-    /// Agent ID for looking up the tab.
-    pub agent_id: String,
-    /// Space ID for looking up the tab.
-    pub space_id: String,
-    /// Room ID for looking up the tab.
-    pub room_id: String,
-    /// Tool name (e.g., "workspace.createCanvas").
-    pub tool: String,
-    /// SSE event type (e.g., "message_start", "content_block_delta").
-    pub event_type: String,
-    /// Event payload (the SSE chunk data).
-    pub payload: serde_json::Value,
-}
-
 /// Errors that can occur during JS bridge operations.
 #[derive(Debug, Clone)]
 pub enum BridgeError {
@@ -156,9 +136,6 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Event name for tool requests.
 pub const EVENT_TOOL_REQUEST: &str = "agent:tool:request";
-
-/// Event name for tool streaming updates.
-pub const EVENT_TOOL_STREAM: &str = "agent:tool:stream";
 
 /// Internal state for pending requests.
 type PendingMap = HashMap<String, oneshot::Sender<ToolResponse>>;
@@ -242,139 +219,6 @@ impl JsBridge {
             app_handle,
             timeout: DEFAULT_TIMEOUT,
         }
-    }
-
-    /// Create a new JS bridge with a custom timeout.
-    ///
-    /// # Arguments
-    ///
-    /// * `app_handle` - Tauri app handle for emitting events
-    /// * `timeout` - Timeout duration for tool requests
-    pub fn with_timeout(app_handle: AppHandle, timeout: Duration) -> Self {
-        Self {
-            app_handle,
-            timeout,
-        }
-    }
-
-    /// Emit a streaming event to the frontend.
-    ///
-    /// This is used to send real-time updates during tool execution,
-    /// such as SSE chunks from the Netdata API. The frontend can use
-    /// these to display streaming content in the AgentChat.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - The streaming event to emit
-    ///
-    /// # Returns
-    ///
-    /// Ok if the event was emitted, Err if emission failed.
-    pub fn emit_stream_event(&self, event: ToolStreamEvent) -> Result<(), BridgeError> {
-        self.app_handle
-            .emit(EVENT_TOOL_STREAM, &event)
-            .map_err(|e| BridgeError::EmitFailed(e.to_string()))
-    }
-
-    /// Setup an agent's tab and canvas before the CLI starts.
-    ///
-    /// This creates the agent's tab with a canvas command upfront, avoiding
-    /// race conditions when multiple tool calls come in rapid succession.
-    ///
-    /// # Arguments
-    ///
-    /// * `agent_id` - Agent type identifier (e.g., "anomaly-investigator")
-    /// * `agent_name` - Human-readable agent name for the tab title
-    /// * `space_id` - Netdata space ID
-    /// * `room_id` - Netdata room ID
-    ///
-    /// # Returns
-    ///
-    /// The tab ID that was created or found.
-    ///
-    /// # Errors
-    ///
-    /// Same as `call_tool`.
-    pub async fn setup_agent_tab(
-        &self,
-        agent_id: &str,
-        agent_name: &str,
-        space_id: &str,
-        room_id: &str,
-        preferred_tab_id: Option<&str>,
-        mcp_server_ids: &[String],
-    ) -> Result<String, BridgeError> {
-        let result = self
-            .call_tool(
-                agent_id,
-                space_id,
-                room_id,
-                "agent.setup",
-                serde_json::json!({
-                    "agentName": agent_name,
-                    "managedAgentTab": true,
-                    "tabId": preferred_tab_id,
-                    "mcpServerIds": mcp_server_ids,
-                }),
-            )
-            .await?;
-
-        // Extract tab ID from result
-        result
-            .get("tabId")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| BridgeError::ToolFailed("Missing tabId in response".to_string()))
-    }
-
-    /// Set an agent's tab mapping for on-demand agents.
-    ///
-    /// Unlike `setup_agent_tab`, this uses an existing tab ID instead of
-    /// creating a new one. Used by on-demand agents where the user is already
-    /// viewing a specific tab.
-    ///
-    /// # Arguments
-    ///
-    /// * `agent_id` - Agent type identifier (e.g., "clai")
-    /// * `agent_name` - Human-readable agent name
-    /// * `space_id` - Netdata space ID
-    /// * `room_id` - Netdata room ID
-    /// * `tab_id` - The existing tab ID to use
-    ///
-    /// # Returns
-    ///
-    /// The tab ID (same as input, for consistency).
-    ///
-    /// # Errors
-    ///
-    /// Same as `call_tool`.
-    pub async fn set_agent_tab(
-        &self,
-        agent_id: &str,
-        agent_name: &str,
-        space_id: &str,
-        room_id: &str,
-        tab_id: &str,
-    ) -> Result<String, BridgeError> {
-        let result = self
-            .call_tool(
-                agent_id,
-                space_id,
-                room_id,
-                "agent.setup",
-                serde_json::json!({
-                    "agentName": agent_name,
-                    "tabId": tab_id,
-                }),
-            )
-            .await?;
-
-        // Extract tab ID from result
-        result
-            .get("tabId")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| BridgeError::ToolFailed("Missing tabId in response".to_string()))
     }
 
     /// Call a JS tool and wait for the response.
@@ -561,34 +405,5 @@ mod tests {
             BridgeError::ToolFailed("test error".to_string()).to_string(),
             "Tool execution failed: test error"
         );
-    }
-
-    #[test]
-    fn test_tool_stream_event_serialization() {
-        let event = ToolStreamEvent {
-            tool_call_id: "call-123".to_string(),
-            agent_id: "anomaly_investigator".to_string(),
-            space_id: "space-456".to_string(),
-            room_id: "room-789".to_string(),
-            tool: "workspace.createCanvas".to_string(),
-            event_type: "content_block_delta".to_string(),
-            payload: serde_json::json!({
-                "delta": {
-                    "type": "text_delta",
-                    "text": "Hello world"
-                }
-            }),
-        };
-
-        let json = serde_json::to_value(&event).unwrap();
-
-        assert_eq!(json["toolCallId"], "call-123");
-        assert_eq!(json["agentId"], "anomaly_investigator");
-        assert_eq!(json["spaceId"], "space-456");
-        assert_eq!(json["roomId"], "room-789");
-        assert_eq!(json["tool"], "workspace.createCanvas");
-        assert_eq!(json["eventType"], "content_block_delta");
-        assert_eq!(json["payload"]["delta"]["type"], "text_delta");
-        assert_eq!(json["payload"]["delta"]["text"], "Hello world");
     }
 }

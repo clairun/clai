@@ -94,81 +94,6 @@ impl NetdataApi {
     // API Methods
     // =========================================================================
 
-    /// Gets information about the authenticated user.
-    ///
-    /// Endpoint: `GET /api/v2/accounts/me`
-    pub async fn get_user_info(&self) -> ApiResult<UserInfo> {
-        let response = self
-            .client
-            .get(format!("{}/api/v2/accounts/me", self.base_url))
-            .timeout(DEFAULT_TIMEOUT)
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        self.handle_response(response).await
-    }
-
-    /// Gets all spaces the user has access to.
-    ///
-    /// Endpoint: `GET /api/v3/spaces`
-    pub async fn get_spaces(&self) -> ApiResult<Vec<Space>> {
-        let response = self
-            .client
-            .get(format!("{}/api/v3/spaces", self.base_url))
-            .timeout(DEFAULT_TIMEOUT)
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        self.handle_response(response).await
-    }
-
-    /// Gets all rooms in a space.
-    ///
-    /// Endpoint: `GET /api/v2/spaces/{space_id}/rooms`
-    ///
-    /// # Arguments
-    ///
-    /// * `space_id` - The ID of the space
-    pub async fn get_rooms(&self, space_id: &str) -> ApiResult<Vec<Room>> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/api/v2/spaces/{}/rooms",
-                self.base_url, space_id
-            ))
-            .timeout(DEFAULT_TIMEOUT)
-            .query(&[("show_all", "true"), ("default", "false")])
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        self.handle_response(response).await
-    }
-
-    /// Gets the billing plan for a space, including AI credits.
-    ///
-    /// Endpoint: `GET /api/v2/spaces/{space_id}/billing/plan`
-    ///
-    /// # Arguments
-    ///
-    /// * `space_id` - The ID of the space
-    pub async fn get_billing_plan(&self, space_id: &str) -> ApiResult<BillingPlan> {
-        let response = self
-            .client
-            .get(format!(
-                "{}/api/v2/spaces/{}/billing/plan",
-                self.base_url, space_id
-            ))
-            .timeout(DEFAULT_TIMEOUT)
-            .header("Authorization", self.auth_header())
-            .send()
-            .await?;
-
-        self.handle_response(response).await
-    }
-
     /// Gets data with complex aggregation and filtering options.
     ///
     /// Endpoint: `POST /api/v3/spaces/{space_id}/rooms/{room_id}/data`
@@ -241,44 +166,6 @@ impl NetdataApi {
 //
 // These structs match the JSON responses from the Netdata Cloud API.
 // Serde automatically converts between JSON and these Rust types.
-
-/// User account information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UserInfo {
-    pub id: String,
-    pub email: String,
-    pub name: String,
-    #[serde(rename = "avatarURL")]
-    pub avatar_url: Option<String>,
-}
-
-/// A Netdata space (organization/team).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Space {
-    pub id: String,
-    pub name: String,
-    pub slug: Option<String>,
-    pub permissions: Option<Vec<String>>,
-}
-
-/// A room within a space.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Room {
-    pub id: String,
-    pub name: String,
-}
-
-/// Billing plan information for a space.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BillingPlan {
-    pub ai: Option<AiCredits>,
-}
-
-/// AI credits information within a billing plan.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiCredits {
-    pub total_available_microcredits: Option<i64>,
-}
 
 // =============================================================================
 // Data Query Types
@@ -656,44 +543,4 @@ pub struct ContextInfo {
     /// Last data entry timestamp (Unix seconds)
     #[serde(default)]
     pub last_entry: i64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_user_info_deserialize() {
-        let json = r#"{
-            "id": "user123",
-            "email": "test@example.com",
-            "name": "Test User",
-            "avatarURL": "https://example.com/avatar.png"
-        }"#;
-
-        let user: UserInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(user.id, "user123");
-        assert_eq!(user.email, "test@example.com");
-        assert_eq!(
-            user.avatar_url,
-            Some("https://example.com/avatar.png".to_string())
-        );
-    }
-
-    #[test]
-    fn test_space_deserialize() {
-        let json = r#"{
-            "id": "space123",
-            "name": "My Space",
-            "slug": "my-space",
-            "permissions": ["read", "write"]
-        }"#;
-
-        let space: Space = serde_json::from_str(json).unwrap();
-        assert_eq!(space.id, "space123");
-        assert_eq!(
-            space.permissions,
-            Some(vec!["read".to_string(), "write".to_string()])
-        );
-    }
 }
