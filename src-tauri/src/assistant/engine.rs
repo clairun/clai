@@ -13,8 +13,9 @@ use crate::assistant::tools::local::agent_workspace_root_for_id;
 use crate::assistant::tools::registry::CallableAgent;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
-    CompletionRequest, ContentPart, MessageRole, ProviderEvent, ProviderInputMessage, RunId,
-    RunStatus, RunTrigger, RunUsage, SessionId, SessionKind, ToolCallStatus, ToolInvocationDraft,
+    AssistantMessage, CompletionRequest, ContentPart, MessageRole, ProviderEvent,
+    ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId, SessionKind,
+    ToolCallStatus, ToolInvocationDraft,
 };
 use crate::config::McpServerIntegrationType;
 use crate::db::DbPool;
@@ -208,14 +209,17 @@ pub async fn run_session_turn(
             return Ok(());
         }
 
-        // Load fresh message history each iteration (includes the persisted trigger)
+        // Load fresh message history each iteration (includes the persisted trigger).
+        // Normalize before sending: drop empty assistant placeholders, drop tool
+        // messages whose tool_call_id has no matching tool_use in the preceding
+        // assistant turn, and merge consecutive same-role messages. The DB stays
+        // the source of truth; this only shapes what the provider sees so a
+        // mid-stream hangup or stacked user typing can't poison subsequent runs.
         let messages = repository::list_messages(&deps.pool, &session.id).await?;
+        let normalized = normalize_history_for_provider(&messages);
 
         let mut provider_messages = vec![system_message.clone()];
-        provider_messages.extend(messages.iter().map(|msg| ProviderInputMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-        }));
+        provider_messages.extend(normalized);
 
         let request = CompletionRequest {
             run_id: run_id.clone(),
@@ -305,45 +309,9 @@ pub async fn run_session_turn(
                         // Could emit live UI updates here in the future
                     }
                     ProviderEvent::MessageComplete => {
-                        // Update assistant message with final content
-                        let mut final_content = Vec::new();
-
-                        if !accumulated_text.is_empty() {
-                            final_content.push(ContentPart::Text {
-                                text: accumulated_text.clone(),
-                            });
-                        }
-
-                        // Add tool use content parts
-                        for tc in &tool_calls {
-                            final_content.push(ContentPart::ToolUse {
-                                tool_call_id: tc.tool_call_id.clone(),
-                                tool_name: tc.tool_name.clone(),
-                                arguments: tc.params.clone(),
-                            });
-                        }
-
-                        if final_content.is_empty() {
-                            final_content.push(ContentPart::Text {
-                                text: String::new(),
-                            });
-                        }
-
-                        let updated_message = repository::update_message_content(
-                            &deps.pool,
-                            &assistant_message.id,
-                            &final_content,
-                        )
-                        .await?;
-
-                        let _ = emit_event(
-                            &deps.app,
-                            &session,
-                            Some(&run_id),
-                            AssistantUiEvent::AssistantMessageCompleted {
-                                message: updated_message,
-                            },
-                        );
+                        // Finalization happens once after the stream loop exits
+                        // so we also capture in-memory state (text + tool_calls)
+                        // when the provider hangs up before sending [DONE].
                     }
                     ProviderEvent::ProviderError { message } => {
                         fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
@@ -360,6 +328,46 @@ pub async fn run_session_turn(
                 None => break,
             }
         }
+
+        // Finalize the assistant message from whatever we accumulated, even if
+        // the provider never emitted MessageComplete. This prevents the orphan-
+        // tool case: tool_calls captured via `finish_reason: tool_calls` but
+        // [DONE] never arriving, leaving the assistant row with empty content
+        // while tool result rows get persisted just below.
+        let mut final_content = Vec::new();
+        if !accumulated_text.is_empty() {
+            final_content.push(ContentPart::Text {
+                text: accumulated_text.clone(),
+            });
+        }
+        for tc in &tool_calls {
+            final_content.push(ContentPart::ToolUse {
+                tool_call_id: tc.tool_call_id.clone(),
+                tool_name: tc.tool_name.clone(),
+                arguments: tc.params.clone(),
+            });
+        }
+        if final_content.is_empty() {
+            final_content.push(ContentPart::Text {
+                text: String::new(),
+            });
+        }
+
+        let updated_message = repository::update_message_content(
+            &deps.pool,
+            &assistant_message.id,
+            &final_content,
+        )
+        .await?;
+
+        let _ = emit_event(
+            &deps.app,
+            &session,
+            Some(&run_id),
+            AssistantUiEvent::AssistantMessageCompleted {
+                message: updated_message,
+            },
+        );
 
         // If no tool calls, we're done
         if tool_calls.is_empty() {
@@ -1109,6 +1117,364 @@ mod tests {
             assert!(text.contains("Do not store secrets in memory"));
             assert!(text.contains("Knowledge is not a dashboard"));
         }
+    }
+
+    fn user_message(text: &str) -> AssistantMessage {
+        AssistantMessage {
+            id: format!("msg-user-{}", text.len()),
+            session_id: "session".to_string(),
+            role: MessageRole::User,
+            content: vec![ContentPart::Text {
+                text: text.to_string(),
+            }],
+            created_at: 0,
+            provider_metadata: None,
+        }
+    }
+
+    fn assistant_message_with_text(text: &str) -> AssistantMessage {
+        assistant_message_with_content(vec![ContentPart::Text {
+            text: text.to_string(),
+        }])
+    }
+
+    fn assistant_message_with_content(content: Vec<ContentPart>) -> AssistantMessage {
+        AssistantMessage {
+            id: format!("msg-assistant-{}", content.len()),
+            session_id: "session".to_string(),
+            role: MessageRole::Assistant,
+            content,
+            created_at: 0,
+            provider_metadata: None,
+        }
+    }
+
+    fn tool_message(tool_call_id: &str) -> AssistantMessage {
+        AssistantMessage {
+            id: format!("msg-tool-{}", tool_call_id),
+            session_id: "session".to_string(),
+            role: MessageRole::Tool,
+            content: vec![ContentPart::ToolResult {
+                tool_call_id: tool_call_id.to_string(),
+                payload: serde_json::json!({ "ok": true }),
+                started_at: None,
+                completed_at: None,
+            }],
+            created_at: 0,
+            provider_metadata: None,
+        }
+    }
+
+    #[test]
+    fn normalize_drops_orphan_tool_messages() {
+        let messages = vec![
+            user_message("write a file"),
+            assistant_message_with_text("Asking a question, no tool calls"),
+            tool_message("call_orphan"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].role, MessageRole::User);
+        assert_eq!(normalized[1].role, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn normalize_keeps_tool_messages_when_assistant_has_matching_tool_use() {
+        let messages = vec![
+            user_message("write a file"),
+            assistant_message_with_content(vec![
+                ContentPart::Text {
+                    text: "Writing now".into(),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "call_a".into(),
+                    tool_name: "fs.write".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ]),
+            tool_message("call_a"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[2].role, MessageRole::Tool);
+    }
+
+    #[test]
+    fn normalize_drops_empty_assistant_placeholder_and_merges_users() {
+        // Reproduces the corruption from the failing scheduled run: an empty
+        // assistant placeholder followed by stacked user messages typed while
+        // earlier runs were failing, plus a scheduled-run boundary appended on
+        // top by the engine.
+        let messages = vec![
+            user_message("first user question"),
+            assistant_message_with_text(""),
+            user_message("did you read me?"),
+            user_message("--- New scheduled run at 2026-05-17 ---"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].role, MessageRole::User);
+        let ContentPart::Text { text } = &normalized[0].content[0] else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("first user question"));
+        assert!(text.contains("did you read me?"));
+        assert!(text.contains("New scheduled run"));
+    }
+
+    #[test]
+    fn normalize_drops_orphan_tools_with_matching_id_too_far_back() {
+        // Tool message whose tool_call_id exists in an earlier assistant turn
+        // but the immediately preceding assistant has only text. This is the
+        // 20:40 corruption from the production session: the model emitted text
+        // and tool_calls in one turn but the persisted assistant has text only,
+        // so the tool rows after it have no anchor.
+        let messages = vec![
+            user_message("do work"),
+            assistant_message_with_content(vec![ContentPart::ToolUse {
+                tool_call_id: "call_old".into(),
+                tool_name: "fs.write".into(),
+                arguments: serde_json::json!({}),
+            }]),
+            tool_message("call_old"),
+            user_message("any update?"),
+            assistant_message_with_text("Here's a question without tool calls"),
+            tool_message("call_stranded"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        // user → assistant(tool_use) → tool(call_old) → user → assistant(text)
+        // The stranded tool message at the tail is dropped.
+        assert_eq!(normalized.len(), 5);
+        assert_eq!(normalized[2].role, MessageRole::Tool);
+        assert!(matches!(
+            &normalized[2].content[0],
+            ContentPart::ToolResult { tool_call_id, .. } if tool_call_id == "call_old"
+        ));
+        assert_eq!(normalized[4].role, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn normalize_preserves_happy_path_alternation() {
+        let messages = vec![
+            user_message("hi"),
+            assistant_message_with_content(vec![
+                ContentPart::Text {
+                    text: "writing".into(),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "call_a".into(),
+                    tool_name: "fs.write".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ]),
+            tool_message("call_a"),
+            assistant_message_with_text("done"),
+            user_message("thanks"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 5);
+        assert_eq!(normalized[0].role, MessageRole::User);
+        assert_eq!(normalized[1].role, MessageRole::Assistant);
+        assert_eq!(normalized[2].role, MessageRole::Tool);
+        assert_eq!(normalized[3].role, MessageRole::Assistant);
+        assert_eq!(normalized[4].role, MessageRole::User);
+    }
+
+    #[test]
+    fn normalize_merges_consecutive_user_messages_with_blank_line_separator() {
+        let messages = vec![
+            user_message("first"),
+            user_message("second"),
+            user_message("third"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 1);
+        let ContentPart::Text { text } = &normalized[0].content[0] else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "first\n\nsecond\n\nthird");
+    }
+
+    #[test]
+    fn normalize_keeps_tools_grouped_after_their_assistant() {
+        // Assistant emits two tool calls; both tool results follow. Both must
+        // pass through because they match parts of the same preceding assistant.
+        let messages = vec![
+            user_message("do two things"),
+            assistant_message_with_content(vec![
+                ContentPart::ToolUse {
+                    tool_call_id: "call_a".into(),
+                    tool_name: "fs.write".into(),
+                    arguments: serde_json::json!({}),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "call_b".into(),
+                    tool_name: "fs.write".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ]),
+            tool_message("call_a"),
+            tool_message("call_b"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 4);
+        assert_eq!(normalized[2].role, MessageRole::Tool);
+        assert_eq!(normalized[3].role, MessageRole::Tool);
+    }
+}
+
+/// Normalize persisted history into a provider-safe message sequence.
+///
+/// Persistence keeps every assistant placeholder, tool result, and user message —
+/// that's good for the UI and for debugging, but a strict provider (e.g. vLLM
+/// via litellm) will reject a request whose history has an unmatched `tool`
+/// role or breaks the `assistant -> tool -> ...` pairing. Two classes of
+/// corruption are common:
+///
+/// 1. Mid-stream hangups before `[DONE]`: the assistant row gets saved with
+///    only the text content, but tool result rows for the (in-memory) tool
+///    calls were already persisted just below.
+/// 2. Stacked user typing while runs fail: multiple `user` rows pile up with
+///    no assistant turn between them, plus the scheduled run-boundary marker
+///    appends yet another `user` row on top.
+///
+/// This pass leaves the DB untouched and instead reshapes the provider view:
+/// drop empty assistant placeholders, drop tool rows whose `tool_call_id`
+/// isn't present in the preceding assistant's `ToolUse` parts, and merge
+/// consecutive same-role messages (text concatenated with a blank-line
+/// separator).
+fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<ProviderInputMessage> {
+    let mut out: Vec<ProviderInputMessage> = Vec::new();
+
+    for msg in messages {
+        match msg.role {
+            MessageRole::Assistant => {
+                if assistant_content_is_empty(&msg.content) {
+                    tracing::debug!(
+                        message_id = %msg.id,
+                        "Dropping empty assistant placeholder from provider history"
+                    );
+                    continue;
+                }
+                if let Some(last) = out.last_mut() {
+                    if last.role == MessageRole::Assistant {
+                        last.content.extend(msg.content.iter().cloned());
+                        continue;
+                    }
+                }
+                out.push(ProviderInputMessage {
+                    role: MessageRole::Assistant,
+                    content: msg.content.clone(),
+                });
+            }
+            MessageRole::Tool => {
+                if !tool_message_has_matching_assistant(&msg.content, &out) {
+                    tracing::warn!(
+                        message_id = %msg.id,
+                        "Dropping orphan tool message (no matching tool_use in preceding assistant)"
+                    );
+                    continue;
+                }
+                out.push(ProviderInputMessage {
+                    role: MessageRole::Tool,
+                    content: msg.content.clone(),
+                });
+            }
+            MessageRole::User => {
+                if let Some(last) = out.last_mut() {
+                    if last.role == MessageRole::User {
+                        append_text_with_separator(&mut last.content, &msg.content);
+                        continue;
+                    }
+                }
+                out.push(ProviderInputMessage {
+                    role: MessageRole::User,
+                    content: msg.content.clone(),
+                });
+            }
+            MessageRole::System => {
+                out.push(ProviderInputMessage {
+                    role: MessageRole::System,
+                    content: msg.content.clone(),
+                });
+            }
+        }
+    }
+
+    out
+}
+
+fn assistant_content_is_empty(content: &[ContentPart]) -> bool {
+    content.iter().all(|part| match part {
+        ContentPart::Text { text } => text.is_empty(),
+        ContentPart::ToolUse { .. } | ContentPart::ToolResult { .. } => false,
+    })
+}
+
+fn tool_message_has_matching_assistant(
+    content: &[ContentPart],
+    out: &[ProviderInputMessage],
+) -> bool {
+    let Some(tool_call_id) = content.iter().find_map(|part| match part {
+        ContentPart::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+        _ => None,
+    }) else {
+        return false;
+    };
+
+    for msg in out.iter().rev() {
+        match msg.role {
+            MessageRole::Assistant => {
+                return msg.content.iter().any(|part| {
+                    matches!(part, ContentPart::ToolUse { tool_call_id: id, .. } if id == tool_call_id)
+                });
+            }
+            MessageRole::Tool => continue,
+            _ => return false,
+        }
+    }
+
+    false
+}
+
+fn append_text_with_separator(target: &mut Vec<ContentPart>, source: &[ContentPart]) {
+    let source_text: String = source
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if source_text.is_empty() {
+        return;
+    }
+
+    if let Some(last_text) = target.iter_mut().rev().find_map(|part| match part {
+        ContentPart::Text { text } => Some(text),
+        _ => None,
+    }) {
+        if !last_text.is_empty() {
+            last_text.push_str("\n\n");
+        }
+        last_text.push_str(&source_text);
+    } else {
+        target.push(ContentPart::Text { text: source_text });
     }
 }
 
