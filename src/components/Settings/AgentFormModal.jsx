@@ -39,16 +39,6 @@ const normalizePathGrants = (items = []) =>
     }))
     .filter((item) => item.path);
 
-const defaultSchemaText = '{\n  "type": "object"\n}';
-const draftId = () => (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-const createDraftExposedTool = (tool = {}) => ({
-  id: tool.id || draftId(),
-  name: tool.name || '',
-  description: tool.description || '',
-  inputSchemaText: JSON.stringify(tool.inputSchema || { type: 'object' }, null, 2),
-  outputSchemaText: JSON.stringify(tool.outputSchema || { type: 'object' }, null, 2),
-});
-
 /**
  * Close icon
  */
@@ -133,7 +123,7 @@ const ListInputField = ({
  * @param {Function} props.onSubmit - Callback with form data
  * @param {Object} props.agent - Agent to edit (null for create)
  */
-const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], providerConnections = [] }) => {
+const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], providerConnections = [], skills = [] }) => {
   const isEditing = !!agent;
 
   const [name, setName] = useState('');
@@ -141,6 +131,7 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
   const [scheduleEnabled, setScheduleEnabled] = useState(true);
   const [intervalMinutes, setIntervalMinutes] = useState(30);
   const [selectedMcpServerIds, setSelectedMcpServerIds] = useState([]);
+  const [selectedSkillIds, setSelectedSkillIds] = useState([]);
   const [providerConnectionIds, setProviderConnectionIds] = useState([]);
   const [providerConnectionDraft, setProviderConnectionDraft] = useState('');
   const [extraPathGrants, setExtraPathGrants] = useState([]);
@@ -176,6 +167,7 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
         setScheduleEnabled(agent.scheduleEnabled !== false);
         setIntervalMinutes(agent.intervalMinutes || 30);
         setSelectedMcpServerIds(agent.selectedMcpServerIds || []);
+        setSelectedSkillIds(agent.selectedSkillIds || []);
         setProviderConnectionIds(agent.providerConnectionIds || []);
         setProviderConnectionDraft('');
         setExtraPathGrants(normalizePathGrants(execution.filesystem?.extraPaths || []));
@@ -187,13 +179,14 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
         setAllowedCommandDraft('');
         setBlockedCommandDraft('');
         setWebEnabled(execution.web?.enabled || false);
-        setExposedTools((agent.exposedTools || []).map((tool) => createDraftExposedTool(tool)));
+        setExposedTools(agent.exposedTools || []);
       } else {
         setName('');
         setDescription('');
         setScheduleEnabled(true);
         setIntervalMinutes(30);
         setSelectedMcpServerIds([]);
+        setSelectedSkillIds([]);
         setProviderConnectionIds([]);
         setProviderConnectionDraft('');
         setExtraPathGrants([]);
@@ -279,58 +272,6 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
       return;
     }
 
-    const parsedExposedTools = [];
-    const seenNames = new Set();
-    for (const tool of exposedTools) {
-      const toolName = tool.name.trim();
-      if (!toolName) {
-        setError('Each exposed tool needs a name.');
-        return;
-      }
-      if (seenNames.has(toolName)) {
-        setError(`Duplicate exposed tool name: ${toolName}`);
-        return;
-      }
-      seenNames.add(toolName);
-
-      const descriptionText = tool.description.trim();
-      if (!descriptionText) {
-        setError(`Exposed tool "${toolName}" needs a description.`);
-        return;
-      }
-
-      let inputSchema;
-      let outputSchema;
-      try {
-        inputSchema = JSON.parse(tool.inputSchemaText || defaultSchemaText);
-      } catch {
-        setError(`Input schema for "${toolName}" is not valid JSON.`);
-        return;
-      }
-      try {
-        outputSchema = JSON.parse(tool.outputSchemaText || defaultSchemaText);
-      } catch {
-        setError(`Output schema for "${toolName}" is not valid JSON.`);
-        return;
-      }
-
-      if (!inputSchema || typeof inputSchema !== 'object' || Array.isArray(inputSchema)) {
-        setError(`Input schema for "${toolName}" must be a JSON object.`);
-        return;
-      }
-      if (!outputSchema || typeof outputSchema !== 'object' || Array.isArray(outputSchema)) {
-        setError(`Output schema for "${toolName}" must be a JSON object.`);
-        return;
-      }
-
-      parsedExposedTools.push({
-        name: toolName,
-        description: descriptionText,
-        inputSchema,
-        outputSchema,
-      });
-    }
-
     setSaving(true);
 
     try {
@@ -340,6 +281,7 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
         scheduleEnabled,
         intervalMinutes: Number(intervalMinutes),
         selectedMcpServerIds,
+        selectedSkillIds,
         providerConnectionIds,
         execution: {
           filesystem: {
@@ -354,7 +296,7 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
             enabled: webEnabled,
           },
         },
-        exposedTools: parsedExposedTools,
+        exposedTools,
       });
     } catch (err) {
       console.error('[AgentFormModal] Submit error:', err);
@@ -432,10 +374,54 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
             </span>
           </div>
 
+          <div className={styles.field}>
+            <label className={styles.label}>Skills</label>
+            {skills.length === 0 ? (
+              <div className={styles.hint}>
+                No skills discovered yet. Add skill sources in Settings to make reusable instructions available.
+              </div>
+            ) : (
+              <div className={styles.checkboxGroup}>
+                {skills.map((skill) => {
+                  const checked = selectedSkillIds.includes(skill.id);
+                  return (
+                    <label key={skill.id} className={`${styles.checkboxOption} ${styles.skillOption}`}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={saving}
+                        onChange={(e) => {
+                          const nextChecked = e.target.checked;
+                          setSelectedSkillIds((current) => (
+                            nextChecked
+                              ? [...current, skill.id]
+                              : current.filter((id) => id !== skill.id)
+                          ));
+                        }}
+                      />
+                      <span className={styles.skillDetails}>
+                        <span className={styles.skillHeader}>
+                          <span className={styles.skillName}>{skill.name}</span>
+                          <span className={styles.skillSource}>{skill.sourceName}</span>
+                        </span>
+                        {skill.description && (
+                          <span className={styles.skillDescription}>{skill.description}</span>
+                        )}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <span className={styles.hint}>
+              Selected skills are appended to the agent instructions at runtime.
+            </span>
+          </div>
+
           <div className={styles.section}>
             <div className={styles.sectionTitle}>Execution Mode</div>
             <div className={styles.sectionDescription}>
-              Agents can run on a schedule, be available only for on-demand inter-agent calls, or both.
+              Agents can run on a schedule or be assigned to workspaces for manager-delegated tasks.
             </div>
 
             <div className={styles.field}>
@@ -459,8 +445,8 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
               </label>
               <span className={styles.hint}>
                 {scheduleEnabled
-                  ? 'When enabled, this agent can be scheduled and can also be called by other agents if it exposes tools.'
-                  : 'On-demand only. The agent will not be registered with the scheduler but can still be enabled and called by other agents.'}
+                  ? 'When enabled, this agent can be scheduled and can also be assigned to workspace teams.'
+                  : 'Workspace-only. The agent will not be registered with the scheduler but can still receive tasks from workspace managers.'}
               </span>
             </div>
 
@@ -648,116 +634,6 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
             <span className={styles.hint}>
               The first connection is primary. Additional connections are used as ordered fallbacks.
             </span>
-          </div>
-
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>Exposed Tools</div>
-            <div className={styles.sectionDescription}>
-              Exposed tools let other enabled agents call this agent synchronously. Define task-shaped tools with explicit input and output schemas.
-            </div>
-
-            {exposedTools.length === 0 ? (
-              <div className={styles.hint}>
-                No exposed tools yet. Leave this empty to keep the agent isolated from other agents.
-              </div>
-            ) : (
-              <div className={styles.providerConnectionList}>
-                {exposedTools.map((tool, index) => (
-                  <div key={tool.id} className={styles.providerConnectionItem}>
-                    <div className={styles.providerConnectionDetails}>
-                      <div className={styles.providerConnectionHeader}>
-                        <span className={styles.providerConnectionName}>
-                          {tool.name.trim() || `Tool ${index + 1}`}
-                        </span>
-                      </div>
-
-                      <div className={styles.field}>
-                        <label className={styles.label}>Tool Name</label>
-                        <input
-                          type="text"
-                          className={styles.input}
-                          value={tool.name}
-                          onChange={(e) => setExposedTools((current) => current.map((item) => (
-                            item.id === tool.id ? { ...item, name: e.target.value } : item
-                          )))}
-                          placeholder="analyze_network_issue"
-                          disabled={saving}
-                        />
-                      </div>
-
-                      <div className={styles.field}>
-                        <label className={styles.label}>Description</label>
-                        <textarea
-                          className={styles.textarea}
-                          value={tool.description}
-                          onChange={(e) => setExposedTools((current) => current.map((item) => (
-                            item.id === tool.id ? { ...item, description: e.target.value } : item
-                          )))}
-                          placeholder="Investigate a network anomaly and return a structured report."
-                          disabled={saving}
-                          rows={3}
-                        />
-                      </div>
-
-                      <div className={styles.gridTwo}>
-                        <div className={styles.field}>
-                          <label className={styles.label}>Input Schema</label>
-                          <textarea
-                            className={styles.textarea}
-                            value={tool.inputSchemaText}
-                            onChange={(e) => setExposedTools((current) => current.map((item) => (
-                              item.id === tool.id ? { ...item, inputSchemaText: e.target.value } : item
-                            )))}
-                            spellCheck={false}
-                            disabled={saving}
-                            rows={8}
-                          />
-                        </div>
-
-                        <div className={styles.field}>
-                          <label className={styles.label}>Output Schema</label>
-                          <textarea
-                            className={styles.textarea}
-                            value={tool.outputSchemaText}
-                            onChange={(e) => setExposedTools((current) => current.map((item) => (
-                              item.id === tool.id ? { ...item, outputSchemaText: e.target.value } : item
-                            )))}
-                            spellCheck={false}
-                            disabled={saving}
-                            rows={8}
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className={styles.providerConnectionActions}>
-                      <button
-                        type="button"
-                        className={styles.chipRemove}
-                        onClick={() => setExposedTools((current) => current.filter((item) => item.id !== tool.id))}
-                        disabled={saving}
-                        aria-label={`Remove tool ${tool.name || index + 1}`}
-                        title="Remove tool"
-                      >
-                        ×
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <button
-              type="button"
-              className={styles.addButton}
-              onClick={() => setExposedTools((current) => [...current, createDraftExposedTool({
-                inputSchema: { type: 'object', properties: {} },
-                outputSchema: { type: 'object', properties: {} },
-              })])}
-              disabled={saving}
-            >
-              Add Exposed Tool
-            </button>
           </div>
 
           <div className={styles.section}>

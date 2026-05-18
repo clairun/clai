@@ -263,6 +263,74 @@ impl McpServerConfig {
 }
 
 // =============================================================================
+// Skill Config
+// =============================================================================
+
+/// Configured source of reusable skills.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SkillSourceKind {
+    Local {
+        path: String,
+    },
+    Git {
+        uri: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        local_path: Option<String>,
+    },
+}
+
+/// User-configured skill source persisted in app config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSourceConfig {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub source: SkillSourceKind,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl SkillSourceConfig {
+    pub fn new_local(name: String, path: String) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            enabled: true,
+            source: SkillSourceKind::Local { path },
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    pub fn new_git(
+        name: String,
+        uri: String,
+        reference: Option<String>,
+        local_path: Option<String>,
+    ) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            enabled: true,
+            source: SkillSourceKind::Git {
+                uri,
+                reference,
+                local_path,
+            },
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+}
+
+// =============================================================================
 // Automation Config
 // =============================================================================
 
@@ -310,6 +378,10 @@ pub struct AgentConfig {
     #[serde(default)]
     pub provider_connection_ids: Vec<String>,
 
+    /// Selected reusable skills.
+    #[serde(default)]
+    pub selected_skill_ids: Vec<String>,
+
     /// Local execution capability policy for this automation.
     #[serde(default)]
     pub execution: ExecutionCapabilityConfig,
@@ -356,6 +428,7 @@ impl AgentConfig {
             enabled: false,
             selected_mcp_server_ids: vec![],
             provider_connection_ids: vec![],
+            selected_skill_ids: vec![],
             execution: ExecutionCapabilityConfig::default(),
             exposed_tools: vec![],
             created_at: now.clone(),
@@ -375,6 +448,7 @@ impl AgentConfig {
             enabled: false,
             selected_mcp_server_ids: vec![],
             provider_connection_ids: vec![],
+            selected_skill_ids: vec![],
             execution: ExecutionCapabilityConfig::default(),
             exposed_tools: vec![],
             created_at: now.clone(),
@@ -466,6 +540,10 @@ pub struct ClaiConfig {
     /// User-configured MCP servers.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+
+    /// Configured skill sources.
+    #[serde(default)]
+    pub skill_sources: Vec<SkillSourceConfig>,
 }
 
 // =============================================================================
@@ -504,6 +582,7 @@ mod tests {
         assert!(agent.schedule_enabled);
         assert!(agent.selected_mcp_server_ids.is_empty());
         assert!(agent.provider_connection_ids.is_empty());
+        assert!(agent.selected_skill_ids.is_empty());
         assert!(matches!(agent.execution.shell.mode, ShellAccessMode::Off));
         assert!(agent.execution.filesystem.extra_paths.is_empty());
         assert!(agent.exposed_tools.is_empty());
@@ -522,6 +601,7 @@ mod tests {
         assert!(agent1.schedule_enabled);
         assert!(agent1.selected_mcp_server_ids.is_empty());
         assert!(agent1.provider_connection_ids.is_empty());
+        assert!(agent1.selected_skill_ids.is_empty());
         assert!(agent1.execution.filesystem.extra_paths.is_empty());
     }
 
@@ -578,6 +658,7 @@ mod tests {
         let mut agent = AgentConfig::default_agent();
         agent.selected_mcp_server_ids = vec!["mcp-a".to_string(), "mcp-b".to_string()];
         agent.provider_connection_ids = vec!["conn-a".to_string(), "conn-b".to_string()];
+        agent.selected_skill_ids = vec!["skill-a".to_string()];
         agent.exposed_tools = vec![ExposedAgentTool {
             name: "analyze".to_string(),
             description: "Analyze something".to_string(),
@@ -591,6 +672,7 @@ mod tests {
         assert!(json.contains("Infrastructure Health Monitor"));
         assert!(json.contains("mcp-a"));
         assert!(json.contains("conn-a"));
+        assert!(json.contains("skill-a"));
 
         let parsed: AgentConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, agent.id);
@@ -603,6 +685,7 @@ mod tests {
             parsed.provider_connection_ids,
             agent.provider_connection_ids
         );
+        assert_eq!(parsed.selected_skill_ids, agent.selected_skill_ids);
         assert_eq!(parsed.execution, agent.execution);
         assert_eq!(parsed.schedule_enabled, agent.schedule_enabled);
         assert_eq!(parsed.exposed_tools, agent.exposed_tools);

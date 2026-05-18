@@ -329,6 +329,7 @@ export const getAgent = async (id) => {
  * @param {string} request.description - Agent description (supports markdown)
  * @param {number} request.intervalMinutes - Check interval in minutes
  * @param {Array<string>} request.selectedMcpServerIds - Enabled MCP servers for this agent
+ * @param {Array<string>} request.selectedSkillIds - Selected reusable skill IDs for this agent
  * @param {Object} request.execution - Local execution capability policy
  * @returns {Promise<Object>} Created agent
  */
@@ -348,6 +349,7 @@ export const createAgent = async (request) => {
  * @param {string} request.description - Agent description
  * @param {number} request.intervalMinutes - Check interval in minutes
  * @param {Array<string>} request.selectedMcpServerIds - Enabled MCP servers for this agent
+ * @param {Array<string>} request.selectedSkillIds - Selected reusable skill IDs for this agent
  * @param {Object} request.execution - Local execution capability policy
  * @returns {Promise<Object>} Updated agent
  */
@@ -385,6 +387,68 @@ export const setAgentEnabled = async (id, enabled) => {
     });
   } catch (error) {
     handleApiError(error, 'Failed to update agent status');
+  }
+};
+
+// ============================================================================
+// Skill Catalog
+// ============================================================================
+
+export const getSkillSources = async () => {
+  try {
+    return await invoke('skill_sources_list');
+  } catch (error) {
+    handleApiError(error, 'Failed to get skill sources');
+  }
+};
+
+export const getSkills = async () => {
+  try {
+    return await invoke('skills_list');
+  } catch (error) {
+    handleApiError(error, 'Failed to get skills');
+  }
+};
+
+export const getSkillsCatalog = async () => {
+  try {
+    return await invoke('skills_catalog');
+  } catch (error) {
+    handleApiError(error, 'Failed to get skill catalog');
+  }
+};
+
+export const addSkillSource = async (request) => {
+  try {
+    return await invoke('skill_source_add', { request });
+  } catch (error) {
+    handleApiError(error, 'Failed to add skill source');
+  }
+};
+
+export const refreshSkillSource = async (id) => {
+  try {
+    return await invoke('skill_source_refresh', { id });
+  } catch (error) {
+    handleApiError(error, 'Failed to refresh skill source');
+  }
+};
+
+export const setSkillSourceEnabled = async (id, enabled) => {
+  try {
+    return await invoke('skill_source_set_enabled', {
+      request: { id, enabled },
+    });
+  } catch (error) {
+    handleApiError(error, 'Failed to update skill source');
+  }
+};
+
+export const deleteSkillSource = async (id) => {
+  try {
+    return await invoke('skill_source_delete', { id });
+  } catch (error) {
+    handleApiError(error, 'Failed to delete skill source');
   }
 };
 

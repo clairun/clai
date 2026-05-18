@@ -12,4 +12,5 @@ pub mod fleet;
 pub mod mcp_servers;
 pub mod provider;
 pub mod provider_connections;
+pub mod skills;
 pub mod workspace;

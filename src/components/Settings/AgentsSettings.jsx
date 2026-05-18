@@ -12,6 +12,7 @@ import {
   updateAgent,
   deleteAgent,
   getMcpServers,
+  getSkills,
   setAgentEnabled,
 } from '../../api/client';
 import { assistantClient } from '../../assistant';
@@ -56,6 +57,7 @@ const WarningIcon = () => (
 const AgentsSettings = () => {
   const [agents, setAgents] = useState([]);
   const [mcpServers, setMcpServers] = useState([]);
+  const [skills, setSkills] = useState([]);
   const [providerConnections, setProviderConnections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -82,6 +84,13 @@ const AgentsSettings = () => {
       setAgents(agentsResult || []);
       setMcpServers(mcpServersResult || []);
       setProviderConnections(providerConnectionsResult || []);
+
+      try {
+        setSkills((await getSkills()) || []);
+      } catch (skillsError) {
+        console.warn('[AgentsSettings] Failed to fetch skills:', skillsError);
+        setSkills([]);
+      }
     } catch (err) {
       console.error('[AgentsSettings] Failed to fetch data:', err);
       setError('Failed to load agents. Please try again.');
@@ -196,7 +205,7 @@ const AgentsSettings = () => {
         <div className={styles.headerText}>
           <h3 className={styles.title}>Agents</h3>
           <p className={styles.description}>
-            Create autonomous and on-demand agents with custom instructions, target scope, local capabilities, and inter-agent tools.
+            Create reusable agents with custom instructions, skills, provider defaults, and local capabilities.
           </p>
         </div>
         <button className={styles.addButton} onClick={handleCreate}>
@@ -225,7 +234,7 @@ const AgentsSettings = () => {
           </div>
           <h4 className={styles.emptyTitle}>No agents configured</h4>
           <p className={styles.emptyDescription}>
-            Create your first agent to run on a recurring interval, accept on-demand calls from other agents, or both.
+            Create your first reusable agent definition for scheduled work or workspace teams.
           </p>
           <button className={styles.emptyButton} onClick={handleCreate}>
             <PlusIcon />
@@ -239,6 +248,7 @@ const AgentsSettings = () => {
               key={agent.id}
               agent={agent}
               mcpServers={mcpServers}
+              skills={skills}
               onEdit={() => handleEdit(agent)}
               onDelete={() => handleDelete(agent.id)}
               onToggleEnabled={() => handleToggleEnabled(agent)}
@@ -251,8 +261,7 @@ const AgentsSettings = () => {
 
       <div className={styles.hint}>
         <p>
-          Enabled agents can run on a schedule, answer inter-agent tool calls, or both. Attach MCP servers here, and let the agent
-          discover any target space or room it needs through those tools.
+          Enabled agents can run on a schedule or be assigned to workspaces. Workspace managers delegate tasks to assigned agents inside that workspace boundary.
         </p>
       </div>
 
@@ -263,6 +272,7 @@ const AgentsSettings = () => {
         onSubmit={handleFormSubmit}
         agent={editingAgent}
         mcpServers={mcpServers}
+        skills={skills}
         providerConnections={providerConnections}
       />
     </div>

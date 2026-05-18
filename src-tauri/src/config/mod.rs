@@ -8,19 +8,20 @@ pub mod types;
 pub use types::{
     AgentConfig, AiProvider, ClaiConfig, ExecutionCapabilityConfig, ExposedAgentTool,
     FilesystemPathAccess, FilesystemPathGrant, McpServerAuth, McpServerConfig,
-    McpServerIntegrationType, McpServerTransport, ShellAccessMode,
+    McpServerIntegrationType, McpServerTransport, ShellAccessMode, SkillSourceConfig,
+    SkillSourceKind,
 };
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Name of the config file.
 const CONFIG_FILE_NAME: &str = "config.json";
 
-/// Application identifier for config directory.
-const APP_IDENTIFIER: &str = "clai";
+/// Application identifier for config and data directories.
+pub const APP_IDENTIFIER: &str = "clai";
 
 /// Manages loading and saving the application configuration.
 pub struct ConfigManager {
@@ -29,6 +30,37 @@ pub struct ConfigManager {
 
     /// Path to the config file.
     config_path: PathBuf,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDefinition {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub source_id: String,
+    pub source_name: String,
+    pub source_path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSourceDiagnostic {
+    pub source_id: String,
+    pub source_name: String,
+    pub ok: bool,
+    pub message: Option<String>,
+    pub skill_count: usize,
+}
+
+impl SkillDefinition {
+    fn prompt_section(&self) -> String {
+        format!(
+            "### {}\nSource: {}\n\n{}",
+            self.name, self.source_path, self.content
+        )
+    }
 }
 
 impl ConfigManager {
@@ -277,6 +309,253 @@ impl ConfigManager {
         })?;
         Ok(changed)
     }
+
+    /// Gets all configured skill sources.
+    pub fn get_skill_sources(&self) -> Vec<SkillSourceConfig> {
+        self.config.lock().unwrap().skill_sources.clone()
+    }
+
+    /// Adds a skill source and saves config.
+    pub fn add_skill_source(&self, source: SkillSourceConfig) -> Result<(), ConfigError> {
+        self.update(|config| {
+            config.skill_sources.push(source);
+        })
+    }
+
+    /// Removes a skill source and clears agent selections from that source.
+    pub fn remove_skill_source(&self, id: &str) -> Result<bool, ConfigError> {
+        let mut removed = false;
+        self.update(|config| {
+            let initial_len = config.skill_sources.len();
+            config.skill_sources.retain(|source| source.id != id);
+            removed = config.skill_sources.len() != initial_len;
+
+            if removed {
+                let prefix = format!("{}:", id);
+                for agent in &mut config.agents {
+                    agent
+                        .selected_skill_ids
+                        .retain(|skill_id| !skill_id.starts_with(&prefix));
+                }
+            }
+        })?;
+        Ok(removed)
+    }
+}
+
+pub fn discover_skills(config: &ClaiConfig) -> Result<Vec<SkillDefinition>, String> {
+    Ok(discover_skills_with_diagnostics(config).0)
+}
+
+pub fn discover_skills_with_diagnostics(
+    config: &ClaiConfig,
+) -> (Vec<SkillDefinition>, Vec<SkillSourceDiagnostic>) {
+    let mut skills = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    for source in &config.skill_sources {
+        if !source.enabled {
+            diagnostics.push(SkillSourceDiagnostic {
+                source_id: source.id.clone(),
+                source_name: source.name.clone(),
+                ok: true,
+                message: Some("Source is disabled.".to_string()),
+                skill_count: 0,
+            });
+            continue;
+        }
+
+        let Some(root) = skill_source_local_path(source) else {
+            diagnostics.push(SkillSourceDiagnostic {
+                source_id: source.id.clone(),
+                source_name: source.name.clone(),
+                ok: false,
+                message: Some("Source has no local path yet. Refresh or re-add it.".to_string()),
+                skill_count: 0,
+            });
+            continue;
+        };
+        if !root.exists() {
+            diagnostics.push(SkillSourceDiagnostic {
+                source_id: source.id.clone(),
+                source_name: source.name.clone(),
+                ok: false,
+                message: Some(format!("Source path does not exist: {}", root.display())),
+                skill_count: 0,
+            });
+            continue;
+        }
+
+        let before = skills.len();
+        match discover_skill_files(source, &root, &root, &mut skills) {
+            Ok(()) => diagnostics.push(SkillSourceDiagnostic {
+                source_id: source.id.clone(),
+                source_name: source.name.clone(),
+                ok: true,
+                message: None,
+                skill_count: skills.len() - before,
+            }),
+            Err(error) => {
+                skills.truncate(before);
+                diagnostics.push(SkillSourceDiagnostic {
+                    source_id: source.id.clone(),
+                    source_name: source.name.clone(),
+                    ok: false,
+                    message: Some(error),
+                    skill_count: 0,
+                });
+            }
+        }
+    }
+
+    skills.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    (skills, diagnostics)
+}
+
+pub fn agent_instructions_with_skills(config: &ClaiConfig, agent: &AgentConfig) -> String {
+    let base = agent.description.clone();
+    let Ok(skills) = discover_skills(config) else {
+        return base;
+    };
+    let selected: Vec<_> = agent
+        .selected_skill_ids
+        .iter()
+        .filter_map(|skill_id| skills.iter().find(|skill| &skill.id == skill_id))
+        .collect();
+
+    if selected.is_empty() {
+        return base;
+    }
+
+    let mut prompt = base;
+    prompt.push_str("\n\n## Selected Skills\n");
+    prompt.push_str(
+        "Use these reusable skill instructions when they are relevant to the current task. \
+         If a skill expects a tool or runtime capability that is unavailable, report that as a runtime blocker.\n",
+    );
+    for skill in selected {
+        prompt.push('\n');
+        prompt.push_str(&skill.prompt_section());
+        prompt.push('\n');
+    }
+    prompt
+}
+
+fn skill_source_local_path(source: &SkillSourceConfig) -> Option<PathBuf> {
+    match &source.source {
+        SkillSourceKind::Local { path } => Some(PathBuf::from(path)),
+        SkillSourceKind::Git { local_path, .. } => local_path.as_ref().map(PathBuf::from),
+    }
+}
+
+fn discover_skill_files(
+    source: &SkillSourceConfig,
+    root: &Path,
+    dir: &Path,
+    skills: &mut Vec<SkillDefinition>,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return Err(format!(
+                "Failed to read skill source directory {}: {}",
+                dir.display(),
+                error
+            ));
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if should_skip_skill_dir(&path) {
+                continue;
+            }
+            discover_skill_files(source, root, &path, skills)?;
+            continue;
+        }
+
+        if !file_type.is_file()
+            || path.file_name().and_then(|name| name.to_str()) != Some("SKILL.md")
+        {
+            continue;
+        }
+
+        let content = fs::read_to_string(&path)
+            .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
+        let relative_path = path
+            .strip_prefix(root)
+            .unwrap_or(path.as_path())
+            .to_string_lossy()
+            .replace('\\', "/");
+        let skill_dir = Path::new(&relative_path)
+            .parent()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "root".to_string());
+
+        skills.push(SkillDefinition {
+            id: format!("{}:{}", source.id, skill_dir),
+            name: skill_name_from_content(&content).unwrap_or_else(|| skill_dir.clone()),
+            description: skill_description_from_content(&content).unwrap_or_default(),
+            source_id: source.id.clone(),
+            source_name: source.name.clone(),
+            source_path: relative_path,
+            content,
+        });
+    }
+
+    Ok(())
+}
+
+fn should_skip_skill_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "venv")
+    )
+}
+
+fn skill_name_from_content(content: &str) -> Option<String> {
+    front_matter_field(content, "name").or_else(|| {
+        content
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("# ").map(str::trim))
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn skill_description_from_content(content: &str) -> Option<String> {
+    front_matter_field(content, "description").or_else(|| {
+        content
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#') && *line != "---")
+            .find(|line| !line.contains(':'))
+            .map(|line| line.chars().take(240).collect())
+    })
+}
+
+fn front_matter_field(content: &str, key: &str) -> Option<String> {
+    let mut lines = content.lines().map(str::trim);
+    if lines.next()? != "---" {
+        return None;
+    }
+    let prefix = format!("{}:", key);
+    lines
+        .take_while(|line| *line != "---")
+        .find_map(|line| line.strip_prefix(&prefix).map(str::trim))
+        .map(|value| value.trim_matches('"').trim_matches('\'').to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Errors that can occur during config operations.
@@ -380,5 +659,58 @@ mod tests {
 
         let agent = manager.get_agents().into_iter().next().unwrap();
         assert!(agent.selected_mcp_server_ids.is_empty());
+    }
+
+    #[test]
+    fn test_discover_skills_loads_local_skill_md() {
+        let temp_dir = TempDir::new().unwrap();
+        let skill_dir = temp_dir.path().join("code-review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Review diffs carefully.\"\n---\n# Code Review\nReview with care.",
+        )
+        .unwrap();
+
+        let source = SkillSourceConfig::new_local(
+            "Local Skills".to_string(),
+            temp_dir.path().display().to_string(),
+        );
+        let mut config = ClaiConfig::default();
+        config.skill_sources.push(source.clone());
+
+        let skills = discover_skills(&config).unwrap();
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "Code Review");
+        assert_eq!(skills[0].description, "Review diffs carefully.");
+        assert_eq!(skills[0].source_id, source.id);
+        assert_eq!(skills[0].source_path, "code-review/SKILL.md");
+
+        let mut agent = AgentConfig::new("Reviewer".to_string(), "Base prompt".to_string(), 5);
+        agent.selected_skill_ids = vec![skills[0].id.clone()];
+        let prompt = agent_instructions_with_skills(&config, &agent);
+
+        assert!(prompt.contains("Base prompt"));
+        assert!(prompt.contains("## Selected Skills"));
+        assert!(prompt.contains("Review with care."));
+    }
+
+    #[test]
+    fn test_remove_skill_source_cleans_agent_selection() {
+        let (manager, _temp_dir) = create_test_manager();
+        let source =
+            SkillSourceConfig::new_local("Local Skills".to_string(), "/tmp/skills".to_string());
+        let source_id = source.id.clone();
+        manager.add_skill_source(source).unwrap();
+
+        let mut agent = AgentConfig::new("Test".to_string(), "Desc".to_string(), 5);
+        agent.selected_skill_ids = vec![format!("{}:code-review", source_id)];
+        manager.add_agent(agent).unwrap();
+
+        assert!(manager.remove_skill_source(&source_id).unwrap());
+
+        let agent = manager.get_agents().into_iter().next().unwrap();
+        assert!(agent.selected_skill_ids.is_empty());
     }
 }

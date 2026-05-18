@@ -9,7 +9,7 @@ use crate::assistant::types::{
     AssistantMessage, AssistantRun, AssistantSession, ContentPart, MessageRole, SessionContext,
     SessionKind, ToolInvocation, WorkspaceAgentSummary,
 };
-use crate::config::{AgentConfig, ExecutionCapabilityConfig};
+use crate::config::{agent_instructions_with_skills, AgentConfig, ExecutionCapabilityConfig};
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -628,6 +628,7 @@ fn resolve_workspace_descriptor(
         .map_err(|error| format!("Lock error: {}", error))?;
 
     if let Some(agent) = config_manager.get_agent(&workspace_id) {
+        let config = config_manager.get();
         let mcp_servers = config_manager.get_mcp_servers();
         let selected_mcp_server_names = agent
             .selected_mcp_server_ids
@@ -640,7 +641,10 @@ fn resolve_workspace_descriptor(
             })
             .collect();
         drop(config_manager);
-        return workspace_descriptor_from_agent(agent, selected_mcp_server_names);
+        let runtime_description = agent_instructions_with_skills(&config, &agent);
+        let mut descriptor = workspace_descriptor_from_agent(agent, selected_mcp_server_names)?;
+        descriptor.automation_description = Some(runtime_description);
+        return Ok(descriptor);
     }
 
     drop(config_manager);
@@ -784,6 +788,15 @@ fn workspace_descriptor_from_agent(
     })
 }
 
+fn agent_runtime_description(state: &AppState, agent: &AgentConfig) -> String {
+    let config = state.config_manager.lock().map(|manager| manager.get());
+
+    match config {
+        Ok(config) => agent_instructions_with_skills(&config, agent),
+        Err(_) => agent.description.clone(),
+    }
+}
+
 fn normalize_workspace_agent_role(role: Option<String>) -> Result<String, String> {
     let normalized = role
         .unwrap_or_else(|| "member".to_string())
@@ -910,7 +923,9 @@ fn workspace_agent_response_from_row(
         provider_connection_ids: agent
             .map(|agent| agent.provider_connection_ids.clone())
             .unwrap_or_default(),
-        skill_ids: Vec::new(),
+        skill_ids: agent
+            .map(|agent| agent.selected_skill_ids.clone())
+            .unwrap_or_default(),
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -1201,6 +1216,7 @@ async fn find_workspace_session(
 }
 
 fn desired_workspace_context(
+    state: &AppState,
     descriptor: &WorkspaceDescriptor,
     existing_session: Option<&AssistantSession>,
     workspace_agents: Vec<WorkspaceAgentSummary>,
@@ -1245,7 +1261,7 @@ fn desired_workspace_context(
     let automation_description = descriptor
         .automation_description
         .clone()
-        .or_else(|| workspace_manager.map(|agent| agent.description.clone()));
+        .or_else(|| workspace_manager.map(|agent| agent_runtime_description(state, agent)));
 
     SessionContext {
         space_id: existing_session.and_then(|session| session.context.space_id.clone()),
@@ -1733,6 +1749,7 @@ pub async fn workspace_get_or_create_session(
     let workspace_manager = resolve_workspace_manager_agent(state.inner(), &workspace_agents)?;
     let session = if let Some(existing) = existing {
         let desired_context = desired_workspace_context(
+            state.inner(),
             &descriptor,
             Some(&existing),
             workspace_agents.clone(),
@@ -1761,6 +1778,7 @@ pub async fn workspace_get_or_create_session(
                 },
                 title: Some(descriptor.title.clone()),
                 context: desired_workspace_context(
+                    state.inner(),
                     &descriptor,
                     None,
                     workspace_agents,
@@ -1932,6 +1950,7 @@ pub async fn workspace_update_session_mcp(
                 },
                 title: Some(descriptor.title.clone()),
                 context: desired_workspace_context(
+                    state.inner(),
                     &descriptor,
                     None,
                     workspace_agents.clone(),
@@ -1946,15 +1965,16 @@ pub async fn workspace_update_session_mcp(
     updated.context.mcp_server_ids = request.mcp_server_ids;
     updated.context.workspace_agents = workspace_agents;
     if descriptor.agent_id.is_none() {
-        if let Some(manager) = workspace_manager {
-            updated.context.execution = manager.execution;
+        if let Some(manager) = workspace_manager.as_ref() {
+            updated.context.execution = manager.execution.clone();
             updated.context.automation_id = Some(manager.id.clone());
             updated.context.agent_workspace_id = descriptor
                 .root_path
                 .as_ref()
                 .map(|_| descriptor.workspace_id.clone());
-            updated.context.automation_name = Some(manager.name);
-            updated.context.automation_description = Some(manager.description);
+            updated.context.automation_name = Some(manager.name.clone());
+            updated.context.automation_description =
+                Some(agent_runtime_description(state.inner(), manager));
         }
     }
     updated.updated_at = chrono::Utc::now().timestamp_millis();
@@ -2309,6 +2329,9 @@ pub struct WorkspaceListEntry {
     pub message_count: i64,
     pub artifact_count: i64,
     pub memory_count: i64,
+    pub assigned_agent_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_manager_name: Option<String>,
     pub running_task_count: i64,
     pub blocked_task_count: i64,
     pub failed_task_count: i64,
@@ -2345,6 +2368,21 @@ impl WorkspaceTaskAttentionSummary {
     fn attention_task_count(&self) -> i64 {
         self.blocked_task_count + self.failed_task_count + self.needs_user_input_task_count
     }
+}
+
+async fn workspace_team_summary(
+    pool: &DbPool,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<(usize, Option<String>), String> {
+    let agents = workspace_agent_summaries(pool, state, workspace_id).await?;
+    let default_manager_name = agents
+        .iter()
+        .find(|agent| agent.is_default)
+        .or_else(|| agents.iter().find(|agent| agent.role == "manager"))
+        .map(|agent| agent.display_name.clone());
+
+    Ok((agents.len(), default_manager_name))
 }
 
 /// Create a new general workspace with a UUID and filesystem root.
@@ -2433,6 +2471,8 @@ pub async fn workspace_list(
     for (id, name, enabled, artifact_count, memory_count, created_at, updated_at) in agent_infos {
         let message_count = count_session_messages(pool.inner(), &id).await;
         let task_attention = workspace_task_attention_summary(pool.inner(), &id).await?;
+        let (assigned_agent_count, default_manager_name) =
+            workspace_team_summary(pool.inner(), state.inner(), &id).await?;
         entries.push(WorkspaceListEntry {
             id: id.clone(),
             kind: "agent".to_string(),
@@ -2442,6 +2482,8 @@ pub async fn workspace_list(
             message_count,
             artifact_count,
             memory_count,
+            assigned_agent_count,
+            default_manager_name,
             running_task_count: task_attention.running_task_count,
             blocked_task_count: task_attention.blocked_task_count,
             failed_task_count: task_attention.failed_task_count,
@@ -2473,6 +2515,8 @@ pub async fn workspace_list(
             .unwrap_or((0, 0));
         let message_count = count_session_messages(pool.inner(), &id).await;
         let task_attention = workspace_task_attention_summary(pool.inner(), &id).await?;
+        let (assigned_agent_count, default_manager_name) =
+            workspace_team_summary(pool.inner(), state.inner(), &id).await?;
 
         entries.push(WorkspaceListEntry {
             id,
@@ -2483,6 +2527,8 @@ pub async fn workspace_list(
             message_count,
             artifact_count,
             memory_count,
+            assigned_agent_count,
+            default_manager_name,
             running_task_count: task_attention.running_task_count,
             blocked_task_count: task_attention.blocked_task_count,
             failed_task_count: task_attention.failed_task_count,

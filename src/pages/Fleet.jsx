@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useFleet } from '../contexts/FleetContext';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { assistantClient, useAssistantStore } from '../assistant';
-import { createAgent, updateAgent, getMcpServers, setAgentEnabled } from '../api/client';
+import { createAgent, updateAgent, getMcpServers, getSkills, setAgentEnabled } from '../api/client';
 import { fleetRunNow } from '../fleet/client';
 import { listWorkspaces, deleteWorkspace } from '../workspace/client';
 import ChatMessageList, { NoticesBanner } from '../components/AssistantChat/ChatMessageList';
@@ -138,6 +138,7 @@ const Fleet = () => {
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState(null);
   const [mcpServers, setMcpServers] = useState([]);
+  const [skills, setSkills] = useState([]);
   const [providerConnections, setProviderConnections] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);
   const {
@@ -242,13 +243,18 @@ const Fleet = () => {
   }, [selectedAgent, refresh]);
 
   const loadFormDependencies = useCallback(async () => {
-    const [serversResult, connectionsResult] = await Promise.allSettled([
+    const [serversResult, skillsResult, connectionsResult] = await Promise.allSettled([
       getMcpServers(),
+      getSkills(),
       assistantClient.listProviderConnections(),
     ]);
 
     if (serversResult.status === 'fulfilled') {
       setMcpServers(serversResult.value || []);
+    }
+
+    if (skillsResult.status === 'fulfilled') {
+      setSkills(skillsResult.value || []);
     }
 
     if (connectionsResult.status === 'fulfilled') {
@@ -271,6 +277,7 @@ const Fleet = () => {
       description: selectedAgent.description,
       intervalMinutes: selectedAgent.intervalMinutes,
       selectedMcpServerIds: selectedAgent.selectedMcpServerIds || [],
+      selectedSkillIds: selectedAgent.selectedSkillIds || [],
       providerConnectionIds: selectedAgent.providerConnectionIds || [],
       execution: selectedAgent.execution || undefined,
     });
@@ -506,6 +513,8 @@ const Fleet = () => {
                     <span>{ws.messageCount} msgs</span>
                     <span>{ws.artifactCount} artifacts</span>
                     <span>{ws.memoryCount} memories</span>
+                    <span>{ws.assignedAgentCount || 0} agents</span>
+                    {ws.defaultManagerName && <span>Manager: <strong>{ws.defaultManagerName}</strong></span>}
                     {ws.runningTaskCount > 0 && <span>{ws.runningTaskCount} running</span>}
                   </div>
                   {(ws.attentionTaskCount || 0) > 0 && (
@@ -628,6 +637,7 @@ const Fleet = () => {
         onSubmit={handleFormSubmit}
         agent={editingAgent}
         mcpServers={mcpServers}
+        skills={skills}
         providerConnections={providerConnections}
       />
     </div>

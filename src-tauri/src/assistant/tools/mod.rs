@@ -1,4 +1,3 @@
-pub mod inter_agent;
 pub mod local;
 pub mod registry;
 pub mod router;

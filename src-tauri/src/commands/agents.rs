@@ -28,6 +28,8 @@ pub struct CreateAgentRequest {
     #[serde(default)]
     pub provider_connection_ids: Vec<String>,
     #[serde(default)]
+    pub selected_skill_ids: Vec<String>,
+    #[serde(default)]
     pub execution: ExecutionCapabilityConfig,
     #[serde(default)]
     pub exposed_tools: Vec<ExposedAgentTool>,
@@ -47,6 +49,8 @@ pub struct UpdateAgentRequest {
     pub selected_mcp_server_ids: Vec<String>,
     #[serde(default)]
     pub provider_connection_ids: Vec<String>,
+    #[serde(default)]
+    pub selected_skill_ids: Vec<String>,
     #[serde(default)]
     pub execution: ExecutionCapabilityConfig,
     #[serde(default)]
@@ -73,6 +77,7 @@ pub struct AgentResponse {
     pub enabled: bool,
     pub selected_mcp_server_ids: Vec<String>,
     pub provider_connection_ids: Vec<String>,
+    pub selected_skill_ids: Vec<String>,
     pub execution: ExecutionCapabilityConfig,
     pub exposed_tools: Vec<ExposedAgentTool>,
     pub created_at: String,
@@ -92,6 +97,7 @@ impl From<AgentConfig> for AgentResponse {
             enabled: agent.enabled,
             selected_mcp_server_ids: agent.selected_mcp_server_ids,
             provider_connection_ids: agent.provider_connection_ids,
+            selected_skill_ids: agent.selected_skill_ids,
             execution: agent.execution,
             exposed_tools: agent.exposed_tools,
             created_at: agent.created_at,
@@ -162,6 +168,7 @@ pub async fn create_agent(
     agent.schedule_enabled = request.schedule_enabled;
     agent.selected_mcp_server_ids = request.selected_mcp_server_ids;
     agent.provider_connection_ids = request.provider_connection_ids;
+    agent.selected_skill_ids = request.selected_skill_ids;
     agent.execution = request.execution;
     agent.exposed_tools = request.exposed_tools;
     agent.validate()?;
@@ -222,6 +229,7 @@ pub async fn update_agent(
         candidate.interval_minutes = request.interval_minutes;
         candidate.selected_mcp_server_ids = request.selected_mcp_server_ids.clone();
         candidate.provider_connection_ids = request.provider_connection_ids.clone();
+        candidate.selected_skill_ids = request.selected_skill_ids.clone();
         candidate.execution = request.execution.clone();
         candidate.exposed_tools = request.exposed_tools.clone();
         candidate.validate()?;

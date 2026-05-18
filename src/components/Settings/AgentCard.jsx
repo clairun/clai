@@ -89,7 +89,7 @@ const truncateDescription = (text, maxLength = 120) => {
  * @param {boolean} props.isDeleting - Whether deletion is in progress
  * @param {boolean} props.isToggling - Whether enable/disable is in progress
  */
-const AgentCard = ({ agent, mcpServers = [], onEdit, onDelete, onToggleEnabled, isDeleting, isToggling }) => {
+const AgentCard = ({ agent, mcpServers = [], skills = [], onEdit, onDelete, onToggleEnabled, isDeleting, isToggling }) => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const handleDeleteClick = () => {
@@ -108,6 +108,9 @@ const AgentCard = ({ agent, mcpServers = [], onEdit, onDelete, onToggleEnabled, 
   const isEnabled = !!agent.enabled;
   const selectedMcpServerNames = (agent.selectedMcpServerIds || [])
     .map((id) => mcpServers.find((server) => server.id === id)?.name)
+    .filter(Boolean);
+  const selectedSkillNames = (agent.selectedSkillIds || [])
+    .map((id) => skills.find((skill) => skill.id === id)?.name)
     .filter(Boolean);
   const filesystemMode = agent.execution?.filesystem?.mode || 'off';
   const shellMode = agent.execution?.shell?.mode || 'off';
@@ -143,8 +146,13 @@ const AgentCard = ({ agent, mcpServers = [], onEdit, onDelete, onToggleEnabled, 
           MCP: {selectedMcpServerNames.length > 0 ? selectedMcpServerNames.join(', ') : 'None'}
         </p>
         <p className={styles.description}>
-          Exposed tools: {exposedToolCount > 0 ? exposedToolCount : 'None'}
+          Skills: {selectedSkillNames.length > 0 ? selectedSkillNames.join(', ') : 'None'}
         </p>
+        {exposedToolCount > 0 && (
+          <p className={styles.description}>
+            Legacy exposed tools: {exposedToolCount}
+          </p>
+        )}
         <p className={styles.description}>
           Local: FS {filesystemMode.replace('_', ' ')} · Shell {shellMode.replace('_', ' ')}
         </p>

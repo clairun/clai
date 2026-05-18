@@ -49,6 +49,7 @@ use crate::assistant::types::{
     AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
     SessionContext, SessionKind,
 };
+use crate::config::agent_instructions_with_skills;
 use crate::db::DbPool;
 use crate::AppState;
 
@@ -400,6 +401,16 @@ async fn ensure_background_session(
     } else {
         Some(room_id.to_string())
     };
+    let state = app_handle.state::<AppState>();
+    let config = state
+        .config_manager
+        .lock()
+        .ok()
+        .map(|manager| manager.get());
+    let automation_description = match config {
+        Some(config) => agent_instructions_with_skills(&config, agent_config),
+        None => agent_config.description.clone(),
+    };
     let desired_context = SessionContext {
         space_id: session_space_id.clone(),
         room_id: session_room_id.clone(),
@@ -416,7 +427,7 @@ async fn ensure_background_session(
         automation_id: Some(agent_config.id.clone()),
         agent_workspace_id: Some(agent_config.id.clone()),
         automation_name: Some(agent_config.name.clone()),
-        automation_description: Some(agent_config.description.clone()),
+        automation_description: Some(automation_description),
         inter_agent_call: None,
         workspace_agents: Vec::new(),
     };

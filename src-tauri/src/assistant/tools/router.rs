@@ -1,7 +1,6 @@
 use tauri::Manager;
 
 use crate::assistant::engine::AssistantDeps;
-use crate::assistant::tools::inter_agent;
 use crate::assistant::tools::local;
 use crate::assistant::tools::workspace_tasks;
 use crate::AppState;
@@ -23,9 +22,10 @@ pub async fn execute_tool(
         {
             local::execute_local_tool(context, name, params).await
         }
-        name if name.starts_with("agent.") => {
-            inter_agent::execute(deps, context, name, params).await
-        }
+        name if name.starts_with("agent.") => Err(
+            "Global agent tools are no longer available. Use workspace-local task delegation instead."
+                .to_string(),
+        ),
         "workspace.listAgents"
         | "workspace.assignTask"
         | "workspace.getTaskResult"

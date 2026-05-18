@@ -215,6 +215,14 @@ pub fn run() {
             commands::provider_connections::provider_connection_list,
             commands::provider_connections::provider_connection_list_models,
             commands::provider_connections::provider_connection_test,
+            // Skill catalog commands
+            commands::skills::skill_sources_list,
+            commands::skills::skills_list,
+            commands::skills::skills_catalog,
+            commands::skills::skill_source_add,
+            commands::skills::skill_source_refresh,
+            commands::skills::skill_source_set_enabled,
+            commands::skills::skill_source_delete,
             // Agent tool bridge commands
             commands::bridge::agent_tool_result,
             commands::bridge::agent_bridge_ready,

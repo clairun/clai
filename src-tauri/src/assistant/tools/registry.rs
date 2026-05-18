@@ -3,14 +3,12 @@ use crate::assistant::tools::workspace_tasks::{
     RequestWorkspaceUserInputParams,
 };
 use crate::assistant::types::{SessionContext, ToolDefinition};
-use crate::config::ExposedAgentTool;
 use crate::config::ShellAccessMode;
 
 /// Returns all tool definitions available for the given session context.
 pub fn available_tools(
     context: &SessionContext,
     external_tools: &[ToolDefinition],
-    callable_agents: &[CallableAgent],
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![];
 
@@ -138,19 +136,6 @@ pub fn available_tools(
         });
     }
 
-    for agent in callable_agents {
-        for tool in &agent.exposed_tools {
-            tools.push(ToolDefinition {
-                name: format!("agent.{}.{}", agent.id, tool.name),
-                description: format!(
-                    "[Agent: {}] {} Returns JSON matching the configured output schema.",
-                    agent.name, tool.description
-                ),
-                input_schema: tool.input_schema.clone(),
-            });
-        }
-    }
-
     tools.extend(external_tools.iter().cloned());
 
     tools
@@ -165,13 +150,6 @@ fn is_workspace_manager_context(context: &SessionContext) -> bool {
         .workspace_agents
         .iter()
         .any(|agent| agent.is_default && agent.agent_definition_id == current_agent_definition_id)
-}
-
-#[derive(Debug, Clone)]
-pub struct CallableAgent {
-    pub id: String,
-    pub name: String,
-    pub exposed_tools: Vec<ExposedAgentTool>,
 }
 
 /// Build a ToolDefinition from a schemars-annotated param type.

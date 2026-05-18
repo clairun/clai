@@ -10,7 +10,6 @@ use crate::assistant::repository;
 use crate::assistant::repository::{CreateMessageParams, CreateRunParams, CreateToolCallParams};
 use crate::assistant::runtime;
 use crate::assistant::tools::local::agent_workspace_root_for_id;
-use crate::assistant::tools::registry::CallableAgent;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
     AssistantMessage, CompletionRequest, ContentPart, MessageRole, ProviderEvent,
@@ -127,8 +126,7 @@ pub async fn run_session_turn(
             .list_tools_for_servers(&session.context.mcp_server_ids)
             .await
     };
-    let callable_agents = resolve_callable_agents(deps, &session.context);
-    let tool_defs = tools::available_tools(&session.context, &external_tools, &callable_agents);
+    let tool_defs = tools::available_tools(&session.context, &external_tools);
 
     // Build execution context for tool calls
     let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -555,29 +553,6 @@ pub async fn run_session_turn(
     );
 
     Ok(())
-}
-
-fn resolve_callable_agents(
-    deps: &AssistantDeps,
-    context: &crate::assistant::types::SessionContext,
-) -> Vec<CallableAgent> {
-    let state = deps.app.state::<crate::AppState>();
-    let Ok(config_manager) = state.config_manager.lock() else {
-        return Vec::new();
-    };
-
-    config_manager
-        .get_agents()
-        .into_iter()
-        .filter(|agent| agent.enabled)
-        .filter(|agent| !agent.exposed_tools.is_empty())
-        .filter(|agent| context.automation_id.as_deref() != Some(agent.id.as_str()))
-        .map(|agent| CallableAgent {
-            id: agent.id,
-            name: agent.name,
-            exposed_tools: agent.exposed_tools,
-        })
-        .collect()
 }
 
 fn usage_none() -> Option<&'static RunUsage> {
