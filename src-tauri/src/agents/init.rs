@@ -1,12 +1,15 @@
 //! Agent initialization.
 //!
-//! This module handles initializing the scheduler with automation definitions
-//! and managing one runtime instance per enabled automation.
+//! Agents are workspace-local (`workspace_agents` DB table). Scheduling for
+//! them is populated by `populate_scheduler_from_workspace_agents` below,
+//! which runs after the DB pool is ready.
 
 use crate::agents::{AgentDefinition, SharedScheduler};
 use crate::auth::TokenStorage;
-use crate::config::{AgentConfig, ConfigManager};
+use crate::config::{AgentConfig, ConfigManager, ExecutionCapabilityConfig, ShellAccessMode};
+use crate::db::DbPool;
 
+#[allow(dead_code)]
 fn agent_config_to_definition(config: &AgentConfig) -> AgentDefinition {
     AgentDefinition::new(
         &config.id,
@@ -17,52 +20,59 @@ fn agent_config_to_definition(config: &AgentConfig) -> AgentDefinition {
     .with_tools(config.required_tools())
 }
 
-/// Initializes the scheduler with agent definitions and restores one instance
-/// for each enabled automation.
+/// No-op kept so the synchronous lib.rs setup path stays untouched. The real
+/// scheduler population now happens in `populate_scheduler_from_workspace_agents`
+/// once the DB pool is initialized.
 pub fn initialize_scheduler(
-    scheduler: &SharedScheduler,
-    config_manager: &ConfigManager,
+    _scheduler: &SharedScheduler,
+    _config_manager: &ConfigManager,
     _token_storage: &TokenStorage,
 ) {
-    let mut scheduler = scheduler.blocking_lock();
-
-    let config = config_manager.get();
-    for agent_config in &config.agents {
-        if !agent_config.schedule_enabled {
-            continue;
-        }
-        let definition = agent_config_to_definition(agent_config);
-        scheduler.register_definition(definition);
-    }
-
-    for agent_config in &config.agents {
-        if !agent_config.enabled || !agent_config.schedule_enabled {
-            continue;
-        }
-
-        scheduler.create_instance(&agent_config.id, "", "");
-    }
+    // intentionally empty
 }
 
-/// Restores agent instances from config.
-pub async fn restore_instances_from_config(
-    scheduler: &SharedScheduler,
-    config: crate::config::ClaiConfig,
-) {
-    let mut scheduler = scheduler.lock().await;
-
-    for agent_config in &config.agents {
-        if !agent_config.schedule_enabled {
-            continue;
+/// Populates the scheduler with scheduled workspace-local agents from the DB.
+///
+/// Called after DB initialization completes (since `ConfigManager::new()`
+/// runs before the DB pool exists). Reads every row in `workspace_agents`
+/// whose `schedule_enabled` flag is set, registers a runtime definition,
+/// and creates an instance for each that is also `enabled`.
+pub async fn populate_scheduler_from_workspace_agents(scheduler: &SharedScheduler, pool: &DbPool) {
+    let rows: Vec<(String, String, String, i64, String, i64)> = match sqlx::query_as(
+        r#"
+        SELECT id, name, description, interval_minutes, execution, enabled
+        FROM workspace_agents
+        WHERE schedule_enabled = 1
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("Failed to load scheduled workspace agents: {}", e);
+            return;
         }
-        let definition = agent_config_to_definition(agent_config);
-        scheduler.register_definition(definition);
+    };
 
-        if !agent_config.enabled {
-            continue;
+    let mut sched = scheduler.lock().await;
+    for (id, name, _description, interval_minutes, execution_json, enabled) in rows {
+        let execution: ExecutionCapabilityConfig =
+            serde_json::from_str(&execution_json).unwrap_or_default();
+        let mut tools: Vec<&'static str> = vec!["netdata", "dashboard", "tabs", "fs"];
+        if !matches!(execution.shell.mode, ShellAccessMode::Off) {
+            tools.push("bash");
         }
-
-        scheduler.create_instance(&agent_config.id, "", "");
+        if execution.web.enabled {
+            tools.push("web");
+        }
+        let definition =
+            AgentDefinition::new(&id, &name, (interval_minutes as u64).max(1) * 60 * 1000)
+                .with_tools(tools);
+        sched.register_definition(definition);
+        if enabled != 0 {
+            sched.create_instance(&id, "", "");
+        }
     }
 }
 
@@ -91,7 +101,6 @@ pub async fn create_instance_for_agent(scheduler: &SharedScheduler, agent_id: &s
 mod tests {
     use super::*;
     use crate::agents::create_shared_scheduler;
-    use crate::config::types::DEFAULT_AGENT_ID;
 
     fn create_test_agent_config() -> AgentConfig {
         AgentConfig::new("Test Agent".to_string(), "Test description".to_string(), 5)
@@ -109,16 +118,6 @@ mod tests {
             definition.required_tools,
             vec!["netdata", "dashboard", "tabs", "fs"]
         );
-    }
-
-    #[test]
-    fn test_default_agent_to_definition() {
-        let agent = AgentConfig::default_agent();
-        let definition = agent_config_to_definition(&agent);
-
-        assert_eq!(definition.id, DEFAULT_AGENT_ID);
-        assert_eq!(definition.name, "Infrastructure Health Monitor");
-        assert_eq!(definition.interval_ms, 5 * 60 * 1000);
     }
 
     #[tokio::test]

@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { assistantClient } from '../../assistant';
-import { getAgents } from '../../api/client';
 import styles from './ProviderSettings.module.css';
 
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
@@ -63,7 +62,6 @@ const initialForm = {
 
 const AssistantProviderSettings = () => {
   const [connections, setConnections] = useState([]);
-  const [agents, setAgents] = useState([]);
   const [adapters, setAdapters] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -77,13 +75,11 @@ const AssistantProviderSettings = () => {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextConnections, nextAgents, nextAdapters] = await Promise.all([
+      const [nextConnections, nextAdapters] = await Promise.all([
         assistantClient.listProviderConnections(),
-        getAgents(),
         assistantClient.listAvailableProviderAdapters().catch(() => []),
       ]);
       setConnections(nextConnections || []);
-      setAgents(nextAgents || []);
       setAdapters(nextAdapters || []);
       setError(null);
     } catch (err) {
@@ -100,15 +96,11 @@ const AssistantProviderSettings = () => {
     return () => window.removeEventListener(CONNECTIONS_CHANGED_EVENT, loadData);
   }, [loadData]);
 
-  const dependencyCounts = useMemo(() => {
-    const counts = new Map();
-    for (const agent of agents) {
-      for (const connectionId of agent.providerConnectionIds || []) {
-        counts.set(connectionId, (counts.get(connectionId) || 0) + 1);
-      }
-    }
-    return counts;
-  }, [agents]);
+  // Provider-connection dependents (workspace agents that reference a
+  // connection) are no longer enumerated client-side — the backend
+  // `provider_connection_delete` refuses deletion with a clear message
+  // including the count when dependents exist.
+  const dependencyCounts = useMemo(() => new Map(), []);
 
   const resetForm = useCallback(() => {
     setEditingId(null);

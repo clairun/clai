@@ -1,20 +1,25 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { getAgents } from '../api/client';
-import { useAssistantStore } from '../assistant';
+import {
+  getAgentTemplates,
+  getMcpServers,
+  getSkills,
+  workspaceCreateAgent,
+  workspaceDeleteAgent,
+  workspaceGetAgent,
+  workspaceUpdateAgent,
+} from '../api/client';
+import AgentFormModal from '../components/Settings/AgentFormModal';
+import WorkspaceTaskTranscriptPanel from '../components/WorkspaceTaskTranscriptPanel';
+import WorkspaceFilePreviewPanel from '../components/WorkspaceFilePreviewPanel';
+import { assistantClient, useAssistantStore } from '../assistant';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
-import WorkspaceRenderer from '../workspace/WorkspaceRenderer';
-import { getViewer } from '../workspace/viewers/registry';
 import {
   acknowledgeWorkspaceTask,
-  assignWorkspaceAgent,
   getWorkspaceSnapshot,
-  readWorkspaceFile,
-  setWorkspaceDefaultAgent,
   submitWorkspaceTaskFeedback,
-  unassignWorkspaceAgent,
 } from '../workspace/client';
 import styles from './Workspace.module.css';
 
@@ -29,39 +34,6 @@ const formatTimestamp = (timestamp) => {
     hour: '2-digit',
     minute: '2-digit',
   });
-};
-
-const renderFileContent = (file) => {
-  if (!file) {
-    return (
-      <div className={styles.viewerEmpty}>
-        Select a memory or artifact to inspect it.
-      </div>
-    );
-  }
-
-  if (file.error) {
-    return (
-      <div className={styles.viewerEmpty}>
-        {file.error}
-      </div>
-    );
-  }
-
-  if (!file.content) {
-    return (
-      <div className={styles.viewerEmpty}>
-        This file is empty.
-      </div>
-    );
-  }
-
-  const Viewer = getViewer(file.viewer);
-  return (
-    <Suspense fallback={<div className={styles.viewerEmpty}>Loading viewer...</div>}>
-      <Viewer content={file.content} />
-    </Suspense>
-  );
 };
 
 const formatRelativeTime = (timestamp) => {
@@ -117,149 +89,35 @@ const isTaskAttention = (task) => (
 const WorkspaceAgentsPanel = ({
   workspaceId,
   snapshot,
-  onChanged,
+  busy,
+  error,
+  onOpenCreate,
+  onOpenEdit,
+  onRemove,
 }) => {
   const assignedAgents = snapshot?.assignedAgents || [];
   const isManageable = snapshot?.kind !== 'agent' && workspaceId !== DEFAULT_WORKSPACE_ID;
-  const [agents, setAgents] = useState([]);
-  const [selectedAgentId, setSelectedAgentId] = useState('');
-  const [busy, setBusy] = useState('');
-  const [error, setError] = useState('');
 
-  useEffect(() => {
-    if (!isManageable) return;
-    let cancelled = false;
+  // The workspace's "manager" is implicit — surfaced via the header gear icon.
+  // Drawer lists only attached helper agents; the "+ Add" affordance lives in
+  // the drawer header so we don't duplicate the "Agents" title here.
+  const memberAgents = assignedAgents.filter((agent) => !agent.isDefault);
 
-    const loadAgents = async () => {
-      try {
-        const result = await getAgents();
-        if (!cancelled) {
-          setAgents(result || []);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(typeof err === 'string' ? err : (err?.message || 'Failed to load agents.'));
-        }
-      }
-    };
-
-    loadAgents();
-    return () => {
-      cancelled = true;
-    };
-  }, [isManageable]);
-
-  const assignedDefinitionIds = useMemo(
-    () => new Set(assignedAgents.map((agent) => agent.agentDefinitionId)),
-    [assignedAgents]
-  );
-
-  const availableAgents = useMemo(
-    () => agents.filter((agent) => !assignedDefinitionIds.has(agent.id)),
-    [agents, assignedDefinitionIds]
-  );
-
-  useEffect(() => {
-    if (!isManageable) return;
-    if (selectedAgentId && availableAgents.some((agent) => agent.id === selectedAgentId)) {
-      return;
-    }
-    setSelectedAgentId(availableAgents[0]?.id || '');
-  }, [availableAgents, isManageable, selectedAgentId]);
-
-  const handleAssign = useCallback(async () => {
-    if (!selectedAgentId || busy) return;
-    setBusy(`assign:${selectedAgentId}`);
-    setError('');
-    try {
-      await assignWorkspaceAgent(workspaceId, selectedAgentId, { role: assignedAgents.length === 0 ? 'manager' : 'member' });
-      await onChanged();
-    } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to assign agent.'));
-    } finally {
-      setBusy('');
-    }
-  }, [assignedAgents.length, busy, onChanged, selectedAgentId, workspaceId]);
-
-  const handleSetDefault = useCallback(async (workspaceAgentId) => {
-    if (busy) return;
-    setBusy(`default:${workspaceAgentId}`);
-    setError('');
-    try {
-      await setWorkspaceDefaultAgent(workspaceId, workspaceAgentId);
-      await onChanged();
-    } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to update manager.'));
-    } finally {
-      setBusy('');
-    }
-  }, [busy, onChanged, workspaceId]);
-
-  const handleRemove = useCallback(async (workspaceAgentId) => {
-    if (busy) return;
-    setBusy(`remove:${workspaceAgentId}`);
-    setError('');
-    try {
-      await unassignWorkspaceAgent(workspaceAgentId);
-      await onChanged();
-    } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to remove agent.'));
-    } finally {
-      setBusy('');
-    }
-  }, [busy, onChanged]);
-
-  if (!isManageable && assignedAgents.length === 0) {
+  if (!isManageable && memberAgents.length === 0) {
     return null;
   }
 
   return (
     <section className={styles.agentRoster} aria-label="Workspace agents">
-      <div className={styles.agentRosterHeader}>
-        <div className={styles.agentRosterTitleBlock}>
-          <h2 className={styles.agentRosterTitle}>Workspace Agents</h2>
-          <span className={styles.agentRosterMeta}>{assignedAgents.length} assigned</span>
-        </div>
-        {isManageable && (
-          <div className={styles.agentAssignControls}>
-            <select
-              className={styles.agentSelect}
-              value={selectedAgentId}
-              onChange={(event) => setSelectedAgentId(event.target.value)}
-              disabled={busy || availableAgents.length === 0}
-              aria-label="Agent to assign"
-            >
-              {availableAgents.length === 0 ? (
-                <option value="">All agents assigned</option>
-              ) : null}
-              {availableAgents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className={styles.agentActionPrimary}
-              onClick={handleAssign}
-              disabled={!selectedAgentId || !!busy}
-            >
-              Assign
-            </button>
-          </div>
-        )}
-      </div>
-
       {error && <div className={styles.agentRosterError}>{error}</div>}
 
-      {assignedAgents.length > 0 ? (
+      {memberAgents.length > 0 ? (
         <div className={styles.agentRosterList}>
-          {assignedAgents.map((agent) => (
+          {memberAgents.map((agent) => (
             <div key={agent.id} className={styles.agentRosterItem}>
               <div className={styles.agentRosterIdentity}>
                 <div className={styles.agentRosterNameRow}>
                   <span className={styles.agentRosterName}>{agent.displayName}</span>
-                  {agent.isDefault && <span className={styles.managerBadge}>Manager</span>}
                 </div>
                 {agent.agentDescription && (
                   <p className={styles.agentRosterDescription}>{agent.agentDescription}</p>
@@ -267,39 +125,39 @@ const WorkspaceAgentsPanel = ({
               </div>
               {isManageable && (
                 <div className={styles.agentRosterActions}>
-                  {!agent.isDefault && (
-                    <button
-                      type="button"
-                      className={styles.agentAction}
-                      onClick={() => handleSetDefault(agent.id)}
-                      disabled={!!busy}
-                    >
-                      Set manager
-                    </button>
-                  )}
-                  {!agent.isDefault && (
-                    <button
-                      type="button"
-                      className={styles.agentActionDanger}
-                      onClick={() => handleRemove(agent.id)}
-                      disabled={!!busy}
-                    >
-                      Remove
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className={styles.agentAction}
+                    onClick={() => onOpenEdit(agent.id)}
+                    disabled={!!busy}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.agentActionDanger}
+                    onClick={() => onRemove(agent.id)}
+                    disabled={!!busy}
+                  >
+                    Remove
+                  </button>
                 </div>
               )}
             </div>
           ))}
         </div>
       ) : (
-        <div className={styles.agentRosterEmpty}>No agents assigned yet.</div>
+        <div className={styles.agentRosterEmpty}>
+          The workspace itself is the entry-point agent — its configuration is
+          edited via the gear icon next to the workspace title. Agents added
+          here are optional helpers the workspace can call as tools.
+        </div>
       )}
     </section>
   );
 };
 
-const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged }) => {
+const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged, onViewTask }) => {
   const visibleTasks = tasks || [];
   const [feedbackDrafts, setFeedbackDrafts] = useState({});
   const [busyTaskId, setBusyTaskId] = useState('');
@@ -410,6 +268,15 @@ const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged }) => {
                         >
                           Mark reviewed
                         </button>
+                        {task.sessionId && (
+                          <button
+                            type="button"
+                            className={styles.taskAction}
+                            onClick={() => onViewTask?.(task)}
+                          >
+                            View log
+                          </button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -423,6 +290,26 @@ const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged }) => {
                       >
                         Mark reviewed
                       </button>
+                      {task.sessionId && (
+                        <button
+                          type="button"
+                          className={styles.taskAction}
+                          onClick={() => onViewTask?.(task)}
+                        >
+                          View log
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {!needsAttention && task.sessionId && (
+                    <div className={styles.taskActions}>
+                      <button
+                        type="button"
+                        className={styles.taskAction}
+                        onClick={() => onViewTask?.(task)}
+                      >
+                        View log
+                      </button>
                     </div>
                   )}
                 </div>
@@ -433,6 +320,7 @@ const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged }) => {
       ) : (
         <div className={styles.agentRosterEmpty}>No delegated tasks yet.</div>
       )}
+
     </section>
   );
 };
@@ -467,12 +355,48 @@ const WorkspaceAttentionBanner = ({ tasks }) => {
 /**
  * Compact workspace header with breadcrumb navigation, status, and inline metrics.
  */
-const WorkspaceHeader = ({ snapshot, workspaceId, isGenericWorkspace, messages, memories, artifacts, navigate }) => {
+const WorkspaceHeader = ({
+  snapshot,
+  workspaceId,
+  isGenericWorkspace,
+  messages,
+  memories,
+  artifacts,
+  navigate,
+  activePanel,
+  setActivePanel,
+  onOpenWorkspaceSettings,
+}) => {
   const isAgent = snapshot?.kind === 'agent';
   const lastRun = getLastRunInfo(snapshot?.runs);
   const nextRunText = formatNextRun(snapshot?.nextRunInSeconds);
-  const assignedAgentCount = snapshot?.assignedAgents?.length || 0;
+  // Manager is invisible to the user — exclude it from the headline count so
+  // the chip and the drawer (which already filters !isDefault) agree.
+  const assignedAgentCount = (snapshot?.assignedAgents || []).filter((a) => !a.isDefault).length;
   const taskCount = snapshot?.tasks?.length || 0;
+
+  // Click a counter to open its panel; click again (or click another) to switch.
+  // null = no panel open, chat takes the full content area.
+  const togglePanel = (panel) => {
+    setActivePanel((current) => (current === panel ? null : panel));
+  };
+
+  const renderCounter = (panel, count, label, clickable = true) => {
+    const isActive = activePanel === panel;
+    if (!clickable) {
+      return <span className={styles.metric}>{count} {label}</span>;
+    }
+    return (
+      <button
+        type="button"
+        className={`${styles.metricButton} ${isActive ? styles.metricButtonActive : ''}`}
+        onClick={() => togglePanel(panel)}
+        title={`Toggle ${label} panel`}
+      >
+        {count} {label}
+      </button>
+    );
+  };
 
   return (
     <div className={styles.header}>
@@ -493,6 +417,20 @@ const WorkspaceHeader = ({ snapshot, workspaceId, isGenericWorkspace, messages, 
         </span>
         {isAgent && snapshot?.enabled === false && (
           <span className={styles.disabledBadge}>Disabled</span>
+        )}
+        {onOpenWorkspaceSettings && (
+          <button
+            type="button"
+            className={styles.workspaceSettingsButton}
+            onClick={onOpenWorkspaceSettings}
+            title="Workspace settings"
+            aria-label="Open workspace settings"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
         )}
       </div>
       <div className={styles.headerRight}>
@@ -515,24 +453,23 @@ const WorkspaceHeader = ({ snapshot, workspaceId, isGenericWorkspace, messages, 
             <span className={styles.metricSeparator}>{'\u00B7'}</span>
           </>
         )}
-        <span className={styles.metric}>{messages.length} msgs</span>
+        {renderCounter(null, messages.length, 'msgs', false)}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        <span className={styles.metric}>{assignedAgentCount} agents</span>
+        {renderCounter('agents', assignedAgentCount, 'agents')}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        <span className={styles.metric}>{taskCount} tasks</span>
+        {renderCounter('tasks', taskCount, 'tasks')}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        <span className={styles.metric}>{memories.length} memories</span>
+        {renderCounter('memories', memories.length, 'memories')}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        <span className={styles.metric}>{artifacts.length} artifacts</span>
+        {renderCounter('artifacts', artifacts.length, 'artifacts')}
       </div>
     </div>
   );
 };
 
-/**
- * Chat-first layout for general workspaces — the conversation is the primary content.
- * Used when a general workspace has no workspace.json and no/few artifacts.
- */
+// Chat is the workspace's primary surface. Memories, artifacts, tasks, and
+// member agents live in the drawer (toggled from the header counters) and
+// open in modals when inspected — the chat is never hidden.
 const ChatFirstLayout = ({ sessionId, messages, toolCalls, streamingText, isStreaming }) => (
   <div className={styles.chatFirstContent}>
     {messages.length > 0 ? (
@@ -558,95 +495,6 @@ const ChatFirstLayout = ({ sessionId, messages, toolCalls, streamingText, isStre
   </div>
 );
 
-/**
- * Fallback layout — two-panel view (sidebar + viewer) used when no workspace.json exists
- * but the workspace has artifacts/memories to browse.
- */
-const WorkspaceFallback = ({
-  memories,
-  artifacts,
-  selectedEntry,
-  setSelectedEntry,
-  activeEntry,
-  fileState,
-}) => (
-  <div className={styles.fallbackContent}>
-    <section className={styles.sidebarPane}>
-      <div className={styles.sidebarSection}>
-        <div className={styles.sectionHeader}>
-          <h2 className={styles.sectionTitle}>Memories</h2>
-          <span className={styles.sectionMeta}>{memories.length}</span>
-        </div>
-        <div className={styles.entryList}>
-          {memories.length > 0 ? memories.map((entry) => {
-            const key = `memory:${entry.path}`;
-            return (
-              <button
-                key={key}
-                type="button"
-                className={`${styles.entryCard} ${selectedEntry === key ? styles.entryCardActive : ''}`}
-                onClick={() => setSelectedEntry(key)}
-              >
-                <div className={styles.entryTitleRow}>
-                  <span className={styles.entryTitle}>{entry.name}</span>
-                  <span className={styles.entryBadge}>memory</span>
-                </div>
-                <div className={styles.entryMeta}>{formatTimestamp(entry.updatedAt)}</div>
-              </button>
-            );
-          }) : (
-            <div className={styles.emptyStateCompact}>No stored memories yet.</div>
-          )}
-        </div>
-      </div>
-
-      <div className={styles.sidebarSection}>
-        <div className={styles.sectionHeader}>
-          <h2 className={styles.sectionTitle}>Artifacts</h2>
-          <span className={styles.sectionMeta}>{artifacts.length}</span>
-        </div>
-        <div className={styles.entryList}>
-          {artifacts.length > 0 ? artifacts.map((entry) => {
-            const key = `artifact:${entry.path}`;
-            return (
-              <button
-                key={key}
-                type="button"
-                className={`${styles.entryCard} ${selectedEntry === key ? styles.entryCardActive : ''}`}
-                onClick={() => setSelectedEntry(key)}
-              >
-                <div className={styles.entryTitleRow}>
-                  <span className={styles.entryTitle}>{entry.name}</span>
-                  <span className={styles.entryBadge}>{entry.viewer}</span>
-                </div>
-                <div className={styles.entryMeta}>{formatTimestamp(entry.updatedAt)}</div>
-              </button>
-            );
-          }) : (
-            <div className={styles.emptyStateCompact}>No artifacts yet.</div>
-          )}
-        </div>
-      </div>
-    </section>
-
-    <section className={styles.viewerPane}>
-      <div className={styles.sectionHeader}>
-        <h2 className={styles.sectionTitle}>
-          {activeEntry ? activeEntry.name : 'Viewer'}
-        </h2>
-        <span className={styles.sectionMeta}>
-          {activeEntry ? activeEntry.relativePath : 'No file selected'}
-        </span>
-      </div>
-      <div className={styles.viewerBody}>
-        {fileState.loading ? (
-          <div className={styles.emptyState}>Loading file...</div>
-        ) : renderFileContent(fileState)}
-      </div>
-    </section>
-  </div>
-);
-
 const Workspace = () => {
   const params = useParams();
   const navigate = useNavigate();
@@ -656,9 +504,51 @@ const Workspace = () => {
   const [snapshot, setSnapshot] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-  const [selectedEntry, setSelectedEntry] = useState(null);
-  const [fileState, setFileState] = useState({ loading: false, content: '', viewer: 'text', error: '' });
-  const [workspaceDefinition, setWorkspaceDefinition] = useState(null);
+  // Which "drawer" is open in response to a counter click in the header.
+  // null = chat-only. 'agents' | 'tasks' | 'memories' | 'artifacts' otherwise.
+  const [activePanel, setActivePanel] = useState(null);
+  // Slide-out side panels (only one may be open at a time):
+  //   - previewEntry: { kind: 'memory' | 'artifact', entry } — file preview
+  //   - viewingTask:  task object — task transcript log
+  // Opening one clears the other; closing the drawer clears both.
+  const [previewEntry, setPreviewEntry] = useState(null);
+  const [viewingTask, setViewingTask] = useState(null);
+
+  const openPreviewEntry = useCallback((next) => {
+    setViewingTask(null);
+    setPreviewEntry(next);
+  }, []);
+
+  const openTaskTranscript = useCallback((task) => {
+    setPreviewEntry(null);
+    setViewingTask(task);
+  }, []);
+
+  // The side panels are contextual to the open drawer chip — switching to a
+  // panel that doesn't own the slide-out content clears it.
+  useEffect(() => {
+    if (activePanel !== 'memories' && activePanel !== 'artifacts') {
+      setPreviewEntry(null);
+    }
+    if (activePanel !== 'tasks') {
+      setViewingTask(null);
+    }
+  }, [activePanel]);
+
+  const isSidePanelOpen = !!previewEntry || !!viewingTask;
+
+  // ── Agent form (lifted up so the Workspace Settings entry can live on the
+  //    header, not inside the agents drawer) ────────────────────────────────
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingAgent, setEditingAgent] = useState(null);
+  const [agentBusy, setAgentBusy] = useState('');
+  const [agentError, setAgentError] = useState('');
+  const [formDeps, setFormDeps] = useState({
+    mcpServers: [],
+    providerConnections: [],
+    skills: [],
+    agentTemplates: [],
+  });
   const sessionId = snapshot?.session?.id || null;
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] : null
@@ -703,127 +593,130 @@ const Workspace = () => {
     }
   }, [workspaceId]);
 
-  // Try to load .clai/workspace.json for designed workspace pages
-  const loadWorkspaceDefinition = useCallback(async () => {
+  // ── Agent form handlers (lifted from WorkspaceAgentsPanel) ─────────────
+  const managerAgentId = snapshot?.assignedAgents?.find((a) => a.isDefault)?.id || null;
+
+  const loadFormDependencies = useCallback(async () => {
+    const [serversResult, skillsResult, connectionsResult, templatesResult] = await Promise.allSettled([
+      getMcpServers(),
+      getSkills(),
+      assistantClient.listProviderConnections(),
+      getAgentTemplates(),
+    ]);
+    setFormDeps({
+      mcpServers: serversResult.status === 'fulfilled' ? (serversResult.value || []) : [],
+      skills: skillsResult.status === 'fulfilled' ? (skillsResult.value || []) : [],
+      providerConnections: connectionsResult.status === 'fulfilled' ? (connectionsResult.value || []) : [],
+      agentTemplates: templatesResult.status === 'fulfilled' ? (templatesResult.value || []) : [],
+    });
+  }, []);
+
+  const openMemberCreate = useCallback(async () => {
+    setAgentError('');
+    await loadFormDependencies();
+    setEditingAgent(null);
+    setIsFormOpen(true);
+  }, [loadFormDependencies]);
+
+  const openAgentEdit = useCallback(async (workspaceAgentId) => {
+    if (agentBusy) return;
+    setAgentBusy(`edit:${workspaceAgentId}`);
+    setAgentError('');
     try {
-      const result = await readWorkspaceFile(workspaceId, '.clai/workspace.json');
-      if (result?.content) {
-        const parsed = JSON.parse(result.content);
-        if (parsed && Array.isArray(parsed.sections)) {
-          setWorkspaceDefinition(parsed);
-          return;
-        }
+      const [detail] = await Promise.all([
+        workspaceGetAgent(workspaceId, workspaceAgentId),
+        loadFormDependencies(),
+      ]);
+      if (!detail) {
+        throw new Error('Workspace agent not found.');
       }
-    } catch {
-      // No workspace.json — use fallback layout
+      setEditingAgent(detail);
+      setIsFormOpen(true);
+    } catch (err) {
+      setAgentError(typeof err === 'string' ? err : (err?.message || 'Failed to load agent.'));
+    } finally {
+      setAgentBusy('');
     }
-    setWorkspaceDefinition(null);
-  }, [workspaceId]);
+  }, [agentBusy, loadFormDependencies, workspaceId]);
+
+  const openWorkspaceSettings = useCallback(async () => {
+    if (!managerAgentId) return;
+    await openAgentEdit(managerAgentId);
+  }, [managerAgentId, openAgentEdit]);
+
+  const handleFormSubmit = useCallback(async (formData) => {
+    setAgentError('');
+    try {
+      if (editingAgent) {
+        await workspaceUpdateAgent({
+          workspaceId,
+          agentId: editingAgent.id,
+          name: formData.name,
+          description: formData.description,
+          selectedSkillIds: formData.selectedSkillIds || [],
+          selectedMcpServerIds: formData.selectedMcpServerIds || [],
+          providerConnectionIds: formData.providerConnectionIds || [],
+          execution: formData.execution,
+          exposedTools: formData.exposedTools || [],
+          scheduleEnabled: !!formData.scheduleEnabled,
+          intervalMinutes: formData.intervalMinutes || 0,
+          enabled: formData.enabled !== false,
+        });
+      } else {
+        await workspaceCreateAgent({
+          workspaceId,
+          name: formData.name,
+          description: formData.description,
+          selectedSkillIds: formData.selectedSkillIds || [],
+          selectedMcpServerIds: formData.selectedMcpServerIds || [],
+          providerConnectionIds: formData.providerConnectionIds || [],
+          execution: formData.execution,
+          exposedTools: formData.exposedTools || [],
+          scheduleEnabled: !!formData.scheduleEnabled,
+          intervalMinutes: formData.intervalMinutes || 0,
+          enabled: formData.enabled !== false,
+        });
+      }
+      setIsFormOpen(false);
+      setEditingAgent(null);
+      await loadSnapshot(false);
+    } catch (err) {
+      setAgentError(typeof err === 'string' ? err : (err?.message || 'Failed to save agent.'));
+    }
+  }, [editingAgent, loadSnapshot, workspaceId]);
+
+  const handleFormClose = useCallback(() => {
+    setIsFormOpen(false);
+    setEditingAgent(null);
+  }, []);
+
+  const handleAgentRemove = useCallback(async (workspaceAgentId) => {
+    if (agentBusy) return;
+    setAgentBusy(`remove:${workspaceAgentId}`);
+    setAgentError('');
+    try {
+      await workspaceDeleteAgent(workspaceId, workspaceAgentId);
+      await loadSnapshot(false);
+    } catch (err) {
+      setAgentError(typeof err === 'string' ? err : (err?.message || 'Failed to remove agent.'));
+    } finally {
+      setAgentBusy('');
+    }
+  }, [agentBusy, loadSnapshot, workspaceId]);
 
   useEffect(() => {
     loadSnapshot(true);
-    loadWorkspaceDefinition();
     const interval = window.setInterval(() => loadSnapshot(false), REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot, loadWorkspaceDefinition]);
+  }, [loadSnapshot]);
 
   const memories = snapshot?.memories || [];
   const artifacts = snapshot?.artifacts || [];
-  const entryLookup = useMemo(() => {
-    const map = new Map();
-    memories.forEach((entry) => map.set(`memory:${entry.path}`, { ...entry, section: 'memory' }));
-    artifacts.forEach((entry) => map.set(`artifact:${entry.path}`, { ...entry, section: 'artifact' }));
-    return map;
-  }, [artifacts, memories]);
-
-  // Auto-select first entry in fallback mode
-  useEffect(() => {
-    if (workspaceDefinition) return; // Not needed in designed mode
-
-    if (selectedEntry && entryLookup.has(selectedEntry)) {
-      return;
-    }
-
-    const nextEntry = memories[0]
-      ? `memory:${memories[0].path}`
-      : artifacts[0]
-        ? `artifact:${artifacts[0].path}`
-        : null;
-
-    setSelectedEntry(nextEntry);
-  }, [artifacts, entryLookup, memories, selectedEntry, workspaceDefinition]);
-
-  // Load file content for fallback viewer
-  useEffect(() => {
-    if (workspaceDefinition) return; // Not needed in designed mode
-
-    let cancelled = false;
-
-    if (!selectedEntry) {
-      setFileState({ loading: false, content: '', viewer: 'text', error: '' });
-      return undefined;
-    }
-
-    const entry = entryLookup.get(selectedEntry);
-    if (!entry) {
-      setFileState({ loading: false, content: '', viewer: 'text', error: '' });
-      return undefined;
-    }
-
-    setFileState((current) => ({
-      ...current,
-      loading: true,
-      error: '',
-    }));
-
-    const load = async () => {
-      try {
-        const result = await readWorkspaceFile(workspaceId, entry.path);
-        if (cancelled) {
-          return;
-        }
-        setFileState({
-          loading: false,
-          content: result.content || '',
-          viewer: result.viewer || entry.viewer || 'text',
-          error: '',
-        });
-      } catch (err) {
-        if (cancelled) {
-          return;
-        }
-        setFileState({
-          loading: false,
-          content: '',
-          viewer: entry.viewer || 'text',
-          error: typeof err === 'string' ? err : (err?.message || 'Failed to read file.'),
-        });
-      }
-    };
-
-    load();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [entryLookup, selectedEntry, workspaceId, workspaceDefinition]);
-
   const messages = sessionState?.messages || snapshot?.messages || [];
   const toolCalls = sessionState?.toolCalls || snapshot?.toolCalls || [];
   const streamingText = sessionState?.streamingTextByMessageId || {};
   const isStreaming = sessionState?.isStreaming || false;
   const tasks = snapshot?.tasks || [];
-  const activeEntry = selectedEntry ? entryLookup.get(selectedEntry) : null;
-  const isAgent = snapshot?.kind === 'agent';
-  const hasContent = memories.length > 0 || artifacts.length > 0;
-
-  // Choose layout:
-  // 1. workspace.json exists → WorkspaceRenderer (agent-designed page)
-  // 2. Agent workspace without workspace.json → fallback file browser
-  // 3. General workspace with files → fallback file browser
-  // 4. General workspace without files → chat-first layout
-  const useDesignedLayout = !!workspaceDefinition;
-  const useChatFirst = !useDesignedLayout && !isAgent && !hasContent;
 
   return (
     <div className={styles.workspacePage}>
@@ -835,52 +728,161 @@ const Workspace = () => {
         memories={memories}
         artifacts={artifacts}
         navigate={navigate}
+        activePanel={activePanel}
+        setActivePanel={setActivePanel}
+        onOpenWorkspaceSettings={managerAgentId ? openWorkspaceSettings : null}
       />
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
       <WorkspaceAttentionBanner tasks={tasks} />
 
-      {snapshot && (
-        <WorkspaceAgentsPanel
-          workspaceId={workspaceId}
-          snapshot={snapshot}
-          onChanged={() => loadSnapshot(false)}
-        />
-      )}
+      <div className={styles.workspaceBody}>
+        <div className={`${styles.workspaceMain} ${isSidePanelOpen ? styles.workspaceMainWithPreview : ''}`}>
+          <ChatFirstLayout
+            sessionId={sessionId}
+            messages={messages}
+            toolCalls={toolCalls}
+            streamingText={streamingText}
+            isStreaming={isStreaming}
+          />
+        </div>
 
-      {snapshot && (
-        <WorkspaceTasksPanel
-          workspaceId={workspaceId}
-          tasks={tasks}
-          onChanged={() => loadSnapshot(false)}
-        />
-      )}
+        {snapshot && activePanel && previewEntry && (
+          <WorkspaceFilePreviewPanel
+            workspaceId={workspaceId}
+            kind={previewEntry.kind}
+            entry={previewEntry.entry}
+            onClose={() => setPreviewEntry(null)}
+          />
+        )}
 
-      {useDesignedLayout ? (
-        <WorkspaceRenderer
-          definition={workspaceDefinition}
-          workspaceId={workspaceId}
-          snapshot={snapshot}
-        />
-      ) : useChatFirst ? (
-        <ChatFirstLayout
-          sessionId={sessionId}
-          messages={messages}
-          toolCalls={toolCalls}
-          streamingText={streamingText}
-          isStreaming={isStreaming}
-        />
-      ) : (
-        <WorkspaceFallback
-          memories={memories}
-          artifacts={artifacts}
-          selectedEntry={selectedEntry}
-          setSelectedEntry={setSelectedEntry}
-          activeEntry={activeEntry}
-          fileState={fileState}
-        />
-      )}
+        {snapshot && activePanel === 'tasks' && viewingTask && (
+          <WorkspaceTaskTranscriptPanel
+            task={viewingTask}
+            onClose={() => setViewingTask(null)}
+          />
+        )}
+
+        {snapshot && activePanel && (
+          <aside className={styles.workspaceDrawer} aria-label={`${activePanel} drawer`}>
+            <div className={styles.workspaceDrawerHeader}>
+              <span className={styles.workspaceDrawerTitle}>
+                {activePanel.charAt(0).toUpperCase() + activePanel.slice(1)}
+              </span>
+              <div className={styles.workspaceDrawerActions}>
+                {activePanel === 'agents'
+                  && snapshot?.kind !== 'agent'
+                  && workspaceId !== DEFAULT_WORKSPACE_ID && (
+                  <button
+                    type="button"
+                    className={styles.workspaceDrawerAction}
+                    onClick={openMemberCreate}
+                    disabled={!!agentBusy}
+                  >
+                    + Add Agent
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={styles.workspaceDrawerClose}
+                  onClick={() => {
+                    setActivePanel(null);
+                    setPreviewEntry(null);
+                    setViewingTask(null);
+                  }}
+                  title="Close panel"
+                  aria-label="Close panel"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className={styles.workspaceDrawerBody}>
+              {activePanel === 'agents' && (
+                <WorkspaceAgentsPanel
+                  workspaceId={workspaceId}
+                  snapshot={snapshot}
+                  busy={agentBusy}
+                  error={agentError}
+                  onOpenCreate={openMemberCreate}
+                  onOpenEdit={openAgentEdit}
+                  onRemove={handleAgentRemove}
+                />
+              )}
+
+              {activePanel === 'tasks' && (
+                <WorkspaceTasksPanel
+                  workspaceId={workspaceId}
+                  tasks={tasks}
+                  onChanged={() => loadSnapshot(false)}
+                  onViewTask={openTaskTranscript}
+                />
+              )}
+
+              {activePanel === 'memories' && (
+                <div className={styles.drawerList}>
+                  {memories.length > 0 ? memories.map((entry) => (
+                    <button
+                      type="button"
+                      key={entry.path}
+                      className={styles.drawerListItem}
+                      onClick={() => openPreviewEntry({ kind: 'memory', entry })}
+                    >
+                      <div className={styles.drawerListName}>{entry.name}</div>
+                      <div className={styles.drawerListMeta}>
+                        {entry.path}
+                        {entry.updatedAt ? ` · ${formatTimestamp(entry.updatedAt)}` : ''}
+                      </div>
+                    </button>
+                  )) : (
+                    <div className={styles.drawerEmpty}>
+                      The workspace hasn&apos;t stored anything in memory yet.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activePanel === 'artifacts' && (
+                <div className={styles.drawerList}>
+                  {artifacts.length > 0 ? artifacts.map((entry) => (
+                    <button
+                      type="button"
+                      key={entry.path}
+                      className={styles.drawerListItem}
+                      onClick={() => openPreviewEntry({ kind: 'artifact', entry })}
+                    >
+                      <div className={styles.drawerListName}>{entry.name}</div>
+                      <div className={styles.drawerListMeta}>
+                        {entry.path}
+                        {entry.updatedAt ? ` · ${formatTimestamp(entry.updatedAt)}` : ''}
+                      </div>
+                    </button>
+                  )) : (
+                    <div className={styles.drawerEmpty}>
+                      No artifacts in this workspace yet.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </aside>
+        )}
+      </div>
+
+      <AgentFormModal
+        isOpen={isFormOpen}
+        onClose={handleFormClose}
+        onSubmit={handleFormSubmit}
+        agent={editingAgent}
+        mcpServers={formDeps.mcpServers}
+        providerConnections={formDeps.providerConnections}
+        skills={formDeps.skills}
+        agentTemplates={formDeps.agentTemplates}
+        mode={editingAgent?.id && managerAgentId === editingAgent.id ? 'workspace' : 'member'}
+        workspaceTitle={snapshot?.title}
+      />
     </div>
   );
 };

@@ -95,16 +95,19 @@ pub async fn fleet_get_snapshot(
     state: State<'_, AppState>,
     pool: State<'_, DbPool>,
 ) -> Result<FleetSnapshot, String> {
-    let (agents, mcp_servers) = {
+    // The Fleet view no longer surfaces global agents — they don't exist as
+    // a first-class concept anymore (agents are workspace-local). A future
+    // change will enumerate workspace_agents with `schedule_enabled = 1` to
+    // populate this list; for now it's intentionally empty so the legacy
+    // "one card per global agent" UI is gone.
+    let mcp_servers = {
         let config_manager = state
             .config_manager
             .lock()
             .map_err(|e| format!("Lock error: {}", e))?;
-        (
-            config_manager.get_agents(),
-            config_manager.get_mcp_servers(),
-        )
+        config_manager.get_mcp_servers()
     };
+    let agents: Vec<crate::config::AgentConfig> = Vec::new();
 
     let mcp_name_map: std::collections::HashMap<&str, &str> = mcp_servers
         .iter()
@@ -272,21 +275,22 @@ pub async fn fleet_get_snapshot(
 }
 
 #[tauri::command]
-pub async fn fleet_run_now(agent_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    // Verify the agent exists and is enabled
-    {
-        let config_manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        let agent = config_manager
-            .get_agents()
-            .into_iter()
-            .find(|a| a.id == agent_id)
-            .ok_or_else(|| format!("Agent not found: {}", agent_id))?;
-        if !agent.enabled {
-            return Err("Agent is disabled. Enable it first.".to_string());
-        }
+pub async fn fleet_run_now(
+    agent_id: String,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    // Verify the workspace-local agent exists and is enabled.
+    let enabled: Option<i64> =
+        sqlx::query_scalar("SELECT enabled FROM workspace_agents WHERE id = ? LIMIT 1")
+            .bind(&agent_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| format!("Failed to load workspace agent: {}", e))?;
+    match enabled {
+        None => return Err(format!("Agent not found: {}", agent_id)),
+        Some(0) => return Err("Agent is disabled. Enable it first.".to_string()),
+        Some(_) => {}
     }
 
     let mut scheduler = state.scheduler.lock().await;

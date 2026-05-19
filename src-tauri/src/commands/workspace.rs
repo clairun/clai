@@ -9,7 +9,9 @@ use crate::assistant::types::{
     AssistantMessage, AssistantRun, AssistantSession, ContentPart, MessageRole, SessionContext,
     SessionKind, ToolInvocation, WorkspaceAgentSummary,
 };
-use crate::config::{agent_instructions_with_skills, AgentConfig, ExecutionCapabilityConfig};
+use crate::config::{
+    agent_instructions_with_skills, AgentConfig, ExecutionCapabilityConfig, ExposedAgentTool,
+};
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -244,17 +246,6 @@ pub struct WorkspaceWriteFileRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceAssignAgentRequest {
-    pub workspace_id: String,
-    pub agent_definition_id: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub role: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WorkspaceTaskActionRequest {
     pub workspace_id: String,
     pub task_id: String,
@@ -314,10 +305,22 @@ struct VirtualWorkspaceArtifact {
 struct WorkspaceAgentRow {
     id: String,
     workspace_id: String,
+    /// Legacy: foreign key into `ClaiConfig.agents`. Will be dropped in Phase 1.7.
     agent_definition_id: String,
     display_name: Option<String>,
+    /// Legacy: replaced by `workspaces.default_workspace_agent_id` in Phase 1.6.
     role: String,
     enabled: bool,
+    // Inline agent fields (Phase 1.2 writes them, Phase 1.4 reads them).
+    name: String,
+    description: String,
+    selected_skill_ids: Vec<String>,
+    selected_mcp_server_ids: Vec<String>,
+    provider_connection_ids: Vec<String>,
+    execution: ExecutionCapabilityConfig,
+    exposed_tools: Vec<ExposedAgentTool>,
+    schedule_enabled: bool,
+    interval_minutes: u32,
     created_at: i64,
     updated_at: i64,
 }
@@ -621,35 +624,12 @@ fn resolve_workspace_descriptor(
         });
     }
 
-    // Try agent config first
-    let config_manager = state
-        .config_manager
-        .lock()
-        .map_err(|error| format!("Lock error: {}", error))?;
+    // Workspace ids are no longer overloaded with global agent ids.
+    // Every non-default workspace_id resolves to a general workspace with a
+    // filesystem root.
+    let _ = state;
 
-    if let Some(agent) = config_manager.get_agent(&workspace_id) {
-        let config = config_manager.get();
-        let mcp_servers = config_manager.get_mcp_servers();
-        let selected_mcp_server_names = agent
-            .selected_mcp_server_ids
-            .iter()
-            .filter_map(|id| {
-                mcp_servers
-                    .iter()
-                    .find(|server| server.id == *id)
-                    .map(|server| server.name.clone())
-            })
-            .collect();
-        drop(config_manager);
-        let runtime_description = agent_instructions_with_skills(&config, &agent);
-        let mut descriptor = workspace_descriptor_from_agent(agent, selected_mcp_server_names)?;
-        descriptor.automation_description = Some(runtime_description);
-        return Ok(descriptor);
-    }
-
-    drop(config_manager);
-
-    // Not an agent — treat as a general workspace with a filesystem root.
+    // Treat as a general workspace with a filesystem root.
     // The workspace may or may not have a row in the `workspaces` table yet
     // (the row is created by workspace_create, but the descriptor works
     // regardless so that workspace_get_snapshot and other commands can
@@ -674,35 +654,6 @@ fn resolve_workspace_descriptor(
         automation_name: None,
         automation_description: None,
     })
-}
-
-// Unreachable after the refactor above, but kept for reference during migration.
-// The original flow that only handled agents:
-#[allow(dead_code)]
-fn resolve_workspace_descriptor_agent_only(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<WorkspaceDescriptor, String> {
-    let config_manager = state
-        .config_manager
-        .lock()
-        .map_err(|error| format!("Lock error: {}", error))?;
-    let agent = config_manager
-        .get_agent(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let mcp_servers = config_manager.get_mcp_servers();
-    let selected_mcp_server_names = agent
-        .selected_mcp_server_ids
-        .iter()
-        .filter_map(|id| {
-            mcp_servers
-                .iter()
-                .find(|server| server.id == *id)
-                .map(|server| server.name.clone())
-        })
-        .collect();
-
-    workspace_descriptor_from_agent(agent, selected_mcp_server_names)
 }
 
 async fn resolve_workspace_provider_selection(
@@ -761,33 +712,6 @@ async fn resolve_workspace_provider_selection(
     })
 }
 
-fn workspace_descriptor_from_agent(
-    agent: AgentConfig,
-    selected_mcp_server_names: Vec<String>,
-) -> Result<WorkspaceDescriptor, String> {
-    let root_path = agent_workspace_root_for_id(&agent.id)
-        .ok_or_else(|| format!("Could not resolve workspace root for agent {}", agent.id))?;
-
-    Ok(WorkspaceDescriptor {
-        workspace_id: agent.id.clone(),
-        kind: "agent".to_string(),
-        title: agent.name.clone(),
-        agent_id: Some(agent.id.clone()),
-        root_path: Some(root_path),
-        provider_connection_ids: agent.provider_connection_ids.clone(),
-        selected_mcp_server_ids: agent.selected_mcp_server_ids.clone(),
-        selected_mcp_server_names,
-        execution: agent.execution.clone(),
-        tool_scopes: agent
-            .required_tools()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        automation_name: Some(agent.name),
-        automation_description: Some(agent.description),
-    })
-}
-
 fn agent_runtime_description(state: &AppState, agent: &AgentConfig) -> String {
     let config = state.config_manager.lock().map(|manager| manager.get());
 
@@ -795,33 +719,6 @@ fn agent_runtime_description(state: &AppState, agent: &AgentConfig) -> String {
         Ok(config) => agent_instructions_with_skills(&config, agent),
         Err(_) => agent.description.clone(),
     }
-}
-
-fn normalize_workspace_agent_role(role: Option<String>) -> Result<String, String> {
-    let normalized = role
-        .unwrap_or_else(|| "member".to_string())
-        .trim()
-        .to_ascii_lowercase();
-
-    match normalized.as_str() {
-        "" => Ok("member".to_string()),
-        "member" | "manager" => Ok(normalized),
-        _ => Err("Workspace agent role must be either 'member' or 'manager'.".to_string()),
-    }
-}
-
-fn select_default_agent_definition_id(state: &AppState) -> Result<Option<String>, String> {
-    let config_manager = state
-        .config_manager
-        .lock()
-        .map_err(|error| format!("Lock error: {}", error))?;
-
-    let agents = config_manager.get_agents();
-    Ok(agents
-        .iter()
-        .find(|agent| agent.is_default())
-        .or_else(|| agents.first())
-        .map(|agent| agent.id.clone()))
 }
 
 async fn workspace_default_agent_id(
@@ -858,57 +755,90 @@ async fn load_workspace_agent_rows(
     pool: &DbPool,
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
-    #[allow(clippy::type_complexity)]
-    let rows: Vec<(String, String, String, Option<String>, String, i64, i64, i64)> =
-        sqlx::query_as(
-            r#"
-            SELECT id, workspace_id, agent_definition_id, display_name, role, enabled, created_at, updated_at
-            FROM workspace_agents
-            WHERE workspace_id = ?
-            ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, created_at ASC
-            "#,
-        )
-        .bind(workspace_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to load workspace agents: {}", e))?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, workspace_id, agent_definition_id, display_name, role, enabled,
+               name, description, selected_skill_ids, selected_mcp_server_ids,
+               provider_connection_ids, execution, exposed_tools,
+               schedule_enabled, interval_minutes,
+               created_at, updated_at
+        FROM workspace_agents
+        WHERE workspace_id = ?
+        ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, created_at ASC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load workspace agents: {}", e))?;
 
-    Ok(rows
-        .into_iter()
-        .map(
-            |(
-                id,
-                workspace_id,
-                agent_definition_id,
-                display_name,
-                role,
-                enabled,
-                created_at,
-                updated_at,
-            )| WorkspaceAgentRow {
-                id,
-                workspace_id,
-                agent_definition_id,
-                display_name,
-                role,
-                enabled: enabled != 0,
-                created_at,
-                updated_at,
-            },
-        )
-        .collect())
+    rows.into_iter().map(map_workspace_agent_row).collect()
+}
+
+fn map_workspace_agent_row(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceAgentRow, String> {
+    use sqlx::Row;
+    let selected_skill_ids: String = row.try_get("selected_skill_ids").unwrap_or_default();
+    let selected_mcp_server_ids: String =
+        row.try_get("selected_mcp_server_ids").unwrap_or_default();
+    let provider_connection_ids: String =
+        row.try_get("provider_connection_ids").unwrap_or_default();
+    let execution: String = row.try_get("execution").unwrap_or_default();
+    let exposed_tools: String = row.try_get("exposed_tools").unwrap_or_default();
+    let enabled: i64 = row.try_get("enabled").map_err(|e| e.to_string())?;
+    let schedule_enabled: i64 = row.try_get("schedule_enabled").unwrap_or(0);
+
+    Ok(WorkspaceAgentRow {
+        id: row.try_get("id").map_err(|e| e.to_string())?,
+        workspace_id: row.try_get("workspace_id").map_err(|e| e.to_string())?,
+        agent_definition_id: row
+            .try_get("agent_definition_id")
+            .map_err(|e| e.to_string())?,
+        display_name: row.try_get("display_name").ok(),
+        role: row.try_get("role").map_err(|e| e.to_string())?,
+        enabled: enabled != 0,
+        name: row.try_get("name").unwrap_or_default(),
+        description: row.try_get("description").unwrap_or_default(),
+        selected_skill_ids: serde_json::from_str(&selected_skill_ids).unwrap_or_default(),
+        selected_mcp_server_ids: serde_json::from_str(&selected_mcp_server_ids).unwrap_or_default(),
+        provider_connection_ids: serde_json::from_str(&provider_connection_ids).unwrap_or_default(),
+        execution: serde_json::from_str(&execution).unwrap_or_default(),
+        exposed_tools: serde_json::from_str(&exposed_tools).unwrap_or_default(),
+        schedule_enabled: schedule_enabled != 0,
+        interval_minutes: row
+            .try_get::<i64, _>("interval_minutes")
+            .unwrap_or(0)
+            .max(0) as u32,
+        created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
+        updated_at: row.try_get("updated_at").map_err(|e| e.to_string())?,
+    })
 }
 
 fn workspace_agent_response_from_row(
     row: WorkspaceAgentRow,
-    agent: Option<&AgentConfig>,
     default_workspace_agent_id: Option<&str>,
 ) -> WorkspaceAgentResponse {
     let display_name = row
         .display_name
         .clone()
-        .or_else(|| agent.map(|agent| agent.name.clone()))
-        .unwrap_or_else(|| row.agent_definition_id.clone());
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if row.name.trim().is_empty() {
+                row.agent_definition_id.clone()
+            } else {
+                row.name.clone()
+            }
+        });
+
+    let agent_name = if row.name.trim().is_empty() {
+        None
+    } else {
+        Some(row.name.clone())
+    };
+    let agent_description = if row.description.trim().is_empty() {
+        None
+    } else {
+        Some(row.description.clone())
+    };
 
     WorkspaceAgentResponse {
         id: row.id.clone(),
@@ -918,14 +848,10 @@ fn workspace_agent_response_from_row(
         role: row.role,
         enabled: row.enabled,
         is_default: default_workspace_agent_id == Some(row.id.as_str()),
-        agent_name: agent.map(|agent| agent.name.clone()),
-        agent_description: agent.map(|agent| agent.description.clone()),
-        provider_connection_ids: agent
-            .map(|agent| agent.provider_connection_ids.clone())
-            .unwrap_or_default(),
-        skill_ids: agent
-            .map(|agent| agent.selected_skill_ids.clone())
-            .unwrap_or_default(),
+        agent_name,
+        agent_description,
+        provider_connection_ids: row.provider_connection_ids,
+        skill_ids: row.selected_skill_ids,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -951,29 +877,17 @@ fn concise_agent_description(description: Option<String>) -> Option<String> {
 
 async fn list_workspace_agent_responses(
     pool: &DbPool,
-    state: &AppState,
+    _state: &AppState,
     workspace_id: &str,
 ) -> Result<(Vec<WorkspaceAgentResponse>, Option<String>), String> {
     let rows = load_workspace_agent_rows(pool, workspace_id).await?;
     let default_workspace_agent_id = workspace_default_agent_id(pool, workspace_id).await?;
-    let agents_by_id: HashMap<String, AgentConfig> = {
-        let config_manager = state
-            .config_manager
-            .lock()
-            .map_err(|error| format!("Lock error: {}", error))?;
-        config_manager
-            .get_agents()
-            .into_iter()
-            .map(|agent| (agent.id.clone(), agent))
-            .collect()
-    };
 
+    // Phase 1.4: no more join with the global agent catalog — every field
+    // the response needs lives inline on the workspace_agents row.
     let responses = rows
         .into_iter()
-        .map(|row| {
-            let agent = agents_by_id.get(&row.agent_definition_id);
-            workspace_agent_response_from_row(row, agent, default_workspace_agent_id.as_deref())
-        })
+        .map(|row| workspace_agent_response_from_row(row, default_workspace_agent_id.as_deref()))
         .collect();
 
     Ok((responses, default_workspace_agent_id))
@@ -990,10 +904,10 @@ async fn list_workspace_task_responses(
             task.id,
             task.workspace_id,
             task.created_by_workspace_agent_id,
-            creator.display_name AS created_by_display_name,
+            COALESCE(NULLIF(TRIM(creator.name), ''), creator.display_name) AS created_by_display_name,
             task.assigned_to_workspace_agent_id,
             task.assigned_agent_definition_id,
-            assigned.display_name AS assigned_display_name,
+            COALESCE(NULLIF(TRIM(assigned.name), ''), assigned.display_name) AS assigned_display_name,
             task.title,
             task.instructions,
             task.status,
@@ -1022,30 +936,18 @@ async fn list_workspace_task_responses(
     .await
     .map_err(|e| format!("Failed to load workspace tasks: {}", e))?;
 
-    let agents_by_id: HashMap<String, AgentConfig> = {
-        let config_manager = state
-            .config_manager
-            .lock()
-            .map_err(|error| format!("Lock error: {}", error))?;
-        config_manager
-            .get_agents()
-            .into_iter()
-            .map(|agent| (agent.id.clone(), agent))
-            .collect()
-    };
+    // task list no longer joins with a global agent catalog; the workspace_tasks
+    // SELECT above pulls the assigned agent's display name directly via JOIN
+    // with workspace_agents (assigned_display_name).
+    let _ = state;
 
     Ok(rows
         .into_iter()
         .map(|row| {
             let assigned_agent_definition_id: String = row.get("assigned_agent_definition_id");
             let assigned_display_name: Option<String> = row.get("assigned_display_name");
-            let assigned_agent_display_name = assigned_display_name
-                .or_else(|| {
-                    agents_by_id
-                        .get(&assigned_agent_definition_id)
-                        .map(|agent| agent.name.clone())
-                })
-                .unwrap_or_else(|| assigned_agent_definition_id.clone());
+            let assigned_agent_display_name =
+                assigned_display_name.unwrap_or_else(|| assigned_agent_definition_id.clone());
 
             WorkspaceTaskResponse {
                 id: row.get("id"),
@@ -1083,8 +985,11 @@ async fn workspace_agent_summaries(
     Ok(agents
         .into_iter()
         .map(|agent| WorkspaceAgentSummary {
+            // Phase 1.5: the LLM-visible "agent id" for inter-agent calls is the
+            // workspace-local row id. The legacy global `agent_definition_id`
+            // column is no longer surfaced (and will be dropped in Phase 1.7).
+            agent_definition_id: agent.id.clone(),
             id: agent.id,
-            agent_definition_id: agent.agent_definition_id,
             display_name: agent.display_name,
             role: agent.role,
             is_default: agent.is_default,
@@ -1093,105 +998,54 @@ async fn workspace_agent_summaries(
         .collect())
 }
 
-fn resolve_workspace_manager_agent(
-    state: &AppState,
-    workspace_agents: &[WorkspaceAgentSummary],
+/// Build a transient `AgentConfig` from a workspace_agents row's inline fields.
+///
+/// Phase 1.4: the row carries the full configuration locally; no global
+/// catalog lookup is needed.
+fn agent_config_from_row(row: &WorkspaceAgentRow) -> AgentConfig {
+    let created_at = chrono::DateTime::from_timestamp_millis(row.created_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let updated_at = chrono::DateTime::from_timestamp_millis(row.updated_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    AgentConfig {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        description: row.description.clone(),
+        schedule_enabled: row.schedule_enabled,
+        interval_minutes: row.interval_minutes,
+        enabled: row.enabled,
+        selected_mcp_server_ids: row.selected_mcp_server_ids.clone(),
+        provider_connection_ids: row.provider_connection_ids.clone(),
+        selected_skill_ids: row.selected_skill_ids.clone(),
+        execution: row.execution.clone(),
+        exposed_tools: row.exposed_tools.clone(),
+        created_at,
+        updated_at,
+    }
+}
+
+async fn resolve_workspace_manager_agent(
+    pool: &DbPool,
+    workspace_id: &str,
 ) -> Result<Option<AgentConfig>, String> {
-    let Some(manager) = workspace_agents
-        .iter()
-        .find(|agent| agent.is_default)
-        .or_else(|| {
-            workspace_agents
-                .iter()
-                .find(|agent| agent.role == "manager")
-        })
-    else {
-        return Ok(None);
+    let default_id = workspace_default_agent_id(pool, workspace_id).await?;
+    let rows = load_workspace_agent_rows(pool, workspace_id).await?;
+
+    let manager_row = if let Some(default_id) = default_id.as_deref() {
+        rows.iter().find(|row| row.id == default_id)
+    } else {
+        // Legacy fallback: if no default pointer, prefer role='manager'.
+        rows.iter().find(|row| row.role == "manager")
     };
 
-    let config_manager = state
-        .config_manager
-        .lock()
-        .map_err(|error| format!("Lock error: {}", error))?;
-
-    Ok(config_manager.get_agent(&manager.agent_definition_id))
+    Ok(manager_row.map(agent_config_from_row))
 }
 
-async fn assign_workspace_agent_row(
-    pool: &DbPool,
-    workspace_id: &str,
-    agent_definition_id: &str,
-    display_name: Option<String>,
-    role: &str,
-) -> Result<String, String> {
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM workspace_agents WHERE workspace_id = ? AND agent_definition_id = ? LIMIT 1",
-    )
-    .bind(workspace_id)
-    .bind(agent_definition_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to check workspace agent assignment: {}", e))?;
-
-    if let Some(id) = existing {
-        sqlx::query("UPDATE workspace_agents SET display_name = COALESCE(?, display_name), role = ?, updated_at = ? WHERE id = ?")
-            .bind(display_name)
-            .bind(role)
-            .bind(now_millis())
-            .bind(&id)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("Failed to update workspace agent assignment: {}", e))?;
-        return Ok(id);
-    }
-
-    let id = uuid::Uuid::new_v4().to_string();
-    let now = now_millis();
-    sqlx::query(
-        r#"
-        INSERT INTO workspace_agents (
-            id, workspace_id, agent_definition_id, display_name, role, enabled, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-        "#,
-    )
-    .bind(&id)
-    .bind(workspace_id)
-    .bind(agent_definition_id)
-    .bind(display_name)
-    .bind(role)
-    .bind(now)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to assign agent to workspace: {}", e))?;
-
-    Ok(id)
-}
-
-async fn ensure_workspace_manager_assignment(
-    pool: &DbPool,
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Option<String>, String> {
-    if workspace_default_agent_id(pool, workspace_id)
-        .await?
-        .is_some()
-    {
-        return Ok(None);
-    }
-
-    let Some(agent_definition_id) = select_default_agent_definition_id(state)? else {
-        return Ok(None);
-    };
-
-    let workspace_agent_id =
-        assign_workspace_agent_row(pool, workspace_id, &agent_definition_id, None, "manager")
-            .await?;
-    set_workspace_default_agent_id(pool, workspace_id, Some(&workspace_agent_id)).await?;
-
-    Ok(Some(workspace_agent_id))
-}
+// assign_workspace_agent_row: removed. Workspace agents are created directly
+// by commands::workspace_agents::workspace_create_agent or seeded by
+// workspace_create's empty-Manager INSERT.
 
 async fn find_workspace_session(
     pool: &DbPool,
@@ -1199,8 +1053,13 @@ async fn find_workspace_session(
 ) -> Result<Option<AssistantSession>, String> {
     let sessions = repository::list_sessions(pool, None).await?;
 
+    // Only *interactive* sessions are the user's chat thread. Background-job
+    // sessions (inter-agent task delegations) share the same `workspace_id`
+    // but are owned by member agents — they have their own UI and must not
+    // hijack the chat panel.
     Ok(sessions
         .into_iter()
+        .filter(|session| matches!(session.kind, SessionKind::Interactive))
         .filter(|session| {
             session.context.workspace_id.as_deref() == Some(descriptor.workspace_id.as_str())
                 || descriptor
@@ -1673,36 +1532,9 @@ pub async fn workspace_get_snapshot(
         list_workspace_task_responses(pool.inner(), state.inner(), &descriptor.workspace_id)
             .await?;
 
-    // Resolve agent schedule info from config + scheduler
-    let (enabled, interval_minutes, next_run_in_seconds) =
-        if let Some(ref agent_id) = descriptor.agent_id {
-            let agent_enabled = {
-                let config = state
-                    .config_manager
-                    .lock()
-                    .map_err(|e| format!("Lock error: {}", e))?;
-                config
-                    .get_agent(agent_id)
-                    .map(|a| (a.enabled, a.interval_minutes))
-            };
-            let next_run = {
-                let scheduler = state.scheduler.lock().await;
-                let mut found = None;
-                for inst in scheduler.all_instances() {
-                    if inst.agent_id == *agent_id {
-                        found = Some(inst.seconds_until_next_run());
-                        break;
-                    }
-                }
-                found
-            };
-            match agent_enabled {
-                Some((en, interval)) => (Some(en), Some(interval), next_run),
-                None => (None, None, None),
-            }
-        } else {
-            (None, None, None)
-        };
+    // Agent-derived workspaces (descriptor.agent_id != None) no longer exist;
+    // schedule metadata is exposed per workspace_agent via list_workspace_agent_responses.
+    let (enabled, interval_minutes, next_run_in_seconds) = (None, None, None);
 
     Ok(WorkspaceSnapshot {
         workspace_id: descriptor.workspace_id,
@@ -1746,7 +1578,8 @@ pub async fn workspace_get_or_create_session(
     let existing = find_workspace_session(pool.inner(), &descriptor).await?;
     let workspace_agents =
         workspace_agent_summaries(pool.inner(), state.inner(), &descriptor.workspace_id).await?;
-    let workspace_manager = resolve_workspace_manager_agent(state.inner(), &workspace_agents)?;
+    let workspace_manager =
+        resolve_workspace_manager_agent(pool.inner(), &descriptor.workspace_id).await?;
     let session = if let Some(existing) = existing {
         let desired_context = desired_workspace_context(
             state.inner(),
@@ -1932,7 +1765,8 @@ pub async fn workspace_update_session_mcp(
     let existing = find_workspace_session(pool.inner(), &descriptor).await?;
     let workspace_agents =
         workspace_agent_summaries(pool.inner(), state.inner(), &descriptor.workspace_id).await?;
-    let workspace_manager = resolve_workspace_manager_agent(state.inner(), &workspace_agents)?;
+    let workspace_manager =
+        resolve_workspace_manager_agent(pool.inner(), &descriptor.workspace_id).await?;
 
     let session = if let Some(session) = existing {
         session
@@ -1962,7 +1796,7 @@ pub async fn workspace_update_session_mcp(
     };
 
     let mut updated = session;
-    updated.context.mcp_server_ids = request.mcp_server_ids;
+    updated.context.mcp_server_ids = request.mcp_server_ids.clone();
     updated.context.workspace_agents = workspace_agents;
     if descriptor.agent_id.is_none() {
         if let Some(manager) = workspace_manager.as_ref() {
@@ -1975,6 +1809,20 @@ pub async fn workspace_update_session_mcp(
             updated.context.automation_name = Some(manager.name.clone());
             updated.context.automation_description =
                 Some(agent_runtime_description(state.inner(), manager));
+
+            // Persist the MCP selection onto the workspace's manager row so
+            // it survives across sessions and shows in Workspace Settings.
+            let encoded = serde_json::to_string(&request.mcp_server_ids)
+                .map_err(|e| format!("Failed to encode mcp ids: {}", e))?;
+            sqlx::query(
+                "UPDATE workspace_agents SET selected_mcp_server_ids = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(&encoded)
+            .bind(chrono::Utc::now().timestamp_millis())
+            .bind(&manager.id)
+            .execute(pool.inner())
+            .await
+            .map_err(|e| format!("Failed to sync MCP selection to workspace manager: {}", e))?;
         }
     }
     updated.updated_at = chrono::Utc::now().timestamp_millis();
@@ -1983,8 +1831,10 @@ pub async fn workspace_update_session_mcp(
     Ok(())
 }
 
-/// Set the preferred provider connection for a general workspace.
-/// Upserts into the workspaces table so the preference survives across sessions.
+/// Set the preferred provider connection for a workspace.
+/// Upserts into the workspaces table AND mirrors onto the workspace's manager
+/// `workspace_agents` row, so the chat selector, the Workspace Settings UI,
+/// and the runtime all see the same single source of truth.
 #[tauri::command]
 pub async fn workspace_set_provider(
     workspace_id: String,
@@ -1993,7 +1843,6 @@ pub async fn workspace_set_provider(
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
 
-    // Upsert: insert if not exists, update if exists
     sqlx::query(
         r#"
         INSERT INTO workspaces (id, kind, title, preferred_provider_connection_id, created_at, updated_at)
@@ -2011,6 +1860,32 @@ pub async fn workspace_set_provider(
     .await
     .map_err(|e| format!("Failed to set workspace provider: {}", e))?;
 
+    // Mirror onto the workspace manager's provider_connection_ids JSON array
+    // so Workspace Settings UI reflects the same choice and so the runtime's
+    // single-source lookup stays consistent.
+    let manager_id: Option<String> = sqlx::query_scalar(
+        "SELECT default_workspace_agent_id FROM workspaces WHERE id = ? LIMIT 1",
+    )
+    .bind(&workspace_id)
+    .fetch_optional(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to load workspace manager id: {}", e))?
+    .flatten();
+
+    if let Some(manager_id) = manager_id {
+        let encoded = serde_json::to_string(&vec![provider_connection_id.clone()])
+            .map_err(|e| format!("Failed to encode provider id: {}", e))?;
+        sqlx::query(
+            "UPDATE workspace_agents SET provider_connection_ids = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&encoded)
+        .bind(now)
+        .bind(&manager_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to sync provider to workspace manager: {}", e))?;
+    }
+
     Ok(())
 }
 
@@ -2026,110 +1901,9 @@ pub async fn workspace_list_agents(
     Ok(agents)
 }
 
-#[tauri::command]
-pub async fn workspace_assign_agent(
-    request: WorkspaceAssignAgentRequest,
-    state: State<'_, AppState>,
-    pool: State<'_, DbPool>,
-) -> Result<WorkspaceAgentResponse, String> {
-    let workspace_id = normalize_workspace_id(Some(request.workspace_id));
-    let agent_definition_id = request.agent_definition_id.trim().to_string();
-    if agent_definition_id.is_empty() {
-        return Err("Agent definition ID is required.".to_string());
-    }
-
-    let role = normalize_workspace_agent_role(request.role)?;
-
-    {
-        let config_manager = state
-            .config_manager
-            .lock()
-            .map_err(|error| format!("Lock error: {}", error))?;
-        if config_manager.get_agent(&agent_definition_id).is_none() {
-            return Err(format!(
-                "Agent definition not found: {}",
-                agent_definition_id
-            ));
-        }
-    }
-
-    let workspace_agent_id = assign_workspace_agent_row(
-        pool.inner(),
-        &workspace_id,
-        &agent_definition_id,
-        request.display_name,
-        &role,
-    )
-    .await?;
-
-    let current_default = workspace_default_agent_id(pool.inner(), &workspace_id).await?;
-    if role == "manager" || current_default.is_none() {
-        let now = now_millis();
-        sqlx::query(
-            "UPDATE workspace_agents SET role = 'member', updated_at = ? WHERE workspace_id = ? AND id != ? AND role = 'manager'",
-        )
-        .bind(now)
-        .bind(&workspace_id)
-        .bind(&workspace_agent_id)
-        .execute(pool.inner())
-        .await
-        .map_err(|e| format!("Failed to update workspace agent roles: {}", e))?;
-        sqlx::query("UPDATE workspace_agents SET role = 'manager', updated_at = ? WHERE id = ?")
-            .bind(now)
-            .bind(&workspace_agent_id)
-            .execute(pool.inner())
-            .await
-            .map_err(|e| format!("Failed to mark workspace agent as manager: {}", e))?;
-        set_workspace_default_agent_id(pool.inner(), &workspace_id, Some(&workspace_agent_id))
-            .await?;
-    }
-
-    let (agents, _) =
-        list_workspace_agent_responses(pool.inner(), state.inner(), &workspace_id).await?;
-    agents
-        .into_iter()
-        .find(|agent| agent.id == workspace_agent_id)
-        .ok_or_else(|| "Workspace agent assignment not found after save.".to_string())
-}
-
-#[tauri::command]
-pub async fn workspace_unassign_agent(
-    workspace_agent_id: String,
-    pool: State<'_, DbPool>,
-) -> Result<(), String> {
-    let row: Option<(String, String)> =
-        sqlx::query_as("SELECT workspace_id, role FROM workspace_agents WHERE id = ? LIMIT 1")
-            .bind(&workspace_agent_id)
-            .fetch_optional(pool.inner())
-            .await
-            .map_err(|e| format!("Failed to load workspace agent assignment: {}", e))?;
-
-    let Some((workspace_id, role)) = row else {
-        return Err(format!(
-            "Workspace agent assignment not found: {}",
-            workspace_agent_id
-        ));
-    };
-
-    if workspace_default_agent_id(pool.inner(), &workspace_id)
-        .await?
-        .as_deref()
-        == Some(workspace_agent_id.as_str())
-        || role == "manager"
-    {
-        return Err(
-            "Cannot remove the workspace manager. Set another agent as manager first.".to_string(),
-        );
-    }
-
-    sqlx::query("DELETE FROM workspace_agents WHERE id = ?")
-        .bind(&workspace_agent_id)
-        .execute(pool.inner())
-        .await
-        .map_err(|e| format!("Failed to unassign workspace agent: {}", e))?;
-
-    Ok(())
-}
+// workspace_assign_agent / workspace_unassign_agent: removed.
+// Agents are workspace-local now; use the workspace-scoped CRUD in
+// `commands::workspace_agents` (workspace_create_agent / workspace_delete_agent).
 
 #[tauri::command]
 pub async fn workspace_set_default_agent(
@@ -2156,24 +1930,8 @@ pub async fn workspace_set_default_agent(
         return Err("Workspace agent assignment does not belong to this workspace.".to_string());
     }
 
-    let now = now_millis();
-    sqlx::query(
-        "UPDATE workspace_agents SET role = 'member', updated_at = ? WHERE workspace_id = ? AND id != ? AND role = 'manager'",
-    )
-    .bind(now)
-    .bind(&workspace_id)
-    .bind(&workspace_agent_id)
-    .execute(pool.inner())
-    .await
-    .map_err(|e| format!("Failed to update workspace agent roles: {}", e))?;
-
-    sqlx::query("UPDATE workspace_agents SET role = 'manager', updated_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(&workspace_agent_id)
-        .execute(pool.inner())
-        .await
-        .map_err(|e| format!("Failed to mark workspace agent as manager: {}", e))?;
-
+    // Phase 1.6: single source of truth for manager identity is
+    // `workspaces.default_workspace_agent_id`. No more role-column shuffling.
     set_workspace_default_agent_id(pool.inner(), &workspace_id, Some(&workspace_agent_id)).await?;
 
     Ok(())
@@ -2347,6 +2105,12 @@ pub struct WorkspaceListEntry {
     pub latest_attention_task_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_attention_task_updated_at: Option<i64>,
+    // Periodic-workspace surface — copied from the workspace's default
+    // manager agent. Lets the Fleet UI sort scheduled workspaces ahead of
+    // ad-hoc ones without each card needing a separate snapshot fetch.
+    pub schedule_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<u32>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -2382,14 +2146,25 @@ async fn workspace_team_summary(
         .or_else(|| agents.iter().find(|agent| agent.role == "manager"))
         .map(|agent| agent.display_name.clone());
 
-    Ok((agents.len(), default_manager_name))
+    // The workspace's default "manager" agent is an implementation detail; the
+    // UI treats it as invisible (its config is surfaced via the gear icon on
+    // the workspace header, not as a peer agent). Exclude it from the
+    // "N agents" headline count so Fleet and Workspace counters agree.
+    let visible_agent_count = agents.iter().filter(|agent| !agent.is_default).count();
+
+    Ok((visible_agent_count, default_manager_name))
 }
 
 /// Create a new general workspace with a UUID and filesystem root.
+///
+/// Per the workspace-local-agents refactor, every new workspace gets an
+/// **empty Manager** agent: no system prompt, no skills, no MCP servers, no
+/// provider connection, default execution policy. The user must configure
+/// at least a provider before chatting.
 #[tauri::command]
 pub async fn workspace_create(
     title: Option<String>,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     pool: State<'_, DbPool>,
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
@@ -2415,14 +2190,46 @@ pub async fn workspace_create(
     .await
     .map_err(|e| format!("Failed to create workspace: {}", e))?;
 
-    ensure_workspace_manager_assignment(pool.inner(), state.inner(), &id).await?;
+    // Seed an empty Manager agent. The legacy `agent_definition_id` column
+    // still has a NOT NULL constraint until Phase 1.7 drops it; we store the
+    // workspace_agent row's own id there so the foreign-key shape is satisfied
+    // without pointing at a (now non-existent) global catalog entry.
+    let manager_id = uuid::Uuid::new_v4().to_string();
+    let default_execution = serde_json::to_string(&ExecutionCapabilityConfig::default())
+        .map_err(|e| format!("Failed to encode default execution config: {}", e))?;
+    sqlx::query(
+        r#"
+        INSERT INTO workspace_agents (
+            id, workspace_id, agent_definition_id, display_name, role, enabled,
+            name, description, selected_skill_ids, selected_mcp_server_ids,
+            provider_connection_ids, execution, exposed_tools,
+            schedule_enabled, interval_minutes,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, NULL, 'manager', 1, 'Manager', '', '[]', '[]', '[]', ?, '[]', 0, 0, ?, ?)
+        "#,
+    )
+    .bind(&manager_id)
+    .bind(&id)
+    .bind(&manager_id) // legacy agent_definition_id placeholder = self
+    .bind(&default_execution)
+    .bind(now)
+    .bind(now)
+    .execute(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to seed workspace manager: {}", e))?;
 
-    tracing::info!(workspace_id = %id, title = %display_title, "Created new general workspace");
+    set_workspace_default_agent_id(pool.inner(), &id, Some(&manager_id)).await?;
+
+    tracing::info!(workspace_id = %id, title = %display_title, "Created new general workspace with empty manager");
 
     Ok(id)
 }
 
-/// List all workspaces — both agent (from config) and general (from SQLite).
+/// List all workspaces from SQLite.
+///
+/// Workspaces are real DB rows now — the legacy synthesized
+/// "one workspace per global agent" branch is gone.
 #[tauri::command]
 pub async fn workspace_list(
     state: State<'_, AppState>,
@@ -2430,76 +2237,7 @@ pub async fn workspace_list(
 ) -> Result<Vec<WorkspaceListEntry>, String> {
     let mut entries = Vec::new();
 
-    // 1. Agent workspaces from config — collect sync data first, then do async work
-    let agent_infos: Vec<_> = {
-        let config = state
-            .config_manager
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        config
-            .get_agents()
-            .into_iter()
-            .map(|agent| {
-                let root = agent_workspace_root_for_id(&agent.id);
-                let (artifact_count, memory_count) = root
-                    .as_ref()
-                    .map(|r| count_workspace_files(r))
-                    .unwrap_or((0, 0));
-                let created_at = agent
-                    .created_at
-                    .parse::<chrono::DateTime<chrono::Utc>>()
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or(0);
-                let updated_at = agent
-                    .updated_at
-                    .parse::<chrono::DateTime<chrono::Utc>>()
-                    .map(|dt| dt.timestamp_millis())
-                    .unwrap_or(0);
-                (
-                    agent.id.clone(),
-                    agent.name.clone(),
-                    agent.enabled,
-                    artifact_count,
-                    memory_count,
-                    created_at,
-                    updated_at,
-                )
-            })
-            .collect()
-    }; // config lock dropped here
-
-    for (id, name, enabled, artifact_count, memory_count, created_at, updated_at) in agent_infos {
-        let message_count = count_session_messages(pool.inner(), &id).await;
-        let task_attention = workspace_task_attention_summary(pool.inner(), &id).await?;
-        let (assigned_agent_count, default_manager_name) =
-            workspace_team_summary(pool.inner(), state.inner(), &id).await?;
-        entries.push(WorkspaceListEntry {
-            id: id.clone(),
-            kind: "agent".to_string(),
-            title: name,
-            agent_id: Some(id),
-            enabled,
-            message_count,
-            artifact_count,
-            memory_count,
-            assigned_agent_count,
-            default_manager_name,
-            running_task_count: task_attention.running_task_count,
-            blocked_task_count: task_attention.blocked_task_count,
-            failed_task_count: task_attention.failed_task_count,
-            needs_user_input_task_count: task_attention.needs_user_input_task_count,
-            attention_task_count: task_attention.attention_task_count(),
-            latest_attention_task_id: task_attention.latest_attention_task_id,
-            latest_attention_task_title: task_attention.latest_attention_task_title,
-            latest_attention_task_status: task_attention.latest_attention_task_status,
-            latest_attention_task_summary: task_attention.latest_attention_task_summary,
-            latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
-            created_at,
-            updated_at,
-        });
-    }
-
-    // 2. General workspaces from SQLite
+    // General workspaces from SQLite
     let rows: Vec<(String, String, Option<String>, i64, i64)> = sqlx::query_as(
         "SELECT id, kind, title, created_at, updated_at FROM workspaces ORDER BY updated_at DESC",
     )
@@ -2517,6 +2255,30 @@ pub async fn workspace_list(
         let task_attention = workspace_task_attention_summary(pool.inner(), &id).await?;
         let (assigned_agent_count, default_manager_name) =
             workspace_team_summary(pool.inner(), state.inner(), &id).await?;
+
+        // Look up the workspace's default manager agent and read its schedule
+        // fields. Empty/missing => schedule_enabled = false. We don't error
+        // out if the lookup fails — the Fleet list should always populate.
+        let (schedule_enabled, interval_minutes) =
+            match workspace_default_agent_id(pool.inner(), &id).await {
+                Ok(Some(manager_id)) => {
+                    let row: Option<(i64, i64)> = sqlx::query_as(
+                        "SELECT schedule_enabled, interval_minutes \
+                         FROM workspace_agents WHERE id = ? LIMIT 1",
+                    )
+                    .bind(&manager_id)
+                    .fetch_optional(pool.inner())
+                    .await
+                    .unwrap_or(None);
+                    match row {
+                        Some((enabled, interval)) if enabled != 0 => {
+                            (true, Some(u32::try_from(interval).unwrap_or(0)))
+                        }
+                        _ => (false, None),
+                    }
+                }
+                _ => (false, None),
+            };
 
         entries.push(WorkspaceListEntry {
             id,
@@ -2539,6 +2301,8 @@ pub async fn workspace_list(
             latest_attention_task_status: task_attention.latest_attention_task_status,
             latest_attention_task_summary: task_attention.latest_attention_task_summary,
             latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
+            schedule_enabled,
+            interval_minutes,
             created_at,
             updated_at,
         });

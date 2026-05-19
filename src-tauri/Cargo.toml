@@ -65,6 +65,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Platform-specific directories (config, data, cache)
 dirs = "5"
 glob = "0.3"
+include_dir = "0.7"
 
 # MCP (Model Context Protocol) server
 # For AI CLI tool integration (Claude Code, Gemini CLI, etc.)

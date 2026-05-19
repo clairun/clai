@@ -67,7 +67,9 @@ const IntervalSelect = ({ value, onChange, disabled, id }) => {
   const dropdownRef = useRef(null);
 
   // Find the label for current value
-  const selectedOption = INTERVAL_OPTIONS.find(opt => opt.value === value) || INTERVAL_OPTIONS[2];
+  const selectedOption = value === 0
+    ? { value: 0, label: 'On demand' }
+    : INTERVAL_OPTIONS.find(opt => opt.value === value) || INTERVAL_OPTIONS[2];
 
   // Update dropdown position when opened
   useEffect(() => {

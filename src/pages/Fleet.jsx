@@ -1,48 +1,15 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useFleet } from '../contexts/FleetContext';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { assistantClient, useAssistantStore } from '../assistant';
-import { createAgent, updateAgent, getMcpServers, getSkills, setAgentEnabled } from '../api/client';
-import { fleetRunNow } from '../fleet/client';
-import { listWorkspaces, deleteWorkspace } from '../workspace/client';
-import ChatMessageList, { NoticesBanner } from '../components/AssistantChat/ChatMessageList';
-import MarkdownMessage from '../components/Chat/MarkdownMessage';
-import AgentFormModal from '../components/Settings/AgentFormModal';
+import { listWorkspaces, deleteWorkspace, getWorkspaceSnapshot } from '../workspace/client';
+import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import styles from './Fleet.module.css';
 
-const formatRelativeTime = (timestamp) => {
-  if (!timestamp) {
-    return 'Never';
-  }
+const REFRESH_INTERVAL_MS = 5000;
 
-  const diffMs = Date.now() - timestamp;
-  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
-
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-  return `${Math.floor(diffSec / 86400)}d ago`;
-};
-
-const formatNextRun = (seconds) => {
-  if (seconds === null || seconds === undefined) {
-    return 'Not scheduled';
-  }
-  if (seconds <= 0) {
-    return 'Due now';
-  }
-  if (seconds < 60) {
-    return `In ${seconds}s`;
-  }
-  if (seconds < 3600) {
-    return `In ${Math.floor(seconds / 60)}m`;
-  }
-  if (seconds < 86400) {
-    return `In ${Math.floor(seconds / 3600)}h`;
-  }
-  return `In ${Math.floor(seconds / 86400)}d`;
-};
+const EMPTY_TOOL_CALLS = [];
+const EMPTY_STREAMING = {};
 
 const formatTimestamp = (timestamp) => {
   if (!timestamp) return '';
@@ -55,102 +22,20 @@ const formatTimestamp = (timestamp) => {
   });
 };
 
-const EMPTY_TOOL_CALLS = [];
-const EMPTY_STREAMING = {};
-
-const SUMMARY_ITEMS = [
-  { key: 'total', label: 'Total', cardClass: 'summaryCardTotal', valueClass: 'summaryValueTotal' },
-  { key: 'enabled', label: 'Enabled', cardClass: 'summaryCardEnabled', valueClass: 'summaryValueEnabled' },
-  { key: 'running', label: 'Running', cardClass: 'summaryCardRunning', valueClass: 'summaryValueRunning' },
-  { key: 'error', label: 'Error', cardClass: 'summaryCardError', valueClass: 'summaryValueError' },
-  { key: 'idle', label: 'Idle', cardClass: 'summaryCardIdle', valueClass: 'summaryValueIdle' },
-  { key: 'disabled', label: 'Disabled', cardClass: 'summaryCardDisabled', valueClass: 'summaryValueDisabled' },
-];
-
-const RUN_STATUS_CLASS = {
-  completed: 'ribbonCompleted',
-  completed_with_warnings: 'ribbonWarning',
-  failed: 'ribbonFailed',
-  cancelled: 'ribbonCancelled',
-  running: 'ribbonRunning',
-};
-
 const TASK_STATUS_LABEL = {
   blocked: 'Blocked',
   failed: 'Failed',
   needs_user_input: 'Needs input',
 };
 
-const MiniRibbon = ({ entries }) => {
-  if (!entries || entries.length === 0) return null;
-
-  // Backend returns newest first — reverse for oldest-left, newest-right
-  const recent = [...entries].reverse().slice(-12);
-
-  return (
-    <div className={styles.miniRibbon}>
-      {recent.map((entry, i) => (
-        <div
-          key={entry.startedAt || i}
-          className={`${styles.miniSegment} ${styles[RUN_STATUS_CLASS[entry.status]] || styles.ribbonCompleted}`}
-          title={`${entry.status}${entry.startedAt ? ' — ' + formatTimestamp(entry.startedAt) : ''}`}
-        />
-      ))}
-    </div>
-  );
-};
-
-const RunRibbon = ({ runs }) => {
-  if (!runs || runs.length === 0) {
-    return (
-      <div className={styles.ribbonRow}>
-        <span className={styles.ribbonLabel}>Runs</span>
-        <span className={styles.ribbonEmpty}>No runs recorded</span>
-      </div>
-    );
-  }
-
-  // Sort ascending by time so oldest is on the left, most recent on the right
-  const recent = [...runs]
-    .sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0))
-    .slice(-24);
-
-  return (
-    <div className={styles.ribbonRow}>
-      <span className={styles.ribbonLabel}>Runs</span>
-      <div className={styles.ribbon}>
-        {recent.map((run, i) => (
-          <div
-            key={run.id || run.startedAt || i}
-            className={`${styles.ribbonSegment} ${styles[RUN_STATUS_CLASS[run.status]] || styles.ribbonCompleted}`}
-            title={`${run.status}${run.startedAt ? ' — ' + formatTimestamp(run.startedAt) : ''}${run.error ? '\n' + run.error : ''}${run.notices?.length ? '\n' + run.notices.length + ' warning(s)' : ''}`}
-          />
-        ))}
-      </div>
-      <span className={styles.ribbonCount}>{runs.length} total</span>
-    </div>
-  );
-};
-
 const Fleet = () => {
   const navigate = useNavigate();
-  const [detailSection, setDetailSection] = useState('chat');
-  const [isFormOpen, setIsFormOpen] = useState(false);
-  const [editingAgent, setEditingAgent] = useState(null);
-  const [mcpServers, setMcpServers] = useState([]);
-  const [skills, setSkills] = useState([]);
-  const [providerConnections, setProviderConnections] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);
-  const {
-    summary,
-    agents,
-    selectedAgent,
-    selectedAgentId,
-    selectAgent,
-    isLoading,
-    error,
-    refresh,
-  } = useFleet();
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState(null);
+  const [snapshotError, setSnapshotError] = useState('');
   const { closeChat, isCurrentChatOpen } = useChatManager();
 
   // Close the sidebar chat when entering Fleet
@@ -160,201 +45,164 @@ const Fleet = () => {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load general workspaces
+  // Load workspaces (initial + periodic refresh so chip counts stay live).
   const loadWorkspaces = useCallback(async () => {
     try {
       const all = await listWorkspaces();
       setWorkspaces(all || []);
-    } catch {
+      setError('');
+    } catch (err) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to load workspaces.');
       setWorkspaces([]);
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadWorkspaces();
+    const interval = window.setInterval(loadWorkspaces, REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(interval);
   }, [loadWorkspaces]);
+
+  // Sort: scheduled-on-top, then most-recently-updated first.
+  const sortedWorkspaces = useMemo(() => (
+    [...workspaces].sort((a, b) => {
+      const aSched = !!a.scheduleEnabled;
+      const bSched = !!b.scheduleEnabled;
+      if (aSched !== bSched) return aSched ? -1 : 1;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    })
+  ), [workspaces]);
+
+  const counters = useMemo(() => ({
+    total: workspaces.length,
+    periodic: workspaces.filter((w) => w.scheduleEnabled).length,
+    running: workspaces.filter((w) => (w.runningTaskCount || 0) > 0).length,
+    attention: workspaces.filter((w) => (w.attentionTaskCount || 0) > 0).length,
+  }), [workspaces]);
+
+  const attentionWorkspaces = useMemo(
+    () => sortedWorkspaces.filter((w) => (w.attentionTaskCount || 0) > 0),
+    [sortedWorkspaces]
+  );
+
+  const selectedWorkspace = useMemo(
+    () => sortedWorkspaces.find((w) => w.id === selectedWorkspaceId) || null,
+    [sortedWorkspaces, selectedWorkspaceId]
+  );
+
+  // Fetch a fresh snapshot for the selected workspace — gives us the session
+  // id + recent messages so the detail-pane chat preview can render.
+  useEffect(() => {
+    if (!selectedWorkspaceId) {
+      setSelectedSnapshot(null);
+      setSnapshotError('');
+      return undefined;
+    }
+    let cancelled = false;
+    setSnapshotError('');
+    getWorkspaceSnapshot(selectedWorkspaceId)
+      .then((snap) => {
+        if (!cancelled) setSelectedSnapshot(snap || null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSnapshotError(typeof err === 'string' ? err : err?.message || 'Failed to load workspace.');
+        setSelectedSnapshot(null);
+      });
+    return () => { cancelled = true; };
+  }, [selectedWorkspaceId]);
+
+  // Live-subscribe to the selected workspace's session so the preview updates
+  // as messages stream in (events flow through MainLayout's useAssistantEvents).
+  const detailSessionId = selectedSnapshot?.session?.id || null;
   const sessionState = useAssistantStore((state) =>
-    selectedAgent?.sessionId ? state.sessions[selectedAgent.sessionId] : null
+    detailSessionId ? state.sessions[detailSessionId] : null
   );
 
   useEffect(() => {
-    if (!selectedAgent?.sessionId) {
-      return;
-    }
-
-    const existing = useAssistantStore.getState().sessions[selectedAgent.sessionId];
-    if (existing) {
-      return;
-    }
+    if (!detailSessionId) return undefined;
+    if (useAssistantStore.getState().sessions[detailSessionId]) return undefined;
 
     let cancelled = false;
-
     const load = async () => {
       try {
         const [session, messages, runs, toolCalls] = await Promise.all([
-          assistantClient.getSession(selectedAgent.sessionId),
-          assistantClient.loadSessionMessages(selectedAgent.sessionId),
-          assistantClient.listRuns(selectedAgent.sessionId),
-          assistantClient.listToolCalls(selectedAgent.sessionId),
+          assistantClient.getSession(detailSessionId),
+          assistantClient.loadSessionMessages(detailSessionId),
+          assistantClient.listRuns(detailSessionId),
+          assistantClient.listToolCalls(detailSessionId, null),
         ]);
-
-        if (cancelled || !session) {
-          return;
-        }
-
+        if (cancelled || !session) return;
         useAssistantStore
           .getState()
-          .loadSessionData(selectedAgent.sessionId, session, messages, runs, toolCalls);
+          .loadSessionData(detailSessionId, session, messages || [], runs || [], toolCalls || []);
       } catch {
-        // Snapshot already contains enough fallback data for the card/detail preview.
+        // Snapshot already contains enough fallback for the preview.
       }
     };
-
     load();
+    return () => { cancelled = true; };
+  }, [detailSessionId]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [selectedAgent?.sessionId]);
+  const handleOpenWorkspace = useCallback((id) => {
+    if (!id) return;
+    navigate(`/workspace/${id}`);
+  }, [navigate]);
 
-  const handleOpenWorkspace = useCallback(() => {
-    if (!selectedAgent) return;
-    navigate(`/workspace/${selectedAgent.agentId}`);
-  }, [selectedAgent, navigate]);
-
-  const handleToggleEnabled = useCallback(async (agentId, currentlyEnabled) => {
+  const handleDeleteWorkspace = useCallback(async (id) => {
     try {
-      await setAgentEnabled(agentId, !currentlyEnabled);
-      refresh();
+      await deleteWorkspace(id);
+      if (selectedWorkspaceId === id) {
+        setSelectedWorkspaceId(null);
+      }
+      await loadWorkspaces();
     } catch (err) {
-      console.error('[Fleet] Toggle enabled failed:', err);
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to delete workspace.');
     }
-  }, [refresh]);
+  }, [loadWorkspaces, selectedWorkspaceId]);
 
-  const handleRunNow = useCallback(async () => {
-    if (!selectedAgent) return;
-    try {
-      await fleetRunNow(selectedAgent.agentId);
-      // Give the scheduler a moment to pick it up, then refresh
-      setTimeout(() => refresh(), 2000);
-    } catch (err) {
-      console.error('[Fleet] Run now failed:', err);
-    }
-  }, [selectedAgent, refresh]);
-
-  const loadFormDependencies = useCallback(async () => {
-    const [serversResult, skillsResult, connectionsResult] = await Promise.allSettled([
-      getMcpServers(),
-      getSkills(),
-      assistantClient.listProviderConnections(),
-    ]);
-
-    if (serversResult.status === 'fulfilled') {
-      setMcpServers(serversResult.value || []);
-    }
-
-    if (skillsResult.status === 'fulfilled') {
-      setSkills(skillsResult.value || []);
-    }
-
-    if (connectionsResult.status === 'fulfilled') {
-      setProviderConnections(connectionsResult.value || []);
-    }
-  }, []);
-
-  const openCreateForm = useCallback(async () => {
-    await loadFormDependencies();
-    setEditingAgent(null);
-    setIsFormOpen(true);
-  }, [loadFormDependencies]);
-
-  const openEditForm = useCallback(async () => {
-    if (!selectedAgent) return;
-    await loadFormDependencies();
-    setEditingAgent({
-      id: selectedAgent.agentId,
-      name: selectedAgent.name,
-      description: selectedAgent.description,
-      intervalMinutes: selectedAgent.intervalMinutes,
-      selectedMcpServerIds: selectedAgent.selectedMcpServerIds || [],
-      selectedSkillIds: selectedAgent.selectedSkillIds || [],
-      providerConnectionIds: selectedAgent.providerConnectionIds || [],
-      execution: selectedAgent.execution || undefined,
-    });
-    setIsFormOpen(true);
-  }, [loadFormDependencies, selectedAgent]);
-
-  const handleFormSubmit = useCallback(async (formData) => {
-    if (editingAgent) {
-      await updateAgent({ id: editingAgent.id, ...formData });
-    } else {
-      await createAgent(formData);
-    }
-    setIsFormOpen(false);
-    setEditingAgent(null);
-    refresh();
-  }, [editingAgent, refresh]);
-
-  const handleFormClose = useCallback(() => {
-    setIsFormOpen(false);
-    setEditingAgent(null);
-  }, []);
-
-  const detailMessages = sessionState?.messages || [];
-  const detailToolCalls = sessionState?.toolCalls || EMPTY_TOOL_CALLS;
+  const detailMessages = sessionState?.messages || selectedSnapshot?.messages || [];
+  const detailToolCalls = sessionState?.toolCalls || selectedSnapshot?.toolCalls || EMPTY_TOOL_CALLS;
   const detailStreamingText = sessionState?.streamingTextByMessageId || EMPTY_STREAMING;
   const detailIsStreaming = sessionState?.isStreaming || false;
-  const detailRuns = sessionState?.runs || [];
-  const generalWorkspaces = useMemo(
-    () => workspaces.filter((workspace) => workspace.kind !== 'agent'),
-    [workspaces]
-  );
-  const attentionWorkspaces = useMemo(
-    () => workspaces.filter((workspace) => (workspace.attentionTaskCount || 0) > 0),
-    [workspaces]
-  );
-  const workspaceAttentionById = useMemo(
-    () => new Map(workspaces.map((workspace) => [workspace.id, workspace])),
-    [workspaces]
-  );
+
+  const hasSelection = !!selectedWorkspace;
 
   return (
     <div className={styles.fleetPage}>
       <div className={styles.header}>
-        <div>
-          <div className={styles.titleRow}>
-            <h1 className={styles.title}>Fleet</h1>
-            {summary && (
-              <span className={styles.titleBadge}>
-                {summary.enabled} active
-              </span>
-            )}
-          </div>
+        <div className={styles.headerLeft}>
+          <h1 className={styles.title}>Fleet</h1>
           <p className={styles.subtitle}>
             Supervise the agent fleet, inspect activity, and intervene when needed.
           </p>
         </div>
-        <button type="button" className={styles.primaryButton} onClick={openCreateForm}>
-          + New Agent
-        </button>
-      </div>
-
-      {summary && (
-        <div className={styles.summaryGrid}>
-          {SUMMARY_ITEMS.map(({ key, label, cardClass, valueClass }) => (
-            <div key={key} className={`${styles.summaryCard} ${styles[cardClass]}`}>
-              <span className={styles.summaryLabel}>{label}</span>
-              <strong className={`${styles.summaryValue} ${styles[valueClass]}`}>
-                {summary[key]}
-              </strong>
-            </div>
-          ))}
+        <div className={styles.headerCounters} role="status" aria-label="Fleet summary">
+          <span className={styles.counterChip}>
+            <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}
+          </span>
+          <span className={styles.counterSep}>{'·'}</span>
+          <span className={styles.counterChip}>
+            <strong>{counters.periodic}</strong> periodic
+          </span>
+          <span className={styles.counterSep}>{'·'}</span>
+          <span className={styles.counterChip}>
+            <strong>{counters.running}</strong> running
+          </span>
+          <span className={styles.counterSep}>{'·'}</span>
+          <span
+            className={`${styles.counterChip} ${counters.attention > 0 ? styles.counterChipAttention : ''}`}
+          >
+            <strong>{counters.attention}</strong> need attention
+          </span>
         </div>
-      )}
+      </div>
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <div className={styles.content}>
+      <div className={`${styles.content} ${hasSelection ? styles.contentWithDetail : ''}`}>
         <div className={styles.cardGrid}>
           {attentionWorkspaces.length > 0 && (
             <section className={styles.attentionPanel} aria-label="Workspace notifications">
@@ -371,7 +219,7 @@ const Fleet = () => {
                       key={workspace.id}
                       type="button"
                       className={styles.attentionItem}
-                      onClick={() => navigate(`/workspace/${workspace.id}`)}
+                      onClick={() => setSelectedWorkspaceId(workspace.id)}
                     >
                       <div className={styles.attentionItemHeader}>
                         <span className={styles.attentionWorkspaceTitle}>{workspace.title}</span>
@@ -396,250 +244,148 @@ const Fleet = () => {
             </section>
           )}
 
-          {agents.map((agent) => {
-            const isSelected = agent.agentId === selectedAgentId;
-            const attention = workspaceAttentionById.get(agent.agentId);
+          {sortedWorkspaces.map((ws) => {
+            const isSelected = ws.id === selectedWorkspaceId;
             return (
-              <button
-                key={agent.agentId}
-                type="button"
-                className={`${styles.agentCard} ${isSelected ? styles.agentCardSelected : ''}`}
-                onClick={() => selectAgent(agent.agentId)}
+              <div
+                key={ws.id}
+                className={`${styles.workspaceCard} ${isSelected ? styles.workspaceCardSelected : ''}`}
+                onClick={() => setSelectedWorkspaceId(ws.id)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => { if (e.key === 'Enter') setSelectedWorkspaceId(ws.id); }}
               >
                 <div className={styles.cardHeader}>
                   <div className={styles.cardTitleBlock}>
-                    <span className={styles.cardTitle}>{agent.name}</span>
-                    <span className={`${styles.statusPill} ${styles[`status_${agent.status}`]}`}>
-                      {agent.status.replace('_', ' ')}
-                    </span>
-                  </div>
-                  <span
-                    className={`${styles.enabledToggle} ${agent.enabled ? styles.enabledToggleOn : ''}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleToggleEnabled(agent.agentId, agent.enabled);
-                    }}
-                    role="switch"
-                    aria-checked={agent.enabled}
-                    title={agent.enabled ? 'Click to disable' : 'Click to enable'}
-                  >
-                    {agent.enabled ? 'Enabled' : 'Disabled'}
-                  </span>
-                </div>
-
-                <div className={styles.metaGrid}>
-                  <span>Interval: <strong>{agent.intervalMinutes}m</strong></span>
-                  <span>Last: <strong>{formatRelativeTime(agent.lastCompletedAt || agent.lastStartedAt)}</strong></span>
-                  <span>Next: <strong>{formatNextRun(agent.nextRunInSeconds)}</strong></span>
-                </div>
-
-                <MiniRibbon entries={agent.recentRunStatuses} />
-
-                {(agent.providerConnectionNames?.length > 0 || agent.selectedMcpServerNames?.length > 0) && (
-                  <div className={styles.mcpBadges}>
-                    {agent.providerConnectionNames?.map((name) => (
-                      <span key={name} className={styles.providerBadge}>{name}</span>
-                    ))}
-                    {agent.selectedMcpServerNames?.map((name) => (
-                      <span key={name} className={styles.mcpBadge}>{name}</span>
-                    ))}
-                  </div>
-                )}
-
-                {agent.lastError && (
-                  <p className={styles.errorPreview}>{agent.lastError}</p>
-                )}
-                {(attention?.attentionTaskCount || 0) > 0 && (
-                  <div className={styles.taskAttentionPreview}>
-                    <span className={styles.taskAttentionBadge}>
-                      {attention.attentionTaskCount} task{attention.attentionTaskCount === 1 ? '' : 's'} need attention
-                    </span>
-                    {attention.latestAttentionTaskTitle && (
-                      <span className={styles.taskAttentionText}>
-                        {attention.latestAttentionTaskTitle}
+                    <span className={styles.cardTitle}>{ws.title}</span>
+                    {ws.scheduleEnabled ? (
+                      <span className={`${styles.workspaceBadge} ${styles.workspaceBadgePeriodic}`}>
+                        {ws.intervalMinutes ? `Periodic · ${ws.intervalMinutes}m` : 'Periodic'}
                       </span>
+                    ) : (
+                      <span className={styles.workspaceBadge}>Workspace</span>
                     )}
                   </div>
-                )}
-              </button>
-            );
-          })}
-
-          {!isLoading && agents.length === 0 && (
-            <div className={styles.emptyState}>
-              <h2 className={styles.emptyStateTitle}>No scheduled agents configured</h2>
-              <p className={styles.emptyStateText}>
-                Create a scheduled agent to get started.
-              </p>
-              <button type="button" className={styles.primaryButton} onClick={openCreateForm} style={{ marginTop: 12 }}>
-                + New Agent
-              </button>
-            </div>
-          )}
-
-          {generalWorkspaces.length > 0 && (
-            <>
-              <div className={styles.sectionDivider}>
-                <span className={styles.sectionDividerLabel}>Past Workspaces</span>
-                <span className={styles.sectionDividerCount}>{generalWorkspaces.length}</span>
-              </div>
-              {generalWorkspaces.map((ws) => (
-                <div
-                  key={ws.id}
-                  className={styles.workspaceCard}
-                  onClick={() => navigate(`/workspace/${ws.id}`)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => { if (e.key === 'Enter') navigate(`/workspace/${ws.id}`); }}
-                >
-                  <div className={styles.cardHeader}>
-                    <div className={styles.cardTitleBlock}>
-                      <span className={styles.cardTitle}>{ws.title}</span>
-                      <span className={styles.workspaceBadge}>Workspace</span>
-                    </div>
+                  <div className={styles.cardHeaderActions}>
+                    <button
+                      type="button"
+                      className={styles.openBtn}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleOpenWorkspace(ws.id);
+                      }}
+                      title="Open workspace"
+                      aria-label="Open workspace"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M7 17L17 7" />
+                        <path d="M8 7h9v9" />
+                      </svg>
+                    </button>
                     <button
                       type="button"
                       className={styles.deleteBtn}
                       onClick={(e) => {
                         e.stopPropagation();
-                        deleteWorkspace(ws.id).then(() => loadWorkspaces());
+                        handleDeleteWorkspace(ws.id);
                       }}
                       title="Delete workspace"
+                      aria-label="Delete workspace"
                     >
-                      {'\u2715'}
+                      {'✕'}
                     </button>
                   </div>
-                  <div className={styles.metaGrid}>
-                    <span>{ws.messageCount} msgs</span>
-                    <span>{ws.artifactCount} artifacts</span>
-                    <span>{ws.memoryCount} memories</span>
-                    <span>{ws.assignedAgentCount || 0} agents</span>
-                    {ws.defaultManagerName && <span>Manager: <strong>{ws.defaultManagerName}</strong></span>}
-                    {ws.runningTaskCount > 0 && <span>{ws.runningTaskCount} running</span>}
-                  </div>
-                  {(ws.attentionTaskCount || 0) > 0 && (
-                    <div className={styles.taskAttentionPreview}>
-                      <span className={styles.taskAttentionBadge}>
-                        {ws.attentionTaskCount} task{ws.attentionTaskCount === 1 ? '' : 's'} need attention
+                </div>
+                <div className={styles.metaGrid}>
+                  <span>{ws.messageCount} msgs</span>
+                  <span>{ws.artifactCount} artifacts</span>
+                  <span>{ws.memoryCount} memories</span>
+                  <span>{ws.assignedAgentCount || 0} agents</span>
+                  {ws.runningTaskCount > 0 && <span>{ws.runningTaskCount} running</span>}
+                </div>
+                {(ws.attentionTaskCount || 0) > 0 && (
+                  <div className={styles.taskAttentionPreview}>
+                    <span className={styles.taskAttentionBadge}>
+                      {ws.attentionTaskCount} task{ws.attentionTaskCount === 1 ? '' : 's'} need attention
+                    </span>
+                    {ws.latestAttentionTaskTitle && (
+                      <span className={styles.taskAttentionText}>
+                        {ws.latestAttentionTaskTitle}
                       </span>
-                      {ws.latestAttentionTaskTitle && (
-                        <span className={styles.taskAttentionText}>
-                          {ws.latestAttentionTaskTitle}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  <div className={styles.workspaceTime}>
-                    {formatTimestamp(ws.updatedAt || ws.createdAt)}
+                    )}
                   </div>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
-
-        <div className={styles.detailPane}>
-          {selectedAgent ? (
-            <>
-              <div className={styles.detailHeader}>
-                <h2 className={styles.detailTitle}>{selectedAgent.name}</h2>
-                <div className={styles.detailActions}>
-                  <button
-                    type="button"
-                    className={styles.accentButton}
-                    onClick={handleRunNow}
-                    disabled={selectedAgent.status === 'running' || selectedAgent.status === 'disabled'}
-                  >
-                    Run Now
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.secondaryButton}
-                    onClick={openEditForm}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.secondaryButton}
-                    onClick={handleOpenWorkspace}
-                  >
-                    Open Workspace
-                  </button>
-                </div>
-              </div>
-
-              <RunRibbon runs={selectedAgent.recentRunStatuses} />
-
-              <div className={styles.detailTabs}>
-                <button
-                  type="button"
-                  className={`${styles.detailTab} ${detailSection === 'chat' ? styles.detailTabActive : ''}`}
-                  onClick={() => setDetailSection('chat')}
-                >
-                  Chat
-                </button>
-                <button
-                  type="button"
-                  className={`${styles.detailTab} ${detailSection === 'prompt' ? styles.detailTabActive : ''}`}
-                  onClick={() => setDetailSection('prompt')}
-                >
-                  Prompt
-                </button>
-              </div>
-
-              <div className={styles.detailSection}>
-                {detailSection === 'chat' ? (
-                  detailMessages.length > 0 ? (
-                    <>
-                      {(() => {
-                        const latestWarningRun = detailRuns.find((r) => r.status === 'completed_with_warnings' && r.notices?.length);
-                        return latestWarningRun ? <NoticesBanner notices={latestWarningRun.notices} /> : null;
-                      })()}
-                      <ChatMessageList
-                        messages={detailMessages}
-                        toolCalls={detailToolCalls}
-                        streamingText={detailStreamingText}
-                        isStreaming={detailIsStreaming}
-                      />
-                    </>
-                  ) : (
-                    <div className={styles.emptyDetail}>
-                      {selectedAgent.sessionId
-                        ? 'Conversation history has not been loaded yet.'
-                        : 'This agent has not started a conversation yet.'}
-                    </div>
-                  )
-                ) : (
-                  selectedAgent.description ? (
-                    <div className={styles.detailDescription}>
-                      <MarkdownMessage content={selectedAgent.description} />
-                    </div>
-                  ) : (
-                    <div className={styles.emptyDetail}>
-                      No prompt configured for this agent.
-                    </div>
-                  )
                 )}
+                <div className={styles.workspaceTime}>
+                  {formatTimestamp(ws.updatedAt || ws.createdAt)}
+                </div>
               </div>
-            </>
-          ) : (
-            <div className={styles.emptyDetail}>
-              Select an agent to inspect conversation history and operational metadata.
+            );
+          })}
+
+          {!isLoading && workspaces.length === 0 && (
+            <div className={styles.emptyState}>
+              <h2 className={styles.emptyStateTitle}>No workspaces yet</h2>
+              <p className={styles.emptyStateText}>
+                Use the &quot;Create Workspace&quot; button below to start.
+              </p>
             </div>
           )}
         </div>
-      </div>
 
-      <AgentFormModal
-        isOpen={isFormOpen}
-        onClose={handleFormClose}
-        onSubmit={handleFormSubmit}
-        agent={editingAgent}
-        mcpServers={mcpServers}
-        skills={skills}
-        providerConnections={providerConnections}
-      />
+        {selectedWorkspace && (
+          <aside className={styles.detailPane} key={selectedWorkspace.id}>
+            <div className={styles.detailHeader}>
+              <div className={styles.detailHeaderText}>
+                <h2 className={styles.detailTitle}>{selectedWorkspace.title}</h2>
+                {selectedWorkspace.scheduleEnabled && (
+                  <div className={styles.detailSubtitle}>
+                    <span className={styles.detailPillPeriodic}>
+                      {selectedWorkspace.intervalMinutes
+                        ? `Periodic · every ${selectedWorkspace.intervalMinutes}m`
+                        : 'Periodic'}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className={styles.detailActions}>
+                <button
+                  type="button"
+                  className={styles.accentButton}
+                  onClick={() => handleOpenWorkspace(selectedWorkspace.id)}
+                >
+                  Open workspace
+                </button>
+                <button
+                  type="button"
+                  className={styles.detailClose}
+                  onClick={() => setSelectedWorkspaceId(null)}
+                  title="Close detail"
+                  aria-label="Close detail"
+                >
+                  {'×'}
+                </button>
+              </div>
+            </div>
+
+            <div className={styles.detailSection}>
+              {snapshotError ? (
+                <div className={styles.emptyDetail}>{snapshotError}</div>
+              ) : detailMessages.length > 0 ? (
+                <ChatMessageList
+                  messages={detailMessages}
+                  toolCalls={detailToolCalls}
+                  streamingText={detailStreamingText}
+                  isStreaming={detailIsStreaming}
+                />
+              ) : (
+                <div className={styles.emptyDetail}>
+                  No conversation yet. Open the workspace to start chatting with its manager.
+                </div>
+              )}
+            </div>
+          </aside>
+        )}
+      </div>
     </div>
   );
 };

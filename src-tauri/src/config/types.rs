@@ -334,10 +334,7 @@ impl SkillSourceConfig {
 // Automation Config
 // =============================================================================
 
-/// Fixed ID for the default automation.
-pub const DEFAULT_AGENT_ID: &str = "00000000-0000-0000-0000-000000000001";
-
-/// User-defined scheduled automation stored in configuration.
+/// Exposed tool that an agent makes callable to siblings via inter-agent calls.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ExposedAgentTool {
@@ -397,46 +394,13 @@ pub struct AgentConfig {
     pub updated_at: String,
 }
 
+// AgentConfig is the in-memory row shape for `workspace_agents`. The helpers
+// below are used by tests and by commands::workspace_agents validation logic
+// (via separate copies); marked `allow(dead_code)` because rustc can't see
+// across that boundary.
+#[allow(dead_code)]
 impl AgentConfig {
-    /// Creates the default automation with fixed ID.
-    pub fn default_agent() -> Self {
-        let now = chrono::Utc::now().to_rfc3339();
-        Self {
-            id: DEFAULT_AGENT_ID.to_string(),
-            name: "Infrastructure Health Monitor".to_string(),
-            description: r#"Monitor infrastructure health by checking for anomalies and investigating root causes.
-
-## What to Monitor
-- CPU, memory, disk, and network metrics
-- Active alerts and their severity
-- Anomaly patterns and trends
-
-## Investigation Process
-1. Query for current anomalies and alerts
-2. Investigate root causes of any issues found
-3. Analyze related metrics for context
-4. Visualize findings with relevant charts
-
-## Reporting
-- Provide actionable insights
-- Highlight critical issues first
-- Suggest next steps when appropriate
-- Keep status updates concise when healthy"#
-                .to_string(),
-            schedule_enabled: true,
-            interval_minutes: 5,
-            enabled: false,
-            selected_mcp_server_ids: vec![],
-            provider_connection_ids: vec![],
-            selected_skill_ids: vec![],
-            execution: ExecutionCapabilityConfig::default(),
-            exposed_tools: vec![],
-            created_at: now.clone(),
-            updated_at: now,
-        }
-    }
-
-    /// Creates a new automation with a generated UUID.
+    /// Creates a new workspace-local agent with a generated UUID.
     pub fn new(name: String, description: String, interval_minutes: u32) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
         Self {
@@ -454,11 +418,6 @@ impl AgentConfig {
             created_at: now.clone(),
             updated_at: now,
         }
-    }
-
-    /// Checks if this is the default automation.
-    pub fn is_default(&self) -> bool {
-        self.id == DEFAULT_AGENT_ID
     }
 
     /// Returns the static list of required built-in tool namespaces.
@@ -523,19 +482,16 @@ impl AgentConfig {
 // =============================================================================
 
 /// Root configuration structure for CLAI.
+///
+/// Agents live in the `workspace_agents` DB table (workspace-local), not here.
+/// Legacy `agents: [...]` and `assistantDefaultModel` entries in existing
+/// `config.json` files are silently dropped by `#[serde(default)]` when
+/// the file is deserialized.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClaiConfig {
     /// Global AI provider for all automations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_provider: Option<AiProvider>,
-
-    /// Legacy default model used only to migrate existing assistant provider sessions.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assistant_default_model: Option<String>,
-
-    /// User-defined scheduled automations.
-    #[serde(default)]
-    pub agents: Vec<AgentConfig>,
 
     /// User-configured MCP servers.
     #[serde(default)]
@@ -556,36 +512,37 @@ mod tests {
 
     #[test]
     fn test_clai_config_serialization() {
-        let mut config = ClaiConfig::default();
-        config.ai_provider = Some(AiProvider::Claude { model: None });
-        config.agents.push(AgentConfig::default_agent());
+        let config = ClaiConfig {
+            ai_provider: Some(AiProvider::Claude { model: None }),
+            ..ClaiConfig::default()
+        };
 
         let json = serde_json::to_string_pretty(&config).unwrap();
         assert!(json.contains("claude"));
-        assert!(json.contains(DEFAULT_AGENT_ID));
 
         let parsed: ClaiConfig = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             parsed.ai_provider,
             Some(AiProvider::Claude { .. })
         ));
-        assert_eq!(parsed.agents.len(), 1);
     }
 
     #[test]
-    fn test_default_agent_has_fixed_id() {
-        let agent = AgentConfig::default_agent();
-        assert_eq!(agent.id, DEFAULT_AGENT_ID);
-        assert!(agent.is_default());
-        assert_eq!(agent.name, "Infrastructure Health Monitor");
-        assert_eq!(agent.interval_minutes, 5);
-        assert!(agent.schedule_enabled);
-        assert!(agent.selected_mcp_server_ids.is_empty());
-        assert!(agent.provider_connection_ids.is_empty());
-        assert!(agent.selected_skill_ids.is_empty());
-        assert!(matches!(agent.execution.shell.mode, ShellAccessMode::Off));
-        assert!(agent.execution.filesystem.extra_paths.is_empty());
-        assert!(agent.exposed_tools.is_empty());
+    fn test_clai_config_drops_legacy_agents_field_on_deserialize() {
+        // A `config.json` written by a pre-refactor build may still have
+        // `agents: [...]`. The struct no longer carries that field; serde
+        // should silently drop it.
+        let legacy = r#"{
+            "ai_provider": {"type": "claude"},
+            "agents": [{"id": "x", "name": "Old", "description": "", "intervalMinutes": 5,
+                        "selectedMcpServerIds": [], "providerConnectionIds": [],
+                        "selectedSkillIds": [], "execution": {},
+                        "exposedTools": [], "createdAt": "", "updatedAt": ""}],
+            "mcp_servers": [],
+            "skill_sources": []
+        }"#;
+        let parsed: ClaiConfig = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.mcp_servers.is_empty());
     }
 
     #[test]
@@ -594,20 +551,13 @@ mod tests {
         let agent2 = AgentConfig::new("Agent 2".to_string(), "Description 2".to_string(), 15);
 
         assert_ne!(agent1.id, agent2.id);
-        assert!(!agent1.is_default());
-        assert!(!agent2.is_default());
         assert_eq!(agent1.name, "Agent 1");
         assert_eq!(agent2.interval_minutes, 15);
-        assert!(agent1.schedule_enabled);
-        assert!(agent1.selected_mcp_server_ids.is_empty());
-        assert!(agent1.provider_connection_ids.is_empty());
-        assert!(agent1.selected_skill_ids.is_empty());
-        assert!(agent1.execution.filesystem.extra_paths.is_empty());
     }
 
     #[test]
     fn test_agent_required_tools() {
-        let agent = AgentConfig::default_agent();
+        let agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
         let tools = agent.required_tools();
 
         assert!(tools.contains(&"netdata"));
@@ -619,7 +569,7 @@ mod tests {
 
     #[test]
     fn test_agent_required_tools_include_local_execution_when_enabled() {
-        let mut agent = AgentConfig::default_agent();
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
         agent.execution.shell.mode = ShellAccessMode::Restricted;
 
         let tools = agent.required_tools();
@@ -630,7 +580,7 @@ mod tests {
 
     #[test]
     fn test_agent_required_tools_include_web_when_enabled() {
-        let mut agent = AgentConfig::default_agent();
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
         agent.execution.web.enabled = true;
 
         let tools = agent.required_tools();
@@ -643,81 +593,14 @@ mod tests {
 
     #[test]
     fn test_agent_enabled_toggle() {
-        let mut agent = AgentConfig::default_agent();
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
+        agent.enabled = false;
 
-        assert!(!agent.enabled);
         assert!(agent.set_enabled(true));
         assert!(agent.enabled);
         assert!(!agent.set_enabled(true));
         assert!(agent.set_enabled(false));
         assert!(!agent.enabled);
-    }
-
-    #[test]
-    fn test_agent_serialization() {
-        let mut agent = AgentConfig::default_agent();
-        agent.selected_mcp_server_ids = vec!["mcp-a".to_string(), "mcp-b".to_string()];
-        agent.provider_connection_ids = vec!["conn-a".to_string(), "conn-b".to_string()];
-        agent.selected_skill_ids = vec!["skill-a".to_string()];
-        agent.exposed_tools = vec![ExposedAgentTool {
-            name: "analyze".to_string(),
-            description: "Analyze something".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
-            output_schema: serde_json::json!({"type": "object"}),
-        }];
-
-        let json = serde_json::to_string_pretty(&agent).unwrap();
-
-        assert!(json.contains(&agent.id));
-        assert!(json.contains("Infrastructure Health Monitor"));
-        assert!(json.contains("mcp-a"));
-        assert!(json.contains("conn-a"));
-        assert!(json.contains("skill-a"));
-
-        let parsed: AgentConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.id, agent.id);
-        assert_eq!(parsed.name, agent.name);
-        assert_eq!(
-            parsed.selected_mcp_server_ids,
-            agent.selected_mcp_server_ids
-        );
-        assert_eq!(
-            parsed.provider_connection_ids,
-            agent.provider_connection_ids
-        );
-        assert_eq!(parsed.selected_skill_ids, agent.selected_skill_ids);
-        assert_eq!(parsed.execution, agent.execution);
-        assert_eq!(parsed.schedule_enabled, agent.schedule_enabled);
-        assert_eq!(parsed.exposed_tools, agent.exposed_tools);
-    }
-
-    #[test]
-    fn test_config_with_agents_serialization() {
-        let mut config = ClaiConfig::default();
-        config.agents.push(AgentConfig::default_agent());
-        config.mcp_servers.push(McpServerConfig::new(
-            "Filesystem MCP".to_string(),
-            McpServerTransport::Stdio {
-                command: "npx".to_string(),
-                args: vec!["@modelcontextprotocol/server-filesystem".to_string()],
-            },
-        ));
-
-        let mut custom_agent = AgentConfig::new(
-            "Custom Monitor".to_string(),
-            "Monitor custom things".to_string(),
-            30,
-        );
-        custom_agent.selected_mcp_server_ids = vec![config.mcp_servers[0].id.clone()];
-        config.agents.push(custom_agent);
-
-        let json = serde_json::to_string_pretty(&config).unwrap();
-        assert!(json.contains("Filesystem MCP"));
-        assert!(json.contains("Custom Monitor"));
-
-        let parsed: ClaiConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.agents.len(), 2);
-        assert_eq!(parsed.mcp_servers.len(), 1);
     }
 
     #[test]

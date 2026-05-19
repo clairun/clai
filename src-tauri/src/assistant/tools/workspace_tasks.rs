@@ -89,6 +89,15 @@ struct WorkspaceAgentRow {
     display_name: Option<String>,
     role: String,
     enabled: bool,
+    // Inline agent fields (Phase 1.4 — populated from workspace_agents columns;
+    // no more join with the global ClaiConfig.agents catalog).
+    name: String,
+    description: String,
+    selected_skill_ids: Vec<String>,
+    selected_mcp_server_ids: Vec<String>,
+    provider_connection_ids: Vec<String>,
+    execution: crate::config::ExecutionCapabilityConfig,
+    exposed_tools: Vec<crate::config::ExposedAgentTool>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,22 +158,27 @@ async fn list_agents(
 ) -> Result<serde_json::Value, String> {
     let workspace_id = workspace_id_from_context(context)?;
     let rows = load_workspace_agent_rows(&deps.pool, &workspace_id).await?;
-    let agent_configs = configured_agents_by_id(deps)?;
 
     let agents: Vec<serde_json::Value> = rows
         .into_iter()
         .filter(|row| params.include_disabled || row.enabled)
         .map(|row| {
-            let config = agent_configs.get(&row.agent_definition_id);
+            // Phase 1.4: every field below comes from the workspace_agents row
+            // itself; no join with the global ClaiConfig.agents catalog.
+            let display_name = row
+                .display_name
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| row.name.clone());
             serde_json::json!({
                 "id": row.id,
                 "workspaceId": row.workspace_id,
                 "agentDefinitionId": row.agent_definition_id,
-                "displayName": row.display_name.or_else(|| config.map(|agent| agent.name.clone())),
+                "displayName": display_name,
                 "role": row.role,
                 "enabled": row.enabled,
-                "description": config.and_then(|agent| concise_agent_description(Some(agent.description.clone()))),
-                "providerConnectionIds": config.map(|agent| agent.provider_connection_ids.clone()).unwrap_or_default(),
+                "description": concise_agent_description(Some(row.description.clone())),
+                "providerConnectionIds": row.provider_connection_ids,
             })
         })
         .collect();
@@ -207,12 +221,22 @@ async fn assign_task(
         ));
     }
 
-    let mut agent_configs = configured_agents_by_id(deps)?;
-    let Some(target_config) = agent_configs.remove(&target.agent_definition_id) else {
-        return Err(format!(
-            "Agent definition not found: {}",
-            target.agent_definition_id
-        ));
+    // Phase 1.4: build the target AgentConfig from the workspace_agents row
+    // inline fields — no global catalog lookup.
+    let target_config = AgentConfig {
+        id: target.id.clone(),
+        name: target.name.clone(),
+        description: target.description.clone(),
+        schedule_enabled: false,
+        interval_minutes: 0,
+        enabled: target.enabled,
+        selected_mcp_server_ids: target.selected_mcp_server_ids.clone(),
+        provider_connection_ids: target.provider_connection_ids.clone(),
+        selected_skill_ids: target.selected_skill_ids.clone(),
+        execution: target.execution.clone(),
+        exposed_tools: target.exposed_tools.clone(),
+        created_at: String::new(),
+        updated_at: String::new(),
     };
 
     let creator_workspace_agent_id = find_workspace_agent_for_definition(
@@ -590,22 +614,6 @@ async fn resolve_first_connection(
     ))
 }
 
-fn configured_agents_by_id(
-    deps: &AssistantDeps,
-) -> Result<std::collections::HashMap<String, AgentConfig>, String> {
-    let state = deps.app.state::<AppState>();
-    let config_manager = state
-        .config_manager
-        .lock()
-        .map_err(|error| format!("Config lock error: {}", error))?;
-
-    Ok(config_manager
-        .get_agents()
-        .into_iter()
-        .map(|agent| (agent.id.clone(), agent))
-        .collect())
-}
-
 fn concise_agent_description(description: Option<String>) -> Option<String> {
     let text = description?;
     let first_line = text
@@ -630,7 +638,9 @@ async fn load_workspace_agent_rows(
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, workspace_id, agent_definition_id, display_name, role, enabled
+        SELECT id, workspace_id, agent_definition_id, display_name, role, enabled,
+               name, description, selected_skill_ids, selected_mcp_server_ids,
+               provider_connection_ids, execution, exposed_tools
         FROM workspace_agents
         WHERE workspace_id = ?
         ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, created_at ASC
@@ -651,7 +661,9 @@ async fn load_workspace_agent_row(
 ) -> Result<Option<WorkspaceAgentRow>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, workspace_id, agent_definition_id, display_name, role, enabled
+        SELECT id, workspace_id, agent_definition_id, display_name, role, enabled,
+               name, description, selected_skill_ids, selected_mcp_server_ids,
+               provider_connection_ids, execution, exposed_tools
         FROM workspace_agents
         WHERE workspace_id = ? AND id = ?
         LIMIT 1
@@ -723,6 +735,14 @@ async fn find_workspace_agent_for_definition(
 }
 
 fn map_workspace_agent_row(row: &sqlx::sqlite::SqliteRow) -> Result<WorkspaceAgentRow, String> {
+    let selected_skill_ids: String = row.try_get("selected_skill_ids").unwrap_or_default();
+    let selected_mcp_server_ids: String =
+        row.try_get("selected_mcp_server_ids").unwrap_or_default();
+    let provider_connection_ids: String =
+        row.try_get("provider_connection_ids").unwrap_or_default();
+    let execution: String = row.try_get("execution").unwrap_or_default();
+    let exposed_tools: String = row.try_get("exposed_tools").unwrap_or_default();
+
     Ok(WorkspaceAgentRow {
         id: row.get("id"),
         workspace_id: row.get("workspace_id"),
@@ -730,6 +750,13 @@ fn map_workspace_agent_row(row: &sqlx::sqlite::SqliteRow) -> Result<WorkspaceAge
         display_name: row.get("display_name"),
         role: row.get("role"),
         enabled: row.get::<i64, _>("enabled") != 0,
+        name: row.try_get("name").unwrap_or_default(),
+        description: row.try_get("description").unwrap_or_default(),
+        selected_skill_ids: serde_json::from_str(&selected_skill_ids).unwrap_or_default(),
+        selected_mcp_server_ids: serde_json::from_str(&selected_mcp_server_ids).unwrap_or_default(),
+        provider_connection_ids: serde_json::from_str(&provider_connection_ids).unwrap_or_default(),
+        execution: serde_json::from_str(&execution).unwrap_or_default(),
+        exposed_tools: serde_json::from_str(&exposed_tools).unwrap_or_default(),
     })
 }
 

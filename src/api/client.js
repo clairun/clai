@@ -297,96 +297,69 @@ export const getProviderModels = async (providerType) => {
 // Agent Management
 // ============================================================================
 
-/**
- * Get all agents
- * @returns {Promise<Array>} List of agents
- */
-export const getAgents = async () => {
+// Legacy global-agent CRUD (getAgents/getAgent/createAgent/updateAgent/
+// deleteAgent/setAgentEnabled) removed — agents are workspace-local now.
+// Use workspaceCreateAgent / workspaceUpdateAgent / workspaceDeleteAgent /
+// workspaceSetAgentEnabled / workspaceGetAgent below.
+
+export const getAgentTemplates = async () => {
   try {
-    return await invoke('get_agents');
+    return await invoke('agent_templates_list');
   } catch (error) {
-    handleApiError(error, 'Failed to get agents');
+    handleApiError(error, 'Failed to get agent templates');
   }
 };
 
-/**
- * Get a single agent by ID
- * @param {string} id - Agent ID
- * @returns {Promise<Object|null>} Agent or null if not found
- */
-export const getAgent = async (id) => {
+// ============================================================================
+// Workspace-Scoped Agent CRUD
+// ----------------------------------------------------------------------------
+// Agents are workspace-local. These wrap the workspace_* Tauri commands.
+// The legacy createAgent/updateAgent/deleteAgent above operate on the
+// (transitional) global catalog and will be removed in the final cleanup.
+// ============================================================================
+
+export const workspaceGetAgent = async (workspaceId, agentId) => {
   try {
-    return await invoke('get_agent', { id });
+    return await invoke('workspace_get_agent', { workspaceId, agentId });
   } catch (error) {
-    handleApiError(error, 'Failed to get agent');
+    handleApiError(error, 'Failed to load workspace agent');
   }
 };
 
-/**
- * Create a new agent
- * @param {Object} request - Agent creation request
- * @param {string} request.name - Agent name
- * @param {string} request.description - Agent description (supports markdown)
- * @param {number} request.intervalMinutes - Check interval in minutes
- * @param {Array<string>} request.selectedMcpServerIds - Enabled MCP servers for this agent
- * @param {Array<string>} request.selectedSkillIds - Selected reusable skill IDs for this agent
- * @param {Object} request.execution - Local execution capability policy
- * @returns {Promise<Object>} Created agent
- */
-export const createAgent = async (request) => {
+export const workspaceCreateAgent = async (request) => {
   try {
-    return await invoke('create_agent', { request });
+    return await invoke('workspace_create_agent', { request });
   } catch (error) {
-    handleApiError(error, 'Failed to create agent');
+    handleApiError(error, 'Failed to create workspace agent');
   }
 };
 
-/**
- * Update an existing agent
- * @param {Object} request - Agent update request
- * @param {string} request.id - Agent ID
- * @param {string} request.name - Agent name
- * @param {string} request.description - Agent description
- * @param {number} request.intervalMinutes - Check interval in minutes
- * @param {Array<string>} request.selectedMcpServerIds - Enabled MCP servers for this agent
- * @param {Array<string>} request.selectedSkillIds - Selected reusable skill IDs for this agent
- * @param {Object} request.execution - Local execution capability policy
- * @returns {Promise<Object>} Updated agent
- */
-export const updateAgent = async (request) => {
+export const workspaceUpdateAgent = async (request) => {
   try {
-    return await invoke('update_agent', { request });
+    return await invoke('workspace_update_agent', { request });
   } catch (error) {
-    handleApiError(error, 'Failed to update agent');
+    handleApiError(error, 'Failed to update workspace agent');
   }
 };
 
-/**
- * Delete an agent
- * @param {string} id - Agent ID
- * @returns {Promise<void>}
- */
-export const deleteAgent = async (id) => {
+export const workspaceDeleteAgent = async (workspaceId, agentId) => {
   try {
-    return await invoke('delete_agent', { id });
-  } catch (error) {
-    handleApiError(error, 'Failed to delete agent');
-  }
-};
-
-/**
- * Enable or disable an agent globally
- * @param {string} id - Agent ID
- * @param {boolean} enabled - Whether the agent should run
- * @returns {Promise<Object>} Updated agent
- */
-export const setAgentEnabled = async (id, enabled) => {
-  try {
-    return await invoke('set_agent_enabled', {
-      request: { id, enabled },
+    return await invoke('workspace_delete_agent', {
+      workspaceId,
+      agentId,
     });
   } catch (error) {
-    handleApiError(error, 'Failed to update agent status');
+    handleApiError(error, 'Failed to delete workspace agent');
+  }
+};
+
+export const workspaceSetAgentEnabled = async (workspaceId, agentId, enabled) => {
+  try {
+    return await invoke('workspace_set_agent_enabled', {
+      request: { workspaceId, agentId, enabled },
+    });
+  } catch (error) {
+    handleApiError(error, 'Failed to update workspace agent status');
   }
 };
 
@@ -449,6 +422,14 @@ export const deleteSkillSource = async (id) => {
     return await invoke('skill_source_delete', { id });
   } catch (error) {
     handleApiError(error, 'Failed to delete skill source');
+  }
+};
+
+export const forkBundledSkill = async (sourceSkillId, newName) => {
+  try {
+    return await invoke('skill_fork_bundled', { sourceSkillId, newName });
+  } catch (error) {
+    handleApiError(error, 'Failed to fork bundled skill');
   }
 };
 

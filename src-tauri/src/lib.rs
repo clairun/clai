@@ -110,8 +110,10 @@ pub fn run() {
     // Register default automation definitions and restore enabled instances
     agents::init::initialize_scheduler(&scheduler, &config_manager, &token_storage);
 
-    // Clone scheduler before moving into state (needed for runner)
+    // Clone scheduler before moving into state (needed for runner and for
+    // post-DB population from workspace_agents).
     let runner_scheduler = scheduler.clone();
+    let post_db_scheduler = scheduler.clone();
 
     // Create the shared application state
     let state = AppState {
@@ -148,6 +150,12 @@ pub fn run() {
                         if let Err(e) = assistant::repository::recover_stale_runs(&pool).await {
                             tracing::warn!("Failed to recover stale runs: {}", e);
                         }
+                        // Populate scheduler with workspace-local scheduled agents.
+                        agents::init::populate_scheduler_from_workspace_agents(
+                            &post_db_scheduler,
+                            &pool,
+                        )
+                        .await;
                         app_handle.manage(pool);
                     }
                     Err(e) => {
@@ -186,13 +194,8 @@ pub fn run() {
             commands::assistant::assistant_send_message,
             commands::assistant::assistant_retry_run,
             commands::assistant::assistant_cancel_run,
-            // Agent commands
-            commands::agents::get_agents,
-            commands::agents::get_agent,
-            commands::agents::create_agent,
-            commands::agents::update_agent,
-            commands::agents::set_agent_enabled,
-            commands::agents::delete_agent,
+            // Bundled agent templates (read-only).
+            commands::agent_templates::agent_templates_list,
             // MCP server commands
             commands::mcp_servers::get_mcp_servers,
             commands::mcp_servers::get_mcp_server,
@@ -223,6 +226,7 @@ pub fn run() {
             commands::skills::skill_source_refresh,
             commands::skills::skill_source_set_enabled,
             commands::skills::skill_source_delete,
+            commands::skills::skill_fork_bundled,
             // Agent tool bridge commands
             commands::bridge::agent_tool_result,
             commands::bridge::agent_bridge_ready,
@@ -239,14 +243,17 @@ pub fn run() {
             commands::workspace::workspace_update_session_mcp,
             commands::workspace::workspace_set_provider,
             commands::workspace::workspace_list_agents,
-            commands::workspace::workspace_assign_agent,
-            commands::workspace::workspace_unassign_agent,
             commands::workspace::workspace_set_default_agent,
             commands::workspace::workspace_acknowledge_task,
             commands::workspace::workspace_submit_task_feedback,
             commands::workspace::workspace_create,
             commands::workspace::workspace_list,
             commands::workspace::workspace_delete,
+            commands::workspace_agents::workspace_get_agent,
+            commands::workspace_agents::workspace_create_agent,
+            commands::workspace_agents::workspace_update_agent,
+            commands::workspace_agents::workspace_delete_agent,
+            commands::workspace_agents::workspace_set_agent_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

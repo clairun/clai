@@ -18,7 +18,7 @@
 
 use tauri::State;
 
-use crate::agents::init::{clear_all_instances, restore_instances_from_config};
+use crate::agents::init::clear_all_instances;
 use crate::AppState;
 
 /// Stores the API token securely in the OS keychain.
@@ -44,14 +44,8 @@ pub async fn set_token(token: String, state: State<'_, AppState>) -> Result<(), 
         .set_token(&token)
         .map_err(|e| format!("Failed to store token: {}", e))?;
 
-    // Restore agent instances from config after login
-    // Get the config (cloned) and drop the lock before the async call
-    let config = {
-        let config_manager = state.config_manager.lock().unwrap();
-        config_manager.get()
-    };
-    restore_instances_from_config(&state.scheduler, config).await;
-
+    // Scheduled agents live in workspace_agents now and are populated by
+    // populate_scheduler_from_workspace_agents at boot. No login-time restore needed.
     Ok(())
 }
 

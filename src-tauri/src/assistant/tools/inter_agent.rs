@@ -13,10 +13,83 @@ use crate::assistant::types::{
     ContentPart, InterAgentCallContext, MessageRole, ProviderConnection, RunTrigger,
     SessionContext, SessionKind,
 };
+use crate::config::{AgentConfig, ExecutionCapabilityConfig, ExposedAgentTool};
+use crate::db::DbPool;
 use crate::AppState;
 
 const MAX_CALL_DEPTH: u32 = 5;
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
+
+/// Loads a workspace_agents row by id and reconstructs it as an `AgentConfig`.
+///
+/// Phase 1.5 of the workspace-local-agents refactor: inter-agent callees are
+/// resolved from the DB, not from the (transitional) global catalog.
+async fn load_workspace_agent_as_config(
+    pool: &DbPool,
+    id: &str,
+) -> Result<Option<AgentConfig>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, description, selected_skill_ids, selected_mcp_server_ids,
+               provider_connection_ids, execution, exposed_tools,
+               schedule_enabled, interval_minutes, enabled,
+               created_at, updated_at
+        FROM workspace_agents
+        WHERE id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load workspace agent: {}", e))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    use sqlx::Row;
+    let selected_skill_ids: String = row.try_get("selected_skill_ids").unwrap_or_default();
+    let selected_mcp_server_ids: String =
+        row.try_get("selected_mcp_server_ids").unwrap_or_default();
+    let provider_connection_ids: String =
+        row.try_get("provider_connection_ids").unwrap_or_default();
+    let execution: String = row.try_get("execution").unwrap_or_default();
+    let exposed_tools: String = row.try_get("exposed_tools").unwrap_or_default();
+    let schedule_enabled: i64 = row.try_get("schedule_enabled").unwrap_or(0);
+    let enabled: i64 = row.try_get("enabled").unwrap_or(1);
+    let created_ms: i64 = row.try_get("created_at").unwrap_or(0);
+    let updated_ms: i64 = row.try_get("updated_at").unwrap_or(0);
+    let created_at = chrono::DateTime::from_timestamp_millis(created_ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let updated_at = chrono::DateTime::from_timestamp_millis(updated_ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+
+    Ok(Some(AgentConfig {
+        id: row.try_get::<String, _>("id").unwrap_or_default(),
+        name: row.try_get::<String, _>("name").unwrap_or_default(),
+        description: row.try_get::<String, _>("description").unwrap_or_default(),
+        schedule_enabled: schedule_enabled != 0,
+        interval_minutes: row
+            .try_get::<i64, _>("interval_minutes")
+            .unwrap_or(0)
+            .max(0) as u32,
+        enabled: enabled != 0,
+        selected_mcp_server_ids: serde_json::from_str(&selected_mcp_server_ids)
+            .unwrap_or_default(),
+        provider_connection_ids: serde_json::from_str(&provider_connection_ids)
+            .unwrap_or_default(),
+        selected_skill_ids: serde_json::from_str(&selected_skill_ids).unwrap_or_default(),
+        execution: serde_json::from_str::<ExecutionCapabilityConfig>(&execution)
+            .unwrap_or_default(),
+        exposed_tools: serde_json::from_str::<Vec<ExposedAgentTool>>(&exposed_tools)
+            .unwrap_or_default(),
+        created_at,
+        updated_at,
+    }))
+}
 
 pub async fn execute(
     deps: &AssistantDeps,
@@ -42,53 +115,49 @@ pub async fn execute(
         ));
     }
 
-    let (target_config, exposed_tool) = {
-        let state = deps.app.state::<AppState>();
-        let config = state
-            .config_manager
-            .lock()
-            .map_err(|e| format!("Config lock error: {}", e))?;
+    // Phase 1.5: resolve the callee from the workspace_agents DB table.
+    // The target_agent_id is the workspace-local row id (populated into
+    // WorkspaceAgentSummary.agent_definition_id by workspace_agent_summaries).
+    let target_config = match load_workspace_agent_as_config(&deps.pool, target_agent_id).await {
+        Ok(Some(agent)) if agent.enabled => agent,
+        Ok(Some(_)) => {
+            return Ok(error_result(
+                "agent_disabled",
+                &format!("Agent '{}' is disabled", target_agent_id),
+                false,
+                None,
+            ));
+        }
+        Ok(None) => {
+            return Ok(error_result(
+                "agent_not_found",
+                &format!("Agent not found: {}", target_agent_id),
+                false,
+                None,
+            ));
+        }
+        Err(message) => {
+            return Ok(error_result("agent_load_failed", &message, false, None));
+        }
+    };
 
-        let target = match config.get_agent(target_agent_id) {
-            Some(agent) if agent.enabled => agent,
-            Some(_) => {
-                return Ok(error_result(
-                    "agent_disabled",
-                    &format!("Agent '{}' is disabled", target_agent_id),
-                    false,
-                    None,
-                ));
-            }
-            None => {
-                return Ok(error_result(
-                    "agent_not_found",
-                    &format!("Agent not found: {}", target_agent_id),
-                    false,
-                    None,
-                ));
-            }
-        };
-
-        let tool = match target
-            .exposed_tools
-            .iter()
-            .find(|tool| tool.name == target_tool_name)
-        {
-            Some(tool) => tool.clone(),
-            None => {
-                return Ok(error_result(
-                    "tool_not_exposed",
-                    &format!(
-                        "Agent '{}' does not expose tool '{}'",
-                        target_agent_id, target_tool_name
-                    ),
-                    false,
-                    None,
-                ));
-            }
-        };
-
-        (target, tool)
+    let exposed_tool = match target_config
+        .exposed_tools
+        .iter()
+        .find(|tool| tool.name == target_tool_name)
+    {
+        Some(tool) => tool.clone(),
+        None => {
+            return Ok(error_result(
+                "tool_not_exposed",
+                &format!(
+                    "Agent '{}' does not expose tool '{}'",
+                    target_agent_id, target_tool_name
+                ),
+                false,
+                None,
+            ));
+        }
     };
 
     let connection = match resolve_first_connection(deps, &target_config).await {

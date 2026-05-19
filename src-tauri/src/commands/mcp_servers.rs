@@ -3,7 +3,47 @@ use tauri::State;
 
 use crate::assistant::auth::McpSecretStorage;
 use crate::config::{McpServerAuth, McpServerConfig, McpServerIntegrationType, McpServerTransport};
+use crate::db::DbPool;
 use crate::AppState;
+
+/// Removes the given MCP server id from every workspace_agents row's
+/// `selected_mcp_server_ids` JSON array.
+async fn sweep_workspace_agent_mcp_ids(pool: &DbPool, server_id: &str) -> Result<(), String> {
+    let like_pattern = format!("%{}%", server_id);
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, selected_mcp_server_ids FROM workspace_agents WHERE selected_mcp_server_ids LIKE ?",
+    )
+    .bind(&like_pattern)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to scan workspace_agents for MCP references: {}", e))?;
+
+    for (id, mcp_ids_json) in rows {
+        let mcp_ids: Vec<String> = serde_json::from_str(&mcp_ids_json).unwrap_or_default();
+        let filtered: Vec<String> = mcp_ids.into_iter().filter(|x| x != server_id).collect();
+        let encoded = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+        if encoded == mcp_ids_json {
+            continue;
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "UPDATE workspace_agents SET selected_mcp_server_ids = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&encoded)
+        .bind(now)
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to sweep MCP references on workspace agent {}: {}",
+                id, e
+            )
+        })?;
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -181,7 +221,11 @@ pub async fn update_mcp_server(
 }
 
 #[tauri::command]
-pub async fn delete_mcp_server(id: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn delete_mcp_server(
+    id: String,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
     {
         let config_manager = state
             .config_manager
@@ -200,6 +244,10 @@ pub async fn delete_mcp_server(id: String, state: State<'_, AppState>) -> Result
             return Err(format!("MCP server not found: {}", id));
         }
     }
+
+    // Workspace-local sweep: drop any reference to this server from every
+    // workspace_agents row's selected_mcp_server_ids JSON array.
+    sweep_workspace_agent_mcp_ids(pool.inner(), &id).await?;
 
     sync_mcp_client_manager(&state).await;
 

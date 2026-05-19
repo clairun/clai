@@ -54,20 +54,9 @@ export async function listWorkspaceAgents(workspaceId) {
   return invoke('workspace_list_agents', { workspaceId });
 }
 
-export async function assignWorkspaceAgent(workspaceId, agentDefinitionId, options = {}) {
-  return invoke('workspace_assign_agent', {
-    request: {
-      workspaceId,
-      agentDefinitionId,
-      displayName: options.displayName || null,
-      role: options.role || 'member',
-    },
-  });
-}
-
-export async function unassignWorkspaceAgent(workspaceAgentId) {
-  return invoke('workspace_unassign_agent', { workspaceAgentId });
-}
+// assignWorkspaceAgent / unassignWorkspaceAgent: removed. Agents are
+// workspace-local; use workspaceCreateAgent / workspaceDeleteAgent from
+// `../api/client.js` instead.
 
 export async function setWorkspaceDefaultAgent(workspaceId, workspaceAgentId) {
   return invoke('workspace_set_default_agent', { workspaceId, workspaceAgentId });

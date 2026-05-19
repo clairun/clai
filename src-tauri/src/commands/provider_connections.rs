@@ -160,23 +160,29 @@ pub async fn provider_connection_delete(
     pool: State<'_, DbPool>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let dependents: Vec<String> = {
-        let config_manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        config_manager
-            .get_agents()
-            .into_iter()
-            .filter(|agent| {
-                agent
-                    .provider_connection_ids
-                    .iter()
-                    .any(|value| value == &id)
-            })
-            .map(|agent| agent.name)
-            .collect()
-    };
+    // Refuse delete if any workspace_agent still references this connection.
+    // We scan the JSON array `provider_connection_ids` for the id substring,
+    // then confirm with a per-row parse.
+    let like_pattern = format!("%{}%", id);
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, provider_connection_ids FROM workspace_agents WHERE provider_connection_ids LIKE ?",
+    )
+    .bind(&like_pattern)
+    .fetch_all(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to scan workspace_agents for provider use: {}", e))?;
+
+    let dependents: Vec<String> = rows
+        .into_iter()
+        .filter_map(|(name, ids_json)| {
+            let ids: Vec<String> = serde_json::from_str(&ids_json).unwrap_or_default();
+            if ids.iter().any(|value| value == &id) {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     if !dependents.is_empty() {
         return Err(format!(
@@ -184,6 +190,8 @@ pub async fn provider_connection_delete(
             dependents.len()
         ));
     }
+
+    let _ = state; // config_manager no longer consulted; agents live in DB.
 
     if let Some(connection) = repository::get_provider_connection(pool.inner(), &id).await? {
         ProviderSecretStorage::clear_secret(&connection.secret_ref)

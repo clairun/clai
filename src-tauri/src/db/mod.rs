@@ -686,6 +686,50 @@ async fn migrate_workspaces(pool: &DbPool) -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to create workspace_agents definition index: {}", e))?;
 
+    // Phase 1.1 of workspace-local-agents migration: additive columns.
+    //
+    // We add inline copies of the agent fields that previously lived only in
+    // `ClaiConfig.agents` (the global catalog) reachable via the
+    // `agent_definition_id` foreign key. After all consumers have been
+    // migrated (phase 1.4 / 1.5), the legacy columns will be dropped
+    // (phase 1.7). For now both shapes coexist; nothing reads the new
+    // columns yet, so behavior is unchanged.
+    //
+    // See `docs/BUNDLED_BUILDING_BLOCKS_RFC.md` (commit 1 sub-phases).
+    for (column, ddl) in [
+        ("name", "name TEXT NOT NULL DEFAULT ''"),
+        ("description", "description TEXT NOT NULL DEFAULT ''"),
+        (
+            "selected_skill_ids",
+            "selected_skill_ids TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "selected_mcp_server_ids",
+            "selected_mcp_server_ids TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "provider_connection_ids",
+            "provider_connection_ids TEXT NOT NULL DEFAULT '[]'",
+        ),
+        ("execution", "execution TEXT NOT NULL DEFAULT '{}'"),
+        ("exposed_tools", "exposed_tools TEXT NOT NULL DEFAULT '[]'"),
+        (
+            "schedule_enabled",
+            "schedule_enabled INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "interval_minutes",
+            "interval_minutes INTEGER NOT NULL DEFAULT 0",
+        ),
+    ] {
+        if !column_exists(pool, "workspace_agents", column).await? {
+            sqlx::query(&format!("ALTER TABLE workspace_agents ADD COLUMN {}", ddl))
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to add workspace_agents.{} column: {}", column, e))?;
+        }
+    }
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS workspace_tasks (
@@ -765,6 +809,38 @@ async fn migrate_workspaces(pool: &DbPool) -> Result<(), String> {
     .execute(pool)
     .await
     .map_err(|e| format!("Failed to create workspace_tasks status index: {}", e))?;
+
+    // Phase 1.3 of workspace-local-agents migration: nuke pre-Phase-1.2 rows.
+    //
+    // Any workspace_agents row whose `name` is still the empty-string default
+    // was inserted before Phase 1.2 added inline data, which means it has no
+    // local copy of the agent's prompt/skills/etc. Per the RFC §5.9 "nuke
+    // existing state" stance, drop these rows. Their workspaces will appear
+    // without a manager; the user can re-assign or re-create.
+    //
+    // Then clear any dangling `default_workspace_agent_id` pointers that
+    // referenced the deleted rows.
+    sqlx::query("DELETE FROM workspace_agents WHERE name = ''")
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to nuke pre-Phase-1.2 workspace_agents rows: {}", e))?;
+
+    sqlx::query(
+        r#"
+        UPDATE workspaces
+        SET default_workspace_agent_id = NULL
+        WHERE default_workspace_agent_id IS NOT NULL
+          AND default_workspace_agent_id NOT IN (SELECT id FROM workspace_agents)
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        format!(
+            "Failed to clear dangling workspace default-agent pointers: {}",
+            e
+        )
+    })?;
 
     Ok(())
 }

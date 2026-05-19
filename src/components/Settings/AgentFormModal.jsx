@@ -38,6 +38,23 @@ const normalizePathGrants = (items = []) =>
       access: item.access || 'read_only',
     }))
     .filter((item) => item.path);
+const formatExposedTools = (tools = []) => JSON.stringify(tools || [], null, 2);
+const normalizeExecution = (execution = {}) => {
+  const defaults = defaultExecution();
+  return {
+    filesystem: {
+      extraPaths: normalizePathGrants(execution.filesystem?.extraPaths || defaults.filesystem.extraPaths),
+    },
+    shell: {
+      mode: execution.shell?.mode || defaults.shell.mode,
+      allowedCommandPrefixes: normalizeItems(execution.shell?.allowedCommandPrefixes || defaults.shell.allowedCommandPrefixes),
+      blockedCommandPrefixes: normalizeItems(execution.shell?.blockedCommandPrefixes || defaults.shell.blockedCommandPrefixes),
+    },
+    web: {
+      enabled: execution.web?.enabled || false,
+    },
+  };
+};
 
 /**
  * Close icon
@@ -123,8 +140,24 @@ const ListInputField = ({
  * @param {Function} props.onSubmit - Callback with form data
  * @param {Object} props.agent - Agent to edit (null for create)
  */
-const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], providerConnections = [], skills = [] }) => {
+const AgentFormModal = ({
+  isOpen,
+  onClose,
+  onSubmit,
+  agent,
+  mcpServers = [],
+  providerConnections = [],
+  skills = [],
+  agentTemplates = [],
+  // `mode="workspace"` re-uses this form to edit the workspace's own
+  // configuration (system prompt, skills, model, MCP, execution, schedule).
+  // `mode="member"` (default) is for adding/editing a member agent inside a
+  // workspace — schedule lives on the workspace, exposed_tools lives on members.
+  mode = 'member',
+  workspaceTitle = null,
+}) => {
   const isEditing = !!agent;
+  const isWorkspaceMode = mode === 'workspace';
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -143,7 +176,8 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
   const [allowedCommandDraft, setAllowedCommandDraft] = useState('');
   const [blockedCommandDraft, setBlockedCommandDraft] = useState('');
   const [webEnabled, setWebEnabled] = useState(false);
-  const [exposedTools, setExposedTools] = useState([]);
+  const [exposedToolsText, setExposedToolsText] = useState('[]');
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
@@ -157,29 +191,39 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
     [enabledProviderConnections, providerConnectionIds]
   );
 
+  const selectedTemplate = useMemo(
+    () => agentTemplates.find((template) => template.id === selectedTemplateId) || null,
+    [agentTemplates, selectedTemplateId]
+  );
+
+  const applyExecutionState = useCallback((executionValue) => {
+    const execution = normalizeExecution(executionValue);
+    setExtraPathGrants(execution.filesystem.extraPaths);
+    setExtraPathDraft('');
+    setExtraPathAccess('read_only');
+    setShellMode(execution.shell.mode);
+    setAllowedCommands(execution.shell.allowedCommandPrefixes);
+    setBlockedCommands(execution.shell.blockedCommandPrefixes);
+    setAllowedCommandDraft('');
+    setBlockedCommandDraft('');
+    setWebEnabled(execution.web.enabled);
+  }, []);
+
   // Reset form when modal opens/closes or agent changes
   useEffect(() => {
     if (isOpen) {
-      const execution = agent?.execution || defaultExecution();
       if (agent) {
         setName(agent.name || '');
         setDescription(agent.description || '');
         setScheduleEnabled(agent.scheduleEnabled !== false);
-        setIntervalMinutes(agent.intervalMinutes || 30);
+        setIntervalMinutes(agent.intervalMinutes ?? 30);
         setSelectedMcpServerIds(agent.selectedMcpServerIds || []);
         setSelectedSkillIds(agent.selectedSkillIds || []);
         setProviderConnectionIds(agent.providerConnectionIds || []);
         setProviderConnectionDraft('');
-        setExtraPathGrants(normalizePathGrants(execution.filesystem?.extraPaths || []));
-        setExtraPathDraft('');
-        setExtraPathAccess('read_only');
-        setShellMode(execution.shell?.mode || 'off');
-        setAllowedCommands(normalizeItems(execution.shell?.allowedCommandPrefixes || []));
-        setBlockedCommands(normalizeItems(execution.shell?.blockedCommandPrefixes || defaultExecution().shell.blockedCommandPrefixes));
-        setAllowedCommandDraft('');
-        setBlockedCommandDraft('');
-        setWebEnabled(execution.web?.enabled || false);
-        setExposedTools(agent.exposedTools || []);
+        applyExecutionState(agent.execution || defaultExecution());
+        setExposedToolsText(formatExposedTools(agent.exposedTools || []));
+        setSelectedTemplateId('');
       } else {
         setName('');
         setDescription('');
@@ -189,20 +233,13 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
         setSelectedSkillIds([]);
         setProviderConnectionIds([]);
         setProviderConnectionDraft('');
-        setExtraPathGrants([]);
-        setExtraPathDraft('');
-        setExtraPathAccess('read_only');
-        setShellMode('off');
-        setAllowedCommands([]);
-        setBlockedCommands(defaultExecution().shell.blockedCommandPrefixes);
-        setAllowedCommandDraft('');
-        setBlockedCommandDraft('');
-        setWebEnabled(false);
-        setExposedTools([]);
+        applyExecutionState(defaultExecution());
+        setExposedToolsText('[]');
+        setSelectedTemplateId('');
       }
       setError(null);
     }
-  }, [isOpen, agent]);
+  }, [isOpen, agent, applyExecutionState]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -246,6 +283,24 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
     }
   }, [saving, onClose]);
 
+  const handleApplyTemplate = () => {
+    if (!selectedTemplate || saving) {
+      return;
+    }
+
+    setName(selectedTemplate.name || '');
+    setDescription(selectedTemplate.description || '');
+    setScheduleEnabled(selectedTemplate.defaultScheduleEnabled !== false);
+    setIntervalMinutes(
+      Number.isFinite(selectedTemplate.defaultIntervalMinutes)
+        ? selectedTemplate.defaultIntervalMinutes
+        : 30
+    );
+    setSelectedSkillIds(selectedTemplate.defaultSkillIds || []);
+    applyExecutionState(selectedTemplate.defaultExecution || defaultExecution());
+    setExposedToolsText(formatExposedTools(selectedTemplate.defaultExposedTools || []));
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError(null);
@@ -269,6 +324,18 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
 
     if (providerConnectionIds.length === 0) {
       setError('Select at least one provider connection');
+      return;
+    }
+
+    let exposedTools = [];
+    try {
+      exposedTools = JSON.parse(exposedToolsText.trim() || '[]');
+    } catch (parseError) {
+      setError(`Exposed tools JSON is invalid: ${parseError.message}`);
+      return;
+    }
+    if (!Array.isArray(exposedTools)) {
+      setError('Exposed tools must be a JSON array');
       return;
     }
 
@@ -316,7 +383,9 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
         {/* Header */}
         <div className={styles.header}>
           <h2 className={styles.title}>
-            {isEditing ? 'Edit Agent' : 'Create Agent'}
+            {isWorkspaceMode
+              ? (workspaceTitle ? `${workspaceTitle} — Settings` : 'Workspace Settings')
+              : (isEditing ? 'Edit Agent' : 'New Agent')}
           </h2>
           <button
             className={styles.closeButton}
@@ -333,6 +402,47 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
           {error && (
             <div className={styles.errorBanner}>
               {error}
+            </div>
+          )}
+
+          {!isEditing && agentTemplates.length > 0 && (
+            <div className={styles.templatePanel}>
+              <div className={styles.templateHeader}>
+                <div>
+                  <div className={styles.sectionTitle}>Start from Template</div>
+                  <div className={styles.sectionDescription}>
+                    Prefill instructions, skills, local capabilities, and exposed tools.
+                  </div>
+                </div>
+              </div>
+              <div className={styles.listInputRow}>
+                <select
+                  className={styles.select}
+                  value={selectedTemplateId}
+                  onChange={(e) => setSelectedTemplateId(e.target.value)}
+                  disabled={saving}
+                >
+                  <option value="">Choose a template</option>
+                  {agentTemplates.map((template) => (
+                    <option key={template.id} value={template.id}>
+                      {template.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className={styles.addButton}
+                  onClick={handleApplyTemplate}
+                  disabled={saving || !selectedTemplate}
+                >
+                  Apply
+                </button>
+              </div>
+              {selectedTemplate && (
+                <div className={styles.templateMeta}>
+                  {selectedTemplate.defaultSkillIds?.length || 0} skills / {selectedTemplate.defaultExposedTools?.length || 0} exposed tools
+                </div>
+              )}
             </div>
           )}
 
@@ -418,55 +528,53 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
             </span>
           </div>
 
-          <div className={styles.section}>
-            <div className={styles.sectionTitle}>Execution Mode</div>
-            <div className={styles.sectionDescription}>
-              Agents can run on a schedule or be assigned to workspaces for manager-delegated tasks.
-            </div>
+          {isWorkspaceMode && (
+            <div className={styles.section}>
+              <div className={styles.sectionTitle}>Schedule</div>
+              <div className={styles.sectionDescription}>
+                Schedule is per workspace. Agents added to the workspace are
+                invoked on-demand as it runs.
+              </div>
 
-            <div className={styles.field}>
-              <label className={styles.label}>Scheduled Execution</label>
-              <label className={styles.toggleRow}>
-                <span className={styles.toggleLabel}>
-                  Run this agent on a recurring schedule
-                </span>
-                <span className={`${styles.toggle} ${scheduleEnabled ? styles.toggleOn : ''}`}>
-                  <input
-                    type="checkbox"
-                    checked={scheduleEnabled}
-                    onChange={(e) => setScheduleEnabled(e.target.checked)}
-                    disabled={saving}
-                    className={styles.toggleInput}
-                  />
-                  <span className={styles.toggleTrack}>
-                    <span className={styles.toggleThumb} />
+              <div className={styles.field}>
+                <label className={styles.label}>Scheduled Execution</label>
+                <label className={styles.toggleRow}>
+                  <span className={styles.toggleLabel}>
+                    Run this workspace on a recurring schedule
                   </span>
-                </span>
-              </label>
-              <span className={styles.hint}>
-                {scheduleEnabled
-                  ? 'When enabled, this agent can be scheduled and can also be assigned to workspace teams.'
-                  : 'Workspace-only. The agent will not be registered with the scheduler but can still receive tasks from workspace managers.'}
-              </span>
-            </div>
+                  <span className={`${styles.toggle} ${scheduleEnabled ? styles.toggleOn : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={scheduleEnabled}
+                      onChange={(e) => setScheduleEnabled(e.target.checked)}
+                      disabled={saving}
+                      className={styles.toggleInput}
+                    />
+                    <span className={styles.toggleTrack}>
+                      <span className={styles.toggleThumb} />
+                    </span>
+                  </span>
+                </label>
+              </div>
 
-            <div className={styles.field}>
-              <label className={styles.label} htmlFor="agent-interval">
-                Check Interval
-              </label>
-              <IntervalSelect
-                id="agent-interval"
-                value={intervalMinutes}
-                onChange={setIntervalMinutes}
-                disabled={saving || !scheduleEnabled}
-              />
-              <span className={styles.hint}>
-                {scheduleEnabled
-                  ? 'How often this agent runs while enabled.'
-                  : 'Stored for later if you re-enable scheduling.'}
-              </span>
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="agent-interval">
+                  Check Interval
+                </label>
+                <IntervalSelect
+                  id="agent-interval"
+                  value={intervalMinutes}
+                  onChange={setIntervalMinutes}
+                  disabled={saving || !scheduleEnabled}
+                />
+                <span className={styles.hint}>
+                  {scheduleEnabled
+                    ? 'How often this workspace runs while enabled.'
+                    : 'Stored for later if you re-enable scheduling.'}
+                </span>
+              </div>
             </div>
-          </div>
+          )}
 
           <div className={styles.field}>
             <label className={styles.label}>MCP Servers</label>
@@ -838,6 +946,32 @@ const AgentFormModal = ({ isOpen, onClose, onSubmit, agent, mcpServers = [], pro
               </span>
             </div>
           </div>
+
+          {!isWorkspaceMode && (
+            <div className={styles.section}>
+              <div className={styles.sectionTitle}>Exposed Tools</div>
+              <div className={styles.sectionDescription}>
+                JSON tool definitions that the workspace can call on this
+                agent.
+              </div>
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="agent-exposed-tools">
+                  Tools JSON
+                </label>
+                <textarea
+                  id="agent-exposed-tools"
+                  className={`${styles.textarea} ${styles.codeTextarea}`}
+                  value={exposedToolsText}
+                  onChange={(e) => setExposedToolsText(e.target.value)}
+                  disabled={saving}
+                  rows={8}
+                />
+                <span className={styles.hint}>
+                  Use a JSON array. Each tool needs name, description, inputSchema, and outputSchema.
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Actions */}
           <div className={styles.actions}>

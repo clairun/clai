@@ -110,6 +110,28 @@
   background: var(--color-bg-secondary, #F6F4F2);
 }
 
+.templatePanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 10px;
+  background: var(--color-bg-secondary, #F6F4F2);
+}
+
+.templateHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.templateMeta {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
 .sectionTitle {
   font-size: 13px;
   font-weight: 600;
@@ -193,6 +215,11 @@
   resize: vertical;
   min-height: 120px;
   line-height: 1.5;
+}
+
+.codeTextarea {
+  font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+  font-size: 12px;
 }
 
 .select {

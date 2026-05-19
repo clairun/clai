@@ -1,11 +1,17 @@
 .workspacePage {
   width: 100%;
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 16px 24px 80px;
-  overflow: auto;
+  padding: 16px 24px;
+  /* Page itself doesn't scroll — the parent `.contentArea` already reserves
+     space for the floating terminal, and interior containers (chat list,
+     drawer body, panel scrollers) handle their own overflow. This lets the
+     workspaceBody fill all remaining vertical space so the drawer can use
+     the full height. */
+  overflow: hidden;
   background: var(--color-bg-secondary);
   color: var(--color-text-primary);
 }
@@ -131,6 +137,52 @@
 .metricSeparator {
   font-size: 12px;
   color: var(--color-border-medium);
+}
+
+.workspaceSettingsButton {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px;
+  border-radius: 6px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.workspaceSettingsButton:hover {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  border-color: var(--color-border-light);
+}
+
+.metricButton {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.metricButton:hover {
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+}
+
+.metricButtonActive {
+  background: var(--color-accent-soft, rgba(99, 102, 241, 0.12));
+  color: var(--color-accent, #6366f1);
+  border-color: var(--color-accent, #6366f1);
 }
 
 /* ── Error Banner ────────────────────────────────────── */
@@ -576,21 +628,270 @@
   opacity: 0.55;
 }
 
+/* ── Workspace body: chat (full width) + floating side drawer ──
+   The drawer is absolutely positioned over the right edge so opening or
+   closing it does NOT shift the chat. The chat inside `.workspaceMain`
+   keeps its `max-width: 860px; margin: 0 auto` centering throughout. */
+
+.workspaceBody {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  /* Side-panel width — file preview & task transcript share this.
+     clamp(min, preferred, max) keeps it readable on small screens while
+     letting it grow on wide monitors. Panels' own `max-width` ensures they
+     never spill past the available room. */
+  --preview-panel-width: clamp(440px, 42vw, 720px);
+}
+
+@media (max-width: 1100px) {
+  .workspaceBody {
+    --preview-panel-width: 380px;
+  }
+}
+
+@media (max-width: 900px) {
+  .workspaceBody {
+    --preview-panel-width: 320px;
+  }
+}
+
+.workspaceMain {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  transition: padding-right 220ms ease-out;
+}
+
+/* When the file-preview panel is open, the chat compresses so both can be
+   visible at once. The preview panel sits at `right: 360px` (left of the
+   side drawer) and is 480px wide — the chat's right edge needs to clear it.
+   The chat is centered (`margin: 0 auto`) inside `.workspaceMain`, so the
+   padding shifts the content leftward smoothly. */
+/* When a side panel is open we want the chat to stay centered if there's
+   room, and shift left only when it would otherwise overlap the panel — and
+   in either case, hold a consistent ~24px visual gap between the chat and
+   the panel rather than touching it or floating far away.
+
+   Two regimes, both targeting a 24px gap:
+    A. Chat fits at 860px centered: solve `chat_right + 24 = panel_left`
+       → padding = 1644 + 2*panel_width − W.   (1644 = 860 + 2*368 + 2*24)
+    B. Chat collapses to content area (W − padding < 860): solve directly
+       → padding = 368 + panel_width + 24 = 392 + panel_width.
+   The actual padding is `max(0, min(A, B))`:
+     - very wide viewports → A goes negative → padding = 0, chat stays
+       fully centered (no shift)
+     - mid viewports → A < B → A applies, chat centered with 24px gap
+     - narrow viewports → B < A → B applies, chat fills the available
+       content area with 24px gap and never disappears behind the panel.
+   368 = drawer width (360) + 8px gap to drawer. */
+.workspaceMainWithPreview {
+  padding-right: max(
+    0px,
+    min(
+      calc(1644px + 2 * var(--preview-panel-width, 600px) - 100%),
+      calc(392px + var(--preview-panel-width, 600px))
+    )
+  );
+}
+
+.workspaceDrawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 360px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  z-index: 10;
+  animation: drawerSlideIn 160ms ease-out;
+}
+
+@keyframes drawerSlideIn {
+  from {
+    transform: translateX(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.workspaceDrawerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  min-height: 48px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--color-border-light);
+  background: var(--color-bg-secondary);
+}
+
+.workspaceDrawerTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  text-transform: capitalize;
+  letter-spacing: 0.02em;
+}
+
+.workspaceDrawerActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workspaceDrawerAction {
+  appearance: none;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-primary);
+  background: var(--color-primary);
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.workspaceDrawerAction:hover {
+  background: color-mix(in srgb, var(--color-primary) 88%, black);
+}
+
+.workspaceDrawerAction:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.workspaceDrawerClose {
+  appearance: none;
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.workspaceDrawerClose:hover {
+  background: var(--color-overlay-08, rgba(0, 0, 0, 0.06));
+  color: var(--color-text-primary);
+}
+
+.workspaceDrawerBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+/* Compact list rendering inside the drawer (for memories/artifacts). */
+.drawerList {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.drawerListItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-light);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.drawerListItem:hover {
+  background: var(--color-overlay-04);
+  border-color: var(--color-primary-alpha-30);
+}
+
+.drawerListItem:focus-visible {
+  outline: 2px solid var(--color-primary-alpha-30);
+  outline-offset: 1px;
+}
+
+.drawerListName {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-primary);
+}
+
+.drawerListMeta {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.drawerEmpty {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  padding: 14px;
+  text-align: center;
+}
+
+/* Narrower screens: drawer becomes a full-overlay so it doesn't get
+   clipped, but still doesn't push the chat. */
+@media (max-width: 900px) {
+  .workspaceDrawer {
+    width: min(360px, 100%);
+  }
+}
+
 /* ── Chat-First Layout (general workspaces) ──────────── */
 
 .chatFirstContent {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-xl);
-  background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
-  box-shadow: var(--shadow-card);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-tinted);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  box-shadow: var(--shadow-md);
   overflow: auto;
   max-width: 860px;
   width: 100%;
   margin: 0 auto;
+}
+
+/* Soft gradient accent line along the top — mirrors the Fleet detail pane
+   so chat surfaces look consistent across the app. */
+.chatFirstContent::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--gradient-primary);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  z-index: 1;
 }
 
 .chatFirstContent::-webkit-scrollbar {
@@ -638,172 +939,7 @@
   max-width: 400px;
 }
 
-/* ── Fallback Layout (file browser for workspaces with content) ── */
-
-.fallbackContent {
-  flex: 1;
-  min-height: 0;
-  display: grid;
-  grid-template-columns: minmax(260px, 0.65fr) minmax(400px, 1fr);
-  gap: 12px;
-}
-
-.sidebarPane,
-.viewerPane {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-xl);
-  background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
-  box-shadow: var(--shadow-card);
-  overflow: hidden;
-}
-
-.sectionHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--color-border-light);
-  background: color-mix(in srgb, var(--color-bg-secondary) 78%, white);
-}
-
-.sectionTitle {
-  margin: 0;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.sectionMeta {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-text-tertiary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.sectionBody,
-.viewerBody {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.sidebarPane {
-  gap: 0;
-}
-
-.sidebarSection {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-}
-
-.sidebarSection + .sidebarSection {
-  border-top: 1px solid var(--color-border-light);
-}
-
-.entryList {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-/* Compact entry cards — 2 lines max */
-.entryCard {
-  text-align: left;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: transparent;
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
-}
-
-.entryCard:hover {
-  background: var(--color-overlay-04);
-  border-color: var(--color-border-light);
-}
-
-.entryCardActive {
-  background: var(--color-primary-alpha-08);
-  border-color: var(--color-primary-alpha-30);
-}
-
-.entryTitleRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.entryTitle {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  word-break: break-word;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.entryBadge {
-  flex-shrink: 0;
-  padding: 2px 6px;
-  border-radius: var(--radius-full);
-  background: var(--color-primary-alpha-08);
-  color: var(--color-primary);
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.entryMeta {
-  margin-top: 2px;
-  font-size: 10px;
-  color: var(--color-text-tertiary);
-}
-
-.viewerBody {
-  padding: 16px;
-}
-
-.viewerEmpty,
-.emptyState,
-.emptyStateCompact {
-  color: var(--color-text-secondary);
-  line-height: 1.5;
-  font-size: 13px;
-}
-
-.emptyState {
-  padding: 24px;
-}
-
-.emptyStateCompact {
-  padding: 8px 4px;
-  font-size: 12px;
-}
-
-.viewerPre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--color-text-primary);
-}
-
-/* ── Responsive: Fallback ────────────────────────────── */
+/* ── Responsive ───────────────────────────────────────── */
 
 @media (max-width: 980px) {
   .workspacePage {
@@ -843,16 +979,5 @@
 
   .taskTitle {
     white-space: normal;
-  }
-
-  .fallbackContent {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(240px, 0.8fr) minmax(300px, 1fr);
-  }
-
-  .sidebarPane,
-  .viewerPane {
-    grid-column: auto;
-    grid-row: auto;
   }
 }

@@ -203,6 +203,11 @@ const ChatMessageList = ({
   streamingText = EMPTY_STREAMING,
   isStreaming = false,
   toolCalls = EMPTY_TOOL_CALLS,
+  // Label shown for `user`-role messages. Defaults to "You" for the human in
+  // the main chat. Pass "Main agent" when rendering a sub-agent's task
+  // transcript — those `user` messages are the parent's task instructions,
+  // not anything the human typed.
+  userLabel = 'You',
 }) => {
   const messagesEndRef = useRef(null);
   const containerRef = useRef(null);
@@ -257,6 +262,7 @@ const ChatMessageList = ({
             message={item.message}
             streamingText={streamingText[item.message.id]}
             toolCalls={toolCalls}
+            userLabel={userLabel}
           />
         )
       )}
@@ -276,7 +282,7 @@ const ChatMessageList = ({
   );
 };
 
-const MessageBlock = memo(({ message, streamingText, toolCalls }) => {
+const MessageBlock = memo(({ message, streamingText, toolCalls, userLabel = 'You' }) => {
   const { role, createdAt } = message;
 
   if (role === 'user') {
@@ -291,10 +297,12 @@ const MessageBlock = memo(({ message, streamingText, toolCalls }) => {
     return (
       <div className={styles.userMessage}>
         <div className={styles.messageHeader}>
-          <span className={styles.messageRoleText}>You</span>
+          <span className={styles.messageRoleText}>{userLabel}</span>
           {createdAt && <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>}
         </div>
-        <div className={styles.messageContent}>{textContent}</div>
+        <div className={styles.messageContent}>
+          <MarkdownMessage content={textContent} />
+        </div>
       </div>
     );
   }
@@ -560,12 +568,10 @@ const StatusIndicator = memo(({ status }) => {
         </span>
       );
     case 'complete':
-      return (
-        <span className={styles.statusSuccess}>
-          <span className={styles.successIcon}>✓</span>
-          Complete
-        </span>
-      );
+      // The leading ✓ icon next to the tool name already conveys success — a
+      // separate green pill on every successful call adds noise. Surface a
+      // badge only for non-default states (pending, warning, error).
+      return null;
     case 'warning':
       return (
         <span className={styles.statusWarning}>

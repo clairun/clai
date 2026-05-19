@@ -12,7 +12,6 @@ import { TabContextProvider } from '../../contexts/TabContext';
 import { useChatManager } from '../../contexts/ChatManagerContext';
 import { useFleet } from '../../contexts/FleetContext';
 import { useAssistantSession, useAssistantStore, assistantClient } from '../../assistant';
-import { getAgent } from '../../api/client';
 import { getOrCreateWorkspaceSession } from '../../workspace/client';
 import TerminalEmulator from './TerminalEmulator';
 
@@ -63,12 +62,8 @@ const TerminalEmulatorWrapper = () => {
       return null;
     }
 
-    const agentId = tab.context?.agent?.agentId;
-    if (agentId) {
-      const agent = await getAgent(agentId).catch(() => null);
-      return agent?.providerConnectionIds?.[0] || null;
-    }
-
+    // Legacy agent-derived tabs no longer exist; fall straight through to the
+    // generic provider-connection picker.
     const connections = await getEnabledProviderConnections();
     if (connections.length === 0) {
       return null;

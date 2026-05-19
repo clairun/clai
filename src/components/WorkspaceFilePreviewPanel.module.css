@@ -1,0 +1,167 @@
+/* The file-preview panel sits between the chat and the workspace side drawer.
+   - position: absolute inside `.workspaceBody` (parent is `position: relative`)
+   - right offset = side-drawer width (360px) + an 8px visual gap
+   - z-index below the side drawer (10) so the slide-in animation reveals
+     naturally from underneath the drawer */
+
+.panel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: calc(360px + 8px);
+  width: var(--preview-panel-width, 480px);
+  max-width: calc(100% - 360px - 8px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  z-index: 9;
+  animation: previewSlideOut 200ms ease-out;
+}
+
+@keyframes previewSlideOut {
+  from {
+    transform: translateX(calc(100% + 8px));
+    opacity: 0.4;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Header — single-line, matches `.workspaceDrawerHeader` dimensions so the
+   two side panels align horizontally. */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border-light);
+  background: var(--color-bg-secondary);
+  min-height: 48px;
+  box-sizing: border-box;
+}
+
+.headerLeft {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.kindPill {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--color-primary-alpha-08);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary-alpha-30);
+  text-transform: uppercase;
+}
+
+.closeButton {
+  appearance: none;
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.closeButton:hover {
+  background: var(--color-overlay-08, rgba(0, 0, 0, 0.06));
+  color: var(--color-text-primary);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 18px;
+  background: var(--color-bg-primary);
+}
+
+.bodyMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed var(--color-border-light);
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.sep {
+  color: var(--color-text-tertiary);
+}
+
+.path {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.error {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-critical) 8%, var(--color-bg-elevated));
+  color: var(--color-critical);
+  font-size: 12px;
+}
+
+.markdownBody {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-primary);
+}
+
+.codeBody {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

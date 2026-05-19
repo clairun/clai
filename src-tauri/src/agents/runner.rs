@@ -39,7 +39,6 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
-use crate::agents::designer;
 use crate::agents::{SchedulerState, SharedScheduler};
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
@@ -49,9 +48,82 @@ use crate::assistant::types::{
     AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
     SessionContext, SessionKind,
 };
-use crate::config::agent_instructions_with_skills;
+use crate::config::{
+    agent_instructions_with_skills, AgentConfig, ExecutionCapabilityConfig, ExposedAgentTool,
+};
 use crate::db::DbPool;
 use crate::AppState;
+
+/// Loads a workspace_agents row by id and reconstructs it as an `AgentConfig`.
+///
+/// Phase 1.4 of the workspace-local-agents refactor: the runner picks up
+/// scheduled agents straight from the DB rather than via the global catalog.
+async fn load_workspace_agent_as_config(
+    pool: &DbPool,
+    id: &str,
+) -> Result<Option<AgentConfig>, RunnerError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, name, description, selected_skill_ids, selected_mcp_server_ids,
+               provider_connection_ids, execution, exposed_tools,
+               schedule_enabled, interval_minutes, enabled,
+               created_at, updated_at
+        FROM workspace_agents
+        WHERE id = ?
+        LIMIT 1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        RunnerError::AssistantPersistence(format!("Failed to load workspace agent: {}", e))
+    })?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    use sqlx::Row;
+    let selected_skill_ids: String = row.try_get("selected_skill_ids").unwrap_or_default();
+    let selected_mcp_server_ids: String =
+        row.try_get("selected_mcp_server_ids").unwrap_or_default();
+    let provider_connection_ids: String =
+        row.try_get("provider_connection_ids").unwrap_or_default();
+    let execution: String = row.try_get("execution").unwrap_or_default();
+    let exposed_tools: String = row.try_get("exposed_tools").unwrap_or_default();
+    let schedule_enabled: i64 = row.try_get("schedule_enabled").unwrap_or(0);
+    let enabled: i64 = row.try_get("enabled").unwrap_or(1);
+    let created_ms: i64 = row.try_get("created_at").unwrap_or(0);
+    let updated_ms: i64 = row.try_get("updated_at").unwrap_or(0);
+    let created_at = chrono::DateTime::from_timestamp_millis(created_ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let updated_at = chrono::DateTime::from_timestamp_millis(updated_ms)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+
+    Ok(Some(AgentConfig {
+        id: row.try_get::<String, _>("id").unwrap_or_default(),
+        name: row.try_get::<String, _>("name").unwrap_or_default(),
+        description: row.try_get::<String, _>("description").unwrap_or_default(),
+        schedule_enabled: schedule_enabled != 0,
+        interval_minutes: row
+            .try_get::<i64, _>("interval_minutes")
+            .unwrap_or(0)
+            .max(0) as u32,
+        enabled: enabled != 0,
+        selected_mcp_server_ids: serde_json::from_str(&selected_mcp_server_ids).unwrap_or_default(),
+        provider_connection_ids: serde_json::from_str(&provider_connection_ids).unwrap_or_default(),
+        selected_skill_ids: serde_json::from_str(&selected_skill_ids).unwrap_or_default(),
+        execution: serde_json::from_str::<ExecutionCapabilityConfig>(&execution)
+            .unwrap_or_default(),
+        exposed_tools: serde_json::from_str::<Vec<ExposedAgentTool>>(&exposed_tools)
+            .unwrap_or_default(),
+        created_at,
+        updated_at,
+    }))
+}
 
 // =============================================================================
 // Configuration
@@ -112,7 +184,7 @@ async fn run_next_agent(
     scheduler: &SharedScheduler,
 ) -> Result<(), RunnerError> {
     // Get app state
-    let state = app_handle.state::<AppState>();
+    let _state = app_handle.state::<AppState>();
 
     let pool = match app_handle.try_state::<DbPool>() {
         Some(pool) => pool.inner().clone(),
@@ -177,13 +249,11 @@ async fn run_next_agent(
         "Got agent instance"
     );
 
-    // Get the agent config from ConfigManager
-    let agent_config = {
-        let config = state.config_manager.lock().unwrap();
-        config
-            .get_agent(&agent_id)
-            .ok_or_else(|| RunnerError::AgentNotFound(agent_id.clone()))?
-    };
+    // Look up the agent's configuration from the workspace_agents row.
+    // Workspace-local agents carry their full config inline (Phase 1.2+).
+    let agent_config = load_workspace_agent_as_config(&pool, &agent_id)
+        .await?
+        .ok_or_else(|| RunnerError::AgentNotFound(agent_id.clone()))?;
 
     // Check if the automation is still enabled.
     if !agent_config.enabled {
@@ -258,36 +328,6 @@ async fn run_next_agent(
             false
         }
     };
-
-    // Run workspace designer after a successful agent run.
-    // This generates/evolves .clai/workspace.json for the workspace UI.
-    // Fire-and-forget: failures are logged but do not affect the run outcome.
-    if success {
-        let message_count = repository::list_messages(&pool, &session.id)
-            .await
-            .map(|msgs| msgs.len())
-            .unwrap_or(0);
-        let artifact_count = 0_usize; // Counted from filesystem by the designer itself
-        let designer_connection = connections.first().cloned();
-        if let Some(conn) = designer_connection {
-            let agent_id = agent_config.id.clone();
-            let agent_name = agent_config.name.clone();
-            let agent_desc = agent_config.description.clone();
-            let sess_id = session.id.clone();
-            tauri::async_runtime::spawn(async move {
-                designer::design_workspace(
-                    &agent_id,
-                    &agent_name,
-                    &agent_desc,
-                    &conn,
-                    &sess_id,
-                    message_count,
-                    artifact_count,
-                )
-                .await;
-            });
-        }
-    }
 
     // Update scheduler with interval from config
     let interval_ms = (agent_config.interval_minutes as u64) * 60 * 1000;
@@ -684,13 +724,6 @@ mod tests {
 
         let err = RunnerError::AgentNotFound("test-agent".to_string());
         assert!(err.to_string().contains("test-agent"));
-    }
-
-    #[test]
-    fn test_check_interval() {
-        // Verify the check interval is reasonable
-        assert!(CHECK_INTERVAL_SECS >= 1, "Check interval too short");
-        assert!(CHECK_INTERVAL_SECS <= 120, "Check interval too long");
     }
 
     #[tokio::test]

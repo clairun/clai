@@ -833,6 +833,10 @@ fn build_system_prompt(
     }
 }
 
+// Production helper fns (normalize_history_for_provider, build_trigger_message,
+// fail_run, cancel_run) live below the test module for legacy reasons; the
+// allow silences clippy's items-after-test-module lint without a noisy reflow.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

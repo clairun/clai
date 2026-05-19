@@ -3,6 +3,7 @@
 //! This module handles loading and saving the application configuration
 //! to a JSON file in the platform-specific config directory.
 
+pub mod bundled;
 pub mod types;
 
 pub use types::{
@@ -83,12 +84,12 @@ impl ConfigManager {
             ClaiConfig::default()
         };
 
-        let needs_save = if config.agents.is_empty() {
-            config.agents.push(AgentConfig::default_agent());
-            true
-        } else {
-            false
-        };
+        bundled::materialize_bundled_skills().map_err(|e| ConfigError::Io {
+            operation: "materialize bundled building blocks".to_string(),
+            source: e,
+        })?;
+
+        let needs_save = bundled::ensure_bundled_skill_source(&mut config);
 
         let manager = Self {
             config: Mutex::new(config),
@@ -229,86 +230,23 @@ impl ConfigManager {
         })
     }
 
-    /// Removes an MCP server and clears stale automation selections.
+    /// Removes an MCP server.
     ///
-    /// Returns true if the server was removed.
+    /// Callers must additionally sweep `workspace_agents.selected_mcp_server_ids`
+    /// in the DB to drop stale references — that sweep lives in
+    /// `commands::mcp_servers`.
     pub fn remove_mcp_server(&self, id: &str) -> Result<bool, ConfigError> {
         let mut removed = false;
         self.update(|config| {
             let initial_len = config.mcp_servers.len();
             config.mcp_servers.retain(|server| server.id != id);
             removed = config.mcp_servers.len() != initial_len;
-
-            if removed {
-                for agent in &mut config.agents {
-                    agent
-                        .selected_mcp_server_ids
-                        .retain(|server_id| server_id != id);
-                }
-            }
         })?;
         Ok(removed)
     }
 
-    /// Gets all automations.
-    pub fn get_agents(&self) -> Vec<AgentConfig> {
-        self.config.lock().unwrap().agents.clone()
-    }
-
-    /// Gets an automation by ID.
-    pub fn get_agent(&self, id: &str) -> Option<AgentConfig> {
-        self.config
-            .lock()
-            .unwrap()
-            .agents
-            .iter()
-            .find(|agent| agent.id == id)
-            .cloned()
-    }
-
-    /// Adds a new automation and saves config.
-    pub fn add_agent(&self, agent: AgentConfig) -> Result<(), ConfigError> {
-        self.update(|config| {
-            config.agents.push(agent);
-        })
-    }
-
-    /// Updates an existing automation and saves config.
-    pub fn update_agent<F>(&self, id: &str, updater: F) -> Result<(), ConfigError>
-    where
-        F: FnOnce(&mut AgentConfig),
-    {
-        self.update(|config| {
-            if let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == id) {
-                updater(agent);
-                agent.updated_at = chrono::Utc::now().to_rfc3339();
-            }
-        })
-    }
-
-    /// Removes an automation by ID and saves config.
-    ///
-    /// Returns true if the automation was removed.
-    pub fn remove_agent(&self, id: &str) -> Result<bool, ConfigError> {
-        let mut removed = false;
-        self.update(|config| {
-            let initial_len = config.agents.len();
-            config.agents.retain(|agent| agent.id != id);
-            removed = config.agents.len() != initial_len;
-        })?;
-        Ok(removed)
-    }
-
-    /// Enables or disables an automation globally and saves config.
-    pub fn set_agent_enabled(&self, agent_id: &str, enabled: bool) -> Result<bool, ConfigError> {
-        let mut changed = false;
-        self.update(|config| {
-            if let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) {
-                changed = agent.set_enabled(enabled);
-            }
-        })?;
-        Ok(changed)
-    }
+    // Agent CRUD helpers removed — agents are workspace-local. Use
+    // `commands::workspace_agents::*` instead.
 
     /// Gets all configured skill sources.
     pub fn get_skill_sources(&self) -> Vec<SkillSourceConfig> {
@@ -322,22 +260,17 @@ impl ConfigManager {
         })
     }
 
-    /// Removes a skill source and clears agent selections from that source.
+    /// Removes a skill source.
+    ///
+    /// Callers must additionally sweep `workspace_agents.selected_skill_ids`
+    /// in the DB to drop stale references — that sweep lives in
+    /// `commands::skills`.
     pub fn remove_skill_source(&self, id: &str) -> Result<bool, ConfigError> {
         let mut removed = false;
         self.update(|config| {
             let initial_len = config.skill_sources.len();
             config.skill_sources.retain(|source| source.id != id);
             removed = config.skill_sources.len() != initial_len;
-
-            if removed {
-                let prefix = format!("{}:", id);
-                for agent in &mut config.agents {
-                    agent
-                        .selected_skill_ids
-                        .retain(|skill_id| !skill_id.starts_with(&prefix));
-                }
-            }
         })?;
         Ok(removed)
     }
@@ -637,29 +570,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_remove_mcp_server_cleans_agent_selection() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        let server = McpServerConfig::new(
-            "Filesystem".to_string(),
-            McpServerTransport::Stdio {
-                command: "npx".to_string(),
-                args: vec!["@modelcontextprotocol/server-filesystem".to_string()],
-            },
-        );
-        let server_id = server.id.clone();
-        manager.add_mcp_server(server).unwrap();
-
-        let mut agent = AgentConfig::new("Test".to_string(), "Desc".to_string(), 5);
-        agent.selected_mcp_server_ids = vec![server_id.clone()];
-        manager.add_agent(agent).unwrap();
-
-        assert!(manager.remove_mcp_server(&server_id).unwrap());
-
-        let agent = manager.get_agents().into_iter().next().unwrap();
-        assert!(agent.selected_mcp_server_ids.is_empty());
-    }
+    // Note: tests that exercised the agent-side sweep on MCP/skill-source
+    // deletion have moved out of this file — agents are workspace-local now
+    // and the sweep lives in commands::skills / commands::mcp_servers
+    // (where a DbPool is available).
 
     #[test]
     fn test_discover_skills_loads_local_skill_md() {
@@ -694,23 +608,5 @@ mod tests {
         assert!(prompt.contains("Base prompt"));
         assert!(prompt.contains("## Selected Skills"));
         assert!(prompt.contains("Review with care."));
-    }
-
-    #[test]
-    fn test_remove_skill_source_cleans_agent_selection() {
-        let (manager, _temp_dir) = create_test_manager();
-        let source =
-            SkillSourceConfig::new_local("Local Skills".to_string(), "/tmp/skills".to_string());
-        let source_id = source.id.clone();
-        manager.add_skill_source(source).unwrap();
-
-        let mut agent = AgentConfig::new("Test".to_string(), "Desc".to_string(), 5);
-        agent.selected_skill_ids = vec![format!("{}:code-review", source_id)];
-        manager.add_agent(agent).unwrap();
-
-        assert!(manager.remove_skill_source(&source_id).unwrap());
-
-        let agent = manager.get_agents().into_iter().next().unwrap();
-        assert!(agent.selected_skill_ids.is_empty());
     }
 }

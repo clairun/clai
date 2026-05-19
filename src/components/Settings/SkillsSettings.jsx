@@ -3,6 +3,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import {
   addSkillSource,
   deleteSkillSource,
+  forkBundledSkill,
   getSkillsCatalog,
   refreshSkillSource,
   setSkillSourceEnabled,
@@ -34,6 +35,13 @@ const basename = (path) => {
 };
 
 const repoNameFromUri = (uri) => basename(uri).replace(/\.git$/, '') || 'Skills repo';
+const isBundledSource = (source) => source?.managedKind === 'bundled';
+const isPersonalSource = (source) => source?.managedKind === 'personal';
+const managedLabel = (source) => {
+  if (isBundledSource(source)) return 'Bundled';
+  if (isPersonalSource(source)) return 'Personal';
+  return null;
+};
 
 const SkillsSettings = () => {
   const [sources, setSources] = useState([]);
@@ -50,6 +58,7 @@ const SkillsSettings = () => {
   const [deletingId, setDeletingId] = useState(null);
   const [refreshingId, setRefreshingId] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
+  const [forkingSkillId, setForkingSkillId] = useState(null);
 
   const skillsBySource = useMemo(() => {
     const counts = new Map();
@@ -62,6 +71,11 @@ const SkillsSettings = () => {
   const diagnosticsBySource = useMemo(
     () => new Map(diagnostics.map((diagnostic) => [diagnostic.sourceId, diagnostic])),
     [diagnostics]
+  );
+
+  const sourcesById = useMemo(
+    () => new Map(sources.map((source) => [source.id, source])),
+    [sources]
   );
 
   useEffect(() => {
@@ -188,6 +202,29 @@ const SkillsSettings = () => {
       setError(deleteError?.message || 'Failed to delete skill source.');
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const handleForkSkill = async (skill) => {
+    if (forkingSkillId) {
+      return;
+    }
+    const defaultName = `${skill.name} Copy`;
+    const newName = window.prompt('Name for the personal fork', defaultName);
+    if (newName === null || !newName.trim()) {
+      return;
+    }
+
+    setForkingSkillId(skill.id);
+    setError(null);
+    try {
+      await forkBundledSkill(skill.id, newName.trim());
+      await loadCatalog();
+    } catch (forkError) {
+      console.error('[SkillsSettings] Failed to fork bundled skill:', forkError);
+      setError(forkError?.message || 'Failed to fork bundled skill.');
+    } finally {
+      setForkingSkillId(null);
     }
   };
 
@@ -320,8 +357,19 @@ const SkillsSettings = () => {
                           {source.enabled ? 'Enabled' : 'Disabled'}
                         </span>
                         <span className={styles.kindBadge}>{source.source?.kind || 'local'}</span>
+                        {managedLabel(source) && (
+                          <span className={isBundledSource(source) ? styles.bundledBadge : styles.personalBadge}>
+                            {managedLabel(source)}
+                          </span>
+                        )}
                       </div>
                       <div className={styles.sourcePath}>{sourcePath(source)}</div>
+                      {isBundledSource(source) && (
+                        <div className={styles.sourceMeta}>Read-only. App upgrades refresh this source automatically.</div>
+                      )}
+                      {isPersonalSource(source) && (
+                        <div className={styles.sourceMeta}>Personal forks live here and are not overwritten by app upgrades.</div>
+                      )}
                       {source.source?.kind === 'git' && source.source?.reference && (
                         <div className={styles.sourceMeta}>Ref: {source.source.reference}</div>
                       )}
@@ -356,14 +404,16 @@ const SkillsSettings = () => {
                       >
                         {source.enabled ? 'Disable' : 'Enable'}
                       </button>
-                      <button
-                        type="button"
-                        className={styles.deleteButton}
-                        onClick={() => handleDeleteSource(source.id)}
-                        disabled={deletingId === source.id}
-                      >
-                        {deletingId === source.id ? 'Deleting...' : 'Delete'}
-                      </button>
+                      {!source.managedKind && (
+                        <button
+                          type="button"
+                          className={styles.deleteButton}
+                          onClick={() => handleDeleteSource(source.id)}
+                          disabled={deletingId === source.id}
+                        >
+                          {deletingId === source.id ? 'Deleting...' : 'Delete'}
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -380,18 +430,39 @@ const SkillsSettings = () => {
               <div className={styles.emptyState}>No SKILL.md files discovered.</div>
             ) : (
               <div className={styles.skillList}>
-                {skills.map((skill) => (
-                  <div key={skill.id} className={styles.skillCard}>
-                    <div className={styles.skillHeader}>
-                      <span className={styles.skillName}>{skill.name}</span>
-                      <span className={styles.sourceBadge}>{skill.sourceName}</span>
+                {skills.map((skill) => {
+                  const source = sourcesById.get(skill.sourceId);
+                  const bundled = isBundledSource(source);
+                  return (
+                    <div key={skill.id} className={styles.skillCard}>
+                      <div className={styles.skillHeader}>
+                        <span className={styles.skillName}>{skill.name}</span>
+                        <span className={styles.sourceBadge}>{skill.sourceName}</span>
+                        {managedLabel(source) && (
+                          <span className={bundled ? styles.bundledBadge : styles.personalBadge}>
+                            {managedLabel(source)}
+                          </span>
+                        )}
+                      </div>
+                      {skill.description && (
+                        <p className={styles.skillDescription}>{skill.description}</p>
+                      )}
+                      <div className={styles.skillFooter}>
+                        <code className={styles.skillPath}>{skill.sourcePath}</code>
+                        {bundled && (
+                          <button
+                            type="button"
+                            className={styles.actionButton}
+                            onClick={() => handleForkSkill(skill)}
+                            disabled={forkingSkillId === skill.id}
+                          >
+                            {forkingSkillId === skill.id ? 'Forking...' : 'Fork to personal...'}
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    {skill.description && (
-                      <p className={styles.skillDescription}>{skill.description}</p>
-                    )}
-                    <code className={styles.skillPath}>{skill.sourcePath}</code>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>

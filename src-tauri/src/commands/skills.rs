@@ -8,11 +8,64 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::config::bundled;
 use crate::config::{
     discover_skills, discover_skills_with_diagnostics, SkillDefinition, SkillSourceConfig,
     SkillSourceDiagnostic, SkillSourceKind, APP_IDENTIFIER,
 };
+use crate::db::DbPool;
 use crate::AppState;
+
+/// Removes all workspace-local skill references that belong to the given source.
+///
+/// Walks every `workspace_agents` row whose JSON-array `selected_skill_ids`
+/// might reference the source (LIKE filter on the source id prefix), then
+/// rewrites the array with the matching ids removed.
+async fn sweep_workspace_agent_skill_ids(pool: &DbPool, source_id: &str) -> Result<(), String> {
+    let prefix = format!("{}:", source_id);
+    let like_pattern = format!("%{}%", source_id);
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, selected_skill_ids FROM workspace_agents WHERE selected_skill_ids LIKE ?",
+    )
+    .bind(&like_pattern)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        format!(
+            "Failed to scan workspace_agents for skill references: {}",
+            e
+        )
+    })?;
+
+    for (id, skill_ids_json) in rows {
+        let skill_ids: Vec<String> = serde_json::from_str(&skill_ids_json).unwrap_or_default();
+        let filtered: Vec<String> = skill_ids
+            .into_iter()
+            .filter(|skill_id| !skill_id.starts_with(&prefix))
+            .collect();
+        let encoded = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
+        if encoded == skill_ids_json {
+            continue;
+        }
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "UPDATE workspace_agents SET selected_skill_ids = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&encoded)
+        .bind(now)
+        .bind(&id)
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to sweep skill references on workspace agent {}: {}",
+                id, e
+            )
+        })?;
+    }
+
+    Ok(())
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,20 +90,51 @@ pub struct SetSkillSourceEnabledRequest {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SkillSourceResponse {
+    #[serde(flatten)]
+    pub source: SkillSourceConfig,
+    pub managed_kind: Option<String>,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillCatalogResponse {
-    pub sources: Vec<SkillSourceConfig>,
+    pub sources: Vec<SkillSourceResponse>,
     pub skills: Vec<SkillDefinition>,
     pub diagnostics: Vec<SkillSourceDiagnostic>,
 }
 
+impl From<SkillSourceConfig> for SkillSourceResponse {
+    fn from(source: SkillSourceConfig) -> Self {
+        let managed_kind = if bundled::is_bundled_source(&source) {
+            Some("bundled".to_string())
+        } else if bundled::is_personal_source(&source) {
+            Some("personal".to_string())
+        } else {
+            None
+        };
+        let read_only = managed_kind.as_deref() == Some("bundled");
+        Self {
+            source,
+            managed_kind,
+            read_only,
+        }
+    }
+}
+
 #[tauri::command]
-pub fn skill_sources_list(state: State<'_, AppState>) -> Result<Vec<SkillSourceConfig>, String> {
+pub fn skill_sources_list(state: State<'_, AppState>) -> Result<Vec<SkillSourceResponse>, String> {
     let config_manager = state
         .config_manager
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    Ok(config_manager.get_skill_sources())
+    Ok(config_manager
+        .get_skill_sources()
+        .into_iter()
+        .map(SkillSourceResponse::from)
+        .collect())
 }
 
 #[tauri::command]
@@ -78,10 +162,109 @@ pub fn skills_catalog(state: State<'_, AppState>) -> Result<SkillCatalogResponse
 
     let (skills, diagnostics) = discover_skills_with_diagnostics(&config);
     Ok(SkillCatalogResponse {
-        sources: config.skill_sources.clone(),
+        sources: config
+            .skill_sources
+            .clone()
+            .into_iter()
+            .map(SkillSourceResponse::from)
+            .collect(),
         skills,
         diagnostics,
     })
+}
+
+#[tauri::command]
+pub fn skill_fork_bundled(
+    source_skill_id: String,
+    new_name: String,
+    state: State<'_, AppState>,
+) -> Result<SkillDefinition, String> {
+    let trimmed_name = new_name.trim();
+    if trimmed_name.is_empty() {
+        return Err("New skill name is required.".to_string());
+    }
+    let slug = slugify_skill_name(trimmed_name);
+    if slug.is_empty() {
+        return Err("New skill name must contain at least one ASCII letter or number.".to_string());
+    }
+
+    let (source_skill, source_config) = {
+        let config_manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let config = config_manager.get();
+        let skills = discover_skills(&config)?;
+        let skill = skills
+            .into_iter()
+            .find(|skill| skill.id == source_skill_id)
+            .ok_or_else(|| format!("Skill not found: {}", source_skill_id))?;
+        let source = config
+            .skill_sources
+            .iter()
+            .find(|source| source.id == skill.source_id)
+            .cloned()
+            .ok_or_else(|| format!("Skill source not found: {}", skill.source_id))?;
+        (skill, source)
+    };
+
+    if !bundled::is_bundled_source(&source_config) {
+        return Err("Only bundled skills can be forked to the personal source.".to_string());
+    }
+
+    let target_dir = bundled::personal_skills_root().join(&slug);
+    if target_dir.exists() {
+        return Err(format!(
+            "A personal skill with slug '{}' already exists.",
+            slug
+        ));
+    }
+
+    {
+        let config_manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let mut ensure_result: Result<bool, String> = Ok(false);
+        config_manager
+            .update(|config| {
+                ensure_result = bundled::ensure_personal_skill_source_lazy(config);
+            })
+            .map_err(|e| format!("Failed to update skill sources: {}", e))?;
+        ensure_result?;
+    }
+
+    fs::create_dir_all(&target_dir)
+        .map_err(|error| format!("Failed to create personal skill directory: {}", error))?;
+    let forked_at = chrono::Utc::now().to_rfc3339();
+    let body = skill_body_without_frontmatter(&source_skill.content);
+    let forked_content = build_forked_skill_content(
+        trimmed_name,
+        &source_skill.description,
+        &source_skill.id,
+        &forked_at,
+        body,
+    );
+    fs::write(target_dir.join("SKILL.md"), forked_content)
+        .map_err(|error| format!("Failed to write forked skill: {}", error))?;
+
+    let config = {
+        let config_manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        config_manager.get()
+    };
+    let personal_source = config
+        .skill_sources
+        .iter()
+        .find(|source| bundled::is_personal_source(source))
+        .ok_or_else(|| "Personal skill source was not registered.".to_string())?;
+    let expected_id = format!("{}:{}", personal_source.id, slug);
+    discover_skills(&config)?
+        .into_iter()
+        .find(|skill| skill.id == expected_id)
+        .ok_or_else(|| format!("Forked skill was not discovered: {}", expected_id))
 }
 
 #[tauri::command]
@@ -219,7 +402,11 @@ pub fn skill_source_set_enabled(
 }
 
 #[tauri::command]
-pub fn skill_source_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn skill_source_delete(
+    id: String,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
     let source = {
         let config_manager = state
             .config_manager
@@ -231,6 +418,15 @@ pub fn skill_source_delete(id: String, state: State<'_, AppState>) -> Result<(),
             .find(|source| source.id == id)
     };
 
+    if let Some(source) = &source {
+        if bundled::is_bundled_source(source) {
+            return Err("Bundled skill sources are app-managed and cannot be deleted.".to_string());
+        }
+        if bundled::is_personal_source(source) {
+            return Err("Personal skill source is app-managed and cannot be deleted.".to_string());
+        }
+    }
+
     let removed = {
         let config_manager = state
             .config_manager
@@ -240,6 +436,10 @@ pub fn skill_source_delete(id: String, state: State<'_, AppState>) -> Result<(),
             .remove_skill_source(&id)
             .map_err(|e| format!("Failed to delete skill source: {}", e))?
     };
+
+    // Workspace-local sweep: drop any skill ids belonging to this source from
+    // every workspace_agents row's selected_skill_ids JSON array.
+    sweep_workspace_agent_skill_ids(pool.inner(), &id).await?;
 
     if removed {
         if let Some(source) = source {
@@ -255,6 +455,70 @@ fn skill_source_cache_root() -> Result<PathBuf, String> {
     let data_dir = dirs::data_dir()
         .ok_or_else(|| "Could not determine application data directory.".to_string())?;
     Ok(data_dir.join(APP_IDENTIFIER).join("skill-sources"))
+}
+
+fn slugify_skill_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_dash = false;
+
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash && !slug.is_empty() {
+            slug.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+
+    slug
+}
+
+fn skill_body_without_frontmatter(content: &str) -> &str {
+    let Some(rest) = content.strip_prefix("---") else {
+        return content;
+    };
+    let Some(rest) = rest
+        .strip_prefix('\n')
+        .or_else(|| rest.strip_prefix("\r\n"))
+    else {
+        return content;
+    };
+
+    let mut offset = content.len() - rest.len();
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim();
+        offset += line.len();
+        if trimmed == "---" {
+            return content[offset..].trim_start_matches(['\n', '\r']);
+        }
+    }
+
+    content
+}
+
+fn build_forked_skill_content(
+    name: &str,
+    description: &str,
+    forked_from: &str,
+    forked_at: &str,
+    body: &str,
+) -> String {
+    let yaml_name = serde_json::to_string(name).unwrap_or_else(|_| "\"Forked Skill\"".to_string());
+    let yaml_description =
+        serde_json::to_string(description).unwrap_or_else(|_| "\"\"".to_string());
+    let yaml_forked_from =
+        serde_json::to_string(forked_from).unwrap_or_else(|_| "\"\"".to_string());
+    let yaml_forked_at = serde_json::to_string(forked_at).unwrap_or_else(|_| "\"\"".to_string());
+
+    format!(
+        "---\nname: {}\ndescription: {}\nforked_from: {}\nforked_at: {}\n---\n{}",
+        yaml_name, yaml_description, yaml_forked_from, yaml_forked_at, body
+    )
 }
 
 async fn sync_git_skill_source_blocking(

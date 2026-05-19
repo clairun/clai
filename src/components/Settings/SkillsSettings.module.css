@@ -322,7 +322,9 @@
 
 .statusBadge,
 .kindBadge,
-.sourceBadge {
+.sourceBadge,
+.bundledBadge,
+.personalBadge {
   display: inline-flex;
   align-items: center;
   padding: 2px 7px;
@@ -349,6 +351,16 @@
   color: var(--color-text-secondary);
 }
 
+.bundledBadge {
+  background: var(--color-primary-alpha-10);
+  color: var(--color-primary);
+}
+
+.personalBadge {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+
 .skillCard {
   display: flex;
   flex-direction: column;
@@ -365,6 +377,13 @@
 .skillPath {
   display: block;
   font-family: 'Monaco', 'Menlo', 'Consolas', monospace;
+}
+
+.skillFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 @media (max-width: 760px) {
@@ -387,6 +406,11 @@
 
   .sourceActions {
     justify-content: flex-start;
+  }
+
+  .skillFooter {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .deleteButton {

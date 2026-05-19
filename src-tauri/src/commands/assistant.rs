@@ -135,25 +135,29 @@ pub async fn assistant_send_message(
     connection_id: String,
     pool: State<'_, DbPool>,
     app: AppHandle,
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
 ) -> Result<AssistantSendMessageResult, String> {
     let mut session = repository::get_session(pool.inner(), &session_id)
         .await?
         .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
 
-    // If tied to an automation, sync execution config with the latest agent config
-    // so that config changes take effect immediately (not just after a scheduled run).
-    let needs_execution_update = {
+    // If tied to a workspace agent (manager), sync execution config with the
+    // latest workspace_agents row so config changes take effect immediately.
+    // Phase 1.4: the row's inline `execution` column is the source of truth.
+    let needs_execution_update: Option<crate::config::ExecutionCapabilityConfig> =
         if let Some(automation_id) = session.context.automation_id.as_deref() {
-            let config_manager = state.config_manager.lock().unwrap();
-            config_manager
-                .get_agent(automation_id)
-                .filter(|agent| agent.execution != session.context.execution)
-                .map(|agent| agent.execution.clone())
+            let exec_json: Option<String> =
+                sqlx::query_scalar("SELECT execution FROM workspace_agents WHERE id = ? LIMIT 1")
+                    .bind(automation_id)
+                    .fetch_optional(pool.inner())
+                    .await
+                    .map_err(|e| format!("Failed to load workspace agent execution: {}", e))?;
+            exec_json
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .filter(|exec| exec != &session.context.execution)
         } else {
             None
-        }
-    };
+        };
     if let Some(fresh_execution) = needs_execution_update {
         session.context.execution = fresh_execution;
         session.updated_at = chrono::Utc::now().timestamp_millis();
