@@ -189,7 +189,7 @@ fn ensure_personal_skill_source_at(config: &mut ClaiConfig, root: &Path) -> io::
 fn source_local_path_matches(source: &SkillSourceConfig, expected: &Path) -> bool {
     matches!(
         &source.source,
-        SkillSourceKind::Local { path } if PathBuf::from(path) == expected
+        SkillSourceKind::Local { path } if Path::new(path) == expected
     )
 }
 
