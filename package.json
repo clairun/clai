@@ -1,7 +1,7 @@
 {
   "name": "clai",
   "private": true,
-  "version": "26.4.16",
+  "version": "26.5.19",
   "description": "Desktop multi-agent orchestration and monitoring app with MCP-native tools",
   "author": "juacker",
   "license": "MIT",
