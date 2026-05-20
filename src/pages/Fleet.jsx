@@ -4,6 +4,10 @@ import { useChatManager } from '../contexts/ChatManagerContext';
 import { assistantClient, useAssistantStore } from '../assistant';
 import { listWorkspaces, deleteWorkspace, getWorkspaceSnapshot } from '../workspace/client';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
+import InlineApprovalCard from '../components/InlineApprovalCard';
+import { useFleet } from '../contexts/FleetContext';
+import { useFleetActivity } from '../hooks/useFleetActivity';
+import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import styles from './Fleet.module.css';
 
 const REFRESH_INTERVAL_MS = 5000;
@@ -37,6 +41,9 @@ const Fleet = () => {
   const [selectedSnapshot, setSelectedSnapshot] = useState(null);
   const [snapshotError, setSnapshotError] = useState('');
   const { closeChat, isCurrentChatOpen } = useChatManager();
+  const { selectAgent } = useFleet();
+  const pendingPermissionCounts = usePermissionAttention();
+  const activeRunsByWorkspace = useFleetActivity();
 
   // Close the sidebar chat when entering Fleet
   useEffect(() => {
@@ -78,9 +85,15 @@ const Fleet = () => {
   const counters = useMemo(() => ({
     total: workspaces.length,
     periodic: workspaces.filter((w) => w.scheduleEnabled).length,
-    running: workspaces.filter((w) => (w.runningTaskCount || 0) > 0).length,
+    // "running" now counts a workspace if EITHER a scheduled task is
+    // running OR an interactive assistant run is in flight (the
+    // useFleetActivity hook tracks the latter via the assistant event
+    // stream — RunStarted / RunCompleted / RunFailed / RunCancelled).
+    running: workspaces.filter(
+      (w) => (w.runningTaskCount || 0) > 0 || (activeRunsByWorkspace[w.id] || 0) > 0
+    ).length,
     attention: workspaces.filter((w) => (w.attentionTaskCount || 0) > 0).length,
-  }), [workspaces]);
+  }), [workspaces, activeRunsByWorkspace]);
 
   const attentionWorkspaces = useMemo(
     () => sortedWorkspaces.filter((w) => (w.attentionTaskCount || 0) > 0),
@@ -168,6 +181,50 @@ const Fleet = () => {
   const detailStreamingText = sessionState?.streamingTextByMessageId || EMPTY_STREAMING;
   const detailIsStreaming = sessionState?.isStreaming || false;
 
+  // Auto-select the workspace's default agent for the chat input. Only
+  // the default agent is reachable from Fleet — other workspace agents
+  // are exposed in the workspace view, not here. When the user
+  // deselects a workspace (or the workspace has no default agent), we
+  // clear the selection so the chat input falls into its
+  // "no-agent-selected" state.
+  useEffect(() => {
+    if (!selectedSnapshot) {
+      selectAgent(null);
+      return;
+    }
+    const defaultId = selectedSnapshot.defaultWorkspaceAgentId;
+    const candidate = (selectedSnapshot.assignedAgents || []).find(
+      (agent) => agent.id === defaultId
+    ) || (selectedSnapshot.assignedAgents || []).find((agent) => agent.isDefault);
+    if (!candidate) {
+      selectAgent(null);
+      return;
+    }
+    // Reshape into the field names TerminalEmulatorWrapper expects
+    // (legacy FleetAgentSnapshot shape: agentId / name / description /
+    // selectedMcpServerIds / execution / providerConnectionIds /
+    // sessionId / tabId).
+    selectAgent({
+      agentId: candidate.id,
+      name: candidate.displayName || candidate.agentName || candidate.id,
+      description: candidate.agentDescription || '',
+      providerConnectionIds: candidate.providerConnectionIds || [],
+      selectedMcpServerIds: candidate.selectedMcpServerIds || [],
+      execution: candidate.execution || undefined,
+      sessionId: selectedSnapshot.session?.id || null,
+      tabId: null,
+    });
+  }, [selectedSnapshot, selectAgent]);
+
+  // Clear the selection when leaving Fleet entirely so a stale agent
+  // doesn't leak into other routes (the rest of the app still uses
+  // useFleet().selectedAgent in places).
+  useEffect(() => {
+    return () => {
+      selectAgent(null);
+    };
+  }, [selectAgent]);
+
   const hasSelection = !!selectedWorkspace;
 
   return (
@@ -246,10 +303,17 @@ const Fleet = () => {
 
           {sortedWorkspaces.map((ws) => {
             const isSelected = ws.id === selectedWorkspaceId;
+            const isProcessing =
+              (ws.runningTaskCount || 0) > 0 || (activeRunsByWorkspace[ws.id] || 0) > 0;
+            const hasPendingApprovals = (pendingPermissionCounts[ws.id] || 0) > 0;
+            const classes = [styles.workspaceCard];
+            if (isSelected) classes.push(styles.workspaceCardSelected);
+            if (isProcessing) classes.push(styles.workspaceCardProcessing);
+            if (hasPendingApprovals) classes.push(styles.workspaceCardAttention);
             return (
               <div
                 key={ws.id}
-                className={`${styles.workspaceCard} ${isSelected ? styles.workspaceCardSelected : ''}`}
+                className={classes.join(' ')}
                 onClick={() => setSelectedWorkspaceId(ws.id)}
                 role="button"
                 tabIndex={0}
@@ -264,6 +328,14 @@ const Fleet = () => {
                       </span>
                     ) : (
                       <span className={styles.workspaceBadge}>Workspace</span>
+                    )}
+                    {pendingPermissionCounts[ws.id] > 0 && (
+                      <span
+                        className={`${styles.workspaceBadge} ${styles.workspaceBadgePermission}`}
+                        title={`${pendingPermissionCounts[ws.id]} command${pendingPermissionCounts[ws.id] === 1 ? '' : 's'} need approval`}
+                      >
+                        Needs approval ({pendingPermissionCounts[ws.id]})
+                      </span>
                     )}
                   </div>
                   <div className={styles.cardHeaderActions}>
@@ -371,16 +443,22 @@ const Fleet = () => {
               {snapshotError ? (
                 <div className={styles.emptyDetail}>{snapshotError}</div>
               ) : detailMessages.length > 0 ? (
-                <ChatMessageList
-                  messages={detailMessages}
-                  toolCalls={detailToolCalls}
-                  streamingText={detailStreamingText}
-                  isStreaming={detailIsStreaming}
-                />
+                <>
+                  <ChatMessageList
+                    messages={detailMessages}
+                    toolCalls={detailToolCalls}
+                    streamingText={detailStreamingText}
+                    isStreaming={detailIsStreaming}
+                  />
+                  <InlineApprovalCard workspaceId={selectedWorkspace.id} />
+                </>
               ) : (
-                <div className={styles.emptyDetail}>
-                  No conversation yet. Open the workspace to start chatting with its manager.
-                </div>
+                <>
+                  <div className={styles.emptyDetail}>
+                    No conversation yet. Open the workspace to start chatting with its manager.
+                  </div>
+                  <InlineApprovalCard workspaceId={selectedWorkspace.id} />
+                </>
               )}
             </div>
           </aside>

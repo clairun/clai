@@ -225,6 +225,7 @@ async fn assign_task(
     // inline fields — no global catalog lookup.
     let target_config = AgentConfig {
         id: target.id.clone(),
+        workspace_id: target.workspace_id.clone(),
         name: target.name.clone(),
         description: target.description.clone(),
         schedule_enabled: false,

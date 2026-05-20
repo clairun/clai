@@ -350,6 +350,14 @@ pub struct AgentConfig {
     /// Unique identifier (UUID).
     pub id: String,
 
+    /// FK to the workspace this agent belongs to (`workspaces.id`).
+    /// Populated by the DB load path; new in-memory constructions
+    /// default to empty — callers that need cross-agent scoping (e.g.,
+    /// the inline approval card binding) must source this from the DB
+    /// load, not from `AgentConfig::new()`.
+    #[serde(default)]
+    pub workspace_id: String,
+
     /// Display name.
     pub name: String,
 
@@ -405,6 +413,7 @@ impl AgentConfig {
         let now = chrono::Utc::now().to_rfc3339();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            workspace_id: String::new(),
             name,
             description,
             schedule_enabled: true,

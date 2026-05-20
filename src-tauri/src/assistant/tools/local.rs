@@ -132,6 +132,7 @@ struct FilesystemEntry {
 }
 
 pub async fn execute_local_tool(
+    deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
     tool_name: &str,
     params: serde_json::Value,
@@ -160,7 +161,7 @@ pub async fn execute_local_tool(
         "bash.exec" => {
             let params: BashExecParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid bash.exec params: {}", e))?;
-            execute_bash_exec(context, params).await
+            execute_bash_exec(deps, context, params).await
         }
         "web.search" => {
             let params: WebSearchParams = serde_json::from_value(params)
@@ -296,6 +297,7 @@ fn execute_fs_write(
 }
 
 async fn execute_bash_exec(
+    deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
     params: BashExecParams,
 ) -> Result<serde_json::Value, String> {
@@ -304,11 +306,35 @@ async fn execute_bash_exec(
     }
 
     let cwd = resolve_shell_cwd(context, params.cwd.as_deref())?;
-    if let Err(denial) = enforce_command_policy(&context.execution, &params.command) {
-        if matches!(denial, CommandDenial::NotInAllowList(_)) {
-            context.add_notice(RunNoticeKind::CommandDenied, denial.message().to_string());
+    let workspace_root = context
+        .agent_workspace_id
+        .as_deref()
+        .and_then(agent_workspace_root_for_id);
+
+    match evaluate_command_policy(
+        &context.execution,
+        workspace_root.as_deref(),
+        &params.command,
+    ) {
+        PolicyResult::Allow => { /* proceed */ }
+        PolicyResult::Block {
+            segment_text,
+            matched_prefix,
+        } => {
+            let message = if segment_text.is_empty() {
+                "Shell command cannot be empty".to_string()
+            } else {
+                format!(
+                    "Command `{}` is blocked for this agent (matched prefix `{}`)",
+                    segment_text, matched_prefix
+                )
+            };
+            return Err(message);
         }
-        return Err(denial.message().to_string());
+        PolicyResult::NeedsApproval(segments) => {
+            await_user_permission(deps, context, &params.command, segments, workspace_root.clone())
+                .await?;
+        }
     }
 
     let timeout_ms = params
@@ -769,7 +795,11 @@ fn path_to_match_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Why a command was denied.
+/// Why a command was denied. Retained for the back-compat
+/// [`enforce_command_policy`] wrapper used by unit tests; new code paths
+/// branch on [`PolicyResult`] directly so they can surface per-segment
+/// info to the approval modal.
+#[allow(dead_code)]
 enum CommandDenial {
     /// The command prefix is in the explicit block list — expected, no notice needed.
     ExplicitlyBlocked(String),
@@ -778,6 +808,7 @@ enum CommandDenial {
     NotInAllowList(String),
 }
 
+#[allow(dead_code)]
 impl CommandDenial {
     fn message(&self) -> &str {
         match self {
@@ -786,43 +817,216 @@ impl CommandDenial {
     }
 }
 
-fn enforce_command_policy(
+/// Richer per-segment policy evaluation result. Distinguishes a hard
+/// block (any segment matched the blocklist) from "needs approval"
+/// (some segments aren't in the allowlist but aren't blocked either).
+/// The approval flow in `execute_bash_exec` uses this to decide whether
+/// to deny outright or raise an interactive prompt.
+pub(crate) enum PolicyResult {
+    /// All segments pass.
+    Allow,
+    /// One or more segments hit a blocklist entry. Whole command denied.
+    Block {
+        segment_text: String,
+        matched_prefix: String,
+    },
+    /// Segments that need user approval (Simple-not-in-allowlist or any
+    /// Opaque in Restricted mode). Each carries the smart-prefix
+    /// suggestion the modal pre-fills.
+    NeedsApproval(Vec<crate::commands::permissions::SegmentApproval>),
+}
+
+pub(crate) fn evaluate_command_policy(
     execution: &ExecutionCapabilityConfig,
+    workspace_root: Option<&std::path::Path>,
     command: &str,
-) -> Result<(), CommandDenial> {
-    let normalized = normalize_command(command).ok_or_else(|| {
-        CommandDenial::ExplicitlyBlocked("Shell command cannot be empty".to_string())
-    })?;
+) -> PolicyResult {
+    use crate::assistant::tools::command_splitter::{split_command, Segment};
+    use crate::assistant::tools::prefix_detector::suggest_prefix;
+    use crate::commands::permissions::{SegmentApproval, SegmentKind};
 
-    if let Some(matched) =
-        find_matching_prefix(&execution.shell.blocked_command_prefixes, &normalized)
-    {
-        return Err(CommandDenial::ExplicitlyBlocked(format!(
-            "Command `{}` is blocked for this agent (matched prefix `{}`)",
-            normalized, matched
-        )));
+    let segments = split_command(command);
+    if segments.is_empty() {
+        return PolicyResult::Block {
+            segment_text: String::new(),
+            matched_prefix: "<empty>".to_string(),
+        };
     }
 
-    if matches!(execution.shell.mode, ShellAccessMode::Restricted)
-        && find_matching_prefix(&execution.shell.allowed_command_prefixes, &normalized).is_none()
-    {
-        let short = command_preview(&normalized);
-        return Err(CommandDenial::NotInAllowList(format!(
-            "Command `{}` is not in the allowed list. Add `{}` to allow it.",
-            short, short
-        )));
+    // Workspace-tier permissions live in <workspace_root>/.clai/permissions.json
+    // and are unioned with the agent's own per-agent lists. Either tier can
+    // block; either tier can allow. Block wins over allow when both apply.
+    let workspace_perms = workspace_root
+        .map(crate::assistant::tools::workspace_permissions::load)
+        .unwrap_or_default();
+
+    let mut approvals: Vec<SegmentApproval> = Vec::new();
+
+    for segment in &segments {
+        let text = segment.text();
+
+        // Blocklist applies to every segment, Simple or Opaque.
+        if let Some(matched) = find_matching_prefix_union(
+            &execution.shell.blocked_command_prefixes,
+            &workspace_perms.shell.blocked_command_prefixes,
+            text,
+        ) {
+            return PolicyResult::Block {
+                segment_text: text.to_string(),
+                matched_prefix: matched,
+            };
+        }
+
+        // Allowlist check only matters in Restricted mode.
+        if !matches!(execution.shell.mode, ShellAccessMode::Restricted) {
+            continue;
+        }
+
+        match segment {
+            Segment::Opaque(_) => {
+                // Opaque segments can never be allowlisted: substitutions,
+                // executor heads, redirects, control flow. Always require
+                // fresh approval. No suggested prefix (can't be saved).
+                approvals.push(SegmentApproval {
+                    text: text.to_string(),
+                    kind: SegmentKind::Opaque,
+                    suggested_prefix: String::new(),
+                });
+            }
+            Segment::Simple(_) => {
+                if find_matching_prefix_union(
+                    &execution.shell.allowed_command_prefixes,
+                    &workspace_perms.shell.allowed_command_prefixes,
+                    text,
+                )
+                .is_none()
+                {
+                    approvals.push(SegmentApproval {
+                        text: text.to_string(),
+                        kind: SegmentKind::Simple,
+                        suggested_prefix: suggest_prefix(text),
+                    });
+                }
+            }
+        }
     }
 
+    if approvals.is_empty() {
+        PolicyResult::Allow
+    } else {
+        PolicyResult::NeedsApproval(approvals)
+    }
+}
+
+/// Runs the interactive approval round-trip for a command that needs
+/// user input. Registers the request in app state, emits the request
+/// and attention events, waits (with timeout) for the user's decisions,
+/// and resolves to `Ok(())` if every segment was allowed or `Err(_)` on
+/// any deny / timeout / channel close. Persistence of "always" grants
+/// is performed by [`crate::commands::permissions::submit_permission_decision`]
+/// before the oneshot is fired, so the grant is durable across crashes
+/// between user click and command execution.
+async fn await_user_permission(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    command: &str,
+    segments: Vec<crate::commands::permissions::SegmentApproval>,
+    workspace_root: Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    use crate::commands::permissions::{
+        emit_attention, PermissionRequest, APPROVAL_TIMEOUT, PERMISSION_REQUEST_EVENT,
+    };
+    use tauri::{Emitter, Manager};
+
+    let app_state = deps.app.state::<crate::AppState>();
+    let workspace_id = context.workspace_id.clone();
+    let agent_id = context.automation_id.clone();
+
+    let request = PermissionRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        workspace_id: workspace_id.clone(),
+        agent_id,
+        // Agent display name isn't on the runtime context; the frontend
+        // resolves it from agent_id via existing workspace queries.
+        agent_name: None,
+        command: command.to_string(),
+        segments,
+    };
+    let request_id = request.request_id.clone();
+
+    let (rx, count) = app_state
+        .pending_approvals
+        .register(request.clone(), workspace_root.clone())
+        .await;
+
+    if let Err(e) = deps.app.emit(PERMISSION_REQUEST_EVENT, &request) {
+        tracing::warn!("Failed to emit permission request event: {}", e);
+    }
+    emit_attention(&deps.app, workspace_id.clone(), count);
+
+    let decisions = match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
+        Ok(Ok(d)) => d,
+        Ok(Err(_)) => {
+            let msg = "Permission approval channel closed before a decision was made";
+            context.add_notice(RunNoticeKind::CommandDenied, msg.to_string());
+            return Err(msg.to_string());
+        }
+        Err(_) => {
+            // Timeout — clean the pending entry and emit attention so the
+            // fleet card clears its badge.
+            if let Some((_, remaining)) = app_state.pending_approvals.take(&request_id).await {
+                emit_attention(&deps.app, workspace_id.clone(), remaining);
+            }
+            let msg = "Permission approval timed out (24h)";
+            context.add_notice(RunNoticeKind::CommandDenied, msg.to_string());
+            return Err(msg.to_string());
+        }
+    };
+
+    if decisions.iter().any(|d| !d.is_allow()) {
+        let msg = "User denied one or more command segments";
+        context.add_notice(RunNoticeKind::CommandDenied, msg.to_string());
+        return Err(msg.to_string());
+    }
     Ok(())
 }
 
-/// Normalize a command string by collapsing whitespace.
-fn normalize_command(command: &str) -> Option<String> {
-    let trimmed = command.trim();
-    if trimmed.is_empty() {
-        return None;
+/// Back-compat wrapper around [`evaluate_command_policy`]. Maps the
+/// richer result to the historic `Result<(), CommandDenial>` shape used
+/// by existing tests and by the legacy "silent deny" code path when the
+/// approval round-trip is unavailable (e.g., during shutdown).
+#[allow(dead_code)]
+fn enforce_command_policy(
+    execution: &ExecutionCapabilityConfig,
+    workspace_root: Option<&std::path::Path>,
+    command: &str,
+) -> Result<(), CommandDenial> {
+    match evaluate_command_policy(execution, workspace_root, command) {
+        PolicyResult::Allow => Ok(()),
+        PolicyResult::Block {
+            segment_text,
+            matched_prefix,
+        } => {
+            if segment_text.is_empty() {
+                Err(CommandDenial::ExplicitlyBlocked(
+                    "Shell command cannot be empty".to_string(),
+                ))
+            } else {
+                Err(CommandDenial::ExplicitlyBlocked(format!(
+                    "Command `{}` is blocked for this agent (matched prefix `{}`)",
+                    segment_text, matched_prefix
+                )))
+            }
+        }
+        PolicyResult::NeedsApproval(segs) => {
+            let first = segs.into_iter().next().unwrap();
+            let short = command_preview(&first.text);
+            Err(CommandDenial::NotInAllowList(format!(
+                "Command `{}` is not in the allowed list. Add `{}` to allow it.",
+                short, short
+            )))
+        }
     }
-    Some(trimmed.to_string())
 }
 
 /// Extract the first two words of a command for display (e.g. "kubectl get").
@@ -835,20 +1039,31 @@ fn command_preview(command: &str) -> String {
     }
 }
 
-/// Check if a command starts with any of the configured prefixes.
-/// Matching is prefix-based at word boundaries:
+/// Word-boundary prefix match across two prefix lists (the agent tier and
+/// the workspace tier). Returns the first matching prefix on a hit.
+///
+/// Matching rules:
 ///   - prefix "kubectl get" matches command "kubectl get pods"
 ///   - prefix "kubectl" matches command "kubectl delete pods"
 ///   - prefix "kubectl get" does NOT match command "kubectl delete pods"
-fn find_matching_prefix<'a>(prefixes: &'a [String], command: &str) -> Option<&'a str> {
-    prefixes
+fn find_matching_prefix_union(
+    agent: &[String],
+    workspace: &[String],
+    command: &str,
+) -> Option<String> {
+    agent
         .iter()
-        .find(|prefix| {
-            let p = prefix.trim();
-            command == p
-                || (command.starts_with(p) && command.as_bytes().get(p.len()) == Some(&b' '))
-        })
-        .map(|s| s.as_str())
+        .chain(workspace.iter())
+        .find(|p| matches_prefix(p, command))
+        .cloned()
+}
+
+fn matches_prefix(prefix: &str, command: &str) -> bool {
+    let p = prefix.trim();
+    if p.is_empty() {
+        return false;
+    }
+    command == p || (command.starts_with(p) && command.as_bytes().get(p.len()) == Some(&b' '))
 }
 
 fn truncate_string(text: String, limit: usize) -> String {
@@ -1342,5 +1557,262 @@ mod tests {
         let result = execute_web_fetch(params).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("private/local"));
+    }
+
+    // ------------------------------------------------------------------
+    // enforce_command_policy — three-tier (agent + workspace) wiring
+    // ------------------------------------------------------------------
+
+    use crate::assistant::tools::workspace_permissions::{
+        save as save_workspace_perms, WorkspacePermissions, WorkspaceShellPermissions,
+    };
+    use crate::config::types::ShellCapabilityConfig;
+    use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
+
+    fn restricted_execution_config(
+        allowed: &[&str],
+        blocked: &[&str],
+    ) -> ExecutionCapabilityConfig {
+        ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Restricted,
+                allowed_command_prefixes: allowed.iter().map(|s| s.to_string()).collect(),
+                blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn policy_blocks_using_agent_blocklist() {
+        let exec = restricted_execution_config(&[], &["rm"]);
+        let err = enforce_command_policy(&exec, None, "rm -rf /tmp").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_blocks_using_workspace_blocklist() {
+        // Agent has no block; workspace blocks `rm`.
+        let temp = tempdir().unwrap();
+        save_workspace_perms(
+            temp.path(),
+            &WorkspacePermissions {
+                version: 1,
+                shell: WorkspaceShellPermissions {
+                    allowed_command_prefixes: vec![],
+                    blocked_command_prefixes: vec!["rm".to_string()],
+                },
+            },
+        )
+        .unwrap();
+
+        let exec = restricted_execution_config(&[], &[]);
+        let err = enforce_command_policy(&exec, Some(temp.path()), "rm -rf /tmp").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_allows_using_workspace_allowlist() {
+        // Agent allowlist empty; workspace allows `git status`.
+        let temp = tempdir().unwrap();
+        save_workspace_perms(
+            temp.path(),
+            &WorkspacePermissions {
+                version: 1,
+                shell: WorkspaceShellPermissions {
+                    allowed_command_prefixes: vec!["git status".to_string()],
+                    blocked_command_prefixes: vec![],
+                },
+            },
+        )
+        .unwrap();
+
+        let exec = restricted_execution_config(&[], &[]);
+        assert!(enforce_command_policy(&exec, Some(temp.path()), "git status -s").is_ok());
+    }
+
+    #[test]
+    fn policy_allows_using_agent_allowlist_even_without_workspace_root() {
+        let exec = restricted_execution_config(&["git status"], &[]);
+        assert!(enforce_command_policy(&exec, None, "git status -s").is_ok());
+    }
+
+    #[test]
+    fn policy_block_in_workspace_beats_allow_in_agent() {
+        // Agent allows `git`, workspace blocks `git push`.
+        let temp = tempdir().unwrap();
+        save_workspace_perms(
+            temp.path(),
+            &WorkspacePermissions {
+                version: 1,
+                shell: WorkspaceShellPermissions {
+                    allowed_command_prefixes: vec![],
+                    blocked_command_prefixes: vec!["git push".to_string()],
+                },
+            },
+        )
+        .unwrap();
+
+        let exec = restricted_execution_config(&["git"], &[]);
+        let err = enforce_command_policy(&exec, Some(temp.path()), "git push origin main")
+            .unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_block_in_agent_beats_allow_in_workspace() {
+        // Workspace allows `kubectl`, agent blocks `kubectl delete`.
+        let temp = tempdir().unwrap();
+        save_workspace_perms(
+            temp.path(),
+            &WorkspacePermissions {
+                version: 1,
+                shell: WorkspaceShellPermissions {
+                    allowed_command_prefixes: vec!["kubectl".to_string()],
+                    blocked_command_prefixes: vec![],
+                },
+            },
+        )
+        .unwrap();
+
+        let exec = restricted_execution_config(&[], &["kubectl delete"]);
+        let err = enforce_command_policy(
+            &exec,
+            Some(temp.path()),
+            "kubectl delete pod my-app",
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_missing_workspace_file_falls_back_to_agent_only() {
+        // No `.clai/permissions.json` exists; should behave as if workspace
+        // contributes empty lists.
+        let temp = tempdir().unwrap();
+        let exec = restricted_execution_config(&["git"], &[]);
+        assert!(enforce_command_policy(&exec, Some(temp.path()), "git status").is_ok());
+    }
+
+    #[test]
+    fn policy_restricted_with_no_allow_anywhere_denies() {
+        let temp = tempdir().unwrap();
+        let exec = restricted_execution_config(&[], &[]);
+        let err = enforce_command_policy(&exec, Some(temp.path()), "git status").unwrap_err();
+        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
+    }
+
+    // ------------------------------------------------------------------
+    // Per-segment evaluation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn policy_pipeline_passes_when_all_segments_allowed() {
+        let exec = restricted_execution_config(&["git log", "head", "wc"], &[]);
+        assert!(enforce_command_policy(&exec, None, "git log | head | wc -l").is_ok());
+    }
+
+    #[test]
+    fn policy_pipeline_denies_when_any_segment_unmatched() {
+        // `git log` is allowed, but `obscure-tool` isn't.
+        let exec = restricted_execution_config(&["git log"], &[]);
+        let err =
+            enforce_command_policy(&exec, None, "git log | obscure-tool").unwrap_err();
+        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
+        // Denial should specifically reference the unapproved segment.
+        let msg = err.message();
+        assert!(
+            msg.contains("obscure-tool"),
+            "denial msg should mention the offending segment, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn policy_pipeline_block_in_one_segment_denies_whole() {
+        // Allow git, block rm — the rm segment denies even when git log is fine.
+        let exec = restricted_execution_config(&["git log"], &["rm"]);
+        let err = enforce_command_policy(&exec, None, "git log | rm -rf /tmp/foo").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_closes_pipe_bypass_foot_gun() {
+        // The motivating bug: pre-segment matcher would word-boundary-match
+        // `git log` as a prefix of the whole pipeline and silently approve
+        // arbitrary downstream commands. Per-segment evaluation now treats
+        // the second segment as its own command — and `rm -rf` (with no
+        // allow entry) denies the pipeline.
+        let exec = restricted_execution_config(&["git log"], &[]);
+        assert!(enforce_command_policy(&exec, None, "git log | rm -rf ~/").is_err());
+    }
+
+    #[test]
+    fn policy_opaque_segment_in_restricted_always_denies_until_approval_flow() {
+        // `bash -c "..."` is Opaque. Even if a permissive prefix appears to
+        // cover it, Opaque can't be allowlisted in the new design.
+        let exec = restricted_execution_config(&["bash"], &[]);
+        let err = enforce_command_policy(&exec, None, r#"bash -c "echo hi""#).unwrap_err();
+        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
+    }
+
+    #[test]
+    fn policy_opaque_segment_in_full_mode_passes() {
+        // Full mode skips the allowlist check, so Opaque segments only
+        // fail if they hit a blocklist entry.
+        let exec = ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                allowed_command_prefixes: vec![],
+                blocked_command_prefixes: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(enforce_command_policy(&exec, None, r#"bash -c "echo hi""#).is_ok());
+    }
+
+    #[test]
+    fn policy_mixed_pipeline_with_opaque_segment_denies_in_restricted() {
+        // `find . | xargs rm` — xargs is Opaque. Even if `find .` is allowed,
+        // the xargs Opaque segment in Restricted mode forces denial.
+        let exec = restricted_execution_config(&["find", "xargs"], &[]);
+        let err = enforce_command_policy(&exec, None, "find . | xargs rm").unwrap_err();
+        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
+    }
+
+    #[test]
+    fn policy_redirect_segment_in_restricted_denies() {
+        // Redirects mark the segment Opaque (can't safely allowlist).
+        let exec = restricted_execution_config(&["cat"], &[]);
+        let err = enforce_command_policy(&exec, None, "cat /etc/hosts > /tmp/x").unwrap_err();
+        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
+    }
+
+    #[test]
+    fn policy_empty_command_still_errors() {
+        let exec = restricted_execution_config(&[], &[]);
+        let err = enforce_command_policy(&exec, None, "   ").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_workspace_block_applied_per_segment() {
+        // Workspace blocklist hits the second segment even though the first
+        // segment is allowed.
+        let temp = tempdir().unwrap();
+        save_workspace_perms(
+            temp.path(),
+            &WorkspacePermissions {
+                version: 1,
+                shell: WorkspaceShellPermissions {
+                    allowed_command_prefixes: vec!["git log".to_string()],
+                    blocked_command_prefixes: vec!["rm".to_string()],
+                },
+            },
+        )
+        .unwrap();
+        let exec = restricted_execution_config(&[], &[]);
+        let err =
+            enforce_command_policy(&exec, Some(temp.path()), "git log | rm -rf /tmp").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
     }
 }

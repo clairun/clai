@@ -1063,10 +1063,73 @@
   background: color-mix(in srgb, var(--color-primary) 4%, var(--color-bg-elevated));
 }
 
+/* Soft teal ring while an assistant run is in flight in this workspace
+ * (scheduled task or user-driven chat). Rendered as a pseudo-element
+ * so it composes with the selected-card indigo border instead of
+ * fighting it. Teal/accent is intentionally distinct from indigo
+ * (selected) and red (needs approval). */
+.workspaceCardProcessing {
+  position: relative;
+}
+
+.workspaceCardProcessing::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  /* Card uses --radius-xl (16px); ring is offset 3px outward, so its
+   * outer corner radius must be card-radius + offset for the curvature
+   * to read as concentric. */
+  border-radius: calc(var(--radius-xl) + 3px);
+  border: 2px solid var(--color-accent-alpha-40);
+  pointer-events: none;
+  opacity: 0;
+  animation: workspaceProcessingPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes workspaceProcessingPulse {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+/* Red ring on cards with pending shell-permission requests. Faster
+ * tempo than processing (more urgent). Stacks under the badge so both
+ * signals can be read at a glance. */
+.workspaceCardAttention {
+  position: relative;
+}
+
+.workspaceCardAttention::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: calc(var(--radius-xl) + 3px);
+  border: 2px solid rgba(220, 38, 38, 0.55);
+  pointer-events: none;
+  opacity: 0;
+  animation: workspaceAttentionPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes workspaceAttentionPulse {
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
 .workspaceBadgePeriodic {
   background: var(--color-primary-alpha-08);
   color: var(--color-primary);
   border: 1px solid var(--color-primary-alpha-30);
+}
+
+.workspaceBadgePermission {
+  background: rgba(248, 113, 113, 0.12);
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  animation: permissionPulse 2s ease-in-out infinite;
+}
+
+@keyframes permissionPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
 }
 
 .cardHeaderActions {

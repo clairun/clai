@@ -10,6 +10,7 @@ pub mod auth;
 pub mod bridge;
 pub mod fleet;
 pub mod mcp_servers;
+pub mod permissions;
 pub mod provider;
 pub mod provider_connections;
 pub mod skills;

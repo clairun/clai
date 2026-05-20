@@ -84,7 +84,10 @@ const TerminalEmulatorWrapper = () => {
     async (query) => {
       if (location.pathname === '/fleet' && isFleetRoute) {
         if (!selectedAgent) {
-          return { error: 'Select an agent in Fleet before sending a message.' };
+          return {
+            error:
+              'Select a workspace in Fleet to chat with its default agent. (If the workspace has no default agent set, open it from the card and configure one.)',
+          };
         }
 
         const connectionId = selectedAgent.providerConnectionIds?.[0] || null;

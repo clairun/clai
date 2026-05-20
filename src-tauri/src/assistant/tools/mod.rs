@@ -1,6 +1,9 @@
+pub mod command_splitter;
 pub mod local;
+pub mod prefix_detector;
 pub mod registry;
 pub mod router;
+pub mod workspace_permissions;
 pub mod workspace_tasks;
 
 pub use registry::available_tools;

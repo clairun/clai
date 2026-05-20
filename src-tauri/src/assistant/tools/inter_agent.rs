@@ -30,7 +30,7 @@ async fn load_workspace_agent_as_config(
 ) -> Result<Option<AgentConfig>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, name, description, selected_skill_ids, selected_mcp_server_ids,
+        SELECT id, workspace_id, name, description, selected_skill_ids, selected_mcp_server_ids,
                provider_connection_ids, execution, exposed_tools,
                schedule_enabled, interval_minutes, enabled,
                created_at, updated_at
@@ -69,6 +69,7 @@ async fn load_workspace_agent_as_config(
 
     Ok(Some(AgentConfig {
         id: row.try_get::<String, _>("id").unwrap_or_default(),
+        workspace_id: row.try_get::<String, _>("workspace_id").unwrap_or_default(),
         name: row.try_get::<String, _>("name").unwrap_or_default(),
         description: row.try_get::<String, _>("description").unwrap_or_default(),
         schedule_enabled: schedule_enabled != 0,

@@ -19,7 +19,13 @@ export const FleetProvider = ({ children }) => {
   const [snapshot, setSnapshot] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [selectedAgentId, setSelectedAgentId] = useState(null);
+  // `selectedAgent` is now stored directly (not derived from a lookup
+  // table). The Fleet page sets it when the user picks a workspace
+  // card — to that workspace's default agent — and clears it when the
+  // workspace is deselected. Pre-existing global-fleet agent-picking
+  // behavior is gone because `fleet_get_snapshot` no longer enumerates
+  // agents (they're workspace-local now).
+  const [selectedAgent, setSelectedAgent] = useState(null);
 
   const refresh = useCallback(async () => {
     setIsLoading(true);
@@ -27,13 +33,6 @@ export const FleetProvider = ({ children }) => {
       const nextSnapshot = await getFleetSnapshot();
       setSnapshot(nextSnapshot);
       setError(null);
-      setSelectedAgentId((current) => {
-        const hasCurrent = nextSnapshot?.agents?.some((agent) => agent.agentId === current);
-        if (hasCurrent) {
-          return current;
-        }
-        return nextSnapshot?.agents?.[0]?.agentId || null;
-      });
       return nextSnapshot;
     } catch (err) {
       const message = typeof err === 'string' ? err : (err?.message || 'Failed to load fleet');
@@ -69,23 +68,18 @@ export const FleetProvider = ({ children }) => {
     };
   }, [isFleetRoute, refresh]);
 
-  const selectedAgent = useMemo(
-    () => snapshot?.agents?.find((agent) => agent.agentId === selectedAgentId) || null,
-    [snapshot, selectedAgentId]
-  );
-
   const value = useMemo(() => ({
     snapshot,
     summary: snapshot?.summary || null,
     agents: snapshot?.agents || [],
-    selectedAgentId,
+    selectedAgentId: selectedAgent?.agentId || null,
     selectedAgent,
-    selectAgent: setSelectedAgentId,
+    selectAgent: setSelectedAgent,
     isLoading,
     error,
     refresh,
     isFleetRoute,
-  }), [snapshot, selectedAgentId, selectedAgent, isLoading, error, refresh, isFleetRoute]);
+  }), [snapshot, selectedAgent, isLoading, error, refresh, isFleetRoute]);
 
   return (
     <FleetContext.Provider value={value}>

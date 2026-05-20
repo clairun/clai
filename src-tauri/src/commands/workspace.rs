@@ -166,6 +166,17 @@ pub struct WorkspaceAgentResponse {
     pub provider_connection_ids: Vec<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    /// MCP server IDs selected for this agent. Surfaced so the Fleet
+    /// chat input (which routes messages to the workspace's default
+    /// agent) can spin up a session with the right tool wiring.
+    #[serde(default)]
+    pub selected_mcp_server_ids: Vec<String>,
+    /// Execution-capability config (shell mode, allow/block prefixes,
+    /// filesystem access, web access). Same rationale as
+    /// `selected_mcp_server_ids` — needed to start a usable session
+    /// from the Fleet view.
+    #[serde(default)]
+    pub execution: ExecutionCapabilityConfig,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -852,6 +863,8 @@ fn workspace_agent_response_from_row(
         agent_description,
         provider_connection_ids: row.provider_connection_ids,
         skill_ids: row.selected_skill_ids,
+        selected_mcp_server_ids: row.selected_mcp_server_ids,
+        execution: row.execution,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
@@ -1011,6 +1024,7 @@ fn agent_config_from_row(row: &WorkspaceAgentRow) -> AgentConfig {
         .unwrap_or_default();
     AgentConfig {
         id: row.id.clone(),
+        workspace_id: row.workspace_id.clone(),
         name: row.name.clone(),
         description: row.description.clone(),
         schedule_enabled: row.schedule_enabled,

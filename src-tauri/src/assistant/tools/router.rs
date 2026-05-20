@@ -20,7 +20,7 @@ pub async fn execute_tool(
             || name.starts_with("bash.")
             || name.starts_with("web.") =>
         {
-            local::execute_local_tool(context, name, params).await
+            local::execute_local_tool(deps, context, name, params).await
         }
         name if name.starts_with("agent.") => Err(
             "Global agent tools are no longer available. Use workspace-local task delegation instead."

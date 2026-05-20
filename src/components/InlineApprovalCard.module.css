@@ -1,0 +1,223 @@
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.card {
+  position: relative;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-light);
+  border-left: 4px solid rgba(220, 38, 38, 0.7);
+  border-radius: var(--radius-md);
+  padding: 14px 16px 14px 18px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.cardHeaderLeft {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  font-weight: 600;
+  background: var(--color-critical-bg, rgba(220, 38, 38, 0.08));
+  color: var(--color-critical-dark, #B91C1C);
+  border: 1px solid var(--color-critical-border, rgba(220, 38, 38, 0.30));
+  padding: 2px 8px;
+  border-radius: var(--radius-xs);
+  width: fit-content;
+}
+
+.cardSubtitle {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.command {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--color-text-primary);
+}
+
+.segments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.segmentsLabel {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.segmentRow {
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--color-bg-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.segmentText {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.segmentText code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border-light);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  word-break: break-all;
+  color: var(--color-text-primary);
+}
+
+.opaqueTag {
+  font-size: 10px;
+  background: var(--color-warning-lighter, #FFFBEB);
+  color: var(--color-warning-dark, #B45309);
+  padding: 1px 7px;
+  border-radius: var(--radius-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+  border: 1px solid var(--color-warning-light, #F59E0B);
+}
+
+.prefixField {
+  display: flex;
+  flex-direction: column;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  gap: 4px;
+}
+
+.prefixField input {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 12.5px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-xs);
+  padding: 6px 10px;
+}
+
+.prefixField input:focus {
+  outline: none;
+  border-color: var(--color-border-focus);
+  box-shadow: 0 0 0 3px var(--color-primary-alpha-15);
+}
+
+.segmentButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.btn {
+  font-size: 12px;
+  padding: 6px 12px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--color-border-medium);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  font-weight: 500;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  border-color: var(--color-border-strong);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btnAllow:hover:not(:disabled) {
+  border-color: var(--color-success, #00AB94);
+  color: var(--color-success, #00AB94);
+}
+
+.btnAllowOnce:hover:not(:disabled) {
+  border-color: var(--color-accent-alpha-30);
+  background: var(--color-accent-alpha-08);
+}
+
+.btnDeny:hover:not(:disabled) {
+  border-color: var(--color-critical, #DC2626);
+  color: var(--color-critical, #DC2626);
+}
+
+.btnDenyOnce:hover:not(:disabled) {
+  background: var(--color-critical-bg, rgba(220, 38, 38, 0.08));
+  border-color: var(--color-critical-border, rgba(220, 38, 38, 0.30));
+}
+
+.btnSelected {
+  border-color: var(--color-primary);
+  background: var(--color-primary-alpha-08);
+  color: var(--color-primary-darker);
+}
+
+.error {
+  padding: 8px 12px;
+  background: var(--color-critical-bg, rgba(220, 38, 38, 0.08));
+  border: 1px solid var(--color-critical-border, rgba(220, 38, 38, 0.30));
+  border-radius: var(--radius-xs);
+  color: var(--color-critical-dark, #B91C1C);
+  font-size: 12px;
+}
+
+.cardFooter {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.btnDenyAll {
+  background: transparent;
+  border: 1px dashed var(--color-border-strong);
+  color: var(--color-text-secondary);
+}
+
+.btnDenyAll:hover:not(:disabled) {
+  color: var(--color-critical, #DC2626);
+  border-color: var(--color-critical, #DC2626);
+  background: var(--color-critical-bg, rgba(220, 38, 38, 0.04));
+}
+

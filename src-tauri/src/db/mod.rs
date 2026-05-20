@@ -944,6 +944,8 @@ async fn run_migrations(pool: &DbPool) -> Result<(), String> {
 
     migrate_workspaces(pool).await?;
 
+    split_workspace_agent_prefixes(pool).await?;
+
     for legacy_table in [
         "assistant_sessions_legacy",
         "assistant_messages_legacy",
@@ -961,6 +963,135 @@ async fn run_migrations(pool: &DbPool) -> Result<(), String> {
         .map_err(|e| format!("Failed to enable foreign keys: {}", e))?;
 
     Ok(())
+}
+
+/// Idempotent migration: walks every `workspace_agents` row and runs each
+/// entry of `execution.shell.allowedCommandPrefixes` and
+/// `blockedCommandPrefixes` through the command splitter, replacing the
+/// entry with the textual content of its resulting segments. Dedupe is
+/// applied per-list, preserving insertion order.
+///
+/// Existing entries that contain shell separators (`|`, `&&`, etc.) become
+/// dead under the new per-segment matcher (which never sees a separator
+/// inside a segment), so this migration repairs them.
+///
+/// Re-running this migration is a no-op: a single-segment entry splits
+/// back to itself.
+async fn split_workspace_agent_prefixes(pool: &DbPool) -> Result<(), String> {
+    use crate::assistant::tools::command_splitter::split_command;
+
+    let rows: Vec<(String, String)> =
+        sqlx::query_as::<_, (String, String)>("SELECT id, execution FROM workspace_agents")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Failed to read workspace_agents for prefix split: {}", e))?;
+
+    let mut migrated = 0_u32;
+    for (id, execution_json) in rows {
+        let mut execution: serde_json::Value = match serde_json::from_str(&execution_json) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping workspace_agent {} during prefix migration: invalid JSON ({})",
+                    id,
+                    e
+                );
+                continue;
+            }
+        };
+
+        let Some(shell) = execution
+            .get_mut("shell")
+            .and_then(|v| v.as_object_mut())
+        else {
+            continue;
+        };
+
+        let changed_allow =
+            split_prefix_array(shell, "allowedCommandPrefixes", split_command);
+        let changed_block =
+            split_prefix_array(shell, "blockedCommandPrefixes", split_command);
+        if !changed_allow && !changed_block {
+            continue;
+        }
+
+        let new_json = serde_json::to_string(&execution).map_err(|e| {
+            format!(
+                "Failed to re-serialize execution for workspace_agent {}: {}",
+                id, e
+            )
+        })?;
+        sqlx::query("UPDATE workspace_agents SET execution = ? WHERE id = ?")
+            .bind(new_json)
+            .bind(&id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to update workspace_agents {}: {}", id, e))?;
+        migrated += 1;
+    }
+
+    if migrated > 0 {
+        tracing::info!(
+            "Split workspace_agents allow/block lists for {} rows (separators no longer matter)",
+            migrated
+        );
+    }
+
+    Ok(())
+}
+
+fn split_prefix_array<F>(
+    shell: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    splitter: F,
+) -> bool
+where
+    F: Fn(&str) -> Vec<crate::assistant::tools::command_splitter::Segment>,
+{
+    let Some(entries) = shell.get(key).and_then(|v| v.as_array()).cloned() else {
+        return false;
+    };
+
+    let mut out: Vec<String> = Vec::with_capacity(entries.len());
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut changed = false;
+
+    for entry in &entries {
+        let Some(text) = entry.as_str() else {
+            changed = true; // drop non-string entries
+            continue;
+        };
+        let segs = splitter(text);
+        if segs.is_empty() {
+            changed = true; // entry was whitespace-only, drop
+            continue;
+        }
+        let pieces: Vec<String> = segs.iter().map(|s| s.text().to_string()).collect();
+        if pieces.len() == 1 && pieces[0] == text {
+            // No semantic split; preserve unless duplicate.
+            if seen.insert(pieces[0].clone()) {
+                out.push(pieces.into_iter().next().unwrap());
+            } else {
+                changed = true;
+            }
+            continue;
+        }
+        // Either multi-segment or text was normalized (whitespace).
+        changed = true;
+        for piece in pieces {
+            if seen.insert(piece.clone()) {
+                out.push(piece);
+            }
+        }
+    }
+
+    if changed {
+        shell.insert(
+            key.to_string(),
+            serde_json::Value::Array(out.into_iter().map(serde_json::Value::String).collect()),
+        );
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -1180,5 +1311,233 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+    }
+
+    // -------------------------------------------------------------------
+    // split_workspace_agent_prefixes migration
+    // -------------------------------------------------------------------
+
+    /// Bare minimum schema for the prefix-split migration to run against.
+    /// Only the columns it reads/writes are needed.
+    async fn create_workspace_agents_for_split_test(pool: &DbPool) {
+        sqlx::query(
+            r#"
+            CREATE TABLE workspace_agents (
+                id TEXT PRIMARY KEY,
+                execution TEXT NOT NULL DEFAULT '{}'
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_agent_with_execution(pool: &DbPool, id: &str, execution_json: &str) {
+        sqlx::query("INSERT INTO workspace_agents (id, execution) VALUES (?, ?)")
+            .bind(id)
+            .bind(execution_json)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn read_agent_execution(pool: &DbPool, id: &str) -> serde_json::Value {
+        let json: String = sqlx::query_scalar("SELECT execution FROM workspace_agents WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        serde_json::from_str(&json).unwrap()
+    }
+
+    #[tokio::test]
+    async fn split_migration_breaks_apart_pipe_containing_entries() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        insert_agent_with_execution(
+            &pool,
+            "a",
+            r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":["git log | head","kubectl get"],"blockedCommandPrefixes":[]}}"#,
+        )
+        .await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+
+        let exec = read_agent_execution(&pool, "a").await;
+        let allowed = exec
+            .pointer("/shell/allowedCommandPrefixes")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let strings: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(strings, vec!["git log", "head", "kubectl get"]);
+    }
+
+    #[tokio::test]
+    async fn split_migration_is_idempotent() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        insert_agent_with_execution(
+            &pool,
+            "a",
+            r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":["git log | head"],"blockedCommandPrefixes":[]}}"#,
+        )
+        .await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+        let first_pass = read_agent_execution(&pool, "a").await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+        let second_pass = read_agent_execution(&pool, "a").await;
+
+        assert_eq!(first_pass, second_pass);
+    }
+
+    #[tokio::test]
+    async fn split_migration_dedupes_results() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        insert_agent_with_execution(
+            &pool,
+            "a",
+            r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":["git log; git log","git log"],"blockedCommandPrefixes":[]}}"#,
+        )
+        .await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+
+        let exec = read_agent_execution(&pool, "a").await;
+        let allowed = exec
+            .pointer("/shell/allowedCommandPrefixes")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let strings: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(strings, vec!["git log"]);
+    }
+
+    #[tokio::test]
+    async fn split_migration_handles_blocklist_too() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        insert_agent_with_execution(
+            &pool,
+            "a",
+            r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":[],"blockedCommandPrefixes":["rm; sudo"]}}"#,
+        )
+        .await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+
+        let exec = read_agent_execution(&pool, "a").await;
+        let blocked = exec
+            .pointer("/shell/blockedCommandPrefixes")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let strings: Vec<&str> = blocked.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(strings, vec!["rm", "sudo"]);
+    }
+
+    #[tokio::test]
+    async fn split_migration_skips_malformed_json_without_failing() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        insert_agent_with_execution(&pool, "broken", "{ not valid json").await;
+        insert_agent_with_execution(
+            &pool,
+            "ok",
+            r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":["a; b"],"blockedCommandPrefixes":[]}}"#,
+        )
+        .await;
+
+        // Should not error.
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+
+        // The valid row still got migrated.
+        let exec = read_agent_execution(&pool, "ok").await;
+        let allowed = exec
+            .pointer("/shell/allowedCommandPrefixes")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let strings: Vec<&str> = allowed.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(strings, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn split_migration_no_op_when_no_separators() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        let original = r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":["git status","kubectl logs"],"blockedCommandPrefixes":["rm"]}}"#;
+        insert_agent_with_execution(&pool, "a", original).await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+
+        let exec_json: String =
+            sqlx::query_scalar("SELECT execution FROM workspace_agents WHERE id = 'a'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let exec: serde_json::Value = serde_json::from_str(&exec_json).unwrap();
+        let allowed: Vec<&str> = exec
+            .pointer("/shell/allowedCommandPrefixes")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(allowed, vec!["git status", "kubectl logs"]);
+    }
+
+    #[tokio::test]
+    async fn split_migration_preserves_unknown_fields() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        // Include a future-unknown field alongside the standard shape.
+        insert_agent_with_execution(
+            &pool,
+            "a",
+            r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":["git log | head"],"blockedCommandPrefixes":[],"futureField":42},"unknownTopLevel":"keep me"}"#,
+        )
+        .await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+
+        let exec = read_agent_execution(&pool, "a").await;
+        assert_eq!(exec.pointer("/shell/futureField"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            exec.pointer("/unknownTopLevel"),
+            Some(&serde_json::Value::String("keep me".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn split_migration_drops_non_string_entries() {
+        let pool = create_test_pool().await;
+        create_workspace_agents_for_split_test(&pool).await;
+
+        insert_agent_with_execution(
+            &pool,
+            "a",
+            r#"{"shell":{"mode":"restricted","allowedCommandPrefixes":["git status",42,null],"blockedCommandPrefixes":[]}}"#,
+        )
+        .await;
+
+        split_workspace_agent_prefixes(&pool).await.unwrap();
+
+        let exec = read_agent_execution(&pool, "a").await;
+        let allowed: Vec<&str> = exec
+            .pointer("/shell/allowedCommandPrefixes")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(allowed, vec!["git status"]);
     }
 }

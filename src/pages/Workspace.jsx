@@ -14,6 +14,7 @@ import WorkspaceTaskTranscriptPanel from '../components/WorkspaceTaskTranscriptP
 import WorkspaceFilePreviewPanel from '../components/WorkspaceFilePreviewPanel';
 import { assistantClient, useAssistantStore } from '../assistant';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
+import InlineApprovalCard from '../components/InlineApprovalCard';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
@@ -471,15 +472,18 @@ const WorkspaceHeader = ({
 // Chat is the workspace's primary surface. Memories, artifacts, tasks, and
 // member agents live in the drawer (toggled from the header counters) and
 // open in modals when inspected — the chat is never hidden.
-const ChatFirstLayout = ({ sessionId, messages, toolCalls, streamingText, isStreaming }) => (
+const ChatFirstLayout = ({ sessionId, workspaceId, messages, toolCalls, streamingText, isStreaming }) => (
   <div className={styles.chatFirstContent}>
     {messages.length > 0 ? (
-      <ChatMessageList
-        messages={messages}
-        toolCalls={toolCalls}
-        streamingText={streamingText}
-        isStreaming={isStreaming}
-      />
+      <>
+        <ChatMessageList
+          messages={messages}
+          toolCalls={toolCalls}
+          streamingText={streamingText}
+          isStreaming={isStreaming}
+        />
+        <InlineApprovalCard workspaceId={workspaceId} />
+      </>
     ) : (
       <div className={styles.chatFirstEmpty}>
         <div className={styles.chatFirstEmptyIcon}>
@@ -747,6 +751,7 @@ const Workspace = () => {
         <div className={`${styles.workspaceMain} ${isSidePanelOpen ? styles.workspaceMainWithPreview : ''}`}>
           <ChatFirstLayout
             sessionId={sessionId}
+            workspaceId={workspaceId}
             messages={messages}
             toolCalls={toolCalls}
             streamingText={streamingText}

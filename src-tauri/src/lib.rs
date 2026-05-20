@@ -61,6 +61,8 @@ pub struct AppState {
     pub mcp_client_manager: AsyncMutex<mcp::client::McpClientManager>,
     /// Agent scheduler (manages agent instances)
     pub scheduler: SharedScheduler,
+    /// In-flight shell-permission approval requests awaiting user decision.
+    pub pending_approvals: commands::permissions::PendingApprovals,
 }
 
 /// Default base URL for Netdata Cloud API.
@@ -126,6 +128,7 @@ pub fn run() {
             manager
         }),
         scheduler,
+        pending_approvals: commands::permissions::PendingApprovals::new(),
     };
 
     // Build and run the Tauri application
@@ -255,6 +258,8 @@ pub fn run() {
             commands::workspace_agents::workspace_update_agent,
             commands::workspace_agents::workspace_delete_agent,
             commands::workspace_agents::workspace_set_agent_enabled,
+            commands::permissions::submit_permission_decision,
+            commands::permissions::list_pending_permission_requests,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
