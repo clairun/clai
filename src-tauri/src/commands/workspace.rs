@@ -1081,6 +1081,12 @@ async fn find_workspace_session(
 
     // First preference: the user's *interactive* chat thread. This is the
     // session the user sends messages into via the workspace input bar.
+    // The closure wrap on `belongs_to_workspace` is needed: `.iter()` yields
+    // `&AssistantSession`, `.filter()` passes a further `&` (so the predicate
+    // sees `&&AssistantSession`), and our helper takes `&AssistantSession`.
+    // The wrap performs the auto-deref. Clippy's `redundant_closure` lint
+    // misfires here because it doesn't model the double-borrow.
+    #[allow(clippy::redundant_closure)]
     let interactive = sessions
         .iter()
         .filter(|session| matches!(session.kind, SessionKind::Interactive))
@@ -1107,6 +1113,7 @@ async fn find_workspace_session(
     let Some(manager_id) = manager_id else {
         return Ok(None);
     };
+    #[allow(clippy::redundant_closure)]
     Ok(sessions
         .into_iter()
         .filter(|session| matches!(session.kind, SessionKind::BackgroundJob))
