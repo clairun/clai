@@ -223,7 +223,14 @@
   min-height: 0;
   overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  /* Fixed column width so cards stay the same size regardless of how
+   * wide the cardGrid container is. Selecting a workspace narrows the
+   * grid (the detail panel takes the right side) — without a fixed
+   * column width, the auto-fill `1fr` max would stretch each card to
+   * consume the slack, growing 280px→~360px and visually "refactoring"
+   * the view. Now selection just changes how many cards fit per row;
+   * each card stays put. */
+  grid-template-columns: repeat(auto-fill, 300px);
   gap: 12px;
   align-content: start;
   padding-right: 4px;

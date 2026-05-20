@@ -1067,24 +1067,51 @@ async fn find_workspace_session(
 ) -> Result<Option<AssistantSession>, String> {
     let sessions = repository::list_sessions(pool, None).await?;
 
-    // Only *interactive* sessions are the user's chat thread. Background-job
-    // sessions (inter-agent task delegations) share the same `workspace_id`
-    // but are owned by member agents — they have their own UI and must not
-    // hijack the chat panel.
+    let belongs_to_workspace = |session: &AssistantSession| -> bool {
+        session.context.workspace_id.as_deref() == Some(descriptor.workspace_id.as_str())
+            || descriptor
+                .agent_id
+                .as_deref()
+                .map(|agent_id| {
+                    session.context.agent_workspace_id.as_deref() == Some(agent_id)
+                        || session.context.automation_id.as_deref() == Some(agent_id)
+                })
+                .unwrap_or(false)
+    };
+
+    // First preference: the user's *interactive* chat thread. This is the
+    // session the user sends messages into via the workspace input bar.
+    let interactive = sessions
+        .iter()
+        .filter(|session| matches!(session.kind, SessionKind::Interactive))
+        .filter(|session| belongs_to_workspace(session))
+        .max_by_key(|session| session.updated_at)
+        .cloned();
+    if interactive.is_some() {
+        return Ok(interactive);
+    }
+
+    // Fallback: if there's no interactive chat (typical for periodic
+    // workspaces that have never been chatted with), surface the most
+    // recent BackgroundJob session OWNED BY THE WORKSPACE'S DEFAULT
+    // MANAGER AGENT. This shows the user what the periodic agent did on
+    // its last tick. Inter-agent task delegations also create
+    // BackgroundJob sessions, but they're owned by the assignee
+    // (`context.automation_id == assignee_agent_id`), not the manager —
+    // so filtering by the default agent cleanly excludes them and
+    // preserves the "task delegations have their own UI" invariant.
+    let manager_id = workspace_default_agent_id(pool, &descriptor.workspace_id)
+        .await
+        .ok()
+        .flatten();
+    let Some(manager_id) = manager_id else {
+        return Ok(None);
+    };
     Ok(sessions
         .into_iter()
-        .filter(|session| matches!(session.kind, SessionKind::Interactive))
-        .filter(|session| {
-            session.context.workspace_id.as_deref() == Some(descriptor.workspace_id.as_str())
-                || descriptor
-                    .agent_id
-                    .as_deref()
-                    .map(|agent_id| {
-                        session.context.agent_workspace_id.as_deref() == Some(agent_id)
-                            || session.context.automation_id.as_deref() == Some(agent_id)
-                    })
-                    .unwrap_or(false)
-        })
+        .filter(|session| matches!(session.kind, SessionKind::BackgroundJob))
+        .filter(|session| belongs_to_workspace(session))
+        .filter(|session| session.context.automation_id.as_deref() == Some(manager_id.as_str()))
         .max_by_key(|session| session.updated_at))
 }
 
