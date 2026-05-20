@@ -217,21 +217,102 @@ pub fn split_command(input: &str) -> Vec<Segment> {
             continue;
         }
 
-        // Heredocs: <<, <<-, <<<
-        if c == '<' && next == Some('<') {
+        // Here-strings (`<<<word`): single-token input, no body. Fall
+        // through to the redirect handler below — they're consumed as
+        // part of the `<` redirect run, like any other redirect form.
+        // We only treat `<<` and `<<-` as proper heredocs that capture
+        // a multi-line body.
+        if c == '<' && next == Some('<') && bytes.get(i + 2) != Some(&b'<') {
             opaque = true;
-            buf.push('<');
-            buf.push('<');
+            buf.push_str("<<");
             i += 2;
-            while i < n {
-                let c2 = bytes[i] as char;
-                if c2 == '<' || c2 == '-' {
-                    buf.push(c2);
+            // <<- variant strips leading tabs in body; same delimiter
+            if bytes.get(i) == Some(&b'-') {
+                buf.push('-');
+                i += 1;
+            }
+            // Skip whitespace before the delimiter token.
+            while i < n && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                buf.push(bytes[i] as char);
+                i += 1;
+            }
+            // Parse the delimiter — may be quoted ('EOF' / "EOF") or
+            // bare (EOF).
+            let mut delim = String::new();
+            if i < n && (bytes[i] == b'\'' || bytes[i] == b'"') {
+                let quote = bytes[i];
+                buf.push(bytes[i] as char);
+                i += 1;
+                while i < n && bytes[i] != quote {
+                    delim.push(bytes[i] as char);
+                    buf.push(bytes[i] as char);
                     i += 1;
-                } else {
+                }
+                if i < n {
+                    buf.push(bytes[i] as char);
+                    i += 1; // closing quote
+                }
+            } else {
+                while i < n && !(bytes[i] as char).is_ascii_whitespace() {
+                    delim.push(bytes[i] as char);
+                    buf.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
+
+            // Malformed (no delimiter parsed) — leave it as Opaque and
+            // let the outer loop handle whatever comes next. This is
+            // the conservative default; we've already set opaque=true.
+            if delim.is_empty() {
+                continue;
+            }
+
+            // The rest of the current line is part of the line that
+            // *started* the heredoc (e.g. trailing pipes or whatever
+            // follows the delimiter on the same line). We consume it
+            // into the segment buffer without doing any separator
+            // splitting, then move on to the body.
+            while i < n && bytes[i] != b'\n' {
+                buf.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < n {
+                buf.push('\n');
+                i += 1;
+            }
+
+            // Consume body lines until we see the delimiter alone on a
+            // line. Per POSIX shell semantics newlines inside the body
+            // are NOT command separators — they're literal data. We
+            // must therefore skip all of our own separator/quote
+            // logic until the closer.
+            while i < n {
+                let line_start = i;
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                let line_bytes = &bytes[line_start..i];
+                let trimmed = std::str::from_utf8(line_bytes).unwrap_or("").trim();
+                // Push the line content verbatim.
+                for &b in line_bytes {
+                    buf.push(b as char);
+                }
+                let is_closer = trimmed == delim;
+                if i < n {
+                    buf.push('\n');
+                    i += 1;
+                }
+                if is_closer {
                     break;
                 }
             }
+            // Heredoc is a self-contained command — flush this segment
+            // now so anything that follows (`echo done` on the next
+            // line, etc.) starts a fresh segment. Without this the
+            // outer loop would keep appending to the same Opaque buf.
+            push_segment(&mut segments, &buf, opaque);
+            buf.clear();
+            opaque = false;
             continue;
         }
 
@@ -603,6 +684,70 @@ mod tests {
     #[test]
     fn heredoc_opaque() {
         assert_eq!(split("cat <<EOF"), vec![opaque("cat <<EOF")]);
+    }
+
+    #[test]
+    fn heredoc_body_does_not_split_on_newlines() {
+        // The whole heredoc — including the body lines — is one
+        // Opaque segment. Newlines inside the body are NOT command
+        // separators (POSIX shell semantics).
+        let input = "cat <<EOF\nline one\nline two\nEOF";
+        let segs = split(input);
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque(), "got {:?}", segs[0]);
+        let text = segs[0].text();
+        assert!(text.contains("line one"));
+        assert!(text.contains("line two"));
+    }
+
+    #[test]
+    fn heredoc_with_quoted_delimiter_does_not_split() {
+        // `<< 'EOF'` style with a body that includes shell-meaningful
+        // chars (// comments, semicolons) that would otherwise split.
+        let input = "cat > file << 'EOF'\n//! comment\npub mod x;\nEOF";
+        let segs = split(input);
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert!(segs[0].text().contains("//! comment"));
+        assert!(segs[0].text().contains("pub mod x"));
+    }
+
+    #[test]
+    fn heredoc_then_followup_command_splits_after_closer() {
+        // After the closing delimiter the next newline IS a separator.
+        let input = "cat <<EOF\nbody\nEOF\necho done";
+        let segs = split(input);
+        assert_eq!(segs.len(), 2);
+        assert!(segs[0].is_opaque());
+        assert!(segs[0].text().contains("body"));
+        assert_eq!(segs[1], simple("echo done"));
+    }
+
+    #[test]
+    fn heredoc_with_leading_tab_strip_delimiter() {
+        // `<<-EOF` is the tab-stripping variant; same delimiter rules.
+        let input = "cat <<-EOF\n\tindented body\n\tEOF";
+        let segs = split(input);
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert!(segs[0].text().contains("indented body"));
+    }
+
+    #[test]
+    fn heredoc_chained_with_logical_and_does_not_overflow() {
+        // The motivating real-world bug from the screenshot: the LLM
+        // emits `cd dir && cat > file << 'EOF' ... EOF` followed by
+        // another command. Before this fix the heredoc body lines were
+        // each treated as separate segments.
+        let input = "cd dir && cat > file << 'EOF'\n//! a\n//! b\nEOF\ncat file";
+        let segs = split(input);
+        // Three logical commands: cd dir, the cat-heredoc Opaque, cat file
+        assert_eq!(segs.len(), 3, "got {:?}", segs);
+        assert_eq!(segs[0], simple("cd dir"));
+        assert!(segs[1].is_opaque());
+        assert!(segs[1].text().contains("//! a"));
+        assert!(segs[1].text().contains("//! b"));
+        assert_eq!(segs[2], simple("cat file"));
     }
 
     // -----------------------------------------------------------------
