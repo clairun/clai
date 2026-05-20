@@ -213,7 +213,9 @@ const AgentFormModal = ({
   useEffect(() => {
     if (isOpen) {
       if (agent) {
-        setName(agent.name || '');
+        // In workspace mode the "Name" field is the workspace title, not the
+        // internal manager-agent name (which is just an implementation label).
+        setName(isWorkspaceMode ? (workspaceTitle || '') : (agent.name || ''));
         setDescription(agent.description || '');
         setScheduleEnabled(agent.scheduleEnabled !== false);
         setIntervalMinutes(agent.intervalMinutes ?? 30);
@@ -239,7 +241,7 @@ const AgentFormModal = ({
       }
       setError(null);
     }
-  }, [isOpen, agent, applyExecutionState]);
+  }, [isOpen, agent, applyExecutionState, isWorkspaceMode, workspaceTitle]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -307,13 +309,14 @@ const AgentFormModal = ({
 
     // Validation
     const trimmedName = name.trim();
+    const nameLabel = isWorkspaceMode ? 'Workspace name' : 'Agent name';
     if (!trimmedName) {
-      setError('Agent name is required');
+      setError(`${nameLabel} is required`);
       return;
     }
 
     if (trimmedName.length > 100) {
-      setError('Agent name must be 100 characters or less');
+      setError(`${nameLabel} must be 100 characters or less`);
       return;
     }
 
@@ -456,13 +459,17 @@ const AgentFormModal = ({
               className={styles.input}
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g., Security Monitor, Performance Analyzer"
+              placeholder={isWorkspaceMode
+                ? 'e.g., Production Monitoring, Q3 Research'
+                : 'e.g., Security Monitor, Performance Analyzer'}
               disabled={saving}
               maxLength={100}
               autoFocus
             />
             <span className={styles.hint}>
-              A descriptive name for this agent
+              {isWorkspaceMode
+                ? 'The name shown for this workspace in the Fleet and header.'
+                : 'A descriptive name for this agent'}
             </span>
           </div>
 

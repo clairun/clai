@@ -19,6 +19,7 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
   acknowledgeWorkspaceTask,
   getWorkspaceSnapshot,
+  setWorkspaceTitle,
   submitWorkspaceTaskFeedback,
 } from '../workspace/client';
 import styles from './Workspace.module.css';
@@ -648,6 +649,11 @@ const Workspace = () => {
     setAgentError('');
     try {
       if (editingAgent) {
+        const isWorkspaceEdit = editingAgent.id === managerAgentId;
+        if (isWorkspaceEdit) {
+          // In workspace mode the "Name" field is the workspace title.
+          await setWorkspaceTitle(workspaceId, formData.name);
+        }
         await workspaceUpdateAgent({
           workspaceId,
           agentId: editingAgent.id,
@@ -683,7 +689,7 @@ const Workspace = () => {
     } catch (err) {
       setAgentError(typeof err === 'string' ? err : (err?.message || 'Failed to save agent.'));
     }
-  }, [editingAgent, loadSnapshot, workspaceId]);
+  }, [editingAgent, loadSnapshot, managerAgentId, workspaceId]);
 
   const handleFormClose = useCallback(() => {
     setIsFormOpen(false);

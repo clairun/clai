@@ -1487,9 +1487,27 @@ pub async fn workspace_get_snapshot(
     state: State<'_, AppState>,
     pool: State<'_, DbPool>,
 ) -> Result<WorkspaceSnapshot, String> {
-    let descriptor = resolve_workspace_descriptor(state.inner(), workspace_id)?;
+    let mut descriptor = resolve_workspace_descriptor(state.inner(), workspace_id)?;
     if let Some(root_path) = &descriptor.root_path {
         ensure_agent_workspace_root(root_path)?;
+    }
+
+    // `resolve_workspace_descriptor` is sync and synthesizes a placeholder
+    // title for any non-default workspace. The real, user-editable title lives
+    // in the `workspaces` table — load it here so renames via
+    // `workspace_set_title` actually surface in the snapshot.
+    if descriptor.workspace_id != DEFAULT_WORKSPACE_ID {
+        if let Ok(Some(db_title)) = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT title FROM workspaces WHERE id = ? LIMIT 1",
+        )
+        .bind(&descriptor.workspace_id)
+        .fetch_optional(pool.inner())
+        .await
+        {
+            if let Some(title) = db_title {
+                descriptor.title = title;
+            }
+        }
     }
 
     let provider_selection =
@@ -2372,6 +2390,36 @@ pub async fn workspace_delete(workspace_id: String, pool: State<'_, DbPool>) -> 
     }
 
     tracing::info!(workspace_id = %workspace_id, "Deleted general workspace");
+
+    Ok(())
+}
+
+/// Rename a workspace (updates the `title` column).
+#[tauri::command]
+pub async fn workspace_set_title(
+    workspace_id: String,
+    title: String,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("Workspace name cannot be empty.".to_string());
+    }
+    if trimmed.chars().count() > 100 {
+        return Err("Workspace name must be 100 characters or less.".to_string());
+    }
+
+    let result = sqlx::query("UPDATE workspaces SET title = ?, updated_at = ? WHERE id = ?")
+        .bind(trimmed)
+        .bind(now_millis())
+        .bind(&workspace_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to rename workspace: {}", e))?;
+
+    if result.rows_affected() == 0 {
+        return Err(format!("Workspace {} not found.", workspace_id));
+    }
 
     Ok(())
 }
