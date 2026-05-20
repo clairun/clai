@@ -483,18 +483,12 @@ mod tests {
 
     #[test]
     fn logical_and_splits() {
-        assert_eq!(
-            split("a && b"),
-            vec![simple("a"), simple("b")]
-        );
+        assert_eq!(split("a && b"), vec![simple("a"), simple("b")]);
     }
 
     #[test]
     fn logical_or_splits() {
-        assert_eq!(
-            split("a || b"),
-            vec![simple("a"), simple("b")]
-        );
+        assert_eq!(split("a || b"), vec![simple("a"), simple("b")]);
     }
 
     #[test]
@@ -507,18 +501,12 @@ mod tests {
 
     #[test]
     fn background_amp_splits() {
-        assert_eq!(
-            split("cmd1 & cmd2"),
-            vec![simple("cmd1"), simple("cmd2")]
-        );
+        assert_eq!(split("cmd1 & cmd2"), vec![simple("cmd1"), simple("cmd2")]);
     }
 
     #[test]
     fn pipe_stderr_splits() {
-        assert_eq!(
-            split("a |& b"),
-            vec![simple("a"), simple("b")]
-        );
+        assert_eq!(split("a |& b"), vec![simple("a"), simple("b")]);
     }
 
     #[test]
@@ -531,10 +519,7 @@ mod tests {
 
     #[test]
     fn repeated_separators_no_empty_segments() {
-        assert_eq!(
-            split("a ;;; b"),
-            vec![simple("a"), simple("b")]
-        );
+        assert_eq!(split("a ;;; b"), vec![simple("a"), simple("b")]);
     }
 
     #[test]
@@ -555,26 +540,17 @@ mod tests {
 
     #[test]
     fn double_quoted_pipe_not_split() {
-        assert_eq!(
-            split(r#"echo "a | b""#),
-            vec![simple(r#"echo "a | b""#)]
-        );
+        assert_eq!(split(r#"echo "a | b""#), vec![simple(r#"echo "a | b""#)]);
     }
 
     #[test]
     fn single_quoted_pipe_not_split() {
-        assert_eq!(
-            split("echo 'a | b'"),
-            vec![simple("echo 'a | b'")]
-        );
+        assert_eq!(split("echo 'a | b'"), vec![simple("echo 'a | b'")]);
     }
 
     #[test]
     fn escaped_pipe_not_split() {
-        assert_eq!(
-            split(r"echo a\|b"),
-            vec![simple(r"echo a\|b")]
-        );
+        assert_eq!(split(r"echo a\|b"), vec![simple(r"echo a\|b")]);
     }
 
     #[test]
@@ -592,26 +568,17 @@ mod tests {
 
     #[test]
     fn redirect_out_marks_opaque() {
-        assert_eq!(
-            split("cat foo > bar"),
-            vec![opaque("cat foo > bar")]
-        );
+        assert_eq!(split("cat foo > bar"), vec![opaque("cat foo > bar")]);
     }
 
     #[test]
     fn append_redirect_marks_opaque() {
-        assert_eq!(
-            split("echo hi >> log"),
-            vec![opaque("echo hi >> log")]
-        );
+        assert_eq!(split("echo hi >> log"), vec![opaque("echo hi >> log")]);
     }
 
     #[test]
     fn stderr_redirect_marks_opaque() {
-        assert_eq!(
-            split("cmd 2> errlog"),
-            vec![opaque("cmd 2> errlog")]
-        );
+        assert_eq!(split("cmd 2> errlog"), vec![opaque("cmd 2> errlog")]);
     }
 
     #[test]
@@ -625,26 +592,17 @@ mod tests {
 
     #[test]
     fn ampersand_gt_redirect_opaque() {
-        assert_eq!(
-            split("cmd &> log"),
-            vec![opaque("cmd &> log")]
-        );
+        assert_eq!(split("cmd &> log"), vec![opaque("cmd &> log")]);
     }
 
     #[test]
     fn here_string_opaque() {
-        assert_eq!(
-            split("cmd <<< hello"),
-            vec![opaque("cmd <<< hello")]
-        );
+        assert_eq!(split("cmd <<< hello"), vec![opaque("cmd <<< hello")]);
     }
 
     #[test]
     fn heredoc_opaque() {
-        assert_eq!(
-            split("cat <<EOF"),
-            vec![opaque("cat <<EOF")]
-        );
+        assert_eq!(split("cat <<EOF"), vec![opaque("cat <<EOF")]);
     }
 
     // -----------------------------------------------------------------
@@ -662,10 +620,7 @@ mod tests {
 
     #[test]
     fn backtick_substitution_opaque() {
-        assert_eq!(
-            split("echo `date`"),
-            vec![opaque("echo `date`")]
-        );
+        assert_eq!(split("echo `date`"), vec![opaque("echo `date`")]);
     }
 
     #[test]
@@ -678,36 +633,24 @@ mod tests {
 
     #[test]
     fn brace_group_opaque() {
-        assert_eq!(
-            split("{ a; b; }"),
-            vec![opaque("{ a; b; }")]
-        );
+        assert_eq!(split("{ a; b; }"), vec![opaque("{ a; b; }")]);
     }
 
     #[test]
     fn process_substitution_opaque() {
-        assert_eq!(
-            split("diff <(a) <(b)"),
-            vec![opaque("diff <(a) <(b)")]
-        );
+        assert_eq!(split("diff <(a) <(b)"), vec![opaque("diff <(a) <(b)")]);
     }
 
     #[test]
     fn parameter_expansion_is_simple() {
         // ${VAR} is variable expansion, not opaque.
-        assert_eq!(
-            split("echo ${HOME}/bin"),
-            vec![simple("echo ${HOME}/bin")]
-        );
+        assert_eq!(split("echo ${HOME}/bin"), vec![simple("echo ${HOME}/bin")]);
     }
 
     #[test]
     fn arithmetic_expansion_is_simple() {
         // $((1+2)) is arithmetic, not opaque.
-        assert_eq!(
-            split("echo $((1+2))"),
-            vec![simple("echo $((1+2))")]
-        );
+        assert_eq!(split("echo $((1+2))"), vec![simple("echo $((1+2))")]);
     }
 
     // -----------------------------------------------------------------
@@ -761,35 +704,23 @@ mod tests {
 
     #[test]
     fn eval_opaque() {
-        assert_eq!(
-            split(r#"eval "$cmd""#),
-            vec![opaque(r#"eval "$cmd""#)]
-        );
+        assert_eq!(split(r#"eval "$cmd""#), vec![opaque(r#"eval "$cmd""#)]);
     }
 
     #[test]
     fn watch_opaque() {
-        assert_eq!(
-            split("watch -n 1 'ls'"),
-            vec![opaque("watch -n 1 'ls'")]
-        );
+        assert_eq!(split("watch -n 1 'ls'"), vec![opaque("watch -n 1 'ls'")]);
     }
 
     #[test]
     fn time_opaque() {
-        assert_eq!(
-            split("time make build"),
-            vec![opaque("time make build")]
-        );
+        assert_eq!(split("time make build"), vec![opaque("time make build")]);
     }
 
     #[test]
     fn env_opaque() {
         // env runs another binary; conservative Opaque.
-        assert_eq!(
-            split("env -i mycmd"),
-            vec![opaque("env -i mycmd")]
-        );
+        assert_eq!(split("env -i mycmd"), vec![opaque("env -i mycmd")]);
     }
 
     #[test]
@@ -802,10 +733,7 @@ mod tests {
 
     #[test]
     fn dot_source_opaque() {
-        assert_eq!(
-            split(". ./setup.sh"),
-            vec![opaque(". ./setup.sh")]
-        );
+        assert_eq!(split(". ./setup.sh"), vec![opaque(". ./setup.sh")]);
     }
 
     // -----------------------------------------------------------------
@@ -824,10 +752,7 @@ mod tests {
 
     #[test]
     fn multi_env_prefix_remains_simple() {
-        assert_eq!(
-            split("A=1 B=2 git log"),
-            vec![simple("A=1 B=2 git log")]
-        );
+        assert_eq!(split("A=1 B=2 git log"), vec![simple("A=1 B=2 git log")]);
     }
 
     // -----------------------------------------------------------------
@@ -900,10 +825,7 @@ mod tests {
         // the default. Either way, the saved `git log` prefix never
         // approves the `rm` segment.
         let segs = split("git log | rm -rf ~/");
-        assert_eq!(
-            segs,
-            vec![simple("git log"), simple("rm -rf ~/")]
-        );
+        assert_eq!(segs, vec![simple("git log"), simple("rm -rf ~/")]);
     }
 
     // -----------------------------------------------------------------

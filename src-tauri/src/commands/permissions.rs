@@ -230,7 +230,10 @@ pub async fn list_pending_permission_requests(
     state: State<'_, AppState>,
     workspace_id: String,
 ) -> Result<Vec<PermissionRequest>, String> {
-    Ok(state.pending_approvals.list_for_workspace(&workspace_id).await)
+    Ok(state
+        .pending_approvals
+        .list_for_workspace(&workspace_id)
+        .await)
 }
 
 /// Tauri command — invoked by the frontend modal when the user submits
@@ -285,10 +288,7 @@ pub fn persist_decisions(
                 }
                 // Reconcile: drop the same prefix from blocklist.
                 let before = perms.shell.blocked_command_prefixes.len();
-                perms
-                    .shell
-                    .blocked_command_prefixes
-                    .retain(|p| p != prefix);
+                perms.shell.blocked_command_prefixes.retain(|p| p != prefix);
                 if perms.shell.blocked_command_prefixes.len() != before {
                     changed = true;
                 }
@@ -311,10 +311,7 @@ pub fn persist_decisions(
                     continue;
                 }
                 let before = perms.shell.allowed_command_prefixes.len();
-                perms
-                    .shell
-                    .allowed_command_prefixes
-                    .retain(|p| p != prefix);
+                perms.shell.allowed_command_prefixes.retain(|p| p != prefix);
                 if perms.shell.allowed_command_prefixes.len() != before {
                     changed = true;
                 }
@@ -351,11 +348,7 @@ pub fn persist_decisions(
 
 /// Emits the per-workspace pending-count update so the fleet card UI can
 /// render a badge.
-pub fn emit_attention(
-    app: &tauri::AppHandle,
-    workspace_id: Option<String>,
-    pending_count: u32,
-) {
+pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pending_count: u32) {
     let payload = AttentionUpdate {
         workspace_id,
         pending_count,
@@ -454,10 +447,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         persist_decisions(
             tmp.path(),
-            &[
-                SegmentDecision::AllowOnce,
-                SegmentDecision::DenyOnce,
-            ],
+            &[SegmentDecision::AllowOnce, SegmentDecision::DenyOnce],
         )
         .unwrap();
         let perms = load(tmp.path());

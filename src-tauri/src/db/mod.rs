@@ -1000,17 +1000,12 @@ async fn split_workspace_agent_prefixes(pool: &DbPool) -> Result<(), String> {
             }
         };
 
-        let Some(shell) = execution
-            .get_mut("shell")
-            .and_then(|v| v.as_object_mut())
-        else {
+        let Some(shell) = execution.get_mut("shell").and_then(|v| v.as_object_mut()) else {
             continue;
         };
 
-        let changed_allow =
-            split_prefix_array(shell, "allowedCommandPrefixes", split_command);
-        let changed_block =
-            split_prefix_array(shell, "blockedCommandPrefixes", split_command);
+        let changed_allow = split_prefix_array(shell, "allowedCommandPrefixes", split_command);
+        let changed_block = split_prefix_array(shell, "blockedCommandPrefixes", split_command);
         if !changed_allow && !changed_block {
             continue;
         }
@@ -1343,11 +1338,12 @@ mod tests {
     }
 
     async fn read_agent_execution(pool: &DbPool, id: &str) -> serde_json::Value {
-        let json: String = sqlx::query_scalar("SELECT execution FROM workspace_agents WHERE id = ?")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+        let json: String =
+            sqlx::query_scalar("SELECT execution FROM workspace_agents WHERE id = ?")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
         serde_json::from_str(&json).unwrap()
     }
 
@@ -1509,7 +1505,10 @@ mod tests {
         split_workspace_agent_prefixes(&pool).await.unwrap();
 
         let exec = read_agent_execution(&pool, "a").await;
-        assert_eq!(exec.pointer("/shell/futureField"), Some(&serde_json::json!(42)));
+        assert_eq!(
+            exec.pointer("/shell/futureField"),
+            Some(&serde_json::json!(42))
+        );
         assert_eq!(
             exec.pointer("/unknownTopLevel"),
             Some(&serde_json::Value::String("keep me".to_string()))

@@ -332,8 +332,14 @@ async fn execute_bash_exec(
             return Err(message);
         }
         PolicyResult::NeedsApproval(segments) => {
-            await_user_permission(deps, context, &params.command, segments, workspace_root.clone())
-                .await?;
+            await_user_permission(
+                deps,
+                context,
+                &params.command,
+                segments,
+                workspace_root.clone(),
+            )
+            .await?;
         }
     }
 
@@ -1654,8 +1660,8 @@ mod tests {
         .unwrap();
 
         let exec = restricted_execution_config(&["git"], &[]);
-        let err = enforce_command_policy(&exec, Some(temp.path()), "git push origin main")
-            .unwrap_err();
+        let err =
+            enforce_command_policy(&exec, Some(temp.path()), "git push origin main").unwrap_err();
         assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
     }
 
@@ -1676,12 +1682,8 @@ mod tests {
         .unwrap();
 
         let exec = restricted_execution_config(&[], &["kubectl delete"]);
-        let err = enforce_command_policy(
-            &exec,
-            Some(temp.path()),
-            "kubectl delete pod my-app",
-        )
-        .unwrap_err();
+        let err = enforce_command_policy(&exec, Some(temp.path()), "kubectl delete pod my-app")
+            .unwrap_err();
         assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
     }
 
@@ -1716,8 +1718,7 @@ mod tests {
     fn policy_pipeline_denies_when_any_segment_unmatched() {
         // `git log` is allowed, but `obscure-tool` isn't.
         let exec = restricted_execution_config(&["git log"], &[]);
-        let err =
-            enforce_command_policy(&exec, None, "git log | obscure-tool").unwrap_err();
+        let err = enforce_command_policy(&exec, None, "git log | obscure-tool").unwrap_err();
         assert!(matches!(err, CommandDenial::NotInAllowList(_)));
         // Denial should specifically reference the unapproved segment.
         let msg = err.message();
