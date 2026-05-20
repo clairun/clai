@@ -607,6 +607,45 @@ fn build_system_prompt(
         current_datetime
     ));
 
+    // Role-identity callout: if this session belongs to the workspace's
+    // default manager AND there are non-manager members in the team,
+    // put a short "you are the manager, here are your members" header
+    // ABOVE the tool list. Without this, LLMs frequently hallucinate
+    // their own toolset on the first turn ("I don't have reviewer
+    // agents available") despite the team being listed lower down in
+    // the prompt. Placing role identity first keeps the model from
+    // framing itself as a solo assistant.
+    let is_manager_session = context
+        .workspace_agents
+        .iter()
+        .any(|a| a.is_default && Some(a.id.as_str()) == context.automation_id.as_deref());
+    let member_agents: Vec<&crate::assistant::types::WorkspaceAgentSummary> = context
+        .workspace_agents
+        .iter()
+        .filter(|a| !a.is_default)
+        .collect();
+    if is_manager_session && !member_agents.is_empty() {
+        prompt.push_str(
+            "## Your Role\n\
+             You are the **manager** of this workspace. The user talks to you; you decide how the work gets done. \
+             You have member agents available for delegation via `workspace_assignTask` — prefer delegating specialized work to them over doing it yourself, then poll `workspace_getTaskResult` for the outcome. \
+             The roster below is your team; you do not need to call `workspace_listAgents` to confirm it.\n\n\
+             Member agents you can delegate to:\n",
+        );
+        for agent in &member_agents {
+            let summary = agent
+                .description
+                .as_deref()
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or("(no description)");
+            prompt.push_str(&format!(
+                "- **{}** ({}): {}\n",
+                agent.display_name, agent.role, summary
+            ));
+        }
+        prompt.push('\n');
+    }
+
     if !tool_names.is_empty() {
         prompt.push_str("You have the following tools available:\n");
         for td in tool_defs {
