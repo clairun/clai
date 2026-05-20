@@ -466,7 +466,13 @@ async fn ensure_background_session(
         execution: agent_config.execution.clone(),
         netdata_conversation_id: None,
         automation_id: Some(agent_config.id.clone()),
-        agent_workspace_id: Some(agent_config.id.clone()),
+        // Despite the misleading name, `agent_workspace_id` is the *workspace*
+        // id the tools use to derive the on-disk working directory. Setting it
+        // to the agent's own id meant periodic runs wrote to a per-agent dir
+        // that the workspace UI never enumerates — manifesting as the
+        // "0 memories" inconsistency. On-demand chats already pass workspace_id
+        // here via `desired_workspace_context`; this matches them.
+        agent_workspace_id: Some(agent_config.workspace_id.clone()),
         automation_name: Some(agent_config.name.clone()),
         automation_description: Some(automation_description),
         inter_agent_call: None,

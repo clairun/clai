@@ -420,7 +420,7 @@ async fn execute_bash_exec(
 
 fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant>, String> {
     let mut grants = vec![ResolvedGrant {
-        root: ensure_agent_workspace_root(context)?,
+        root: ensure_workspace_root(context)?,
         access: AccessKind::ReadWrite,
     }];
 
@@ -604,7 +604,7 @@ fn resolve_grant(grant: &FilesystemPathGrant) -> Result<ResolvedGrant, String> {
     })
 }
 
-fn ensure_agent_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
+fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
     let automation_id = context.agent_workspace_id.as_deref();
     let automation_id = automation_id.ok_or_else(|| {
         "Agent workspace is unavailable because this session is not tied to an automation"
@@ -633,7 +633,7 @@ fn resolve_shell_cwd(
     context: &ToolExecutionContext,
     requested_cwd: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let agent_workspace = ensure_agent_workspace_root(context)?;
+    let agent_workspace = ensure_workspace_root(context)?;
     let base = requested_cwd.unwrap_or(".");
 
     let cwd = if base == "." {

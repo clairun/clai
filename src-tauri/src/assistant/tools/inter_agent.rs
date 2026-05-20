@@ -176,7 +176,7 @@ pub async fn execute(
             context: SessionContext {
                 space_id: context.space_id.clone(),
                 room_id: context.room_id.clone(),
-                workspace_id: Some(target_config.id.clone()),
+                workspace_id: Some(target_config.workspace_id.clone()),
                 tab_id: None,
                 tool_scopes: target_config
                     .required_tools()
@@ -187,7 +187,10 @@ pub async fn execute(
                 execution: target_config.execution.clone(),
                 netdata_conversation_id: None,
                 automation_id: Some(target_config.id.clone()),
-                agent_workspace_id: Some(target_config.id.clone()),
+                // Same workspace, same on-disk root as the caller. Tools
+                // dispatched from the assignee write into the workspace's
+                // shared dir, not the assignee's per-agent scratch.
+                agent_workspace_id: Some(target_config.workspace_id.clone()),
                 automation_name: Some(target_config.name.clone()),
                 automation_description: Some(target_config.description.clone()),
                 inter_agent_call: Some(InterAgentCallContext {

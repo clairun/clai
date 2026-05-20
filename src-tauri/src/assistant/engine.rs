@@ -699,12 +699,13 @@ fn build_system_prompt(
         prompt.push_str("\n## Local Execution Capabilities\n");
         if let Some(workspace_root) = agent_workspace_root_for_id(agent_workspace_id) {
             prompt.push_str(&format!(
-                "- Private agent workspace: `{}` (read_write, default shell cwd)\n",
+                "- Workspace filesystem root: `{}` (read_write, default shell cwd). This directory is shared with other agents in the same workspace.\n",
                 workspace_root.display()
             ));
         } else {
-            prompt
-                .push_str("- Private agent workspace: available (read_write, default shell cwd)\n");
+            prompt.push_str(
+                "- Workspace filesystem root: available (read_write, default shell cwd). Shared with other agents in the same workspace.\n",
+            );
         }
 
         if context.execution.filesystem.extra_paths.is_empty() {
