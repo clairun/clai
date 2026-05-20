@@ -1369,17 +1369,72 @@ fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<Provider
                 });
             }
             MessageRole::Tool => {
-                if !tool_message_has_matching_assistant(&msg.content, &out) {
+                // Find the assistant message that owns this tool_call_id
+                // ANYWHERE in `out`, not just at the tail. This handles the
+                // common-but-recently-painful case where a user typed a
+                // message between an assistant's tool_calls and the tool
+                // results landing — previously the predecessor check
+                // failed, the tool result got dropped, and the next
+                // provider call rejected the orphan tool_calls.
+                //
+                // When we do find the owning assistant, we insert the tool
+                // message right after it (and after any already-emitted
+                // sibling tool messages for the same group). The user
+                // messages that were between get pushed past the tool
+                // block — i.e., the assistant→tool invariant is preserved
+                // at the cost of slightly delaying the user's interjection
+                // in the provider's view. Same outcome a proper "queue
+                // user messages while the LLM is running" UI would have
+                // produced.
+                let Some(target_tool_call_id) = msg.content.iter().find_map(|part| match part {
+                    ContentPart::ToolResult { tool_call_id, .. } => Some(tool_call_id.clone()),
+                    _ => None,
+                }) else {
                     tracing::warn!(
                         message_id = %msg.id,
-                        "Dropping orphan tool message (no matching tool_use in preceding assistant)"
+                        "Dropping tool message with no ToolResult part"
                     );
                     continue;
-                }
-                out.push(ProviderInputMessage {
-                    role: MessageRole::Tool,
-                    content: msg.content.clone(),
+                };
+
+                let owning_assistant_idx = out.iter().rposition(|m| {
+                    m.role == MessageRole::Assistant
+                        && m.content.iter().any(|p| {
+                            matches!(p, ContentPart::ToolUse { tool_call_id: id, .. }
+                                if id == &target_tool_call_id)
+                        })
                 });
+
+                let Some(idx) = owning_assistant_idx else {
+                    tracing::warn!(
+                        message_id = %msg.id,
+                        tool_call_id = %target_tool_call_id,
+                        "Dropping orphan tool message (no assistant in history claims this tool_call_id)"
+                    );
+                    continue;
+                };
+
+                // Skip past any tool messages already attached to this
+                // assistant's group, so a multi-tool-call group accumulates
+                // its results in order.
+                let mut insert_at = idx + 1;
+                while insert_at < out.len() && out[insert_at].role == MessageRole::Tool {
+                    insert_at += 1;
+                }
+                if insert_at == out.len() {
+                    out.push(ProviderInputMessage {
+                        role: MessageRole::Tool,
+                        content: msg.content.clone(),
+                    });
+                } else {
+                    out.insert(
+                        insert_at,
+                        ProviderInputMessage {
+                            role: MessageRole::Tool,
+                            content: msg.content.clone(),
+                        },
+                    );
+                }
             }
             MessageRole::User => {
                 if let Some(last) = out.last_mut() {
@@ -1414,32 +1469,6 @@ fn assistant_content_is_empty(content: &[ContentPart]) -> bool {
         ContentPart::Thinking { text } => text.is_empty(),
         ContentPart::ToolUse { .. } | ContentPart::ToolResult { .. } => false,
     })
-}
-
-fn tool_message_has_matching_assistant(
-    content: &[ContentPart],
-    out: &[ProviderInputMessage],
-) -> bool {
-    let Some(tool_call_id) = content.iter().find_map(|part| match part {
-        ContentPart::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
-        _ => None,
-    }) else {
-        return false;
-    };
-
-    for msg in out.iter().rev() {
-        match msg.role {
-            MessageRole::Assistant => {
-                return msg.content.iter().any(|part| {
-                    matches!(part, ContentPart::ToolUse { tool_call_id: id, .. } if id == tool_call_id)
-                });
-            }
-            MessageRole::Tool => continue,
-            _ => return false,
-        }
-    }
-
-    false
 }
 
 fn append_text_with_separator(target: &mut Vec<ContentPart>, source: &[ContentPart]) {
