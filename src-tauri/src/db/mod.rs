@@ -1004,12 +1004,16 @@ async fn canonicalize_legacy_tool_names(pool: &DbPool) -> Result<(), String> {
     }
 
     // 2. JSON blob rewrite for content parts.
-    let rows: Vec<(String, String)> = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, content_json FROM assistant_messages",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to read assistant_messages for tool-name migration: {}", e))?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as::<_, (String, String)>("SELECT id, content_json FROM assistant_messages")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to read assistant_messages for tool-name migration: {}",
+                    e
+                )
+            })?;
 
     let mut blob_updates = 0_u32;
     for (id, content_json) in rows {
@@ -1685,12 +1689,11 @@ mod tests {
 
         canonicalize_legacy_tool_names(&pool).await.unwrap();
 
-        let names: Vec<String> = sqlx::query_scalar(
-            "SELECT tool_name FROM assistant_tool_calls ORDER BY id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let names: Vec<String> =
+            sqlx::query_scalar("SELECT tool_name FROM assistant_tool_calls ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(
             names,
             vec![
