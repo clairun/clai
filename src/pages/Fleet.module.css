@@ -541,8 +541,9 @@
 
 .taskAttentionPreview {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
   min-width: 0;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
@@ -550,20 +551,59 @@
   border: 1px solid var(--color-warning-border);
 }
 
-.taskAttentionBadge {
-  flex-shrink: 0;
+.attentionPills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attentionPill {
+  padding: 2px 8px;
+  border-radius: var(--badge-radius);
   font-size: 10px;
   font-weight: 700;
-  color: var(--color-warning-dark);
-  text-transform: uppercase;
   letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.attentionPill_attention {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-dark);
+  border: 1px solid var(--color-warning-border);
+}
+
+.attentionPill_critical {
+  background: var(--color-critical-bg);
+  color: var(--color-critical-dark);
+  border: 1px solid var(--color-critical-border);
 }
 
 .taskAttentionText {
   min-width: 0;
   font-size: 11px;
   color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+/* Running dot reuses the same teal as .workspaceCardProcessing's pulse
+ * ring; critical reuses the red from .workspaceCardAttention's pulse.
+ * Idle is intentionally neutral grey (not green) — healthy and accent
+ * tokens resolve to the same teal as running, which would collide. */
+.statusDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+}
+
+.statusDot_idle      { background: var(--color-text-tertiary); }
+.statusDot_running   { background: var(--color-accent-dark); }
+.statusDot_attention { background: var(--color-warning-dark); }
+.statusDot_critical  { background: var(--color-critical); }
 
 /* ============================================
    STATUS PILLS (semantic colors)

@@ -15,15 +15,13 @@ const REFRESH_INTERVAL_MS = 5000;
 const EMPTY_TOOL_CALLS = [];
 const EMPTY_STREAMING = {};
 
-const formatTimestamp = (timestamp) => {
-  if (!timestamp) return '';
-  const date = new Date(timestamp);
-  return date.toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+const formatNextRun = (seconds) => {
+  if (seconds == null) return '';
+  if (seconds <= 0) return 'Due now';
+  if (seconds < 60) return `Next run in ${seconds}s`;
+  if (seconds < 3600) return `Next run in ${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `Next run in ${Math.floor(seconds / 3600)}h`;
+  return `Next run in ${Math.floor(seconds / 86400)}d`;
 };
 
 const TASK_STATUS_LABEL = {
@@ -31,6 +29,30 @@ const TASK_STATUS_LABEL = {
   failed: 'Failed',
   needs_user_input: 'Needs input',
 };
+
+const CARD_STATUS_LABEL = {
+  idle: 'Idle',
+  running: 'Running',
+  attention: 'Needs attention',
+  critical: 'Failed task',
+};
+
+const deriveCardStatus = (ws, isProcessing, hasPendingApprovals) => {
+  if ((ws.failedTaskCount || 0) > 0) return 'critical';
+  if (
+    hasPendingApprovals ||
+    (ws.blockedTaskCount || 0) > 0 ||
+    (ws.needsUserInputTaskCount || 0) > 0
+  ) return 'attention';
+  if (isProcessing) return 'running';
+  return 'idle';
+};
+
+const ATTENTION_PILLS = [
+  { key: 'failed', countField: 'failedTaskCount', label: 'failed', tone: 'critical' },
+  { key: 'blocked', countField: 'blockedTaskCount', label: 'blocked', tone: 'attention' },
+  { key: 'needs_input', countField: 'needsUserInputTaskCount', label: 'needs input', tone: 'attention' },
+];
 
 const Fleet = () => {
   const navigate = useNavigate();
@@ -306,6 +328,12 @@ const Fleet = () => {
             const isProcessing =
               (ws.runningTaskCount || 0) > 0 || (activeRunsByWorkspace[ws.id] || 0) > 0;
             const hasPendingApprovals = (pendingPermissionCounts[ws.id] || 0) > 0;
+            const cardStatus = deriveCardStatus(ws, isProcessing, hasPendingApprovals);
+            const attentionPills = ATTENTION_PILLS
+              .map((p) => ({ ...p, count: ws[p.countField] || 0 }))
+              .filter((p) => p.count > 0);
+            const showNextRun =
+              ws.scheduleEnabled && typeof ws.nextRunInSeconds === 'number';
             const classes = [styles.workspaceCard];
             if (isSelected) classes.push(styles.workspaceCardSelected);
             if (isProcessing) classes.push(styles.workspaceCardProcessing);
@@ -321,6 +349,11 @@ const Fleet = () => {
               >
                 <div className={styles.cardHeader}>
                   <div className={styles.cardTitleBlock}>
+                    <span
+                      className={`${styles.statusDot} ${styles[`statusDot_${cardStatus}`]}`}
+                      aria-hidden="true"
+                      title={CARD_STATUS_LABEL[cardStatus]}
+                    />
                     <span className={styles.cardTitle}>{ws.title}</span>
                     {ws.scheduleEnabled ? (
                       <span className={`${styles.workspaceBadge} ${styles.workspaceBadgePeriodic}`}>
@@ -375,11 +408,18 @@ const Fleet = () => {
                   <span>{ws.assignedAgentCount || 0} agents</span>
                   {ws.runningTaskCount > 0 && <span>{ws.runningTaskCount} running</span>}
                 </div>
-                {(ws.attentionTaskCount || 0) > 0 && (
+                {attentionPills.length > 0 && (
                   <div className={styles.taskAttentionPreview}>
-                    <span className={styles.taskAttentionBadge}>
-                      {ws.attentionTaskCount} task{ws.attentionTaskCount === 1 ? '' : 's'} need attention
-                    </span>
+                    <div className={styles.attentionPills}>
+                      {attentionPills.map((pill) => (
+                        <span
+                          key={pill.key}
+                          className={`${styles.attentionPill} ${styles[`attentionPill_${pill.tone}`]}`}
+                        >
+                          {pill.count} {pill.label}
+                        </span>
+                      ))}
+                    </div>
                     {ws.latestAttentionTaskTitle && (
                       <span className={styles.taskAttentionText}>
                         {ws.latestAttentionTaskTitle}
@@ -387,9 +427,11 @@ const Fleet = () => {
                     )}
                   </div>
                 )}
-                <div className={styles.workspaceTime}>
-                  {formatTimestamp(ws.updatedAt || ws.createdAt)}
-                </div>
+                {showNextRun && (
+                  <div className={styles.workspaceTime}>
+                    {formatNextRun(ws.nextRunInSeconds)}
+                  </div>
+                )}
               </div>
             );
           })}

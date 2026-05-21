@@ -2175,6 +2175,12 @@ pub struct WorkspaceListEntry {
     pub schedule_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interval_minutes: Option<u32>,
+    // Seconds until the next scheduled run for this workspace's manager
+    // agent, read live from the in-memory scheduler. None when the
+    // scheduler has no entry for the manager (e.g. workspace was created
+    // this session — the scheduler is only populated at startup).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_run_in_seconds: Option<u64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -2309,6 +2315,19 @@ pub async fn workspace_list(
     .await
     .map_err(|e| format!("Failed to list workspaces: {}", e))?;
 
+    // Snapshot the scheduler once so each card can show a live "next run
+    // in Xm" countdown without N lock acquisitions. Keyed by agent_id —
+    // for workspaces, that's the manager workspace_agent's row id
+    // (init.rs:populate_scheduler_from_workspace_agents registers with
+    // workspace_agents.id as both the definition id and instance agent_id).
+    let scheduler_seconds: HashMap<String, u64> = {
+        let scheduler = state.scheduler.lock().await;
+        scheduler
+            .all_instances()
+            .map(|instance| (instance.agent_id.clone(), instance.seconds_until_next_run()))
+            .collect()
+    };
+
     for (id, kind, title, created_at, updated_at) in rows {
         let root = agent_workspace_root_for_id(&id);
         let (artifact_count, memory_count) = root
@@ -2323,26 +2342,40 @@ pub async fn workspace_list(
         // Look up the workspace's default manager agent and read its schedule
         // fields. Empty/missing => schedule_enabled = false. We don't error
         // out if the lookup fails — the Fleet list should always populate.
-        let (schedule_enabled, interval_minutes) =
-            match workspace_default_agent_id(pool.inner(), &id).await {
-                Ok(Some(manager_id)) => {
-                    let row: Option<(i64, i64)> = sqlx::query_as(
-                        "SELECT schedule_enabled, interval_minutes \
+        let manager_id = workspace_default_agent_id(pool.inner(), &id)
+            .await
+            .ok()
+            .flatten();
+        let (schedule_enabled, interval_minutes) = match manager_id.as_deref() {
+            Some(manager_id) => {
+                let row: Option<(i64, i64)> = sqlx::query_as(
+                    "SELECT schedule_enabled, interval_minutes \
                          FROM workspace_agents WHERE id = ? LIMIT 1",
-                    )
-                    .bind(&manager_id)
-                    .fetch_optional(pool.inner())
-                    .await
-                    .unwrap_or(None);
-                    match row {
-                        Some((enabled, interval)) if enabled != 0 => {
-                            (true, Some(u32::try_from(interval).unwrap_or(0)))
-                        }
-                        _ => (false, None),
+                )
+                .bind(manager_id)
+                .fetch_optional(pool.inner())
+                .await
+                .unwrap_or(None);
+                match row {
+                    Some((enabled, interval)) if enabled != 0 => {
+                        (true, Some(u32::try_from(interval).unwrap_or(0)))
                     }
+                    _ => (false, None),
                 }
-                _ => (false, None),
-            };
+            }
+            None => (false, None),
+        };
+
+        // Only surface next_run for actually-scheduled workspaces. Workspaces
+        // whose manager isn't in the scheduler map (created mid-session, or
+        // schedule disabled) get None — the FE hides the countdown then.
+        let next_run_in_seconds = if schedule_enabled {
+            manager_id
+                .as_deref()
+                .and_then(|mid| scheduler_seconds.get(mid).copied())
+        } else {
+            None
+        };
 
         entries.push(WorkspaceListEntry {
             id,
@@ -2367,6 +2400,7 @@ pub async fn workspace_list(
             latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
             schedule_enabled,
             interval_minutes,
+            next_run_in_seconds,
             created_at,
             updated_at,
         });
