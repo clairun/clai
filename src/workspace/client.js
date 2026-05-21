@@ -93,6 +93,10 @@ export async function deleteWorkspace(workspaceId) {
   return invoke('workspace_delete', { workspaceId });
 }
 
+export async function runWorkspaceNow(workspaceId) {
+  return invoke('workspace_run_now', { workspaceId });
+}
+
 export async function setWorkspaceTitle(workspaceId, title) {
   return invoke('workspace_set_title', { workspaceId, title });
 }

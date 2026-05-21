@@ -2412,6 +2412,44 @@ pub async fn workspace_list(
     Ok(entries)
 }
 
+/// Trigger an immediate run of the workspace's manager agent. Mirrors
+/// `fleet_run_now`, but takes a workspace id instead of an agent id so the
+/// Fleet UI's workspace cards (which don't carry the manager agent id in
+/// the list payload) can wire a "run now" action without an extra lookup.
+#[tauri::command]
+pub async fn workspace_run_now(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    let manager_id = workspace_default_agent_id(pool.inner(), &workspace_id)
+        .await?
+        .ok_or_else(|| "Workspace has no manager agent.".to_string())?;
+
+    // The scheduler only registers agents whose schedule is enabled. An
+    // explicit enabled/disabled check up front gives a clearer error than
+    // the generic "no scheduler instance" message that `force_ready`
+    // returns for unscheduled agents.
+    let enabled: Option<i64> =
+        sqlx::query_scalar("SELECT enabled FROM workspace_agents WHERE id = ? LIMIT 1")
+            .bind(&manager_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| format!("Failed to load manager agent: {}", e))?;
+    match enabled {
+        None => return Err("Manager agent not found.".to_string()),
+        Some(0) => return Err("Manager agent is disabled. Enable it first.".to_string()),
+        Some(_) => {}
+    }
+
+    let mut scheduler = state.scheduler.lock().await;
+    if scheduler.force_ready(&manager_id) {
+        Ok(())
+    } else {
+        Err("Agent is currently running or is not scheduled.".to_string())
+    }
+}
+
 /// Delete a general workspace — removes metadata, session data, and filesystem root.
 #[tauri::command]
 pub async fn workspace_delete(workspace_id: String, pool: State<'_, DbPool>) -> Result<(), String> {

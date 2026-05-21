@@ -230,8 +230,8 @@
    * consume the slack, growing 280px→~360px and visually "refactoring"
    * the view. Now selection just changes how many cards fit per row;
    * each card stays put. */
-  grid-template-columns: repeat(auto-fill, 300px);
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, 340px);
+  gap: 14px;
   align-content: start;
   padding-right: 4px;
 }
@@ -593,6 +593,7 @@
  * Idle is intentionally neutral grey (not green) — healthy and accent
  * tokens resolve to the same teal as running, which would collide. */
 .statusDot {
+  position: relative;
   flex-shrink: 0;
   width: 8px;
   height: 8px;
@@ -604,6 +605,25 @@
 .statusDot_running   { background: var(--color-accent-dark); }
 .statusDot_attention { background: var(--color-warning-dark); }
 .statusDot_critical  { background: var(--color-critical); }
+
+/* Live activity feedback — only on the running dot, kept local so it
+ * can't visually compete with attention/critical signals on cards that
+ * are simultaneously running. The expanding ring animates *out from*
+ * the dot itself, scaling against the dot's own color. */
+.statusDot_running::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 2px solid var(--color-accent-dark);
+  opacity: 0.6;
+  animation: statusDotPulse 1.8s ease-out infinite;
+}
+
+@keyframes statusDotPulse {
+  0%   { transform: scale(0.6); opacity: 0.7; }
+  100% { transform: scale(1.9); opacity: 0; }
+}
 
 /* ============================================
    STATUS PILLS (semantic colors)
@@ -1041,14 +1061,30 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px 16px 14px;
+  gap: 14px;
+  padding: 18px 18px 16px 22px; /* extra left padding to clear accent bar */
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-xl);
   background: var(--color-bg-elevated);
   cursor: pointer;
   text-align: left;
+  overflow: hidden; /* clip the left accent bar to the rounded corners */
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
+}
+
+/* Left accent bar — replaces the older overlapping pulse rings. Color is
+ * set per-state via --card-accent so only one tone shows at any time;
+ * the bar can't blend with anything because nothing else paints in that
+ * column. */
+.workspaceCard::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--card-accent, transparent);
+  transition: background var(--transition-fast);
 }
 
 .workspaceCard:hover {
@@ -1110,56 +1146,14 @@
   background: color-mix(in srgb, var(--color-primary) 4%, var(--color-bg-elevated));
 }
 
-/* Soft teal ring while an assistant run is in flight in this workspace
- * (scheduled task or user-driven chat). Rendered as a pseudo-element
- * so it composes with the selected-card indigo border instead of
- * fighting it. Teal/accent is intentionally distinct from indigo
- * (selected) and red (needs approval). */
-.workspaceCardProcessing {
-  position: relative;
-}
-
-.workspaceCardProcessing::after {
-  content: '';
-  position: absolute;
-  inset: -3px;
-  /* Card uses --radius-xl (16px); ring is offset 3px outward, so its
-   * outer corner radius must be card-radius + offset for the curvature
-   * to read as concentric. */
-  border-radius: calc(var(--radius-xl) + 3px);
-  border: 2px solid var(--color-accent-alpha-40);
-  pointer-events: none;
-  opacity: 0;
-  animation: workspaceProcessingPulse 2.4s ease-in-out infinite;
-}
-
-@keyframes workspaceProcessingPulse {
-  0%, 100% { opacity: 0; }
-  50% { opacity: 1; }
-}
-
-/* Red ring on cards with pending shell-permission requests. Faster
- * tempo than processing (more urgent). Stacks under the badge so both
- * signals can be read at a glance. */
-.workspaceCardAttention {
-  position: relative;
-}
-
-.workspaceCardAttention::before {
-  content: '';
-  position: absolute;
-  inset: -3px;
-  border-radius: calc(var(--radius-xl) + 3px);
-  border: 2px solid rgba(220, 38, 38, 0.55);
-  pointer-events: none;
-  opacity: 0;
-  animation: workspaceAttentionPulse 1.6s ease-in-out infinite;
-}
-
-@keyframes workspaceAttentionPulse {
-  0%, 100% { opacity: 0; }
-  50% { opacity: 1; }
-}
+/* Card state — drives the left accent bar via --card-accent. Priority is
+ * baked into deriveCardStatus on the JS side (critical > attention >
+ * running > idle), so we apply exactly one of these classes per card.
+ * No more overlapping pulse rings mixing colors. */
+.workspaceCardState_running   { --card-accent: var(--color-accent); }
+.workspaceCardState_attention { --card-accent: var(--color-warning); }
+.workspaceCardState_critical  { --card-accent: var(--color-critical); }
+/* idle: no accent (bar stays transparent) */
 
 .workspaceBadgePeriodic {
   background: var(--color-primary-alpha-08);
@@ -1171,12 +1165,6 @@
   background: rgba(248, 113, 113, 0.12);
   color: #f87171;
   border: 1px solid rgba(248, 113, 113, 0.4);
-  animation: permissionPulse 2s ease-in-out infinite;
-}
-
-@keyframes permissionPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
 }
 
 .cardHeaderActions {
@@ -1209,6 +1197,34 @@
 .openBtn:hover {
   background: var(--color-primary-alpha-08);
   color: var(--color-primary);
+}
+
+/* Run-now button: unlike open/delete (hover-revealed), this one is the
+ * primary action for periodic workspaces and is always visible so it's
+ * discoverable. Accent-colored to flag it as the "live" affordance. */
+.runNowBtn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-accent-alpha-30, rgba(0, 171, 148, 0.28));
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-alpha-08, rgba(0, 171, 148, 0.08));
+  color: var(--color-accent-dark);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+}
+
+.runNowBtn:hover:not(:disabled) {
+  background: var(--color-accent-alpha-20, rgba(0, 171, 148, 0.18));
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.runNowBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* Detail-pane slide-in. Keyed on selectedWorkspace.id, so picking a different

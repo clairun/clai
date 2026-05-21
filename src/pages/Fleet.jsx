@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { useAssistantStore } from '../assistant';
-import { listWorkspaces, deleteWorkspace, getWorkspaceSnapshot } from '../workspace/client';
+import { listWorkspaces, deleteWorkspace, getWorkspaceSnapshot, runWorkspaceNow } from '../workspace/client';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import { useFleet } from '../contexts/FleetContext';
@@ -221,6 +221,24 @@ const Fleet = () => {
     }
   }, [loadWorkspaces, selectedWorkspaceId]);
 
+  // Track the workspace whose "run now" is in flight so we can disable the
+  // button and avoid double-firing. The scheduler itself refuses a second
+  // force_ready while a run is active, but UI feedback should reflect that
+  // before the round-trip completes.
+  const [runNowBusyId, setRunNowBusyId] = useState(null);
+  const handleRunNow = useCallback(async (id) => {
+    if (!id || runNowBusyId) return;
+    setRunNowBusyId(id);
+    try {
+      await runWorkspaceNow(id);
+      setError('');
+    } catch (err) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to start run.');
+    } finally {
+      setRunNowBusyId(null);
+    }
+  }, [runNowBusyId]);
+
   // Length-aware fallback: `[] || x` evaluates to `[]` in JS, so a bare
   // `||` chain masks the snapshot data whenever the store holds an empty
   // stub (created by session_created -> initSession). The snapshot
@@ -375,10 +393,16 @@ const Fleet = () => {
               .filter((p) => p.count > 0);
             const showNextRun =
               ws.scheduleEnabled && typeof ws.nextRunInSeconds === 'number';
-            const classes = [styles.workspaceCard];
+            // Card state is single-valued (priority-ordered in
+            // deriveCardStatus), so we apply ONE state class — replacing
+            // the older dual-ring approach where `workspaceCardProcessing`
+            // and `workspaceCardAttention` could both be active and their
+            // overlapping pulse animations muddied each other's color.
+            const classes = [
+              styles.workspaceCard,
+              styles[`workspaceCardState_${cardStatus}`],
+            ];
             if (isSelected) classes.push(styles.workspaceCardSelected);
-            if (isProcessing) classes.push(styles.workspaceCardProcessing);
-            if (hasPendingApprovals) classes.push(styles.workspaceCardAttention);
             return (
               <div
                 key={ws.id}
@@ -413,6 +437,29 @@ const Fleet = () => {
                     )}
                   </div>
                   <div className={styles.cardHeaderActions}>
+                    {ws.scheduleEnabled && (
+                      <button
+                        type="button"
+                        className={styles.runNowBtn}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRunNow(ws.id);
+                        }}
+                        disabled={isProcessing || runNowBusyId === ws.id}
+                        title={
+                          isProcessing
+                            ? 'Already running'
+                            : runNowBusyId === ws.id
+                            ? 'Starting…'
+                            : 'Run now'
+                        }
+                        aria-label="Run now"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      </button>
+                    )}
                     <button
                       type="button"
                       className={styles.openBtn}
