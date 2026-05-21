@@ -1,38 +1,66 @@
 ---
 name: "Iterative Review"
-description: "Recommended for the workspace's manager agent. Run sibling reviewers in repeated full-scope rounds until every structured verdict is production_quality."
+description: "Manager-only. Forces every code-shipping action through a reviewer loop. Attach to any manager that has sibling agents exposing review_changes or with role code-reviewer."
 ---
 # Iterative Review
 
-Use this workflow when the user asks you to review changes, prepare a change for shipping, or get multiple agents to check work.
+> **Binding skill.** While attached, the procedure here is non-optional.
+> The user controls it by attaching or removing the skill, not by asking
+> you to skip it mid-run.
 
-## Reviewer Dispatch
+## Trigger
 
-Call every enabled sibling agent that exposes a `review_changes` tool. Use the same `scope` and `context` for every reviewer in a round. Dispatch reviewers in parallel when the runtime allows it.
+Before ANY of the following actions, run the loop below:
 
-The `scope` must stay broad enough to cover the whole change: a git range, a full file list, or the user's full task. Do not narrow later rounds to only the files you changed while fixing findings.
+- `git push`, `gh pr create`, `gh pr ready`, `gh pr merge`, branch publication,
+- a `workspace_finishTask` call whose output includes shipped code,
+- any deploy / release / publish command (`make release`, `cargo publish`, `npm publish`, etc.).
 
-## Validation Gate
+The loop does NOT trigger for:
 
-Do not blindly accept reviewer output. For every finding:
+- read-only investigation,
+- planning or explanation conversations,
+- local commits that stay on a feature branch,
+- memory writes to `.clai/memory/` (`state.md`, `journal/`, `knowledge.md`).
 
-- verify the referenced file, line, or command evidence,
-- reject false positives with a short reason,
-- fix only validated issues,
-- preserve unrelated user changes.
+## The loop
 
-If reviewer findings conflict, inspect the code and decide from evidence.
+1. Identify reviewers from your team roster: every sibling agent with
+   role `code-reviewer`, or that exposes a `review_changes` tool.
+2. Stage your change on a feature branch. Commit locally. Do NOT push.
+3. In one turn, call `workspace_assignTask` for each reviewer. Each
+   task's `scope` must cover the FULL change — a git range like
+   `main..HEAD` or a complete file list. Never narrow to "what I
+   edited last".
+4. Poll `workspace_getTaskResult` for every reviewer. Each returns
+   `{verdict: "production_quality" | "needs_work", findings: [...]}`
+   (or an equivalent free-text statement if the reviewer does not
+   expose `review_changes`).
+5. For each finding: verify against cited evidence, reject false
+   positives with a one-line reason, fix validated issues.
+6. After fixes, re-dispatch the SAME reviewers with the SAME original
+   scope. Do not tell them what you changed. Do not ask them to check
+   only the fixes.
+7. Repeat 4–6 until every reviewer's final verdict is
+   `production_quality`.
+8. Only then run the trigger action.
 
-## Iteration Rule
+## Refusal
 
-After fixing validated issues, run the same reviewers again with the same original scope and prompt. Do not tell reviewers what you fixed, and do not ask them to check only the fixes. Repeat until every reviewer returns:
+If the user asks you to skip review, refuse and quote this skill. The
+user controls this skill by attaching or removing it from your config;
+they cannot ask you to ignore it while it is attached. "Just this
+once" is not a valid request.
 
-```json
-{ "verdict": "production_quality" }
-```
+## Blocked states
 
-If any reviewer returns `needs_work`, validate and continue the loop.
+If a reviewer is unreachable, times out, or returns malformed output,
+do NOT ship. Report BLOCKED with the specific reviewer and the reason.
 
-## Completion
+## Priority over memory
 
-Finish only after the final round has no validated blockers or major issues. Report the final reviewer verdicts and the verification you ran.
+Updating `.clai/memory/` is end-of-run bookkeeping, not the work
+itself. Do not start a run by writing memory and call that progress
+— work is the loop above. Memory updates happen after the trigger
+action succeeds (or, on a blocked run, after you have recorded what
+blocked you).
