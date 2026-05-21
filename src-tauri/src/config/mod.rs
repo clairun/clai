@@ -609,4 +609,258 @@ mod tests {
         assert!(prompt.contains("## Selected Skills"));
         assert!(prompt.contains("Review with care."));
     }
+
+    // -------------------------------------------------------------------
+    // front_matter_field
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn front_matter_field_reads_unquoted_value() {
+        let content = "---\nname: Iterative Review\ndescription: Loop reviewers\n---\nBody";
+        assert_eq!(
+            front_matter_field(content, "name"),
+            Some("Iterative Review".to_string())
+        );
+        assert_eq!(
+            front_matter_field(content, "description"),
+            Some("Loop reviewers".to_string())
+        );
+    }
+
+    #[test]
+    fn front_matter_field_strips_double_and_single_quotes() {
+        let content = "---\nname: \"Quoted Name\"\ndescription: 'Single quoted'\n---\n";
+        assert_eq!(
+            front_matter_field(content, "name"),
+            Some("Quoted Name".to_string())
+        );
+        assert_eq!(
+            front_matter_field(content, "description"),
+            Some("Single quoted".to_string())
+        );
+    }
+
+    #[test]
+    fn front_matter_field_returns_none_without_opening_delimiter() {
+        let content = "name: Not Frontmatter\n# Heading\nBody";
+        assert_eq!(front_matter_field(content, "name"), None);
+    }
+
+    #[test]
+    fn front_matter_field_returns_none_for_missing_key() {
+        let content = "---\nname: Only Name\n---\n";
+        assert_eq!(front_matter_field(content, "description"), None);
+    }
+
+    #[test]
+    fn front_matter_field_filters_empty_values() {
+        let content = "---\nname:\ndescription: \"\"\n---\n";
+        assert_eq!(front_matter_field(content, "name"), None);
+        assert_eq!(front_matter_field(content, "description"), None);
+    }
+
+    #[test]
+    fn front_matter_field_stops_at_closing_delimiter() {
+        // A field with the same key after the closing `---` must not be picked up.
+        let content = "---\nname: First\n---\nname: Second\n";
+        assert_eq!(
+            front_matter_field(content, "name"),
+            Some("First".to_string())
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // skill_name_from_content
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn skill_name_prefers_front_matter_over_heading() {
+        let content = "---\nname: \"From Front\"\n---\n# From Heading\n";
+        assert_eq!(
+            skill_name_from_content(content),
+            Some("From Front".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_falls_back_to_first_h1() {
+        let content = "# My Skill\nSome body text.\n";
+        assert_eq!(
+            skill_name_from_content(content),
+            Some("My Skill".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_returns_none_when_missing() {
+        let content = "Just some prose without a heading.\n";
+        assert_eq!(skill_name_from_content(content), None);
+    }
+
+    #[test]
+    fn skill_name_ignores_empty_h1() {
+        // A `# ` with nothing after should not become the name.
+        let content = "# \nReal body.\n";
+        assert_eq!(skill_name_from_content(content), None);
+    }
+
+    // -------------------------------------------------------------------
+    // skill_description_from_content
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn skill_description_prefers_front_matter() {
+        let content =
+            "---\ndescription: \"From front matter\"\n---\n# Heading\nLong prose paragraph.\n";
+        assert_eq!(
+            skill_description_from_content(content),
+            Some("From front matter".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_description_falls_back_to_first_prose_line() {
+        // No front matter, first non-empty non-heading line without `:`.
+        let content = "# Heading\nThis is a body paragraph.\nSecond line.\n";
+        assert_eq!(
+            skill_description_from_content(content),
+            Some("This is a body paragraph.".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_description_truncates_at_240_chars() {
+        // Build a 300-char prose line; expect exactly 240 chars back.
+        let long_prose = "a".repeat(300);
+        let content = format!("# Heading\n{}\n", long_prose);
+        let desc = skill_description_from_content(&content).expect("description");
+        assert_eq!(desc.chars().count(), 240);
+        assert!(desc.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn skill_description_returns_none_for_only_heading() {
+        let content = "# Just a heading\n";
+        assert_eq!(skill_description_from_content(content), None);
+    }
+
+    // -------------------------------------------------------------------
+    // should_skip_skill_dir
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn should_skip_skill_dir_blocks_well_known_dirs() {
+        for name in [
+            ".git",
+            "node_modules",
+            "target",
+            "dist",
+            "build",
+            ".venv",
+            "venv",
+        ] {
+            assert!(
+                should_skip_skill_dir(Path::new(name)),
+                "expected {} to be skipped",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn should_skip_skill_dir_allows_normal_dirs() {
+        assert!(!should_skip_skill_dir(Path::new("code-review")));
+        assert!(!should_skip_skill_dir(Path::new("nested/dir")));
+    }
+
+    // -------------------------------------------------------------------
+    // discover_skills_with_diagnostics
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn discover_skills_emits_disabled_diagnostic() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut source = SkillSourceConfig::new_local(
+            "Disabled".to_string(),
+            temp_dir.path().display().to_string(),
+        );
+        source.enabled = false;
+        let mut config = ClaiConfig::default();
+        config.skill_sources.push(source);
+
+        let (skills, diagnostics) = discover_skills_with_diagnostics(&config);
+        assert!(skills.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics[0].ok);
+        assert_eq!(diagnostics[0].skill_count, 0);
+        assert_eq!(
+            diagnostics[0].message.as_deref(),
+            Some("Source is disabled.")
+        );
+    }
+
+    #[test]
+    fn discover_skills_emits_missing_path_diagnostic() {
+        let mut config = ClaiConfig::default();
+        config.skill_sources.push(SkillSourceConfig::new_local(
+            "Ghost".to_string(),
+            "/definitely/does/not/exist/clai-qa-bogus".to_string(),
+        ));
+
+        let (skills, diagnostics) = discover_skills_with_diagnostics(&config);
+        assert!(skills.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(!diagnostics[0].ok);
+        assert!(diagnostics[0]
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("does not exist"));
+    }
+
+    #[test]
+    fn discover_skills_sorts_results_case_insensitively() {
+        let temp_dir = TempDir::new().unwrap();
+        let zeta = temp_dir.path().join("zeta");
+        let alpha = temp_dir.path().join("alpha");
+        std::fs::create_dir_all(&zeta).unwrap();
+        std::fs::create_dir_all(&alpha).unwrap();
+        std::fs::write(zeta.join("SKILL.md"), "# Zeta Skill\nBody.\n").unwrap();
+        std::fs::write(alpha.join("SKILL.md"), "# alpha skill\nBody.\n").unwrap();
+
+        let mut config = ClaiConfig::default();
+        config.skill_sources.push(SkillSourceConfig::new_local(
+            "Two".to_string(),
+            temp_dir.path().display().to_string(),
+        ));
+
+        let skills = discover_skills(&config).unwrap();
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].name, "alpha skill");
+        assert_eq!(skills[1].name, "Zeta Skill");
+    }
+
+    // -------------------------------------------------------------------
+    // agent_instructions_with_skills
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn agent_instructions_returns_base_when_no_skills_selected() {
+        let config = ClaiConfig::default();
+        let agent = AgentConfig::new("R".to_string(), "BASE-PROMPT".to_string(), 5);
+        let prompt = agent_instructions_with_skills(&config, &agent);
+        assert_eq!(prompt, "BASE-PROMPT");
+        assert!(!prompt.contains("Selected Skills"));
+    }
+
+    #[test]
+    fn agent_instructions_returns_base_when_selected_id_is_unknown() {
+        // Stale skill id in agent config must not corrupt the prompt — it
+        // should silently fall through to the base description.
+        let config = ClaiConfig::default();
+        let mut agent = AgentConfig::new("R".to_string(), "BASE".to_string(), 5);
+        agent.selected_skill_ids = vec!["nonexistent:skill-id".to_string()];
+        let prompt = agent_instructions_with_skills(&config, &agent);
+        assert_eq!(prompt, "BASE");
+    }
 }
