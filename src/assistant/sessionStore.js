@@ -85,6 +85,22 @@ const useAssistantStore = create(
           // longer working."
         }),
 
+      // Mid-turn content swap: replaces the message's persisted content
+      // (Claude Code emits tool_use parts as the run progresses, so we
+      // flush them to the assistant message immediately for live
+      // rendering) without clearing the streamingText buffer the way
+      // `completeMessage` does — text deltas may still be flowing for
+      // a later text block in the same turn.
+      updateMessageContent: (sessionId, message) =>
+        set((state) => {
+          const s = state.sessions[sessionId];
+          if (!s) return;
+          const idx = s.messages.findIndex((m) => m.id === message.id);
+          if (idx >= 0) {
+            s.messages[idx] = message;
+          }
+        }),
+
       setRunStatus: (sessionId, run) =>
         set((state) => {
           const s = state.sessions[sessionId];

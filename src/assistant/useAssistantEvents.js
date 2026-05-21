@@ -59,6 +59,14 @@ export function useAssistantEvents() {
           store.completeMessage(sessionId, payload.message);
           break;
 
+        case 'assistant_message_updated':
+          // Mid-turn content flush from local_agent's persist_tool_use —
+          // refresh message.content so the chat picks up the new
+          // tool_use parts without waiting for the run-terminal
+          // assistant_message_completed.
+          store.updateMessageContent(sessionId, payload.message);
+          break;
+
         case 'tool_call_started':
         case 'tool_call_completed':
         case 'tool_call_failed':

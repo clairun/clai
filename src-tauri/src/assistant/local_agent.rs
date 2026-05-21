@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -17,10 +17,12 @@ use crate::assistant::engine::{
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::CLAUDE_CODE_PROVIDER_ID;
-use crate::assistant::repository::{self, CreateMessageParams, CreateRunParams};
+use crate::assistant::repository::{
+    self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
+};
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, ContentPart, MessageRole, ProviderConnection,
-    ProviderInputMessage, RunNotice, RunStatus, RunUsage,
+    ProviderInputMessage, RunNotice, RunStatus, RunUsage, ToolCallStatus,
 };
 
 const CLAUDE_DISABLED_TOOLS: &str = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,NotebookRead,LSP";
@@ -315,8 +317,7 @@ async fn run_claude_turn(
         .take()
         .ok_or_else(|| LocalAgentRunError::failed("Claude stdout was not captured"))?;
     let mut lines = BufReader::new(stdout).lines();
-    let mut accumulated_text = String::new();
-    let mut accumulated_thinking = String::new();
+    let mut state = ClaudeStreamState::new();
     let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
 
@@ -324,14 +325,8 @@ async fn run_claude_turn(
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
-                finalize_assistant_message(
-                    deps,
-                    session,
-                    run_id,
-                    &assistant_message,
-                    &accumulated_text,
-                    &accumulated_thinking,
-                ).await?;
+                finalize_assistant_message(deps, session, run_id, &assistant_message, &state)
+                    .await?;
                 return Err(LocalAgentRunError::Cancelled { usage });
             }
             next = lines.next_line() => next
@@ -353,8 +348,7 @@ async fn run_claude_turn(
             run_id,
             &assistant_message,
             &value,
-            &mut accumulated_text,
-            &mut accumulated_thinking,
+            &mut state,
             &mut usage,
             &mut result_error,
         )
@@ -365,15 +359,7 @@ async fn run_claude_turn(
         .wait()
         .await
         .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    finalize_assistant_message(
-        deps,
-        session,
-        run_id,
-        &assistant_message,
-        &accumulated_text,
-        &accumulated_thinking,
-    )
-    .await?;
+    finalize_assistant_message(deps, session, run_id, &assistant_message, &state).await?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -451,6 +437,82 @@ async fn system_prompt_text(
     provider_message_text(&build_system_prompt(&session.context, &tool_defs, trigger))
 }
 
+/// In-flight state of a Claude Code stream.
+///
+/// The stream interleaves text, thinking, and tool_use content blocks
+/// (each indexed by `content_block` index). To preserve order in the
+/// persisted assistant message we keep a single ordered `Vec<ContentPart>`
+/// and remember which content_block index maps to which open part.
+///
+/// `persisted_tool_use_ids` lets us safely consume tool_use blocks from
+/// either the streamed (`stream_event` deltas) or the complete
+/// (`"type":"assistant"`) message envelope without double-persisting.
+/// `pending_tool_results` buffers `tool_result` blocks that arrive
+/// before their `tool_use` (rare, but possible when Claude Code emits
+/// tool_use only in the complete assistant message): we replay the
+/// buffer as soon as the matching tool_use is registered.
+struct ClaudeStreamState {
+    parts: Vec<ContentPart>,
+    open_blocks: HashMap<u64, OpenBlock>,
+    persisted_tool_use_ids: std::collections::HashSet<String>,
+    pending_tool_results: HashMap<String, Value>,
+}
+
+enum OpenBlock {
+    /// Text block currently being streamed. Deltas append to
+    /// `parts[parts_index]`.
+    Text { parts_index: usize },
+    /// Thinking block currently being streamed. Deltas append to
+    /// `parts[parts_index]`.
+    Thinking { parts_index: usize },
+    /// Tool-use block being streamed. JSON input chunks accumulate in
+    /// `accumulated_json` until `content_block_stop`, at which point we
+    /// parse it, persist the tool_call record with the Claude-supplied
+    /// `tool_call_id`, and push a `ContentPart::ToolUse` onto `parts`.
+    ToolUse {
+        tool_call_id: String,
+        tool_name: String,
+        accumulated_json: String,
+    },
+}
+
+impl ClaudeStreamState {
+    fn new() -> Self {
+        Self {
+            parts: Vec::new(),
+            open_blocks: HashMap::new(),
+            persisted_tool_use_ids: std::collections::HashSet::new(),
+            pending_tool_results: HashMap::new(),
+        }
+    }
+
+    /// True iff the message accumulated any prose (non-empty Text part).
+    /// Used by the `result` fallback to decide whether to inject the
+    /// `result` summary text.
+    fn has_text(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, ContentPart::Text { text } if !text.is_empty()))
+    }
+
+    fn last_part_is_text(&self) -> bool {
+        matches!(self.parts.last(), Some(ContentPart::Text { .. }))
+    }
+
+    fn last_part_text_ends_with(&self, suffix: &str) -> bool {
+        match self.parts.last() {
+            Some(ContentPart::Text { text }) => text.ends_with(suffix),
+            _ => false,
+        }
+    }
+
+    fn append_to_last_text(&mut self, extra: &str) {
+        if let Some(ContentPart::Text { text }) = self.parts.last_mut() {
+            text.push_str(extra);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_claude_event(
     deps: &AssistantDeps,
@@ -458,86 +520,76 @@ async fn handle_claude_event(
     run_id: &str,
     assistant_message: &AssistantMessage,
     value: &Value,
-    accumulated_text: &mut String,
-    accumulated_thinking: &mut String,
+    state: &mut ClaudeStreamState,
     usage: &mut Option<RunUsage>,
     result_error: &mut Option<String>,
 ) -> Result<(), LocalAgentRunError> {
+    let top_type = value.get("type").and_then(Value::as_str).unwrap_or("?");
+    // Verbose trace of every event Claude Code emits. Filed under
+    // `claude_stream` so it can be enabled in isolation
+    // (RUST_LOG=claude_stream=debug) without flooding the rest of the
+    // crate's logs. Use info-level for the top-level type tag so it's
+    // visible at default log levels too, and debug-level for the full
+    // payload (turned on only when we're hunting tool/format issues).
+    tracing::info!(
+        target: "claude_stream",
+        run_id = %run_id,
+        top_type = %top_type,
+        "Claude Code event"
+    );
+    tracing::debug!(
+        target: "claude_stream",
+        run_id = %run_id,
+        top_type = %top_type,
+        payload = %value,
+        "Claude Code event payload"
+    );
     match value.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
             let event = value.get("event").unwrap_or(&Value::Null);
-            match event.get("type").and_then(Value::as_str) {
-                Some("content_block_start") => {
-                    let block = event.get("content_block").unwrap_or(&Value::Null);
-                    if block.get("type").and_then(Value::as_str) == Some("text")
-                        && !accumulated_text.is_empty()
-                        && !accumulated_text.ends_with("\n\n")
-                    {
-                        let separator = if accumulated_text.ends_with('\n') {
-                            "\n"
-                        } else {
-                            "\n\n"
-                        };
-                        accumulated_text.push_str(separator);
-                        let _ = emit_event(
-                            &deps.app,
-                            session,
-                            Some(run_id),
-                            AssistantUiEvent::AssistantDelta {
-                                message_id: assistant_message.id.clone(),
-                                text: separator.to_string(),
-                            },
-                        );
+            handle_stream_event(
+                deps,
+                session,
+                run_id,
+                assistant_message,
+                event,
+                state,
+                usage,
+            )
+            .await?;
+        }
+        Some("assistant") => {
+            // Complete (non-partial) assistant message. We treat this
+            // as the authoritative source of tool_use blocks — Claude
+            // Code's `--include-partial-messages` is documented to
+            // stream partial *text* deltas, but tool_use blocks may
+            // only appear in this complete envelope. Adopting tool_use
+            // blocks here, idempotent against the stream-event path
+            // (skip ids we already saw), guarantees we never miss them.
+            let message = value.get("message").unwrap_or(&Value::Null);
+            adopt_complete_assistant_message(
+                deps,
+                session,
+                run_id,
+                assistant_message,
+                message,
+                state,
+            )
+            .await?;
+        }
+        Some("user") => {
+            // Claude Code reports tool execution outputs by emitting the
+            // matching tool_result blocks inside a synthesized `user`
+            // message in the stream. We close out the corresponding
+            // tool_call records here.
+            let message = value.get("message").unwrap_or(&Value::Null);
+            if let Some(content) = message.get("content").and_then(Value::as_array) {
+                for block in content {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                        continue;
                     }
+                    handle_tool_result(deps, session, run_id, state, block).await?;
                 }
-                Some("content_block_delta") => {
-                    let delta = event.get("delta").unwrap_or(&Value::Null);
-                    match delta.get("type").and_then(Value::as_str) {
-                        Some("text_delta") => {
-                            if let Some(text) = delta.get("text").and_then(Value::as_str) {
-                                accumulated_text.push_str(text);
-                                let _ = emit_event(
-                                    &deps.app,
-                                    session,
-                                    Some(run_id),
-                                    AssistantUiEvent::AssistantDelta {
-                                        message_id: assistant_message.id.clone(),
-                                        text: text.to_string(),
-                                    },
-                                );
-                            }
-                        }
-                        Some("thinking_delta") | Some("signature_delta") => {
-                            if let Some(text) = delta
-                                .get("thinking")
-                                .or_else(|| delta.get("text"))
-                                .and_then(Value::as_str)
-                            {
-                                accumulated_thinking.push_str(text);
-                                let _ = emit_event(
-                                    &deps.app,
-                                    session,
-                                    Some(run_id),
-                                    AssistantUiEvent::AssistantThinkingDelta {
-                                        message_id: assistant_message.id.clone(),
-                                        text: text.to_string(),
-                                    },
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Some("message_start") | Some("message_delta") => {
-                    if let Some(parsed) = usage_from_value(
-                        event
-                            .get("usage")
-                            .or_else(|| event.get("message").and_then(|m| m.get("usage"))),
-                    ) {
-                        *usage = Some(parsed);
-                    }
-                }
-                _ => {}
             }
         }
         Some("result") => {
@@ -561,9 +613,13 @@ async fn handle_claude_event(
                         .unwrap_or("Claude Code run failed")
                         .to_string(),
                 );
-            } else if accumulated_text.is_empty() {
+            } else if !state.has_text() {
                 if let Some(text) = value.get("result").and_then(Value::as_str) {
-                    accumulated_text.push_str(text);
+                    // Open a fresh text part for the trailing summary so
+                    // it doesn't get appended to a stale tool_use part.
+                    state.parts.push(ContentPart::Text {
+                        text: text.to_string(),
+                    });
                     let _ = emit_event(
                         &deps.app,
                         session,
@@ -591,23 +647,561 @@ async fn handle_claude_event(
     Ok(())
 }
 
+async fn handle_stream_event(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    assistant_message: &AssistantMessage,
+    event: &Value,
+    state: &mut ClaudeStreamState,
+    usage: &mut Option<RunUsage>,
+) -> Result<(), LocalAgentRunError> {
+    let event_type = event.get("type").and_then(Value::as_str);
+    let block_index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+
+    match event_type {
+        Some("content_block_start") => {
+            let block = event.get("content_block").unwrap_or(&Value::Null);
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    // Consecutive text blocks merge into one Text part
+                    // with a "\n\n" paragraph separator so the
+                    // downstream UI's `getTextContent` (which joins text
+                    // parts with no separator) still renders breaks
+                    // between Claude's individual text emissions.
+                    if state.last_part_is_text() {
+                        let separator = if state.last_part_text_ends_with("\n\n") {
+                            ""
+                        } else if state.last_part_text_ends_with("\n") {
+                            "\n"
+                        } else {
+                            "\n\n"
+                        };
+                        if !separator.is_empty() {
+                            state.append_to_last_text(separator);
+                            let _ = emit_event(
+                                &deps.app,
+                                session,
+                                Some(run_id),
+                                AssistantUiEvent::AssistantDelta {
+                                    message_id: assistant_message.id.clone(),
+                                    text: separator.to_string(),
+                                },
+                            );
+                        }
+                        let parts_index = state.parts.len() - 1;
+                        state
+                            .open_blocks
+                            .insert(block_index, OpenBlock::Text { parts_index });
+                    } else {
+                        state.parts.push(ContentPart::Text {
+                            text: String::new(),
+                        });
+                        let parts_index = state.parts.len() - 1;
+                        state
+                            .open_blocks
+                            .insert(block_index, OpenBlock::Text { parts_index });
+                    }
+                }
+                Some("thinking") => {
+                    state.parts.push(ContentPart::Thinking {
+                        text: String::new(),
+                    });
+                    let parts_index = state.parts.len() - 1;
+                    state
+                        .open_blocks
+                        .insert(block_index, OpenBlock::Thinking { parts_index });
+                }
+                Some("tool_use") => {
+                    let tool_call_id = block
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| Uuid::new_v4().to_string());
+                    let tool_name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    state.open_blocks.insert(
+                        block_index,
+                        OpenBlock::ToolUse {
+                            tool_call_id,
+                            tool_name,
+                            accumulated_json: String::new(),
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        Some("content_block_delta") => {
+            let delta = event.get("delta").unwrap_or(&Value::Null);
+            match delta.get("type").and_then(Value::as_str) {
+                Some("text_delta") => {
+                    if let Some(text) = delta.get("text").and_then(Value::as_str) {
+                        // Route to the Text part that content_block_start
+                        // opened at this block_index. If we never saw a
+                        // start (defensive — rare for Claude Code with
+                        // partial messages enabled), fall back to the
+                        // last Text part or create one.
+                        let parts_index = match state.open_blocks.get(&block_index) {
+                            Some(OpenBlock::Text { parts_index }) => Some(*parts_index),
+                            _ => {
+                                if state.last_part_is_text() {
+                                    Some(state.parts.len() - 1)
+                                } else {
+                                    state.parts.push(ContentPart::Text {
+                                        text: String::new(),
+                                    });
+                                    Some(state.parts.len() - 1)
+                                }
+                            }
+                        };
+                        if let Some(idx) = parts_index {
+                            if let Some(ContentPart::Text { text: t }) = state.parts.get_mut(idx) {
+                                t.push_str(text);
+                            }
+                        }
+                        let _ = emit_event(
+                            &deps.app,
+                            session,
+                            Some(run_id),
+                            AssistantUiEvent::AssistantDelta {
+                                message_id: assistant_message.id.clone(),
+                                text: text.to_string(),
+                            },
+                        );
+                    }
+                }
+                Some("thinking_delta") | Some("signature_delta") => {
+                    if let Some(text) = delta
+                        .get("thinking")
+                        .or_else(|| delta.get("text"))
+                        .and_then(Value::as_str)
+                    {
+                        let parts_index = match state.open_blocks.get(&block_index) {
+                            Some(OpenBlock::Thinking { parts_index }) => Some(*parts_index),
+                            _ => {
+                                if matches!(state.parts.last(), Some(ContentPart::Thinking { .. }))
+                                {
+                                    Some(state.parts.len() - 1)
+                                } else {
+                                    state.parts.push(ContentPart::Thinking {
+                                        text: String::new(),
+                                    });
+                                    Some(state.parts.len() - 1)
+                                }
+                            }
+                        };
+                        if let Some(idx) = parts_index {
+                            if let Some(ContentPart::Thinking { text: t }) =
+                                state.parts.get_mut(idx)
+                            {
+                                t.push_str(text);
+                            }
+                        }
+                        let _ = emit_event(
+                            &deps.app,
+                            session,
+                            Some(run_id),
+                            AssistantUiEvent::AssistantThinkingDelta {
+                                message_id: assistant_message.id.clone(),
+                                text: text.to_string(),
+                            },
+                        );
+                    }
+                }
+                Some("input_json_delta") => {
+                    if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
+                        if let Some(OpenBlock::ToolUse {
+                            accumulated_json, ..
+                        }) = state.open_blocks.get_mut(&block_index)
+                        {
+                            accumulated_json.push_str(partial);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some("content_block_stop") => {
+            if let Some(OpenBlock::ToolUse {
+                tool_call_id,
+                tool_name,
+                accumulated_json,
+            }) = state.open_blocks.remove(&block_index)
+            {
+                if !state.persisted_tool_use_ids.contains(&tool_call_id) {
+                    let params: Value = if accumulated_json.is_empty() {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::from_str(&accumulated_json)
+                            .unwrap_or_else(|_| serde_json::json!({}))
+                    };
+
+                    persist_tool_use(
+                        deps,
+                        session,
+                        run_id,
+                        assistant_message,
+                        state,
+                        &tool_call_id,
+                        &tool_name,
+                        params,
+                    )
+                    .await?;
+                }
+            }
+        }
+        Some("message_start") | Some("message_delta") => {
+            if let Some(parsed) = usage_from_value(
+                event
+                    .get("usage")
+                    .or_else(|| event.get("message").and_then(|m| m.get("usage"))),
+            ) {
+                *usage = Some(parsed);
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Parse a single tool_result content block (from a synthesized "user"
+/// stream message) and close out the matching tool_call record.
+///
+/// If we haven't yet seen the matching `tool_use` (which can happen
+/// when Claude Code emits tool_use only in the trailing
+/// `"type":"assistant"` complete-message envelope rather than as
+/// streamed `content_block_start`/`content_block_stop` deltas), the
+/// raw block is buffered and replayed once `persist_tool_use` registers
+/// the id.
+async fn handle_tool_result(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    state: &mut ClaudeStreamState,
+    block: &Value,
+) -> Result<(), LocalAgentRunError> {
+    let tool_use_id = match block.get("tool_use_id").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => return Ok(()),
+    };
+    if !state.persisted_tool_use_ids.contains(&tool_use_id) {
+        // No matching tool_use yet — buffer and replay later.
+        state
+            .pending_tool_results
+            .insert(tool_use_id, block.clone());
+        return Ok(());
+    }
+    apply_tool_result(deps, session, run_id, &tool_use_id, block).await
+}
+
+/// Persist a tool_use block (from either streamed or complete envelopes)
+/// and emit its `ToolCallStarted` UI event. Idempotent: callers should
+/// guard with `state.persisted_tool_use_ids.contains(id)` before calling,
+/// but if the DB INSERT fails because the row already exists we just
+/// surface the error to the caller (it's unexpected at that point).
+///
+/// Crucially, this also flushes the growing assistant message content
+/// to the DB and emits `AssistantMessageUpdated` so the chat surfaces
+/// tool calls *live*. Without this step, mid-turn tool_use parts
+/// stay in memory only and the UI sees just an empty bubble until the
+/// whole Claude Code turn finalizes — which can take a long time when
+/// Claude makes many tool calls in a row.
+#[allow(clippy::too_many_arguments)]
+async fn persist_tool_use(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    assistant_message: &AssistantMessage,
+    state: &mut ClaudeStreamState,
+    tool_call_id: &str,
+    tool_name: &str,
+    params: Value,
+) -> Result<(), LocalAgentRunError> {
+    let invocation = repository::create_tool_call(
+        &deps.pool,
+        CreateToolCallParams {
+            id: tool_call_id.to_string(),
+            run_id: run_id.to_string(),
+            session_id: session.id.clone(),
+            tool_name: tool_name.to_string(),
+            params: params.clone(),
+            status: ToolCallStatus::Running,
+        },
+    )
+    .await
+    .map_err(LocalAgentRunError::failed)?;
+
+    let _ = emit_event(
+        &deps.app,
+        session,
+        Some(run_id),
+        AssistantUiEvent::ToolCallStarted {
+            tool_call: invocation,
+        },
+    );
+
+    state.parts.push(ContentPart::ToolUse {
+        tool_call_id: tool_call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        arguments: params,
+    });
+    state
+        .persisted_tool_use_ids
+        .insert(tool_call_id.to_string());
+
+    // Flush the running parts vec into the assistant message so the
+    // chat UI's tool_use renderer can pick it up immediately. We drop
+    // empty Text placeholders just like `finalize_assistant_message`
+    // does so the message doesn't render an empty text section
+    // alongside the tool calls.
+    flush_assistant_message_content(deps, session, run_id, assistant_message, state).await?;
+
+    // If a tool_result arrived before this tool_use was registered (e.g.
+    // tool_use only present in the complete assistant message), flush it
+    // now.
+    if let Some(pending) = state.pending_tool_results.remove(tool_call_id) {
+        apply_tool_result(deps, session, run_id, tool_call_id, &pending).await?;
+    }
+
+    Ok(())
+}
+
+/// Push the in-memory `state.parts` to the assistant message row and
+/// emit `AssistantMessageUpdated`. Cheap to call — `update_message_content`
+/// is a single UPDATE — but we only invoke it from sites where the parts
+/// vec actually changed (currently after a tool_use is persisted) to
+/// avoid hammering the DB on every text delta. Errors are downgraded to
+/// warnings so a transient write failure doesn't tear down the whole
+/// run; the final `finalize_assistant_message` is the safety net.
+async fn flush_assistant_message_content(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    assistant_message: &AssistantMessage,
+    state: &ClaudeStreamState,
+) -> Result<(), LocalAgentRunError> {
+    let content: Vec<ContentPart> = state
+        .parts
+        .iter()
+        .filter(|p| !matches!(p, ContentPart::Text { text } if text.is_empty()))
+        .cloned()
+        .collect();
+    if content.is_empty() {
+        return Ok(());
+    }
+    match repository::update_message_content(&deps.pool, &assistant_message.id, &content).await {
+        Ok(updated) => {
+            let _ = emit_event(
+                &deps.app,
+                session,
+                Some(run_id),
+                AssistantUiEvent::AssistantMessageUpdated { message: updated },
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                message_id = %assistant_message.id,
+                "Failed to flush assistant message content mid-turn"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Walks a complete `"type":"assistant"` envelope and consumes any
+/// content blocks the streamed deltas didn't already cover. Tool_use is
+/// the main reason this exists — partial-message streaming in Claude
+/// Code may not include tool_use deltas, so we treat the complete
+/// envelope as authoritative for that. Text/thinking blocks are skipped
+/// here because the streamed path already accumulated them; re-adding
+/// would double up.
+async fn adopt_complete_assistant_message(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    assistant_message: &AssistantMessage,
+    message: &Value,
+    state: &mut ClaudeStreamState,
+) -> Result<(), LocalAgentRunError> {
+    let Some(content) = message.get("content").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for block in content {
+        let Some(block_type) = block.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if block_type != "tool_use" {
+            continue;
+        }
+        let tool_use_id = match block.get("id").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => continue,
+        };
+        if state.persisted_tool_use_ids.contains(&tool_use_id) {
+            continue;
+        }
+        let tool_name = block
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+        persist_tool_use(
+            deps,
+            session,
+            run_id,
+            assistant_message,
+            state,
+            &tool_use_id,
+            &tool_name,
+            input,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Update the persisted tool_call record from a `tool_result` block,
+/// emit the matching `ToolCallCompleted` / `ToolCallFailed` UI event,
+/// and create the Tool-role message whose `ContentPart::ToolResult`
+/// carries the payload the chat UI renders.
+async fn apply_tool_result(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    tool_use_id: &str,
+    block: &Value,
+) -> Result<(), LocalAgentRunError> {
+    let is_error = block
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let payload = block.get("content").cloned().unwrap_or(Value::Null);
+
+    let (status, result_arg, error_arg) = if is_error {
+        let error_text = extract_text_from_tool_result(&payload)
+            .unwrap_or_else(|| "Tool execution failed".to_string());
+        (ToolCallStatus::Failed, None, Some(error_text))
+    } else {
+        (ToolCallStatus::Completed, Some(payload.clone()), None)
+    };
+
+    let updated = match repository::update_tool_call(
+        &deps.pool,
+        tool_use_id,
+        status.clone(),
+        result_arg.as_ref(),
+        error_arg.as_deref(),
+    )
+    .await
+    {
+        Ok(tc) => tc,
+        Err(err) => {
+            tracing::warn!(
+                tool_use_id = %tool_use_id,
+                error = %err,
+                "Claude tool_result update failed even after tool_use was registered"
+            );
+            return Ok(());
+        }
+    };
+
+    let started_at = updated.started_at;
+    let completed_at = updated.completed_at;
+
+    let ui_event = if is_error {
+        AssistantUiEvent::ToolCallFailed { tool_call: updated }
+    } else {
+        AssistantUiEvent::ToolCallCompleted { tool_call: updated }
+    };
+    let _ = emit_event(&deps.app, session, Some(run_id), ui_event);
+
+    let result_message = repository::create_message(
+        &deps.pool,
+        CreateMessageParams {
+            session_id: session.id.clone(),
+            role: MessageRole::Tool,
+            content: vec![ContentPart::ToolResult {
+                tool_call_id: tool_use_id.to_string(),
+                payload,
+                started_at: Some(started_at),
+                completed_at,
+            }],
+            provider_metadata: Some(serde_json::json!({
+                "source": "claude-code",
+            })),
+        },
+    )
+    .await?;
+
+    let _ = emit_event(
+        &deps.app,
+        session,
+        Some(run_id),
+        AssistantUiEvent::MessageCreated {
+            message: result_message,
+        },
+    );
+
+    Ok(())
+}
+
+/// Best-effort extraction of a text representation from a tool_result's
+/// `content` field. Claude Code emits it as either a string or an array
+/// of content blocks (each typically `{ "type": "text", "text": "..." }`).
+fn extract_text_from_tool_result(payload: &Value) -> Option<String> {
+    if let Some(s) = payload.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(arr) = payload.as_array() {
+        let mut buf = String::new();
+        for block in arr {
+            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(t);
+            }
+        }
+        if !buf.is_empty() {
+            return Some(buf);
+        }
+    }
+    None
+}
+
 async fn finalize_assistant_message(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
     assistant_message: &AssistantMessage,
-    accumulated_text: &str,
-    accumulated_thinking: &str,
+    state: &ClaudeStreamState,
 ) -> Result<(), LocalAgentRunError> {
-    let mut content = Vec::new();
-    if !accumulated_thinking.is_empty() {
-        content.push(ContentPart::Thinking {
-            text: accumulated_thinking.to_string(),
+    // Build the final content from the ordered parts vec. Drop empty
+    // Text parts (left over when a turn was purely tool calls — the
+    // assistant_message row was seeded with a placeholder empty Text
+    // that we no longer need). If everything came out empty (e.g. a
+    // run that errored before any content was emitted) we still write
+    // a single empty Text to keep the message row schema consistent
+    // with what the UI expects.
+    let mut content: Vec<ContentPart> = state
+        .parts
+        .iter()
+        .filter(|p| !matches!(p, ContentPart::Text { text } if text.is_empty()))
+        .cloned()
+        .collect();
+    if content.is_empty() {
+        content.push(ContentPart::Text {
+            text: String::new(),
         });
     }
-    content.push(ContentPart::Text {
-        text: accumulated_text.to_string(),
-    });
+
     let updated =
         repository::update_message_content(&deps.pool, &assistant_message.id, &content).await?;
     let _ = emit_event(

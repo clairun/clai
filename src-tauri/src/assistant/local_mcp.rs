@@ -21,12 +21,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::assistant::engine::AssistantDeps;
-use crate::assistant::events::{emit_event, AssistantUiEvent};
-use crate::assistant::repository::{self, CreateMessageParams, CreateToolCallParams};
+use crate::assistant::repository;
 use crate::assistant::tools::{self, ToolExecutionContext};
-use crate::assistant::types::{
-    ContentPart, MessageRole, RunNotice, ToolCallStatus, ToolDefinition,
-};
+use crate::assistant::types::{RunNotice, ToolDefinition};
 use crate::AppState;
 
 static LOCAL_MCP_RUNTIME: OnceLock<tokio::sync::Mutex<Option<Arc<LocalMcpRuntime>>>> =
@@ -208,6 +205,19 @@ impl ServerHandler for ClaiMcpService {
     }
 }
 
+/// Execute the requested tool for a Claude Code MCP call.
+///
+/// This is a silent executor — it does **not** persist tool_call records,
+/// emit ToolCall* UI events, or create Tool-role messages. The Claude
+/// stream parser in `local_agent::handle_claude_event` owns all that
+/// bookkeeping (it sees the matching `tool_use` and `tool_result` blocks
+/// in the stream and uses Claude's `tool_use_id` as the canonical id, so
+/// the chat UI can wire results back to the originating assistant
+/// message). If this function did its own writes we'd end up with two
+/// disconnected tool_call records per invocation — one with a random
+/// UUID from here and one with Claude's id from the stream parser — and
+/// the chat couldn't enrich the assistant's `ContentPart::ToolUse` with
+/// a result.
 async fn execute_bound_tool(
     deps: &AssistantDeps,
     binding: &ToolBinding,
@@ -221,33 +231,15 @@ async fn execute_bound_tool(
     let session = repository::get_session(&deps.pool, &binding.session_id)
         .await?
         .ok_or_else(|| format!("Assistant session not found: {}", binding.session_id))?;
-    let tool_call_id = Uuid::new_v4().to_string();
-    let tool_invocation = repository::create_tool_call(
-        &deps.pool,
-        CreateToolCallParams {
-            id: tool_call_id.clone(),
-            run_id: binding.run_id.clone(),
-            session_id: binding.session_id.clone(),
-            tool_name: tool_name.to_string(),
-            params: params.clone(),
-            status: ToolCallStatus::Running,
-        },
-    )
-    .await?;
-
-    let _ = emit_event(
-        &deps.app,
-        &session,
-        Some(&binding.run_id),
-        AssistantUiEvent::ToolCallStarted {
-            tool_call: tool_invocation.clone(),
-        },
-    );
 
     let tool_context = ToolExecutionContext {
         session_id: binding.session_id.clone(),
         run_id: binding.run_id.clone(),
-        tool_call_id: Some(tool_call_id.clone()),
+        // No tool_call_id here — the stream parser doesn't surface it
+        // through the MCP transport. Inter-agent caller-id telemetry
+        // therefore loses that one link for Claude-CLI sessions; the
+        // tool still executes correctly.
+        tool_call_id: None,
         tab_id: session.tab_id.clone(),
         workspace_id: session.context.workspace_id.clone(),
         space_id: session.context.space_id.clone(),
@@ -261,109 +253,9 @@ async fn execute_bound_tool(
         notices: binding.notices.clone(),
     };
 
-    let result = tokio::select! {
+    tokio::select! {
         _ = binding.cancel_token.cancelled() => Err("run cancelled".to_string()),
         result = tools::execute_tool(deps, &tool_context, tool_name, params) => result,
-    };
-
-    match result {
-        Ok(value) => {
-            let updated = repository::update_tool_call(
-                &deps.pool,
-                &tool_invocation.id,
-                ToolCallStatus::Completed,
-                Some(&value),
-                None,
-            )
-            .await?;
-            let tool_started_at = updated.started_at;
-            let tool_completed_at = updated.completed_at;
-
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&binding.run_id),
-                AssistantUiEvent::ToolCallCompleted { tool_call: updated },
-            );
-
-            let result_message = repository::create_message(
-                &deps.pool,
-                CreateMessageParams {
-                    session_id: binding.session_id.clone(),
-                    role: MessageRole::Tool,
-                    content: vec![ContentPart::ToolResult {
-                        tool_call_id,
-                        payload: value.clone(),
-                        started_at: Some(tool_started_at),
-                        completed_at: tool_completed_at,
-                    }],
-                    provider_metadata: Some(serde_json::json!({
-                        "source": "local_mcp",
-                    })),
-                },
-            )
-            .await?;
-
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&binding.run_id),
-                AssistantUiEvent::MessageCreated {
-                    message: result_message,
-                },
-            );
-
-            Ok(value)
-        }
-        Err(error) => {
-            let updated = repository::update_tool_call(
-                &deps.pool,
-                &tool_invocation.id,
-                ToolCallStatus::Failed,
-                None,
-                Some(&error),
-            )
-            .await?;
-            let tool_started_at = updated.started_at;
-            let tool_completed_at = updated.completed_at;
-
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&binding.run_id),
-                AssistantUiEvent::ToolCallFailed { tool_call: updated },
-            );
-
-            let error_payload = serde_json::json!({ "error": error.clone() });
-            let result_message = repository::create_message(
-                &deps.pool,
-                CreateMessageParams {
-                    session_id: binding.session_id.clone(),
-                    role: MessageRole::Tool,
-                    content: vec![ContentPart::ToolResult {
-                        tool_call_id,
-                        payload: error_payload,
-                        started_at: Some(tool_started_at),
-                        completed_at: tool_completed_at,
-                    }],
-                    provider_metadata: Some(serde_json::json!({
-                        "source": "local_mcp",
-                    })),
-                },
-            )
-            .await?;
-
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&binding.run_id),
-                AssistantUiEvent::MessageCreated {
-                    message: result_message,
-                },
-            );
-
-            Err(error)
-        }
     }
 }
 

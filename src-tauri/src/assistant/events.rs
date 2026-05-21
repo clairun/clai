@@ -11,19 +11,57 @@ pub const ASSISTANT_EVENT_NAME: &str = "assistant://event";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum AssistantUiEvent {
-    SessionCreated { session: Box<AssistantSession> },
-    MessageCreated { message: AssistantMessage },
-    RunQueued { run: AssistantRun },
-    RunStarted { run: AssistantRun },
-    AssistantDelta { message_id: MessageId, text: String },
-    AssistantThinkingDelta { message_id: MessageId, text: String },
-    AssistantMessageCompleted { message: AssistantMessage },
-    ToolCallStarted { tool_call: ToolInvocation },
-    ToolCallCompleted { tool_call: ToolInvocation },
-    ToolCallFailed { tool_call: ToolInvocation },
-    RunCompleted { run: AssistantRun },
-    RunFailed { run: AssistantRun },
-    RunCancelled { run: AssistantRun },
+    SessionCreated {
+        session: Box<AssistantSession>,
+    },
+    MessageCreated {
+        message: AssistantMessage,
+    },
+    RunQueued {
+        run: AssistantRun,
+    },
+    RunStarted {
+        run: AssistantRun,
+    },
+    AssistantDelta {
+        message_id: MessageId,
+        text: String,
+    },
+    AssistantThinkingDelta {
+        message_id: MessageId,
+        text: String,
+    },
+    AssistantMessageCompleted {
+        message: AssistantMessage,
+    },
+    /// Emitted mid-turn when an assistant message's persisted content
+    /// has grown (e.g. a Claude Code stream just added a `ToolUse`
+    /// part). The frontend should swap the message's `content` for the
+    /// new version so live tool-call rendering doesn't have to wait for
+    /// the turn-final `AssistantMessageCompleted`. Distinct from
+    /// `*Completed` so the streaming-state UI (spinner, "writing…")
+    /// stays on until the run actually ends.
+    AssistantMessageUpdated {
+        message: AssistantMessage,
+    },
+    ToolCallStarted {
+        tool_call: ToolInvocation,
+    },
+    ToolCallCompleted {
+        tool_call: ToolInvocation,
+    },
+    ToolCallFailed {
+        tool_call: ToolInvocation,
+    },
+    RunCompleted {
+        run: AssistantRun,
+    },
+    RunFailed {
+        run: AssistantRun,
+    },
+    RunCancelled {
+        run: AssistantRun,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
