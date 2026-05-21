@@ -5,7 +5,7 @@
  * Handles markdown rendering, tool call display, and auto-scrolling.
  */
 
-import React, { useEffect, useRef, useState, useCallback, memo } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo, memo } from 'react';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
 import styles from './AssistantChat.module.css';
@@ -94,7 +94,7 @@ const cleanToolName = (name) => {
  * The output order mirrors the source order, so callers see exactly
  * the text↔tool interleaving the agent produced.
  */
-const groupAssistantContent = (content, toolCalls) => {
+const groupAssistantContent = (content, toolCallsById) => {
   if (!Array.isArray(content)) return [];
   const segments = [];
   for (const part of content) {
@@ -118,7 +118,10 @@ const groupAssistantContent = (content, toolCalls) => {
         segments.push({ kind: 'thinking', text });
       }
     } else if (part.type === 'tool_use') {
-      const tc = toolCalls.find((t) => t.id === part.tool_call_id);
+      // O(1) Map lookup (vs the old O(N) Array.find). On a 35-tool
+      // turn the difference is ~1200 → ~35 ops per render — material
+      // on every re-render the chat tree triggers.
+      const tc = toolCallsById?.get(part.tool_call_id);
       const enriched = {
         toolCallId: part.tool_call_id,
         toolName: cleanToolName(part.tool_name),
@@ -347,6 +350,16 @@ const ChatMessageList = ({
     }
   }, [messages, isStreaming, streamingText, toolCalls]);
 
+  // Build a Map of toolCalls keyed by id once per render, so every
+  // tool_use part lookup is O(1) instead of an Array.find walk. Memoized
+  // on the toolCalls reference so the Map is stable while toolCalls
+  // doesn't change, which keeps memoized children from re-rendering.
+  const toolCallsById = useMemo(() => {
+    const map = new Map();
+    for (const tc of toolCalls) map.set(tc.id, tc);
+    return map;
+  }, [toolCalls]);
+
   const grouped = groupMessages(messages);
 
   // An item is an "assistant continuation" when it's an assistant turn
@@ -376,7 +389,7 @@ const ChatMessageList = ({
           <MergedToolGroup
             key={item.id}
             item={item}
-            toolCalls={toolCalls}
+            toolCallsById={toolCallsById}
             isContinuation={continuationFlags[idx]}
           />
         ) : (
@@ -384,7 +397,7 @@ const ChatMessageList = ({
             key={item.message.id}
             message={item.message}
             streamingText={streamingText[item.message.id]}
-            toolCalls={toolCalls}
+            toolCallsById={toolCallsById}
             userLabel={userLabel}
             isContinuation={continuationFlags[idx]}
           />
@@ -406,7 +419,7 @@ const ChatMessageList = ({
   );
 };
 
-const MessageBlock = memo(({ message, streamingText, toolCalls, userLabel = 'You', isContinuation = false }) => {
+const MessageBlock = memo(({ message, streamingText, toolCallsById, userLabel = 'You', isContinuation = false }) => {
   const { role, createdAt } = message;
 
   if (role === 'user') {
@@ -432,18 +445,23 @@ const MessageBlock = memo(({ message, streamingText, toolCalls, userLabel = 'You
   }
 
   if (role === 'assistant') {
-    const isCurrentlyStreaming = !!streamingText;
     // Walk message.content in order, grouping consecutive same-type
     // parts into segments. This preserves the interleaving (text → tool
     // → text → tool …) the assistant actually produced, rather than
     // collapsing all text to the top and all tools to the bottom.
     // streamingText is appended as a trailing segment because by
     // definition it represents the *current* in-flight text block,
-    // which sits after everything already persisted.
-    const segments = groupAssistantContent(message.content, toolCalls);
-    if (isCurrentlyStreaming) {
-      segments.push({ kind: 'text', text: streamingText, streaming: true });
-    }
+    // which sits after everything already persisted. Memoized so
+    // ToolCallGroup's prop reference is stable across re-renders when
+    // nothing actually changed — its memo only helps if its toolUses
+    // array reference doesn't churn.
+    const segments = useMemo(() => {
+      const base = groupAssistantContent(message.content, toolCallsById);
+      if (streamingText) {
+        base.push({ kind: 'text', text: streamingText, streaming: true });
+      }
+      return base;
+    }, [message.content, toolCallsById, streamingText]);
 
     return (
       <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
@@ -485,19 +503,22 @@ const MessageBlock = memo(({ message, streamingText, toolCalls, userLabel = 'You
  * MergedToolGroup — renders tool calls from multiple consecutive assistant turns
  * as a single collapsed group, avoiding repeated "CLAI" headers for tool-only turns.
  */
-const MergedToolGroup = memo(({ item, toolCalls, isContinuation = false }) => {
-  const enrichedToolUses = item.toolUses.map((tu) => {
-    const tc = toolCalls.find((t) => t.id === tu.tool_call_id);
-    return {
-      toolCallId: tu.tool_call_id,
-      toolName: cleanToolName(tu.tool_name),
-      arguments: tu.arguments,
-      status: tc?.status || 'running',
-      params: tc?.params,
-      result: tc?.result,
-      error: tc?.error,
-    };
-  });
+const MergedToolGroup = memo(({ item, toolCallsById, isContinuation = false }) => {
+  const enrichedToolUses = useMemo(
+    () => item.toolUses.map((tu) => {
+      const tc = toolCallsById?.get(tu.tool_call_id);
+      return {
+        toolCallId: tu.tool_call_id,
+        toolName: cleanToolName(tu.tool_name),
+        arguments: tu.arguments,
+        status: tc?.status || 'running',
+        params: tc?.params,
+        result: tc?.result,
+        error: tc?.error,
+      };
+    }),
+    [item.toolUses, toolCallsById]
+  );
 
   return (
     <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>

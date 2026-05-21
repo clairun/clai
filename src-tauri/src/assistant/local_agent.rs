@@ -451,12 +451,25 @@ async fn system_prompt_text(
 /// before their `tool_use` (rare, but possible when Claude Code emits
 /// tool_use only in the complete assistant message): we replay the
 /// buffer as soon as the matching tool_use is registered.
+/// `last_update_emit_at` throttles `AssistantMessageUpdated` emissions
+/// — without it a tool-heavy turn fires one full message-replacement
+/// event per tool_use and React re-renders the entire chat tree each
+/// time, wedging WebKit on long runs.
 struct ClaudeStreamState {
     parts: Vec<ContentPart>,
     open_blocks: HashMap<u64, OpenBlock>,
     persisted_tool_use_ids: std::collections::HashSet<String>,
     pending_tool_results: HashMap<String, Value>,
+    last_update_emit_at: Option<std::time::Instant>,
 }
+
+/// Minimum gap between consecutive `AssistantMessageUpdated` emissions.
+/// The DB write still happens on every flush (so the persisted state is
+/// always up to date), but the frontend gets coalesced updates at most
+/// ~5/sec. The turn-final `AssistantMessageCompleted` always fires
+/// regardless, so the user sees the final state immediately on
+/// completion.
+const ASSISTANT_UPDATE_EMIT_THROTTLE_MS: u128 = 200;
 
 enum OpenBlock {
     /// Text block currently being streamed. Deltas append to
@@ -483,6 +496,7 @@ impl ClaudeStreamState {
             open_blocks: HashMap::new(),
             persisted_tool_use_ids: std::collections::HashSet::new(),
             pending_tool_results: HashMap::new(),
+            last_update_emit_at: None,
         }
     }
 
@@ -935,10 +949,10 @@ async fn persist_tool_use(
         .insert(tool_call_id.to_string());
 
     // Flush the running parts vec into the assistant message so the
-    // chat UI's tool_use renderer can pick it up immediately. We drop
-    // empty Text placeholders just like `finalize_assistant_message`
-    // does so the message doesn't render an empty text section
-    // alongside the tool calls.
+    // chat UI's tool_use renderer can pick it up immediately. The DB
+    // write happens every call; the AssistantMessageUpdated event is
+    // throttled inside flush_assistant_message_content to avoid an
+    // event storm on tool-heavy turns.
     flush_assistant_message_content(deps, session, run_id, assistant_message, state).await?;
 
     // If a tool_result arrived before this tool_use was registered (e.g.
@@ -951,19 +965,24 @@ async fn persist_tool_use(
     Ok(())
 }
 
-/// Push the in-memory `state.parts` to the assistant message row and
-/// emit `AssistantMessageUpdated`. Cheap to call — `update_message_content`
-/// is a single UPDATE — but we only invoke it from sites where the parts
-/// vec actually changed (currently after a tool_use is persisted) to
-/// avoid hammering the DB on every text delta. Errors are downgraded to
-/// warnings so a transient write failure doesn't tear down the whole
-/// run; the final `finalize_assistant_message` is the safety net.
+/// Push the in-memory `state.parts` to the assistant message row and,
+/// when not throttled, emit `AssistantMessageUpdated`.
+///
+/// The DB UPDATE runs on every call (cheap, single-row write) so the
+/// persisted state is always current. The frontend event is coalesced
+/// to at most one emission per `ASSISTANT_UPDATE_EMIT_THROTTLE_MS` — on
+/// a tool-heavy turn (e.g. 35 sequential tool_uses) un-throttled
+/// emissions would re-render the entire chat tree dozens of times,
+/// pinning WebKit at 100%+ CPU. The turn-final
+/// `AssistantMessageCompleted` is always emitted by
+/// `finalize_assistant_message`, so the user sees the final state
+/// immediately when the run ends regardless of throttling.
 async fn flush_assistant_message_content(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
     assistant_message: &AssistantMessage,
-    state: &ClaudeStreamState,
+    state: &mut ClaudeStreamState,
 ) -> Result<(), LocalAgentRunError> {
     let content: Vec<ContentPart> = state
         .parts
@@ -974,22 +993,33 @@ async fn flush_assistant_message_content(
     if content.is_empty() {
         return Ok(());
     }
-    match repository::update_message_content(&deps.pool, &assistant_message.id, &content).await {
-        Ok(updated) => {
-            let _ = emit_event(
-                &deps.app,
-                session,
-                Some(run_id),
-                AssistantUiEvent::AssistantMessageUpdated { message: updated },
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                message_id = %assistant_message.id,
-                "Failed to flush assistant message content mid-turn"
-            );
-        }
+    let updated =
+        match repository::update_message_content(&deps.pool, &assistant_message.id, &content).await
+        {
+            Ok(m) => m,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    message_id = %assistant_message.id,
+                    "Failed to flush assistant message content mid-turn"
+                );
+                return Ok(());
+            }
+        };
+
+    let now = std::time::Instant::now();
+    let should_emit = match state.last_update_emit_at {
+        None => true,
+        Some(last) => now.duration_since(last).as_millis() >= ASSISTANT_UPDATE_EMIT_THROTTLE_MS,
+    };
+    if should_emit {
+        state.last_update_emit_at = Some(now);
+        let _ = emit_event(
+            &deps.app,
+            session,
+            Some(run_id),
+            AssistantUiEvent::AssistantMessageUpdated { message: updated },
+        );
     }
     Ok(())
 }
