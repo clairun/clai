@@ -467,6 +467,29 @@ async fn handle_claude_event(
         Some("stream_event") => {
             let event = value.get("event").unwrap_or(&Value::Null);
             match event.get("type").and_then(Value::as_str) {
+                Some("content_block_start") => {
+                    let block = event.get("content_block").unwrap_or(&Value::Null);
+                    if block.get("type").and_then(Value::as_str) == Some("text")
+                        && !accumulated_text.is_empty()
+                        && !accumulated_text.ends_with("\n\n")
+                    {
+                        let separator = if accumulated_text.ends_with('\n') {
+                            "\n"
+                        } else {
+                            "\n\n"
+                        };
+                        accumulated_text.push_str(separator);
+                        let _ = emit_event(
+                            &deps.app,
+                            session,
+                            Some(run_id),
+                            AssistantUiEvent::AssistantDelta {
+                                message_id: assistant_message.id.clone(),
+                                text: separator.to_string(),
+                            },
+                        );
+                    }
+                }
                 Some("content_block_delta") => {
                     let delta = event.get("delta").unwrap_or(&Value::Null);
                     match delta.get("type").and_then(Value::as_str) {

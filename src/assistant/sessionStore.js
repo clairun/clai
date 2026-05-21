@@ -122,11 +122,20 @@ const useAssistantStore = create(
 
       loadSessionData: (sessionId, session, messages, runs = [], toolCalls = []) =>
         set((state) => {
+          const existing = state.sessions[sessionId];
           state.sessions[sessionId] = {
             ...createInitialSessionState(session),
             messages,
             runs,
             toolCalls,
+            // Preserve in-flight streaming state across snapshot refreshes.
+            // The DB only persists assistant text at end-of-run, so a poll
+            // tick that lands mid-stream would otherwise wipe the deltas the
+            // user is watching arrive, making text flicker on and off.
+            // Stale entries get cleared naturally by completeMessage and
+            // setRunStatus when the run terminates.
+            streamingTextByMessageId: existing?.streamingTextByMessageId || {},
+            isStreaming: existing?.isStreaming || false,
           };
         }),
 
