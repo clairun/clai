@@ -422,6 +422,12 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+  /* Badges (flex-shrink:0) used to overflow this block when title + badges
+   * + actions didn't fit on one row — visually colliding with
+   * .cardHeaderActions. Wrapping the block lets badges drop onto a second
+   * line under the title only when there's no horizontal room. */
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 .cardTitle {
@@ -539,18 +545,37 @@
   overflow: hidden;
 }
 
-.taskAttentionPreview {
+/* Footer row: schedule status on the left, attention pills inline on the
+ * right. The row is always rendered (with min-height) so transitions like
+ * pausing/resuming or resolving the last pending approval don't change
+ * card height. */
+.statusRow {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
-  min-width: 0;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--color-warning-bg);
-  border: 1px solid var(--color-warning-border);
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
 }
 
+.statusRowText {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attentionPillsInline {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* Legacy attention pills (kept for any other consumers — currently
+ * unused). Inline pills above reuse the per-pill .attentionPill style
+ * directly. */
 .attentionPills {
   display: flex;
   flex-wrap: wrap;
@@ -1110,6 +1135,11 @@
   color: var(--color-text-tertiary);
 }
 
+.workspaceTimePaused {
+  font-style: italic;
+  opacity: 0.7;
+}
+
 .deleteBtn {
   width: 24px;
   height: 24px;
@@ -1159,12 +1189,6 @@
   background: var(--color-primary-alpha-08);
   color: var(--color-primary);
   border: 1px solid var(--color-primary-alpha-30);
-}
-
-.workspaceBadgePermission {
-  background: rgba(248, 113, 113, 0.12);
-  color: #f87171;
-  border: 1px solid rgba(248, 113, 113, 0.4);
 }
 
 .cardHeaderActions {
@@ -1223,6 +1247,70 @@
 }
 
 .runNowBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Pause button: muted by default (secondary affordance next to Run Now).
+ * In its Resume state (workspace is paused) it becomes the primary action
+ * for that card, so we promote it to the accent treatment. */
+.pauseBtn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-overlay-12, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+}
+
+.pauseBtn:hover:not(:disabled) {
+  background: var(--color-overlay-06);
+  border-color: var(--color-overlay-12, rgba(255, 255, 255, 0.18));
+  color: var(--color-text-secondary);
+}
+
+.pauseBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* When paused, the workspace's "Periodic · Nm" badge is replaced by this
+ * Resume button — same position in the title row, similar pill shape, but
+ * with accent coloring + hover state to telegraph "this is clickable." The
+ * Run Now / Pause icon buttons collapse away too (they don't apply when
+ * paused), so the card's header gets simpler. The interval is preserved
+ * by moving "Paused · Nm" into the status line below. */
+.resumeBtn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 10px;
+  border: 1px solid var(--color-accent-alpha-30, rgba(0, 171, 148, 0.28));
+  border-radius: var(--radius-full);
+  background: var(--color-accent-alpha-08, rgba(0, 171, 148, 0.08));
+  color: var(--color-accent-dark);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+}
+
+.resumeBtn:hover:not(:disabled) {
+  background: var(--color-accent-alpha-20, rgba(0, 171, 148, 0.18));
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.resumeBtn:disabled {
   opacity: 0.45;
   cursor: default;
 }

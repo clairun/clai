@@ -2174,6 +2174,7 @@ pub struct WorkspaceListEntry {
     // manager agent. Lets the Fleet UI sort scheduled workspaces ahead of
     // ad-hoc ones without each card needing a separate snapshot fetch.
     pub schedule_enabled: bool,
+    pub schedule_paused: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interval_minutes: Option<u32>,
     // Seconds until the next scheduled run for this workspace's manager
@@ -2347,10 +2348,10 @@ pub async fn workspace_list(
             .await
             .ok()
             .flatten();
-        let (schedule_enabled, interval_minutes) = match manager_id.as_deref() {
+        let (schedule_enabled, schedule_paused, interval_minutes) = match manager_id.as_deref() {
             Some(manager_id) => {
-                let row: Option<(i64, i64)> = sqlx::query_as(
-                    "SELECT schedule_enabled, interval_minutes \
+                let row: Option<(i64, i64, i64)> = sqlx::query_as(
+                    "SELECT schedule_enabled, interval_minutes, schedule_paused \
                          FROM workspace_agents WHERE id = ? LIMIT 1",
                 )
                 .bind(manager_id)
@@ -2358,19 +2359,22 @@ pub async fn workspace_list(
                 .await
                 .unwrap_or(None);
                 match row {
-                    Some((enabled, interval)) if enabled != 0 => {
-                        (true, Some(u32::try_from(interval).unwrap_or(0)))
-                    }
-                    _ => (false, None),
+                    Some((enabled, interval, paused)) if enabled != 0 => (
+                        true,
+                        paused != 0,
+                        Some(u32::try_from(interval).unwrap_or(0)),
+                    ),
+                    _ => (false, false, None),
                 }
             }
-            None => (false, None),
+            None => (false, false, None),
         };
 
-        // Only surface next_run for actually-scheduled workspaces. Workspaces
-        // whose manager isn't in the scheduler map (created mid-session, or
-        // schedule disabled) get None — the FE hides the countdown then.
-        let next_run_in_seconds = if schedule_enabled {
+        // Only surface next_run for actually-scheduled workspaces that are not
+        // paused. Paused workspaces keep their next_run_at intact in-memory
+        // (so resume picks up from where they left off), but the FE would
+        // mis-render a countdown that won't actually advance until resume.
+        let next_run_in_seconds = if schedule_enabled && !schedule_paused {
             manager_id
                 .as_deref()
                 .and_then(|mid| scheduler_seconds.get(mid).copied())
@@ -2400,6 +2404,7 @@ pub async fn workspace_list(
             latest_attention_task_summary: task_attention.latest_attention_task_summary,
             latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
             schedule_enabled,
+            schedule_paused,
             interval_minutes,
             next_run_in_seconds,
             created_at,
@@ -2430,16 +2435,22 @@ pub async fn workspace_run_now(
     // The scheduler only registers agents whose schedule is enabled. An
     // explicit enabled/disabled check up front gives a clearer error than
     // the generic "no scheduler instance" message that `force_ready`
-    // returns for unscheduled agents.
-    let enabled: Option<i64> =
-        sqlx::query_scalar("SELECT enabled FROM workspace_agents WHERE id = ? LIMIT 1")
-            .bind(&manager_id)
-            .fetch_optional(pool.inner())
-            .await
-            .map_err(|e| format!("Failed to load manager agent: {}", e))?;
-    match enabled {
+    // returns for unscheduled agents. Also flag paused workspaces here —
+    // `force_ready` skips disabled instances and would otherwise produce
+    // a misleading "currently running" message.
+    let row: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT enabled, schedule_paused FROM workspace_agents WHERE id = ? LIMIT 1",
+    )
+    .bind(&manager_id)
+    .fetch_optional(pool.inner())
+    .await
+    .map_err(|e| format!("Failed to load manager agent: {}", e))?;
+    match row {
         None => return Err("Manager agent not found.".to_string()),
-        Some(0) => return Err("Manager agent is disabled. Enable it first.".to_string()),
+        Some((0, _)) => return Err("Manager agent is disabled. Enable it first.".to_string()),
+        Some((_, paused)) if paused != 0 => {
+            return Err("Workspace schedule is paused. Resume it first.".to_string());
+        }
         Some(_) => {}
     }
 
@@ -2449,6 +2460,56 @@ pub async fn workspace_run_now(
     } else {
         Err("Agent is currently running or is not scheduled.".to_string())
     }
+}
+
+/// Pause or resume the workspace's periodic schedule.
+///
+/// Pausing keeps the workspace's "periodic" identity (schedule_enabled stays
+/// true, interval is preserved) but disables the scheduler instance so the
+/// runner skips it. Resuming flips the instance back on and the next tick
+/// will fire normally.
+#[tauri::command]
+pub async fn workspace_set_schedule_paused(
+    workspace_id: String,
+    paused: bool,
+    state: State<'_, AppState>,
+    pool: State<'_, DbPool>,
+) -> Result<(), String> {
+    let manager_id = workspace_default_agent_id(pool.inner(), &workspace_id)
+        .await?
+        .ok_or_else(|| "Workspace has no manager agent.".to_string())?;
+
+    let schedule_enabled: Option<i64> =
+        sqlx::query_scalar("SELECT schedule_enabled FROM workspace_agents WHERE id = ? LIMIT 1")
+            .bind(&manager_id)
+            .fetch_optional(pool.inner())
+            .await
+            .map_err(|e| format!("Failed to load manager schedule: {}", e))?;
+    match schedule_enabled {
+        None => return Err("Manager agent not found.".to_string()),
+        Some(0) => return Err("Workspace is not periodic.".to_string()),
+        Some(_) => {}
+    }
+
+    sqlx::query("UPDATE workspace_agents SET schedule_paused = ?, updated_at = ? WHERE id = ?")
+        .bind(i64::from(paused))
+        .bind(now_millis())
+        .bind(&manager_id)
+        .execute(pool.inner())
+        .await
+        .map_err(|e| format!("Failed to update workspace pause state: {}", e))?;
+
+    // Flip the live scheduler instance. populate_scheduler_from_workspace_agents
+    // creates instances with empty space/room ids, so the instance id is
+    // `{manager_id}::`. set_instance_enabled is a no-op if the instance is
+    // absent (e.g. workspace was made periodic mid-session and the scheduler
+    // hasn't been repopulated since startup) — DB persistence still wins on
+    // next restart.
+    let instance_id = format!("{}::", manager_id);
+    let mut scheduler = state.scheduler.lock().await;
+    scheduler.set_instance_enabled(&instance_id, !paused);
+
+    Ok(())
 }
 
 /// Delete a general workspace — removes metadata, session data, and filesystem root.

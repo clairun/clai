@@ -2,7 +2,13 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { useAssistantStore } from '../assistant';
-import { listWorkspaces, deleteWorkspace, getWorkspaceSnapshot, runWorkspaceNow } from '../workspace/client';
+import {
+  listWorkspaces,
+  deleteWorkspace,
+  getWorkspaceSnapshot,
+  runWorkspaceNow,
+  setWorkspaceSchedulePaused,
+} from '../workspace/client';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import { useFleet } from '../contexts/FleetContext';
@@ -239,6 +245,31 @@ const Fleet = () => {
     }
   }, [runNowBusyId]);
 
+  // Pause/resume the workspace's periodic schedule. Optimistically flip the
+  // local row so the button swaps immediately; the next loadWorkspaces tick
+  // will reconcile if the backend disagrees.
+  const [pauseBusyId, setPauseBusyId] = useState(null);
+  const handleTogglePause = useCallback(async (id, currentlyPaused) => {
+    if (!id || pauseBusyId) return;
+    setPauseBusyId(id);
+    const nextPaused = !currentlyPaused;
+    setWorkspaces((prev) =>
+      prev.map((w) => (w.id === id ? { ...w, schedulePaused: nextPaused } : w))
+    );
+    try {
+      await setWorkspaceSchedulePaused(id, nextPaused);
+      setError('');
+      await loadWorkspaces();
+    } catch (err) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to update pause state.');
+      setWorkspaces((prev) =>
+        prev.map((w) => (w.id === id ? { ...w, schedulePaused: currentlyPaused } : w))
+      );
+    } finally {
+      setPauseBusyId(null);
+    }
+  }, [pauseBusyId, loadWorkspaces]);
+
   // Length-aware fallback: `[] || x` evaluates to `[]` in JS, so a bare
   // `||` chain masks the snapshot data whenever the store holds an empty
   // stub (created by session_created -> initSession). The snapshot
@@ -388,11 +419,34 @@ const Fleet = () => {
               (ws.runningTaskCount || 0) > 0 || (activeRunsByWorkspace[ws.id] || 0) > 0;
             const hasPendingApprovals = (pendingPermissionCounts[ws.id] || 0) > 0;
             const cardStatus = deriveCardStatus(ws, isProcessing, hasPendingApprovals);
-            const attentionPills = ATTENTION_PILLS
-              .map((p) => ({ ...p, count: ws[p.countField] || 0 }))
-              .filter((p) => p.count > 0);
-            const showNextRun =
-              ws.scheduleEnabled && typeof ws.nextRunInSeconds === 'number';
+            const permsCount = pendingPermissionCounts[ws.id] || 0;
+            const attentionPills = [
+              ...ATTENTION_PILLS.map((p) => ({ ...p, count: ws[p.countField] || 0 })),
+              ...(permsCount > 0
+                ? [{
+                    key: 'permission',
+                    count: permsCount,
+                    label: permsCount === 1 ? 'needs approval' : 'need approval',
+                    tone: 'critical',
+                  }]
+                : []),
+            ].filter((p) => p.count > 0);
+            const isPaused = !!ws.schedulePaused;
+            // Periodic workspaces always reserve the schedule-status line so
+            // pausing doesn't change card height. Content swaps between
+            // "Paused", the next-run countdown, or a neutral "Scheduled"
+            // fallback for periodic workspaces created mid-session (the
+            // scheduler is only populated at startup, so nextRunInSeconds
+            // can be missing for those until the next app launch).
+            const scheduleStatusText = ws.scheduleEnabled
+              ? isPaused
+                ? ws.intervalMinutes
+                  ? `Paused · ${ws.intervalMinutes}m`
+                  : 'Paused'
+                : typeof ws.nextRunInSeconds === 'number'
+                ? formatNextRun(ws.nextRunInSeconds)
+                : 'Scheduled'
+              : null;
             // Card state is single-valued (priority-ordered in
             // deriveCardStatus), so we apply ONE state class — replacing
             // the older dual-ring approach where `workspaceCardProcessing`
@@ -420,45 +474,77 @@ const Fleet = () => {
                       title={CARD_STATUS_LABEL[cardStatus]}
                     />
                     <span className={styles.cardTitle}>{ws.title}</span>
-                    {ws.scheduleEnabled ? (
+                    {ws.scheduleEnabled && !isPaused && (
                       <span className={`${styles.workspaceBadge} ${styles.workspaceBadgePeriodic}`}>
                         {ws.intervalMinutes ? `Periodic · ${ws.intervalMinutes}m` : 'Periodic'}
                       </span>
-                    ) : (
-                      <span className={styles.workspaceBadge}>Workspace</span>
                     )}
-                    {pendingPermissionCounts[ws.id] > 0 && (
-                      <span
-                        className={`${styles.workspaceBadge} ${styles.workspaceBadgePermission}`}
-                        title={`${pendingPermissionCounts[ws.id]} command${pendingPermissionCounts[ws.id] === 1 ? '' : 's'} need approval`}
+                    {ws.scheduleEnabled && isPaused && (
+                      <button
+                        type="button"
+                        className={styles.resumeBtn}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTogglePause(ws.id, true);
+                        }}
+                        disabled={pauseBusyId === ws.id}
+                        title={pauseBusyId === ws.id ? 'Updating…' : 'Resume schedule'}
+                        aria-label="Resume schedule"
                       >
-                        Needs approval ({pendingPermissionCounts[ws.id]})
-                      </span>
+                        Resume
+                      </button>
+                    )}
+                    {!ws.scheduleEnabled && (
+                      <span className={styles.workspaceBadge}>Workspace</span>
                     )}
                   </div>
                   <div className={styles.cardHeaderActions}>
-                    {ws.scheduleEnabled && (
-                      <button
-                        type="button"
-                        className={styles.runNowBtn}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRunNow(ws.id);
-                        }}
-                        disabled={isProcessing || runNowBusyId === ws.id}
-                        title={
-                          isProcessing
-                            ? 'Already running'
-                            : runNowBusyId === ws.id
-                            ? 'Starting…'
-                            : 'Run now'
-                        }
-                        aria-label="Run now"
-                      >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
-                      </button>
+                    {ws.scheduleEnabled && !isPaused && (
+                      <>
+                        <button
+                          type="button"
+                          className={styles.runNowBtn}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRunNow(ws.id);
+                          }}
+                          disabled={isProcessing || runNowBusyId === ws.id}
+                          title={
+                            isProcessing
+                              ? 'Already running'
+                              : runNowBusyId === ws.id
+                              ? 'Starting…'
+                              : 'Run now'
+                          }
+                          aria-label="Run now"
+                        >
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.pauseBtn}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleTogglePause(ws.id, false);
+                          }}
+                          disabled={pauseBusyId === ws.id}
+                          title={
+                            pauseBusyId === ws.id
+                              ? 'Updating…'
+                              : isProcessing
+                              ? 'Pause schedule (current run will finish)'
+                              : 'Pause schedule'
+                          }
+                          aria-label="Pause schedule"
+                        >
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                            <rect x="6" y="5" width="4" height="14" rx="1" />
+                            <rect x="14" y="5" width="4" height="14" rx="1" />
+                          </svg>
+                        </button>
+                      </>
                     )}
                     <button
                       type="button"
@@ -496,9 +582,24 @@ const Fleet = () => {
                   <span>{ws.assignedAgentCount || 0} agents</span>
                   {ws.runningTaskCount > 0 && <span>{ws.runningTaskCount} running</span>}
                 </div>
-                {attentionPills.length > 0 && (
-                  <div className={styles.taskAttentionPreview}>
-                    <div className={styles.attentionPills}>
+                {/* Single always-rendered footer row. Schedule status on the
+                 * left, attention pills (failed/blocked/needs-input/needs-
+                 * approval) inline on the right. Empty content still
+                 * reserves min-height, so toggling pause or resolving the
+                 * last attention item never changes card height. */}
+                <div className={styles.statusRow}>
+                  <span
+                    className={`${styles.statusRowText} ${
+                      isPaused ? styles.workspaceTimePaused : ''
+                    }`}
+                  >
+                    {scheduleStatusText || ''}
+                  </span>
+                  {attentionPills.length > 0 && (
+                    <div
+                      className={styles.attentionPillsInline}
+                      title={ws.latestAttentionTaskTitle || undefined}
+                    >
                       {attentionPills.map((pill) => (
                         <span
                           key={pill.key}
@@ -508,18 +609,8 @@ const Fleet = () => {
                         </span>
                       ))}
                     </div>
-                    {ws.latestAttentionTaskTitle && (
-                      <span className={styles.taskAttentionText}>
-                        {ws.latestAttentionTaskTitle}
-                      </span>
-                    )}
-                  </div>
-                )}
-                {showNextRun && (
-                  <div className={styles.workspaceTime}>
-                    {formatNextRun(ws.nextRunInSeconds)}
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             );
           })}
@@ -542,7 +633,11 @@ const Fleet = () => {
                 {selectedWorkspace.scheduleEnabled && (
                   <div className={styles.detailSubtitle}>
                     <span className={styles.detailPillPeriodic}>
-                      {selectedWorkspace.intervalMinutes
+                      {selectedWorkspace.schedulePaused
+                        ? selectedWorkspace.intervalMinutes
+                          ? `Paused · every ${selectedWorkspace.intervalMinutes}m`
+                          : 'Paused'
+                        : selectedWorkspace.intervalMinutes
                         ? `Periodic · every ${selectedWorkspace.intervalMinutes}m`
                         : 'Periodic'}
                     </span>

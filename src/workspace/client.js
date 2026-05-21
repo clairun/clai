@@ -97,6 +97,10 @@ export async function runWorkspaceNow(workspaceId) {
   return invoke('workspace_run_now', { workspaceId });
 }
 
+export async function setWorkspaceSchedulePaused(workspaceId, paused) {
+  return invoke('workspace_set_schedule_paused', { workspaceId, paused });
+}
+
 export async function setWorkspaceTitle(workspaceId, title) {
   return invoke('workspace_set_title', { workspaceId, title });
 }

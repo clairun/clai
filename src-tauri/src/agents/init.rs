@@ -38,9 +38,9 @@ pub fn initialize_scheduler(
 /// whose `schedule_enabled` flag is set, registers a runtime definition,
 /// and creates an instance for each that is also `enabled`.
 pub async fn populate_scheduler_from_workspace_agents(scheduler: &SharedScheduler, pool: &DbPool) {
-    let rows: Vec<(String, String, String, i64, String, i64)> = match sqlx::query_as(
+    let rows: Vec<(String, String, String, i64, String, i64, i64)> = match sqlx::query_as(
         r#"
-        SELECT id, name, description, interval_minutes, execution, enabled
+        SELECT id, name, description, interval_minutes, execution, enabled, schedule_paused
         FROM workspace_agents
         WHERE schedule_enabled = 1
         "#,
@@ -56,7 +56,8 @@ pub async fn populate_scheduler_from_workspace_agents(scheduler: &SharedSchedule
     };
 
     let mut sched = scheduler.lock().await;
-    for (id, name, _description, interval_minutes, execution_json, enabled) in rows {
+    for (id, name, _description, interval_minutes, execution_json, enabled, schedule_paused) in rows
+    {
         let execution: ExecutionCapabilityConfig =
             serde_json::from_str(&execution_json).unwrap_or_default();
         let mut tools: Vec<&'static str> = vec!["netdata", "dashboard", "tabs", "fs"];
@@ -71,7 +72,16 @@ pub async fn populate_scheduler_from_workspace_agents(scheduler: &SharedSchedule
                 .with_tools(tools);
         sched.register_definition(definition);
         if enabled != 0 {
-            sched.create_instance(&id, "", "");
+            let instance_id = sched.create_instance(&id, "", "");
+            // Paused workspaces still get a scheduler instance (so the live
+            // pause/resume toggle can flip it without re-registering), but the
+            // instance is created disabled so the runner ignores it until
+            // resumed.
+            if schedule_paused != 0 {
+                if let Some(instance_id) = instance_id {
+                    sched.set_instance_enabled(&instance_id, false);
+                }
+            }
         }
     }
 }

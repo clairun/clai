@@ -721,6 +721,10 @@ async fn migrate_workspaces(pool: &DbPool) -> Result<(), String> {
             "interval_minutes",
             "interval_minutes INTEGER NOT NULL DEFAULT 0",
         ),
+        (
+            "schedule_paused",
+            "schedule_paused INTEGER NOT NULL DEFAULT 0",
+        ),
     ] {
         if !column_exists(pool, "workspace_agents", column).await? {
             sqlx::query(&format!("ALTER TABLE workspace_agents ADD COLUMN {}", ddl))
