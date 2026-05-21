@@ -6,6 +6,8 @@
 pub mod auth;
 pub mod engine;
 pub mod events;
+pub mod local_agent;
+pub mod local_mcp;
 pub mod providers;
 pub mod repository;
 pub mod runtime;

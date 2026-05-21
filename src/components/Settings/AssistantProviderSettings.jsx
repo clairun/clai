@@ -58,6 +58,13 @@ const initialForm = {
   baseUrl: '',
   modelId: '',
   enabled: true,
+  authMode: null,
+};
+
+const CLI_BINARY_PLACEHOLDERS = {
+  'claude-code': 'claude',
+  codex: 'codex',
+  opencode: 'opencode',
 };
 
 const AssistantProviderSettings = () => {
@@ -71,6 +78,13 @@ const AssistantProviderSettings = () => {
   const [form, setForm] = useState(initialForm);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [descriptorModels, setDescriptorModels] = useState([]);
+
+  const selectedAdapter = useMemo(
+    () => adapters.find((adapter) => adapter.id === form.providerId) || null,
+    [adapters, form.providerId],
+  );
+  const isCliAdapter = selectedAdapter?.isCliBacked === true;
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -96,6 +110,33 @@ const AssistantProviderSettings = () => {
     return () => window.removeEventListener(CONNECTIONS_CHANGED_EVENT, loadData);
   }, [loadData]);
 
+  useEffect(() => {
+    if (!isCliAdapter) {
+      setDescriptorModels([]);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const models = await assistantClient.listProviderDescriptorModels(form.providerId);
+        if (cancelled) return;
+        const list = models || [];
+        setDescriptorModels(list);
+        setForm((current) => {
+          if (current.providerId !== form.providerId) return current;
+          if (current.modelId.trim()) return current;
+          return { ...current, modelId: list[0]?.id || '' };
+        });
+      } catch (err) {
+        console.error('[AssistantProviderSettings] Failed to load CLI models:', err);
+        if (!cancelled) setDescriptorModels([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isCliAdapter, form.providerId]);
+
   // Provider-connection dependents (workspace agents that reference a
   // connection) are no longer enumerated client-side — the backend
   // `provider_connection_delete` refuses deletion with a clear message
@@ -120,6 +161,7 @@ const AssistantProviderSettings = () => {
       baseUrl: connection.baseUrl || '',
       modelId: connection.modelId,
       enabled: connection.enabled,
+      authMode: connection.authMode || null,
     });
     setError(null);
     setSuccess(null);
@@ -134,7 +176,7 @@ const AssistantProviderSettings = () => {
       setError('Model ID is required.');
       return;
     }
-    if (!editingId && !form.apiKey.trim()) {
+    if (!editingId && !isCliAdapter && !form.apiKey.trim()) {
       setError('API key is required for new connections.');
       return;
     }
@@ -143,13 +185,18 @@ const AssistantProviderSettings = () => {
     setError(null);
     setSuccess(null);
 
+    const authMode = isCliAdapter
+      ? 'subscription_login'
+      : form.authMode || undefined;
+
     try {
       if (editingId) {
         await assistantClient.updateProviderConnection({
           id: form.id,
           name: form.name.trim(),
           providerId: form.providerId,
-          apiKey: form.apiKey.trim() || null,
+          apiKey: isCliAdapter ? null : form.apiKey.trim() || null,
+          authMode,
           baseUrl: form.baseUrl.trim() || null,
           modelId: form.modelId.trim(),
           enabled: form.enabled,
@@ -159,7 +206,8 @@ const AssistantProviderSettings = () => {
         await assistantClient.createProviderConnection({
           name: form.name.trim(),
           providerId: form.providerId,
-          apiKey: form.apiKey.trim(),
+          apiKey: isCliAdapter ? null : form.apiKey.trim(),
+          authMode,
           baseUrl: form.baseUrl.trim() || null,
           modelId: form.modelId.trim(),
         });
@@ -175,7 +223,7 @@ const AssistantProviderSettings = () => {
     } finally {
       setSaving(false);
     }
-  }, [editingId, form, loadData, resetForm]);
+  }, [editingId, form, isCliAdapter, loadData, resetForm]);
 
   const handleDelete = useCallback(async (connection) => {
     if (!window.confirm(`Delete provider connection "${connection.name}"?`)) {
@@ -236,7 +284,8 @@ const AssistantProviderSettings = () => {
       <div className={styles.sectionHeader}>
         <h3 className={styles.sectionTitle}>Assistant Provider Connections</h3>
         <p className={styles.sectionDescription}>
-          Configure one or more OpenAI-compatible connections for the assistant runtime and scheduled agents.
+          Configure API providers (OpenAI / Anthropic) or local CLI agents (Claude Code, Codex,
+          OpenCode) for the assistant runtime and scheduled agents.
         </p>
       </div>
 
@@ -282,9 +331,16 @@ const AssistantProviderSettings = () => {
               <div className={styles.providerMain}>
                 <span className={styles.providerName}>{connection.name}</span>
                 <span className={styles.providerVersion}>{connection.enabled ? 'enabled' : 'disabled'}</span>
+                {connection.authMode === 'subscription_login' && (
+                  <span className={styles.providerVersion}>via CLI</span>
+                )}
               </div>
               <span className={styles.providerCommand}>
-                <code>{connection.modelId}</code> • <code>{connection.baseUrl || 'api.openai.com/v1'}</code>
+                <code>{connection.modelId}</code> • <code>
+                  {connection.authMode === 'subscription_login'
+                    ? (connection.baseUrl || CLI_BINARY_PLACEHOLDERS[connection.providerId] || connection.providerId)
+                    : (connection.baseUrl || 'api.openai.com/v1')}
+                </code>
               </span>
               <span className={styles.providerCommand}>
                 used by {dependencyCounts.get(connection.id) || 0} agent(s)
@@ -362,39 +418,79 @@ const AssistantProviderSettings = () => {
           </select>
         </div>
 
-        <div>
-          <label style={labelStyle}>
-            API Key {!editingId && <span style={{ color: 'var(--color-critical, #DC2626)' }}>*</span>}
-          </label>
-          <input
-            type="password"
-            value={form.apiKey}
-            onChange={(e) => setForm((current) => ({ ...current, apiKey: e.target.value }))}
-            placeholder={editingId ? 'Leave blank to keep existing key' : 'sk-...'}
-            style={inputStyle}
-          />
-        </div>
+        {isCliAdapter && (
+          <div style={{
+            padding: '10px 12px',
+            border: '1px solid var(--color-border-light)',
+            borderRadius: '8px',
+            background: 'var(--color-bg-elevated)',
+            fontSize: '12px',
+            color: 'var(--color-text-secondary)',
+            lineHeight: 1.5,
+          }}>
+            This provider runs through your local <strong>{selectedAdapter?.displayName}</strong> CLI
+            using its own authentication (typically a paid subscription). Make sure the binary is
+            installed and you have signed in (e.g. <code>claude /login</code>) in your terminal
+            before testing this connection. No API key is stored.
+          </div>
+        )}
+
+        {!isCliAdapter && (
+          <div>
+            <label style={labelStyle}>
+              API Key {!editingId && <span style={{ color: 'var(--color-critical, #DC2626)' }}>*</span>}
+            </label>
+            <input
+              type="password"
+              value={form.apiKey}
+              onChange={(e) => setForm((current) => ({ ...current, apiKey: e.target.value }))}
+              placeholder={editingId ? 'Leave blank to keep existing key' : 'sk-...'}
+              style={inputStyle}
+            />
+          </div>
+        )}
 
         <div>
           <label style={labelStyle}>
             Model ID <span style={{ color: 'var(--color-critical, #DC2626)' }}>*</span>
           </label>
-          <input
-            type="text"
-            value={form.modelId}
-            onChange={(e) => setForm((current) => ({ ...current, modelId: e.target.value }))}
-            placeholder="e.g. gpt-4o-mini"
-            style={inputStyle}
-          />
+          {isCliAdapter && descriptorModels.length > 0 ? (
+            <select
+              className={styles.select}
+              value={form.modelId}
+              onChange={(e) => setForm((current) => ({ ...current, modelId: e.target.value }))}
+              disabled={saving}
+            >
+              {descriptorModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.displayName} ({model.id})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={form.modelId}
+              onChange={(e) => setForm((current) => ({ ...current, modelId: e.target.value }))}
+              placeholder={isCliAdapter ? 'e.g. sonnet' : 'e.g. gpt-4o-mini'}
+              style={inputStyle}
+            />
+          )}
         </div>
 
         <div>
-          <label style={labelStyle}>Base URL</label>
+          <label style={labelStyle}>
+            {isCliAdapter ? 'CLI binary path (optional)' : 'Base URL'}
+          </label>
           <input
             type="text"
             value={form.baseUrl}
             onChange={(e) => setForm((current) => ({ ...current, baseUrl: e.target.value }))}
-            placeholder="https://api.openai.com/v1"
+            placeholder={
+              isCliAdapter
+                ? CLI_BINARY_PLACEHOLDERS[form.providerId] || 'claude'
+                : 'https://api.openai.com/v1'
+            }
             style={inputStyle}
           />
         </div>

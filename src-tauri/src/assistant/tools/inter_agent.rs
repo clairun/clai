@@ -186,6 +186,7 @@ pub async fn execute(
                 mcp_server_ids: target_config.selected_mcp_server_ids.clone(),
                 execution: target_config.execution.clone(),
                 netdata_conversation_id: None,
+                cli_session_id: None,
                 automation_id: Some(target_config.id.clone()),
                 // Same workspace, same on-disk root as the caller. Tools
                 // dispatched from the assignee write into the workspace's

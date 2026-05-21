@@ -28,6 +28,7 @@ pub fn provider_descriptor() -> ProviderDescriptor {
         protocol_family: ProtocolFamily::Anthropic,
         supported_auth_modes: vec![AuthMode::DeveloperApiKey],
         configurable_base_url: true,
+        is_cli_backed: false,
     }
 }
 

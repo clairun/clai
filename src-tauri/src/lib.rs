@@ -220,6 +220,7 @@ pub fn run() {
             commands::provider_connections::provider_connection_get,
             commands::provider_connections::provider_connection_list,
             commands::provider_connections::provider_connection_list_models,
+            commands::provider_connections::provider_descriptor_models,
             commands::provider_connections::provider_connection_test,
             // Skill catalog commands
             commands::skills::skill_sources_list,

@@ -494,6 +494,7 @@ async fn ensure_background_session(
         mcp_server_ids: agent_config.selected_mcp_server_ids.clone(),
         execution: agent_config.execution.clone(),
         netdata_conversation_id: None,
+        cli_session_id: None,
         automation_id: Some(agent_config.id.clone()),
         // Despite the misleading name, `agent_workspace_id` is the *workspace*
         // id the tools use to derive the on-disk working directory. Setting it
