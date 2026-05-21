@@ -446,7 +446,13 @@ pub fn split_command(input: &str) -> Vec<Segment> {
         }
     }
 
-    segments
+    // Collapse compound shell constructs (`for/while/until/select … done`,
+    // `if … fi`, `case … esac`) into a single Opaque segment. Splitting on
+    // every `;` / `&&` / `||` inside a loop produces meaningless approval
+    // fragments like `do gh run view …`, `break`, `done` — none of which
+    // the user can sensibly decide on in isolation. One construct = one
+    // approval card.
+    merge_compound_constructs(input, segments)
 }
 
 fn push_segment(out: &mut Vec<Segment>, buf: &str, opaque: bool) {
@@ -474,7 +480,7 @@ fn head_is_opaque_trigger(segment: &str) -> bool {
     ];
     const CONTROL_FLOW: &[&str] = &[
         "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac",
-        "select", "function", "in",
+        "select", "function", "in", "break", "continue", "return",
     ];
 
     let mut tokens = segment.split_whitespace();
@@ -490,6 +496,126 @@ fn head_is_opaque_trigger(segment: &str) -> bool {
         return false;
     };
     EXECUTORS.contains(&head) || CONTROL_FLOW.contains(&head)
+}
+
+/// Collapses runs of segments belonging to a single compound shell construct
+/// (`for…done`, `while…done`, `until…done`, `select…done`, `if…fi`,
+/// `case…esac`) into one Opaque segment carrying the verbatim original text.
+///
+/// Uses head-token matching only (not a scan of every word) so that
+/// `echo for; echo done` is *not* falsely treated as a loop. The trade-off:
+/// constructs nested without a separator between keywords (e.g.
+/// `if cond; then if other; then x; fi; fi`) merge in two passes rather than
+/// one. That's a minor regression on a pathological shape, not on the
+/// common shapes the LLM actually emits (CI polling loops, retry loops,
+/// case-based dispatch).
+fn merge_compound_constructs(input: &str, segments: Vec<Segment>) -> Vec<Segment> {
+    if !segments
+        .iter()
+        .any(|s| is_compound_opener(first_token(s.text())))
+    {
+        return segments;
+    }
+    let ranges = locate_segments(input, &segments);
+
+    let mut result: Vec<Segment> = Vec::with_capacity(segments.len());
+    let mut i = 0;
+    while i < segments.len() {
+        let head = first_token(segments[i].text());
+        let Some(opener_kw) = compound_opener_kw(head) else {
+            result.push(segments[i].clone());
+            i += 1;
+            continue;
+        };
+        let mut stack: Vec<&'static str> = vec![opener_kw];
+        let mut end: Option<usize> = None;
+        for (j, seg) in segments.iter().enumerate().skip(i + 1) {
+            let h = first_token(seg.text());
+            if let Some(kw) = compound_opener_kw(h) {
+                stack.push(kw);
+            } else if let Some(closes) = closer_targets(h) {
+                if let Some(top) = stack.last() {
+                    if closes.contains(top) {
+                        stack.pop();
+                    }
+                }
+            }
+            if stack.is_empty() {
+                end = Some(j);
+                break;
+            }
+        }
+        match end {
+            Some(end_idx) => {
+                let start_b = ranges[i].start;
+                let end_b = ranges[end_idx].end;
+                let merged = input[start_b..end_b].trim().to_string();
+                result.push(Segment::Opaque(merged));
+                i = end_idx + 1;
+            }
+            None => {
+                // Malformed: opener with no matching closer in this input.
+                // Fall through to per-segment behavior so the user still
+                // sees something rather than silently dropping work.
+                result.push(segments[i].clone());
+                i += 1;
+            }
+        }
+    }
+    result
+}
+
+fn is_compound_opener(tok: &str) -> bool {
+    compound_opener_kw(tok).is_some()
+}
+
+fn compound_opener_kw(tok: &str) -> Option<&'static str> {
+    match tok {
+        "for" => Some("for"),
+        "while" => Some("while"),
+        "until" => Some("until"),
+        "select" => Some("select"),
+        "if" => Some("if"),
+        "case" => Some("case"),
+        _ => None,
+    }
+}
+
+fn closer_targets(tok: &str) -> Option<&'static [&'static str]> {
+    match tok {
+        "done" => Some(&["for", "while", "until", "select"]),
+        "fi" => Some(&["if"]),
+        "esac" => Some(&["case"]),
+        _ => None,
+    }
+}
+
+fn first_token(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or("")
+}
+
+/// Finds each segment's byte range in the original input. Segment text was
+/// produced from `input` by the splitter (with at most leading/trailing
+/// whitespace trimmed), so a forward-only substring search reliably
+/// recovers each segment's position. Used by [`merge_compound_constructs`]
+/// to slice the verbatim original text (separators included) when merging.
+fn locate_segments(input: &str, segments: &[Segment]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::with_capacity(segments.len());
+    let mut search_from = 0;
+    for seg in segments {
+        let text = seg.text();
+        if let Some(rel) = input[search_from..].find(text) {
+            let start = search_from + rel;
+            let end = start + text.len();
+            ranges.push(start..end);
+            search_from = end;
+        } else {
+            // Unreachable: a segment came from this input. Defensive
+            // fallback keeps indices aligned with `segments`.
+            ranges.push(0..0);
+        }
+    }
+    ranges
 }
 
 fn is_env_assignment(tok: &str) -> bool {
@@ -905,22 +1031,116 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn if_then_fi_each_opaque() {
+    fn if_then_fi_collapses_to_single_opaque() {
         let segs = split("if true; then echo yes; fi");
-        assert_eq!(segs.len(), 3);
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert_eq!(segs[0].text(), "if true; then echo yes; fi");
+    }
+
+    #[test]
+    fn for_loop_collapses_to_single_opaque() {
+        let segs = split("for f in *.txt; do cat $f; done");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert_eq!(segs[0].text(), "for f in *.txt; do cat $f; done");
+    }
+
+    #[test]
+    fn while_loop_collapses_to_single_opaque() {
+        let segs = split("while true; do sleep 1; done");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+    }
+
+    #[test]
+    fn until_loop_collapses_to_single_opaque() {
+        let segs = split("until [ -f /tmp/x ]; do sleep 1; done");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+    }
+
+    #[test]
+    fn case_block_collapses_to_single_opaque() {
+        let segs = split("case x in a) echo a;; b) echo b;; esac");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert!(segs[0].text().contains("esac"));
+    }
+
+    #[test]
+    fn retry_polling_loop_collapses_verbatim() {
+        // Motivating real-world case: a CI polling loop the LLM emitted to
+        // monitor a workflow. Before this fix it produced 4-5 meaningless
+        // approval cards (`for i in 1..5`, `do gh run view ...`, `break`,
+        // `sleep 15`, `done`); now it's one Opaque carrying the original
+        // text verbatim — including `&&` and `||`, not just `;`.
+        let input =
+            "for i in 1 2 3 4 5; do gh run view --json status && break || sleep 15; done";
+        let segs = split(input);
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert_eq!(segs[0].text(), input);
+    }
+
+    #[test]
+    fn trailing_command_after_loop_stays_separate() {
+        let segs = split("for i in 1 2; do echo $i; done && echo finished");
+        assert_eq!(segs.len(), 2);
+        assert!(segs[0].is_opaque());
+        assert!(segs[0].text().contains("for i in 1 2"));
+        assert!(segs[0].text().contains("done"));
+        assert!(!segs[0].text().contains("finished"));
+        assert_eq!(segs[1], simple("echo finished"));
+    }
+
+    #[test]
+    fn two_sequential_loops_each_collapse_separately() {
+        let segs = split("for i in 1; do echo a; done; for j in 2; do echo b; done");
+        assert_eq!(segs.len(), 2);
+        assert!(segs[0].is_opaque());
+        assert!(segs[0].text().contains("for i in 1"));
+        assert!(segs[1].is_opaque());
+        assert!(segs[1].text().contains("for j in 2"));
+    }
+
+    #[test]
+    fn nested_if_inside_for_collapses_at_outer_done() {
+        let segs = split("for i in *; do if [ -f $i ]; then echo $i; fi; done");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert!(segs[0].text().ends_with("done"));
+    }
+
+    #[test]
+    fn malformed_loop_without_closer_falls_through() {
+        // No matching `done`. We don't hang; we keep the segments split.
+        let segs = split("for i in 1 2 3; do echo $i");
+        assert!(!segs.is_empty());
         for seg in &segs {
             assert!(seg.is_opaque(), "{:?} should be Opaque", seg);
         }
     }
 
     #[test]
-    fn for_loop_opaque() {
-        let segs = split("for f in *.txt; do cat $f; done");
-        // 'for' head, 'do' head, 'done' head all opaque
-        assert!(segs.iter().any(|s| s.text().starts_with("for")));
-        for seg in &segs {
-            assert!(seg.is_opaque(), "{:?} should be Opaque", seg);
-        }
+    fn echo_with_kw_substring_not_treated_as_loop() {
+        // `echo for; echo done` is two echo commands, not a loop. Head
+        // tokens are `echo`, not the loop keywords — must not collapse.
+        let segs = split("echo for; echo done");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0], simple("echo for"));
+        assert_eq!(segs[1], simple("echo done"));
+    }
+
+    #[test]
+    fn break_is_opaque_not_simple_with_prefix() {
+        // `break` is a loop builtin — meaningless outside a loop and
+        // unsafe to allowlist (`break-something` would match). Even
+        // when it survives compound-construct merging (e.g. malformed
+        // input), it must not be Simple.
+        let segs = split("break");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
     }
 
     // -----------------------------------------------------------------
