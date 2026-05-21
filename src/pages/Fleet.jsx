@@ -163,9 +163,43 @@ const Fleet = () => {
     return () => { cancelled = true; };
   }, [selectedWorkspaceId]);
 
-  // Live-subscribe to the selected workspace's session so the preview updates
-  // as messages stream in (events flow through MainLayout's useAssistantEvents).
-  const detailSessionId = selectedSnapshot?.session?.id || null;
+  // Resolve which session the detail aside should subscribe to. The snapshot
+  // endpoint prefers the workspace's *interactive* session (the chat the
+  // user typed into), but periodic agent runs write to a *separate*
+  // BackgroundJob session — so if the user has previously chatted with a
+  // workspace that also runs scheduled jobs, the aside ends up pinned to
+  // the interactive session forever and the periodic run's events stream
+  // into a sibling session the view never reads from.
+  //
+  // To make the aside follow live activity: scan all sessions in the store
+  // for ones matching this workspace, and prefer whichever has a
+  // non-terminal run. Pin the choice (don't snap back after the run ends)
+  // so the user can keep reading the agent's output. Reset on workspace
+  // change.
+  const liveActiveSessionId = useAssistantStore((state) => {
+    if (!selectedWorkspaceId) return null;
+    for (const [id, s] of Object.entries(state.sessions)) {
+      if (s.session?.context?.workspaceId !== selectedWorkspaceId) continue;
+      const hasActiveRun = (s.runs || []).some((r) =>
+        ['queued', 'running', 'waiting_for_tool'].includes(r.status)
+      );
+      if (hasActiveRun) return id;
+    }
+    return null;
+  });
+
+  const [pinnedSessionId, setPinnedSessionId] = useState(null);
+  useEffect(() => {
+    setPinnedSessionId(null);
+  }, [selectedWorkspaceId]);
+  useEffect(() => {
+    if (liveActiveSessionId && liveActiveSessionId !== pinnedSessionId) {
+      setPinnedSessionId(liveActiveSessionId);
+    }
+  }, [liveActiveSessionId, pinnedSessionId]);
+
+  const detailSessionId =
+    pinnedSessionId || selectedSnapshot?.session?.id || null;
   const sessionState = useAssistantStore((state) =>
     detailSessionId ? state.sessions[detailSessionId] : null
   );
@@ -189,13 +223,24 @@ const Fleet = () => {
 
   // Length-aware fallback: `[] || x` evaluates to `[]` in JS, so a bare
   // `||` chain masks the snapshot data whenever the store holds an empty
-  // stub (created by session_created -> initSession).
+  // stub (created by session_created -> initSession). The snapshot
+  // fallback is only valid while we're rendering the *snapshot's*
+  // session — once we've pinned to a sibling (the periodic-run session),
+  // its messages must come from the live store alone, otherwise we'd
+  // bleed the interactive transcript into the background-job view.
+  const showingSnapshotSession =
+    !pinnedSessionId ||
+    pinnedSessionId === selectedSnapshot?.session?.id;
   const detailMessages = sessionState?.messages?.length
     ? sessionState.messages
-    : selectedSnapshot?.messages || [];
+    : showingSnapshotSession
+    ? selectedSnapshot?.messages || []
+    : [];
   const detailToolCalls = sessionState?.toolCalls?.length
     ? sessionState.toolCalls
-    : selectedSnapshot?.toolCalls || EMPTY_TOOL_CALLS;
+    : showingSnapshotSession
+    ? selectedSnapshot?.toolCalls || EMPTY_TOOL_CALLS
+    : EMPTY_TOOL_CALLS;
   const detailStreamingText = sessionState?.streamingTextByMessageId || EMPTY_STREAMING;
   const detailIsStreaming = sessionState?.isStreaming || false;
 
