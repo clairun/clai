@@ -11,3 +11,6 @@ pub mod repository;
 pub mod runtime;
 pub mod tools;
 pub mod types;
+
+#[cfg(test)]
+mod repository_tests;
