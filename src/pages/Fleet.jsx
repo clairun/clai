@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChatManager } from '../contexts/ChatManagerContext';
-import { assistantClient, useAssistantStore } from '../assistant';
+import { useAssistantStore } from '../assistant';
 import { listWorkspaces, deleteWorkspace, getWorkspaceSnapshot } from '../workspace/client';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import InlineApprovalCard from '../components/InlineApprovalCard';
@@ -127,8 +127,12 @@ const Fleet = () => {
     [sortedWorkspaces, selectedWorkspaceId]
   );
 
-  // Fetch a fresh snapshot for the selected workspace — gives us the session
-  // id + recent messages so the detail-pane chat preview can render.
+  // Fetch a fresh snapshot for the selected workspace and push its
+  // messages/runs/toolCalls straight into the assistant store. Mirrors
+  // Workspace.jsx's loadSnapshot — the snapshot endpoint already bakes
+  // in everything we need, so a separate getSession/listMessages roundtrip
+  // is wasted work and risks losing to a stub session entry created by
+  // session_created events (initSession creates { messages: [] }).
   useEffect(() => {
     if (!selectedWorkspaceId) {
       setSelectedSnapshot(null);
@@ -139,7 +143,17 @@ const Fleet = () => {
     setSnapshotError('');
     getWorkspaceSnapshot(selectedWorkspaceId)
       .then((snap) => {
-        if (!cancelled) setSelectedSnapshot(snap || null);
+        if (cancelled) return;
+        setSelectedSnapshot(snap || null);
+        if (snap?.session?.id) {
+          useAssistantStore.getState().loadSessionData(
+            snap.session.id,
+            snap.session,
+            snap.messages || [],
+            snap.runs || [],
+            snap.toolCalls || []
+          );
+        }
       })
       .catch((err) => {
         if (cancelled) return;
@@ -155,31 +169,6 @@ const Fleet = () => {
   const sessionState = useAssistantStore((state) =>
     detailSessionId ? state.sessions[detailSessionId] : null
   );
-
-  useEffect(() => {
-    if (!detailSessionId) return undefined;
-    if (useAssistantStore.getState().sessions[detailSessionId]) return undefined;
-
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const [session, messages, runs, toolCalls] = await Promise.all([
-          assistantClient.getSession(detailSessionId),
-          assistantClient.loadSessionMessages(detailSessionId),
-          assistantClient.listRuns(detailSessionId),
-          assistantClient.listToolCalls(detailSessionId, null),
-        ]);
-        if (cancelled || !session) return;
-        useAssistantStore
-          .getState()
-          .loadSessionData(detailSessionId, session, messages || [], runs || [], toolCalls || []);
-      } catch {
-        // Snapshot already contains enough fallback for the preview.
-      }
-    };
-    load();
-    return () => { cancelled = true; };
-  }, [detailSessionId]);
 
   const handleOpenWorkspace = useCallback((id) => {
     if (!id) return;
@@ -198,8 +187,15 @@ const Fleet = () => {
     }
   }, [loadWorkspaces, selectedWorkspaceId]);
 
-  const detailMessages = sessionState?.messages || selectedSnapshot?.messages || [];
-  const detailToolCalls = sessionState?.toolCalls || selectedSnapshot?.toolCalls || EMPTY_TOOL_CALLS;
+  // Length-aware fallback: `[] || x` evaluates to `[]` in JS, so a bare
+  // `||` chain masks the snapshot data whenever the store holds an empty
+  // stub (created by session_created -> initSession).
+  const detailMessages = sessionState?.messages?.length
+    ? sessionState.messages
+    : selectedSnapshot?.messages || [];
+  const detailToolCalls = sessionState?.toolCalls?.length
+    ? sessionState.toolCalls
+    : selectedSnapshot?.toolCalls || EMPTY_TOOL_CALLS;
   const detailStreamingText = sessionState?.streamingTextByMessageId || EMPTY_STREAMING;
   const detailIsStreaming = sessionState?.isStreaming || false;
 
