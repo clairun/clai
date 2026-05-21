@@ -821,6 +821,20 @@ pub(crate) fn build_system_prompt(
             prompt.push_str("- Web access: enabled (`web.search` and `web.fetch` available)\n");
         }
 
+        // Filesystem boundary — soft contract, because shell access is a
+        // real escape hatch we can't enforce at the OS level without
+        // namespaces/landlock. The `fs_*` tools enforce path grants; the
+        // shell tool runs on the host with the user's OS permissions, so
+        // the only thing stopping an agent from `cd ~/somewhere/else &&
+        // cat > file` is this paragraph. Treat it as a trust contract.
+        prompt.push_str(
+            "\n## Filesystem boundary\n\
+             The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. The `fs_*` tools enforce this for you. The shell tool runs on the host with the user's OS permissions, so it is technically able to reach anywhere outside the grants — treat that capability as a hole in the sandbox, NOT as permission.\n\
+             - Do not `cd`, redirect to, or pass paths outside the listed grants — not even via subshells, heredocs, scripts, or absolute paths.\n\
+             - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
+             - If a task genuinely needs access beyond the grants, stop and tell the user exactly which path and which access level (read-only or read-write) you would need. Do not silently extend your reach.\n",
+        );
+
         prompt.push_str(
             "\n## Agent Memory\n\
              The `.clai/memory/` directory inside your workspace is pre-created and ready to use as durable memory across runs.\n\
