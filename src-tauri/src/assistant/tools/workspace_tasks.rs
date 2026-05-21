@@ -967,3 +967,172 @@ async fn latest_assistant_text(pool: &DbPool, session_id: &str) -> Result<Option
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    // concise_agent_description
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn concise_agent_description_none_returns_none() {
+        assert_eq!(concise_agent_description(None), None);
+    }
+
+    #[test]
+    fn concise_agent_description_empty_returns_none() {
+        assert_eq!(concise_agent_description(Some("".to_string())), None);
+    }
+
+    #[test]
+    fn concise_agent_description_whitespace_only_returns_none() {
+        assert_eq!(
+            concise_agent_description(Some("   \n\t  ".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn concise_agent_description_short_single_line() {
+        let input = Some("A short description.".to_string());
+        assert_eq!(
+            concise_agent_description(input),
+            Some("A short description.".to_string())
+        );
+    }
+
+    #[test]
+    fn concise_agent_description_takes_first_non_empty_line() {
+        let input = Some("\n\nSecond line is first non-empty.\nThird line.".to_string());
+        assert_eq!(
+            concise_agent_description(input),
+            Some("Second line is first non-empty.".to_string())
+        );
+    }
+
+    #[test]
+    fn concise_agent_description_trims_leading_whitespace() {
+        let input = Some("   \t  Trimmed description.".to_string());
+        assert_eq!(
+            concise_agent_description(input),
+            Some("Trimmed description.".to_string())
+        );
+    }
+
+    #[test]
+    fn concise_agent_description_truncates_long_line() {
+        let long = "x".repeat(300);
+        let result = concise_agent_description(Some(long.clone()));
+        let expected = "x".repeat(240) + "...";
+        assert_eq!(result, Some(expected));
+    }
+
+    #[test]
+    fn concise_agent_description_exactly_max_length_passes_through() {
+        let exact = "x".repeat(240);
+        assert_eq!(concise_agent_description(Some(exact.clone())), Some(exact));
+    }
+
+    // -----------------------------------------------------------------
+    // is_attention_status
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn is_attention_status_blocked() {
+        assert!(is_attention_status("blocked"));
+    }
+
+    #[test]
+    fn is_attention_status_failed() {
+        assert!(is_attention_status("failed"));
+    }
+
+    #[test]
+    fn is_attention_status_needs_user_input() {
+        assert!(is_attention_status("needs_user_input"));
+    }
+
+    #[test]
+    fn is_attention_status_running_is_false() {
+        assert!(!is_attention_status("running"));
+    }
+
+    #[test]
+    fn is_attention_status_completed_is_false() {
+        assert!(!is_attention_status("completed"));
+    }
+
+    #[test]
+    fn is_attention_status_queued_is_false() {
+        assert!(!is_attention_status("queued"));
+    }
+
+    #[test]
+    fn is_attention_status_empty_is_false() {
+        assert!(!is_attention_status(""));
+    }
+
+    // -----------------------------------------------------------------
+    // classify_worker_status
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn classify_worker_status_none_returns_fallback() {
+        assert_eq!(classify_worker_status(None, "completed"), "completed");
+    }
+
+    #[test]
+    fn classify_worker_status_needs_user_input_prefix() {
+        assert_eq!(
+            classify_worker_status(Some("NEEDS_USER_INPUT: Please review."), "completed"),
+            "needs_user_input"
+        );
+    }
+
+    #[test]
+    fn classify_worker_status_user_input_prefix() {
+        assert_eq!(
+            classify_worker_status(Some("USER_INPUT: What is your decision?"), "completed"),
+            "needs_user_input"
+        );
+    }
+
+    #[test]
+    fn classify_worker_status_blocked_prefix() {
+        assert_eq!(
+            classify_worker_status(Some("BLOCKED: Missing API key."), "completed"),
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn classify_worker_status_normal_summary_returns_fallback() {
+        assert_eq!(
+            classify_worker_status(Some("Task completed successfully."), "completed"),
+            "completed"
+        );
+    }
+
+    #[test]
+    fn classify_worker_status_trims_leading_whitespace() {
+        assert_eq!(
+            classify_worker_status(Some("  BLOCKED: Whitespace before."), "running"),
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn classify_worker_status_empty_string_returns_fallback() {
+        assert_eq!(classify_worker_status(Some(""), "completed"), "completed");
+    }
+
+    #[test]
+    fn classify_worker_status_whitespace_only_returns_fallback() {
+        assert_eq!(
+            classify_worker_status(Some("   \n  "), "completed"),
+            "completed"
+        );
+    }
+}
