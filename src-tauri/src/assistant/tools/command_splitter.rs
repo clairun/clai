@@ -1075,8 +1075,7 @@ mod tests {
         // approval cards (`for i in 1..5`, `do gh run view ...`, `break`,
         // `sleep 15`, `done`); now it's one Opaque carrying the original
         // text verbatim — including `&&` and `||`, not just `;`.
-        let input =
-            "for i in 1 2 3 4 5; do gh run view --json status && break || sleep 15; done";
+        let input = "for i in 1 2 3 4 5; do gh run view --json status && break || sleep 15; done";
         let segs = split(input);
         assert_eq!(segs.len(), 1);
         assert!(segs[0].is_opaque());
