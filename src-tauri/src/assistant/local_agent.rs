@@ -524,26 +524,6 @@ async fn handle_claude_event(
     usage: &mut Option<RunUsage>,
     result_error: &mut Option<String>,
 ) -> Result<(), LocalAgentRunError> {
-    let top_type = value.get("type").and_then(Value::as_str).unwrap_or("?");
-    // Verbose trace of every event Claude Code emits. Filed under
-    // `claude_stream` so it can be enabled in isolation
-    // (RUST_LOG=claude_stream=debug) without flooding the rest of the
-    // crate's logs. Use info-level for the top-level type tag so it's
-    // visible at default log levels too, and debug-level for the full
-    // payload (turned on only when we're hunting tool/format issues).
-    tracing::info!(
-        target: "claude_stream",
-        run_id = %run_id,
-        top_type = %top_type,
-        "Claude Code event"
-    );
-    tracing::debug!(
-        target: "claude_stream",
-        run_id = %run_id,
-        top_type = %top_type,
-        payload = %value,
-        "Claude Code event payload"
-    );
     match value.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
             let event = value.get("event").unwrap_or(&Value::Null);

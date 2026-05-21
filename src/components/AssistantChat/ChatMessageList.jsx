@@ -81,6 +81,65 @@ const cleanToolName = (name) => {
 };
 
 /**
+ * Walk an assistant message's `content` array (already ordered) and
+ * collapse it into render-ready segments, merging consecutive
+ * same-type parts. Consecutive `tool_use` parts share one
+ * `ToolCallGroup` so a turn that fires 35 tools in a row still renders
+ * compactly instead of producing 35 separate cards; consecutive text
+ * (or thinking) parts merge into one block. Empty Text parts (the
+ * placeholder the assistant message is seeded with before the first
+ * delta arrives) are skipped — otherwise an empty bubble would render
+ * a phantom empty paragraph above the first real content.
+ *
+ * The output order mirrors the source order, so callers see exactly
+ * the text↔tool interleaving the agent produced.
+ */
+const groupAssistantContent = (content, toolCalls) => {
+  if (!Array.isArray(content)) return [];
+  const segments = [];
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue;
+    if (part.type === 'text') {
+      const text = part.text || '';
+      if (!text) continue;
+      const last = segments[segments.length - 1];
+      if (last && last.kind === 'text') {
+        last.text += text;
+      } else {
+        segments.push({ kind: 'text', text });
+      }
+    } else if (part.type === 'thinking') {
+      const text = part.text || '';
+      if (!text) continue;
+      const last = segments[segments.length - 1];
+      if (last && last.kind === 'thinking') {
+        last.text += text;
+      } else {
+        segments.push({ kind: 'thinking', text });
+      }
+    } else if (part.type === 'tool_use') {
+      const tc = toolCalls.find((t) => t.id === part.tool_call_id);
+      const enriched = {
+        toolCallId: part.tool_call_id,
+        toolName: cleanToolName(part.tool_name),
+        arguments: part.arguments,
+        status: tc?.status || 'running',
+        params: tc?.params,
+        result: tc?.result,
+        error: tc?.error,
+      };
+      const last = segments[segments.length - 1];
+      if (last && last.kind === 'tools') {
+        last.toolUses.push(enriched);
+      } else {
+        segments.push({ kind: 'tools', toolUses: [enriched] });
+      }
+    }
+  }
+  return segments;
+};
+
+/**
  * Check if an assistant message contains only tool calls (no text).
  */
 const isToolOnlyMessage = (message) => {
@@ -373,24 +432,18 @@ const MessageBlock = memo(({ message, streamingText, toolCalls, userLabel = 'You
   }
 
   if (role === 'assistant') {
-    const textContent = streamingText || getTextContent(message);
     const isCurrentlyStreaming = !!streamingText;
-    const toolUses = getToolUses(message);
-    const thinkingContent = getThinkingContent(message);
-
-    // Build enriched tool use list with params from store
-    const enrichedToolUses = toolUses.map((tu) => {
-      const tc = toolCalls.find((t) => t.id === tu.tool_call_id);
-      return {
-        toolCallId: tu.tool_call_id,
-        toolName: cleanToolName(tu.tool_name),
-        arguments: tu.arguments,
-        status: tc?.status || 'running',
-        params: tc?.params,
-        result: tc?.result,
-        error: tc?.error,
-      };
-    });
+    // Walk message.content in order, grouping consecutive same-type
+    // parts into segments. This preserves the interleaving (text → tool
+    // → text → tool …) the assistant actually produced, rather than
+    // collapsing all text to the top and all tools to the bottom.
+    // streamingText is appended as a trailing segment because by
+    // definition it represents the *current* in-flight text block,
+    // which sits after everything already persisted.
+    const segments = groupAssistantContent(message.content, toolCalls);
+    if (isCurrentlyStreaming) {
+      segments.push({ kind: 'text', text: streamingText, streaming: true });
+    }
 
     return (
       <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
@@ -401,15 +454,24 @@ const MessageBlock = memo(({ message, streamingText, toolCalls, userLabel = 'You
           </div>
         )}
         <div className={styles.messageContent}>
-          {thinkingContent && (
-            <ThinkingBlock content={thinkingContent} />
-          )}
-          {textContent && (
-            <StreamingMarkdown content={textContent} isStreaming={isCurrentlyStreaming} />
-          )}
-          {enrichedToolUses.length > 0 && (
-            <ToolCallGroup toolUses={enrichedToolUses} />
-          )}
+          {segments.map((seg, idx) => {
+            if (seg.kind === 'thinking') {
+              return <ThinkingBlock key={idx} content={seg.text} />;
+            }
+            if (seg.kind === 'text') {
+              return (
+                <StreamingMarkdown
+                  key={idx}
+                  content={seg.text}
+                  isStreaming={!!seg.streaming}
+                />
+              );
+            }
+            if (seg.kind === 'tools') {
+              return <ToolCallGroup key={idx} toolUses={seg.toolUses} />;
+            }
+            return null;
+          })}
         </div>
       </div>
     );
