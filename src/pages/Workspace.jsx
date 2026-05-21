@@ -327,6 +327,54 @@ const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged, onViewTask }) => {
   );
 };
 
+const ArtifactsList = ({ artifacts, onSelect }) => {
+  const [query, setQuery] = useState('');
+  const list = artifacts || [];
+  const normalized = query.trim().toLowerCase();
+  const filtered = normalized
+    ? list.filter((entry) =>
+        (entry.name || '').toLowerCase().includes(normalized)
+        || (entry.path || '').toLowerCase().includes(normalized))
+    : list;
+
+  return (
+    <div className={styles.searchableList}>
+      {list.length > 0 && (
+        <input
+          type="text"
+          className={styles.searchInput}
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`Search artifacts (${list.length})`}
+          aria-label="Search artifacts"
+        />
+      )}
+      <div className={styles.drawerList}>
+        {list.length === 0 ? (
+          <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
+        ) : filtered.length === 0 ? (
+          <div className={styles.drawerEmpty}>No artifacts match &quot;{query}&quot;.</div>
+        ) : (
+          filtered.map((entry) => (
+            <button
+              type="button"
+              key={entry.path}
+              className={styles.drawerListItem}
+              onClick={() => onSelect?.(entry)}
+            >
+              <div className={styles.drawerListName}>{entry.name}</div>
+              <div className={styles.drawerListMeta}>
+                {entry.path}
+                {entry.updatedAt ? ` · ${formatTimestamp(entry.updatedAt)}` : ''}
+              </div>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+};
+
 const WorkspaceAttentionBanner = ({ tasks }) => {
   const attentionTasks = (tasks || []).filter(isTaskAttention);
 
@@ -376,6 +424,9 @@ const WorkspaceHeader = ({
   // the chip and the drawer (which already filters !isDefault) agree.
   const assignedAgentCount = (snapshot?.assignedAgents || []).filter((a) => !a.isDefault).length;
   const taskCount = snapshot?.tasks?.length || 0;
+  const activeTaskCount = (snapshot?.tasks || []).filter(
+    (task) => task.status === 'running' || task.status === 'queued',
+  ).length;
 
   // Click a counter to open its panel; click again (or click another) to switch.
   // null = no panel open, chat takes the full content area.
@@ -383,7 +434,7 @@ const WorkspaceHeader = ({
     setActivePanel((current) => (current === panel ? null : panel));
   };
 
-  const renderCounter = (panel, count, label, clickable = true) => {
+  const renderCounter = (panel, count, label, clickable = true, activeCount = 0) => {
     const isActive = activePanel === panel;
     if (!clickable) {
       return <span className={styles.metric}>{count} {label}</span>;
@@ -393,9 +444,18 @@ const WorkspaceHeader = ({
         type="button"
         className={`${styles.metricButton} ${isActive ? styles.metricButtonActive : ''}`}
         onClick={() => togglePanel(panel)}
-        title={`Toggle ${label} panel`}
+        title={activeCount > 0 ? `${activeCount} ${label} in flight` : `Toggle ${label} panel`}
       >
+        {activeCount > 0 && (
+          <span
+            className={`${styles.statusDot} ${styles.status_running} ${styles.metricLeadingDot}`}
+            aria-hidden="true"
+          />
+        )}
         {count} {label}
+        {activeCount > 0 && (
+          <span className={styles.metricActiveSuffix}> · {activeCount} active</span>
+        )}
       </button>
     );
   };
@@ -459,7 +519,7 @@ const WorkspaceHeader = ({
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter('agents', assignedAgentCount, 'agents')}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter('tasks', taskCount, 'tasks')}
+        {renderCounter('tasks', taskCount, 'tasks', true, activeTaskCount)}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter('memories', memories.length, 'memories')}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
@@ -856,26 +916,10 @@ const Workspace = () => {
               )}
 
               {activePanel === 'artifacts' && (
-                <div className={styles.drawerList}>
-                  {artifacts.length > 0 ? artifacts.map((entry) => (
-                    <button
-                      type="button"
-                      key={entry.path}
-                      className={styles.drawerListItem}
-                      onClick={() => openPreviewEntry({ kind: 'artifact', entry })}
-                    >
-                      <div className={styles.drawerListName}>{entry.name}</div>
-                      <div className={styles.drawerListMeta}>
-                        {entry.path}
-                        {entry.updatedAt ? ` · ${formatTimestamp(entry.updatedAt)}` : ''}
-                      </div>
-                    </button>
-                  )) : (
-                    <div className={styles.drawerEmpty}>
-                      No artifacts in this workspace yet.
-                    </div>
-                  )}
-                </div>
+                <ArtifactsList
+                  artifacts={artifacts}
+                  onSelect={(entry) => openPreviewEntry({ kind: 'artifact', entry })}
+                />
               )}
             </div>
           </aside>
