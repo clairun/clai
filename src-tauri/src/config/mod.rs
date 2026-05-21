@@ -800,6 +800,30 @@ mod tests {
     }
 
     #[test]
+    fn discover_skills_emits_no_local_path_diagnostic_for_git_source() {
+        // Enabled Git skill source whose clone has not produced a local_path
+        // yet must surface an actionable diagnostic asking the user to refresh.
+        let mut config = ClaiConfig::default();
+        config.skill_sources.push(SkillSourceConfig::new_git(
+            "Awaiting clone".to_string(),
+            "https://example.invalid/skills.git".to_string(),
+            None,
+            None,
+        ));
+
+        let (skills, diagnostics) = discover_skills_with_diagnostics(&config);
+        assert!(skills.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(!diagnostics[0].ok);
+        assert_eq!(diagnostics[0].skill_count, 0);
+        assert!(diagnostics[0]
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .contains("no local path yet"));
+    }
+
+    #[test]
     fn discover_skills_emits_missing_path_diagnostic() {
         let mut config = ClaiConfig::default();
         config.skill_sources.push(SkillSourceConfig::new_local(
