@@ -647,6 +647,7 @@ const AgentFormModal = ({
                       .map((connection) => (
                         <option key={connection.id} value={connection.id}>
                           {connection.name} ({connection.modelId})
+                          {connection.authMode === 'subscription_login' ? ' — via CLI' : ''}
                         </option>
                       ))}
                   </select>
@@ -680,6 +681,9 @@ const AgentFormModal = ({
                             <div className={styles.providerConnectionHeader}>
                               <span className={styles.providerConnectionName}>{label}</span>
                               <span className={styles.chipMeta}>{meta}</span>
+                              {connection?.authMode === 'subscription_login' && (
+                                <span className={styles.chipMeta}>via CLI</span>
+                              )}
                               {statusLabel ? (
                                 <span className={styles.providerConnectionStatus}>{statusLabel}</span>
                               ) : null}

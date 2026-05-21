@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use tokio::process::Command;
 
 use crate::assistant::auth::ProviderSecretStorage;
-use crate::assistant::providers;
+use crate::assistant::providers::{self, cli};
 use crate::assistant::repository;
 use crate::assistant::repository::{
     CreateProviderConnectionParams, UpdateProviderConnectionParams,
@@ -16,7 +17,10 @@ use crate::AppState;
 pub struct CreateProviderConnectionRequest {
     pub name: String,
     pub provider_id: String,
-    pub api_key: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub auth_mode: Option<AuthMode>,
     #[serde(default)]
     pub base_url: Option<String>,
     pub model_id: String,
@@ -32,6 +36,8 @@ pub struct UpdateProviderConnectionRequest {
     pub provider_id: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub auth_mode: Option<AuthMode>,
     #[serde(default)]
     pub base_url: Option<String>,
     pub model_id: String,
@@ -61,20 +67,31 @@ pub async fn provider_connection_create(
     let descriptor = providers::get_provider_descriptor(&request.provider_id)
         .ok_or_else(|| format!("Unsupported provider: {}", request.provider_id))?;
 
-    if !descriptor
-        .supported_auth_modes
-        .contains(&AuthMode::DeveloperApiKey)
-    {
+    if !descriptor.supported_auth_modes.contains(
+        &request
+            .auth_mode
+            .clone()
+            .unwrap_or(AuthMode::DeveloperApiKey),
+    ) {
         return Err(format!(
-            "Provider '{}' does not support developer API keys",
+            "Provider '{}' does not support the requested auth mode",
             request.provider_id
         ));
     }
 
     let id = uuid::Uuid::new_v4().to_string();
+    let auth_mode = request.auth_mode.unwrap_or(AuthMode::DeveloperApiKey);
     let secret_ref = format!("provider-connection::{}", id);
-    ProviderSecretStorage::set_secret(&secret_ref, request.api_key.trim())
-        .map_err(|e| format!("Failed to store provider credential: {}", e))?;
+    if auth_mode == AuthMode::DeveloperApiKey {
+        let api_key = request
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "API key is required for developer API key connections".to_string())?;
+        ProviderSecretStorage::set_secret(&secret_ref, api_key)
+            .map_err(|e| format!("Failed to store provider credential: {}", e))?;
+    }
 
     repository::create_provider_connection(
         pool.inner(),
@@ -82,7 +99,7 @@ pub async fn provider_connection_create(
             id,
             name: request.name.trim().to_string(),
             provider_id: request.provider_id,
-            auth_mode: AuthMode::DeveloperApiKey,
+            auth_mode,
             base_url: request
                 .base_url
                 .map(|v| v.trim().to_string())
@@ -111,24 +128,29 @@ pub async fn provider_connection_update(
     let descriptor = providers::get_provider_descriptor(&request.provider_id)
         .ok_or_else(|| format!("Unsupported provider: {}", request.provider_id))?;
 
-    if !descriptor
-        .supported_auth_modes
-        .contains(&AuthMode::DeveloperApiKey)
-    {
+    if !descriptor.supported_auth_modes.contains(
+        &request
+            .auth_mode
+            .clone()
+            .unwrap_or(existing.auth_mode.clone()),
+    ) {
         return Err(format!(
-            "Provider '{}' does not support developer API keys",
+            "Provider '{}' does not support the requested auth mode",
             request.provider_id
         ));
     }
 
+    let auth_mode = request.auth_mode.unwrap_or(existing.auth_mode.clone());
     if let Some(api_key) = request
         .api_key
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        ProviderSecretStorage::set_secret(&existing.secret_ref, api_key)
-            .map_err(|e| format!("Failed to store provider credential: {}", e))?;
+        if auth_mode == AuthMode::DeveloperApiKey {
+            ProviderSecretStorage::set_secret(&existing.secret_ref, api_key)
+                .map_err(|e| format!("Failed to store provider credential: {}", e))?;
+        }
     }
 
     repository::update_provider_connection(
@@ -137,7 +159,7 @@ pub async fn provider_connection_update(
             id: request.id,
             name: request.name.trim().to_string(),
             provider_id: request.provider_id,
-            auth_mode: AuthMode::DeveloperApiKey,
+            auth_mode,
             base_url: request
                 .base_url
                 .map(|v| v.trim().to_string())
@@ -217,6 +239,12 @@ pub async fn provider_connection_list(
 }
 
 #[tauri::command]
+pub async fn provider_descriptor_models(provider_id: String) -> Result<Vec<ModelInfo>, String> {
+    cli::models_for_provider(&provider_id)
+        .ok_or_else(|| format!("No static model list for provider '{}'", provider_id))
+}
+
+#[tauri::command]
 pub async fn provider_connection_list_models(
     id: String,
     pool: State<'_, DbPool>,
@@ -224,6 +252,10 @@ pub async fn provider_connection_list_models(
     let connection = repository::get_provider_connection(pool.inner(), &id)
         .await?
         .ok_or_else(|| format!("Provider connection not found: {}", id))?;
+
+    if let Some(models) = cli::models_for_provider(&connection.provider_id) {
+        return Ok(models);
+    }
 
     let adapter = providers::resolve_adapter(&connection.provider_id).map_err(|e| e.to_string())?;
     adapter
@@ -250,6 +282,10 @@ pub async fn provider_connection_test(
         auth_mode = ?connection.auth_mode,
         "Testing provider connection"
     );
+
+    if providers::is_cli_provider(&connection.provider_id) {
+        return test_cli_provider_connection(&connection).await;
+    }
 
     let adapter = providers::resolve_adapter(&connection.provider_id).map_err(|e| {
         tracing::error!(
@@ -369,4 +405,61 @@ pub async fn provider_connection_test(
             })
         }
     }
+}
+
+async fn test_cli_provider_connection(
+    connection: &ProviderConnection,
+) -> Result<TestResult, String> {
+    let command = connection
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| cli::command_for_provider(&connection.provider_id).map(str::to_string))
+        .ok_or_else(|| format!("Unsupported CLI provider: {}", connection.provider_id))?;
+
+    let output = if connection.provider_id == cli::CLAUDE_CODE_PROVIDER_ID {
+        Command::new(&command)
+            .args(["auth", "status"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run `{}`: {}", command, e))?
+    } else {
+        Command::new(&command)
+            .arg("--version")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run `{}`: {}", command, e))?
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(TestResult {
+            success: false,
+            error: Some(if stderr.is_empty() { stdout } else { stderr }),
+        });
+    }
+
+    if connection.provider_id == cli::CLAUDE_CODE_PROVIDER_ID {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|e| format!("Claude auth status returned invalid JSON: {}", e))?;
+        if !value
+            .get("loggedIn")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(TestResult {
+                success: false,
+                error: Some("Claude Code is installed but not logged in".to_string()),
+            });
+        }
+    }
+
+    Ok(TestResult {
+        success: true,
+        error: None,
+    })
 }

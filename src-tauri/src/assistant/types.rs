@@ -135,6 +135,8 @@ pub struct SessionContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub netdata_conversation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub automation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_workspace_id: Option<String>,
@@ -294,6 +296,8 @@ pub struct ProviderDescriptor {
     #[serde(default)]
     pub supported_auth_modes: Vec<AuthMode>,
     pub configurable_base_url: bool,
+    #[serde(default)]
+    pub is_cli_backed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

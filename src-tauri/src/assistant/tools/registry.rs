@@ -89,7 +89,7 @@ pub fn available_tools(
     {
         tools.push(ToolDefinition {
             name: "bash_exec".to_string(),
-            description: "Run a shell command inside this automation's allowed working directory. Use this for local command execution and data processing when MCP tools are not the right fit. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 600000 (10 min) — the default is 120000 (2 min).".to_string(),
+            description: "Run a shell command through CLAI's guarded executor inside this automation's allowed working directory. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 600000 (10 min); the default is 120000 (2 min).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

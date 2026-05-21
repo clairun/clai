@@ -75,6 +75,10 @@ export async function listProviderModels(id) {
   return invoke('provider_connection_list_models', { id });
 }
 
+export async function listProviderDescriptorModels(providerId) {
+  return invoke('provider_descriptor_models', { providerId });
+}
+
 export async function testProviderConnection(id) {
   return invoke('provider_connection_test', { id });
 }

@@ -69,6 +69,10 @@ pub async fn run_session_turn(
         .await?
         .ok_or_else(|| AssistantEngineError::ProviderNotConfigured(input.connection_id.clone()))?;
 
+    if providers::is_cli_provider(&connection.provider_id) {
+        return crate::assistant::local_agent::run_session_turn(deps, input).await;
+    }
+
     // Get or create the run
     let run_id = match &input.run_id {
         Some(id) => {
@@ -586,7 +590,7 @@ fn usage_none() -> Option<&'static RunUsage> {
 }
 
 /// Build the system prompt for the assistant.
-fn build_system_prompt(
+pub(crate) fn build_system_prompt(
     context: &crate::assistant::types::SessionContext,
     tool_defs: &[crate::assistant::types::ToolDefinition],
     trigger: &RunTrigger,
@@ -659,7 +663,7 @@ fn build_system_prompt(
         "## Tool Usage Guidelines\n\
          - First inspect what is available in this session and choose the smallest set of tools needed.\n\
          - Use the configured MCP tools available in this session for domain-specific work.\n\
-         - Use `fs.*` and `bash.*` only when those local execution capabilities are exposed in this session.\n\
+         - Use exposed CLAI tools such as `fs_list`, `fs_read`, `fs_write`, `fs_glob`, and `bash_exec` only when those local execution capabilities are available in this session.\n\
          - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
          - Evaluate whether prior tool outputs are still fresh enough for the current decision. When information can expire or change over time (for example issues, alerts, metrics, repo state, or external system status), re-run the relevant tools if freshness matters.\n\
          - Chat is the default output channel. Use normal assistant replies for status, findings, and conclusions.\n\
@@ -1589,7 +1593,7 @@ fn append_text_with_separator(target: &mut Vec<ContentPart>, source: &[ContentPa
     }
 }
 
-fn build_trigger_message(
+pub(crate) fn build_trigger_message(
     session: &crate::assistant::types::AssistantSession,
     trigger: &RunTrigger,
 ) -> Option<ProviderInputMessage> {
