@@ -89,13 +89,13 @@ pub fn available_tools(
     {
         tools.push(ToolDefinition {
             name: "bash_exec".to_string(),
-            description: "Run a shell command inside this automation's allowed working directory. Use this for local command execution and data processing when MCP tools are not the right fit.".to_string(),
+            description: "Run a shell command inside this automation's allowed working directory. Use this for local command execution and data processing when MCP tools are not the right fit. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 600000 (10 min) — the default is 120000 (2 min).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
                     "cwd": { "type": "string" },
-                    "timeoutMs": { "type": "integer", "minimum": 1 },
+                    "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000, "description": "Command timeout in milliseconds (default 120000, max 600000)" },
                     "maxOutputChars": { "type": "integer", "minimum": 1 }
                 },
                 "required": ["command"]
