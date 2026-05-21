@@ -266,6 +266,12 @@ export const CommandProvider = ({ children }) => {
    *
    * @returns {Array} Non-navigation commands
    */
+
+  const isNavigationCommand = (cmd) => {
+    const navigationTypes = ["navigate", "open", "switch", "back", "forward"];
+    return navigationTypes.includes(cmd?.type) || cmd?.type?.endsWith("_navigation");
+  };
+
   const getVisualizationHistory = useCallback(() => {
     return commandHistory.filter(cmd => !isNavigationCommand(cmd));
   }, [commandHistory]);

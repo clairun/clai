@@ -37,7 +37,7 @@ export const useCommandRegistration = (commandId, apiFactory, deps = []) => {
   const registeredTabIdRef = useRef(null);
 
   // Create the API object, memoized on dependencies
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   const api = useMemo(apiFactory, deps);
 
   useEffect(() => {

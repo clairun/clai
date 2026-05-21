@@ -199,7 +199,7 @@ const ContextChart = ({
     setActiveGroupBy(normalizedGroupBy);
     setActiveFilters(normalizedFilterBy);
     setIsInitialized(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, []);
 
   // Update filters/groups when props change
@@ -648,7 +648,7 @@ const ContextChart = ({
       setError(err.message || 'Failed to load chart data');
       setLoading(false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [space?.id, room?.id, buildGetDataParams, transformResponseToChartData, getApplicableFilters]);
 
   // Fetch data when initialized and when filters/grouping changes

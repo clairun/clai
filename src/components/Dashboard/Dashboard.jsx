@@ -295,7 +295,7 @@ const Dashboard = ({ command }) => {
       });
     }
     // Only run once on mount - command.args won't change
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, []);
 
   // Find the initial time interval from persisted state
@@ -426,7 +426,7 @@ const Dashboard = ({ command }) => {
   // Calculate time range based on selected interval (recalculates on refresh)
   const timeRange = useMemo(() => {
     return calculateTimeRange(selectedInterval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [selectedInterval, lastRefresh]);
 
   // Handle time interval change

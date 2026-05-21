@@ -50,7 +50,7 @@ const Fleet = () => {
     if (isCurrentChatOpen()) {
       closeChat();
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load workspaces (initial + periodic refresh so chip counts stay live).
   const loadWorkspaces = useCallback(async () => {
