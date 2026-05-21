@@ -262,7 +262,6 @@ async fn run_claude_turn(
     let mut command = Command::new(binary);
     command
         .arg("-p")
-        .arg(prompt)
         .arg("--output-format")
         .arg("stream-json")
         .arg("--include-partial-messages")
@@ -285,6 +284,7 @@ async fn run_claude_turn(
         .arg("--disable-slash-commands")
         .arg("--system-prompt")
         .arg(system_prompt)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if !connection.model_id.trim().is_empty() {
@@ -297,6 +297,14 @@ async fn run_claude_turn(
             binary, e
         ))
     })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|e| LocalAgentRunError::failed(format!("Failed to write prompt: {}", e)))?;
+        drop(stdin);
+    }
     let stderr_tail: Arc<Mutex<VecDeque<String>>> =
         Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
     if let Some(stderr) = child.stderr.take() {
