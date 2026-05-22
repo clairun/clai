@@ -1798,4 +1798,404 @@ mod tests {
                 .unwrap();
         assert_eq!(name, "bash_exec");
     }
+
+    // -------------------------------------------------------------------
+    // is_legacy_dotted_tool_name (pure helper)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn is_legacy_dotted_recognizes_all_known_prefixes() {
+        assert!(is_legacy_dotted_tool_name("fs.list"));
+        assert!(is_legacy_dotted_tool_name("bash.exec"));
+        assert!(is_legacy_dotted_tool_name("web.fetch"));
+        assert!(is_legacy_dotted_tool_name("workspace.listAgents"));
+        assert!(is_legacy_dotted_tool_name("agent.spawn"));
+    }
+
+    #[test]
+    fn is_legacy_dotted_rejects_canonical_underscore_form() {
+        assert!(!is_legacy_dotted_tool_name("fs_list"));
+        assert!(!is_legacy_dotted_tool_name("bash_exec"));
+        assert!(!is_legacy_dotted_tool_name("workspace_listAgents"));
+    }
+
+    #[test]
+    fn is_legacy_dotted_rejects_external_mcp_names() {
+        // External MCP tool names use a `.` but are NOT in the legacy
+        // built-in prefix list. They must be left alone.
+        assert!(!is_legacy_dotted_tool_name("external_mcp.tool"));
+        assert!(!is_legacy_dotted_tool_name("github.create_issue"));
+        assert!(!is_legacy_dotted_tool_name("notion.search"));
+    }
+
+    #[test]
+    fn is_legacy_dotted_rejects_empty_and_dotless_strings() {
+        assert!(!is_legacy_dotted_tool_name(""));
+        assert!(!is_legacy_dotted_tool_name("nope"));
+        // Bare prefix without trailing dot does not match.
+        assert!(!is_legacy_dotted_tool_name("fs"));
+        assert!(!is_legacy_dotted_tool_name("bash"));
+    }
+
+    #[test]
+    fn is_legacy_dotted_requires_dot_terminated_prefix() {
+        // Strings that start with one of the prefix letters minus the
+        // dot must not match — the matcher requires the trailing `.`.
+        assert!(!is_legacy_dotted_tool_name("fsx.read"));
+        assert!(!is_legacy_dotted_tool_name("webhook.post"));
+        // But the exact prefix + dot + name does match, even with an
+        // empty suffix.
+        assert!(is_legacy_dotted_tool_name("fs."));
+        assert!(is_legacy_dotted_tool_name("bash.x"));
+    }
+
+    // -------------------------------------------------------------------
+    // table_exists / column_exists / foreign_key_targets /
+    // drop_table_if_exists
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn table_exists_returns_false_for_missing_table() {
+        let pool = create_test_pool().await;
+        assert!(!table_exists(&pool, "nope").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn table_exists_returns_true_after_create() {
+        let pool = create_test_pool().await;
+        sqlx::query("CREATE TABLE foo (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(table_exists(&pool, "foo").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn column_exists_distinguishes_present_and_absent_columns() {
+        let pool = create_test_pool().await;
+        sqlx::query("CREATE TABLE foo (id TEXT PRIMARY KEY, name TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(column_exists(&pool, "foo", "id").await.unwrap());
+        assert!(column_exists(&pool, "foo", "name").await.unwrap());
+        assert!(!column_exists(&pool, "foo", "missing").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn foreign_key_targets_lists_referenced_tables() {
+        let pool = create_test_pool().await;
+        sqlx::query("CREATE TABLE parent (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES parent(id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let targets = foreign_key_targets(&pool, "child").await.unwrap();
+        assert_eq!(targets, vec!["parent".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn foreign_key_targets_returns_empty_for_missing_table() {
+        let pool = create_test_pool().await;
+        // Documented behavior: an absent table returns an empty Vec,
+        // not an error.
+        let targets = foreign_key_targets(&pool, "nope").await.unwrap();
+        assert!(targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drop_table_if_exists_is_a_no_op_when_absent() {
+        let pool = create_test_pool().await;
+        // Must not error even though the table does not exist.
+        drop_table_if_exists(&pool, "nope").await.unwrap();
+        assert!(!table_exists(&pool, "nope").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn drop_table_if_exists_drops_present_table() {
+        let pool = create_test_pool().await;
+        sqlx::query("CREATE TABLE foo (id TEXT PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(table_exists(&pool, "foo").await.unwrap());
+        drop_table_if_exists(&pool, "foo").await.unwrap();
+        assert!(!table_exists(&pool, "foo").await.unwrap());
+    }
+
+    // -------------------------------------------------------------------
+    // sweep_orphaned_running_state
+    // -------------------------------------------------------------------
+
+    /// Minimal `workspace_tasks` schema for sweep tests. Only the
+    /// columns the sweep reads/writes (status, error, updated_at,
+    /// completed_at) plus the PK — kept small so the test does not
+    /// have to track unrelated schema changes elsewhere.
+    async fn create_workspace_tasks_for_sweep_test(pool: &DbPool) {
+        sqlx::query(
+            r#"
+            CREATE TABLE workspace_tasks (
+                id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                error TEXT,
+                updated_at INTEGER NOT NULL,
+                completed_at INTEGER
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_sweep_task(pool: &DbPool, id: &str, status: &str, error: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO workspace_tasks (id, status, error, updated_at, completed_at) \
+             VALUES (?, ?, ?, 1, NULL)",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(error)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sweep_marks_running_rows_as_failed() {
+        let pool = create_test_pool().await;
+        create_workspace_tasks_for_sweep_test(&pool).await;
+        insert_sweep_task(&pool, "t1", "running", None).await;
+
+        sweep_orphaned_running_state(&pool).await.unwrap();
+
+        let row: (String, Option<String>, i64, Option<i64>) = sqlx::query_as(
+            "SELECT status, error, updated_at, completed_at \
+             FROM workspace_tasks WHERE id = 't1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1.as_deref(), Some("task interrupted by app restart"));
+        // updated_at and completed_at are stamped from chrono::Utc::now()
+        // — we only check they were re-stamped (not the placeholder 1)
+        // and that completed_at is no longer NULL.
+        assert!(row.2 > 1, "updated_at must be re-stamped: {}", row.2);
+        let completed_at = row.3.expect("completed_at must be set after sweep");
+        assert!(completed_at > 1);
+    }
+
+    #[tokio::test]
+    async fn sweep_preserves_existing_error_via_coalesce() {
+        let pool = create_test_pool().await;
+        create_workspace_tasks_for_sweep_test(&pool).await;
+        insert_sweep_task(&pool, "t1", "running", Some("custom failure reason")).await;
+
+        sweep_orphaned_running_state(&pool).await.unwrap();
+
+        let error: Option<String> =
+            sqlx::query_scalar("SELECT error FROM workspace_tasks WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            error.as_deref(),
+            Some("custom failure reason"),
+            "COALESCE must keep the existing error",
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_non_running_rows_untouched() {
+        let pool = create_test_pool().await;
+        create_workspace_tasks_for_sweep_test(&pool).await;
+        insert_sweep_task(&pool, "done", "completed", None).await;
+        insert_sweep_task(&pool, "fail", "failed", Some("original error")).await;
+        insert_sweep_task(&pool, "pending", "pending", None).await;
+
+        sweep_orphaned_running_state(&pool).await.unwrap();
+
+        let rows: Vec<(String, String, Option<String>, i64)> = sqlx::query_as(
+            "SELECT id, status, error, updated_at \
+             FROM workspace_tasks ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        for (id, status, _err, updated_at) in &rows {
+            assert_ne!(status, "running", "row {} should not be running", id);
+            assert_eq!(
+                *updated_at, 1,
+                "non-running row {} must not be re-stamped",
+                id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_is_idempotent_after_no_running_rows_remain() {
+        let pool = create_test_pool().await;
+        create_workspace_tasks_for_sweep_test(&pool).await;
+        insert_sweep_task(&pool, "t1", "running", None).await;
+
+        sweep_orphaned_running_state(&pool).await.unwrap();
+        let after_first: (String, i64) =
+            sqlx::query_as("SELECT status, updated_at FROM workspace_tasks WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after_first.0, "failed");
+
+        // Second sweep: no rows are 'running' anymore, so nothing should
+        // change — updated_at must stay at its first-sweep value.
+        sweep_orphaned_running_state(&pool).await.unwrap();
+        let after_second: (String, i64) =
+            sqlx::query_as("SELECT status, updated_at FROM workspace_tasks WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after_second.0, "failed");
+        assert_eq!(
+            after_first.1, after_second.1,
+            "updated_at must not move on a second sweep",
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_handles_empty_table() {
+        let pool = create_test_pool().await;
+        create_workspace_tasks_for_sweep_test(&pool).await;
+        // Must not error.
+        sweep_orphaned_running_state(&pool).await.unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workspace_tasks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // canonicalize_legacy_tool_names — additional JSON edge cases
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn canonicalize_skips_messages_with_non_array_content() {
+        let pool = create_test_pool().await;
+        create_legacy_tool_name_schema(&pool).await;
+        // Non-array content (a single object) — the helper inspects
+        // `as_array_mut` and must not crash or alter this shape.
+        let json = r#"{"type":"text","text":"hi","tool_name":"bash.exec"}"#;
+        sqlx::query("INSERT INTO assistant_messages VALUES ('m1', ?)")
+            .bind(json)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        canonicalize_legacy_tool_names(&pool).await.unwrap();
+
+        let updated: String =
+            sqlx::query_scalar("SELECT content_json FROM assistant_messages WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // Untouched — non-array content is skipped.
+        assert!(updated.contains("\"tool_name\":\"bash.exec\""));
+    }
+
+    #[tokio::test]
+    async fn canonicalize_skips_parts_without_tool_name_field() {
+        let pool = create_test_pool().await;
+        create_legacy_tool_name_schema(&pool).await;
+        let json = r#"[
+            {"type":"text","text":"hi"},
+            {"type":"thinking","text":"thought"}
+        ]"#;
+        sqlx::query("INSERT INTO assistant_messages VALUES ('m1', ?)")
+            .bind(json)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        canonicalize_legacy_tool_names(&pool).await.unwrap();
+
+        let updated: String =
+            sqlx::query_scalar("SELECT content_json FROM assistant_messages WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // The parts have no tool_name; round-trip should be unchanged.
+        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        let arr = parsed.as_array().expect("content remains an array");
+        assert_eq!(arr.len(), 2);
+        assert!(arr.iter().all(|v| v.get("tool_name").is_none()));
+    }
+
+    #[tokio::test]
+    async fn canonicalize_only_rewrites_first_dot_in_legacy_prefix() {
+        let pool = create_test_pool().await;
+        create_legacy_tool_name_schema(&pool).await;
+        // A legacy-prefixed name with a second `.` after the slot
+        // (`bash.exec.advanced`). The helper uses
+        // `replacen('.', "_", 1)`, so only the leading dot is rewritten.
+        let json = r#"[{"type":"tool_use","tool_call_id":"a","tool_name":"bash.exec.advanced"}]"#;
+        sqlx::query("INSERT INTO assistant_messages VALUES ('m1', ?)")
+            .bind(json)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        canonicalize_legacy_tool_names(&pool).await.unwrap();
+
+        let updated: String =
+            sqlx::query_scalar("SELECT content_json FROM assistant_messages WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(updated.contains("\"tool_name\":\"bash_exec.advanced\""));
+    }
+
+    #[tokio::test]
+    async fn canonicalize_handles_mixed_legacy_and_canonical_in_same_row() {
+        let pool = create_test_pool().await;
+        create_legacy_tool_name_schema(&pool).await;
+        let json = r#"[
+            {"type":"tool_use","tool_call_id":"a","tool_name":"fs.list"},
+            {"type":"tool_use","tool_call_id":"b","tool_name":"fs_read"},
+            {"type":"tool_use","tool_call_id":"c","tool_name":"workspace.assignTask"}
+        ]"#;
+        sqlx::query("INSERT INTO assistant_messages VALUES ('m1', ?)")
+            .bind(json)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        canonicalize_legacy_tool_names(&pool).await.unwrap();
+
+        let updated: String =
+            sqlx::query_scalar("SELECT content_json FROM assistant_messages WHERE id = 'm1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        let names: Vec<&str> = parsed
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.get("tool_name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["fs_list", "fs_read", "workspace_assignTask"],
+            "legacy names rewritten, already-canonical names left alone",
+        );
+    }
 }
