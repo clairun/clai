@@ -1384,6 +1384,459 @@ mod tests {
         assert_eq!(normalized[2].role, MessageRole::Tool);
         assert_eq!(normalized[3].role, MessageRole::Tool);
     }
+
+    fn assistant_message_with_thinking(text: &str) -> AssistantMessage {
+        assistant_message_with_content(vec![ContentPart::Thinking {
+            text: text.to_string(),
+        }])
+    }
+
+    fn system_message(text: &str) -> AssistantMessage {
+        AssistantMessage {
+            id: format!("msg-system-{}", text.len()),
+            session_id: "session".to_string(),
+            role: MessageRole::System,
+            content: vec![ContentPart::Text {
+                text: text.to_string(),
+            }],
+            created_at: 0,
+            provider_metadata: None,
+        }
+    }
+
+    fn make_session(automation_name: Option<&str>) -> crate::assistant::types::AssistantSession {
+        crate::assistant::types::AssistantSession {
+            id: "session".to_string(),
+            tab_id: None,
+            kind: SessionKind::BackgroundJob,
+            title: None,
+            context: SessionContext {
+                automation_name: automation_name.map(str::to_string),
+                ..Default::default()
+            },
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn normalize_strips_orphan_tool_use_from_assistant_in_final_pass() {
+        // Assistant has two tool_calls but only one tool_result follows; the
+        // orphan tool_use must be stripped while the assistant text and the
+        // matched tool_use survive.
+        let messages = vec![
+            user_message("do two things"),
+            assistant_message_with_content(vec![
+                ContentPart::Text {
+                    text: "writing".into(),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "call_a".into(),
+                    tool_name: "fs_write".into(),
+                    arguments: serde_json::json!({}),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "call_b".into(),
+                    tool_name: "fs_write".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ]),
+            tool_message("call_a"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[1].role, MessageRole::Assistant);
+        let tool_ids: Vec<&str> = normalized[1]
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::ToolUse { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_ids, vec!["call_a"]);
+        assert!(normalized[1]
+            .content
+            .iter()
+            .any(|p| matches!(p, ContentPart::Text { text } if text == "writing")));
+        assert_eq!(normalized[2].role, MessageRole::Tool);
+    }
+
+    #[test]
+    fn normalize_drops_assistant_left_empty_by_orphan_strip() {
+        // Assistant has only an orphan tool_use (no matching tool_result and no
+        // text). After the final-invariant pass strips the orphan, the
+        // assistant is empty and must be dropped entirely.
+        let messages = vec![
+            user_message("kick off"),
+            assistant_message_with_content(vec![ContentPart::ToolUse {
+                tool_call_id: "call_orphan".into(),
+                tool_name: "fs_write".into(),
+                arguments: serde_json::json!({}),
+            }]),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].role, MessageRole::User);
+    }
+
+    #[test]
+    fn normalize_merges_consecutive_assistant_text_messages() {
+        // Two assistant rows with no tool calls and no intervening user must
+        // collapse into a single assistant message, content concatenated in
+        // order.
+        let messages = vec![
+            user_message("hi"),
+            assistant_message_with_text("first chunk"),
+            assistant_message_with_text("second chunk"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[1].role, MessageRole::Assistant);
+        let texts: Vec<&str> = normalized[1]
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["first chunk", "second chunk"]);
+    }
+
+    #[test]
+    fn normalize_preserves_system_message_pass_through() {
+        let messages = vec![
+            system_message("system prelude"),
+            user_message("hi"),
+            assistant_message_with_text("hello"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[0].role, MessageRole::System);
+        let ContentPart::Text { text } = &normalized[0].content[0] else {
+            panic!("expected text content");
+        };
+        assert_eq!(text, "system prelude");
+    }
+
+    #[test]
+    fn normalize_drops_tool_message_without_tool_result_part() {
+        // Tool row with no ToolResult content (only stray text) — must be
+        // dropped because we can't anchor it to an assistant tool_call_id.
+        let bogus_tool = AssistantMessage {
+            id: "msg-tool-bogus".to_string(),
+            session_id: "session".to_string(),
+            role: MessageRole::Tool,
+            content: vec![ContentPart::Text {
+                text: "not a tool result".into(),
+            }],
+            created_at: 0,
+            provider_metadata: None,
+        };
+        let messages = vec![
+            user_message("do work"),
+            assistant_message_with_content(vec![ContentPart::ToolUse {
+                tool_call_id: "call_a".into(),
+                tool_name: "fs_write".into(),
+                arguments: serde_json::json!({}),
+            }]),
+            bogus_tool,
+            tool_message("call_a"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        // The bogus tool row is dropped; the real tool result still attaches
+        // to its assistant.
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[2].role, MessageRole::Tool);
+        assert!(matches!(
+            &normalized[2].content[0],
+            ContentPart::ToolResult { tool_call_id, .. } if tool_call_id == "call_a"
+        ));
+    }
+
+    #[test]
+    fn normalize_drops_assistant_with_only_empty_thinking_placeholder() {
+        // `assistant_content_is_empty` treats a Thinking part as empty only
+        // when its text is empty (matching the helper's matrix: a thinking
+        // placeholder ingested before any reasoning text streamed in).
+        // Such an assistant placeholder must be dropped so the surrounding
+        // user messages can merge.
+        let messages = vec![
+            user_message("hi"),
+            assistant_message_with_thinking(""),
+            user_message("are you there?"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].role, MessageRole::User);
+        let ContentPart::Text { text } = &normalized[0].content[0] else {
+            panic!("expected text content");
+        };
+        assert!(text.contains("hi"));
+        assert!(text.contains("are you there?"));
+    }
+
+    #[test]
+    fn normalize_preserves_assistant_with_non_empty_thinking() {
+        // A Thinking part with real reasoning text is NOT empty per
+        // `assistant_content_is_empty` (text.is_empty() is the only check).
+        // The assistant message must pass through so providers that require
+        // the reasoning_content blob (e.g. LiteLLM-fronted OpenAI with
+        // thinking enabled) still see it.
+        let messages = vec![
+            user_message("hi"),
+            assistant_message_with_thinking("internal monologue"),
+            user_message("are you there?"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[0].role, MessageRole::User);
+        assert_eq!(normalized[1].role, MessageRole::Assistant);
+        assert!(matches!(
+            &normalized[1].content[0],
+            ContentPart::Thinking { text } if text == "internal monologue"
+        ));
+        assert_eq!(normalized[2].role, MessageRole::User);
+    }
+
+    #[test]
+    fn normalize_handles_empty_input() {
+        let normalized = normalize_history_for_provider(&[]);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn assistant_content_is_empty_matrix() {
+        // Empty content list → empty.
+        assert!(assistant_content_is_empty(&[]));
+        // Only-text with empty string → empty.
+        assert!(assistant_content_is_empty(&[ContentPart::Text {
+            text: String::new()
+        }]));
+        // Only-thinking with empty string → empty.
+        assert!(assistant_content_is_empty(&[ContentPart::Thinking {
+            text: String::new()
+        }]));
+        // Empty text + empty thinking → still empty.
+        assert!(assistant_content_is_empty(&[
+            ContentPart::Text {
+                text: String::new()
+            },
+            ContentPart::Thinking {
+                text: String::new()
+            },
+        ]));
+        // Non-empty text → not empty.
+        assert!(!assistant_content_is_empty(&[ContentPart::Text {
+            text: "hi".into()
+        }]));
+        // Non-empty thinking → not empty.
+        assert!(!assistant_content_is_empty(&[ContentPart::Thinking {
+            text: "ponder".into()
+        }]));
+        // ToolUse alone is always non-empty.
+        assert!(!assistant_content_is_empty(&[ContentPart::ToolUse {
+            tool_call_id: "call_a".into(),
+            tool_name: "fs_write".into(),
+            arguments: serde_json::json!({}),
+        }]));
+        // ToolResult alone is always non-empty (irrelevant for assistant but
+        // the helper still treats it as not-empty).
+        assert!(!assistant_content_is_empty(&[ContentPart::ToolResult {
+            tool_call_id: "call_a".into(),
+            payload: serde_json::json!({}),
+            started_at: None,
+            completed_at: None,
+        }]));
+    }
+
+    #[test]
+    fn append_text_with_separator_appends_blank_line_between_existing_and_new_text() {
+        let mut target = vec![ContentPart::Text {
+            text: "first".to_string(),
+        }];
+        let source = vec![ContentPart::Text {
+            text: "second".to_string(),
+        }];
+
+        append_text_with_separator(&mut target, &source);
+
+        assert_eq!(target.len(), 1);
+        let ContentPart::Text { text } = &target[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text, "first\n\nsecond");
+    }
+
+    #[test]
+    fn append_text_with_separator_pushes_text_part_when_target_has_no_text() {
+        // Target has only a ToolUse part; the appended text must be added as
+        // a new Text part, not merged into anything.
+        let mut target = vec![ContentPart::ToolUse {
+            tool_call_id: "call_a".into(),
+            tool_name: "fs_write".into(),
+            arguments: serde_json::json!({}),
+        }];
+        let source = vec![ContentPart::Text {
+            text: "hello".to_string(),
+        }];
+
+        append_text_with_separator(&mut target, &source);
+
+        assert_eq!(target.len(), 2);
+        assert!(matches!(&target[1], ContentPart::Text { text } if text == "hello"));
+    }
+
+    #[test]
+    fn append_text_with_separator_skips_when_source_has_no_text() {
+        // Source has only a non-text part → target untouched.
+        let mut target = vec![ContentPart::Text {
+            text: "keep me".to_string(),
+        }];
+        let source = vec![ContentPart::ToolUse {
+            tool_call_id: "call_a".into(),
+            tool_name: "fs_write".into(),
+            arguments: serde_json::json!({}),
+        }];
+
+        append_text_with_separator(&mut target, &source);
+
+        assert_eq!(target.len(), 1);
+        let ContentPart::Text { text } = &target[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text, "keep me");
+    }
+
+    #[test]
+    fn append_text_with_separator_replaces_blank_target_text_without_separator() {
+        // Target's last text part is empty — appended text must replace it
+        // without a leading "\n\n" separator.
+        let mut target = vec![ContentPart::Text {
+            text: String::new(),
+        }];
+        let source = vec![ContentPart::Text {
+            text: "fresh".to_string(),
+        }];
+
+        append_text_with_separator(&mut target, &source);
+
+        assert_eq!(target.len(), 1);
+        let ContentPart::Text { text } = &target[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text, "fresh");
+    }
+
+    #[test]
+    fn append_text_with_separator_joins_multiple_source_text_parts_with_newline() {
+        let mut target = vec![ContentPart::Text {
+            text: "header".to_string(),
+        }];
+        let source = vec![
+            ContentPart::Text {
+                text: "line1".to_string(),
+            },
+            ContentPart::Text {
+                text: "line2".to_string(),
+            },
+        ];
+
+        append_text_with_separator(&mut target, &source);
+
+        assert_eq!(target.len(), 1);
+        let ContentPart::Text { text } = &target[0] else {
+            panic!("expected text");
+        };
+        assert_eq!(text, "header\n\nline1\nline2");
+    }
+
+    #[test]
+    fn build_trigger_message_scheduled_emits_user_marker_with_automation_name() {
+        let session = make_session(Some("Health Monitor"));
+        let message = build_trigger_message(&session, &RunTrigger::Scheduled)
+            .expect("scheduled returns Some");
+
+        assert_eq!(message.role, MessageRole::User);
+        let ContentPart::Text { text } = &message.content[0] else {
+            panic!("expected text");
+        };
+        assert!(text.contains("--- New scheduled run at "));
+        assert!(text.contains("Health Monitor"));
+        assert!(text.contains("Tool outputs above this marker are from previous runs."));
+    }
+
+    #[test]
+    fn build_trigger_message_scheduled_falls_back_when_automation_name_missing() {
+        // No automation_name → fallback string "automation" appears in the
+        // marker.
+        let session = make_session(None);
+        let message = build_trigger_message(&session, &RunTrigger::Scheduled)
+            .expect("scheduled returns Some");
+
+        let ContentPart::Text { text } = &message.content[0] else {
+            panic!("expected text");
+        };
+        assert!(text.contains("--- New scheduled run at "));
+        assert!(text.contains("Run the next scheduled pass for automation now."));
+    }
+
+    #[test]
+    fn build_trigger_message_manual_automation_emits_manual_marker() {
+        let session = make_session(Some("Daily Report"));
+        let message = build_trigger_message(&session, &RunTrigger::ManualAutomation)
+            .expect("manual returns Some");
+
+        assert_eq!(message.role, MessageRole::User);
+        let ContentPart::Text { text } = &message.content[0] else {
+            panic!("expected text");
+        };
+        assert!(text.contains("--- Manual run at "));
+        assert!(text.contains("Daily Report"));
+        assert!(text.contains("Run the automation Daily Report now"));
+    }
+
+    #[test]
+    fn build_trigger_message_returns_none_for_user_driven_triggers() {
+        let session = make_session(Some("ignored"));
+        for trigger in &[
+            RunTrigger::UserMessage,
+            RunTrigger::Retry,
+            RunTrigger::InterAgentCall,
+            RunTrigger::WorkspaceTask,
+        ] {
+            assert!(
+                build_trigger_message(&session, trigger).is_none(),
+                "expected None for {:?}",
+                trigger
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_agent_id_formats_session_id_with_prefix() {
+        assert_eq!(
+            bridge_agent_id("abc-123"),
+            "assistant-session:abc-123".to_string()
+        );
+        // Empty session id still produces a prefixed string (no panic).
+        assert_eq!(bridge_agent_id(""), "assistant-session:".to_string());
+    }
 }
 
 /// Normalize persisted history into a provider-safe message sequence.
