@@ -68,6 +68,7 @@ pub async fn run_session_turn(
     let (cli_session_id, is_new_session) = ensure_cli_session_id(deps, &mut session).await?;
     let mcp_runtime = local_mcp::ensure_started(deps).await?;
     let notices = Arc::new(Mutex::new(Vec::<RunNotice>::new()));
+    let session_grants = Arc::new(Mutex::new(Vec::new()));
     let token = mcp_runtime
         .bind_run(ToolBinding {
             session_id: session.id.clone(),
@@ -75,6 +76,7 @@ pub async fn run_session_turn(
             cancel_token: input.cancel_token.clone(),
             inter_agent_call_depth: input.inter_agent_call_depth,
             notices: notices.clone(),
+            session_grants,
         })
         .await;
     let mcp_config_path = match write_mcp_config(mcp_runtime.url(), &token) {

@@ -8,9 +8,9 @@ pub mod types;
 
 pub use types::{
     AgentConfig, AiProvider, ClaiConfig, ExecutionCapabilityConfig, ExposedAgentTool,
-    FilesystemPathAccess, FilesystemPathGrant, McpServerAuth, McpServerConfig,
-    McpServerIntegrationType, McpServerTransport, ShellAccessMode, SkillSourceConfig,
-    SkillSourceKind,
+    FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, McpServerAuth, McpServerConfig,
+    McpServerIntegrationType, McpServerTransport, SandboxNetworkConfig, SandboxSessionBusConfig,
+    ShellAccessMode, SkillSourceConfig, SkillSourceKind,
 };
 
 use std::fs;

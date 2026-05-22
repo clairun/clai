@@ -11,6 +11,7 @@ import {
 } from '../workspace/client';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import InlineApprovalCard from '../components/InlineApprovalCard';
+import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import { useFleet } from '../contexts/FleetContext';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
@@ -676,6 +677,7 @@ const Fleet = () => {
                     isStreaming={detailIsStreaming}
                   />
                   <InlineApprovalCard workspaceId={selectedWorkspace.id} />
+                  <InlinePathGrantCard workspaceId={selectedWorkspace.id} />
                 </>
               ) : (
                 <>
@@ -683,6 +685,7 @@ const Fleet = () => {
                     No conversation yet. Open the workspace to start chatting with its manager.
                   </div>
                   <InlineApprovalCard workspaceId={selectedWorkspace.id} />
+                  <InlinePathGrantCard workspaceId={selectedWorkspace.id} />
                 </>
               )}
             </div>

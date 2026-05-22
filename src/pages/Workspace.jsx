@@ -15,6 +15,7 @@ import WorkspaceFilePreviewPanel from '../components/WorkspaceFilePreviewPanel';
 import { assistantClient, useAssistantStore } from '../assistant';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import InlineApprovalCard from '../components/InlineApprovalCard';
+import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
@@ -543,6 +544,7 @@ const ChatFirstLayout = ({ sessionId, workspaceId, messages, toolCalls, streamin
           isStreaming={isStreaming}
         />
         <InlineApprovalCard workspaceId={workspaceId} />
+        <InlinePathGrantCard workspaceId={workspaceId} />
       </>
     ) : (
       <div className={styles.chatFirstEmpty}>

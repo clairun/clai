@@ -11,6 +11,7 @@ pub mod local_mcp;
 pub mod providers;
 pub mod repository;
 pub mod runtime;
+pub mod sandbox;
 pub mod tools;
 pub mod types;
 

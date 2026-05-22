@@ -176,11 +176,31 @@ pub struct McpServerConfig {
 // Local Execution Capability Config
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FilesystemPathAccess {
     ReadOnly,
     ReadWrite,
+}
+
+/// Provenance for a `FilesystemPathGrant`. Lets the agent-settings UI tell
+/// the user *why* a path is in the grant list: was it added by hand, derived
+/// from the credentials preset, or accepted via an in-run approval modal?
+/// `None` (the historical shape) is treated as `Manual` by the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum GrantOrigin {
+    /// Added by the user via the agent settings form.
+    Manual,
+    /// Derived from `credentials_preset = true`. Not stored individually in
+    /// `extra_paths` — computed at sandbox-profile build time.
+    CredentialsPreset,
+    /// Accepted via the in-run `fs_request_grant` approval modal.
+    #[serde(rename_all = "camelCase")]
+    Approval {
+        reason: String,
+        granted_at_unix_ms: i64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -188,6 +208,11 @@ pub enum FilesystemPathAccess {
 pub struct FilesystemPathGrant {
     pub path: String,
     pub access: FilesystemPathAccess,
+    /// Set by paths that landed in `extra_paths` via the approval flow.
+    /// Pre-existing grants on disk have no provenance and deserialize as
+    /// `None`; the UI shows those as `Manual`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<GrantOrigin>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -202,6 +227,16 @@ pub enum ShellAccessMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FilesystemCapabilityConfig {
+    /// Additional path grants. Used for two things now that the sandbox
+    /// auto-binds the user's `$HOME` read-only:
+    /// 1. Read-write upgrades to specific subpaths inside `$HOME`
+    ///    (e.g., a tool cache directory the agent needs to write).
+    /// 2. Any access (read or write) to paths outside `$HOME` (e.g.,
+    ///    `/mnt/data`, `/opt/external`).
+    ///
+    /// Entries land here either from explicit user edits in agent
+    /// settings or from `fs_request_grant` approvals (the latter
+    /// carries provenance via `GrantOrigin::Approval`).
     #[serde(default)]
     pub extra_paths: Vec<FilesystemPathGrant>,
 }
@@ -234,9 +269,51 @@ pub struct WebCapabilityConfig {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxNetworkConfig {
+    #[default]
+    Enabled,
+    Disabled,
+}
+
+/// Whether the agent's sandbox can reach the user's session D-Bus.
+///
+/// `Allow` (the default) exposes the user's D-Bus session bus socket
+/// (`$XDG_RUNTIME_DIR/bus`) inside the sandbox and lets
+/// `DBUS_SESSION_BUS_ADDRESS` + `XDG_RUNTIME_DIR` through the env filter.
+/// This enables every CLI that talks to libsecret / `gnome-keyring-daemon`
+/// over D-Bus — most importantly `gh`, but also `git-credential-libsecret`,
+/// `secret-tool`, password managers, and so on. It matches Codex's
+/// "agent acts as me on my desktop" reach while CLAI's path-grant flow
+/// keeps file access narrow.
+///
+/// `Deny` strips the bus socket bind and the corresponding env vars.
+/// Use for high-isolation agents — running untrusted code, agents that
+/// don't need any host integration, or workspaces where you specifically
+/// want keyring contents kept out of reach.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxSessionBusConfig {
+    Deny,
+    #[default]
+    Allow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionSandboxConfig {
+    #[serde(default)]
+    pub network: SandboxNetworkConfig,
+    #[serde(default)]
+    pub session_bus: SandboxSessionBusConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecutionCapabilityConfig {
+    #[serde(default)]
+    pub sandbox: ExecutionSandboxConfig,
     #[serde(default)]
     pub filesystem: FilesystemCapabilityConfig,
     #[serde(default)]

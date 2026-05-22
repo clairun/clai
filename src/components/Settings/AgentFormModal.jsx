@@ -6,10 +6,15 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom';
+import { homeDir } from '@tauri-apps/api/path';
 import IntervalSelect from './IntervalSelect';
 import styles from './AgentFormModal.module.css';
 
 const defaultExecution = () => ({
+  sandbox: {
+    network: 'enabled',
+    sessionBus: 'allow',
+  },
   filesystem: {
     extraPaths: [],
   },
@@ -22,6 +27,14 @@ const defaultExecution = () => ({
     enabled: false,
   },
 });
+
+// Trim trailing slash so the chip "/home/foo" matches the canonical form
+// used elsewhere in the path-grant list.
+const normalizeHostHome = (path) => {
+  if (!path) return null;
+  const trimmed = String(path).replace(/\/+$/, '');
+  return trimmed || null;
+};
 
 const normalizeItems = (items = []) => items.map((item) => item.trim()).filter(Boolean);
 const addUniqueItem = (items, value) => {
@@ -36,12 +49,51 @@ const normalizePathGrants = (items = []) =>
     .map((item) => ({
       path: item.path?.trim() || '',
       access: item.access || 'read_only',
+      // Preserve the origin tag set by the backend approval flow so the
+      // chip can show "approved 2026-05-22 for git push" provenance. New
+      // hand-added entries (form input) carry no origin and the chip
+      // labels them as "Manual".
+      origin: item.origin || null,
     }))
     .filter((item) => item.path);
+
+const grantOriginLabel = (origin) => {
+  if (!origin || origin.kind === 'manual') return 'Manual';
+  if (origin.kind === 'credentialsPreset') return 'Preset';
+  if (origin.kind === 'approval') {
+    const when = origin.grantedAtUnixMs
+      ? new Date(origin.grantedAtUnixMs).toLocaleDateString(undefined, {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+        })
+      : null;
+    return when ? `Approved ${when}` : 'Approved';
+  }
+  return 'Manual';
+};
+
+const grantOriginTooltip = (origin) => {
+  if (!origin || origin.kind === 'manual') {
+    return 'Added manually in agent settings.';
+  }
+  if (origin.kind === 'credentialsPreset') {
+    return 'Derived from the credentials preset toggle.';
+  }
+  if (origin.kind === 'approval') {
+    const reason = origin.reason ? `Reason: "${origin.reason}". ` : '';
+    return `${reason}Granted via the in-run fs_request_grant approval modal.`;
+  }
+  return '';
+};
 const formatExposedTools = (tools = []) => JSON.stringify(tools || [], null, 2);
 const normalizeExecution = (execution = {}) => {
   const defaults = defaultExecution();
   return {
+    sandbox: {
+      network: execution.sandbox?.network || defaults.sandbox.network,
+      sessionBus: execution.sandbox?.sessionBus || defaults.sandbox.sessionBus,
+    },
     filesystem: {
       extraPaths: normalizePathGrants(execution.filesystem?.extraPaths || defaults.filesystem.extraPaths),
     },
@@ -170,6 +222,12 @@ const AgentFormModal = ({
   const [extraPathGrants, setExtraPathGrants] = useState([]);
   const [extraPathDraft, setExtraPathDraft] = useState('');
   const [extraPathAccess, setExtraPathAccess] = useState('read_only');
+  const [sessionBusAllowed, setSessionBusAllowed] = useState(true);
+  // Resolved at form-mount time via Tauri's `homeDir()`. Used to pre-fill
+  // a default `<host $HOME>` RO entry into `extraPaths` for new agents,
+  // matching the model: $HOME is just a default grant — user can ×-remove
+  // it from the Additional Path Grants list to get a fully-isolated agent.
+  const [hostHomeDir, setHostHomeDir] = useState(null);
   const [shellMode, setShellMode] = useState('off');
   const [allowedCommands, setAllowedCommands] = useState([]);
   const [blockedCommands, setBlockedCommands] = useState(defaultExecution().shell.blockedCommandPrefixes);
@@ -201,6 +259,7 @@ const AgentFormModal = ({
     setExtraPathGrants(execution.filesystem.extraPaths);
     setExtraPathDraft('');
     setExtraPathAccess('read_only');
+    setSessionBusAllowed(execution.sandbox.sessionBus === 'allow');
     setShellMode(execution.shell.mode);
     setAllowedCommands(execution.shell.allowedCommandPrefixes);
     setBlockedCommands(execution.shell.blockedCommandPrefixes);
@@ -208,6 +267,41 @@ const AgentFormModal = ({
     setBlockedCommandDraft('');
     setWebEnabled(execution.web.enabled);
   }, []);
+
+  // Resolve the host's $HOME once per mount via Tauri's path API. Used
+  // below to pre-fill the default `<host $HOME>` RO entry for new agents.
+  // Failure is silent — the form just opens without that default and the
+  // user can still add paths manually.
+  useEffect(() => {
+    if (!isOpen || hostHomeDir) return undefined;
+    let cancelled = false;
+    homeDir()
+      .then((value) => {
+        if (cancelled) return;
+        const normalized = normalizeHostHome(value);
+        if (normalized) setHostHomeDir(normalized);
+      })
+      .catch(() => {
+        // Non-fatal; new agents just won't get the default $HOME entry.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, hostHomeDir]);
+
+  // For a NEW agent (no `agent` prop), once we've resolved the host $HOME
+  // and the form's extraPathGrants is still empty, drop in one default
+  // entry: <host $HOME> read-only. The user can ×-remove it before saving
+  // to opt into a fully isolated agent. We deliberately don't inject for
+  // existing agents — their stored extra_paths are the source of truth.
+  useEffect(() => {
+    if (!isOpen || agent) return;
+    if (!hostHomeDir) return;
+    setExtraPathGrants((current) => {
+      if (current.length > 0) return current;
+      return [{ path: hostHomeDir, access: 'read_only', origin: null }];
+    });
+  }, [isOpen, agent, hostHomeDir]);
 
   // Reset form when modal opens/closes or agent changes
   useEffect(() => {
@@ -354,6 +448,10 @@ const AgentFormModal = ({
         selectedSkillIds,
         providerConnectionIds,
         execution: {
+          sandbox: {
+            network: 'enabled',
+            sessionBus: sessionBusAllowed ? 'allow' : 'deny',
+          },
           filesystem: {
             extraPaths: extraPathGrants,
           },
@@ -772,6 +870,36 @@ const AgentFormModal = ({
             </div>
 
             <div className={styles.field}>
+              <label className={styles.label}>Desktop integration</label>
+              <label className={styles.toggleRow}>
+                <span className={styles.toggleLabel}>
+                  Let this agent use host CLIs that need the keyring (<code>gh</code>,
+                  git credential helpers, etc.)
+                </span>
+                <span className={`${styles.toggle} ${sessionBusAllowed ? styles.toggleOn : ''}`}>
+                  <input
+                    type="checkbox"
+                    checked={sessionBusAllowed}
+                    onChange={(e) => setSessionBusAllowed(e.target.checked)}
+                    disabled={saving}
+                    className={styles.toggleInput}
+                  />
+                  <span className={styles.toggleTrack}>
+                    <span className={styles.toggleThumb} />
+                  </span>
+                </span>
+              </label>
+              <span className={styles.hint}>
+                On by default — most agents need this for <code>gh pr create</code> and
+                similar workflows to find their tokens. Technically: binds the user's
+                D-Bus session bus socket and passes <code>DBUS_SESSION_BUS_ADDRESS</code>
+                through. The agent also gains access to other keyring entries (browser
+                saved passwords, etc.). Turn off for high-isolation agents running
+                untrusted code.
+              </span>
+            </div>
+
+            <div className={styles.field}>
               <label className={styles.label} htmlFor="agent-extra-path">
                 Additional Path Grants
               </label>
@@ -833,6 +961,12 @@ const AgentFormModal = ({
                     <span key={item.path} className={styles.chip}>
                       <code>{item.path}</code>
                       <span className={styles.chipMeta}>{item.access === 'read_write' ? 'rw' : 'ro'}</span>
+                      <span
+                        className={styles.chipMeta}
+                        title={grantOriginTooltip(item.origin)}
+                      >
+                        {grantOriginLabel(item.origin)}
+                      </span>
                       <button
                         type="button"
                         className={styles.chipRemove}
