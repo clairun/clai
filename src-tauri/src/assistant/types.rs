@@ -68,6 +68,15 @@ pub enum RunStatus {
 pub enum RunNoticeKind {
     CommandDenied,
     PathDenied,
+    SandboxUnavailable,
+    /// A `fs_request_grant` was approved by the user. Carries the granted
+    /// path and access level in the message so the run record shows what
+    /// was extended.
+    PathGranted,
+    /// A `fs_request_grant` was denied (explicit deny, timeout, or channel
+    /// close). Same shape as the existing `PathDenied` but distinguishes
+    /// "path was outside grants" from "grant request was refused."
+    PathGrantDenied,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

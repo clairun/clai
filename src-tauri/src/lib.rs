@@ -63,6 +63,8 @@ pub struct AppState {
     pub scheduler: SharedScheduler,
     /// In-flight shell-permission approval requests awaiting user decision.
     pub pending_approvals: commands::permissions::PendingApprovals,
+    /// In-flight filesystem path-grant requests awaiting user decision.
+    pub pending_path_grants: commands::path_grants::PendingPathGrants,
 }
 
 /// Default base URL for Netdata Cloud API.
@@ -129,6 +131,7 @@ pub fn run() {
         }),
         scheduler,
         pending_approvals: commands::permissions::PendingApprovals::new(),
+        pending_path_grants: commands::path_grants::PendingPathGrants::new(),
     };
 
     // Build and run the Tauri application
@@ -263,6 +266,8 @@ pub fn run() {
             commands::workspace_agents::workspace_set_agent_enabled,
             commands::permissions::submit_permission_decision,
             commands::permissions::list_pending_permission_requests,
+            commands::path_grants::submit_path_grant_decision,
+            commands::path_grants::list_pending_path_grant_requests,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

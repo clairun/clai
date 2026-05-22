@@ -25,6 +25,14 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "rpm", "dmg", "msi", "nsis"],
+    "linux": {
+      "deb": {
+        "depends": ["bubblewrap (>= 0.4.0)"]
+      },
+      "rpm": {
+        "depends": ["bubblewrap >= 0.4.0"]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

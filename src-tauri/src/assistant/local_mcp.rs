@@ -48,6 +48,10 @@ pub struct ToolBinding {
     pub cancel_token: CancellationToken,
     pub inter_agent_call_depth: Option<u32>,
     pub notices: Arc<Mutex<Vec<RunNotice>>>,
+    /// Run-scoped grants accepted via `fs_request_grant`. Shared with the
+    /// host engine so a session grant accepted during a CLI-provider run is
+    /// visible to the same run's subsequent tool calls.
+    pub session_grants: Arc<Mutex<Vec<crate::config::FilesystemPathGrant>>>,
 }
 
 impl LocalMcpRuntime {
@@ -251,6 +255,7 @@ async fn execute_bound_tool(
         inter_agent_call_depth: binding.inter_agent_call_depth,
         execution: session.context.execution.clone(),
         notices: binding.notices.clone(),
+        session_grants: binding.session_grants.clone(),
     };
 
     tokio::select! {

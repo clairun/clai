@@ -1,16 +1,18 @@
 use glob::{MatchOptions, Pattern};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 
 use serde::Deserialize;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
+use crate::assistant::sandbox::{
+    run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxPathAccess,
+    SandboxPathGrant, SandboxProfile, SandboxSessionBusMode,
+};
 use crate::assistant::types::RunNoticeKind;
 use crate::config::{
-    ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
+    ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin,
+    SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
 };
 
 use super::ToolExecutionContext;
@@ -97,6 +99,19 @@ struct BashExecParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct FsRequestGrantParams {
+    /// Path the agent wants access to. Absolute or `~`-prefixed; the
+    /// backend resolves `~` against the host `HOME` env var.
+    path: String,
+    /// `read_only` or `read_write`.
+    access: FilesystemPathAccess,
+    /// Why the agent needs this access. Shown to the user in the modal so
+    /// they can make an informed decision.
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WebSearchParams {
     query: String,
     #[serde(default)]
@@ -162,6 +177,11 @@ pub async fn execute_local_tool(
             let params: BashExecParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid bash_exec params: {}", e))?;
             execute_bash_exec(deps, context, params).await
+        }
+        "fs_request_grant" => {
+            let params: FsRequestGrantParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid fs_request_grant params: {}", e))?;
+            execute_fs_request_grant(deps, context, params).await
         }
         "web_search" => {
             let params: WebSearchParams = serde_json::from_value(params)
@@ -306,14 +326,11 @@ async fn execute_bash_exec(
     }
 
     let cwd = resolve_shell_cwd(context, params.cwd.as_deref())?;
-    let workspace_root = context
-        .agent_workspace_id
-        .as_deref()
-        .and_then(agent_workspace_root_for_id);
+    let workspace_root = ensure_workspace_root(context)?;
 
     match evaluate_command_policy(
         &context.execution,
-        workspace_root.as_deref(),
+        Some(workspace_root.as_path()),
         &params.command,
     ) {
         PolicyResult::Allow => { /* proceed */ }
@@ -337,7 +354,7 @@ async fn execute_bash_exec(
                 context,
                 &params.command,
                 segments,
-                workspace_root.clone(),
+                Some(workspace_root.clone()),
             )
             .await?;
         }
@@ -352,69 +369,32 @@ async fn execute_bash_exec(
         .unwrap_or(DEFAULT_BASH_OUTPUT_LIMIT)
         .min(MAX_BASH_OUTPUT_LIMIT);
 
-    let mut child = Command::new("/bin/sh")
-        .arg("-lc")
-        .arg(&params.command)
-        .current_dir(&cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to start shell command: {}", e))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to capture command stdout".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "Failed to capture command stderr".to_string())?;
-
-    let stdout_task = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stdout);
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.map(|_| buf)
-    });
-    let stderr_task = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut buf = Vec::new();
-        reader.read_to_end(&mut buf).await.map(|_| buf)
-    });
-
-    let status = match timeout(Duration::from_millis(timeout_ms), child.wait()).await {
-        Ok(result) => result.map_err(|e| format!("Shell command failed: {}", e))?,
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(format!("Shell command timed out after {} ms", timeout_ms));
+    let output = run_command(SandboxCommand {
+        argv: vec!["/bin/sh".into(), "-lc".into(), params.command.into()],
+        cwd,
+        timeout_ms,
+        max_output_chars: output_limit,
+        profile: sandbox_profile(context, workspace_root)?,
+    })
+    .await
+    .inspect_err(|error| {
+        // Surface sandbox-availability failures (bwrap missing, kernel
+        // refused namespaces, etc.) as a first-class run notice so the
+        // run completes with a SandboxUnavailable warning rather than a
+        // generic tool failure. The sandbox runner uses the
+        // "Sandboxed shell is unavailable" sentinel prefix for exactly
+        // this case; other errors stay as plain tool failures.
+        if error.starts_with("Sandboxed shell is unavailable") {
+            context.add_notice(RunNoticeKind::SandboxUnavailable, error.clone());
         }
-    };
-
-    let stdout_bytes = stdout_task
-        .await
-        .map_err(|e| format!("Failed to collect stdout: {}", e))?
-        .map_err(|e| format!("Failed to read stdout: {}", e))?;
-    let stderr_bytes = stderr_task
-        .await
-        .map_err(|e| format!("Failed to collect stderr: {}", e))?
-        .map_err(|e| format!("Failed to read stderr: {}", e))?;
-
-    let stdout = truncate_string(
-        String::from_utf8_lossy(&stdout_bytes).into_owned(),
-        output_limit,
-    );
-    let stderr = truncate_string(
-        String::from_utf8_lossy(&stderr_bytes).into_owned(),
-        output_limit,
-    );
+    })?;
 
     Ok(serde_json::json!({
-        "cwd": cwd.display().to_string(),
-        "exitCode": status.code(),
-        "success": status.success(),
-        "stdout": stdout,
-        "stderr": stderr
+        "cwd": output.cwd.display().to_string(),
+        "exitCode": output.exit_code,
+        "success": output.success,
+        "stdout": output.stdout,
+        "stderr": output.stderr
     }))
 }
 
@@ -426,6 +406,20 @@ fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant
 
     for grant in &context.execution.filesystem.extra_paths {
         let resolved = resolve_grant(grant)?;
+        if !grants
+            .iter()
+            .any(|existing| existing.root == resolved.root && existing.access == resolved.access)
+        {
+            grants.push(resolved);
+        }
+    }
+
+    // Run-scoped grants accepted via the fs_request_grant modal. These come
+    // last so the dedup above doesn't drop them in favour of weaker durable
+    // entries — but path resolution still goes through the same helper so
+    // a session grant on `~/.cargo` lands in the same shape as a durable one.
+    for grant in context.session_grants_snapshot() {
+        let resolved = resolve_grant(&grant)?;
         if !grants
             .iter()
             .any(|existing| existing.root == resolved.root && existing.access == resolved.access)
@@ -645,6 +639,54 @@ fn resolve_shell_cwd(
     };
 
     Ok(cwd)
+}
+
+fn sandbox_profile(
+    context: &ToolExecutionContext,
+    workspace_root: PathBuf,
+) -> Result<SandboxProfile, String> {
+    let mut path_grants = Vec::new();
+    for grant in filesystem_grants(context)? {
+        if grant.root == workspace_root {
+            continue;
+        }
+        path_grants.push(SandboxPathGrant {
+            host_path: grant.root,
+            access: match grant.access {
+                AccessKind::ReadOnly => SandboxPathAccess::ReadOnly,
+                AccessKind::ReadWrite => SandboxPathAccess::ReadWrite,
+            },
+        });
+    }
+
+    let network = match context.execution.sandbox.network {
+        SandboxNetworkConfig::Enabled => SandboxNetworkMode::Host,
+        SandboxNetworkConfig::Disabled => SandboxNetworkMode::Disabled,
+    };
+
+    let session_bus = match context.execution.sandbox.session_bus {
+        SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
+        SandboxSessionBusConfig::Allow => SandboxSessionBusMode::Allow,
+    };
+
+    // HOME env points at the user's real $HOME so `~/.foo` resolves the
+    // same way the user's own shell does. The user's `extra_paths` config
+    // is the source of truth for what's actually visible: a new agent's
+    // defaults include `$HOME` (RO) as a normal entry, and the user can
+    // remove it from agent settings if they want a fully-isolated agent.
+    // If host HOME is unset (rare service contexts), fall back to the
+    // workspace so the env still has a valid HOME.
+    let env_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.clone());
+
+    Ok(SandboxProfile {
+        env: SandboxEnv::filtered_from_current(&env_home, session_bus),
+        workspace_root,
+        path_grants,
+        network,
+        session_bus,
+    })
 }
 
 fn resolve_allowed_existing_path(
@@ -997,6 +1039,195 @@ async fn await_user_permission(
     Ok(())
 }
 
+async fn execute_fs_request_grant(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    params: FsRequestGrantParams,
+) -> Result<serde_json::Value, String> {
+    let canonical = canonicalize_requested_path(&params.path)?;
+    let canonical_str = canonical.to_string_lossy().into_owned();
+
+    // If the path is already covered (by extra_paths, the preset, or an
+    // earlier session grant), short-circuit — no user prompt, just say yes.
+    // This keeps repeated requests cheap and avoids modal spam when the LLM
+    // forgets it already has the grant.
+    let existing_grants = filesystem_grants(context)?;
+    if path_already_covered(&existing_grants, &canonical, params.access) {
+        return Ok(serde_json::json!({
+            "granted": true,
+            "path": canonical_str,
+            "access": access_to_str(params.access),
+            "scope": "already-granted",
+        }));
+    }
+
+    let request = crate::commands::path_grants::PathGrantRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        workspace_id: context.workspace_id.clone(),
+        agent_id: context.automation_id.clone(),
+        agent_name: None,
+        requested_path: canonical_str.clone(),
+        requested_access: params.access,
+        reason: params.reason.clone(),
+    };
+
+    let decision = await_path_grant_decision(deps, context, request).await?;
+
+    match decision {
+        crate::commands::path_grants::PathGrantDecision::Deny => {
+            let msg = format!("User denied path grant for `{}`", canonical_str);
+            context.add_notice(RunNoticeKind::PathGrantDenied, msg.clone());
+            Err(msg)
+        }
+        crate::commands::path_grants::PathGrantDecision::AllowOnce { path, access } => {
+            apply_session_grant(context, &path, access);
+            let msg = format!(
+                "User granted `{}` ({}) for this run",
+                path,
+                access_to_str(access)
+            );
+            context.add_notice(RunNoticeKind::PathGranted, msg);
+            Ok(serde_json::json!({
+                "granted": true,
+                "path": path,
+                "access": access_to_str(access),
+                "scope": "once",
+            }))
+        }
+        crate::commands::path_grants::PathGrantDecision::AllowAlways {
+            path,
+            access,
+            scope: _,
+        } => {
+            // The submit handler already persisted to the agent's DB row;
+            // we only need to make the grant visible in the *current* run.
+            apply_session_grant(context, &path, access);
+            let msg = format!(
+                "User granted `{}` ({}) and persisted to agent settings",
+                path,
+                access_to_str(access)
+            );
+            context.add_notice(RunNoticeKind::PathGranted, msg);
+            Ok(serde_json::json!({
+                "granted": true,
+                "path": path,
+                "access": access_to_str(access),
+                "scope": "always",
+            }))
+        }
+    }
+}
+
+fn canonicalize_requested_path(input: &str) -> Result<PathBuf, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("fs_request_grant requires a non-empty path".to_string());
+    }
+    let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| "Cannot expand ~ in path: HOME is unset".to_string())?;
+        PathBuf::from(home).join(rest)
+    } else if trimmed == "~" {
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| "Cannot expand ~ in path: HOME is unset".to_string())?;
+        PathBuf::from(home)
+    } else {
+        PathBuf::from(trimmed)
+    };
+    if !expanded.is_absolute() {
+        return Err(format!(
+            "fs_request_grant requires an absolute or ~-prefixed path; got `{}`",
+            input
+        ));
+    }
+    // Try to canonicalize (resolve symlinks). If the path doesn't exist
+    // yet, fall back to the normalized form — the user can still grant
+    // access to a not-yet-existing path (e.g. a future cache dir).
+    Ok(std::fs::canonicalize(&expanded).unwrap_or_else(|_| normalize_path(expanded)))
+}
+
+fn path_already_covered(
+    grants: &[ResolvedGrant],
+    path: &Path,
+    required: FilesystemPathAccess,
+) -> bool {
+    grants.iter().any(|grant| {
+        let covers_path = path == grant.root || path.starts_with(&grant.root);
+        if !covers_path {
+            return false;
+        }
+        match (grant.access, required) {
+            (AccessKind::ReadWrite, _) => true,
+            (AccessKind::ReadOnly, FilesystemPathAccess::ReadOnly) => true,
+            (AccessKind::ReadOnly, FilesystemPathAccess::ReadWrite) => false,
+        }
+    })
+}
+
+fn apply_session_grant(context: &ToolExecutionContext, path: &str, access: FilesystemPathAccess) {
+    context.add_session_grant(FilesystemPathGrant {
+        path: path.to_string(),
+        access,
+        origin: Some(GrantOrigin::Approval {
+            reason: String::new(),
+            granted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+        }),
+    });
+}
+
+fn access_to_str(access: FilesystemPathAccess) -> &'static str {
+    match access {
+        FilesystemPathAccess::ReadOnly => "read_only",
+        FilesystemPathAccess::ReadWrite => "read_write",
+    }
+}
+
+/// Awaits the user's decision on a path-grant request. Mirrors
+/// [`await_user_permission`] for shape; the only differences are the
+/// request type, the registry it talks to, and the single-decision
+/// return shape (path grants aren't per-segment).
+async fn await_path_grant_decision(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    request: crate::commands::path_grants::PathGrantRequest,
+) -> Result<crate::commands::path_grants::PathGrantDecision, String> {
+    use crate::commands::path_grants::{
+        emit_attention, PATH_GRANT_REQUEST_EVENT, PATH_GRANT_TIMEOUT,
+    };
+    use tauri::{Emitter, Manager};
+
+    let app_state = deps.app.state::<crate::AppState>();
+    let workspace_id = context.workspace_id.clone();
+    let request_id = request.request_id.clone();
+
+    let (rx, count) = app_state
+        .pending_path_grants
+        .register(request.clone())
+        .await;
+
+    if let Err(e) = deps.app.emit(PATH_GRANT_REQUEST_EVENT, &request) {
+        tracing::warn!("Failed to emit path-grant request event: {}", e);
+    }
+    emit_attention(&deps.app, workspace_id.clone(), count);
+
+    match tokio::time::timeout(PATH_GRANT_TIMEOUT, rx).await {
+        Ok(Ok(decision)) => Ok(decision),
+        Ok(Err(_)) => {
+            let msg = "Path-grant approval channel closed before a decision was made".to_string();
+            context.add_notice(RunNoticeKind::PathGrantDenied, msg.clone());
+            Err(msg)
+        }
+        Err(_) => {
+            if let Some((_, remaining)) = app_state.pending_path_grants.take(&request_id).await {
+                emit_attention(&deps.app, workspace_id.clone(), remaining);
+            }
+            let msg = "Path-grant approval timed out (24h)".to_string();
+            context.add_notice(RunNoticeKind::PathGrantDenied, msg.clone());
+            Err(msg)
+        }
+    }
+}
+
 /// Back-compat wrapper around [`evaluate_command_policy`]. Maps the
 /// richer result to the historic `Result<(), CommandDenial>` shape used
 /// by existing tests and by the legacy "silent deny" code path when the
@@ -1070,14 +1301,6 @@ fn matches_prefix(prefix: &str, command: &str) -> bool {
         return false;
     }
     command == p || (command.starts_with(p) && command.as_bytes().get(p.len()) == Some(&b' '))
-}
-
-fn truncate_string(text: String, limit: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= limit {
-        return text;
-    }
-    chars[..limit].iter().collect::<String>() + "\n…[truncated]"
 }
 
 // =============================================================================
@@ -1352,6 +1575,101 @@ mod tests {
         ResolvedGrant {
             root: path.to_path_buf(),
             access: AccessKind::ReadWrite,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // path_already_covered short-circuit predicate
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn path_already_covered_recognises_exact_match() {
+        let grants = vec![ResolvedGrant {
+            root: PathBuf::from("/a/b"),
+            access: AccessKind::ReadOnly,
+        }];
+        assert!(path_already_covered(
+            &grants,
+            Path::new("/a/b"),
+            FilesystemPathAccess::ReadOnly
+        ));
+    }
+
+    #[test]
+    fn path_already_covered_recognises_descendant() {
+        let grants = vec![ResolvedGrant {
+            root: PathBuf::from("/a"),
+            access: AccessKind::ReadOnly,
+        }];
+        assert!(path_already_covered(
+            &grants,
+            Path::new("/a/b/c"),
+            FilesystemPathAccess::ReadOnly
+        ));
+    }
+
+    #[test]
+    fn path_already_covered_requires_rw_for_rw_request() {
+        let grants = vec![ResolvedGrant {
+            root: PathBuf::from("/a"),
+            access: AccessKind::ReadOnly,
+        }];
+        assert!(!path_already_covered(
+            &grants,
+            Path::new("/a/b"),
+            FilesystemPathAccess::ReadWrite
+        ));
+    }
+
+    #[test]
+    fn path_already_covered_rw_grant_satisfies_ro_request() {
+        let grants = vec![ResolvedGrant {
+            root: PathBuf::from("/a"),
+            access: AccessKind::ReadWrite,
+        }];
+        assert!(path_already_covered(
+            &grants,
+            Path::new("/a/b"),
+            FilesystemPathAccess::ReadOnly
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // canonicalize_requested_path
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn canonicalize_rejects_empty_path() {
+        let err = canonicalize_requested_path("   ").unwrap_err();
+        assert!(err.contains("non-empty"));
+    }
+
+    #[test]
+    fn canonicalize_rejects_relative_paths() {
+        let err = canonicalize_requested_path("relative/path").unwrap_err();
+        assert!(err.contains("absolute"));
+    }
+
+    #[test]
+    fn canonicalize_expands_tilde_with_real_home() {
+        let temp = tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+        }
+
+        let resolved = canonicalize_requested_path("~/some/subpath").unwrap();
+        // Use canonicalize on the temp dir for comparison since macOS
+        // symlinks /var → /private/var which would otherwise mismatch.
+        let expected_parent = std::fs::canonicalize(temp.path()).unwrap();
+        assert!(resolved.starts_with(&expected_parent));
+        assert!(resolved.ends_with("some/subpath"));
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
         }
     }
 

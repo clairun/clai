@@ -82,6 +82,19 @@ pub fn available_tools(
                 "required": ["path", "content"]
             }),
         });
+        tools.push(ToolDefinition {
+            name: "fs_request_grant".to_string(),
+            description: "Request the user's approval to extend this agent's filesystem grants. Use BEFORE attempting work that needs paths outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI). Request the narrowest path that satisfies the task. The user can approve (once or always), narrow the path, downgrade the access, or deny. If granted `once`, the access lasts the rest of this run. If granted `always`, the grant persists to agent settings. If the path is already covered by existing grants, the tool returns immediately without prompting.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path or ~-prefixed path" },
+                    "access": { "type": "string", "enum": ["read_only", "read_write"], "description": "Requested access level. Prefer read_only unless writes are genuinely needed." },
+                    "reason": { "type": "string", "description": "Brief explanation shown to the user in the approval modal. Be specific about why you need this path for the current task." }
+                },
+                "required": ["path", "access", "reason"]
+            }),
+        });
     }
 
     if context.agent_workspace_id.is_some()
@@ -89,7 +102,7 @@ pub fn available_tools(
     {
         tools.push(ToolDefinition {
             name: "bash_exec".to_string(),
-            description: "Run a shell command through CLAI's guarded executor inside this automation's allowed working directory. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 600000 (10 min); the default is 120000 (2 min).".to_string(),
+            description: "Run a shell command through CLAI's guarded executor inside this automation's allowed working directory. On Linux this runs inside the local execution sandbox; if the sandbox is unavailable, the command fails closed. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 600000 (10 min); the default is 120000 (2 min).".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
