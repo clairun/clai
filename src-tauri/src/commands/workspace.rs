@@ -85,8 +85,22 @@ pub struct WorkspaceState {
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
 const MAX_ENTRY_COUNT: usize = 500;
-const MAX_PREVIEW_CHARS: usize = 280;
 const MAX_FILE_CONTENT_BYTES: usize = 200_000;
+const SKIPPED_ARTIFACT_DIRS: &[&str] = &[
+    ".cache",
+    ".cargo",
+    ".clai",
+    ".git",
+    ".npm",
+    ".rustup",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "target",
+    "venv",
+];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,6 +160,25 @@ pub struct WorkspaceSnapshot {
     pub interval_minutes: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_run_in_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSnapshotOptions {
+    #[serde(default)]
+    pub include_session_payload: Option<bool>,
+    #[serde(default)]
+    pub include_files: Option<bool>,
+}
+
+impl WorkspaceSnapshotOptions {
+    fn include_session_payload(&self) -> bool {
+        self.include_session_payload.unwrap_or(true)
+    }
+
+    fn include_files(&self) -> bool {
+        self.include_files.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -508,25 +541,6 @@ fn command_to_virtual_artifact(
     }))
 }
 
-fn read_text_preview(path: &Path, max_bytes: usize, max_chars: usize) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
-    let bytes = if bytes.len() > max_bytes {
-        &bytes[..max_bytes]
-    } else {
-        &bytes[..]
-    };
-    let text = String::from_utf8(bytes.to_vec()).ok()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut preview: String = trimmed.chars().take(max_chars).collect();
-    if trimmed.chars().count() > max_chars {
-        preview.push('…');
-    }
-    Some(preview)
-}
-
 fn file_updated_at(metadata: &fs::Metadata) -> Option<i64> {
     metadata
         .modified()
@@ -553,8 +567,15 @@ fn build_file_entry(root: &Path, path: &Path) -> Option<WorkspaceFileEntry> {
         viewer: viewer_for_path(path),
         size: Some(metadata.len()),
         updated_at: file_updated_at(&metadata),
-        preview: read_text_preview(path, 2048, MAX_PREVIEW_CHARS),
+        preview: None,
     })
+}
+
+fn should_skip_artifact_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| SKIPPED_ARTIFACT_DIRS.contains(&name))
+        .unwrap_or(false)
 }
 
 fn collect_files(
@@ -585,7 +606,7 @@ fn collect_files(
             .map_err(|error| format!("Failed to inspect {}: {}", path.display(), error))?;
 
         if file_type.is_dir() {
-            if skip_clai && path.file_name().and_then(|value| value.to_str()) == Some(".clai") {
+            if skip_clai && should_skip_artifact_dir(&path) {
                 continue;
             }
             collect_files(&path, root, entries, skip_clai)?;
@@ -1533,9 +1554,11 @@ pub async fn save_workspace_state(
 #[tauri::command]
 pub async fn workspace_get_snapshot(
     workspace_id: Option<String>,
+    options: Option<WorkspaceSnapshotOptions>,
     state: State<'_, AppState>,
     pool: State<'_, DbPool>,
 ) -> Result<WorkspaceSnapshot, String> {
+    let options = options.unwrap_or_default();
     let mut descriptor = resolve_workspace_descriptor(state.inner(), workspace_id)?;
     if let Some(root_path) = &descriptor.root_path {
         ensure_agent_workspace_root(root_path)?;
@@ -1562,34 +1585,45 @@ pub async fn workspace_get_snapshot(
 
     let session = find_workspace_session(pool.inner(), &descriptor).await?;
     let (messages, runs, tool_calls) = if let Some(session) = &session {
-        (
-            repository::list_messages(pool.inner(), &session.id).await?,
-            repository::list_runs(pool.inner(), &session.id).await?,
-            repository::list_tool_calls(pool.inner(), &session.id, None).await?,
-        )
+        let runs = repository::list_runs(pool.inner(), &session.id).await?;
+        if !options.include_session_payload() {
+            (Vec::new(), runs, Vec::new())
+        } else {
+            (
+                repository::list_messages(pool.inner(), &session.id).await?,
+                runs,
+                repository::list_tool_calls(pool.inner(), &session.id, None).await?,
+            )
+        }
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };
 
-    let (memories, artifacts) = if let Some(root_path) = &descriptor.root_path {
-        let memory_root = root_path.join(".clai").join("memory");
-        let mut memories = Vec::new();
-        if memory_root.exists() {
-            collect_files(&memory_root, root_path, &mut memories, false)?;
-        }
+    let (memories, artifacts) = if options.include_files() {
+        if let Some(root_path) = &descriptor.root_path {
+            let memory_root = root_path.join(".clai").join("memory");
+            let mut memories = Vec::new();
+            if memory_root.exists() {
+                collect_files(&memory_root, root_path, &mut memories, false)?;
+            }
 
-        let mut artifacts = Vec::new();
-        collect_files(root_path, root_path, &mut artifacts, true)?;
-        sort_workspace_entries(&mut memories);
-        sort_workspace_entries(&mut artifacts);
-        (memories, artifacts)
+            let mut artifacts = Vec::new();
+            collect_files(root_path, root_path, &mut artifacts, true)?;
+            sort_workspace_entries(&mut memories);
+            sort_workspace_entries(&mut artifacts);
+
+            let workspace_state = load_workspace_state_from_pool(pool.inner()).await?;
+            let virtual_artifacts = workspace_virtual_artifacts(&descriptor, &workspace_state)?;
+            let artifacts = merge_workspace_artifacts(artifacts, virtual_artifacts);
+
+            (memories, artifacts)
+        } else {
+            (Vec::new(), Vec::new())
+        }
     } else {
         (Vec::new(), Vec::new())
     };
 
-    let workspace_state = load_workspace_state_from_pool(pool.inner()).await?;
-    let virtual_artifacts = workspace_virtual_artifacts(&descriptor, &workspace_state)?;
-    let artifacts = merge_workspace_artifacts(artifacts, virtual_artifacts);
     let (assigned_agents, default_workspace_agent_id) =
         list_workspace_agent_responses(pool.inner(), state.inner(), &descriptor.workspace_id)
             .await?;

@@ -84,10 +84,9 @@
   flex: 1;
   overflow-y: auto;
   padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
   min-height: 0;
+  contain: layout paint style;
+  overflow-anchor: none;
 }
 
 /* Custom scrollbar */
@@ -144,6 +143,7 @@
   border-left: 3px solid var(--color-accent);
   border-radius: var(--radius-md);
   animation: slideIn var(--transition-base) ease-out;
+  contain: layout paint style;
 }
 
 /* Agent Query Message - when agent initiates a query with [@clai] */
@@ -272,6 +272,7 @@
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
   animation: slideIn var(--transition-base) ease-out;
+  contain: layout paint style;
 }
 
 /* Continuation: a follow-up assistant turn that belongs to the same
@@ -284,8 +285,9 @@
   background: transparent;
   border: none;
   border-radius: 0;
-  margin-top: -4px; /* tighten the gap left by .activityList's flex gap */
+  margin-top: -4px;
   animation: slideIn var(--transition-base) ease-out;
+  contain: layout paint style;
 }
 
 .assistantMessage .messageRole {

@@ -5,9 +5,10 @@
  * Handles markdown rendering, tool call display, and auto-scrolling.
  */
 
-import React, { useEffect, useRef, useState, useCallback, useMemo, memo } from 'react';
+import React, { useState, useCallback, useMemo, memo } from 'react';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
+import VirtualizedList from '../common/VirtualizedList';
 import styles from './AssistantChat.module.css';
 
 const EMPTY_STREAMING = {};
@@ -152,6 +153,19 @@ const isToolOnlyMessage = (message) => {
   return !text.trim() && tools.length > 0;
 };
 
+const isHiddenMessage = (message) => {
+  if (!message) return true;
+  if (message.role === 'tool') return true;
+
+  if (message.role !== 'user') return false;
+  const text = getTextContent(message);
+  return (
+    !text
+    || text.startsWith('--- New scheduled run at')
+    || text.startsWith('--- Manual run at')
+  );
+};
+
 /**
  * Group consecutive tool-only assistant messages into merged blocks.
  * Returns an array of render items:
@@ -165,13 +179,18 @@ const groupMessages = (messages) => {
   while (i < messages.length) {
     const msg = messages[i];
 
+    if (isHiddenMessage(msg)) {
+      i++;
+      continue;
+    }
+
     if (isToolOnlyMessage(msg)) {
       // Collect consecutive tool-only assistant messages
       const group = [msg];
       let j = i + 1;
       while (j < messages.length) {
-        // Skip tool-result messages (role: tool) between assistant turns
-        if (messages[j].role === 'tool') {
+        // Skip non-rendered messages between assistant turns.
+        if (isHiddenMessage(messages[j])) {
           j++;
           continue;
         }
@@ -310,45 +329,7 @@ const ChatMessageList = ({
   // not anything the human typed.
   userLabel = 'You',
 }) => {
-  const messagesEndRef = useRef(null);
-  const containerRef = useRef(null);
-  const isNearBottomRef = useRef(true);
-  const prevMessageCountRef = useRef(0);
-
-  const checkIfNearBottom = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return true;
-    const threshold = 150;
-    return container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
-  }, []);
-
-  const handleScroll = useCallback(() => {
-    isNearBottomRef.current = checkIfNearBottom();
-  }, [checkIfNearBottom]);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const currentCount = messages.length;
-    const isNewMessage = currentCount > prevMessageCountRef.current;
-    prevMessageCountRef.current = currentCount;
-
-    // New message boundary: do a single smooth scroll to anchor the
-    // conversation at the new turn. After that, while content is still
-    // flowing in, we pin the viewport to the bottom directly (no
-    // animation) so the typewriter / tool blocks grow in place without
-    // fighting an in-flight smooth-scroll animation.
-    if (isNewMessage) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-      isNearBottomRef.current = true;
-      return;
-    }
-
-    if (isStreaming && isNearBottomRef.current) {
-      container.scrollTop = container.scrollHeight - container.clientHeight;
-    }
-  }, [messages, isStreaming, streamingText, toolCalls]);
+  const [isNearBottom, setIsNearBottom] = useState(true);
 
   // Build a Map of toolCalls keyed by id once per render, so every
   // tool_use part lookup is O(1) instead of an Array.find walk. Memoized
@@ -360,7 +341,7 @@ const ChatMessageList = ({
     return map;
   }, [toolCalls]);
 
-  const grouped = groupMessages(messages);
+  const grouped = useMemo(() => groupMessages(messages), [messages]);
 
   // An item is an "assistant continuation" when it's an assistant turn
   // (text+tools MessageBlock or a tool-only MergedToolGroup) AND the
@@ -369,53 +350,73 @@ const ChatMessageList = ({
   // previous block. The first assistant after a user message keeps
   // the full header and card framing so the turn boundary stays
   // legible.
-  const isAssistantItem = (it) => {
-    if (!it) return false;
-    if (it.type === 'tool-group') return true;
-    return it.message?.role === 'assistant';
-  };
-  const continuationFlags = grouped.map((_, idx) =>
-    isAssistantItem(grouped[idx]) && isAssistantItem(grouped[idx - 1])
-  );
+  const continuationFlags = useMemo(() => {
+    const isAssistantItem = (it) => {
+      if (!it) return false;
+      if (it.type === 'tool-group') return true;
+      return it.message?.role === 'assistant';
+    };
+
+    return grouped.map((_, idx) =>
+      isAssistantItem(grouped[idx]) && isAssistantItem(grouped[idx - 1])
+    );
+  }, [grouped]);
+
+  const itemKey = useCallback((item) => (
+    item.type === 'tool-group'
+      ? `tool-group:${item.id}`
+      : `message:${item.message.id}`
+  ), []);
+
+  const renderItem = useCallback((item, idx) => (
+    item.type === 'tool-group' ? (
+      <MergedToolGroup
+        item={item}
+        toolCallsById={toolCallsById}
+        isContinuation={continuationFlags[idx]}
+      />
+    ) : (
+      <MessageBlock
+        message={item.message}
+        streamingText={streamingText[item.message.id]}
+        toolCallsById={toolCallsById}
+        userLabel={userLabel}
+        isContinuation={continuationFlags[idx]}
+      />
+    )
+  ), [continuationFlags, streamingText, toolCallsById, userLabel]);
+
+  const runningFooter = isStreaming ? (
+    <div className={styles.runningIndicator}>
+      <img
+        src="/icon.svg"
+        alt="Clai"
+        className={styles.runningIcon}
+      />
+    </div>
+  ) : null;
+
+  const handleNearBottomChange = useCallback((isNearBottom) => {
+    setIsNearBottom((current) => (current === isNearBottom ? current : isNearBottom));
+  }, []);
 
   return (
-    <div
-      ref={containerRef}
+    <VirtualizedList
+      items={grouped}
+      itemKey={itemKey}
+      renderItem={renderItem}
       className={styles.activityList}
-      onScroll={handleScroll}
-    >
-      {grouped.map((item, idx) =>
-        item.type === 'tool-group' ? (
-          <MergedToolGroup
-            key={item.id}
-            item={item}
-            toolCallsById={toolCallsById}
-            isContinuation={continuationFlags[idx]}
-          />
-        ) : (
-          <MessageBlock
-            key={item.message.id}
-            message={item.message}
-            streamingText={streamingText[item.message.id]}
-            toolCallsById={toolCallsById}
-            userLabel={userLabel}
-            isContinuation={continuationFlags[idx]}
-          />
-        )
-      )}
-
-      {isStreaming && (
-        <div className={styles.runningIndicator}>
-          <img
-            src="/icon.svg"
-            alt="Clai"
-            className={styles.runningIcon}
-          />
-        </div>
-      )}
-
-      <div ref={messagesEndRef} />
-    </div>
+      estimateSize={180}
+      overscan={1400}
+      gap={12}
+      footer={runningFooter}
+      footerEstimateSize={56}
+      initialScrollToBottom
+      scrollToBottomSignal={messages.length}
+      scrollToBottomBehavior="auto"
+      stickToBottom={isStreaming && isNearBottom}
+      onNearBottomChange={handleNearBottomChange}
+    />
   );
 };
 

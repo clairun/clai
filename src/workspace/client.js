@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export async function getWorkspaceSnapshot(workspaceId = 'default') {
-  return invoke('workspace_get_snapshot', { workspaceId });
+export async function getWorkspaceSnapshot(workspaceId = 'default', options = null) {
+  return invoke('workspace_get_snapshot', { workspaceId, options });
 }
 
 export async function getOrCreateWorkspaceSession(workspaceId = 'default') {

@@ -10,6 +10,10 @@ import styles from './WorkspaceContextBar.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
+const SNAPSHOT_OPTIONS = {
+  includeSessionPayload: false,
+  includeFiles: false,
+};
 
 /**
  * WorkspaceContextBar — shows MCP server badges and provider info for workspaces.
@@ -36,7 +40,7 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
 
     const loadSnapshot = async () => {
       try {
-        const snap = await getWorkspaceSnapshot(workspaceId);
+        const snap = await getWorkspaceSnapshot(workspaceId, SNAPSHOT_OPTIONS);
         if (cancelled) return;
         const agent = snap?.kind === 'agent';
         setIsAgent(agent);

@@ -479,6 +479,9 @@
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-sm);
   background: var(--color-bg-secondary);
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: 96px;
 }
 
 .taskMain {
@@ -851,6 +854,14 @@
   gap: 6px;
 }
 
+.drawerVirtualList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  contain: layout paint style;
+  overflow-anchor: none;
+}
+
 .drawerListItem {
   display: block;
   width: 100%;
@@ -863,6 +874,7 @@
   font: inherit;
   cursor: pointer;
   transition: background var(--transition-fast), border-color var(--transition-fast);
+  contain: layout paint style;
 }
 
 .drawerListItem:hover {

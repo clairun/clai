@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   getAgentTemplates,
@@ -16,6 +16,7 @@ import { assistantClient, useAssistantStore } from '../assistant';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
+import VirtualizedList from '../components/common/VirtualizedList';
 import { useChatManager } from '../contexts/ChatManagerContext';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
@@ -28,6 +29,10 @@ import styles from './Workspace.module.css';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
+const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
+  includeSessionPayload: false,
+  includeFiles: false,
+};
 
 const formatTimestamp = (timestamp) => {
   if (!timestamp) return 'Never';
@@ -328,15 +333,50 @@ const WorkspaceTasksPanel = ({ workspaceId, tasks, onChanged, onViewTask }) => {
   );
 };
 
+const WorkspaceFileEntryList = ({ entries, emptyMessage, onSelect }) => {
+  const itemKey = useCallback((entry) => entry.path, []);
+  const renderEntry = useCallback((entry) => (
+    <button
+      type="button"
+      className={styles.drawerListItem}
+      onClick={() => onSelect?.(entry)}
+    >
+      <div className={styles.drawerListName}>{entry.name}</div>
+      <div className={styles.drawerListMeta}>
+        {entry.path}
+        {entry.updatedAt ? ` · ${formatTimestamp(entry.updatedAt)}` : ''}
+      </div>
+    </button>
+  ), [onSelect]);
+
+  if (!entries || entries.length === 0) {
+    return <div className={styles.drawerEmpty}>{emptyMessage}</div>;
+  }
+
+  return (
+    <VirtualizedList
+      items={entries}
+      itemKey={itemKey}
+      renderItem={renderEntry}
+      className={styles.drawerVirtualList}
+      estimateSize={58}
+      overscan={500}
+      gap={6}
+    />
+  );
+};
+
 const ArtifactsList = ({ artifacts, onSelect }) => {
   const [query, setQuery] = useState('');
   const list = artifacts || [];
   const normalized = query.trim().toLowerCase();
-  const filtered = normalized
-    ? list.filter((entry) =>
+  const filtered = useMemo(() => (
+    normalized
+      ? list.filter((entry) =>
         (entry.name || '').toLowerCase().includes(normalized)
         || (entry.path || '').toLowerCase().includes(normalized))
-    : list;
+      : list
+  ), [list, normalized]);
 
   return (
     <div className={styles.searchableList}>
@@ -350,28 +390,17 @@ const ArtifactsList = ({ artifacts, onSelect }) => {
           aria-label="Search artifacts"
         />
       )}
-      <div className={styles.drawerList}>
-        {list.length === 0 ? (
-          <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
-        ) : filtered.length === 0 ? (
-          <div className={styles.drawerEmpty}>No artifacts match &quot;{query}&quot;.</div>
-        ) : (
-          filtered.map((entry) => (
-            <button
-              type="button"
-              key={entry.path}
-              className={styles.drawerListItem}
-              onClick={() => onSelect?.(entry)}
-            >
-              <div className={styles.drawerListName}>{entry.name}</div>
-              <div className={styles.drawerListMeta}>
-                {entry.path}
-                {entry.updatedAt ? ` · ${formatTimestamp(entry.updatedAt)}` : ''}
-              </div>
-            </button>
-          ))
-        )}
-      </div>
+      {list.length === 0 ? (
+        <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
+      ) : filtered.length === 0 ? (
+        <div className={styles.drawerEmpty}>No artifacts match &quot;{query}&quot;.</div>
+      ) : (
+        <WorkspaceFileEntryList
+          entries={filtered}
+          emptyMessage="No artifacts in this workspace yet."
+          onSelect={onSelect}
+        />
+      )}
     </div>
   );
 };
@@ -620,6 +649,7 @@ const Workspace = () => {
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] : null
   );
+  const lastLoadedSessionUpdatedAtRef = useRef(null);
 
   // Register Ctrl/Cmd+Shift+C to toggle chat panel — only for agent workspaces.
   // General workspaces embed chat directly in the page.
@@ -631,27 +661,66 @@ const Workspace = () => {
     },
   });
 
-  const loadSnapshot = useCallback(async (showSpinner = false) => {
+  const loadSnapshot = useCallback(async (showSpinner = false, options = null) => {
     if (showSpinner) {
       setIsLoading(true);
     }
 
+    const isLightweight = !!options;
+
     try {
-      const nextSnapshot = await getWorkspaceSnapshot(workspaceId);
-      setSnapshot(nextSnapshot);
+      const nextSnapshot = await getWorkspaceSnapshot(workspaceId, options);
+      setSnapshot((current) => {
+        if (!isLightweight || !current) {
+          return nextSnapshot;
+        }
+
+        return {
+          ...nextSnapshot,
+          messages: current.messages || [],
+          toolCalls: current.toolCalls || [],
+          memories: current.memories || [],
+          artifacts: current.artifacts || [],
+        };
+      });
       setError('');
 
       if (nextSnapshot?.session) {
         const store = useAssistantStore.getState();
-        store.loadSessionData(
-          nextSnapshot.session.id,
-          nextSnapshot.session,
-          nextSnapshot.messages || [],
-          nextSnapshot.runs || [],
-          nextSnapshot.toolCalls || []
-        );
-        // Bridge workspace session to the chat panel via synthetic tab key
         store.setActiveSessionForTab(`workspace:${workspaceId}`, nextSnapshot.session.id);
+
+        const existingSession = store.sessions[nextSnapshot.session.id];
+        const needsInitialHydration = !existingSession;
+        const hasUnloadedUpdate = (
+          nextSnapshot.session.updatedAt
+          && lastLoadedSessionUpdatedAtRef.current !== nextSnapshot.session.updatedAt
+        );
+        const shouldHydrateSession = !isLightweight
+          || needsInitialHydration
+          || (hasUnloadedUpdate && !existingSession?.isStreaming);
+
+        if (shouldHydrateSession) {
+          const [messages, runs, toolCalls] = isLightweight
+            ? await Promise.all([
+                assistantClient.loadSessionMessages(nextSnapshot.session.id),
+                assistantClient.listRuns(nextSnapshot.session.id),
+                assistantClient.listToolCalls(nextSnapshot.session.id),
+              ])
+            : [
+                nextSnapshot.messages || [],
+                nextSnapshot.runs || [],
+                nextSnapshot.toolCalls || [],
+              ];
+
+          store.loadSessionData(
+            nextSnapshot.session.id,
+            nextSnapshot.session,
+            messages,
+            runs,
+            toolCalls
+          );
+          lastLoadedSessionUpdatedAtRef.current = nextSnapshot.session.updatedAt || null;
+        }
       }
     } catch (err) {
       setError(typeof err === 'string' ? err : (err?.message || 'Failed to load workspace.'));
@@ -777,8 +846,12 @@ const Workspace = () => {
   }, [agentBusy, loadSnapshot, workspaceId]);
 
   useEffect(() => {
+    lastLoadedSessionUpdatedAtRef.current = null;
     loadSnapshot(true);
-    const interval = window.setInterval(() => loadSnapshot(false), REFRESH_INTERVAL_MS);
+    const interval = window.setInterval(
+      () => loadSnapshot(false, LIGHTWEIGHT_SNAPSHOT_OPTIONS),
+      REFRESH_INTERVAL_MS
+    );
     return () => window.clearInterval(interval);
   }, [loadSnapshot]);
 
@@ -895,26 +968,11 @@ const Workspace = () => {
               )}
 
               {activePanel === 'memories' && (
-                <div className={styles.drawerList}>
-                  {memories.length > 0 ? memories.map((entry) => (
-                    <button
-                      type="button"
-                      key={entry.path}
-                      className={styles.drawerListItem}
-                      onClick={() => openPreviewEntry({ kind: 'memory', entry })}
-                    >
-                      <div className={styles.drawerListName}>{entry.name}</div>
-                      <div className={styles.drawerListMeta}>
-                        {entry.path}
-                        {entry.updatedAt ? ` · ${formatTimestamp(entry.updatedAt)}` : ''}
-                      </div>
-                    </button>
-                  )) : (
-                    <div className={styles.drawerEmpty}>
-                      The workspace hasn&apos;t stored anything in memory yet.
-                    </div>
-                  )}
-                </div>
+                <WorkspaceFileEntryList
+                  entries={memories}
+                  emptyMessage="The workspace hasn't stored anything in memory yet."
+                  onSelect={(entry) => openPreviewEntry({ kind: 'memory', entry })}
+                />
               )}
 
               {activePanel === 'artifacts' && (
