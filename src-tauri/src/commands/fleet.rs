@@ -1,10 +1,8 @@
 use serde::Serialize;
 use tauri::State;
 
-use crate::assistant::repository;
-use crate::assistant::types::{AssistantMessage, ContentPart, MessageRole, RunStatus};
+use crate::assistant::types::RunStatus;
 use crate::config::ExecutionCapabilityConfig;
-use crate::db::DbPool;
 use crate::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -20,6 +18,7 @@ pub struct FleetSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum FleetAgentStatus {
     Running,
     Ok,
@@ -51,7 +50,6 @@ pub struct FleetAgentSnapshot {
     pub provider_connection_ids: Vec<String>,
     pub provider_connection_names: Vec<String>,
     pub execution: ExecutionCapabilityConfig,
-    pub tab_id: Option<String>,
     pub session_id: Option<String>,
     pub last_started_at: Option<i64>,
     pub last_completed_at: Option<i64>,
@@ -69,203 +67,24 @@ pub struct FleetSnapshot {
     pub agents: Vec<FleetAgentSnapshot>,
 }
 
-fn extract_message_preview(message: &AssistantMessage) -> Option<String> {
-    let mut parts = Vec::new();
-
-    for part in &message.content {
-        if let ContentPart::Text { text } = part {
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                parts.push(trimmed.to_string());
-            }
-        }
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        let joined = parts.join(" ");
-        let preview: String = joined.chars().take(200).collect();
-        Some(preview)
-    }
-}
 
 #[tauri::command]
 pub async fn fleet_get_snapshot(
-    state: State<'_, AppState>,
-    pool: State<'_, DbPool>,
+    _state: State<'_, AppState>,
 ) -> Result<FleetSnapshot, String> {
     // The Fleet view no longer surfaces global agents — they don't exist as
-    // a first-class concept anymore (agents are workspace-local). A future
-    // change will enumerate workspace_agents with `schedule_enabled = 1` to
-    // populate this list; for now it's intentionally empty so the legacy
-    // "one card per global agent" UI is gone.
-    let mcp_servers = {
-        let config_manager = state
-            .config_manager
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        config_manager.get_mcp_servers()
-    };
-    let agents: Vec<crate::config::AgentConfig> = Vec::new();
-
-    let mcp_name_map: std::collections::HashMap<&str, &str> = mcp_servers
-        .iter()
-        .map(|s| (s.id.as_str(), s.name.as_str()))
-        .collect();
-
-    let connections = repository::list_provider_connections(pool.inner()).await?;
-    let connection_name_map: std::collections::HashMap<&str, &str> = connections
-        .iter()
-        .map(|c| (c.id.as_str(), c.name.as_str()))
-        .collect();
-
-    let sessions = repository::list_sessions(pool.inner(), None).await?;
-
-    let scheduler_info: std::collections::HashMap<String, (Option<String>, bool, u64)> = {
-        let scheduler = state.scheduler.lock().await;
-        scheduler
-            .all_instances()
-            .map(|instance| {
-                (
-                    instance.agent_id.clone(),
-                    (
-                        instance.tab_id.clone(),
-                        instance.is_running,
-                        instance.seconds_until_next_run(),
-                    ),
-                )
-            })
-            .collect()
-    };
-
-    let mut items = Vec::with_capacity(agents.len());
-
-    for agent in agents {
-        let session = sessions
-            .iter()
-            .filter(|session| session.context.automation_id.as_deref() == Some(agent.id.as_str()))
-            .max_by_key(|session| session.updated_at)
-            .cloned();
-
-        let (last_run, recent_run_statuses, last_message_preview) = if let Some(session) = &session
-        {
-            let runs = repository::list_runs(pool.inner(), &session.id).await?;
-
-            let recent: Vec<FleetRunEntry> = runs
-                .iter()
-                .take(24)
-                .map(|r| FleetRunEntry {
-                    status: r.status.clone(),
-                    started_at: Some(r.started_at),
-                })
-                .collect();
-
-            let last_run = runs.into_iter().next();
-
-            let messages = repository::list_messages(pool.inner(), &session.id).await?;
-            let last_assistant_message = messages
-                .iter()
-                .rev()
-                .find(|message| message.role == MessageRole::Assistant);
-
-            (
-                last_run,
-                recent,
-                last_assistant_message.and_then(extract_message_preview),
-            )
-        } else {
-            (None, Vec::new(), None)
-        };
-
-        let scheduler_entry = scheduler_info.get(&agent.id);
-        let tab_id = scheduler_entry
-            .and_then(|(tab_id, _, _)| tab_id.clone())
-            .or_else(|| session.as_ref().and_then(|value| value.tab_id.clone()));
-        let is_running = scheduler_entry
-            .map(|(_, running, _)| *running)
-            .unwrap_or(false);
-        let next_run_in_seconds = scheduler_entry.map(|(_, _, seconds)| *seconds);
-
-        let status = if !agent.enabled {
-            FleetAgentStatus::Disabled
-        } else if is_running {
-            FleetAgentStatus::Running
-        } else if let Some(run) = &last_run {
-            match run.status {
-                RunStatus::Completed => FleetAgentStatus::Ok,
-                RunStatus::CompletedWithWarnings => FleetAgentStatus::Warning,
-                RunStatus::Failed | RunStatus::Cancelled => FleetAgentStatus::Error,
-                // The scheduler is the source of truth for whether an agent is
-                // actively running.  If we reach this branch, is_running is false,
-                // so a DB run stuck in a non-terminal state is stale — treat it as
-                // OK (it likely completed but the status update was lost).
-                RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool => {
-                    FleetAgentStatus::Ok
-                }
-            }
-        } else {
-            FleetAgentStatus::Idle
-        };
-
-        let mcp_names: Vec<String> = agent
-            .selected_mcp_server_ids
-            .iter()
-            .filter_map(|id| mcp_name_map.get(id.as_str()).map(|n| n.to_string()))
-            .collect();
-
-        let connection_names: Vec<String> = agent
-            .provider_connection_ids
-            .iter()
-            .filter_map(|id| connection_name_map.get(id.as_str()).map(|n| n.to_string()))
-            .collect();
-
-        items.push(FleetAgentSnapshot {
-            agent_id: agent.id,
-            name: agent.name,
-            description: agent.description,
-            enabled: agent.enabled,
-            interval_minutes: agent.interval_minutes,
-            status,
-            selected_mcp_server_ids: agent.selected_mcp_server_ids,
-            selected_mcp_server_names: mcp_names,
-            selected_skill_ids: agent.selected_skill_ids,
-            provider_connection_ids: agent.provider_connection_ids,
-            provider_connection_names: connection_names,
-            execution: agent.execution,
-            tab_id,
-            session_id: session.as_ref().map(|value| value.id.clone()),
-            last_started_at: last_run.as_ref().map(|run| run.started_at),
-            last_completed_at: last_run.as_ref().and_then(|run| run.completed_at),
-            next_run_in_seconds,
-            last_run_status: last_run.as_ref().map(|run| run.status.clone()),
-            last_error: last_run.as_ref().and_then(|run| run.error.clone()),
-            last_message_preview,
-            recent_run_statuses,
-        });
-    }
-
-    items.sort_by_key(|a| a.name.to_lowercase());
+    // a first-class concept anymore (agents are workspace-local). Kept for
+    // frontend wire compatibility; agents are now enumerated per-workspace
+    // via workspace_list.
+    let items: Vec<FleetAgentSnapshot> = Vec::new();
 
     let summary = FleetSummary {
-        total: items.len(),
-        enabled: items.iter().filter(|agent| agent.enabled).count(),
-        running: items
-            .iter()
-            .filter(|agent| matches!(agent.status, FleetAgentStatus::Running))
-            .count(),
-        error: items
-            .iter()
-            .filter(|agent| matches!(agent.status, FleetAgentStatus::Error))
-            .count(),
-        idle: items
-            .iter()
-            .filter(|agent| matches!(agent.status, FleetAgentStatus::Idle))
-            .count(),
-        disabled: items
-            .iter()
-            .filter(|agent| matches!(agent.status, FleetAgentStatus::Disabled))
-            .count(),
+        total: 0,
+        enabled: 0,
+        running: 0,
+        error: 0,
+        idle: 0,
+        disabled: 0,
     };
 
     Ok(FleetSnapshot {
@@ -275,22 +94,27 @@ pub async fn fleet_get_snapshot(
 }
 
 #[tauri::command]
-pub async fn fleet_run_now(
-    agent_id: String,
-    state: State<'_, AppState>,
-    pool: State<'_, DbPool>,
-) -> Result<(), String> {
+pub async fn fleet_run_now(agent_id: String, state: State<'_, AppState>) -> Result<(), String> {
     // Verify the workspace-local agent exists and is enabled.
-    let enabled: Option<i64> =
-        sqlx::query_scalar("SELECT enabled FROM workspace_agents WHERE id = ? LIMIT 1")
-            .bind(&agent_id)
-            .fetch_optional(pool.inner())
-            .await
-            .map_err(|e| format!("Failed to load workspace agent: {}", e))?;
-    match enabled {
+    let locators = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .locators_sorted();
+    let mut found = None;
+    for locator in locators {
+        let Ok(config) = crate::config::workspace_config::load(&locator.root_path) else {
+            continue;
+        };
+        if let Some(agent) = config.agents.iter().find(|agent| agent.id == agent_id) {
+            found = Some(agent.enabled);
+            break;
+        }
+    }
+    match found {
         None => return Err(format!("Agent not found: {}", agent_id)),
-        Some(0) => return Err("Agent is disabled. Enable it first.".to_string()),
-        Some(_) => {}
+        Some(false) => return Err("Agent is disabled. Enable it first.".to_string()),
+        Some(true) => {}
     }
 
     let mut scheduler = state.scheduler.lock().await;

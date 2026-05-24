@@ -7,7 +7,10 @@ use crate::assistant::types::{
     ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger, SessionContext,
     SessionKind,
 };
-use crate::config::{agent_instructions_with_skills, AgentConfig};
+use crate::config::{
+    agent_instructions_with_skills, workspace_config, AgentConfig, AppConfig, WorkspaceAgent,
+    WorkspaceConfig,
+};
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -97,7 +100,6 @@ struct WorkspaceAgentRow {
     selected_mcp_server_ids: Vec<String>,
     provider_connection_ids: Vec<String>,
     execution: crate::config::ExecutionCapabilityConfig,
-    exposed_tools: Vec<crate::config::ExposedAgentTool>,
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +159,8 @@ async fn list_agents(
     params: ListWorkspaceAgentsParams,
 ) -> Result<serde_json::Value, String> {
     let workspace_id = workspace_id_from_context(context)?;
-    let rows = load_workspace_agent_rows(&deps.pool, &workspace_id).await?;
+    let app_state = deps.app.state::<AppState>();
+    let rows = load_workspace_agent_rows(app_state.inner(), &workspace_id)?;
 
     let agents: Vec<serde_json::Value> = rows
         .into_iter()
@@ -205,14 +208,15 @@ async fn assign_task(
         return Err("Task instructions are required.".to_string());
     }
 
-    let target = load_workspace_agent_row(&deps.pool, &workspace_id, &params.workspace_agent_id)
-        .await?
-        .ok_or_else(|| {
-            format!(
-                "Workspace agent assignment not found in this workspace: {}",
-                params.workspace_agent_id
-            )
-        })?;
+    let app_state = deps.app.state::<AppState>();
+    let target =
+        load_workspace_agent_row(app_state.inner(), &workspace_id, &params.workspace_agent_id)?
+            .ok_or_else(|| {
+                format!(
+                    "Workspace agent assignment not found in this workspace: {}",
+                    params.workspace_agent_id
+                )
+            })?;
 
     if !target.enabled {
         return Err(format!(
@@ -235,23 +239,20 @@ async fn assign_task(
         provider_connection_ids: target.provider_connection_ids.clone(),
         selected_skill_ids: target.selected_skill_ids.clone(),
         execution: target.execution.clone(),
-        exposed_tools: target.exposed_tools.clone(),
         created_at: String::new(),
         updated_at: String::new(),
     };
 
     let creator_workspace_agent_id = find_workspace_agent_for_definition(
-        &deps.pool,
+        app_state.inner(),
         &workspace_id,
         context.automation_id.as_deref(),
-    )
-    .await?;
+    )?;
 
     let task_id = uuid::Uuid::new_v4().to_string();
     create_task_row(
         &deps.pool,
         &task_id,
-        &workspace_id,
         creator_workspace_agent_id.as_deref(),
         &target,
         title,
@@ -259,7 +260,7 @@ async fn assign_task(
     )
     .await?;
 
-    let connection = match resolve_first_connection(&deps.pool, &target_config).await {
+    let connection = match resolve_first_connection(deps, &target_config).await {
         Ok(connection) => connection,
         Err(message) => {
             update_task_status(
@@ -274,8 +275,8 @@ async fn assign_task(
                 true,
             )
             .await?;
-            let _ = emit_task_attention_event(&deps.app, &deps.pool, &task_id).await;
-            let task = load_task(&deps.pool, &task_id).await?;
+            let _ = emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id).await;
+            let task = load_task(&deps.pool, &workspace_id, &task_id).await?;
             return Ok(serde_json::json!({
                 "ok": true,
                 "task": task_to_response(task)?,
@@ -286,7 +287,6 @@ async fn assign_task(
     let session = repository::create_session(
         &deps.pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::BackgroundJob,
             title: Some(format!("Task: {}", title)),
             context: task_session_context(deps, context, &workspace_id, &target_config),
@@ -345,13 +345,14 @@ async fn assign_task(
 
     spawn_task_run(
         deps.clone(),
+        workspace_id.clone(),
         task_id.clone(),
         session.id.clone(),
         run.id.clone(),
         connection.id.clone(),
     );
 
-    let task = load_task(&deps.pool, &task_id).await?;
+    let task = load_task(&deps.pool, &workspace_id, &task_id).await?;
     Ok(serde_json::json!({
         "ok": true,
         "task": task_to_response(task)?,
@@ -364,10 +365,7 @@ async fn get_task_result(
     params: GetWorkspaceTaskResultParams,
 ) -> Result<serde_json::Value, String> {
     let workspace_id = workspace_id_from_context(context)?;
-    let task = load_task(&deps.pool, &params.task_id).await?;
-    if task.workspace_id != workspace_id {
-        return Err("Task does not belong to the current workspace.".to_string());
-    }
+    let task = load_task(&deps.pool, &workspace_id, &params.task_id).await?;
 
     Ok(serde_json::json!({
         "ok": true,
@@ -390,13 +388,13 @@ async fn request_user_input(
         return Err("User input request question is required.".to_string());
     }
 
-    let manager = current_manager_workspace_agent_row(&deps.pool, context, &workspace_id).await?;
+    let app_state = deps.app.state::<AppState>();
+    let manager = current_manager_workspace_agent_row(app_state.inner(), context, &workspace_id)?;
     let creator_workspace_agent_id = find_workspace_agent_for_definition(
-        &deps.pool,
+        app_state.inner(),
         &workspace_id,
         context.automation_id.as_deref(),
-    )
-    .await?;
+    )?;
     let context_text = params
         .context
         .as_deref()
@@ -422,7 +420,6 @@ async fn request_user_input(
     create_task_row(
         &deps.pool,
         &task_id,
-        &workspace_id,
         creator_workspace_agent_id.as_deref(),
         &manager,
         title,
@@ -447,9 +444,9 @@ async fn request_user_input(
         false,
     )
     .await?;
-    let _ = emit_task_attention_event(&deps.app, &deps.pool, &task_id).await;
+    let _ = emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id).await;
 
-    let task = load_task(&deps.pool, &task_id).await?;
+    let task = load_task(&deps.pool, &workspace_id, &task_id).await?;
     Ok(serde_json::json!({
         "ok": true,
         "task": task_to_response(task)?,
@@ -458,6 +455,7 @@ async fn request_user_input(
 
 fn spawn_task_run(
     deps: AssistantDeps,
+    workspace_id: String,
     task_id: String,
     session_id: String,
     run_id: String,
@@ -523,7 +521,9 @@ fn spawn_task_run(
                 )
                 .await;
                 if is_attention_status(status) {
-                    let _ = emit_task_attention_event(&deps.app, &deps.pool, &task_id).await;
+                    let _ =
+                        emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id)
+                            .await;
                 }
             }
             Err(error) => {
@@ -539,7 +539,8 @@ fn spawn_task_run(
                     true,
                 )
                 .await;
-                let _ = emit_task_attention_event(&deps.app, &deps.pool, &task_id).await;
+                let _ =
+                    emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id).await;
             }
         }
     });
@@ -578,7 +579,6 @@ fn task_session_context(
         space_id: context.space_id.clone(),
         room_id: context.room_id.clone(),
         workspace_id: Some(workspace_id.to_string()),
-        tab_id: None,
         tool_scopes: target_config
             .required_tools()
             .into_iter()
@@ -598,10 +598,16 @@ fn task_session_context(
 }
 
 async fn resolve_first_connection(
-    pool: &DbPool,
+    deps: &AssistantDeps,
     config: &AgentConfig,
 ) -> Result<ProviderConnection, String> {
-    let all = repository::list_provider_connections(pool).await?;
+    let all = deps
+        .app
+        .state::<AppState>()
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connections();
     for id in &config.provider_connection_ids {
         if let Some(connection) = all
             .iter()
@@ -634,54 +640,49 @@ fn concise_agent_description(description: Option<String>) -> Option<String> {
     Some(summary)
 }
 
-async fn load_workspace_agent_rows(
-    pool: &DbPool,
+fn load_workspace_agent_rows(
+    state: &AppState,
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
-    let rows = sqlx::query(
-        r#"
-        SELECT id, workspace_id, agent_definition_id, display_name, role, enabled,
-               name, description, selected_skill_ids, selected_mcp_server_ids,
-               provider_connection_ids, execution, exposed_tools
-        FROM workspace_agents
-        WHERE workspace_id = ?
-        ORDER BY CASE role WHEN 'manager' THEN 0 ELSE 1 END, created_at ASC
-        "#,
-    )
-    .bind(workspace_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load workspace agents: {}", e))?;
-
-    rows.iter().map(map_workspace_agent_row).collect()
+    let app_config = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get();
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
+    let mut rows: Vec<_> = config
+        .agents
+        .iter()
+        .map(|agent| workspace_agent_row_from_config(&app_config, &config, agent))
+        .collect();
+    rows.sort_by_key(|row| {
+        (
+            if row.id == config.default_agent_id {
+                0
+            } else {
+                1
+            },
+            row.id.clone(),
+        )
+    });
+    Ok(rows)
 }
 
-async fn load_workspace_agent_row(
-    pool: &DbPool,
+fn load_workspace_agent_row(
+    state: &AppState,
     workspace_id: &str,
     workspace_agent_id: &str,
 ) -> Result<Option<WorkspaceAgentRow>, String> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, workspace_id, agent_definition_id, display_name, role, enabled,
-               name, description, selected_skill_ids, selected_mcp_server_ids,
-               provider_connection_ids, execution, exposed_tools
-        FROM workspace_agents
-        WHERE workspace_id = ? AND id = ?
-        LIMIT 1
-        "#,
-    )
-    .bind(workspace_id)
-    .bind(workspace_agent_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load workspace agent: {}", e))?;
-
-    row.as_ref().map(map_workspace_agent_row).transpose()
+    Ok(load_workspace_agent_rows(state, workspace_id)?
+        .into_iter()
+        .find(|row| row.id == workspace_agent_id))
 }
 
-async fn current_manager_workspace_agent_row(
-    pool: &DbPool,
+fn current_manager_workspace_agent_row(
+    state: &AppState,
     context: &ToolExecutionContext,
     workspace_id: &str,
 ) -> Result<WorkspaceAgentRow, String> {
@@ -690,22 +691,18 @@ async fn current_manager_workspace_agent_row(
         .iter()
         .find(|agent| agent.is_default)
     {
-        if let Some(row) = load_workspace_agent_row(pool, workspace_id, &manager.id).await? {
+        if let Some(row) = load_workspace_agent_row(state, workspace_id, &manager.id)? {
             return Ok(row);
         }
     }
 
     if let Some(current_agent_definition_id) = context.automation_id.as_deref() {
         if let Some(workspace_agent_id) = find_workspace_agent_for_definition(
-            pool,
+            state,
             workspace_id,
             Some(current_agent_definition_id),
-        )
-        .await?
-        {
-            if let Some(row) =
-                load_workspace_agent_row(pool, workspace_id, &workspace_agent_id).await?
-            {
+        )? {
+            if let Some(row) = load_workspace_agent_row(state, workspace_id, &workspace_agent_id)? {
                 return Ok(row);
             }
         }
@@ -717,8 +714,8 @@ async fn current_manager_workspace_agent_row(
     )
 }
 
-async fn find_workspace_agent_for_definition(
-    pool: &DbPool,
+fn find_workspace_agent_for_definition(
+    state: &AppState,
     workspace_id: &str,
     agent_definition_id: Option<&str>,
 ) -> Result<Option<String>, String> {
@@ -726,46 +723,43 @@ async fn find_workspace_agent_for_definition(
         return Ok(None);
     };
 
-    sqlx::query_scalar(
-        "SELECT id FROM workspace_agents WHERE workspace_id = ? AND agent_definition_id = ? LIMIT 1",
-    )
-    .bind(workspace_id)
-    .bind(agent_definition_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to resolve caller workspace agent: {}", e))
+    Ok(load_workspace_agent_rows(state, workspace_id)?
+        .into_iter()
+        .find(|row| row.id == agent_definition_id || row.agent_definition_id == agent_definition_id)
+        .map(|row| row.id))
 }
 
-fn map_workspace_agent_row(row: &sqlx::sqlite::SqliteRow) -> Result<WorkspaceAgentRow, String> {
-    let selected_skill_ids: String = row.try_get("selected_skill_ids").unwrap_or_default();
-    let selected_mcp_server_ids: String =
-        row.try_get("selected_mcp_server_ids").unwrap_or_default();
-    let provider_connection_ids: String =
-        row.try_get("provider_connection_ids").unwrap_or_default();
-    let execution: String = row.try_get("execution").unwrap_or_default();
-    let exposed_tools: String = row.try_get("exposed_tools").unwrap_or_default();
-
-    Ok(WorkspaceAgentRow {
-        id: row.get("id"),
-        workspace_id: row.get("workspace_id"),
-        agent_definition_id: row.get("agent_definition_id"),
-        display_name: row.get("display_name"),
-        role: row.get("role"),
-        enabled: row.get::<i64, _>("enabled") != 0,
-        name: row.try_get("name").unwrap_or_default(),
-        description: row.try_get("description").unwrap_or_default(),
-        selected_skill_ids: serde_json::from_str(&selected_skill_ids).unwrap_or_default(),
-        selected_mcp_server_ids: serde_json::from_str(&selected_mcp_server_ids).unwrap_or_default(),
-        provider_connection_ids: serde_json::from_str(&provider_connection_ids).unwrap_or_default(),
-        execution: serde_json::from_str(&execution).unwrap_or_default(),
-        exposed_tools: serde_json::from_str(&exposed_tools).unwrap_or_default(),
-    })
+fn workspace_agent_row_from_config(
+    app_config: &AppConfig,
+    workspace: &WorkspaceConfig,
+    agent: &WorkspaceAgent,
+) -> WorkspaceAgentRow {
+    WorkspaceAgentRow {
+        id: agent.id.clone(),
+        workspace_id: workspace.id.clone(),
+        agent_definition_id: agent.id.clone(),
+        display_name: None,
+        role: if workspace.default_agent_id == agent.id {
+            "manager".to_string()
+        } else {
+            "member".to_string()
+        },
+        enabled: agent.enabled,
+        name: agent.name.clone(),
+        description: agent.description.clone(),
+        selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
+        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
+            app_config,
+            &agent.selected_mcp_servers,
+        ),
+        provider_connection_ids: agent.provider_connection_ids.clone(),
+        execution: agent.execution.clone(),
+    }
 }
 
 async fn create_task_row(
     pool: &DbPool,
     task_id: &str,
-    workspace_id: &str,
     created_by_workspace_agent_id: Option<&str>,
     target: &WorkspaceAgentRow,
     title: &str,
@@ -775,14 +769,13 @@ async fn create_task_row(
     sqlx::query(
         r#"
         INSERT INTO workspace_tasks (
-            id, workspace_id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
+            id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
             assigned_agent_definition_id, title, instructions, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
         "#,
     )
     .bind(task_id)
-    .bind(workspace_id)
     .bind(created_by_workspace_agent_id)
     .bind(&target.id)
     .bind(&target.agent_definition_id)
@@ -839,10 +832,14 @@ async fn update_task_status(
     Ok(())
 }
 
-async fn load_task(pool: &DbPool, task_id: &str) -> Result<WorkspaceTaskRow, String> {
+async fn load_task(
+    pool: &DbPool,
+    workspace_id: &str,
+    task_id: &str,
+) -> Result<WorkspaceTaskRow, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, workspace_id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
+        SELECT id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
                assigned_agent_definition_id, title, instructions, status, result_summary,
                result_json, error, session_id, run_id, created_at, updated_at, completed_at
         FROM workspace_tasks
@@ -855,13 +852,16 @@ async fn load_task(pool: &DbPool, task_id: &str) -> Result<WorkspaceTaskRow, Str
     .map_err(|e| format!("Failed to load workspace task: {}", e))?
     .ok_or_else(|| format!("Workspace task not found: {}", task_id))?;
 
-    map_task_row(&row)
+    map_task_row(&row, workspace_id)
 }
 
-fn map_task_row(row: &sqlx::sqlite::SqliteRow) -> Result<WorkspaceTaskRow, String> {
+fn map_task_row(
+    row: &sqlx::sqlite::SqliteRow,
+    workspace_id: &str,
+) -> Result<WorkspaceTaskRow, String> {
     Ok(WorkspaceTaskRow {
         id: row.get("id"),
-        workspace_id: row.get("workspace_id"),
+        workspace_id: workspace_id.to_string(),
         created_by_workspace_agent_id: row.get("created_by_workspace_agent_id"),
         assigned_to_workspace_agent_id: row.get("assigned_to_workspace_agent_id"),
         assigned_agent_definition_id: row.get("assigned_agent_definition_id"),
@@ -907,9 +907,10 @@ fn task_to_response(task: WorkspaceTaskRow) -> Result<WorkspaceTaskResponse, Str
 async fn emit_task_attention_event(
     app: &tauri::AppHandle,
     pool: &DbPool,
+    workspace_id: &str,
     task_id: &str,
 ) -> Result<(), String> {
-    let task = load_task(pool, task_id).await?;
+    let task = load_task(pool, workspace_id, task_id).await?;
     if !is_attention_status(&task.status) {
         return Ok(());
     }

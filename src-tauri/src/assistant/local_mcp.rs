@@ -235,6 +235,15 @@ async fn execute_bound_tool(
     let session = repository::get_session(&deps.pool, &binding.session_id)
         .await?
         .ok_or_else(|| format!("Assistant session not found: {}", binding.session_id))?;
+    let workspace_root = session
+        .context
+        .agent_workspace_id
+        .as_deref()
+        .and_then(|workspace_id| {
+            deps.app
+                .try_state::<AppState>()
+                .and_then(|state| state.workspace_root(workspace_id))
+        });
 
     let tool_context = ToolExecutionContext {
         session_id: binding.session_id.clone(),
@@ -244,12 +253,12 @@ async fn execute_bound_tool(
         // therefore loses that one link for Claude-CLI sessions; the
         // tool still executes correctly.
         tool_call_id: None,
-        tab_id: session.tab_id.clone(),
         workspace_id: session.context.workspace_id.clone(),
         space_id: session.context.space_id.clone(),
         room_id: session.context.room_id.clone(),
         mcp_server_ids: session.context.mcp_server_ids.clone(),
         agent_workspace_id: session.context.agent_workspace_id.clone(),
+        workspace_root,
         automation_id: session.context.automation_id.clone(),
         workspace_agents: session.context.workspace_agents.clone(),
         inter_agent_call_depth: binding.inter_agent_call_depth,

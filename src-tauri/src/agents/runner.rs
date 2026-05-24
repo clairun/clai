@@ -48,82 +48,71 @@ use crate::assistant::types::{
     AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
     SessionContext, SessionKind,
 };
-use crate::config::{
-    agent_instructions_with_skills, AgentConfig, ExecutionCapabilityConfig, ExposedAgentTool,
-};
+use crate::config::{agent_instructions_with_skills, workspace_config, AgentConfig};
 use crate::db::DbPool;
 use crate::AppState;
 
-/// Loads a workspace_agents row by id and reconstructs it as an `AgentConfig`.
-///
-/// Phase 1.4 of the workspace-local-agents refactor: the runner picks up
-/// scheduled agents straight from the DB rather than via the global catalog.
-async fn load_workspace_agent_as_config(
-    pool: &DbPool,
+/// Loads a workspace-local agent from `<workspace>/.clai/config.json`.
+fn load_workspace_agent_as_config(
+    state: &AppState,
     id: &str,
 ) -> Result<Option<AgentConfig>, RunnerError> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, workspace_id, name, description, selected_skill_ids, selected_mcp_server_ids,
-               provider_connection_ids, execution, exposed_tools,
-               schedule_enabled, interval_minutes, enabled,
-               created_at, updated_at
-        FROM workspace_agents
-        WHERE id = ?
-        LIMIT 1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        RunnerError::AssistantPersistence(format!("Failed to load workspace agent: {}", e))
-    })?;
+    let app_config = state
+        .config_manager
+        .lock()
+        .map_err(|e| RunnerError::AssistantPersistence(format!("Lock error: {}", e)))?
+        .get();
+    let locators = state
+        .workspace_index
+        .read()
+        .map_err(|e| {
+            RunnerError::AssistantPersistence(format!("Workspace index lock error: {}", e))
+        })?
+        .locators_sorted();
 
-    let Some(row) = row else {
-        return Ok(None);
-    };
-
-    use sqlx::Row;
-    let selected_skill_ids: String = row.try_get("selected_skill_ids").unwrap_or_default();
-    let selected_mcp_server_ids: String =
-        row.try_get("selected_mcp_server_ids").unwrap_or_default();
-    let provider_connection_ids: String =
-        row.try_get("provider_connection_ids").unwrap_or_default();
-    let execution: String = row.try_get("execution").unwrap_or_default();
-    let exposed_tools: String = row.try_get("exposed_tools").unwrap_or_default();
-    let schedule_enabled: i64 = row.try_get("schedule_enabled").unwrap_or(0);
-    let enabled: i64 = row.try_get("enabled").unwrap_or(1);
-    let created_ms: i64 = row.try_get("created_at").unwrap_or(0);
-    let updated_ms: i64 = row.try_get("updated_at").unwrap_or(0);
-    let created_at = chrono::DateTime::from_timestamp_millis(created_ms)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default();
-    let updated_at = chrono::DateTime::from_timestamp_millis(updated_ms)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default();
-
-    Ok(Some(AgentConfig {
-        id: row.try_get::<String, _>("id").unwrap_or_default(),
-        workspace_id: row.try_get::<String, _>("workspace_id").unwrap_or_default(),
-        name: row.try_get::<String, _>("name").unwrap_or_default(),
-        description: row.try_get::<String, _>("description").unwrap_or_default(),
-        schedule_enabled: schedule_enabled != 0,
-        interval_minutes: row
-            .try_get::<i64, _>("interval_minutes")
-            .unwrap_or(0)
-            .max(0) as u32,
-        enabled: enabled != 0,
-        selected_mcp_server_ids: serde_json::from_str(&selected_mcp_server_ids).unwrap_or_default(),
-        provider_connection_ids: serde_json::from_str(&provider_connection_ids).unwrap_or_default(),
-        selected_skill_ids: serde_json::from_str(&selected_skill_ids).unwrap_or_default(),
-        execution: serde_json::from_str::<ExecutionCapabilityConfig>(&execution)
-            .unwrap_or_default(),
-        exposed_tools: serde_json::from_str::<Vec<ExposedAgentTool>>(&exposed_tools)
-            .unwrap_or_default(),
-        created_at,
-        updated_at,
-    }))
+    for locator in locators {
+        let config = workspace_config::load(&locator.root_path).map_err(|e| {
+            RunnerError::AssistantPersistence(format!("Failed to load workspace config: {}", e))
+        })?;
+        if let Some(agent) = config.agents.iter().find(|agent| agent.id == id) {
+            let created_at = chrono::DateTime::from_timestamp_millis(agent.created_at)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default();
+            let updated_at = chrono::DateTime::from_timestamp_millis(agent.updated_at)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default();
+            let is_manager = agent.id == config.default_agent_id;
+            return Ok(Some(AgentConfig {
+                id: agent.id.clone(),
+                workspace_id: config.id,
+                name: agent.name.clone(),
+                description: agent.description.clone(),
+                // Schedule is workspace-level. Only the default (manager)
+                // agent inherits the workspace schedule; sub-agents never
+                // run on their own schedule.
+                schedule_enabled: is_manager && config.schedule.enabled,
+                interval_minutes: if is_manager {
+                    config.schedule.interval_minutes
+                } else {
+                    0
+                },
+                enabled: agent.enabled,
+                selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
+                    &app_config,
+                    &agent.selected_mcp_servers,
+                ),
+                provider_connection_ids: agent.provider_connection_ids.clone(),
+                selected_skill_ids: workspace_config::refs_to_skill_ids(
+                    &app_config,
+                    &agent.selected_skills,
+                ),
+                execution: agent.execution.clone(),
+                created_at,
+                updated_at,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 // =============================================================================
@@ -185,15 +174,12 @@ async fn run_next_agent(
     scheduler: &SharedScheduler,
 ) -> Result<(), RunnerError> {
     // Get app state
-    let _state = app_handle.state::<AppState>();
+    let state = app_handle.state::<AppState>();
 
-    let pool = match app_handle.try_state::<DbPool>() {
-        Some(pool) => pool.inner().clone(),
-        None => {
-            tracing::debug!("Assistant database not ready yet, skipping agent check");
-            return Ok(());
-        }
-    };
+    if app_handle.try_state::<DbPool>().is_none() {
+        tracing::debug!("Assistant database not ready yet, skipping agent check");
+        return Ok(());
+    }
 
     // Check for a ready agent
     let instance_id = {
@@ -250,11 +236,12 @@ async fn run_next_agent(
         "Got agent instance"
     );
 
-    // Look up the agent's configuration from the workspace_agents row.
-    // Workspace-local agents carry their full config inline (Phase 1.2+).
-    let agent_config = load_workspace_agent_as_config(&pool, &agent_id)
-        .await?
+    let agent_config = load_workspace_agent_as_config(state.inner(), &agent_id)?
         .ok_or_else(|| RunnerError::AgentNotFound(agent_id.clone()))?;
+    let workspace_pool = state
+        .workspace_db(&agent_config.workspace_id)
+        .await
+        .map_err(RunnerError::AssistantPersistence)?;
 
     // Check if the automation is still enabled.
     if !agent_config.enabled {
@@ -276,10 +263,10 @@ async fn run_next_agent(
 
     tracing::debug!(agent_name = %agent_config.name, "Got agent config");
 
-    let connections = resolve_agent_connections(&pool, &agent_config).await?;
+    let connections = resolve_agent_connections(state.inner(), &agent_config)?;
 
     let existing_session = find_background_session(
-        &pool,
+        &workspace_pool,
         &agent_config,
         if space_id.is_empty() {
             None
@@ -293,30 +280,25 @@ async fn run_next_agent(
         },
     )
     .await?;
-    let preferred_tab_id = existing_session
-        .as_ref()
-        .and_then(|session| session.tab_id.clone());
-
-    {
-        let mut sched = scheduler.lock().await;
-        if let Some(instance) = sched.get_instance_mut(&instance_id) {
-            instance.tab_id = preferred_tab_id.clone();
-        }
-    }
+    let _ = existing_session;
 
     let session = ensure_background_session(
         app_handle,
-        &pool,
+        &workspace_pool,
         &agent_config,
         &space_id,
         &room_id,
-        preferred_tab_id.as_deref(),
     )
     .await?;
 
-    let result =
-        run_scheduled_agent_with_fallback(app_handle, &pool, &instance_id, &session, &connections)
-            .await;
+    let result = run_scheduled_agent_with_fallback(
+        app_handle,
+        &workspace_pool,
+        &instance_id,
+        &session,
+        &connections,
+    )
+    .await;
 
     // Mark agent complete
     let success = match &result {
@@ -368,9 +350,6 @@ pub enum RunnerError {
     AssistantSession(String),
     /// No usable provider connections are configured for the agent.
     NoProviderConfigured(String),
-    /// Tab was not persisted within the expected timeout.
-    #[cfg(test)]
-    TabPersistenceFailed(String),
 }
 
 impl std::fmt::Display for RunnerError {
@@ -383,45 +362,11 @@ impl std::fmt::Display for RunnerError {
             }
             RunnerError::AssistantSession(msg) => write!(f, "Assistant session failed: {}", msg),
             RunnerError::NoProviderConfigured(msg) => write!(f, "No provider configured: {}", msg),
-            #[cfg(test)]
-            RunnerError::TabPersistenceFailed(msg) => {
-                write!(f, "Tab persistence timed out: {}", msg)
-            }
         }
     }
 }
 
 impl std::error::Error for RunnerError {}
-
-/// Poll the database until a tab row with the given `tab_id` exists,
-/// or return `TabPersistenceFailed` after `timeout` elapses.
-#[cfg(test)]
-async fn wait_for_persisted_tab(
-    pool: &sqlx::SqlitePool,
-    tab_id: &str,
-    timeout: std::time::Duration,
-    poll_interval: std::time::Duration,
-) -> Result<(), RunnerError> {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let exists: bool = sqlx::query_scalar::<_, i64>("SELECT 1 FROM tabs WHERE id = ? LIMIT 1")
-            .bind(tab_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| RunnerError::TabPersistenceFailed(e.to_string()))?
-            .is_some();
-        if exists {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(RunnerError::TabPersistenceFailed(format!(
-                "Tab {} was not persisted within {:?}",
-                tab_id, timeout
-            )));
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 async fn ensure_background_session(
@@ -430,7 +375,6 @@ async fn ensure_background_session(
     agent_config: &crate::config::AgentConfig,
     space_id: &str,
     room_id: &str,
-    tab_id: Option<&str>,
 ) -> Result<crate::assistant::types::AssistantSession, RunnerError> {
     let session_space_id = if space_id.is_empty() {
         None
@@ -467,7 +411,6 @@ async fn ensure_background_session(
         Vec::new()
     } else {
         crate::commands::workspace::workspace_agent_summaries(
-            pool,
             &state,
             &agent_config.workspace_id,
         )
@@ -485,7 +428,6 @@ async fn ensure_background_session(
         space_id: session_space_id.clone(),
         room_id: session_room_id.clone(),
         workspace_id: Some(agent_config.workspace_id.clone()),
-        tab_id: tab_id.map(str::to_string),
         tool_scopes: agent_config
             .required_tools()
             .into_iter()
@@ -518,12 +460,10 @@ async fn ensure_background_session(
     .await?;
 
     if let Some(session) = existing {
-        let session = if session.tab_id.as_deref() != tab_id
-            || session.title.as_deref() != Some(agent_config.name.as_str())
+        let session = if session.title.as_deref() != Some(agent_config.name.as_str())
             || session.context != desired_context
         {
             let mut updated = session;
-            updated.tab_id = tab_id.map(str::to_string);
             updated.title = Some(agent_config.name.clone());
             updated.context = desired_context.clone();
             updated.updated_at = chrono::Utc::now().timestamp_millis();
@@ -550,7 +490,6 @@ async fn ensure_background_session(
     let session = repository::create_session(
         pool,
         CreateSessionParams {
-            tab_id: tab_id.map(str::to_string),
             kind: SessionKind::BackgroundJob,
             title: Some(agent_config.name.clone()),
             context: desired_context,
@@ -581,7 +520,7 @@ async fn find_background_session(
     let session_space_id = space_id.map(str::to_string);
     let session_room_id = room_id.map(str::to_string);
 
-    Ok(repository::list_sessions(pool, None)
+    Ok(repository::list_sessions(pool)
         .await
         .map_err(RunnerError::AssistantPersistence)?
         .into_iter()
@@ -593,13 +532,15 @@ async fn find_background_session(
         }))
 }
 
-async fn resolve_agent_connections(
-    pool: &DbPool,
+fn resolve_agent_connections(
+    state: &AppState,
     agent_config: &crate::config::AgentConfig,
 ) -> Result<Vec<ProviderConnection>, RunnerError> {
-    let all_connections = repository::list_provider_connections(pool)
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
+    let all_connections = state
+        .config_manager
+        .lock()
+        .map_err(|e| RunnerError::AssistantPersistence(format!("Lock error: {}", e)))?
+        .get_provider_connections();
 
     let mut resolved = Vec::new();
     for connection_id in &agent_config.provider_connection_ids {
@@ -754,8 +695,6 @@ fn message_contains_output(content: &[ContentPart]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
-    use tokio::time::sleep;
 
     #[test]
     fn test_runner_error_display() {
@@ -764,68 +703,5 @@ mod tests {
 
         let err = RunnerError::AgentNotFound("test-agent".to_string());
         assert!(err.to_string().contains("test-agent"));
-    }
-
-    #[tokio::test]
-    async fn waits_for_persisted_tab() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-
-        sqlx::query("CREATE TABLE tabs (id TEXT PRIMARY KEY)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let pool_for_insert = pool.clone();
-        tokio::spawn(async move {
-            sleep(Duration::from_millis(50)).await;
-            sqlx::query("INSERT INTO tabs (id) VALUES (?)")
-                .bind("tab-delayed")
-                .execute(&pool_for_insert)
-                .await
-                .unwrap();
-        });
-
-        let result = wait_for_persisted_tab(
-            &pool,
-            "tab-delayed",
-            Duration::from_millis(500),
-            Duration::from_millis(10),
-        )
-        .await;
-
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn times_out_when_tab_is_not_persisted() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-
-        sqlx::query("CREATE TABLE tabs (id TEXT PRIMARY KEY)")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let result = wait_for_persisted_tab(
-            &pool,
-            "tab-missing",
-            Duration::from_millis(100),
-            Duration::from_millis(10),
-        )
-        .await;
-
-        match result {
-            Err(RunnerError::TabPersistenceFailed(message)) => {
-                assert!(message.contains("tab-missing"));
-            }
-            other => panic!("expected timeout error, got {:?}", other),
-        }
     }
 }

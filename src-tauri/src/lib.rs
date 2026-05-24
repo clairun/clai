@@ -35,15 +35,19 @@ mod commands;
 mod config;
 mod db;
 mod mcp;
+mod paths;
 mod providers;
+mod workspace_index;
 
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock};
 
 use agents::SharedScheduler;
 use auth::TokenStorage;
 use config::ConfigManager;
 use tauri::Manager;
 use tokio::sync::Mutex as AsyncMutex;
+use workspace_index::WorkspaceIndex;
 
 /// Shared application state accessible from all commands.
 ///
@@ -65,6 +69,61 @@ pub struct AppState {
     pub pending_approvals: commands::permissions::PendingApprovals,
     /// In-flight filesystem path-grant requests awaiting user decision.
     pub pending_path_grants: commands::path_grants::PendingPathGrants,
+    /// File-backed workspace discovery index.
+    pub workspace_index: Arc<RwLock<WorkspaceIndex>>,
+}
+
+impl AppState {
+    pub fn workspace_root(&self, workspace_id: &str) -> Option<PathBuf> {
+        self.workspace_index.read().ok()?.root(workspace_id)
+    }
+
+    pub fn workspace_create_target(&self, requested: Option<&Path>) -> Result<PathBuf, String> {
+        let config = self
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?
+            .get();
+        let dirs = config.expanded_workspace_dirs();
+        let base = match requested {
+            Some(path) => {
+                let expanded = paths::expand_tilde(path);
+                if !dirs.iter().any(|dir| dir == &expanded) {
+                    return Err(format!(
+                        "Workspace directory is not configured: {}",
+                        expanded.display()
+                    ));
+                }
+                expanded
+            }
+            None if dirs.len() == 1 => dirs[0].clone(),
+            None => {
+                return Err("Workspace directory must be selected.".to_string());
+            }
+        };
+        Ok(base)
+    }
+
+    pub async fn workspace_db(&self, workspace_id: &str) -> Result<db::DbPool, String> {
+        if let Some(pool) = self
+            .workspace_index
+            .read()
+            .map_err(|e| format!("Workspace index lock error: {}", e))?
+            .pool(workspace_id)
+        {
+            return Ok(pool);
+        }
+
+        let root = self
+            .workspace_root(workspace_id)
+            .ok_or_else(|| format!("Workspace {} not found", workspace_id))?;
+        let pool = db::init_workspace_db(&root).await?;
+        self.workspace_index
+            .write()
+            .map_err(|e| format!("Workspace index lock error: {}", e))?
+            .attach_pool(workspace_id.to_string(), pool.clone());
+        Ok(pool)
+    }
 }
 
 /// Default base URL for Netdata Cloud API.
@@ -107,6 +166,7 @@ pub fn run() {
          Check that the config directory is accessible.",
     );
     let initial_config = config_manager.get();
+    let workspace_index = WorkspaceIndex::scan(&initial_config);
 
     // Initialize agent scheduler
     let scheduler = agents::create_shared_scheduler();
@@ -132,6 +192,7 @@ pub fn run() {
         scheduler,
         pending_approvals: commands::permissions::PendingApprovals::new(),
         pending_path_grants: commands::path_grants::PendingPathGrants::new(),
+        workspace_index: Arc::new(RwLock::new(workspace_index)),
     };
 
     // Build and run the Tauri application
@@ -146,28 +207,18 @@ pub fn run() {
         .manage(state)
         // Setup hook - runs after app is built, gives us AppHandle
         .setup(move |app| {
-            // Initialize database for workspace state persistence
+            // Open per-workspace DBs and populate the scheduler.
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                match db::init_db().await {
-                    Ok(pool) => {
-                        tracing::info!("Database initialized successfully");
-                        // Recover any runs/tool calls left stuck from a previous crash
-                        if let Err(e) = assistant::repository::recover_stale_runs(&pool).await {
-                            tracing::warn!("Failed to recover stale runs: {}", e);
-                        }
-                        // Populate scheduler with workspace-local scheduled agents.
-                        agents::init::populate_scheduler_from_workspace_agents(
-                            &post_db_scheduler,
-                            &pool,
-                        )
-                        .await;
-                        app_handle.manage(pool);
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Err(e) = initialize_workspace_storage(&state).await {
+                        tracing::warn!("Failed to initialize workspace storage: {}", e);
                     }
-                    Err(e) => {
-                        tracing::error!("Failed to initialize database: {}", e);
-                        // Database is optional - app can still work without persistence
-                    }
+                    agents::init::populate_scheduler_from_workspace_agents(
+                        &post_db_scheduler,
+                        state.inner(),
+                    )
+                    .await;
                 }
             });
 
@@ -193,7 +244,6 @@ pub fn run() {
             commands::assistant::assistant_get_session,
             commands::assistant::assistant_list_sessions,
             commands::assistant::assistant_delete_session,
-            commands::assistant::assistant_attach_session_to_tab,
             commands::assistant::assistant_load_session_messages,
             commands::assistant::assistant_list_runs,
             commands::assistant::assistant_list_tool_calls,
@@ -234,9 +284,6 @@ pub fn run() {
             commands::skills::skill_source_set_enabled,
             commands::skills::skill_source_delete,
             commands::skills::skill_fork_bundled,
-            // Agent tool bridge commands
-            commands::bridge::agent_tool_result,
-            commands::bridge::agent_bridge_ready,
             commands::fleet::fleet_get_snapshot,
             commands::fleet::fleet_run_now,
             // Workspace state persistence commands
@@ -271,4 +318,106 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Result<(), String> {
+    {
+        let config = state
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?
+            .get();
+        for dir in config.expanded_workspace_dirs() {
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("Failed to create workspace dir {}: {}", dir.display(), e))?;
+        }
+    }
+
+    let is_empty = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .by_id
+        .is_empty();
+
+    if is_empty {
+        let id = uuid::Uuid::new_v4().to_string();
+        let manager_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().timestamp_millis();
+        let base = state.workspace_create_target(None)?;
+        let root = base.join(&id);
+        let config = config::workspace_config::WorkspaceConfig::new(
+            id.clone(),
+            "Default".to_string(),
+            now,
+            manager_id,
+        );
+        config::workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(root.join(".clai").join("memory").join("journal"))
+            .map_err(|e| format!("Failed to prepare default workspace: {}", e))?;
+        let pool = db::init_workspace_db(&root).await?;
+        let mut index = state
+            .workspace_index
+            .write()
+            .map_err(|e| format!("Workspace index lock error: {}", e))?;
+        index.insert_config(root, &config);
+        index.attach_pool(id, pool);
+        return Ok(());
+    }
+
+    let locators = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .locators_sorted();
+
+    const MAX_WORKSPACE_DB_INIT_CONCURRENCY: usize = 8;
+    let mut pending = tokio::task::JoinSet::new();
+    for locator in locators {
+        pending.spawn(async move {
+            let id = locator.id;
+            let root_path = locator.root_path;
+            let result = db::init_workspace_db(&root_path).await;
+            (id, root_path, result)
+        });
+
+        if pending.len() >= MAX_WORKSPACE_DB_INIT_CONCURRENCY {
+            let Some(joined) = pending.join_next().await else {
+                continue;
+            };
+            attach_workspace_db_result(state, joined)?;
+        }
+    }
+
+    while let Some(joined) = pending.join_next().await {
+        attach_workspace_db_result(state, joined)?;
+    }
+    Ok(())
+}
+
+fn attach_workspace_db_result(
+    state: &tauri::State<'_, AppState>,
+    joined: Result<
+        (String, std::path::PathBuf, Result<db::DbPool, String>),
+        tokio::task::JoinError,
+    >,
+) -> Result<(), String> {
+    let (id, root_path, result) =
+        joined.map_err(|e| format!("Workspace DB initialization task failed: {}", e))?;
+    match result {
+        Ok(pool) => state
+            .workspace_index
+            .write()
+            .map_err(|e| format!("Workspace index lock error: {}", e))?
+            .attach_pool(id, pool),
+        Err(error) => state
+            .workspace_index
+            .write()
+            .map_err(|e| format!("Workspace index lock error: {}", e))?
+            .record_failure(
+                root_path,
+                workspace_index::LoadFailureReason::DbCorrupt(error),
+            ),
+    }
+    Ok(())
 }

@@ -7,7 +7,6 @@ pub mod agent_templates;
 pub mod api;
 pub mod assistant;
 pub mod auth;
-pub mod bridge;
 pub mod fleet;
 pub mod mcp_servers;
 pub mod path_grants;

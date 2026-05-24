@@ -9,14 +9,14 @@ use crate::assistant::providers::types::ProviderError;
 use crate::assistant::repository;
 use crate::assistant::repository::{CreateMessageParams, CreateRunParams, CreateToolCallParams};
 use crate::assistant::runtime;
-use crate::assistant::tools::local::agent_workspace_root_for_id;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
     AssistantMessage, CompletionRequest, ContentPart, MessageRole, ProviderEvent,
-    ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId, SessionKind,
+    ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId,
     ToolCallStatus, ToolInvocationDraft,
 };
 use crate::db::DbPool;
+use crate::AppState;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -64,10 +64,33 @@ pub async fn run_session_turn(
         .await?
         .ok_or_else(|| AssistantEngineError::SessionNotFound(input.session_id.clone()))?;
 
-    // Load provider connection
-    let connection = repository::get_provider_connection(&deps.pool, &input.connection_id)
-        .await?
+    let app_state = deps.app.try_state::<AppState>();
+    // Load provider connection from app config.
+    let connection = app_state
+        .as_ref()
+        .and_then(|state| {
+            state
+                .config_manager
+                .lock()
+                .ok()?
+                .get_provider_connection(&input.connection_id)
+        })
         .ok_or_else(|| AssistantEngineError::ProviderNotConfigured(input.connection_id.clone()))?;
+    let workspace_root = match session.context.agent_workspace_id.as_deref() {
+        Some(workspace_id) => {
+            let root = app_state
+                .as_ref()
+                .and_then(|state| state.workspace_root(workspace_id));
+            if root.is_none() {
+                return Err(AssistantEngineError::Persistence(format!(
+                    "workspace {} no longer exists or failed to load",
+                    workspace_id
+                )));
+            }
+            root
+        }
+        None => None,
+    };
 
     if providers::is_cli_provider(&connection.provider_id) {
         return crate::assistant::local_agent::run_session_turn(deps, input).await;
@@ -138,35 +161,6 @@ pub async fn run_session_turn(
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let mut usage: Option<RunUsage> = None;
-
-    // Pre-register the assistant's tab with the JS bridge (once per run)
-    // so that frontend tool handlers can find the correct tab.
-    if let Some(tab_id) = &session.tab_id {
-        let managed_agent_tab = session.kind == SessionKind::BackgroundJob
-            || session.context.automation_id.is_some()
-            || session.context.automation_name.is_some();
-        let bridge = crate::mcp::bridge::JsBridge::new(deps.app.clone());
-        let setup_params = serde_json::json!({
-            "agentName": session
-                .context
-                .automation_name
-                .as_deref()
-                .or(session.title.as_deref())
-                .unwrap_or("Assistant"),
-            "managedAgentTab": managed_agent_tab,
-            "tabId": tab_id,
-            "mcpServerIds": session.context.mcp_server_ids,
-        });
-        let _ = bridge
-            .call_tool(
-                &bridge_agent_id(&session.id),
-                session.context.space_id.as_deref().unwrap_or(""),
-                session.context.room_id.as_deref().unwrap_or(""),
-                "agent.setup",
-                setup_params,
-            )
-            .await;
-    }
 
     // === Tool execution loop ===
     // Build system prompt (prepended to every API call, not persisted)
@@ -432,12 +426,12 @@ pub async fn run_session_turn(
                 session_id: session.id.clone(),
                 run_id: run_id.clone(),
                 tool_call_id: Some(tc.tool_call_id.clone()),
-                tab_id: session.tab_id.clone(),
                 workspace_id: session.context.workspace_id.clone(),
                 space_id: session.context.space_id.clone(),
                 room_id: session.context.room_id.clone(),
                 mcp_server_ids: session.context.mcp_server_ids.clone(),
                 agent_workspace_id: session.context.agent_workspace_id.clone(),
+                workspace_root: workspace_root.clone(),
                 automation_id: session.context.automation_id.clone(),
                 workspace_agents: session.context.workspace_agents.clone(),
                 inter_agent_call_depth: input.inter_agent_call_depth,
@@ -553,12 +547,12 @@ pub async fn run_session_turn(
         session_id: session.id.clone(),
         run_id: run_id.clone(),
         tool_call_id: None,
-        tab_id: session.tab_id.clone(),
         workspace_id: session.context.workspace_id.clone(),
         space_id: session.context.space_id.clone(),
         room_id: session.context.room_id.clone(),
         mcp_server_ids: session.context.mcp_server_ids.clone(),
         agent_workspace_id: session.context.agent_workspace_id.clone(),
+        workspace_root: workspace_root.clone(),
         automation_id: session.context.automation_id.clone(),
         workspace_agents: session.context.workspace_agents.clone(),
         inter_agent_call_depth: input.inter_agent_call_depth,
@@ -770,18 +764,11 @@ pub(crate) fn build_system_prompt(
         );
     }
 
-    if let Some(agent_workspace_id) = context.agent_workspace_id.as_deref() {
+    if context.agent_workspace_id.is_some() {
         prompt.push_str("\n## Local Execution Capabilities\n");
-        if let Some(workspace_root) = agent_workspace_root_for_id(agent_workspace_id) {
-            prompt.push_str(&format!(
-                "- Workspace filesystem root: `{}` (read_write, default shell cwd). This directory is shared with other agents in the same workspace.\n",
-                workspace_root.display()
-            ));
-        } else {
-            prompt.push_str(
-                "- Workspace filesystem root: available (read_write, default shell cwd). Shared with other agents in the same workspace.\n",
-            );
-        }
+        prompt.push_str(
+            "- Workspace filesystem root: available (read_write, default shell cwd). Shared with other agents in the same workspace.\n",
+        );
 
         if context.execution.filesystem.extra_paths.is_empty() {
             prompt.push_str("- Additional path grants: none\n");
@@ -962,6 +949,7 @@ pub(crate) fn build_system_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::SessionKind;
     use crate::assistant::types::ContentPart;
     use crate::assistant::types::SessionContext;
     use crate::assistant::types::WorkspaceAgentSummary;
@@ -1445,7 +1433,6 @@ mod tests {
     fn make_session(automation_name: Option<&str>) -> crate::assistant::types::AssistantSession {
         crate::assistant::types::AssistantSession {
             id: "session".to_string(),
-            tab_id: None,
             kind: SessionKind::BackgroundJob,
             title: None,
             context: SessionContext {
@@ -1866,15 +1853,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bridge_agent_id_formats_session_id_with_prefix() {
-        assert_eq!(
-            bridge_agent_id("abc-123"),
-            "assistant-session:abc-123".to_string()
-        );
-        // Empty session id still produces a prefixed string (no panic).
-        assert_eq!(bridge_agent_id(""), "assistant-session:".to_string());
-    }
 }
 
 /// Normalize persisted history into a provider-safe message sequence.
@@ -2137,10 +2115,6 @@ pub(crate) fn build_trigger_message(
         role: MessageRole::User,
         content: vec![ContentPart::Text { text }],
     })
-}
-
-pub fn bridge_agent_id(session_id: &str) -> String {
-    format!("assistant-session:{}", session_id)
 }
 
 /// Helper to mark a run as failed and emit the event.

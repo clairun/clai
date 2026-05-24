@@ -6,8 +6,10 @@
 
 use crate::agents::{AgentDefinition, SharedScheduler};
 use crate::auth::TokenStorage;
-use crate::config::{AgentConfig, ConfigManager, ExecutionCapabilityConfig, ShellAccessMode};
-use crate::db::DbPool;
+use crate::config::{
+    workspace_config, AgentConfig, ConfigManager, ExecutionCapabilityConfig, ShellAccessMode,
+};
+use crate::AppState;
 
 #[allow(dead_code)]
 fn agent_config_to_definition(config: &AgentConfig) -> AgentDefinition {
@@ -31,35 +33,44 @@ pub fn initialize_scheduler(
     // intentionally empty
 }
 
-/// Populates the scheduler with scheduled workspace-local agents from the DB.
+/// Populates the scheduler with scheduled workspace-local agents from workspace configs.
 ///
-/// Called after DB initialization completes (since `ConfigManager::new()`
-/// runs before the DB pool exists). Reads every row in `workspace_agents`
-/// whose `schedule_enabled` flag is set, registers a runtime definition,
-/// and creates an instance for each that is also `enabled`.
-pub async fn populate_scheduler_from_workspace_agents(scheduler: &SharedScheduler, pool: &DbPool) {
-    let rows: Vec<(String, String, String, i64, String, i64, i64)> = match sqlx::query_as(
-        r#"
-        SELECT id, name, description, interval_minutes, execution, enabled, schedule_paused
-        FROM workspace_agents
-        WHERE schedule_enabled = 1
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(rows) => rows,
+/// Called after workspace storage is initialized. Reads every workspace
+/// `config.json`, registers scheduled agent definitions, and creates an
+/// instance for each enabled agent.
+pub async fn populate_scheduler_from_workspace_agents(
+    scheduler: &SharedScheduler,
+    state: &AppState,
+) {
+    let locators = match state.workspace_index.read() {
+        Ok(index) => index.locators_sorted(),
         Err(e) => {
-            tracing::warn!("Failed to load scheduled workspace agents: {}", e);
+            tracing::warn!(
+                "Failed to read workspace index for scheduler population: {}",
+                e
+            );
             return;
         }
     };
 
     let mut sched = scheduler.lock().await;
-    for (id, name, _description, interval_minutes, execution_json, enabled, schedule_paused) in rows
-    {
-        let execution: ExecutionCapabilityConfig =
-            serde_json::from_str(&execution_json).unwrap_or_default();
+    for locator in locators {
+        if !locator.schedule_enabled {
+            continue;
+        }
+        let Ok(config) = workspace_config::load(&locator.root_path) else {
+            continue;
+        };
+        // The workspace schedule fires the workspace's default (manager) agent.
+        let Some(agent) = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == config.default_agent_id)
+        else {
+            continue;
+        };
+
+        let execution: ExecutionCapabilityConfig = agent.execution.clone();
         let mut tools: Vec<&'static str> = vec!["netdata", "dashboard", "tabs", "fs"];
         if !matches!(execution.shell.mode, ShellAccessMode::Off) {
             tools.push("bash");
@@ -67,17 +78,20 @@ pub async fn populate_scheduler_from_workspace_agents(scheduler: &SharedSchedule
         if execution.web.enabled {
             tools.push("web");
         }
-        let definition =
-            AgentDefinition::new(&id, &name, (interval_minutes as u64).max(1) * 60 * 1000)
-                .with_tools(tools);
+        let definition = AgentDefinition::new(
+            &agent.id,
+            &agent.name,
+            (config.schedule.interval_minutes as u64).max(1) * 60 * 1000,
+        )
+        .with_tools(tools);
         sched.register_definition(definition);
-        if enabled != 0 {
-            let instance_id = sched.create_instance(&id, "", "");
+        if agent.enabled {
+            let instance_id = sched.create_instance(&agent.id, "", "");
             // Paused workspaces still get a scheduler instance (so the live
             // pause/resume toggle can flip it without re-registering), but the
             // instance is created disabled so the runner ignores it until
             // resumed.
-            if schedule_paused != 0 {
+            if config.schedule.paused {
                 if let Some(instance_id) = instance_id {
                     sched.set_instance_enabled(&instance_id, false);
                 }

@@ -2,46 +2,9 @@
   "id": "sow-tracker",
   "name": "SOW Tracker",
   "description": "You maintain and report the current Statement of Work for this workspace's target project. Stay within the project SOW area, preserve existing user-authored notes, and return concise structured state when called through current_sow. If the target project path has not been granted in local capabilities, report that blocker.",
-  "default_schedule_enabled": false,
-  "default_interval_minutes": 0,
   "default_skill_slugs": [
     "sow-workflow",
     "self-reflection"
-  ],
-  "default_exposed_tools": [
-    {
-      "name": "current_sow",
-      "description": "Return the current in-progress SOW for the target project, or absent if none.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {}
-      },
-      "outputSchema": {
-        "type": "object",
-        "required": [
-          "present"
-        ],
-        "properties": {
-          "present": {
-            "type": "boolean"
-          },
-          "id": {
-            "type": "string"
-          },
-          "status": {
-            "enum": [
-              "open",
-              "in-progress",
-              "completed",
-              "closed"
-            ]
-          },
-          "plan": {
-            "type": "string"
-          }
-        }
-      }
-    }
   ],
   "default_execution": {
     "shell": {

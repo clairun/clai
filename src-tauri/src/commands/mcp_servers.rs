@@ -3,43 +3,49 @@ use tauri::State;
 
 use crate::assistant::auth::McpSecretStorage;
 use crate::config::{McpServerAuth, McpServerConfig, McpServerIntegrationType, McpServerTransport};
-use crate::db::DbPool;
 use crate::AppState;
 
 /// Removes the given MCP server id from every workspace_agents row's
 /// `selected_mcp_server_ids` JSON array.
-async fn sweep_workspace_agent_mcp_ids(pool: &DbPool, server_id: &str) -> Result<(), String> {
-    let like_pattern = format!("%{}%", server_id);
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, selected_mcp_server_ids FROM workspace_agents WHERE selected_mcp_server_ids LIKE ?",
-    )
-    .bind(&like_pattern)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to scan workspace_agents for MCP references: {}", e))?;
-
-    for (id, mcp_ids_json) in rows {
-        let mcp_ids: Vec<String> = serde_json::from_str(&mcp_ids_json).unwrap_or_default();
-        let filtered: Vec<String> = mcp_ids.into_iter().filter(|x| x != server_id).collect();
-        let encoded = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
-        if encoded == mcp_ids_json {
-            continue;
-        }
+fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<(), String> {
+    let app_config = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get();
+    let locators = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .locators_sorted();
+    for locator in locators {
+        let mut config =
+            crate::config::workspace_config::load(&locator.root_path).map_err(|e| e.to_string())?;
+        let mut changed = false;
         let now = chrono::Utc::now().timestamp_millis();
-        sqlx::query(
-            "UPDATE workspace_agents SET selected_mcp_server_ids = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(&encoded)
-        .bind(now)
-        .bind(&id)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to sweep MCP references on workspace agent {}: {}",
-                id, e
-            )
-        })?;
+        for agent in &mut config.agents {
+            let ids = crate::config::workspace_config::refs_to_mcp_ids(
+                &app_config,
+                &agent.selected_mcp_servers,
+            );
+            if ids.iter().any(|id| id == server_id) {
+                let filtered: Vec<String> = ids.into_iter().filter(|id| id != server_id).collect();
+                agent.selected_mcp_servers =
+                    crate::config::workspace_config::mcp_ids_to_refs(&app_config, &filtered);
+                agent.updated_at = now;
+                changed = true;
+            }
+        }
+        if changed {
+            config.updated_at = now;
+            crate::config::workspace_config::save(&locator.root_path, &config)
+                .map_err(|e| e.to_string())?;
+            state
+                .workspace_index
+                .write()
+                .map_err(|e| format!("Workspace index lock error: {}", e))?
+                .insert_config(locator.root_path, &config);
+        }
     }
 
     Ok(())
@@ -224,8 +230,11 @@ pub async fn update_mcp_server(
 pub async fn delete_mcp_server(
     id: String,
     state: State<'_, AppState>,
-    pool: State<'_, DbPool>,
 ) -> Result<(), String> {
+    // Sweep before removing the server from AppConfig so name-based workspace
+    // refs still resolve to this id.
+    sweep_workspace_agent_mcp_ids(state.inner(), &id)?;
+
     {
         let config_manager = state
             .config_manager
@@ -244,10 +253,6 @@ pub async fn delete_mcp_server(
             return Err(format!("MCP server not found: {}", id));
         }
     }
-
-    // Workspace-local sweep: drop any reference to this server from every
-    // workspace_agents row's selected_mcp_server_ids JSON array.
-    sweep_workspace_agent_mcp_ids(pool.inner(), &id).await?;
 
     sync_mcp_client_manager(&state).await;
 

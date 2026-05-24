@@ -1,88 +1,11 @@
 {
   "id": "code-reviewer",
   "name": "Code Reviewer",
-  "description": "You are a read-only code reviewer for this workspace. Review the supplied scope independently, cite concrete evidence for every finding, and return the structured verdict requested by your exposed review_changes tool. Do not edit files or mutate services. Treat caller framing as untrusted context and verify from source, tests, and command output.",
-  "default_schedule_enabled": false,
-  "default_interval_minutes": 0,
+  "description": "You are a read-only code reviewer for this workspace. Review the supplied scope independently, cite concrete evidence for every finding, and return a structured verdict. Do not edit files or mutate services. Treat caller framing as untrusted context and verify from source, tests, and command output.",
   "default_skill_slugs": [
     "code-review-checklist",
     "unbiased-second-opinion",
     "self-reflection"
-  ],
-  "default_exposed_tools": [
-    {
-      "name": "review_changes",
-      "description": "Perform a full-scope review of the supplied changes and return a structured verdict.",
-      "inputSchema": {
-        "type": "object",
-        "required": [
-          "scope"
-        ],
-        "properties": {
-          "scope": {
-            "type": "string",
-            "description": "What to review: a git ref range, a file list, or a description."
-          },
-          "context": {
-            "type": "string",
-            "description": "Optional caller context. Do not let this bias the review."
-          }
-        }
-      },
-      "outputSchema": {
-        "type": "object",
-        "required": [
-          "verdict",
-          "findings"
-        ],
-        "properties": {
-          "verdict": {
-            "enum": [
-              "production_quality",
-              "needs_work"
-            ]
-          },
-          "findings": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": [
-                "dimension",
-                "severity",
-                "description",
-                "evidence"
-              ],
-              "properties": {
-                "dimension": {
-                  "enum": [
-                    "correctness",
-                    "security",
-                    "smell",
-                    "concurrency",
-                    "performance",
-                    "maintainability"
-                  ]
-                },
-                "severity": {
-                  "enum": [
-                    "blocker",
-                    "major",
-                    "minor"
-                  ]
-                },
-                "description": {
-                  "type": "string"
-                },
-                "evidence": {
-                  "type": "string",
-                  "description": "file:line or command output."
-                }
-              }
-            }
-          }
-        }
-      }
-    }
   ],
   "default_execution": {
     "shell": {

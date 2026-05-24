@@ -11,9 +11,8 @@ use tauri::State;
 use crate::config::bundled;
 use crate::config::{
     discover_skills, discover_skills_with_diagnostics, SkillDefinition, SkillSourceConfig,
-    SkillSourceDiagnostic, SkillSourceKind, APP_IDENTIFIER,
+    SkillSourceDiagnostic, SkillSourceKind,
 };
-use crate::db::DbPool;
 use crate::AppState;
 
 /// Removes all workspace-local skill references that belong to the given source.
@@ -21,47 +20,49 @@ use crate::AppState;
 /// Walks every `workspace_agents` row whose JSON-array `selected_skill_ids`
 /// might reference the source (LIKE filter on the source id prefix), then
 /// rewrites the array with the matching ids removed.
-async fn sweep_workspace_agent_skill_ids(pool: &DbPool, source_id: &str) -> Result<(), String> {
+fn sweep_workspace_agent_skill_ids(state: &AppState, source_id: &str) -> Result<(), String> {
     let prefix = format!("{}:", source_id);
-    let like_pattern = format!("%{}%", source_id);
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, selected_skill_ids FROM workspace_agents WHERE selected_skill_ids LIKE ?",
-    )
-    .bind(&like_pattern)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        format!(
-            "Failed to scan workspace_agents for skill references: {}",
-            e
-        )
-    })?;
-
-    for (id, skill_ids_json) in rows {
-        let skill_ids: Vec<String> = serde_json::from_str(&skill_ids_json).unwrap_or_default();
-        let filtered: Vec<String> = skill_ids
-            .into_iter()
-            .filter(|skill_id| !skill_id.starts_with(&prefix))
-            .collect();
-        let encoded = serde_json::to_string(&filtered).unwrap_or_else(|_| "[]".to_string());
-        if encoded == skill_ids_json {
-            continue;
-        }
+    let app_config = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get();
+    let locators = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .locators_sorted();
+    for locator in locators {
+        let mut config =
+            crate::config::workspace_config::load(&locator.root_path).map_err(|e| e.to_string())?;
+        let mut changed = false;
         let now = chrono::Utc::now().timestamp_millis();
-        sqlx::query(
-            "UPDATE workspace_agents SET selected_skill_ids = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(&encoded)
-        .bind(now)
-        .bind(&id)
-        .execute(pool)
-        .await
-        .map_err(|e| {
-            format!(
-                "Failed to sweep skill references on workspace agent {}: {}",
-                id, e
-            )
-        })?;
+        for agent in &mut config.agents {
+            let ids = crate::config::workspace_config::refs_to_skill_ids(
+                &app_config,
+                &agent.selected_skills,
+            );
+            if ids.iter().any(|skill_id| skill_id.starts_with(&prefix)) {
+                let filtered: Vec<String> = ids
+                    .into_iter()
+                    .filter(|skill_id| !skill_id.starts_with(&prefix))
+                    .collect();
+                agent.selected_skills =
+                    crate::config::workspace_config::skill_ids_to_refs(&app_config, &filtered);
+                agent.updated_at = now;
+                changed = true;
+            }
+        }
+        if changed {
+            config.updated_at = now;
+            crate::config::workspace_config::save(&locator.root_path, &config)
+                .map_err(|e| e.to_string())?;
+            state
+                .workspace_index
+                .write()
+                .map_err(|e| format!("Workspace index lock error: {}", e))?
+                .insert_config(locator.root_path, &config);
+        }
     }
 
     Ok(())
@@ -405,7 +406,6 @@ pub fn skill_source_set_enabled(
 pub async fn skill_source_delete(
     id: String,
     state: State<'_, AppState>,
-    pool: State<'_, DbPool>,
 ) -> Result<(), String> {
     let source = {
         let config_manager = state
@@ -427,6 +427,10 @@ pub async fn skill_source_delete(
         }
     }
 
+    // Sweep while the source is still present in AppConfig so stable skill refs
+    // can be resolved back to the frontend `sourceId:slug` form.
+    sweep_workspace_agent_skill_ids(state.inner(), &id)?;
+
     let removed = {
         let config_manager = state
             .config_manager
@@ -436,10 +440,6 @@ pub async fn skill_source_delete(
             .remove_skill_source(&id)
             .map_err(|e| format!("Failed to delete skill source: {}", e))?
     };
-
-    // Workspace-local sweep: drop any skill ids belonging to this source from
-    // every workspace_agents row's selected_skill_ids JSON array.
-    sweep_workspace_agent_skill_ids(pool.inner(), &id).await?;
 
     if removed {
         if let Some(source) = source {
@@ -452,9 +452,7 @@ pub async fn skill_source_delete(
 }
 
 fn skill_source_cache_root() -> Result<PathBuf, String> {
-    let data_dir = dirs::data_dir()
-        .ok_or_else(|| "Could not determine application data directory.".to_string())?;
-    Ok(data_dir.join(APP_IDENTIFIER).join("skill-sources"))
+    Ok(crate::paths::clai_cache_skill_sources_root())
 }
 
 fn slugify_skill_name(name: &str) -> String {

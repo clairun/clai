@@ -5,14 +5,12 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::assistant::types::{
-    AssistantMessage, AssistantRun, AssistantSession, AuthMode, ContentPart, MessageRole,
-    ProviderConnection, RunNotice, RunStatus, RunTrigger, RunUsage, SessionContext, SessionKind,
-    ToolCallStatus, ToolInvocation,
+    AssistantMessage, AssistantRun, AssistantSession, ContentPart, MessageRole, RunNotice,
+    RunStatus, RunTrigger, RunUsage, SessionContext, SessionKind, ToolCallStatus, ToolInvocation,
 };
 use crate::db::DbPool;
 
 pub struct CreateSessionParams {
-    pub tab_id: Option<String>,
     pub kind: SessionKind,
     pub title: Option<String>,
     pub context: SessionContext,
@@ -45,30 +43,6 @@ pub struct CreateToolCallParams {
     pub status: ToolCallStatus,
 }
 
-pub struct CreateProviderConnectionParams {
-    pub id: String,
-    pub name: String,
-    pub provider_id: String,
-    pub auth_mode: AuthMode,
-    pub base_url: Option<String>,
-    pub secret_ref: String,
-    pub model_id: String,
-    pub account_label: Option<String>,
-    pub enabled: bool,
-}
-
-pub struct UpdateProviderConnectionParams {
-    pub id: String,
-    pub name: String,
-    pub provider_id: String,
-    pub auth_mode: AuthMode,
-    pub base_url: Option<String>,
-    pub secret_ref: String,
-    pub model_id: String,
-    pub account_label: Option<String>,
-    pub enabled: bool,
-}
-
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
@@ -91,7 +65,6 @@ fn parse_optional_json<T: DeserializeOwned>(
 fn map_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantSession, String> {
     Ok(AssistantSession {
         id: row.get("id"),
-        tab_id: row.get("tab_id"),
         kind: parse_json::<SessionKind>(&row.get::<String, _>("kind"), "session kind")?,
         title: row.get("title"),
         context: parse_json::<SessionContext>(
@@ -138,38 +111,17 @@ fn map_run_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantRun, String> {
     })
 }
 
-fn map_provider_connection_row(
-    row: &sqlx::sqlite::SqliteRow,
-) -> Result<ProviderConnection, String> {
-    Ok(ProviderConnection {
-        id: row.get("id"),
-        name: row.get("name"),
-        provider_id: row.get("provider_id"),
-        auth_mode: parse_json::<AuthMode>(&row.get::<String, _>("auth_mode"), "auth mode")?,
-        base_url: row.get("base_url"),
-        secret_ref: row.get("secret_ref"),
-        model_id: row.get("model_id"),
-        account_label: row.get("account_label"),
-        enabled: row.get::<i64, _>("enabled") != 0,
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
-}
-
 pub async fn create_session(
     pool: &DbPool,
     params: CreateSessionParams,
 ) -> Result<AssistantSession, String> {
     let now = now_ms();
-    let mut context = params.context;
-    context.tab_id = params.tab_id.clone();
 
     let session = AssistantSession {
         id: Uuid::new_v4().to_string(),
-        tab_id: params.tab_id,
         kind: params.kind,
         title: params.title,
-        context,
+        context: params.context,
         created_at: now,
         updated_at: now,
     };
@@ -177,12 +129,11 @@ pub async fn create_session(
     sqlx::query(
         r#"
         INSERT INTO assistant_sessions
-            (id, tab_id, kind, title, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (id, kind, title, context_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&session.id)
-    .bind(&session.tab_id)
     .bind(to_json_string(&session.kind)?)
     .bind(&session.title)
     .bind(to_json_string(&session.context)?)
@@ -201,7 +152,7 @@ pub async fn get_session(
 ) -> Result<Option<AssistantSession>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, tab_id, kind, title, context_json, created_at, updated_at
+        SELECT id, kind, title, context_json, created_at, updated_at
         FROM assistant_sessions
         WHERE id = ?
         "#,
@@ -214,35 +165,17 @@ pub async fn get_session(
     row.as_ref().map(map_session_row).transpose()
 }
 
-pub async fn list_sessions(
-    pool: &DbPool,
-    tab_id: Option<&str>,
-) -> Result<Vec<AssistantSession>, String> {
-    let rows = if let Some(tab_id) = tab_id {
-        sqlx::query(
-            r#"
-            SELECT id, tab_id, kind, title, context_json, created_at, updated_at
-            FROM assistant_sessions
-            WHERE tab_id = ?
-            ORDER BY updated_at DESC
-            "#,
-        )
-        .bind(tab_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to list assistant sessions: {}", e))?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT id, tab_id, kind, title, context_json, created_at, updated_at
-            FROM assistant_sessions
-            ORDER BY updated_at DESC
-            "#,
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to list assistant sessions: {}", e))?
-    };
+pub async fn list_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, kind, title, context_json, created_at, updated_at
+        FROM assistant_sessions
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to list assistant sessions: {}", e))?;
 
     rows.iter().map(map_session_row).collect()
 }
@@ -257,24 +190,6 @@ pub async fn delete_session(pool: &DbPool, session_id: &str) -> Result<bool, Str
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn attach_session_to_tab(
-    pool: &DbPool,
-    session_id: &str,
-    tab_id: Option<&str>,
-) -> Result<AssistantSession, String> {
-    let mut session = get_session(pool, session_id)
-        .await?
-        .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
-
-    session.tab_id = tab_id.map(str::to_string);
-    session.context.tab_id = session.tab_id.clone();
-    session.updated_at = now_ms();
-
-    update_session(pool, &session)
-        .await
-        .map_err(|e| format!("Failed to attach session to tab: {}", e))
-}
-
 pub async fn update_session(
     pool: &DbPool,
     session: &AssistantSession,
@@ -282,11 +197,10 @@ pub async fn update_session(
     sqlx::query(
         r#"
         UPDATE assistant_sessions
-        SET tab_id = ?, title = ?, context_json = ?, updated_at = ?
+        SET title = ?, context_json = ?, updated_at = ?
         WHERE id = ?
         "#,
     )
-    .bind(&session.tab_id)
     .bind(&session.title)
     .bind(to_json_string(&session.context)?)
     .bind(session.updated_at)
@@ -434,139 +348,6 @@ pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>
     .map_err(|e| format!("Failed to load assistant run: {}", e))?;
 
     row.as_ref().map(map_run_row).transpose()
-}
-
-pub async fn create_provider_connection(
-    pool: &DbPool,
-    params: CreateProviderConnectionParams,
-) -> Result<ProviderConnection, String> {
-    let now = now_ms();
-    let connection = ProviderConnection {
-        id: params.id,
-        name: params.name,
-        provider_id: params.provider_id,
-        auth_mode: params.auth_mode,
-        base_url: params.base_url,
-        secret_ref: params.secret_ref,
-        model_id: params.model_id,
-        account_label: params.account_label,
-        enabled: params.enabled,
-        created_at: now,
-        updated_at: now,
-    };
-
-    sqlx::query(
-        r#"
-        INSERT INTO provider_connections
-            (id, name, provider_id, auth_mode, base_url, secret_ref, model_id, account_label, enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#,
-    )
-    .bind(&connection.id)
-    .bind(&connection.name)
-    .bind(&connection.provider_id)
-    .bind(to_json_string(&connection.auth_mode)?)
-    .bind(&connection.base_url)
-    .bind(&connection.secret_ref)
-    .bind(&connection.model_id)
-    .bind(&connection.account_label)
-    .bind(if connection.enabled { 1_i64 } else { 0_i64 })
-    .bind(connection.created_at)
-    .bind(connection.updated_at)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to create provider connection: {}", e))?;
-
-    Ok(connection)
-}
-
-pub async fn update_provider_connection(
-    pool: &DbPool,
-    params: UpdateProviderConnectionParams,
-) -> Result<ProviderConnection, String> {
-    let existing = get_provider_connection(pool, &params.id)
-        .await?
-        .ok_or_else(|| format!("Provider connection not found: {}", params.id))?;
-    let updated = ProviderConnection {
-        id: existing.id,
-        name: params.name,
-        provider_id: params.provider_id,
-        auth_mode: params.auth_mode,
-        base_url: params.base_url,
-        secret_ref: params.secret_ref,
-        model_id: params.model_id,
-        account_label: params.account_label,
-        enabled: params.enabled,
-        created_at: existing.created_at,
-        updated_at: now_ms(),
-    };
-
-    sqlx::query(
-        r#"
-        UPDATE provider_connections
-        SET name = ?, provider_id = ?, auth_mode = ?, base_url = ?, secret_ref = ?, model_id = ?, account_label = ?, enabled = ?, updated_at = ?
-        WHERE id = ?
-        "#,
-    )
-    .bind(&updated.name)
-    .bind(&updated.provider_id)
-    .bind(to_json_string(&updated.auth_mode)?)
-    .bind(&updated.base_url)
-    .bind(&updated.secret_ref)
-    .bind(&updated.model_id)
-    .bind(&updated.account_label)
-    .bind(if updated.enabled { 1_i64 } else { 0_i64 })
-    .bind(updated.updated_at)
-    .bind(&updated.id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to update provider connection: {}", e))?;
-
-    Ok(updated)
-}
-
-pub async fn get_provider_connection(
-    pool: &DbPool,
-    id: &str,
-) -> Result<Option<ProviderConnection>, String> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, name, provider_id, auth_mode, base_url, secret_ref, model_id, account_label, enabled, created_at, updated_at
-        FROM provider_connections
-        WHERE id = ?
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load provider connection: {}", e))?;
-
-    row.as_ref().map(map_provider_connection_row).transpose()
-}
-
-pub async fn list_provider_connections(pool: &DbPool) -> Result<Vec<ProviderConnection>, String> {
-    let rows = sqlx::query(
-        r#"
-        SELECT id, name, provider_id, auth_mode, base_url, secret_ref, model_id, account_label, enabled, created_at, updated_at
-        FROM provider_connections
-        ORDER BY created_at ASC, updated_at ASC
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to list provider connections: {}", e))?;
-
-    rows.iter().map(map_provider_connection_row).collect()
-}
-
-pub async fn delete_provider_connection(pool: &DbPool, id: &str) -> Result<bool, String> {
-    let result = sqlx::query("DELETE FROM provider_connections WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("Failed to delete provider connection: {}", e))?;
-
-    Ok(result.rows_affected() > 0)
 }
 
 pub async fn update_run_status(

@@ -88,10 +88,6 @@ pub struct AgentInstance {
     /// Room this agent is monitoring.
     pub room_id: String,
 
-    /// Tab ID where this agent's output is displayed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<String>,
-
     /// Whether the agent is currently running.
     #[serde(default)]
     pub is_running: bool,
@@ -123,18 +119,11 @@ impl AgentInstance {
             instance_id,
             space_id,
             room_id,
-            tab_id: None,
             is_running: false,
             enabled: true,
             last_conversation_id: None,
             next_run_at: None,
         }
-    }
-
-    /// Sets the tab ID for this agent instance.
-    pub fn with_tab_id(mut self, tab_id: String) -> Self {
-        self.tab_id = Some(tab_id);
-        self
     }
 
     /// Returns true if this agent is ready to run.

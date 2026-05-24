@@ -133,8 +133,6 @@ pub struct SessionContext {
     pub room_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<String>,
     #[serde(default)]
     pub tool_scopes: Vec<String>,
     #[serde(default)]
@@ -163,8 +161,6 @@ pub struct SessionContext {
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSession {
     pub id: SessionId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<String>,
     pub kind: SessionKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,

@@ -12,10 +12,10 @@
 //!    the fleet card can render a badge.
 //! 4. `.await`s the oneshot (bounded by [`APPROVAL_TIMEOUT`]).
 //! 5. When the frontend invokes [`submit_permission_decision`], the
-//!    backend looks up the sender, [`persist_decisions`] writes any
-//!    `AllowAlways`/`DenyAlways` entries to `.clai/permissions.json`
-//!    *before* delivering the decisions, then sends the decisions through
-//!    the oneshot. The bash tool resumes and either runs (all allows) or
+//!    backend looks up the sender, writes any `AllowAlways`/`DenyAlways`
+//!    entries to the workspace config for the request's agent *before*
+//!    delivering the decisions, then sends the decisions through the
+//!    oneshot. The bash tool resumes and either runs (all allows) or
 //!    returns an error (any deny).
 //!
 //! Sequencing: persistence happens *before* the oneshot delivery so that a
@@ -26,13 +26,13 @@
 #![allow(dead_code)] // wired into local::execute_bash_exec; some helpers also called from tests
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
+use crate::config::workspace_config;
 use crate::AppState;
 
 pub const PERMISSION_REQUEST_EVENT: &str = "permissions://request";
@@ -47,8 +47,8 @@ pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionScope {
-    /// Persist for this agent only. v1 stores in
-    /// `<agent_workspace_root>/.clai/permissions.json`.
+    /// Persist for this workspace agent only, in
+    /// `WorkspaceConfig.agents[].execution.shell`.
     Agent,
     // Workspace,  // deferred: requires workspace_id plumbing through
     //             // AgentConfig / SessionContext (runner.rs currently
@@ -115,9 +115,7 @@ impl SegmentDecision {
     }
 }
 
-/// In-memory registry of in-flight approval requests. Each entry holds
-/// the workspace root path (resolved server-side at register time so the
-/// frontend can't redirect persistence to an arbitrary directory) and a
+/// In-memory registry of in-flight approval requests. Each entry holds a
 /// oneshot sender used to deliver the user's decisions to the awaiting
 /// bash tool.
 pub struct PendingApprovals {
@@ -132,7 +130,6 @@ struct PendingInner {
 pub struct PendingEntry {
     pub sender: oneshot::Sender<Vec<SegmentDecision>>,
     pub workspace_id: Option<String>,
-    pub workspace_root: Option<PathBuf>,
     /// The original request payload as emitted to the frontend. Stored
     /// so that components that mount after the event fired can still
     /// discover the request via [`list_pending_permission_requests`].
@@ -159,7 +156,6 @@ impl PendingApprovals {
     pub async fn register(
         &self,
         request: PermissionRequest,
-        workspace_root: Option<PathBuf>,
     ) -> (oneshot::Receiver<Vec<SegmentDecision>>, u32) {
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().await;
@@ -170,7 +166,6 @@ impl PendingApprovals {
             PendingEntry {
                 sender: tx,
                 workspace_id: workspace_id.clone(),
-                workspace_root,
                 request,
             },
         );
@@ -194,8 +189,8 @@ impl PendingApprovals {
     }
 
     /// Removes the pending entry and decrements its workspace count.
-    /// Returns the entry (so callers can use the sender + workspace_root)
-    /// and the post-decrement workspace count (for emitting attention).
+    /// Returns the entry and the post-decrement workspace count (for
+    /// emitting attention).
     pub async fn take(&self, request_id: &str) -> Option<(PendingEntry, u32)> {
         let mut inner = self.inner.lock().await;
         let entry = inner.entries.remove(request_id)?;
@@ -254,29 +249,36 @@ pub async fn submit_permission_decision(
         ));
     };
 
-    // Persist always-decisions before delivering — so the grant survives
-    // a crash between user click and command execution. The workspace
-    // root comes from server-side state, not the frontend; the frontend
-    // can't redirect writes elsewhere.
-    if let Some(root) = entry.workspace_root.as_deref() {
-        persist_decisions(root, &decisions)?;
+    // Persist always-decisions before delivering so the grant survives a
+    // crash between user click and command execution. If a request lacks
+    // workspace/agent identity, there is intentionally no legacy fallback:
+    // "always" decisions degrade to the current approval round only.
+    if let (Some(workspace_id), Some(agent_id)) = (
+        entry.workspace_id.as_deref(),
+        entry.request.agent_id.as_deref(),
+    ) {
+        persist_decisions_to_agent(state.inner(), workspace_id, agent_id, &decisions)?;
     }
     let _ = entry.sender.send(decisions);
     emit_attention(&app, entry.workspace_id, remaining);
     Ok(())
 }
 
-/// Writes always-allow / always-deny decisions to the per-agent
-/// `.clai/permissions.json` file. Reconciliation: when adding to one
-/// list, the same prefix is removed from the opposite list so the user's
-/// state never accumulates contradictory entries at the same scope.
-pub fn persist_decisions(
-    workspace_root: &Path,
+/// Writes always-allow / always-deny decisions into the workspace config's
+/// per-agent execution policy.
+pub fn persist_decisions_to_agent(
+    state: &AppState,
+    workspace_id: &str,
+    agent_id: &str,
     decisions: &[SegmentDecision],
 ) -> Result<(), String> {
-    use crate::assistant::tools::workspace_permissions::{load, save};
-
-    let mut perms = load(workspace_root);
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let mut config = workspace_config::load(&root).map_err(|e| e.to_string())?;
+    let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
+        return Err(format!("Workspace agent not found: {}", agent_id));
+    };
     let mut changed = false;
 
     for decision in decisions {
@@ -286,19 +288,22 @@ pub fn persist_decisions(
                 if prefix.is_empty() {
                     continue;
                 }
-                // Reconcile: drop the same prefix from blocklist.
-                let before = perms.shell.blocked_command_prefixes.len();
-                perms.shell.blocked_command_prefixes.retain(|p| p != prefix);
-                if perms.shell.blocked_command_prefixes.len() != before {
-                    changed = true;
-                }
-                if !perms
+                let before = agent.execution.shell.blocked_command_prefixes.len();
+                agent
+                    .execution
+                    .shell
+                    .blocked_command_prefixes
+                    .retain(|p| p != prefix);
+                changed |= agent.execution.shell.blocked_command_prefixes.len() != before;
+                if !agent
+                    .execution
                     .shell
                     .allowed_command_prefixes
                     .iter()
                     .any(|p| p == prefix)
                 {
-                    perms
+                    agent
+                        .execution
                         .shell
                         .allowed_command_prefixes
                         .push(prefix.to_string());
@@ -310,39 +315,43 @@ pub fn persist_decisions(
                 if prefix.is_empty() {
                     continue;
                 }
-                let before = perms.shell.allowed_command_prefixes.len();
-                perms.shell.allowed_command_prefixes.retain(|p| p != prefix);
-                if perms.shell.allowed_command_prefixes.len() != before {
-                    changed = true;
-                }
-                if !perms
+                let before = agent.execution.shell.allowed_command_prefixes.len();
+                agent
+                    .execution
+                    .shell
+                    .allowed_command_prefixes
+                    .retain(|p| p != prefix);
+                changed |= agent.execution.shell.allowed_command_prefixes.len() != before;
+                if !agent
+                    .execution
                     .shell
                     .blocked_command_prefixes
                     .iter()
                     .any(|p| p == prefix)
                 {
-                    perms
+                    agent
+                        .execution
                         .shell
                         .blocked_command_prefixes
                         .push(prefix.to_string());
                     changed = true;
                 }
             }
-            SegmentDecision::AllowOnce | SegmentDecision::DenyOnce => {
-                // Nothing to persist.
-            }
+            SegmentDecision::AllowOnce | SegmentDecision::DenyOnce => {}
         }
     }
 
     if changed {
-        save(workspace_root, &perms).map_err(|e| {
-            format!(
-                "Failed to write workspace permissions at {}: {}",
-                workspace_root.display(),
-                e
-            )
-        })?;
+        agent.updated_at = chrono::Utc::now().timestamp_millis();
+        config.updated_at = agent.updated_at;
+        workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
+        state
+            .workspace_index
+            .write()
+            .map_err(|e| format!("Workspace index lock error: {}", e))?
+            .insert_config(root, &config);
     }
+
     Ok(())
 }
 
@@ -361,139 +370,6 @@ pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pend
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::tools::workspace_permissions::{load, WorkspaceShellPermissions};
-    use tempfile::TempDir;
-
-    fn allow_always(prefix: &str) -> SegmentDecision {
-        SegmentDecision::AllowAlways {
-            scope: PermissionScope::Agent,
-            prefix: prefix.to_string(),
-        }
-    }
-
-    fn deny_always(prefix: &str) -> SegmentDecision {
-        SegmentDecision::DenyAlways {
-            scope: PermissionScope::Agent,
-            prefix: prefix.to_string(),
-        }
-    }
-
-    #[test]
-    fn persist_writes_allow_to_disk() {
-        let tmp = TempDir::new().unwrap();
-        persist_decisions(tmp.path(), &[allow_always("git status")]).unwrap();
-        let perms = load(tmp.path());
-        assert_eq!(perms.shell.allowed_command_prefixes, vec!["git status"]);
-    }
-
-    #[test]
-    fn persist_writes_deny_to_disk() {
-        let tmp = TempDir::new().unwrap();
-        persist_decisions(tmp.path(), &[deny_always("rm")]).unwrap();
-        let perms = load(tmp.path());
-        assert_eq!(perms.shell.blocked_command_prefixes, vec!["rm"]);
-    }
-
-    #[test]
-    fn persist_reconciles_allow_against_existing_block() {
-        let tmp = TempDir::new().unwrap();
-        // Seed an existing block on `git status`.
-        crate::assistant::tools::workspace_permissions::save(
-            tmp.path(),
-            &crate::assistant::tools::workspace_permissions::WorkspacePermissions {
-                version: 1,
-                shell: WorkspaceShellPermissions {
-                    allowed_command_prefixes: vec![],
-                    blocked_command_prefixes: vec!["git status".to_string()],
-                },
-            },
-        )
-        .unwrap();
-
-        persist_decisions(tmp.path(), &[allow_always("git status")]).unwrap();
-
-        let perms = load(tmp.path());
-        assert_eq!(perms.shell.allowed_command_prefixes, vec!["git status"]);
-        assert!(
-            perms.shell.blocked_command_prefixes.is_empty(),
-            "block of `git status` should be reconciled away on allow"
-        );
-    }
-
-    #[test]
-    fn persist_reconciles_deny_against_existing_allow() {
-        let tmp = TempDir::new().unwrap();
-        crate::assistant::tools::workspace_permissions::save(
-            tmp.path(),
-            &crate::assistant::tools::workspace_permissions::WorkspacePermissions {
-                version: 1,
-                shell: WorkspaceShellPermissions {
-                    allowed_command_prefixes: vec!["kubectl logs".to_string()],
-                    blocked_command_prefixes: vec![],
-                },
-            },
-        )
-        .unwrap();
-
-        persist_decisions(tmp.path(), &[deny_always("kubectl logs")]).unwrap();
-
-        let perms = load(tmp.path());
-        assert!(perms.shell.allowed_command_prefixes.is_empty());
-        assert_eq!(perms.shell.blocked_command_prefixes, vec!["kubectl logs"]);
-    }
-
-    #[test]
-    fn persist_skips_once_decisions() {
-        let tmp = TempDir::new().unwrap();
-        persist_decisions(
-            tmp.path(),
-            &[SegmentDecision::AllowOnce, SegmentDecision::DenyOnce],
-        )
-        .unwrap();
-        let perms = load(tmp.path());
-        assert!(perms.shell.allowed_command_prefixes.is_empty());
-        assert!(perms.shell.blocked_command_prefixes.is_empty());
-    }
-
-    #[test]
-    fn persist_dedupes_within_same_call() {
-        let tmp = TempDir::new().unwrap();
-        persist_decisions(
-            tmp.path(),
-            &[allow_always("git status"), allow_always("git status")],
-        )
-        .unwrap();
-        let perms = load(tmp.path());
-        assert_eq!(perms.shell.allowed_command_prefixes, vec!["git status"]);
-    }
-
-    #[test]
-    fn persist_dedupes_against_existing() {
-        let tmp = TempDir::new().unwrap();
-        crate::assistant::tools::workspace_permissions::save(
-            tmp.path(),
-            &crate::assistant::tools::workspace_permissions::WorkspacePermissions {
-                version: 1,
-                shell: WorkspaceShellPermissions {
-                    allowed_command_prefixes: vec!["git status".to_string()],
-                    blocked_command_prefixes: vec![],
-                },
-            },
-        )
-        .unwrap();
-
-        persist_decisions(tmp.path(), &[allow_always("git status")]).unwrap();
-        let perms = load(tmp.path());
-        assert_eq!(perms.shell.allowed_command_prefixes, vec!["git status"]);
-    }
-
-    #[test]
-    fn persist_ignores_empty_prefix() {
-        let tmp = TempDir::new().unwrap();
-        persist_decisions(tmp.path(), &[allow_always("   ")]).unwrap();
-        let perms = load(tmp.path());
-        assert!(perms.shell.allowed_command_prefixes.is_empty());
-    }
 
     fn fake_request(workspace_id: Option<&str>) -> PermissionRequest {
         PermissionRequest {
@@ -511,7 +387,7 @@ mod tests {
         let pending = PendingApprovals::new();
         let req = fake_request(Some("ws-1"));
         let id = req.request_id.clone();
-        let (_rx, count) = pending.register(req, None).await;
+        let (_rx, count) = pending.register(req).await;
         assert_eq!(count, 1);
         let taken = pending.take(&id).await;
         assert!(taken.is_some());
@@ -526,8 +402,8 @@ mod tests {
         let req2 = fake_request(Some("ws-1"));
         let id1 = req1.request_id.clone();
         let id2 = req2.request_id.clone();
-        let (_rx1, c1) = pending.register(req1, None).await;
-        let (_rx2, c2) = pending.register(req2, None).await;
+        let (_rx1, c1) = pending.register(req1).await;
+        let (_rx2, c2) = pending.register(req2).await;
         assert_eq!(c1, 1);
         assert_eq!(c2, 2);
         let (_, remaining) = pending.take(&id1).await.unwrap();
@@ -537,24 +413,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_approvals_remember_workspace_root() {
-        let pending = PendingApprovals::new();
-        let req = fake_request(Some("ws-1"));
-        let id = req.request_id.clone();
-        let (_rx, _) = pending
-            .register(req, Some(PathBuf::from("/tmp/somewhere")))
-            .await;
-        let (entry, _) = pending.take(&id).await.unwrap();
-        assert_eq!(entry.workspace_root, Some(PathBuf::from("/tmp/somewhere")));
-    }
-
-    #[tokio::test]
     async fn pending_approvals_list_for_workspace_returns_matching_requests() {
         let pending = PendingApprovals::new();
         let req_a = fake_request(Some("ws-A"));
         let req_b = fake_request(Some("ws-B"));
-        let _ = pending.register(req_a.clone(), None).await;
-        let _ = pending.register(req_b, None).await;
+        let _ = pending.register(req_a.clone()).await;
+        let _ = pending.register(req_b).await;
         let list = pending.list_for_workspace("ws-A").await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].request_id, req_a.request_id);

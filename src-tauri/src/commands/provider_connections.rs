@@ -4,12 +4,7 @@ use tokio::process::Command;
 
 use crate::assistant::auth::ProviderSecretStorage;
 use crate::assistant::providers::{self, cli};
-use crate::assistant::repository;
-use crate::assistant::repository::{
-    CreateProviderConnectionParams, UpdateProviderConnectionParams,
-};
 use crate::assistant::types::{AuthMode, ModelInfo, ProviderConnection, ProviderDescriptor};
-use crate::db::DbPool;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -62,7 +57,7 @@ pub async fn provider_connection_list_available() -> Result<Vec<ProviderDescript
 #[tauri::command]
 pub async fn provider_connection_create(
     request: CreateProviderConnectionRequest,
-    pool: State<'_, DbPool>,
+    state: State<'_, AppState>,
 ) -> Result<ProviderConnection, String> {
     let descriptor = providers::get_provider_descriptor(&request.provider_id)
         .ok_or_else(|| format!("Unsupported provider: {}", request.provider_id))?;
@@ -93,36 +88,45 @@ pub async fn provider_connection_create(
             .map_err(|e| format!("Failed to store provider credential: {}", e))?;
     }
 
-    repository::create_provider_connection(
-        pool.inner(),
-        CreateProviderConnectionParams {
-            id,
-            name: request.name.trim().to_string(),
-            provider_id: request.provider_id,
-            auth_mode,
-            base_url: request
-                .base_url
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
-            secret_ref,
-            model_id: request.model_id.trim().to_string(),
-            account_label: request
-                .account_label
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
-            enabled: true,
-        },
-    )
-    .await
+    let now = chrono::Utc::now().timestamp_millis();
+    let connection = ProviderConnection {
+        id,
+        name: request.name.trim().to_string(),
+        provider_id: request.provider_id,
+        auth_mode,
+        base_url: request
+            .base_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        secret_ref,
+        model_id: request.model_id.trim().to_string(),
+        account_label: request
+            .account_label
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        enabled: true,
+        created_at: now,
+        updated_at: now,
+    };
+    state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .add_provider_connection(connection.clone())
+        .map_err(|e| format!("Failed to create provider connection: {}", e))?;
+    Ok(connection)
 }
 
 #[tauri::command]
 pub async fn provider_connection_update(
     request: UpdateProviderConnectionRequest,
-    pool: State<'_, DbPool>,
+    state: State<'_, AppState>,
 ) -> Result<ProviderConnection, String> {
-    let existing = repository::get_provider_connection(pool.inner(), &request.id)
-        .await?
+    let existing = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connection(&request.id)
         .ok_or_else(|| format!("Provider connection not found: {}", request.id))?;
 
     let descriptor = providers::get_provider_descriptor(&request.provider_id)
@@ -153,58 +157,59 @@ pub async fn provider_connection_update(
         }
     }
 
-    repository::update_provider_connection(
-        pool.inner(),
-        UpdateProviderConnectionParams {
-            id: request.id,
-            name: request.name.trim().to_string(),
-            provider_id: request.provider_id,
-            auth_mode,
-            base_url: request
-                .base_url
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
-            secret_ref: existing.secret_ref,
-            model_id: request.model_id.trim().to_string(),
-            account_label: request
-                .account_label
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
-            enabled: request.enabled,
-        },
-    )
-    .await
+    let updated = ProviderConnection {
+        id: request.id,
+        name: request.name.trim().to_string(),
+        provider_id: request.provider_id,
+        auth_mode,
+        base_url: request
+            .base_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        secret_ref: existing.secret_ref,
+        model_id: request.model_id.trim().to_string(),
+        account_label: request
+            .account_label
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+        enabled: request.enabled,
+        created_at: existing.created_at,
+        updated_at: chrono::Utc::now().timestamp_millis(),
+    };
+    state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .update_provider_connection(updated.clone())
+        .map_err(|e| format!("Failed to update provider connection: {}", e))?;
+    Ok(updated)
 }
 
 #[tauri::command]
 pub async fn provider_connection_delete(
     id: String,
-    pool: State<'_, DbPool>,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    // Refuse delete if any workspace_agent still references this connection.
-    // We scan the JSON array `provider_connection_ids` for the id substring,
-    // then confirm with a per-row parse.
-    let like_pattern = format!("%{}%", id);
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT name, provider_connection_ids FROM workspace_agents WHERE provider_connection_ids LIKE ?",
-    )
-    .bind(&like_pattern)
-    .fetch_all(pool.inner())
-    .await
-    .map_err(|e| format!("Failed to scan workspace_agents for provider use: {}", e))?;
-
-    let dependents: Vec<String> = rows
-        .into_iter()
-        .filter_map(|(name, ids_json)| {
-            let ids: Vec<String> = serde_json::from_str(&ids_json).unwrap_or_default();
-            if ids.iter().any(|value| value == &id) {
-                Some(name)
-            } else {
-                None
+    let locators = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .locators_sorted();
+    let mut dependents = Vec::new();
+    for locator in locators {
+        let Ok(config) = crate::config::workspace_config::load(&locator.root_path) else {
+            continue;
+        };
+        for agent in config.agents {
+            if agent
+                .provider_connection_ids
+                .iter()
+                .any(|value| value == &id)
+            {
+                dependents.push(agent.name);
             }
-        })
-        .collect();
+        }
+    }
 
     if !dependents.is_empty() {
         return Err(format!(
@@ -213,29 +218,45 @@ pub async fn provider_connection_delete(
         ));
     }
 
-    let _ = state; // config_manager no longer consulted; agents live in DB.
-
-    if let Some(connection) = repository::get_provider_connection(pool.inner(), &id).await? {
+    let connection = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connection(&id);
+    if let Some(connection) = connection {
         ProviderSecretStorage::clear_secret(&connection.secret_ref)
             .map_err(|e| format!("Failed to clear provider credential: {}", e))?;
     }
 
-    repository::delete_provider_connection(pool.inner(), &id).await
+    state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .remove_provider_connection(&id)
+        .map_err(|e| format!("Failed to delete provider connection: {}", e))
 }
 
 #[tauri::command]
 pub async fn provider_connection_get(
     id: String,
-    pool: State<'_, DbPool>,
+    state: State<'_, AppState>,
 ) -> Result<Option<ProviderConnection>, String> {
-    repository::get_provider_connection(pool.inner(), &id).await
+    Ok(state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connection(&id))
 }
 
 #[tauri::command]
 pub async fn provider_connection_list(
-    pool: State<'_, DbPool>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ProviderConnection>, String> {
-    repository::list_provider_connections(pool.inner()).await
+    Ok(state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connections())
 }
 
 #[tauri::command]
@@ -247,10 +268,13 @@ pub async fn provider_descriptor_models(provider_id: String) -> Result<Vec<Model
 #[tauri::command]
 pub async fn provider_connection_list_models(
     id: String,
-    pool: State<'_, DbPool>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ModelInfo>, String> {
-    let connection = repository::get_provider_connection(pool.inner(), &id)
-        .await?
+    let connection = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connection(&id)
         .ok_or_else(|| format!("Provider connection not found: {}", id))?;
 
     if let Some(models) = cli::models_for_provider(&connection.provider_id) {
@@ -267,10 +291,13 @@ pub async fn provider_connection_list_models(
 #[tauri::command]
 pub async fn provider_connection_test(
     id: String,
-    pool: State<'_, DbPool>,
+    state: State<'_, AppState>,
 ) -> Result<TestResult, String> {
-    let connection = repository::get_provider_connection(pool.inner(), &id)
-        .await?
+    let connection = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connection(&id)
         .ok_or_else(|| format!("Provider connection not found: {}", id))?;
 
     tracing::info!(

@@ -877,9 +877,6 @@ const Workspace = () => {
           selectedMcpServerIds: formData.selectedMcpServerIds || [],
           providerConnectionIds: formData.providerConnectionIds || [],
           execution: formData.execution,
-          exposedTools: formData.exposedTools || [],
-          scheduleEnabled: !!formData.scheduleEnabled,
-          intervalMinutes: formData.intervalMinutes || 0,
           enabled: formData.enabled !== false,
         });
       } else {
@@ -891,9 +888,6 @@ const Workspace = () => {
           selectedMcpServerIds: formData.selectedMcpServerIds || [],
           providerConnectionIds: formData.providerConnectionIds || [],
           execution: formData.execution,
-          exposedTools: formData.exposedTools || [],
-          scheduleEnabled: !!formData.scheduleEnabled,
-          intervalMinutes: formData.intervalMinutes || 0,
           enabled: formData.enabled !== false,
         });
       }

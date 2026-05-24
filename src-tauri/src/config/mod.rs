@@ -5,24 +5,22 @@
 
 pub mod bundled;
 pub mod types;
+pub mod workspace_config;
 
 pub use types::{
-    AgentConfig, AiProvider, ClaiConfig, ExecutionCapabilityConfig, ExposedAgentTool,
+    AgentConfig, AiProvider, AppConfig, ClaiConfig, ExecutionCapabilityConfig,
     FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, McpServerAuth, McpServerConfig,
     McpServerIntegrationType, McpServerTransport, SandboxNetworkConfig, SandboxSessionBusConfig,
     ShellAccessMode, SkillSourceConfig, SkillSourceKind,
 };
+pub use workspace_config::{WorkspaceAgent, WorkspaceConfig};
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Name of the config file.
 const CONFIG_FILE_NAME: &str = "config.json";
-
-/// Application identifier for config and data directories.
-pub const APP_IDENTIFIER: &str = "clai";
 
 /// Manages loading and saving the application configuration.
 pub struct ConfigManager {
@@ -105,8 +103,7 @@ impl ConfigManager {
 
     /// Gets the platform-specific config file path.
     fn get_config_path() -> Result<PathBuf, ConfigError> {
-        let config_dir = dirs::config_dir().ok_or(ConfigError::NoConfigDir)?;
-        Ok(config_dir.join(APP_IDENTIFIER).join(CONFIG_FILE_NAME))
+        Ok(crate::paths::clai_home().join(CONFIG_FILE_NAME))
     }
 
     /// Loads config from a file.
@@ -241,6 +238,59 @@ impl ConfigManager {
             let initial_len = config.mcp_servers.len();
             config.mcp_servers.retain(|server| server.id != id);
             removed = config.mcp_servers.len() != initial_len;
+        })?;
+        Ok(removed)
+    }
+
+    pub fn get_provider_connections(&self) -> Vec<crate::assistant::types::ProviderConnection> {
+        self.config.lock().unwrap().provider_connections.clone()
+    }
+
+    pub fn get_provider_connection(
+        &self,
+        id: &str,
+    ) -> Option<crate::assistant::types::ProviderConnection> {
+        self.config
+            .lock()
+            .unwrap()
+            .provider_connections
+            .iter()
+            .find(|connection| connection.id == id)
+            .cloned()
+    }
+
+    pub fn add_provider_connection(
+        &self,
+        connection: crate::assistant::types::ProviderConnection,
+    ) -> Result<(), ConfigError> {
+        self.update(|config| {
+            config.provider_connections.push(connection);
+        })
+    }
+
+    pub fn update_provider_connection(
+        &self,
+        connection: crate::assistant::types::ProviderConnection,
+    ) -> Result<(), ConfigError> {
+        self.update(|config| {
+            if let Some(existing) = config
+                .provider_connections
+                .iter_mut()
+                .find(|existing| existing.id == connection.id)
+            {
+                *existing = connection;
+            }
+        })
+    }
+
+    pub fn remove_provider_connection(&self, id: &str) -> Result<bool, ConfigError> {
+        let mut removed = false;
+        self.update(|config| {
+            let before = config.provider_connections.len();
+            config
+                .provider_connections
+                .retain(|connection| connection.id != id);
+            removed = config.provider_connections.len() != before;
         })?;
         Ok(removed)
     }

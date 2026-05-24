@@ -12,8 +12,7 @@ use include_dir::{include_dir, Dir, DirEntry};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ClaiConfig, ExecutionCapabilityConfig, ExposedAgentTool, SkillSourceConfig, SkillSourceKind,
-    APP_IDENTIFIER,
+    ClaiConfig, ExecutionCapabilityConfig, SkillSourceConfig, SkillSourceKind,
 };
 
 static BUNDLED_SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/embedded/skills");
@@ -31,7 +30,7 @@ const BUNDLED_SKILL_SLUGS: &[&str] = &[
 ];
 
 pub fn bundled_root() -> PathBuf {
-    data_root().join("bundled")
+    crate::paths::clai_cache_bundled_root()
 }
 
 pub fn bundled_skills_root() -> PathBuf {
@@ -43,7 +42,7 @@ pub fn bundled_agent_templates_root() -> PathBuf {
 }
 
 pub fn personal_skills_root() -> PathBuf {
-    data_root().join("skill-sources").join("personal")
+    crate::paths::clai_skills_root()
 }
 
 pub fn is_bundled_source(source: &SkillSourceConfig) -> bool {
@@ -73,10 +72,9 @@ pub struct BundledAgentTemplate {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub default_schedule_enabled: bool,
-    pub default_interval_minutes: u32,
+    #[serde(default)]
     pub default_skill_slugs: Vec<String>,
-    pub default_exposed_tools: Vec<ExposedAgentTool>,
+    #[serde(default)]
     pub default_execution: ExecutionCapabilityConfig,
 }
 
@@ -111,12 +109,6 @@ pub fn resolve_bundled_skill_id(slug: &str, config: &ClaiConfig) -> Option<Strin
         .iter()
         .find(|source| is_bundled_source(source))
         .map(|source| format!("{}:{}", source.id, slug))
-}
-
-fn data_root() -> PathBuf {
-    dirs::data_dir()
-        .expect("Could not determine application data directory")
-        .join(APP_IDENTIFIER)
 }
 
 fn materialize_embedded_dir(source: &Dir<'_>, target: &Path) -> io::Result<()> {

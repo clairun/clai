@@ -3,7 +3,12 @@
 //! This module defines the configuration structures that are persisted
 //! to disk and shared across the application.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
+
+use crate::assistant::types::ProviderConnection;
+use crate::paths;
 
 fn default_true() -> bool {
     true
@@ -411,16 +416,6 @@ impl SkillSourceConfig {
 // Automation Config
 // =============================================================================
 
-/// Exposed tool that an agent makes callable to siblings via inter-agent calls.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ExposedAgentTool {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
-    pub output_schema: serde_json::Value,
-}
-
 /// User-defined scheduled automation stored in configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -468,10 +463,6 @@ pub struct AgentConfig {
     #[serde(default)]
     pub execution: ExecutionCapabilityConfig,
 
-    /// Tools intentionally exposed to other agents.
-    #[serde(default)]
-    pub exposed_tools: Vec<ExposedAgentTool>,
-
     /// When the automation was created (ISO 8601).
     pub created_at: String,
 
@@ -500,7 +491,6 @@ impl AgentConfig {
             provider_connection_ids: vec![],
             selected_skill_ids: vec![],
             execution: ExecutionCapabilityConfig::default(),
-            exposed_tools: vec![],
             created_at: now.clone(),
             updated_at: now,
         }
@@ -534,31 +524,6 @@ impl AgentConfig {
         if self.schedule_enabled && self.interval_minutes == 0 {
             return Err("Scheduled agents must have an interval of at least 1 minute.".to_string());
         }
-
-        for tool in &self.exposed_tools {
-            if tool.name.trim().is_empty() {
-                return Err("Exposed tool names cannot be empty.".to_string());
-            }
-            if tool.description.trim().is_empty() {
-                return Err(format!(
-                    "Exposed tool '{}' must have a description.",
-                    tool.name
-                ));
-            }
-            if !tool.input_schema.is_object() {
-                return Err(format!(
-                    "Exposed tool '{}' must define an object JSON Schema for input_schema.",
-                    tool.name
-                ));
-            }
-            if !tool.output_schema.is_object() {
-                return Err(format!(
-                    "Exposed tool '{}' must define an object JSON Schema for output_schema.",
-                    tool.name
-                ));
-            }
-        }
-
         Ok(())
     }
 }
@@ -567,14 +532,24 @@ impl AgentConfig {
 // Root Config
 // =============================================================================
 
-/// Root configuration structure for CLAI.
-///
-/// Agents live in the `workspace_agents` DB table (workspace-local), not here.
-/// Legacy `agents: [...]` and `assistantDefaultModel` entries in existing
-/// `config.json` files are silently dropped by `#[serde(default)]` when
-/// the file is deserialized.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ClaiConfig {
+fn default_app_config_version() -> u32 {
+    1
+}
+
+fn default_workspace_dirs() -> Vec<PathBuf> {
+    vec![PathBuf::from("~/.clai/workspaces")]
+}
+
+/// Root app configuration persisted at `~/.clai/config.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppConfig {
+    #[serde(default = "default_app_config_version")]
+    pub version: u32,
+
+    #[serde(default = "default_workspace_dirs")]
+    pub workspace_dirs: Vec<PathBuf>,
+
     /// Global AI provider for all automations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_provider: Option<AiProvider>,
@@ -586,7 +561,35 @@ pub struct ClaiConfig {
     /// Configured skill sources.
     #[serde(default)]
     pub skill_sources: Vec<SkillSourceConfig>,
+
+    /// User-configured provider connections for the app-owned assistant runtime.
+    #[serde(default)]
+    pub provider_connections: Vec<ProviderConnection>,
 }
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            version: default_app_config_version(),
+            workspace_dirs: default_workspace_dirs(),
+            ai_provider: None,
+            mcp_servers: Vec::new(),
+            skill_sources: Vec::new(),
+            provider_connections: Vec::new(),
+        }
+    }
+}
+
+impl AppConfig {
+    pub fn expanded_workspace_dirs(&self) -> Vec<PathBuf> {
+        self.workspace_dirs
+            .iter()
+            .map(|path| paths::expand_tilde(path))
+            .collect()
+    }
+}
+
+pub type ClaiConfig = AppConfig;
 
 // =============================================================================
 // Tests

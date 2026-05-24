@@ -4,7 +4,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::config::bundled::{self, BundledAgentTemplate};
-use crate::config::{ExecutionCapabilityConfig, ExposedAgentTool};
+use crate::config::ExecutionCapabilityConfig;
 use crate::AppState;
 
 #[derive(Debug, Clone, Serialize)]
@@ -13,10 +13,7 @@ pub struct AgentTemplateResponse {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub default_schedule_enabled: bool,
-    pub default_interval_minutes: u32,
     pub default_skill_ids: Vec<String>,
-    pub default_exposed_tools: Vec<ExposedAgentTool>,
     pub default_execution: ExecutionCapabilityConfig,
 }
 
@@ -57,10 +54,7 @@ fn resolve_template(
         id: template.id,
         name: template.name,
         description: template.description,
-        default_schedule_enabled: template.default_schedule_enabled,
-        default_interval_minutes: template.default_interval_minutes,
         default_skill_ids,
-        default_exposed_tools: template.default_exposed_tools,
         default_execution: template.default_execution,
     })
 }

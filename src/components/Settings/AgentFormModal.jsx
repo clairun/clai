@@ -6,8 +6,6 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import ReactDOM from 'react-dom';
-import { homeDir } from '@tauri-apps/api/path';
-import IntervalSelect from './IntervalSelect';
 import styles from './AgentFormModal.module.css';
 
 const defaultExecution = () => ({
@@ -27,14 +25,6 @@ const defaultExecution = () => ({
     enabled: false,
   },
 });
-
-// Trim trailing slash so the chip "/home/foo" matches the canonical form
-// used elsewhere in the path-grant list.
-const normalizeHostHome = (path) => {
-  if (!path) return null;
-  const trimmed = String(path).replace(/\/+$/, '');
-  return trimmed || null;
-};
 
 const normalizeItems = (items = []) => items.map((item) => item.trim()).filter(Boolean);
 const addUniqueItem = (items, value) => {
@@ -86,7 +76,6 @@ const grantOriginTooltip = (origin) => {
   }
   return '';
 };
-const formatExposedTools = (tools = []) => JSON.stringify(tools || [], null, 2);
 const normalizeExecution = (execution = {}) => {
   const defaults = defaultExecution();
   return {
@@ -213,8 +202,6 @@ const AgentFormModal = ({
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [scheduleEnabled, setScheduleEnabled] = useState(true);
-  const [intervalMinutes, setIntervalMinutes] = useState(30);
   const [selectedMcpServerIds, setSelectedMcpServerIds] = useState([]);
   const [selectedSkillIds, setSelectedSkillIds] = useState([]);
   const [providerConnectionIds, setProviderConnectionIds] = useState([]);
@@ -223,18 +210,12 @@ const AgentFormModal = ({
   const [extraPathDraft, setExtraPathDraft] = useState('');
   const [extraPathAccess, setExtraPathAccess] = useState('read_only');
   const [sessionBusAllowed, setSessionBusAllowed] = useState(true);
-  // Resolved at form-mount time via Tauri's `homeDir()`. Used to pre-fill
-  // a default `<host $HOME>` RO entry into `extraPaths` for new agents,
-  // matching the model: $HOME is just a default grant — user can ×-remove
-  // it from the Additional Path Grants list to get a fully-isolated agent.
-  const [hostHomeDir, setHostHomeDir] = useState(null);
   const [shellMode, setShellMode] = useState('off');
   const [allowedCommands, setAllowedCommands] = useState([]);
   const [blockedCommands, setBlockedCommands] = useState(defaultExecution().shell.blockedCommandPrefixes);
   const [allowedCommandDraft, setAllowedCommandDraft] = useState('');
   const [blockedCommandDraft, setBlockedCommandDraft] = useState('');
   const [webEnabled, setWebEnabled] = useState(false);
-  const [exposedToolsText, setExposedToolsText] = useState('[]');
   const [selectedTemplateId, setSelectedTemplateId] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
@@ -268,41 +249,6 @@ const AgentFormModal = ({
     setWebEnabled(execution.web.enabled);
   }, []);
 
-  // Resolve the host's $HOME once per mount via Tauri's path API. Used
-  // below to pre-fill the default `<host $HOME>` RO entry for new agents.
-  // Failure is silent — the form just opens without that default and the
-  // user can still add paths manually.
-  useEffect(() => {
-    if (!isOpen || hostHomeDir) return undefined;
-    let cancelled = false;
-    homeDir()
-      .then((value) => {
-        if (cancelled) return;
-        const normalized = normalizeHostHome(value);
-        if (normalized) setHostHomeDir(normalized);
-      })
-      .catch(() => {
-        // Non-fatal; new agents just won't get the default $HOME entry.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isOpen, hostHomeDir]);
-
-  // For a NEW agent (no `agent` prop), once we've resolved the host $HOME
-  // and the form's extraPathGrants is still empty, drop in one default
-  // entry: <host $HOME> read-only. The user can ×-remove it before saving
-  // to opt into a fully isolated agent. We deliberately don't inject for
-  // existing agents — their stored extra_paths are the source of truth.
-  useEffect(() => {
-    if (!isOpen || agent) return;
-    if (!hostHomeDir) return;
-    setExtraPathGrants((current) => {
-      if (current.length > 0) return current;
-      return [{ path: hostHomeDir, access: 'read_only', origin: null }];
-    });
-  }, [isOpen, agent, hostHomeDir]);
-
   // Reset form when modal opens/closes or agent changes
   useEffect(() => {
     if (isOpen) {
@@ -311,26 +257,20 @@ const AgentFormModal = ({
         // internal manager-agent name (which is just an implementation label).
         setName(isWorkspaceMode ? (workspaceTitle || '') : (agent.name || ''));
         setDescription(agent.description || '');
-        setScheduleEnabled(agent.scheduleEnabled !== false);
-        setIntervalMinutes(agent.intervalMinutes ?? 30);
         setSelectedMcpServerIds(agent.selectedMcpServerIds || []);
         setSelectedSkillIds(agent.selectedSkillIds || []);
         setProviderConnectionIds(agent.providerConnectionIds || []);
         setProviderConnectionDraft('');
         applyExecutionState(agent.execution || defaultExecution());
-        setExposedToolsText(formatExposedTools(agent.exposedTools || []));
         setSelectedTemplateId('');
       } else {
         setName('');
         setDescription('');
-        setScheduleEnabled(true);
-        setIntervalMinutes(30);
         setSelectedMcpServerIds([]);
         setSelectedSkillIds([]);
         setProviderConnectionIds([]);
         setProviderConnectionDraft('');
         applyExecutionState(defaultExecution());
-        setExposedToolsText('[]');
         setSelectedTemplateId('');
       }
       setError(null);
@@ -386,15 +326,8 @@ const AgentFormModal = ({
 
     setName(selectedTemplate.name || '');
     setDescription(selectedTemplate.description || '');
-    setScheduleEnabled(selectedTemplate.defaultScheduleEnabled !== false);
-    setIntervalMinutes(
-      Number.isFinite(selectedTemplate.defaultIntervalMinutes)
-        ? selectedTemplate.defaultIntervalMinutes
-        : 30
-    );
     setSelectedSkillIds(selectedTemplate.defaultSkillIds || []);
     applyExecutionState(selectedTemplate.defaultExecution || defaultExecution());
-    setExposedToolsText(formatExposedTools(selectedTemplate.defaultExposedTools || []));
   };
 
   const handleSubmit = async (e) => {
@@ -414,25 +347,8 @@ const AgentFormModal = ({
       return;
     }
 
-    if (scheduleEnabled && (intervalMinutes < 1 || intervalMinutes > 1440)) {
-      setError('Interval must be between 1 minute and 24 hours');
-      return;
-    }
-
     if (providerConnectionIds.length === 0) {
       setError('Select at least one provider connection');
-      return;
-    }
-
-    let exposedTools = [];
-    try {
-      exposedTools = JSON.parse(exposedToolsText.trim() || '[]');
-    } catch (parseError) {
-      setError(`Exposed tools JSON is invalid: ${parseError.message}`);
-      return;
-    }
-    if (!Array.isArray(exposedTools)) {
-      setError('Exposed tools must be a JSON array');
       return;
     }
 
@@ -442,8 +358,6 @@ const AgentFormModal = ({
       await onSubmit({
         name: trimmedName,
         description: description.trim(),
-        scheduleEnabled,
-        intervalMinutes: Number(intervalMinutes),
         selectedMcpServerIds,
         selectedSkillIds,
         providerConnectionIds,
@@ -464,7 +378,6 @@ const AgentFormModal = ({
             enabled: webEnabled,
           },
         },
-        exposedTools,
       });
     } catch (err) {
       console.error('[AgentFormModal] Submit error:', err);
@@ -632,54 +545,6 @@ const AgentFormModal = ({
               Selected skills are appended to the agent instructions at runtime.
             </span>
           </div>
-
-          {isWorkspaceMode && (
-            <div className={styles.section}>
-              <div className={styles.sectionTitle}>Schedule</div>
-              <div className={styles.sectionDescription}>
-                Schedule is per workspace. Agents added to the workspace are
-                invoked on-demand as it runs.
-              </div>
-
-              <div className={styles.field}>
-                <label className={styles.label}>Scheduled Execution</label>
-                <label className={styles.toggleRow}>
-                  <span className={styles.toggleLabel}>
-                    Run this workspace on a recurring schedule
-                  </span>
-                  <span className={`${styles.toggle} ${scheduleEnabled ? styles.toggleOn : ''}`}>
-                    <input
-                      type="checkbox"
-                      checked={scheduleEnabled}
-                      onChange={(e) => setScheduleEnabled(e.target.checked)}
-                      disabled={saving}
-                      className={styles.toggleInput}
-                    />
-                    <span className={styles.toggleTrack}>
-                      <span className={styles.toggleThumb} />
-                    </span>
-                  </span>
-                </label>
-              </div>
-
-              <div className={styles.field}>
-                <label className={styles.label} htmlFor="agent-interval">
-                  Check Interval
-                </label>
-                <IntervalSelect
-                  id="agent-interval"
-                  value={intervalMinutes}
-                  onChange={setIntervalMinutes}
-                  disabled={saving || !scheduleEnabled}
-                />
-                <span className={styles.hint}>
-                  {scheduleEnabled
-                    ? 'How often this workspace runs while enabled.'
-                    : 'Stored for later if you re-enable scheduling.'}
-                </span>
-              </div>
-            </div>
-          )}
 
           <div className={styles.field}>
             <label className={styles.label}>MCP Servers</label>
@@ -1091,32 +956,6 @@ const AgentFormModal = ({
               </span>
             </div>
           </div>
-
-          {!isWorkspaceMode && (
-            <div className={styles.section}>
-              <div className={styles.sectionTitle}>Exposed Tools</div>
-              <div className={styles.sectionDescription}>
-                JSON tool definitions that the workspace can call on this
-                agent.
-              </div>
-              <div className={styles.field}>
-                <label className={styles.label} htmlFor="agent-exposed-tools">
-                  Tools JSON
-                </label>
-                <textarea
-                  id="agent-exposed-tools"
-                  className={`${styles.textarea} ${styles.codeTextarea}`}
-                  value={exposedToolsText}
-                  onChange={(e) => setExposedToolsText(e.target.value)}
-                  disabled={saving}
-                  rows={8}
-                />
-                <span className={styles.hint}>
-                  Use a JSON array. Each tool needs name, description, inputSchema, and outputSchema.
-                </span>
-              </div>
-            </div>
-          )}
 
           {/* Actions */}
           <div className={styles.actions}>

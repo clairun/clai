@@ -76,27 +76,6 @@ async fn setup_test_pool() -> DbPool {
 
     sqlx::query(
         r#"
-        CREATE TABLE provider_connections (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            provider_id TEXT NOT NULL,
-            auth_mode TEXT NOT NULL,
-            base_url TEXT,
-            secret_ref TEXT NOT NULL,
-            model_id TEXT NOT NULL,
-            account_label TEXT,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
         CREATE TABLE assistant_tool_calls (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -123,7 +102,6 @@ fn sample_context() -> SessionContext {
         space_id: None,
         room_id: None,
         workspace_id: Some("ws-1".to_string()),
-        tab_id: None,
         tool_scopes: vec![],
         mcp_server_ids: vec![],
         execution: ExecutionCapabilityConfig::default(),
@@ -149,7 +127,6 @@ async fn test_create_and_get_session() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: Some("tab-1".to_string()),
             kind: SessionKind::Interactive,
             title: Some("Test Session".to_string()),
             context: sample_context(),
@@ -158,7 +135,6 @@ async fn test_create_and_get_session() {
     .await
     .unwrap();
 
-    assert_eq!(session.tab_id, Some("tab-1".to_string()));
     assert_eq!(session.kind, SessionKind::Interactive);
     assert_eq!(session.title, Some("Test Session".to_string()));
     assert_eq!(session.context.workspace_id, Some("ws-1".to_string()));
@@ -185,7 +161,6 @@ async fn test_list_sessions_ordered_by_updated_at_desc() {
     let s1 = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: Some("First".to_string()),
             context: sample_context(),
@@ -199,7 +174,6 @@ async fn test_list_sessions_ordered_by_updated_at_desc() {
     let s2 = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::BackgroundJob,
             title: Some("Second".to_string()),
             context: sample_context(),
@@ -208,43 +182,10 @@ async fn test_list_sessions_ordered_by_updated_at_desc() {
     .await
     .unwrap();
 
-    let all = list_sessions(&pool, None).await.unwrap();
+    let all = list_sessions(&pool).await.unwrap();
     assert_eq!(all.len(), 2);
     assert_eq!(all[0].id, s2.id); // newest first
     assert_eq!(all[1].id, s1.id);
-}
-
-#[tokio::test]
-async fn test_list_sessions_filter_by_tab_id() {
-    let pool = setup_test_pool().await;
-
-    create_session(
-        &pool,
-        CreateSessionParams {
-            tab_id: Some("tab-a".to_string()),
-            kind: SessionKind::Interactive,
-            title: Some("A".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    create_session(
-        &pool,
-        CreateSessionParams {
-            tab_id: Some("tab-b".to_string()),
-            kind: SessionKind::Interactive,
-            title: Some("B".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let a_sessions = list_sessions(&pool, Some("tab-a")).await.unwrap();
-    assert_eq!(a_sessions.len(), 1);
-    assert_eq!(a_sessions[0].title, Some("A".to_string()));
 }
 
 #[tokio::test]
@@ -254,7 +195,6 @@ async fn test_delete_session() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: Some("ToDelete".to_string()),
             context: sample_context(),
@@ -280,7 +220,6 @@ async fn test_update_session_title_and_context() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: Some("Old".to_string()),
             context: sample_context(),
@@ -301,37 +240,6 @@ async fn test_update_session_title_and_context() {
     assert_eq!(fetched.context.workspace_id, Some("ws-2".to_string()));
 }
 
-#[tokio::test]
-async fn test_attach_session_to_tab() {
-    let pool = setup_test_pool().await;
-
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            tab_id: None,
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let attached = attach_session_to_tab(&pool, &session.id, Some("tab-x"))
-        .await
-        .unwrap();
-    assert_eq!(attached.tab_id, Some("tab-x".to_string()));
-    assert_eq!(attached.context.tab_id, Some("tab-x".to_string()));
-}
-
-#[tokio::test]
-async fn test_attach_session_to_tab_missing_errors() {
-    let pool = setup_test_pool().await;
-    let result = attach_session_to_tab(&pool, "no-such-id", Some("tab-x")).await;
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not found"));
-}
-
 // ---------------------------------------------------------------------------
 // Message CRUD
 // ---------------------------------------------------------------------------
@@ -343,7 +251,6 @@ async fn test_create_and_list_messages() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -397,7 +304,6 @@ async fn test_update_message_content() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -466,7 +372,6 @@ async fn test_create_and_get_run() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -509,7 +414,6 @@ async fn test_list_runs_ordered_by_started_at_desc() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -565,7 +469,6 @@ async fn test_update_run_status_to_terminal_sets_completed_at() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -607,7 +510,6 @@ async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -646,7 +548,6 @@ async fn test_complete_run_with_usage_and_notices() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -709,7 +610,6 @@ async fn test_complete_run_preserves_existing_usage_when_none_passed() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: None,
             kind: SessionKind::Interactive,
             title: None,
             context: sample_context(),
@@ -749,187 +649,6 @@ async fn test_complete_run_preserves_existing_usage_when_none_passed() {
 }
 
 // ---------------------------------------------------------------------------
-// Provider connection CRUD
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_create_and_get_provider_connection() {
-    let pool = setup_test_pool().await;
-
-    let conn = create_provider_connection(
-        &pool,
-        CreateProviderConnectionParams {
-            id: "conn-test".to_string(),
-            name: "Test Conn".to_string(),
-            provider_id: "openai".to_string(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: Some("https://api.openai.com".to_string()),
-            secret_ref: "keyring://openai-key".to_string(),
-            model_id: "gpt-4".to_string(),
-            account_label: Some("personal".to_string()),
-            enabled: true,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(conn.id, "conn-test");
-    assert_eq!(conn.enabled, true);
-
-    let fetched = get_provider_connection(&pool, "conn-test").await.unwrap();
-    assert!(fetched.is_some());
-    let fetched = fetched.unwrap();
-    assert_eq!(fetched.name, "Test Conn");
-    assert_eq!(fetched.auth_mode, AuthMode::DeveloperApiKey);
-    assert_eq!(fetched.base_url, Some("https://api.openai.com".to_string()));
-}
-
-#[tokio::test]
-async fn test_list_provider_connections() {
-    let pool = setup_test_pool().await;
-
-    create_provider_connection(
-        &pool,
-        CreateProviderConnectionParams {
-            id: "c1".to_string(),
-            name: "First".to_string(),
-            provider_id: "openai".to_string(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: None,
-            secret_ref: "ref1".to_string(),
-            model_id: "gpt-4".to_string(),
-            account_label: None,
-            enabled: true,
-        },
-    )
-    .await
-    .unwrap();
-
-    create_provider_connection(
-        &pool,
-        CreateProviderConnectionParams {
-            id: "c2".to_string(),
-            name: "Second".to_string(),
-            provider_id: "groq".to_string(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: None,
-            secret_ref: "ref2".to_string(),
-            model_id: "llama3".to_string(),
-            account_label: None,
-            enabled: false,
-        },
-    )
-    .await
-    .unwrap();
-
-    let connections = list_provider_connections(&pool).await.unwrap();
-    assert_eq!(connections.len(), 2);
-    assert_eq!(connections[0].id, "c1");
-    assert_eq!(connections[1].id, "c2");
-    assert!(!connections[1].enabled);
-}
-
-#[tokio::test]
-async fn test_update_provider_connection() {
-    let pool = setup_test_pool().await;
-
-    create_provider_connection(
-        &pool,
-        CreateProviderConnectionParams {
-            id: "c1".to_string(),
-            name: "Old".to_string(),
-            provider_id: "openai".to_string(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: None,
-            secret_ref: "ref".to_string(),
-            model_id: "gpt-4".to_string(),
-            account_label: None,
-            enabled: true,
-        },
-    )
-    .await
-    .unwrap();
-
-    let updated = update_provider_connection(
-        &pool,
-        UpdateProviderConnectionParams {
-            id: "c1".to_string(),
-            name: "New".to_string(),
-            provider_id: "groq".to_string(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: Some("https://api.groq.com".to_string()),
-            secret_ref: "new-ref".to_string(),
-            model_id: "llama3".to_string(),
-            account_label: Some("work".to_string()),
-            enabled: false,
-        },
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(updated.name, "New");
-    assert_eq!(updated.provider_id, "groq");
-    assert_eq!(updated.enabled, false);
-
-    let fetched = get_provider_connection(&pool, "c1").await.unwrap().unwrap();
-    assert_eq!(fetched.name, "New");
-}
-
-#[tokio::test]
-async fn test_update_provider_connection_missing_errors() {
-    let pool = setup_test_pool().await;
-    let result = update_provider_connection(
-        &pool,
-        UpdateProviderConnectionParams {
-            id: "no-such-id".to_string(),
-            name: "X".to_string(),
-            provider_id: "p".to_string(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: None,
-            secret_ref: "r".to_string(),
-            model_id: "m".to_string(),
-            account_label: None,
-            enabled: true,
-        },
-    )
-    .await;
-
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("not found"));
-}
-
-#[tokio::test]
-async fn test_delete_provider_connection() {
-    let pool = setup_test_pool().await;
-
-    create_provider_connection(
-        &pool,
-        CreateProviderConnectionParams {
-            id: "c-del".to_string(),
-            name: "ToDelete".to_string(),
-            provider_id: "openai".to_string(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: None,
-            secret_ref: "ref".to_string(),
-            model_id: "gpt-4".to_string(),
-            account_label: None,
-            enabled: true,
-        },
-    )
-    .await
-    .unwrap();
-
-    let deleted = delete_provider_connection(&pool, "c-del").await.unwrap();
-    assert!(deleted);
-
-    let missing = delete_provider_connection(&pool, "c-del").await.unwrap();
-    assert!(!missing);
-
-    let fetched = get_provider_connection(&pool, "c-del").await.unwrap();
-    assert!(fetched.is_none());
-}
-
-// ---------------------------------------------------------------------------
 // Integration: session → messages → runs end-to-end
 // ---------------------------------------------------------------------------
 
@@ -941,7 +660,6 @@ async fn test_full_session_lifecycle() {
     let session = create_session(
         &pool,
         CreateSessionParams {
-            tab_id: Some("tab-1".to_string()),
             kind: SessionKind::Interactive,
             title: Some("Demo".to_string()),
             context: sample_context(),

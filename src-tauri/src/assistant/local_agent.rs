@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 const STDERR_TAIL_LINES: usize = 20;
 
 use serde_json::Value;
+use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -24,6 +25,7 @@ use crate::assistant::types::{
     AssistantMessage, AssistantSession, ContentPart, MessageRole, ProviderConnection,
     ProviderInputMessage, RunNotice, RunStatus, RunUsage, ToolCallStatus,
 };
+use crate::AppState;
 
 const CLAUDE_DISABLED_TOOLS: &str = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,NotebookRead,LSP";
 
@@ -35,8 +37,16 @@ pub async fn run_session_turn(
         .await?
         .ok_or_else(|| AssistantEngineError::SessionNotFound(input.session_id.clone()))?;
 
-    let connection = repository::get_provider_connection(&deps.pool, &input.connection_id)
-        .await?
+    let connection = deps
+        .app
+        .try_state::<AppState>()
+        .and_then(|state| {
+            state
+                .config_manager
+                .lock()
+                .ok()?
+                .get_provider_connection(&input.connection_id)
+        })
         .ok_or_else(|| AssistantEngineError::ProviderNotConfigured(input.connection_id.clone()))?;
 
     let run_id = resolve_run_id(deps, &session, &connection, &input).await?;
