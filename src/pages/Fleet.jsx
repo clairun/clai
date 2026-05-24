@@ -10,8 +10,10 @@ import {
   setWorkspaceSchedulePaused,
 } from '../workspace/client';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
+import ConfirmDialog from '../components/ConfirmDialog';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
+import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
 import { useFleet } from '../contexts/FleetContext';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
@@ -69,6 +71,21 @@ const Fleet = () => {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(null);
   const [selectedSnapshot, setSelectedSnapshot] = useState(null);
   const [snapshotError, setSnapshotError] = useState('');
+  // Workspace settings modal — opened by the cog icon on each card. We
+  // mount the same `WorkspaceSettingsModal` used by the workspace page
+  // here so users can edit settings without leaving Fleet. Snapshot is
+  // fetched on demand because Fleet's card payload is intentionally
+  // lighter than a full snapshot.
+  const [settingsState, setSettingsState] = useState({
+    open: false,
+    workspaceId: null,
+    snapshot: null,
+  });
+  // Pending delete confirmation. `null` when no dialog is open. Captures
+  // title at request time so the dialog body stays stable even if the
+  // workspace list refreshes mid-confirmation.
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const { closeChat, isCurrentChatOpen } = useChatManager();
   const { selectAgent } = useFleet();
   const pendingPermissionCounts = usePermissionAttention();
@@ -216,17 +233,60 @@ const Fleet = () => {
     navigate(`/workspace/${id}`);
   }, [navigate]);
 
-  const handleDeleteWorkspace = useCallback(async (id) => {
+  const handleOpenSettings = useCallback(async (id) => {
+    if (!id) return;
+    try {
+      const snapshot = await getWorkspaceSnapshot(id);
+      setSettingsState({ open: true, workspaceId: id, snapshot });
+    } catch (err) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to open workspace settings.');
+    }
+  }, []);
+
+  const handleSettingsClose = useCallback(() => {
+    setSettingsState({ open: false, workspaceId: null, snapshot: null });
+  }, []);
+
+  // After a save inside the modal: refetch the snapshot so the modal's
+  // own view stays current (e.g., a newly created agent shows up in the
+  // sidebar) and refresh the fleet card data (title/schedule changes).
+  const handleSettingsChanged = useCallback(async () => {
+    const id = settingsState.workspaceId;
+    if (!id) return;
+    try {
+      const snapshot = await getWorkspaceSnapshot(id);
+      setSettingsState((s) => (s.workspaceId === id ? { ...s, snapshot } : s));
+    } catch { /* non-fatal — modal stays open with old snapshot */ }
+    loadWorkspaces();
+  }, [settingsState.workspaceId, loadWorkspaces]);
+
+  const handleRequestDeleteWorkspace = useCallback((id, title) => {
+    if (!id) return;
+    setPendingDelete({ id, title: title || 'this workspace' });
+  }, []);
+
+  const handleCancelDelete = useCallback(() => {
+    if (deleting) return;
+    setPendingDelete(null);
+  }, [deleting]);
+
+  const handleConfirmDelete = useCallback(async () => {
+    if (!pendingDelete) return;
+    const { id } = pendingDelete;
+    setDeleting(true);
     try {
       await deleteWorkspace(id);
       if (selectedWorkspaceId === id) {
         setSelectedWorkspaceId(null);
       }
       await loadWorkspaces();
+      setPendingDelete(null);
     } catch (err) {
       setError(typeof err === 'string' ? err : err?.message || 'Failed to delete workspace.');
+    } finally {
+      setDeleting(false);
     }
-  }, [loadWorkspaces, selectedWorkspaceId]);
+  }, [pendingDelete, loadWorkspaces, selectedWorkspaceId]);
 
   // Track the workspace whose "run now" is in flight so we can disable the
   // button and avoid double-firing. The scheduler itself refuses a second
@@ -433,21 +493,35 @@ const Fleet = () => {
                 : []),
             ].filter((p) => p.count > 0);
             const isPaused = !!ws.schedulePaused;
-            // Periodic workspaces always reserve the schedule-status line so
-            // pausing doesn't change card height. Content swaps between
-            // "Paused", the next-run countdown, or a neutral "Scheduled"
-            // fallback for periodic workspaces created mid-session (the
-            // scheduler is only populated at startup, so nextRunInSeconds
-            // can be missing for those until the next app launch).
-            const scheduleStatusText = ws.scheduleEnabled
-              ? isPaused
-                ? ws.intervalMinutes
-                  ? `Paused · ${ws.intervalMinutes}m`
-                  : 'Paused'
-                : typeof ws.nextRunInSeconds === 'number'
+            const intervalMinutes = ws.intervalMinutes;
+            // Status-row composition.
+            //  - The "every Xm" portion is rendered as an inline toggle —
+            //    clicking it pauses/resumes the schedule, and when paused
+            //    the text gets a strikethrough. The cadence text IS the
+            //    control, so we don't need a separate pause button.
+            //  - The runtime prefix ("Due now", "Next run in 2m",
+            //    "Scheduled") only renders when the schedule is *active*;
+            //    when paused there's nothing to count down to, so the
+            //    crossed-out interval stands alone.
+            //  - `fallbackStateLabel` only kicks in for the rare case of
+            //    scheduled-but-no-intervalMinutes (e.g., workspace created
+            //    mid-session before the scheduler has been re-populated)
+            //    where there's no toggle to render.
+            const showScheduleToggle = ws.scheduleEnabled && !!intervalMinutes;
+            // Runtime suffix (rendered after the cadence toggle). Suppressed
+            // entirely when paused (the struck-through interval is the only
+            // signal needed) and when active-without-countdown if we have
+            // an interval to show (else "every 30m · Scheduled" is just
+            // restating itself).
+            const runtimeSuffix = !ws.scheduleEnabled || isPaused
+              ? null
+              : typeof ws.nextRunInSeconds === 'number'
                 ? formatNextRun(ws.nextRunInSeconds)
-                : 'Scheduled'
-              : null;
+                : intervalMinutes
+                  ? null
+                  : 'Scheduled';
+            const fallbackStateLabel =
+              ws.scheduleEnabled && !intervalMinutes && isPaused ? 'Paused' : null;
             // Card state is single-valued (priority-ordered in
             // deriveCardStatus), so we apply ONE state class — replacing
             // the older dual-ring approach where `workspaceCardProcessing`
@@ -474,79 +548,51 @@ const Fleet = () => {
                       aria-hidden="true"
                       title={CARD_STATUS_LABEL[cardStatus]}
                     />
-                    <span className={styles.cardTitle}>{ws.title}</span>
-                    {ws.scheduleEnabled && !isPaused && (
-                      <span className={`${styles.workspaceBadge} ${styles.workspaceBadgePeriodic}`}>
-                        {ws.intervalMinutes ? `Periodic · ${ws.intervalMinutes}m` : 'Periodic'}
-                      </span>
-                    )}
-                    {ws.scheduleEnabled && isPaused && (
-                      <button
-                        type="button"
-                        className={styles.resumeBtn}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleTogglePause(ws.id, true);
-                        }}
-                        disabled={pauseBusyId === ws.id}
-                        title={pauseBusyId === ws.id ? 'Updating…' : 'Resume schedule'}
-                        aria-label="Resume schedule"
-                      >
-                        Resume
-                      </button>
-                    )}
-                    {!ws.scheduleEnabled && (
-                      <span className={styles.workspaceBadge}>Workspace</span>
-                    )}
+                    <span className={styles.cardTitle} title={ws.title}>{ws.title}</span>
                   </div>
                   <div className={styles.cardHeaderActions}>
-                    {ws.scheduleEnabled && !isPaused && (
-                      <>
-                        <button
-                          type="button"
-                          className={styles.runNowBtn}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleRunNow(ws.id);
-                          }}
-                          disabled={isProcessing || runNowBusyId === ws.id}
-                          title={
-                            isProcessing
-                              ? 'Already running'
-                              : runNowBusyId === ws.id
-                              ? 'Starting…'
-                              : 'Run now'
-                          }
-                          aria-label="Run now"
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                            <path d="M8 5v14l11-7z" />
-                          </svg>
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.pauseBtn}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleTogglePause(ws.id, false);
-                          }}
-                          disabled={pauseBusyId === ws.id}
-                          title={
-                            pauseBusyId === ws.id
-                              ? 'Updating…'
-                              : isProcessing
-                              ? 'Pause schedule (current run will finish)'
-                              : 'Pause schedule'
-                          }
-                          aria-label="Pause schedule"
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                            <rect x="6" y="5" width="4" height="14" rx="1" />
-                            <rect x="14" y="5" width="4" height="14" rx="1" />
-                          </svg>
-                        </button>
-                      </>
+                    {/* Run-now is enabled regardless of pause state — a
+                     * paused schedule means "don't auto-tick," not "no
+                     * manual runs." Pause/Resume lives on the cadence
+                     * text in the status row (see below). */}
+                    {ws.scheduleEnabled && (
+                      <button
+                        type="button"
+                        className={styles.runNowBtn}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRunNow(ws.id);
+                        }}
+                        disabled={isProcessing || runNowBusyId === ws.id}
+                        title={
+                          isProcessing
+                            ? 'Already running'
+                            : runNowBusyId === ws.id
+                            ? 'Starting…'
+                            : 'Run now'
+                        }
+                        aria-label="Run now"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      </button>
                     )}
+                    <button
+                      type="button"
+                      className={styles.settingsBtn}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleOpenSettings(ws.id);
+                      }}
+                      title="Workspace settings"
+                      aria-label="Workspace settings"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="12" r="3" />
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                      </svg>
+                    </button>
                     <button
                       type="button"
                       className={styles.openBtn}
@@ -567,7 +613,7 @@ const Fleet = () => {
                       className={styles.deleteBtn}
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleDeleteWorkspace(ws.id);
+                        handleRequestDeleteWorkspace(ws.id, ws.title);
                       }}
                       title="Delete workspace"
                       aria-label="Delete workspace"
@@ -589,12 +635,31 @@ const Fleet = () => {
                  * reserves min-height, so toggling pause or resolving the
                  * last attention item never changes card height. */}
                 <div className={styles.statusRow}>
-                  <span
-                    className={`${styles.statusRowText} ${
-                      isPaused ? styles.workspaceTimePaused : ''
-                    }`}
-                  >
-                    {scheduleStatusText || ''}
+                  <span className={styles.statusRowText}>
+                    {showScheduleToggle && (
+                      <button
+                        type="button"
+                        className={`${styles.scheduleToggle} ${isPaused ? styles.scheduleTogglePaused : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleTogglePause(ws.id, isPaused);
+                        }}
+                        disabled={pauseBusyId === ws.id}
+                        title={
+                          pauseBusyId === ws.id
+                            ? 'Updating…'
+                            : isPaused
+                            ? 'Resume schedule'
+                            : 'Pause schedule'
+                        }
+                        aria-pressed={isPaused}
+                      >
+                        every {intervalMinutes}m
+                      </button>
+                    )}
+                    {showScheduleToggle && runtimeSuffix ? ' · ' : ''}
+                    {runtimeSuffix}
+                    {fallbackStateLabel}
                   </span>
                   {attentionPills.length > 0 && (
                     <div
@@ -692,6 +757,33 @@ const Fleet = () => {
           </aside>
         )}
       </div>
+
+      <WorkspaceSettingsModal
+        isOpen={settingsState.open}
+        onClose={handleSettingsClose}
+        workspaceId={settingsState.workspaceId}
+        snapshot={settingsState.snapshot}
+        initialSelection={{ kind: 'general' }}
+        onChanged={handleSettingsChanged}
+      />
+
+      <ConfirmDialog
+        isOpen={!!pendingDelete}
+        title="Delete workspace?"
+        body={(
+          <>
+            <strong>{pendingDelete?.title}</strong> will be permanently
+            deleted, along with its agents, chat history, schedules, and
+            artifacts. This cannot be undone.
+          </>
+        )}
+        confirmLabel="Delete workspace"
+        cancelLabel="Cancel"
+        confirmTone="danger"
+        busy={deleting}
+        onCancel={handleCancelDelete}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 };

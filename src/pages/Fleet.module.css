@@ -438,6 +438,12 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  /* Take remaining row width and allow shrinking below content size so a
+   * long title ellipsis-truncates in place instead of getting bumped onto
+   * a new line by .cardTitleBlock's flex-wrap (which exists for badges,
+   * not for the title itself). */
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .enabledToggle {
@@ -1140,6 +1146,45 @@
   opacity: 0.7;
 }
 
+/* Inline "every Xm" toggle inside the status row. The cadence text IS the
+ * pause/resume control: clicking flips paused state and the text gets a
+ * line-through to visually communicate "this schedule isn't ticking right
+ * now." Inherits its base typography from .statusRowText so the row reads
+ * as a single sentence rather than a button bolted onto text. */
+.scheduleToggle {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color 120ms ease, opacity 120ms ease;
+}
+
+.scheduleToggle:hover:not(:disabled) {
+  color: var(--color-text-secondary);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.scheduleTogglePaused {
+  text-decoration: line-through;
+  opacity: 0.65;
+}
+
+.scheduleTogglePaused:hover:not(:disabled) {
+  text-decoration: line-through underline;
+  text-decoration-style: solid;
+  opacity: 0.9;
+}
+
+.scheduleToggle:disabled {
+  cursor: wait;
+}
+
 .deleteBtn {
   width: 24px;
   height: 24px;
@@ -1198,7 +1243,8 @@
   flex-shrink: 0;
 }
 
-.openBtn {
+.openBtn,
+.settingsBtn {
   width: 24px;
   height: 24px;
   display: flex;
@@ -1214,11 +1260,14 @@
 }
 
 .workspaceCard:hover .openBtn,
-.workspaceCardSelected .openBtn {
+.workspaceCardSelected .openBtn,
+.workspaceCard:hover .settingsBtn,
+.workspaceCardSelected .settingsBtn {
   opacity: 1;
 }
 
-.openBtn:hover {
+.openBtn:hover,
+.settingsBtn:hover {
   background: var(--color-primary-alpha-08);
   color: var(--color-primary);
 }
