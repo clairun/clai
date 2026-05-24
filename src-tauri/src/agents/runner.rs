@@ -176,10 +176,11 @@ async fn run_next_agent(
     // Get app state
     let state = app_handle.state::<AppState>();
 
-    if app_handle.try_state::<DbPool>().is_none() {
-        tracing::debug!("Assistant database not ready yet, skipping agent check");
-        return Ok(());
-    }
+    // Note: pre-refactor this guard waited on a global `DbPool` in
+    // managed state. After the move to per-workspace SQLite that pool
+    // no longer exists — the per-workspace pool is loaded on demand
+    // below via `state.workspace_db(...)`. Leaving the guard in caused
+    // every tick to exit early, so scheduled workspaces never ran.
 
     // Check for a ready agent
     let instance_id = {

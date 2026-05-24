@@ -106,12 +106,15 @@ const TerminalEmulatorWrapper = () => {
               kind: 'background_job',
               title: selectedAgent.name,
               context: {
-                workspaceId: selectedAgent.agentId,
+                // `workspaceId` opens the per-workspace DB on the backend;
+                // `automationId` / `agentWorkspaceId` identify the agent
+                // within it. These are distinct ids — keep them straight.
+                workspaceId: selectedAgent.workspaceId,
                 tabId: selectedAgent.tabId || null,
                 mcpServerIds: selectedAgent.selectedMcpServerIds || [],
                 execution: selectedAgent.execution || undefined,
                 automationId: selectedAgent.agentId,
-                agentWorkspaceId: selectedAgent.agentId,
+                agentWorkspaceId: selectedAgent.workspaceId,
                 automationName: selectedAgent.name,
                 automationDescription: selectedAgent.description || null,
               },

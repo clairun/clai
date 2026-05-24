@@ -378,6 +378,12 @@ const Fleet = () => {
     // selectedMcpServerIds / execution / providerConnectionIds /
     // sessionId / tabId).
     selectAgent({
+      // The workspace id is what the backend uses to open the per-workspace
+      // DB when creating a session. `agentId` is the agent's own id; they
+      // are *not* the same — passing the agent id as workspaceId used to
+      // produce "Workspace <agent-id> not found" the first time a chat
+      // was opened on a fresh workspace.
+      workspaceId: selectedSnapshot.workspaceId || selectedWorkspaceId,
       agentId: candidate.id,
       name: candidate.displayName || candidate.agentName || candidate.id,
       description: candidate.agentDescription || '',
@@ -387,7 +393,7 @@ const Fleet = () => {
       sessionId: selectedSnapshot.session?.id || null,
       tabId: null,
     });
-  }, [selectedSnapshot, selectAgent]);
+  }, [selectedSnapshot, selectedWorkspaceId, selectAgent]);
 
   // Clear the selection when leaving Fleet entirely so a stale agent
   // doesn't leak into other routes (the rest of the app still uses

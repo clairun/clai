@@ -189,6 +189,10 @@ impl Scheduler {
     pub fn complete_agent(&mut self, instance_id: &str, success: bool, interval_ms: u64) {
         if let Some(instance) = self.instances.get_mut(instance_id) {
             instance.is_running = false;
+            // Clear the one-shot manual-run flag: a paused instance that
+            // ran via `force_ready` should drop back to paused, not keep
+            // ticking.
+            instance.manual_run_pending = false;
             instance.schedule_next(interval_ms);
 
             if !success {
@@ -252,10 +256,16 @@ impl Scheduler {
     /// Forces an agent to be ready for immediate execution by clearing its
     /// next_run_at. The runner loop will pick it up on its next tick.
     /// Returns true if the instance was found and updated.
+    ///
+    /// Works on disabled (paused) instances too — sets `manual_run_pending`
+    /// so the next `is_ready` check passes once. Cleared by
+    /// `complete_agent` so a paused schedule resumes its pause after the
+    /// one-shot manual run, instead of going back to ticking on its own.
     pub fn force_ready(&mut self, agent_id: &str) -> bool {
         for instance in self.instances.values_mut() {
-            if instance.agent_id == agent_id && instance.enabled && !instance.is_running {
+            if instance.agent_id == agent_id && !instance.is_running {
                 instance.next_run_at = None;
+                instance.manual_run_pending = true;
                 return true;
             }
         }

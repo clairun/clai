@@ -2160,14 +2160,15 @@ pub async fn workspace_run_now(
     // The scheduler only registers agents whose schedule is enabled. An
     // explicit enabled/disabled check up front gives a clearer error than
     // the generic "no scheduler instance" message that `force_ready`
-    // returns for unscheduled agents. Also flag paused workspaces here —
-    // `force_ready` skips disabled instances and would otherwise produce
-    // a misleading "currently running" message.
+    // returns for unscheduled agents.
+    //
+    // Paused workspaces are *not* blocked here: `force_ready` sets a
+    // one-shot `manual_run_pending` flag on the disabled instance, the
+    // runner picks it up once, and `complete_agent` clears the flag so
+    // the schedule stays paused afterward. Manual invocation is
+    // intentionally orthogonal to auto-tick pause.
     if !manager.enabled {
         return Err("Manager agent is disabled. Enable it first.".to_string());
-    }
-    if config.schedule.paused {
-        return Err("Workspace schedule is paused. Resume it first.".to_string());
     }
 
     let mut scheduler = state.scheduler.lock().await;

@@ -96,6 +96,14 @@ pub struct AgentInstance {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
+    /// Marks a one-shot manual run requested via `force_ready`. Lets the
+    /// runner pick up a *paused* instance for a single tick — the
+    /// pause-vs-manual-run distinction the UI relies on. Cleared by
+    /// `complete_agent` so the next tick falls back to the regular
+    /// `enabled` gate. Not persisted: transient by nature.
+    #[serde(skip)]
+    pub manual_run_pending: bool,
+
     /// Conversation ID from the last run (for viewing history).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_conversation_id: Option<String>,
@@ -121,14 +129,20 @@ impl AgentInstance {
             room_id,
             is_running: false,
             enabled: true,
+            manual_run_pending: false,
             last_conversation_id: None,
             next_run_at: None,
         }
     }
 
-    /// Returns true if this agent is ready to run.
+    /// Returns true if this agent is ready to run. A paused instance
+    /// (`!enabled`) is still picked up once if a manual run was queued
+    /// via `force_ready` — that's how the Fleet "Run now" button works
+    /// against paused schedules.
     pub fn is_ready(&self, now: Instant) -> bool {
-        self.enabled && !self.is_running && self.next_run_at.map(|t| t <= now).unwrap_or(true)
+        (self.enabled || self.manual_run_pending)
+            && !self.is_running
+            && self.next_run_at.map(|t| t <= now).unwrap_or(true)
     }
 
     /// Schedules the next run based on the interval.
