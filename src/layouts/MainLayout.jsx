@@ -6,16 +6,9 @@ import { CommandProvider } from '../contexts/CommandContext';
 import { TabManagerProvider } from '../contexts/TabManagerContext';
 import { CommandMessagingProvider } from '../contexts/CommandMessagingContext';
 import { ChatManagerProvider } from '../contexts/ChatManagerContext';
-import { AgentActivityProvider } from '../contexts/AgentActivityContext';
 import { FleetProvider } from '../contexts/FleetContext';
-import { useAgentBridge } from '../agents';
 import { useAssistantEvents } from '../assistant';
 import styles from './MainLayout.module.css';
-
-const AgentBridgeInitializer = ({ children }) => {
-  useAgentBridge();
-  return children;
-};
 
 const AssistantEventListener = ({ children }) => {
   useAssistantEvents();
@@ -32,25 +25,21 @@ const MainLayout = () => {
   return (
     <CommandProvider>
       <TabManagerProvider>
-        <AgentActivityProvider>
-          <AgentBridgeInitializer>
-            <AssistantEventListener>
-              <CommandMessagingProvider>
-                <ChatManagerProvider>
-                  <FleetProvider>
-                    <div className={styles.mainLayout}>
-                      <WorkspaceTaskNotifications />
-                      <TerminalEmulatorWrapper />
-                      <div className={styles.contentArea}>
-                        <Outlet />
-                      </div>
-                    </div>
-                  </FleetProvider>
-                </ChatManagerProvider>
-              </CommandMessagingProvider>
-            </AssistantEventListener>
-          </AgentBridgeInitializer>
-        </AgentActivityProvider>
+        <AssistantEventListener>
+          <CommandMessagingProvider>
+            <ChatManagerProvider>
+              <FleetProvider>
+                <div className={styles.mainLayout}>
+                  <WorkspaceTaskNotifications />
+                  <TerminalEmulatorWrapper />
+                  <div className={styles.contentArea}>
+                    <Outlet />
+                  </div>
+                </div>
+              </FleetProvider>
+            </ChatManagerProvider>
+          </CommandMessagingProvider>
+        </AssistantEventListener>
       </TabManagerProvider>
     </CommandProvider>
   );
