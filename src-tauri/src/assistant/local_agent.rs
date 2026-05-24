@@ -305,6 +305,24 @@ async fn run_claude_turn(
         command.arg("--model").arg(connection.model_id.trim());
     }
 
+    // Pin the subprocess cwd to the agent's workspace root. Without
+    // this, Claude Code inherits CLAI's launch cwd — which on a dev
+    // machine is the CLAI repo itself, causing Claude Code's
+    // auto-memory loader (`~/.claude/projects/<hash-of-cwd>/memory/`)
+    // to pull in memory from unrelated projects. Pinning cwd keys
+    // memory to the workspace, giving each agent a clean per-workspace
+    // context. Skipped when the session has no workspace_id (transient
+    // sessions) or the workspace is no longer in the index.
+    if let Some(workspace_id) = session.context.workspace_id.as_deref() {
+        if let Some(root) = deps
+            .app
+            .state::<crate::AppState>()
+            .workspace_root(workspace_id)
+        {
+            command.current_dir(&root);
+        }
+    }
+
     let mut child = command.spawn().map_err(|e| {
         LocalAgentRunError::failed(format!(
             "Failed to launch `{}`: {}. Is Claude Code installed and on PATH?",
