@@ -67,11 +67,8 @@ pub struct FleetSnapshot {
     pub agents: Vec<FleetAgentSnapshot>,
 }
 
-
 #[tauri::command]
-pub async fn fleet_get_snapshot(
-    _state: State<'_, AppState>,
-) -> Result<FleetSnapshot, String> {
+pub async fn fleet_get_snapshot(_state: State<'_, AppState>) -> Result<FleetSnapshot, String> {
     // The Fleet view no longer surfaces global agents — they don't exist as
     // a first-class concept anymore (agents are workspace-local). Kept for
     // frontend wire compatibility; agents are now enumerated per-workspace

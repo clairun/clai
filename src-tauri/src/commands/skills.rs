@@ -403,10 +403,7 @@ pub fn skill_source_set_enabled(
 }
 
 #[tauri::command]
-pub async fn skill_source_delete(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn skill_source_delete(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let source = {
         let config_manager = state
             .config_manager

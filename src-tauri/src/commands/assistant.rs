@@ -60,10 +60,7 @@ async fn session_pool(
     Err(format!("Assistant session not found: {}", session_id))
 }
 
-async fn run_pool(
-    state: &AppState,
-    run_id: &str,
-) -> Result<(DbPool, AssistantRun), String> {
+async fn run_pool(state: &AppState, run_id: &str) -> Result<(DbPool, AssistantRun), String> {
     let locators = state
         .workspace_index
         .read()
@@ -223,8 +220,7 @@ pub async fn assistant_list_tool_calls(
     request: ListToolCallsRequest,
     state: State<'_, AppState>,
 ) -> Result<Vec<ToolInvocation>, String> {
-    let (target_pool, _session) =
-        session_pool(state.inner(), &request.session_id).await?;
+    let (target_pool, _session) = session_pool(state.inner(), &request.session_id).await?;
     repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref()).await
 }
 

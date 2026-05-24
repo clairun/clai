@@ -227,10 +227,7 @@ pub async fn update_mcp_server(
 }
 
 #[tauri::command]
-pub async fn delete_mcp_server(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn delete_mcp_server(id: String, state: State<'_, AppState>) -> Result<(), String> {
     // Sweep before removing the server from AppConfig so name-based workspace
     // refs still resolve to this id.
     sweep_workspace_agent_mcp_ids(state.inner(), &id)?;

@@ -108,12 +108,7 @@ mod tests {
         (tmp, pool)
     }
 
-    async fn insert_sweep_task(
-        pool: &DbPool,
-        id: &str,
-        status: &str,
-        error: Option<&str>,
-    ) {
+    async fn insert_sweep_task(pool: &DbPool, id: &str, status: &str, error: Option<&str>) {
         sqlx::query(
             r#"
             INSERT INTO workspace_tasks
@@ -150,7 +145,11 @@ mod tests {
             .await
             .unwrap()
             .is_some();
-            assert!(exists, "expected table `{}` to be created by migrations", table);
+            assert!(
+                exists,
+                "expected table `{}` to be created by migrations",
+                table
+            );
         }
     }
 
@@ -221,12 +220,11 @@ mod tests {
 
         sweep_orphaned_running_state(&pool).await.unwrap();
 
-        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, status, error FROM workspace_tasks ORDER BY id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let rows: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT id, status, error FROM workspace_tasks ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].1, "completed");
         assert_eq!(rows[1].1, "failed");

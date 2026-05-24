@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 use include_dir::{include_dir, Dir, DirEntry};
 use serde::{Deserialize, Serialize};
 
-use super::{
-    ClaiConfig, ExecutionCapabilityConfig, SkillSourceConfig, SkillSourceKind,
-};
+use super::{ClaiConfig, ExecutionCapabilityConfig, SkillSourceConfig, SkillSourceKind};
 
 static BUNDLED_SKILLS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/embedded/skills");
 static BUNDLED_AGENT_TEMPLATES: Dir<'_> =

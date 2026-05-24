@@ -9,8 +9,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::config::{
-    workspace_config, AppConfig, ExecutionCapabilityConfig, WorkspaceAgent,
-    WorkspaceConfig,
+    workspace_config, AppConfig, ExecutionCapabilityConfig, WorkspaceAgent, WorkspaceConfig,
 };
 use crate::AppState;
 

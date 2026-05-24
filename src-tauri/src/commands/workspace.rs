@@ -1354,9 +1354,7 @@ pub async fn load_workspace_state() -> Result<WorkspaceState, String> {
 /// frontend's `workspaceStore` still invokes this; we accept and ignore
 /// the payload until that store is removed.
 #[tauri::command]
-pub async fn save_workspace_state(
-    _workspace_state: WorkspaceState,
-) -> Result<(), String> {
+pub async fn save_workspace_state(_workspace_state: WorkspaceState) -> Result<(), String> {
     Ok(())
 }
 
@@ -1417,8 +1415,7 @@ pub async fn workspace_get_snapshot(
     };
 
     let (assigned_agents, default_workspace_agent_id) =
-        list_workspace_agent_responses(state.inner(), &descriptor.workspace_id)
-            .await?;
+        list_workspace_agent_responses(state.inner(), &descriptor.workspace_id).await?;
     let tasks =
         list_workspace_task_responses(&workspace_pool, state.inner(), &descriptor.workspace_id)
             .await?;
@@ -1496,8 +1493,7 @@ pub async fn workspace_get_or_create_session(
     let workspace_agents =
         workspace_agent_summaries(state.inner(), &descriptor.workspace_id).await?;
     let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)
-            .await?;
+        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id).await?;
     let session = if let Some(existing) = existing {
         let desired_context = desired_workspace_context(
             state.inner(),
@@ -1681,8 +1677,7 @@ pub async fn workspace_update_session_mcp(
     let workspace_agents =
         workspace_agent_summaries(state.inner(), &descriptor.workspace_id).await?;
     let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)
-            .await?;
+        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id).await?;
 
     let session = if let Some(session) = existing {
         session
@@ -1779,8 +1774,7 @@ pub async fn workspace_list_agents(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkspaceAgentResponse>, String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let (agents, _) =
-        list_workspace_agent_responses(state.inner(), &workspace_id).await?;
+    let (agents, _) = list_workspace_agent_responses(state.inner(), &workspace_id).await?;
     Ok(agents)
 }
 
@@ -2060,9 +2054,7 @@ pub async fn workspace_create(
 
 /// List all file-backed workspaces.
 #[tauri::command]
-pub async fn workspace_list(
-    state: State<'_, AppState>,
-) -> Result<Vec<WorkspaceListEntry>, String> {
+pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceListEntry>, String> {
     let mut entries = Vec::new();
     let locators = state
         .workspace_index
@@ -2306,7 +2298,10 @@ pub async fn workspace_delete(
     // surfaces as a closed-channel error on the awaiting side — correct,
     // since the workspace they were scoped to no longer exists.
     let purged_approvals = state.pending_approvals.purge_workspace(&workspace_id).await;
-    let purged_path_grants = state.pending_path_grants.purge_workspace(&workspace_id).await;
+    let purged_path_grants = state
+        .pending_path_grants
+        .purge_workspace(&workspace_id)
+        .await;
 
     tracing::info!(
         workspace_id = %workspace_id,
@@ -2443,9 +2438,7 @@ fn count_files_recursive(dir: &Path) -> i64 {
 }
 
 async fn count_session_messages(pool: &DbPool, workspace_id: &str) -> i64 {
-    let sessions = repository::list_sessions(pool)
-        .await
-        .unwrap_or_default();
+    let sessions = repository::list_sessions(pool).await.unwrap_or_default();
 
     let session = sessions.iter().find(|s| {
         s.context.workspace_id.as_deref() == Some(workspace_id)

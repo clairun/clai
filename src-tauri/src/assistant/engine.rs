@@ -12,8 +12,8 @@ use crate::assistant::runtime;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
     AssistantMessage, CompletionRequest, ContentPart, MessageRole, ProviderEvent,
-    ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId,
-    ToolCallStatus, ToolInvocationDraft,
+    ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId, ToolCallStatus,
+    ToolInvocationDraft,
 };
 use crate::db::DbPool;
 use crate::AppState;
@@ -949,9 +949,9 @@ pub(crate) fn build_system_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::SessionKind;
     use crate::assistant::types::ContentPart;
     use crate::assistant::types::SessionContext;
+    use crate::assistant::types::SessionKind;
     use crate::assistant::types::WorkspaceAgentSummary;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
 
@@ -1852,7 +1852,6 @@ mod tests {
             );
         }
     }
-
 }
 
 /// Normalize persisted history into a provider-safe message sequence.
