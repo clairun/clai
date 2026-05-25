@@ -296,6 +296,34 @@ impl Scheduler {
             instance.enabled = enabled;
         }
     }
+
+    /// Seeds the instance's in-memory `next_run_at` from a persisted
+    /// wall-clock target. Used at startup (and on schedule reconcile) so
+    /// a previously-scheduled workspace continues from where it left off
+    /// instead of firing immediately on app launch.
+    ///
+    /// `target_unix_ms = None` clears `next_run_at` (instance becomes
+    /// ready-now, matching the "fresh schedule, no anchor" semantic).
+    /// A past target also clears `next_run_at` so the instance catches
+    /// up on the next tick — useful when the app was down across one or
+    /// more intervals.
+    pub fn set_instance_next_run_at(&mut self, instance_id: &str, target_unix_ms: Option<i64>) {
+        let Some(instance) = self.instances.get_mut(instance_id) else {
+            return;
+        };
+        let Some(target) = target_unix_ms else {
+            instance.next_run_at = None;
+            return;
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        if target <= now_ms {
+            // Past target — let the next tick pick it up.
+            instance.next_run_at = None;
+            return;
+        }
+        let remaining = (target - now_ms) as u64;
+        instance.next_run_at = Some(Instant::now() + std::time::Duration::from_millis(remaining));
+    }
 }
 
 impl Default for Scheduler {
@@ -462,5 +490,63 @@ mod tests {
         // Should be ready now
         let next = scheduler.next_ready();
         assert!(next.is_some());
+    }
+
+    // -------------------------------------------------------------------
+    // set_instance_next_run_at: restart-survival seed
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn set_instance_next_run_at_future_target_defers_readiness() {
+        let mut scheduler = Scheduler::new();
+        scheduler.register_definition(create_test_definition());
+        let instance_id = scheduler.create_instance("test-agent", "", "").unwrap();
+
+        // Target 1 hour in the future — instance should not be ready.
+        let future = chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000;
+        scheduler.set_instance_next_run_at(&instance_id, Some(future));
+
+        assert!(scheduler.next_ready().is_none());
+    }
+
+    #[test]
+    fn set_instance_next_run_at_past_target_clears_to_ready_now() {
+        let mut scheduler = Scheduler::new();
+        scheduler.register_definition(create_test_definition());
+        let instance_id = scheduler.create_instance("test-agent", "", "").unwrap();
+
+        // Mark instance not-ready first by giving it a far-future anchor.
+        let future = chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000;
+        scheduler.set_instance_next_run_at(&instance_id, Some(future));
+        assert!(scheduler.next_ready().is_none());
+
+        // Past anchor (1 hour ago) — clears next_run_at so the next tick
+        // picks it up. Matches "catch up after restart" semantics when
+        // the app was down across an interval boundary.
+        let past = chrono::Utc::now().timestamp_millis() - 60 * 60 * 1000;
+        scheduler.set_instance_next_run_at(&instance_id, Some(past));
+        assert!(scheduler.next_ready().is_some());
+    }
+
+    #[test]
+    fn set_instance_next_run_at_none_clears_to_ready_now() {
+        let mut scheduler = Scheduler::new();
+        scheduler.register_definition(create_test_definition());
+        let instance_id = scheduler.create_instance("test-agent", "", "").unwrap();
+
+        // Park far in the future, then clear with None.
+        let future = chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000;
+        scheduler.set_instance_next_run_at(&instance_id, Some(future));
+        scheduler.set_instance_next_run_at(&instance_id, None);
+
+        assert!(scheduler.next_ready().is_some());
+    }
+
+    #[test]
+    fn set_instance_next_run_at_ignores_unknown_instance() {
+        let mut scheduler = Scheduler::new();
+        // Just a smoke check that the function doesn't panic on a
+        // missing id — covers the early-return branch.
+        scheduler.set_instance_next_run_at("nonexistent", Some(0));
     }
 }

@@ -54,6 +54,19 @@ pub struct WorkspaceSchedule {
     pub paused: bool,
     #[serde(default)]
     pub interval_minutes: u32,
+    /// Unix-ms wall-clock time when this workspace's manager should run
+    /// next. `None` means "as soon as possible" — used for first-time
+    /// scheduling before any tick has happened, and as the explicit
+    /// "clear" value when the schedule is disabled.
+    ///
+    /// Persisting this is what survives an app restart: without it, the
+    /// scheduler's in-memory `Instant` next_run_at resets to the
+    /// "ready-now" state on startup and every scheduled workspace fires
+    /// immediately. The runner writes this after each completed tick;
+    /// `apply_workspace_schedule` reads it when (re)creating the live
+    /// instance so the live schedule resumes from disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at_unix_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

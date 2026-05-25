@@ -110,8 +110,14 @@ pub fn apply_workspace_schedule(
         // Paused workspaces still get an instance (so pause/resume can flip
         // it without re-registering), but the instance starts disabled so
         // the runner skips it until resumed.
-        if config.schedule.paused {
-            if let Some(instance_id) = instance_id {
+        if let Some(instance_id) = instance_id {
+            // Seed the in-memory `next_run_at` from the persisted
+            // wall-clock value. Without this, every scheduled workspace
+            // would fire immediately on app start regardless of when it
+            // was actually due — the `Instant` `next_run_at` doesn't
+            // survive process restart.
+            sched.set_instance_next_run_at(&instance_id, config.schedule.next_run_at_unix_ms);
+            if config.schedule.paused {
                 sched.set_instance_enabled(&instance_id, false);
             }
         }

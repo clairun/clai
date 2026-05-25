@@ -298,6 +298,7 @@ async fn run_next_agent(
 
     // Update scheduler with interval from config
     let interval_ms = (agent_config.interval_minutes as u64) * 60 * 1000;
+    let next_run_at_unix_ms = chrono::Utc::now().timestamp_millis() + interval_ms as i64;
     {
         let mut sched = scheduler.lock().await;
         sched.complete_agent(&instance_id, success, interval_ms);
@@ -314,6 +315,49 @@ async fn run_next_agent(
         }
     }
 
+    // Persist the new next-run wall-clock time so an app restart
+    // resumes the schedule instead of firing immediately. Best-effort:
+    // a write failure here only loses the restart-survival guarantee
+    // for this one workspace until the next successful tick.
+    if let Err(e) = persist_workspace_next_run_at(
+        state.inner(),
+        &agent_config.workspace_id,
+        Some(next_run_at_unix_ms),
+    ) {
+        tracing::warn!(
+            workspace_id = %agent_config.workspace_id,
+            error = %e,
+            "Failed to persist next_run_at to workspace config"
+        );
+    }
+
+    Ok(())
+}
+
+/// Update a workspace's persisted `schedule.next_run_at_unix_ms` and
+/// refresh the in-memory workspace index so subsequent loads see it.
+/// `None` clears the anchor (used by `workspace_set_schedule` when
+/// disabling the schedule); a `Some(unix_ms)` overwrites.
+pub(crate) fn persist_workspace_next_run_at(
+    state: &AppState,
+    workspace_id: &str,
+    next_run_at_unix_ms: Option<i64>,
+) -> Result<(), String> {
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let mut config = workspace_config::load(&root).map_err(|e| e.to_string())?;
+    if config.schedule.next_run_at_unix_ms == next_run_at_unix_ms {
+        return Ok(());
+    }
+    config.schedule.next_run_at_unix_ms = next_run_at_unix_ms;
+    config.updated_at = chrono::Utc::now().timestamp_millis();
+    workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
+    state
+        .workspace_index
+        .write()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .insert_config(root, &config);
     Ok(())
 }
 

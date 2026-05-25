@@ -2079,9 +2079,20 @@ pub async fn workspace_set_schedule(
     config.schedule.enabled = enabled;
     config.schedule.interval_minutes = interval_minutes;
     // Disabling the schedule clears any prior pause — there's nothing to be
-    // paused if the workspace isn't scheduled.
+    // paused if the workspace isn't scheduled. Also clear the persisted
+    // next-run anchor so re-enabling later starts from a fresh interval.
     if !enabled {
         config.schedule.paused = false;
+        config.schedule.next_run_at_unix_ms = None;
+    } else {
+        // Anchor the next run to `now + interval` so the schedule is
+        // exact ("next run in N minutes") from the user's perspective —
+        // without this, enabling a fresh schedule (or changing the
+        // interval) would fire immediately on the next tick because the
+        // newly-created instance's in-memory next_run_at is None.
+        let now = now_millis();
+        let interval_ms = (interval_minutes as i64) * 60 * 1000;
+        config.schedule.next_run_at_unix_ms = Some(now + interval_ms);
     }
     config.updated_at = now_millis();
     save_workspace_config_for_root(state.inner(), &root, &config)?;
