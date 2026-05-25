@@ -409,7 +409,7 @@ pub async fn assistant_cancel_run(
     Ok(cancelled)
 }
 
-fn spawn_run_task(
+pub(crate) fn spawn_run_task(
     pool: DbPool,
     app: AppHandle,
     session_id: String,
