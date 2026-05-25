@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
@@ -15,8 +15,7 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::ServerHandler;
-use tauri::Manager;
-use tokio::sync::RwLock;
+use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -24,6 +23,7 @@ use crate::assistant::engine::AssistantDeps;
 use crate::assistant::repository;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{RunNotice, ToolDefinition};
+use crate::db::DbPool;
 use crate::AppState;
 
 static LOCAL_MCP_RUNTIME: OnceLock<tokio::sync::Mutex<Option<Arc<LocalMcpRuntime>>>> =
@@ -36,13 +36,21 @@ fn runtime_slot() -> &'static tokio::sync::Mutex<Option<Arc<LocalMcpRuntime>>> {
 #[derive(Clone)]
 pub struct LocalMcpRuntime {
     url: String,
-    deps: AssistantDeps,
+    // Only process-wide state lives on the runtime. The DB pool is
+    // per-workspace and rides on each ToolBinding instead — pinning a
+    // pool here would silently route every workspace's MCP calls to
+    // whichever workspace happened to bind first.
+    app: AppHandle,
     cancellation_token: CancellationToken,
     bindings: Arc<RwLock<HashMap<String, ToolBinding>>>,
 }
 
 #[derive(Clone)]
 pub struct ToolBinding {
+    /// The workspace-scoped DB pool this run's session lives in. Carried
+    /// per-binding because the local MCP runtime is a process singleton
+    /// while pools are per-workspace.
+    pub pool: DbPool,
     pub session_id: String,
     pub run_id: String,
     pub cancel_token: CancellationToken,
@@ -59,17 +67,27 @@ impl LocalMcpRuntime {
         &self.url
     }
 
-    pub async fn bind_run(&self, binding: ToolBinding) -> String {
+    /// Register a tool binding and return an RAII guard. The binding is
+    /// removed automatically when the guard is dropped — including on
+    /// panic or early return — so callers cannot leak entries into the
+    /// bindings map.
+    pub fn bind_run(&self, binding: ToolBinding) -> BindingGuard {
         let token = Uuid::new_v4().to_string();
-        self.bindings.write().await.insert(token.clone(), binding);
-        token
+        // Bindings map only ever holds short, await-free critical sections,
+        // so `std::sync::RwLock` is fine and lets `Drop` clean up sync.
+        // A poisoned lock means the binding map is unusable; we'd rather
+        // panic here than continue with a corrupted server state.
+        self.bindings
+            .write()
+            .expect("local MCP binding map poisoned")
+            .insert(token.clone(), binding);
+        BindingGuard {
+            bindings: self.bindings.clone(),
+            token,
+        }
     }
 
-    pub async fn unbind_token(&self, token: &str) {
-        self.bindings.write().await.remove(token);
-    }
-
-    async fn binding_from_request(
+    fn binding_from_request(
         &self,
         context: &RequestContext<RoleServer>,
     ) -> Result<ToolBinding, McpError> {
@@ -78,7 +96,7 @@ impl LocalMcpRuntime {
         })?;
         self.bindings
             .read()
-            .await
+            .expect("local MCP binding map poisoned")
             .get(&token)
             .cloned()
             .ok_or_else(|| {
@@ -87,7 +105,33 @@ impl LocalMcpRuntime {
     }
 }
 
-pub async fn ensure_started(deps: &AssistantDeps) -> Result<Arc<LocalMcpRuntime>, String> {
+/// RAII guard returned by [`LocalMcpRuntime::bind_run`]. Holds the bearer
+/// token while alive and removes it from the runtime on drop, so a panic
+/// or early return between bind and the end of a run cannot leak a stale
+/// binding into the process-singleton MCP server.
+pub struct BindingGuard {
+    bindings: Arc<RwLock<HashMap<String, ToolBinding>>>,
+    token: String,
+}
+
+impl BindingGuard {
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+impl Drop for BindingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut bindings) = self.bindings.write() {
+            bindings.remove(&self.token);
+        }
+        // If the lock is poisoned we leave the (now-unreachable) entry
+        // in place; the binding map is already in an unrecoverable state
+        // and the process is on its way down.
+    }
+}
+
+pub async fn ensure_started(app: &AppHandle) -> Result<Arc<LocalMcpRuntime>, String> {
     let mut guard = runtime_slot().lock().await;
     if let Some(runtime) = guard.as_ref() {
         return Ok(runtime.clone());
@@ -105,7 +149,7 @@ pub async fn ensure_started(deps: &AssistantDeps) -> Result<Arc<LocalMcpRuntime>
 
     let runtime_with_url = Arc::new(LocalMcpRuntime {
         url,
-        deps: deps.clone(),
+        app: app.clone(),
         cancellation_token: cancellation_token.clone(),
         bindings,
     });
@@ -164,14 +208,14 @@ impl ServerHandler for ClaiMcpService {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
-            let binding = self.runtime.binding_from_request(&context).await?;
-            let session = repository::get_session(&self.runtime.deps.pool, &binding.session_id)
+            let binding = self.runtime.binding_from_request(&context)?;
+            let session = repository::get_session(&binding.pool, &binding.session_id)
                 .await
                 .map_err(|e| McpError::internal_error(e, None))?
                 .ok_or_else(|| McpError::invalid_request("assistant session not found", None))?;
 
             let external_tools = {
-                let state = self.runtime.deps.app.state::<AppState>();
+                let state = self.runtime.app.state::<AppState>();
                 let mut manager = state.mcp_client_manager.lock().await;
                 manager
                     .list_tools_for_servers(&session.context.mcp_server_ids)
@@ -192,14 +236,14 @@ impl ServerHandler for ClaiMcpService {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
         async move {
-            let binding = self.runtime.binding_from_request(&context).await?;
+            let binding = self.runtime.binding_from_request(&context)?;
             let tool_name = request.name.to_string();
             let params = request
                 .arguments
                 .map(serde_json::Value::Object)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
 
-            match execute_bound_tool(&self.runtime.deps, &binding, &tool_name, params).await {
+            match execute_bound_tool(&self.runtime.app, &binding, &tool_name, params).await {
                 Ok(value) => Ok(CallToolResult::structured(value)),
                 Err(error) => Ok(CallToolResult::structured_error(serde_json::json!({
                     "error": error,
@@ -223,7 +267,7 @@ impl ServerHandler for ClaiMcpService {
 /// the chat couldn't enrich the assistant's `ContentPart::ToolUse` with
 /// a result.
 async fn execute_bound_tool(
-    deps: &AssistantDeps,
+    app: &AppHandle,
     binding: &ToolBinding,
     tool_name: &str,
     params: serde_json::Value,
@@ -231,6 +275,14 @@ async fn execute_bound_tool(
     if binding.cancel_token.is_cancelled() {
         return Err("run cancelled".to_string());
     }
+
+    // Rebuild AssistantDeps from the per-binding pool plus the singleton's
+    // app handle, so downstream `tools::execute_tool` keeps its existing
+    // `&AssistantDeps` API but operates on the correct workspace DB.
+    let deps = AssistantDeps {
+        pool: binding.pool.clone(),
+        app: app.clone(),
+    };
 
     let session = repository::get_session(&deps.pool, &binding.session_id)
         .await?
@@ -269,7 +321,7 @@ async fn execute_bound_tool(
 
     tokio::select! {
         _ = binding.cancel_token.cancelled() => Err("run cancelled".to_string()),
-        result = tools::execute_tool(deps, &tool_context, tool_name, params) => result,
+        result = tools::execute_tool(&deps, &tool_context, tool_name, params) => result,
     }
 }
 

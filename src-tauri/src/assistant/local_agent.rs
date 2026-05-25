@@ -76,23 +76,25 @@ pub async fn run_session_turn(
     }
 
     let (cli_session_id, is_new_session) = ensure_cli_session_id(deps, &mut session).await?;
-    let mcp_runtime = local_mcp::ensure_started(deps).await?;
+    let mcp_runtime = local_mcp::ensure_started(&deps.app).await?;
     let notices = Arc::new(Mutex::new(Vec::<RunNotice>::new()));
     let session_grants = Arc::new(Mutex::new(Vec::new()));
-    let token = mcp_runtime
-        .bind_run(ToolBinding {
-            session_id: session.id.clone(),
-            run_id: run_id.clone(),
-            cancel_token: input.cancel_token.clone(),
-            inter_agent_call_depth: input.inter_agent_call_depth,
-            notices: notices.clone(),
-            session_grants,
-        })
-        .await;
-    let mcp_config_path = match write_mcp_config(mcp_runtime.url(), &token) {
+    // `binding_guard` removes the bearer token from the MCP runtime on
+    // drop, including on panic or early return — keep it alive until
+    // after `run_claude_turn` returns and the Claude subprocess has
+    // finished making MCP calls.
+    let binding_guard = mcp_runtime.bind_run(ToolBinding {
+        pool: deps.pool.clone(),
+        session_id: session.id.clone(),
+        run_id: run_id.clone(),
+        cancel_token: input.cancel_token.clone(),
+        inter_agent_call_depth: input.inter_agent_call_depth,
+        notices: notices.clone(),
+        session_grants,
+    });
+    let mcp_config_path = match write_mcp_config(mcp_runtime.url(), binding_guard.token()) {
         Ok(path) => path,
         Err(error) => {
-            mcp_runtime.unbind_token(&token).await;
             let message = error.message();
             fail_run(deps, &session, &run_id, None, &message).await?;
             return Err(AssistantEngineError::Provider(
@@ -114,7 +116,7 @@ pub async fn run_session_turn(
     )
     .await;
 
-    mcp_runtime.unbind_token(&token).await;
+    drop(binding_guard);
     let _ = std::fs::remove_file(&mcp_config_path);
 
     match run_result {
