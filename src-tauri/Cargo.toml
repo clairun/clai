@@ -61,6 +61,19 @@ uuid = { version = "1", features = ["v4"] }
 
 # Date/time handling (for agent timestamps)
 chrono = { version = "0.4", features = ["serde"] }
+# Timezone database for cron schedules tied to a user-local IANA zone
+# (e.g. "America/New_York"). chrono-tz handles DST transitions internally
+# so cron's "every weekday at 9am" fires at the right wall-clock time
+# across DST boundaries.
+chrono-tz = "0.10"
+# Parse and iterate Vixie-style cron expressions for workspace
+# schedules. We expose 5-field cron to the user and pad with a leading
+# "0 " internally because this crate requires a seconds field.
+cron = "0.12"
+# Resolve the host's IANA timezone name once at startup so the frontend
+# can default new cron schedules to the user's local zone instead of
+# UTC. Pure native call, no fork.
+iana-time-zone = "0.1"
 
 # Platform-specific directories (config, data, cache)
 dirs = "5"

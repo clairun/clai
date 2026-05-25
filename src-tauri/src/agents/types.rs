@@ -11,15 +11,18 @@ use std::time::Instant;
 
 /// Runtime definition of an agent.
 ///
-/// This is the processed/compiled version of an AgentConfig from the config file.
-/// It is used by the scheduler and executor.
+/// This is the processed/compiled version of an AgentConfig from the
+/// config file. It is used by the scheduler and executor. Note that
+/// scheduling cadence is **not** carried on the definition — it lives on
+/// `WorkspaceSchedule.kind` and is computed per-tick by
+/// `agents::schedule::compute_next_run_at`. The definition is just the
+/// identity + capability surface.
 ///
 /// # Fields
 ///
 /// - `id`: Unique identifier (UUID from config)
 /// - `name`: Human-readable name for UI
 /// - `description`: Description of what this agent does
-/// - `interval_ms`: How often to run (in milliseconds)
 /// - `required_tools`: Tool namespaces this agent needs (e.g., ["netdata", "canvas"])
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
@@ -33,9 +36,6 @@ pub struct AgentDefinition {
     #[serde(default)]
     pub description: String,
 
-    /// How often to run this agent (in milliseconds).
-    pub interval_ms: u64,
-
     /// List of tool namespaces this agent needs (e.g., ["netdata", "canvas", "tabs"]).
     ///
     /// The executor will only expose tools from these namespaces to the AI.
@@ -46,12 +46,11 @@ pub struct AgentDefinition {
 
 impl AgentDefinition {
     /// Creates a new agent definition.
-    pub fn new(id: &str, name: &str, interval_ms: u64) -> Self {
+    pub fn new(id: &str, name: &str) -> Self {
         Self {
             id: id.to_string(),
             name: name.to_string(),
             description: String::new(),
-            interval_ms,
             required_tools: vec![],
         }
     }
@@ -145,11 +144,6 @@ impl AgentInstance {
             && self.next_run_at.map(|t| t <= now).unwrap_or(true)
     }
 
-    /// Schedules the next run based on the interval.
-    pub fn schedule_next(&mut self, interval_ms: u64) {
-        self.next_run_at = Some(Instant::now() + std::time::Duration::from_millis(interval_ms));
-    }
-
     /// Returns seconds until the next scheduled run (0 if ready now or no schedule).
     pub fn seconds_until_next_run(&self) -> u64 {
         match self.next_run_at {
@@ -176,19 +170,18 @@ mod tests {
 
     #[test]
     fn test_agent_definition_creation() {
-        let def = AgentDefinition::new("test-agent", "Test Agent", 60_000)
+        let def = AgentDefinition::new("test-agent", "Test Agent")
             .with_description("A test agent")
             .with_tools(vec!["canvas", "tabs"]);
 
         assert_eq!(def.id, "test-agent");
         assert_eq!(def.name, "Test Agent");
-        assert_eq!(def.interval_ms, 60_000);
         assert_eq!(def.required_tools, vec!["canvas", "tabs"]);
     }
 
     #[test]
     fn test_agent_instance_creation() {
-        let def = AgentDefinition::new("test-agent", "Test Agent", 60_000);
+        let def = AgentDefinition::new("test-agent", "Test Agent");
         let instance = AgentInstance::new(&def, "space1".to_string(), "room1".to_string());
 
         assert_eq!(instance.agent_id, "test-agent");
@@ -201,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_agent_instance_is_ready() {
-        let def = AgentDefinition::new("test-agent", "Test Agent", 60_000);
+        let def = AgentDefinition::new("test-agent", "Test Agent");
         let mut instance = AgentInstance::new(&def, "space1".to_string(), "room1".to_string());
         let now = Instant::now();
 

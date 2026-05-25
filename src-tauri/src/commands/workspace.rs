@@ -163,8 +163,12 @@ pub struct WorkspaceSnapshot {
     // controls the Fleet card has. Mirrors WorkspaceListEntry.
     pub schedule_enabled: bool,
     pub schedule_paused: bool,
+    /// The workspace's schedule mode (interval vs cron). Empty when the
+    /// workspace isn't scheduled. The frontend reads this to render the
+    /// "every Nm" / "Cron: …" label and to populate the workspace
+    /// settings modal.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub interval_minutes: Option<u32>,
+    pub schedule_kind: Option<crate::config::workspace_config::ScheduleKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_run_in_seconds: Option<u64>,
 }
@@ -1081,7 +1085,7 @@ fn agent_config_from_row(
         name: row.name.clone(),
         description: row.description.clone(),
         schedule_enabled: schedule.map(|s| s.enabled).unwrap_or(false),
-        interval_minutes: schedule.map(|s| s.interval_minutes).unwrap_or(0),
+        schedule_kind: schedule.map(|s| s.kind.clone()).unwrap_or_default(),
         enabled: row.enabled,
         selected_mcp_server_ids: row.selected_mcp_server_ids.clone(),
         provider_connection_ids: row.provider_connection_ids.clone(),
@@ -1408,13 +1412,11 @@ pub async fn workspace_get_snapshot(
     let workspace_config_for_schedule = state
         .workspace_root(&descriptor.workspace_id)
         .and_then(|root| workspace_config::load(&root).ok());
-    let (schedule_enabled, schedule_paused, interval_minutes) =
+    let (schedule_enabled, schedule_paused, schedule_kind) =
         match workspace_config_for_schedule.as_ref() {
-            Some(cfg) if cfg.schedule.enabled => (
-                true,
-                cfg.schedule.paused,
-                Some(cfg.schedule.interval_minutes),
-            ),
+            Some(cfg) if cfg.schedule.enabled => {
+                (true, cfg.schedule.paused, Some(cfg.schedule.kind.clone()))
+            }
             _ => (false, false, None),
         };
     let next_run_in_seconds = if schedule_enabled && !schedule_paused {
@@ -1453,7 +1455,7 @@ pub async fn workspace_get_snapshot(
         enabled,
         schedule_enabled,
         schedule_paused,
-        interval_minutes,
+        schedule_kind,
         next_run_in_seconds,
     })
 }
@@ -1844,8 +1846,11 @@ pub struct WorkspaceListEntry {
     // ad-hoc ones without each card needing a separate snapshot fetch.
     pub schedule_enabled: bool,
     pub schedule_paused: bool,
+    /// Schedule mode (interval vs cron). Empty when the workspace is
+    /// not scheduled. The Fleet card reads this to render the cadence
+    /// label (`every 5m` for Interval, `0 9 * * 1-5` for Cron).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub interval_minutes: Option<u32>,
+    pub schedule_kind: Option<crate::config::workspace_config::ScheduleKind>,
     // Seconds until the next scheduled run for this workspace's manager
     // agent, read live from the in-memory scheduler. None when the
     // scheduler has no entry for the manager (e.g. workspace was created
@@ -1968,7 +1973,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         let manager_id = Some(locator.default_agent_id.clone());
         let schedule_enabled = locator.schedule_enabled;
         let schedule_paused = locator.schedule_paused;
-        let interval_minutes = locator.interval_minutes;
+        let schedule_kind = locator.schedule_kind.clone();
 
         // Only surface next_run for actually-scheduled workspaces that are not
         // paused. Paused workspaces keep their next_run_at intact in-memory
@@ -2004,7 +2009,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
             schedule_enabled,
             schedule_paused,
-            interval_minutes,
+            schedule_kind,
             next_run_in_seconds,
             created_at: load_workspace_config_for_id(state.inner(), &locator.id)
                 .map(|(_, config)| config.created_at)
@@ -2059,40 +2064,41 @@ pub async fn workspace_run_now(
     }
 }
 
-/// Set the workspace's schedule (enable / disable + interval).
+/// Set the workspace's schedule (enable / disable + mode).
 ///
-/// Writes `WorkspaceConfig.schedule.{enabled, interval_minutes}` and
-/// reconciles the live scheduler so the change takes effect immediately —
-/// no restart required.
+/// `kind = None` disables the schedule entirely; `kind = Some(Interval)`
+/// or `kind = Some(Cron)` enables it with the chosen mode. The Cron
+/// expression and timezone are validated server-side via
+/// [`agents::schedule::compute_next_run_at`] before the config is saved,
+/// so a malformed cron string returns a structured error to the FE
+/// instead of silently breaking the scheduler. The persisted
+/// `next_run_at_unix_ms` is recomputed against the new mode so the
+/// schedule is exact ("next run at ...") from the user's perspective.
 #[tauri::command]
 pub async fn workspace_set_schedule(
     workspace_id: String,
-    enabled: bool,
-    interval_minutes: u32,
+    kind: Option<crate::config::workspace_config::ScheduleKind>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    if enabled && interval_minutes == 0 {
-        return Err("Schedule interval must be at least 1 minute.".to_string());
-    }
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
     let (root, mut config) = load_workspace_config_for_id(state.inner(), &workspace_id)?;
-    config.schedule.enabled = enabled;
-    config.schedule.interval_minutes = interval_minutes;
-    // Disabling the schedule clears any prior pause — there's nothing to be
-    // paused if the workspace isn't scheduled. Also clear the persisted
-    // next-run anchor so re-enabling later starts from a fresh interval.
-    if !enabled {
-        config.schedule.paused = false;
-        config.schedule.next_run_at_unix_ms = None;
-    } else {
-        // Anchor the next run to `now + interval` so the schedule is
-        // exact ("next run in N minutes") from the user's perspective —
-        // without this, enabling a fresh schedule (or changing the
-        // interval) would fire immediately on the next tick because the
-        // newly-created instance's in-memory next_run_at is None.
-        let now = now_millis();
-        let interval_ms = (interval_minutes as i64) * 60 * 1000;
-        config.schedule.next_run_at_unix_ms = Some(now + interval_ms);
+    match kind {
+        None => {
+            // Disabling clears the pause + next-run anchor so a future
+            // re-enable starts from a fresh schedule.
+            config.schedule.enabled = false;
+            config.schedule.paused = false;
+            config.schedule.next_run_at_unix_ms = None;
+        }
+        Some(new_kind) => {
+            // Validate before saving — surfaces "invalid cron" /
+            // "unknown timezone" / "interval=0" as a clean error to the UI.
+            let now = now_millis();
+            let next = crate::agents::schedule::compute_next_run_at(&new_kind, now)?;
+            config.schedule.enabled = true;
+            config.schedule.kind = new_kind;
+            config.schedule.next_run_at_unix_ms = Some(next);
+        }
     }
     config.updated_at = now_millis();
     save_workspace_config_for_root(state.inner(), &root, &config)?;
@@ -2101,6 +2107,43 @@ pub async fn workspace_set_schedule(
     crate::agents::init::apply_workspace_schedule(&mut scheduler, &config);
 
     Ok(())
+}
+
+/// Preview the next `n` fire times for a candidate schedule without
+/// persisting it. Used by the workspace settings modal so the user can
+/// see what "0 9 * * 1-5 America/New_York" actually means before saving.
+///
+/// Returns the next fire times as Unix-ms (UTC); the FE formats them
+/// in the user's locale. For interval mode there's only one meaningful
+/// "next" (now + N minutes), so the result is a single-element vec.
+#[tauri::command]
+pub async fn workspace_preview_schedule(
+    kind: crate::config::workspace_config::ScheduleKind,
+    count: Option<usize>,
+) -> Result<Vec<i64>, String> {
+    use crate::config::workspace_config::ScheduleKind;
+    let now = now_millis();
+    let n = count.unwrap_or(3).clamp(1, 10);
+    match &kind {
+        ScheduleKind::Interval { .. } => {
+            // For interval mode the next-N preview is just repeated
+            // increments — `now + N*interval` is informative enough
+            // and avoids implying the cadence is anchored to wall-clock
+            // boundaries (it isn't; it anchors to completion).
+            Ok(vec![crate::agents::schedule::compute_next_run_at(
+                &kind, now,
+            )?])
+        }
+        ScheduleKind::Cron { .. } => crate::agents::schedule::upcoming_cron_runs(&kind, now, n),
+    }
+}
+
+/// Best-effort detection of the host's IANA timezone for use as the
+/// default value when the user first switches to cron mode. Falls back
+/// to `"UTC"` if the platform can't resolve.
+#[tauri::command]
+pub fn workspace_host_timezone() -> String {
+    crate::agents::schedule::host_timezone()
 }
 
 /// Pause or resume the workspace's periodic schedule.

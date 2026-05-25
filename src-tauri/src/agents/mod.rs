@@ -32,6 +32,7 @@
 
 pub mod init;
 pub mod runner;
+pub mod schedule;
 pub mod scheduler;
 pub mod tmp;
 pub mod types;

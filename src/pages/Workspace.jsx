@@ -58,11 +58,17 @@ const formatNextRun = (seconds) => {
 
 const formatSchedulePill = (snapshot) => {
   if (!snapshot?.scheduleEnabled) return null;
-  const interval = snapshot.intervalMinutes;
-  if (snapshot.schedulePaused) {
-    return interval ? `Paused · every ${interval}m` : 'Paused';
+  const kind = snapshot.scheduleKind;
+  let cadence = null;
+  if (kind?.type === 'interval' && Number(kind.intervalMinutes) > 0) {
+    cadence = `every ${Number(kind.intervalMinutes)}m`;
+  } else if (kind?.type === 'cron' && typeof kind.expression === 'string' && kind.expression.trim()) {
+    cadence = `cron: ${kind.expression.trim()}`;
   }
-  return interval ? `Periodic · every ${interval}m` : 'Periodic';
+  if (snapshot.schedulePaused) {
+    return cadence ? `Paused · ${cadence}` : 'Paused';
+  }
+  return cadence ? `Periodic · ${cadence}` : 'Periodic';
 };
 
 const getLastRunInfo = (runs) => {

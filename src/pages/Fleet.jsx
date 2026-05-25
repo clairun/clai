@@ -57,6 +57,26 @@ const ATTENTION_PILLS = [
   { key: 'blocked', countField: 'blockedTaskCount', label: 'blocked', tone: 'attention' },
 ];
 
+// Render the user-facing cadence label for a workspace's schedule.
+// Returns `null` when no schedule is set (workspace cards and pills
+// hide the cadence row in that case). Mirrors the backend's
+// `ScheduleKind` tagged union and falls back to the raw expression for
+// cron — the workspace settings modal has the full friendly editor.
+const formatScheduleLabel = (kind) => {
+  if (!kind || typeof kind !== 'object') return null;
+  if (kind.type === 'interval') {
+    const n = Number(kind.intervalMinutes ?? 0);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return `every ${n}m`;
+  }
+  if (kind.type === 'cron') {
+    const expr = (kind.expression || '').trim();
+    if (!expr) return null;
+    return `cron: ${expr}`;
+  }
+  return null;
+};
+
 const Fleet = () => {
   const navigate = useNavigate();
   const [workspaces, setWorkspaces] = useState([]);
@@ -493,7 +513,7 @@ const Fleet = () => {
                 : []),
             ].filter((p) => p.count > 0);
             const isPaused = !!ws.schedulePaused;
-            const intervalMinutes = ws.intervalMinutes;
+            const scheduleLabel = formatScheduleLabel(ws.scheduleKind);
             // Status-row composition.
             //  - The "every Xm" portion is rendered as an inline toggle —
             //    clicking it pauses/resumes the schedule, and when paused
@@ -507,7 +527,7 @@ const Fleet = () => {
             //    scheduled-but-no-intervalMinutes (e.g., workspace created
             //    mid-session before the scheduler has been re-populated)
             //    where there's no toggle to render.
-            const showScheduleToggle = ws.scheduleEnabled && !!intervalMinutes;
+            const showScheduleToggle = ws.scheduleEnabled && !!scheduleLabel;
             // Runtime suffix (rendered after the cadence toggle). Suppressed
             // entirely when paused (the struck-through interval is the only
             // signal needed) and when active-without-countdown if we have
@@ -517,11 +537,11 @@ const Fleet = () => {
               ? null
               : typeof ws.nextRunInSeconds === 'number'
                 ? formatNextRun(ws.nextRunInSeconds)
-                : intervalMinutes
+                : scheduleLabel
                   ? null
                   : 'Scheduled';
             const fallbackStateLabel =
-              ws.scheduleEnabled && !intervalMinutes && isPaused ? 'Paused' : null;
+              ws.scheduleEnabled && !scheduleLabel && isPaused ? 'Paused' : null;
             // Card state is single-valued (priority-ordered in
             // deriveCardStatus), so we apply ONE state class — replacing
             // the older dual-ring approach where `workspaceCardProcessing`
@@ -654,7 +674,7 @@ const Fleet = () => {
                         }
                         aria-pressed={isPaused}
                       >
-                        every {intervalMinutes}m
+                        {scheduleLabel}
                       </button>
                     )}
                     {showScheduleToggle && runtimeSuffix ? ' · ' : ''}
@@ -699,13 +719,13 @@ const Fleet = () => {
                 {selectedWorkspace.scheduleEnabled && (
                   <div className={styles.detailSubtitle}>
                     <span className={styles.detailPillPeriodic}>
-                      {selectedWorkspace.schedulePaused
-                        ? selectedWorkspace.intervalMinutes
-                          ? `Paused · every ${selectedWorkspace.intervalMinutes}m`
-                          : 'Paused'
-                        : selectedWorkspace.intervalMinutes
-                        ? `Periodic · every ${selectedWorkspace.intervalMinutes}m`
-                        : 'Periodic'}
+                      {(() => {
+                        const label = formatScheduleLabel(selectedWorkspace.scheduleKind);
+                        if (selectedWorkspace.schedulePaused) {
+                          return label ? `Paused · ${label}` : 'Paused';
+                        }
+                        return label ? `Periodic · ${label}` : 'Periodic';
+                      })()}
                     </span>
                   </div>
                 )}

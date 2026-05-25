@@ -440,8 +440,13 @@ pub struct AgentConfig {
     #[serde(default = "default_true")]
     pub schedule_enabled: bool,
 
-    /// How often the automation runs (in minutes).
-    pub interval_minutes: u32,
+    /// How the automation's next run is computed — interval after
+    /// completion, or a cron expression in a chosen timezone. Mirrors
+    /// the workspace-level `WorkspaceSchedule.kind` for the manager
+    /// agent; non-manager agents leave this at the default (`Interval{0}`)
+    /// since only the workspace's manager runs on a schedule.
+    #[serde(default)]
+    pub schedule_kind: crate::config::workspace_config::ScheduleKind,
 
     /// Whether this automation is enabled.
     #[serde(default = "default_true")]
@@ -477,7 +482,11 @@ pub struct AgentConfig {
 #[allow(dead_code)]
 impl AgentConfig {
     /// Creates a new workspace-local agent with a generated UUID.
-    pub fn new(name: String, description: String, interval_minutes: u32) -> Self {
+    pub fn new(
+        name: String,
+        description: String,
+        schedule_kind: crate::config::workspace_config::ScheduleKind,
+    ) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
         Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -485,7 +494,7 @@ impl AgentConfig {
             name,
             description,
             schedule_enabled: true,
-            interval_minutes,
+            schedule_kind,
             enabled: false,
             selected_mcp_server_ids: vec![],
             provider_connection_ids: vec![],
@@ -521,8 +530,23 @@ impl AgentConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.schedule_enabled && self.interval_minutes == 0 {
-            return Err("Scheduled agents must have an interval of at least 1 minute.".to_string());
+        use crate::config::workspace_config::ScheduleKind;
+        if !self.schedule_enabled {
+            return Ok(());
+        }
+        match &self.schedule_kind {
+            ScheduleKind::Interval { interval_minutes } => {
+                if *interval_minutes == 0 {
+                    return Err(
+                        "Scheduled agents must have an interval of at least 1 minute.".to_string(),
+                    );
+                }
+            }
+            ScheduleKind::Cron { expression, .. } => {
+                if expression.trim().is_empty() {
+                    return Err("Cron-scheduled agents must have a cron expression.".to_string());
+                }
+            }
         }
         Ok(())
     }
@@ -634,19 +658,38 @@ mod tests {
         assert!(parsed.mcp_servers.is_empty());
     }
 
+    fn interval_kind(minutes: u32) -> crate::config::workspace_config::ScheduleKind {
+        crate::config::workspace_config::ScheduleKind::Interval {
+            interval_minutes: minutes,
+        }
+    }
+
     #[test]
     fn test_new_agent_has_unique_id() {
-        let agent1 = AgentConfig::new("Agent 1".to_string(), "Description 1".to_string(), 10);
-        let agent2 = AgentConfig::new("Agent 2".to_string(), "Description 2".to_string(), 15);
+        let agent1 = AgentConfig::new(
+            "Agent 1".to_string(),
+            "Description 1".to_string(),
+            interval_kind(10),
+        );
+        let agent2 = AgentConfig::new(
+            "Agent 2".to_string(),
+            "Description 2".to_string(),
+            interval_kind(15),
+        );
 
         assert_ne!(agent1.id, agent2.id);
         assert_eq!(agent1.name, "Agent 1");
-        assert_eq!(agent2.interval_minutes, 15);
+        assert!(matches!(
+            agent2.schedule_kind,
+            crate::config::workspace_config::ScheduleKind::Interval {
+                interval_minutes: 15
+            }
+        ));
     }
 
     #[test]
     fn test_agent_required_tools() {
-        let agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
+        let agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
         let tools = agent.required_tools();
 
         assert!(tools.contains(&"netdata"));
@@ -658,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_agent_required_tools_include_local_execution_when_enabled() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
         agent.execution.shell.mode = ShellAccessMode::Restricted;
 
         let tools = agent.required_tools();
@@ -669,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_agent_required_tools_include_web_when_enabled() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
         agent.execution.web.enabled = true;
 
         let tools = agent.required_tools();
@@ -682,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_agent_enabled_toggle() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 5);
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
         agent.enabled = false;
 
         assert!(agent.set_enabled(true));
@@ -694,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_agent_validate_rejects_zero_interval_when_scheduled() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 0);
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(0));
         agent.schedule_enabled = true;
 
         let err = agent.validate().unwrap_err();
@@ -703,8 +746,23 @@ mod tests {
 
     #[test]
     fn test_agent_validate_allows_on_demand_agent() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), 0);
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(0));
         agent.schedule_enabled = false;
         assert!(agent.validate().is_ok());
+    }
+
+    #[test]
+    fn test_agent_validate_rejects_empty_cron_expression() {
+        let mut agent = AgentConfig::new(
+            "Agent".to_string(),
+            "Desc".to_string(),
+            crate::config::workspace_config::ScheduleKind::Cron {
+                expression: String::new(),
+                timezone: "UTC".to_string(),
+            },
+        );
+        agent.schedule_enabled = true;
+        let err = agent.validate().unwrap_err();
+        assert!(err.to_lowercase().contains("cron"));
     }
 }

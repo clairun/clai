@@ -217,7 +217,7 @@ async fn assign_task(
         name: target.name.clone(),
         description: target.description.clone(),
         schedule_enabled: false,
-        interval_minutes: 0,
+        schedule_kind: crate::config::workspace_config::ScheduleKind::default(),
         enabled: target.enabled,
         selected_mcp_server_ids: target.selected_mcp_server_ids.clone(),
         provider_connection_ids: target.provider_connection_ids.clone(),

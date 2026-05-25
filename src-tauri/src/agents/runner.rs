@@ -91,10 +91,10 @@ fn load_workspace_agent_as_config(
                 // agent inherits the workspace schedule; sub-agents never
                 // run on their own schedule.
                 schedule_enabled: is_manager && config.schedule.enabled,
-                interval_minutes: if is_manager {
-                    config.schedule.interval_minutes
+                schedule_kind: if is_manager {
+                    config.schedule.kind.clone()
                 } else {
-                    0
+                    crate::config::workspace_config::ScheduleKind::default()
                 },
                 enabled: agent.enabled,
                 selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
@@ -296,12 +296,37 @@ async fn run_next_agent(
         }
     };
 
-    // Update scheduler with interval from config
-    let interval_ms = (agent_config.interval_minutes as u64) * 60 * 1000;
-    let next_run_at_unix_ms = chrono::Utc::now().timestamp_millis() + interval_ms as i64;
+    // Compute the next wall-clock fire time from the workspace's
+    // schedule kind. For Interval mode this is `now + N min`; for Cron
+    // this is the next cron fire in the user's timezone. Errors are
+    // logged but non-fatal — the instance won't be re-scheduled, which
+    // is the safest behavior in the face of a malformed cron expression
+    // (user can fix via the UI without the agent loop-firing).
+    let now_unix_ms = chrono::Utc::now().timestamp_millis();
+    let next_run_at_unix_ms = match crate::agents::schedule::compute_next_run_at(
+        &agent_config.schedule_kind,
+        now_unix_ms,
+    ) {
+        Ok(target) => Some(target),
+        Err(e) => {
+            tracing::warn!(
+                workspace_id = %agent_config.workspace_id,
+                error = %e,
+                "Failed to compute next run time; agent will not be rescheduled"
+            );
+            None
+        }
+    };
     {
         let mut sched = scheduler.lock().await;
-        sched.complete_agent(&instance_id, success, interval_ms);
+        // When we can't compute a next time, pass `i64::MAX` so the
+        // scheduler parks the instance indefinitely. The user has to
+        // fix the schedule via the UI before it ticks again.
+        sched.complete_agent(
+            &instance_id,
+            success,
+            next_run_at_unix_ms.unwrap_or(i64::MAX),
+        );
 
         // Log next run time
         if let Some(instance) = sched.get_instance(&instance_id) {
@@ -322,7 +347,7 @@ async fn run_next_agent(
     if let Err(e) = persist_workspace_next_run_at(
         state.inner(),
         &agent_config.workspace_id,
-        Some(next_run_at_unix_ms),
+        next_run_at_unix_ms,
     ) {
         tracing::warn!(
             workspace_id = %agent_config.workspace_id,

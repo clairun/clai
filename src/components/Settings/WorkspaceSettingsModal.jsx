@@ -427,39 +427,155 @@ const GeneralSection = ({ workspaceId, snapshot, onSaved }) => {
 // Workspace / Schedule
 // ──────────────────────────────────────────────────────────────────────────
 
+// Common cron patterns surfaced as a dropdown — keeps simple cases
+// one-click and lets users escape to free-text for anything custom.
+const CRON_PRESETS = [
+  { label: 'Every hour on the hour', value: '0 * * * *' },
+  { label: 'Every day at 9:00 AM', value: '0 9 * * *' },
+  { label: 'Every day at midnight', value: '0 0 * * *' },
+  { label: 'Every weekday at 9:00 AM', value: '0 9 * * 1-5' },
+  { label: 'Every Monday at 9:00 AM', value: '0 9 * * 1' },
+  { label: 'First of the month at midnight', value: '0 0 1 * *' },
+];
+
+const initialScheduleKindFromSnapshot = (snapshot) => {
+  const kind = snapshot?.scheduleKind;
+  if (kind?.type === 'cron') {
+    return { type: 'cron', expression: kind.expression || '', timezone: kind.timezone || '' };
+  }
+  if (kind?.type === 'interval') {
+    return { type: 'interval', intervalMinutes: kind.intervalMinutes ?? 30 };
+  }
+  return { type: 'interval', intervalMinutes: 30 };
+};
+
+const formatUnixMsForUserLocale = (ms) => {
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return new Date(ms).toISOString();
+  }
+};
+
 const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
   const [enabled, setEnabled] = useState(!!snapshot?.scheduleEnabled);
-  const [intervalMinutes, setIntervalMinutes] = useState(snapshot?.intervalMinutes ?? 30);
+  const [scheduleKind, setScheduleKind] = useState(() =>
+    initialScheduleKindFromSnapshot(snapshot)
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [previewTimes, setPreviewTimes] = useState([]);
+  const [previewError, setPreviewError] = useState(null);
+
+  // Resolve the host timezone once and use it as the default when the
+  // user first switches to cron mode. Falls back to the browser's own
+  // resolved zone if the Tauri command isn't available (e.g., dev).
+  const [hostTimezone, setHostTimezone] = useState('UTC');
+  useEffect(() => {
+    let cancelled = false;
+    invoke('workspace_host_timezone')
+      .then((tz) => {
+        if (!cancelled && typeof tz === 'string' && tz.length > 0) {
+          setHostTimezone(tz);
+        }
+      })
+      .catch(() => {
+        const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (!cancelled && fallback) setHostTimezone(fallback);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     setEnabled(!!snapshot?.scheduleEnabled);
-    setIntervalMinutes(snapshot?.intervalMinutes ?? 30);
-  }, [snapshot?.scheduleEnabled, snapshot?.intervalMinutes]);
+    setScheduleKind(initialScheduleKindFromSnapshot(snapshot));
+  }, [snapshot?.scheduleEnabled, snapshot?.scheduleKind]);
 
   const paused = !!snapshot?.schedulePaused;
 
-  const handleSave = useCallback(async () => {
-    if (enabled && (intervalMinutes < 1 || intervalMinutes > 1440)) {
-      setError('Interval must be between 1 minute and 24 hours.');
-      return;
+  // Live preview: every time the user edits the cron expression or
+  // timezone, ping the backend for the next 3 fire times so they can
+  // sanity-check what they typed before hitting Save.
+  useEffect(() => {
+    if (!enabled || scheduleKind.type !== 'cron') {
+      setPreviewTimes([]);
+      setPreviewError(null);
+      return undefined;
     }
+    const expr = (scheduleKind.expression || '').trim();
+    const tz = (scheduleKind.timezone || '').trim();
+    if (!expr || !tz) {
+      setPreviewTimes([]);
+      setPreviewError(null);
+      return undefined;
+    }
+    let cancelled = false;
+    invoke('workspace_preview_schedule', {
+      kind: { type: 'cron', expression: expr, timezone: tz },
+      count: 3,
+    })
+      .then((times) => {
+        if (cancelled) return;
+        setPreviewTimes(Array.isArray(times) ? times : []);
+        setPreviewError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setPreviewTimes([]);
+        setPreviewError(typeof err === 'string' ? err : err?.message || 'Invalid schedule.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, scheduleKind]);
+
+  const updateKindType = (type) => {
+    if (type === 'cron') {
+      setScheduleKind((prev) =>
+        prev.type === 'cron'
+          ? prev
+          : { type: 'cron', expression: '0 * * * *', timezone: hostTimezone || 'UTC' }
+      );
+    } else {
+      setScheduleKind((prev) =>
+        prev.type === 'interval' ? prev : { type: 'interval', intervalMinutes: 30 }
+      );
+    }
+  };
+
+  const handleSave = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
+      let payloadKind = null;
+      if (enabled) {
+        if (scheduleKind.type === 'interval') {
+          const mins = Number(scheduleKind.intervalMinutes);
+          if (!Number.isFinite(mins) || mins < 1 || mins > 1440) {
+            throw new Error('Interval must be between 1 minute and 24 hours.');
+          }
+          payloadKind = { type: 'interval', intervalMinutes: mins };
+        } else {
+          const expr = (scheduleKind.expression || '').trim();
+          const tz = (scheduleKind.timezone || '').trim();
+          if (!expr) throw new Error('Cron expression is required.');
+          if (!tz) throw new Error('Timezone is required.');
+          payloadKind = { type: 'cron', expression: expr, timezone: tz };
+        }
+      }
       await invoke('workspace_set_schedule', {
         workspaceId,
-        enabled,
-        intervalMinutes: Number(intervalMinutes),
+        kind: payloadKind,
       });
       onSaved?.();
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to save schedule.'));
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to save schedule.');
     } finally {
       setBusy(false);
     }
-  }, [enabled, intervalMinutes, workspaceId, onSaved]);
+  }, [enabled, scheduleKind, workspaceId, onSaved]);
 
   const handleTogglePaused = useCallback(async () => {
     setBusy(true);
@@ -492,13 +608,13 @@ const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
 
   const dirty =
     enabled !== !!snapshot?.scheduleEnabled
-    || Number(intervalMinutes) !== Number(snapshot?.intervalMinutes ?? 30);
+    || JSON.stringify(scheduleKind) !== JSON.stringify(initialScheduleKindFromSnapshot(snapshot));
 
   return (
     <div className={styles.sectionRoot}>
       <h3 className={styles.sectionTitle}>Schedule</h3>
       <p className={styles.sectionDescription}>
-        When enabled, the main agent runs every <em>N</em> minutes. Sub-agents are invoked on demand by the main agent — they don&apos;t have their own schedules.
+        When enabled, the main agent runs on the chosen schedule. Sub-agents are invoked on demand by the main agent — they don&apos;t have their own schedules.
       </p>
 
       <div className={styles.field}>
@@ -520,17 +636,121 @@ const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
       </div>
 
       <div className={styles.field}>
-        <label className={styles.label} htmlFor="ws-interval">Interval</label>
-        <IntervalSelect
-          id="ws-interval"
-          value={intervalMinutes}
-          onChange={setIntervalMinutes}
+        <label className={styles.label} htmlFor="ws-schedule-type">Schedule type</label>
+        <select
+          id="ws-schedule-type"
+          className={styles.input}
+          value={scheduleKind.type}
+          onChange={(e) => updateKindType(e.target.value)}
           disabled={busy || !enabled}
-        />
-        <span className={styles.hint}>
-          {enabled ? 'How often the main agent runs while not paused.' : 'Stored for later if you re-enable scheduling.'}
-        </span>
+        >
+          <option value="interval">Interval (every N minutes, anchored to last completion)</option>
+          <option value="cron">Cron (fire at a specific time / day)</option>
+        </select>
       </div>
+
+      {scheduleKind.type === 'interval' && (
+        <div className={styles.field}>
+          <label className={styles.label} htmlFor="ws-interval">Interval</label>
+          <IntervalSelect
+            id="ws-interval"
+            value={scheduleKind.intervalMinutes}
+            onChange={(v) =>
+              setScheduleKind((prev) => ({ ...prev, intervalMinutes: Number(v) }))
+            }
+            disabled={busy || !enabled}
+          />
+          <span className={styles.hint}>
+            {enabled
+              ? 'How often the main agent runs while not paused. Anchored to the previous completion.'
+              : 'Stored for later if you re-enable scheduling.'}
+          </span>
+        </div>
+      )}
+
+      {scheduleKind.type === 'cron' && (
+        <>
+          <div className={styles.field}>
+            <label className={styles.label} htmlFor="ws-cron-preset">Common patterns</label>
+            <select
+              id="ws-cron-preset"
+              className={styles.input}
+              value=""
+              onChange={(e) => {
+                if (!e.target.value) return;
+                setScheduleKind((prev) => ({ ...prev, expression: e.target.value }));
+              }}
+              disabled={busy || !enabled}
+            >
+              <option value="">Pick a preset or write your own below…</option>
+              {CRON_PRESETS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label} ({p.value})</option>
+              ))}
+            </select>
+          </div>
+
+          <div className={styles.field}>
+            <label className={styles.label} htmlFor="ws-cron-expr">
+              Cron expression (5 fields: minute hour day-of-month month day-of-week)
+            </label>
+            <input
+              id="ws-cron-expr"
+              type="text"
+              className={styles.input}
+              value={scheduleKind.expression || ''}
+              onChange={(e) =>
+                setScheduleKind((prev) => ({ ...prev, expression: e.target.value }))
+              }
+              placeholder="e.g. 0 9 * * 1-5"
+              disabled={busy || !enabled}
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="off"
+            />
+          </div>
+
+          <div className={styles.field}>
+            <label className={styles.label} htmlFor="ws-cron-tz">Timezone (IANA)</label>
+            <input
+              id="ws-cron-tz"
+              type="text"
+              className={styles.input}
+              value={scheduleKind.timezone || ''}
+              onChange={(e) =>
+                setScheduleKind((prev) => ({ ...prev, timezone: e.target.value }))
+              }
+              placeholder="e.g. America/New_York"
+              disabled={busy || !enabled}
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="off"
+            />
+            <span className={styles.hint}>
+              Defaults to your system timezone ({hostTimezone}). Use any IANA name like
+              {' '}<code>UTC</code>, <code>Europe/Madrid</code>, etc.
+            </span>
+          </div>
+
+          <div className={styles.field}>
+            <label className={styles.label}>Next 3 fire times</label>
+            {previewError && (
+              <div className={styles.errorBanner}>{previewError}</div>
+            )}
+            {!previewError && previewTimes.length === 0 && (
+              <span className={styles.hint}>
+                Enter a valid expression + timezone to see the next runs.
+              </span>
+            )}
+            {!previewError && previewTimes.length > 0 && (
+              <ul className={styles.cronPreviewList}>
+                {previewTimes.map((ms) => (
+                  <li key={ms}>{formatUnixMsForUserLocale(ms)}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
 
       {snapshot?.scheduleEnabled && (
         <div className={styles.field}>

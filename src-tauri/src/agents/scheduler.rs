@@ -185,20 +185,27 @@ impl Scheduler {
     ///
     /// * `instance_id` - The instance to mark complete
     /// * `success` - Whether the run was successful
-    /// * `interval_ms` - The interval in milliseconds until the next run
-    pub fn complete_agent(&mut self, instance_id: &str, success: bool, interval_ms: u64) {
+    /// * `next_run_at_unix_ms` - Wall-clock target for the next fire,
+    ///   computed by `agents::schedule::compute_next_run_at` against the
+    ///   workspace's current `ScheduleKind`. The scheduler translates
+    ///   this into an `Instant` via `set_instance_next_run_at`.
+    pub fn complete_agent(&mut self, instance_id: &str, success: bool, next_run_at_unix_ms: i64) {
         if let Some(instance) = self.instances.get_mut(instance_id) {
             instance.is_running = false;
             // Clear the one-shot manual-run flag: a paused instance that
             // ran via `force_ready` should drop back to paused, not keep
             // ticking.
             instance.manual_run_pending = false;
-            instance.schedule_next(interval_ms);
-
             if !success {
                 // Could track consecutive failures here if needed
             }
         }
+
+        // Seed the in-memory next_run_at from the wall-clock target so
+        // both interval and cron modes share one code path. Past
+        // targets clear next_run_at to "ready-now", matching the
+        // catch-up semantic.
+        self.set_instance_next_run_at(instance_id, Some(next_run_at_unix_ms));
 
         if self.running.as_ref() == Some(&instance_id.to_string()) {
             self.running = None;
@@ -349,7 +356,7 @@ mod tests {
     use super::*;
 
     fn create_test_definition() -> AgentDefinition {
-        AgentDefinition::new("test-agent", "Test Agent", 60_000).with_description("A test agent")
+        AgentDefinition::new("test-agent", "Test Agent").with_description("A test agent")
     }
 
     #[test]
@@ -408,7 +415,8 @@ mod tests {
         assert!(next.is_none());
 
         // After completion, should be scheduled for later (not immediately ready)
-        scheduler.complete_agent("test-agent:space1:room1", true, 60_000);
+        let target = chrono::Utc::now().timestamp_millis() + 60_000;
+        scheduler.complete_agent("test-agent:space1:room1", true, target);
         let next = scheduler.next_ready();
         assert!(next.is_none()); // Scheduled for 60 seconds later
     }
@@ -430,7 +438,8 @@ mod tests {
         assert!(second.is_none());
 
         // Complete first
-        scheduler.complete_agent(&first.unwrap(), true, 60_000);
+        let target = chrono::Utc::now().timestamp_millis() + 60_000;
+        scheduler.complete_agent(&first.unwrap(), true, target);
 
         // Now second should work (but it's scheduled for later)
         // Both instances were scheduled, so they'll run based on next_run_at

@@ -52,8 +52,12 @@ pub struct WorkspaceSchedule {
     pub enabled: bool,
     #[serde(default)]
     pub paused: bool,
+    /// How the next run is computed. `Interval` (current behavior) fires
+    /// `N` minutes after the previous completion. `Cron` fires at the
+    /// next wall-clock time matching a Vixie-style 5-field expression in
+    /// a user-chosen IANA timezone.
     #[serde(default)]
-    pub interval_minutes: u32,
+    pub kind: ScheduleKind,
     /// Unix-ms wall-clock time when this workspace's manager should run
     /// next. `None` means "as soon as possible" — used for first-time
     /// scheduling before any tick has happened, and as the explicit
@@ -67,6 +71,41 @@ pub struct WorkspaceSchedule {
     /// instance so the live schedule resumes from disk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at_unix_ms: Option<i64>,
+}
+
+/// Discriminated union describing *how* the manager's next run is
+/// computed. Stored inline on [`WorkspaceSchedule`] and consumed by
+/// [`crate::agents::schedule::compute_next_run_at`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ScheduleKind {
+    /// Fire `N` minutes after the previous completion. Stable in the
+    /// face of long-running tasks: a tick that takes 10 minutes pushes
+    /// the next fire 10 minutes later, guaranteeing inter-run quiet
+    /// time. Doesn't let the user pin to a particular clock-time — for
+    /// that, use `Cron`.
+    Interval {
+        #[serde(default)]
+        interval_minutes: u32,
+    },
+    /// Fire at the next wall-clock time matching a 5-field Vixie cron
+    /// expression in the given IANA timezone (e.g. `0 9 * * 1-5` in
+    /// `America/New_York` = weekdays at 9am NY-local across DST).
+    Cron {
+        expression: String,
+        /// IANA timezone name. Empty / unknown values are rejected by
+        /// `compute_next_run_at` at save time so an invalid string can't
+        /// silently fall through to UTC.
+        timezone: String,
+    },
+}
+
+impl Default for ScheduleKind {
+    fn default() -> Self {
+        Self::Interval {
+            interval_minutes: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

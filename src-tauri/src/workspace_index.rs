@@ -16,7 +16,10 @@ pub struct WorkspaceLocator {
     pub default_agent_id: String,
     pub schedule_enabled: bool,
     pub schedule_paused: bool,
-    pub interval_minutes: Option<u32>,
+    /// Snapshot of the workspace's schedule mode (interval vs cron) for
+    /// quick reads by Fleet/list endpoints. `None` when the workspace
+    /// isn't scheduled. Refreshed via `insert_config`.
+    pub schedule_kind: Option<crate::config::workspace_config::ScheduleKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,8 +132,8 @@ impl WorkspaceIndex {
                 default_agent_id: config.default_agent_id.clone(),
                 schedule_enabled: config.schedule.enabled,
                 schedule_paused: config.schedule.paused,
-                interval_minutes: if config.schedule.enabled {
-                    Some(config.schedule.interval_minutes)
+                schedule_kind: if config.schedule.enabled {
+                    Some(config.schedule.kind.clone())
                 } else {
                     None
                 },

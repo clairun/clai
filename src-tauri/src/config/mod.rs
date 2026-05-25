@@ -651,7 +651,13 @@ mod tests {
         assert_eq!(skills[0].source_id, source.id);
         assert_eq!(skills[0].source_path, "code-review/SKILL.md");
 
-        let mut agent = AgentConfig::new("Reviewer".to_string(), "Base prompt".to_string(), 5);
+        let mut agent = AgentConfig::new(
+            "Reviewer".to_string(),
+            "Base prompt".to_string(),
+            crate::config::workspace_config::ScheduleKind::Interval {
+                interval_minutes: 5,
+            },
+        );
         agent.selected_skill_ids = vec![skills[0].id.clone()];
         let prompt = agent_instructions_with_skills(&config, &agent);
 
@@ -921,7 +927,13 @@ mod tests {
     #[test]
     fn agent_instructions_returns_base_when_no_skills_selected() {
         let config = ClaiConfig::default();
-        let agent = AgentConfig::new("R".to_string(), "BASE-PROMPT".to_string(), 5);
+        let agent = AgentConfig::new(
+            "R".to_string(),
+            "BASE-PROMPT".to_string(),
+            crate::config::workspace_config::ScheduleKind::Interval {
+                interval_minutes: 5,
+            },
+        );
         let prompt = agent_instructions_with_skills(&config, &agent);
         assert_eq!(prompt, "BASE-PROMPT");
         assert!(!prompt.contains("Selected Skills"));
@@ -932,7 +944,13 @@ mod tests {
         // Stale skill id in agent config must not corrupt the prompt — it
         // should silently fall through to the base description.
         let config = ClaiConfig::default();
-        let mut agent = AgentConfig::new("R".to_string(), "BASE".to_string(), 5);
+        let mut agent = AgentConfig::new(
+            "R".to_string(),
+            "BASE".to_string(),
+            crate::config::workspace_config::ScheduleKind::Interval {
+                interval_minutes: 5,
+            },
+        );
         agent.selected_skill_ids = vec!["nonexistent:skill-id".to_string()];
         let prompt = agent_instructions_with_skills(&config, &agent);
         assert_eq!(prompt, "BASE");

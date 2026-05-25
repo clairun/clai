@@ -305,6 +305,8 @@ pub fn run() {
             commands::workspace::workspace_run_now,
             commands::workspace::workspace_set_schedule,
             commands::workspace::workspace_set_schedule_paused,
+            commands::workspace::workspace_preview_schedule,
+            commands::workspace::workspace_host_timezone,
             commands::workspace::workspace_delete,
             commands::workspace::workspace_set_title,
             commands::workspace_agents::workspace_get_agent,

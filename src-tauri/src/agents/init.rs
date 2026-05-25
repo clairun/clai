@@ -13,13 +13,9 @@ use crate::AppState;
 
 #[allow(dead_code)]
 fn agent_config_to_definition(config: &AgentConfig) -> AgentDefinition {
-    AgentDefinition::new(
-        &config.id,
-        &config.name,
-        (config.interval_minutes as u64) * 60 * 1000,
-    )
-    .with_description(&config.description)
-    .with_tools(config.required_tools())
+    AgentDefinition::new(&config.id, &config.name)
+        .with_description(&config.description)
+        .with_tools(config.required_tools())
 }
 
 /// No-op kept so the synchronous lib.rs setup path stays untouched. The real
@@ -97,12 +93,7 @@ pub fn apply_workspace_schedule(
     if execution.web.enabled {
         tools.push("web");
     }
-    let definition = AgentDefinition::new(
-        &agent.id,
-        &agent.name,
-        (config.schedule.interval_minutes as u64).max(1) * 60 * 1000,
-    )
-    .with_tools(tools);
+    let definition = AgentDefinition::new(&agent.id, &agent.name).with_tools(tools);
     sched.register_definition(definition);
 
     if agent.enabled {
@@ -151,7 +142,13 @@ mod tests {
     use crate::agents::create_shared_scheduler;
 
     fn create_test_agent_config() -> AgentConfig {
-        AgentConfig::new("Test Agent".to_string(), "Test description".to_string(), 5)
+        AgentConfig::new(
+            "Test Agent".to_string(),
+            "Test description".to_string(),
+            crate::config::workspace_config::ScheduleKind::Interval {
+                interval_minutes: 5,
+            },
+        )
     }
 
     #[test]
@@ -161,7 +158,6 @@ mod tests {
 
         assert_eq!(definition.id, agent.id);
         assert_eq!(definition.name, "Test Agent");
-        assert_eq!(definition.interval_ms, 5 * 60 * 1000);
         assert_eq!(
             definition.required_tools,
             vec!["netdata", "dashboard", "tabs", "fs"]
