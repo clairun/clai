@@ -224,6 +224,13 @@ pub async fn assistant_list_tool_calls(
     repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref()).await
 }
 
+/// Error string returned by [`assistant_send_message`] when the session
+/// already has a non-terminal run. The frontend matches on this exact
+/// prefix to distinguish "wait, the agent is still working" from generic
+/// failures so it can keep the input disabled instead of surfacing a
+/// red error toast.
+pub const ASSISTANT_RUN_IN_FLIGHT_ERROR: &str = "RUN_IN_FLIGHT: ";
+
 #[tauri::command]
 pub async fn assistant_send_message(
     session_id: String,
@@ -233,6 +240,18 @@ pub async fn assistant_send_message(
     state: State<'_, AppState>,
 ) -> Result<AssistantSendMessageResult, String> {
     let (target_pool, mut session) = session_pool(state.inner(), &session_id).await?;
+
+    // Server-side belt-and-braces guard. The FE disables the input while
+    // a run is in flight, but multi-tab usage, race conditions on
+    // network-slow turns, and future programmatic callers all need the
+    // backend to reject too. When we add user-message queueing later
+    // this is the natural spot to enqueue instead of refusing.
+    if repository::session_has_active_run(&target_pool, &session.id).await? {
+        return Err(format!(
+            "{}A run is already in flight for this session — wait for it to finish or cancel it.",
+            ASSISTANT_RUN_IN_FLIGHT_ERROR
+        ));
+    }
 
     // If tied to a workspace agent (manager), sync execution config with the
     // latest workspace_agents row so config changes take effect immediately.

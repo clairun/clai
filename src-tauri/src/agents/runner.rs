@@ -266,24 +266,7 @@ async fn run_next_agent(
 
     let connections = resolve_agent_connections(state.inner(), &agent_config)?;
 
-    let existing_session = find_background_session(
-        &workspace_pool,
-        &agent_config,
-        if space_id.is_empty() {
-            None
-        } else {
-            Some(space_id.as_str())
-        },
-        if room_id.is_empty() {
-            None
-        } else {
-            Some(room_id.as_str())
-        },
-    )
-    .await?;
-    let _ = existing_session;
-
-    let session = ensure_background_session(
+    let session = ensure_workspace_manager_session(
         app_handle,
         &workspace_pool,
         &agent_config,
@@ -369,8 +352,28 @@ impl std::fmt::Display for RunnerError {
 
 impl std::error::Error for RunnerError {}
 
+/// Find-or-create the canonical (workspace, manager) session for a
+/// scheduled run.
+///
+/// This is the **same** session row that the workspace card-click path
+/// resolves via `commands::workspace::find_workspace_session` (Interactive
+/// kind, `automation_id == manager_id`, workspace matches). User chats
+/// and scheduler ticks both write here, so the user sees one continuous
+/// thread regardless of how the turn was triggered.
+///
+/// Reconcile rules: title and most context fields track the live agent
+/// config; **dynamic per-run fields are preserved** when an existing row
+/// is found:
+/// - `cli_session_id`: the Claude Code CLI session id, set on first turn
+///   and reused across ticks so the model has its own conversation state
+///   to resume. Wiping this on every reconcile would force a fresh CLI
+///   session every 5 min — i.e. the model loses its prior reasoning.
+/// - `inter_agent_call`: only meaningful inside a synchronous inter-agent
+///   call frame; outside one it's already `None`, and overwriting an
+///   in-flight value here would be a data race anyway (this function is
+///   called between turns, never during one).
 #[allow(clippy::too_many_arguments)]
-async fn ensure_background_session(
+async fn ensure_workspace_manager_session(
     app_handle: &AppHandle,
     pool: &DbPool,
     agent_config: &crate::config::AgentConfig,
@@ -452,21 +455,21 @@ async fn ensure_background_session(
         workspace_agents,
     };
 
-    let existing = find_background_session(
-        pool,
-        agent_config,
-        session_space_id.as_deref(),
-        session_room_id.as_deref(),
-    )
-    .await?;
+    let existing = find_manager_session(pool, agent_config).await?;
 
     if let Some(session) = existing {
+        // Preserve dynamic per-run fields that aren't part of the "config
+        // reconcile" — see the doc comment above.
+        let mut merged = desired_context.clone();
+        merged.cli_session_id = session.context.cli_session_id.clone();
+        merged.inter_agent_call = session.context.inter_agent_call.clone();
+
         let session = if session.title.as_deref() != Some(agent_config.name.as_str())
-            || session.context != desired_context
+            || session.context != merged
         {
             let mut updated = session;
             updated.title = Some(agent_config.name.clone());
-            updated.context = desired_context.clone();
+            updated.context = merged;
             updated.updated_at = chrono::Utc::now().timestamp_millis();
             repository::update_session(pool, &updated)
                 .await
@@ -491,7 +494,9 @@ async fn ensure_background_session(
     let session = repository::create_session(
         pool,
         CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
+            // Interactive — the user can type into this same session from
+            // the workspace's chat UI. See the doc comment above.
+            kind: SessionKind::Interactive,
             title: Some(agent_config.name.clone()),
             context: desired_context,
         },
@@ -512,25 +517,21 @@ async fn ensure_background_session(
     Ok(session)
 }
 
-async fn find_background_session(
+/// Look up the canonical (workspace, manager) session by `automation_id`.
+///
+/// Kind is intentionally not part of the filter: legacy rows may still be
+/// `BackgroundJob` and we want to keep using them rather than creating a
+/// parallel Interactive row. Going forward, new rows are created Interactive
+/// (see `ensure_workspace_manager_session`).
+async fn find_manager_session(
     pool: &DbPool,
     agent_config: &crate::config::AgentConfig,
-    space_id: Option<&str>,
-    room_id: Option<&str>,
 ) -> Result<Option<crate::assistant::types::AssistantSession>, RunnerError> {
-    let session_space_id = space_id.map(str::to_string);
-    let session_room_id = room_id.map(str::to_string);
-
     Ok(repository::list_sessions(pool)
         .await
         .map_err(RunnerError::AssistantPersistence)?
         .into_iter()
-        .find(|session| {
-            session.kind == SessionKind::BackgroundJob
-                && session.context.space_id == session_space_id
-                && session.context.room_id == session_room_id
-                && session.context.automation_id.as_deref() == Some(agent_config.id.as_str())
-        }))
+        .find(|session| session.context.automation_id.as_deref() == Some(agent_config.id.as_str())))
 }
 
 fn resolve_agent_connections(

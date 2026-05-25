@@ -334,6 +334,28 @@ pub async fn list_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantR
     rows.iter().map(map_run_row).collect()
 }
 
+/// Whether the session currently has a non-terminal run (queued, running,
+/// or waiting for a tool). Used by `assistant_send_message` to reject new
+/// user input while the agent is still working on the previous turn —
+/// `Run`-level locking, not `Session`-level, because a session has at
+/// most one in-flight run at any given moment by construction.
+pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<bool, String> {
+    let (count,): (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM assistant_runs
+        WHERE session_id = ?
+          AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
+        "#,
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to check for active runs: {}", e))?;
+
+    Ok(count > 0)
+}
+
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"

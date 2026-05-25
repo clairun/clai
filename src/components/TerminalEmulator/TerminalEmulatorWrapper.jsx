@@ -21,17 +21,53 @@ const getEnabledMcpServerIds = (tab) => {
   return attached.filter((id) => !disabled.has(id));
 };
 
+// Error prefix returned by the backend's `assistant_send_message` when a
+// run is already in flight for the session. Keep in sync with
+// `ASSISTANT_RUN_IN_FLIGHT_ERROR` in `commands/assistant.rs`.
+const RUN_IN_FLIGHT_ERROR_PREFIX = 'RUN_IN_FLIGHT: ';
+
+const isRunInFlightError = (err) => {
+  const msg = typeof err === 'string' ? err : (err?.message || '');
+  return msg.startsWith(RUN_IN_FLIGHT_ERROR_PREFIX);
+};
+
 const TerminalEmulatorWrapper = () => {
   const location = useLocation();
   const { tabs, activeTabId, updateTabContext } = useTabManager();
   const { openChat } = useChatManager();
   const { isFleetRoute, selectedAgent, refresh: refreshFleet } = useFleet();
-  const { ensureSession } = useAssistantSession(activeTabId);
+  const { ensureSession, isStreaming: tabIsStreaming } = useAssistantSession(activeTabId);
   const workspaceRouteMatch = location.pathname.match(/^\/workspace(?:\/([^/]+))?\/?$/);
   const isWorkspaceRoute = Boolean(workspaceRouteMatch);
   const currentWorkspaceId = workspaceRouteMatch?.[1]
     ? decodeURIComponent(workspaceRouteMatch[1])
     : 'default';
+
+  // Track whether the active route's session has a non-terminal run. We
+  // use this to disable the chat input — the backend additionally rejects
+  // a send while a run is in flight (belt-and-braces), but the visual
+  // cue belongs here so the user can see immediately that the agent is
+  // busy. Per route:
+  //  - workspace: the workspace's canonical manager session, looked up by
+  //    `workspace:<id>` tab-key (Workspace.jsx populates this on load).
+  //  - fleet: the selected agent's `sessionId` once it's been created.
+  //  - default tab: the tab's own session via `useAssistantSession`.
+  const workspaceSessionId = useAssistantStore(
+    (state) => state.activeSessionByTab[`workspace:${currentWorkspaceId}`] || null
+  );
+  const workspaceIsStreaming = useAssistantStore(
+    (state) => (workspaceSessionId ? !!state.sessions[workspaceSessionId]?.isStreaming : false)
+  );
+  const fleetSessionId = selectedAgent?.sessionId || null;
+  const fleetIsStreaming = useAssistantStore(
+    (state) => (fleetSessionId ? !!state.sessions[fleetSessionId]?.isStreaming : false)
+  );
+
+  const inputDisabled = isWorkspaceRoute
+    ? workspaceIsStreaming
+    : isFleetRoute
+      ? fleetIsStreaming
+      : tabIsStreaming;
 
   // Get active tab
   const activeTab = tabs.find(t => t.id === activeTabId);
@@ -131,7 +167,9 @@ const TerminalEmulatorWrapper = () => {
         } catch (err) {
           console.error('[TerminalEmulatorWrapper] Fleet assistant error:', err);
           return {
-            error: typeof err === 'string' ? err : (err?.message || 'Assistant request failed.'),
+            error: isRunInFlightError(err)
+              ? 'The agent is still working on the previous turn — wait for it to finish.'
+              : typeof err === 'string' ? err : (err?.message || 'Assistant request failed.'),
           };
         }
       }
@@ -165,7 +203,9 @@ const TerminalEmulatorWrapper = () => {
         } catch (err) {
           console.error('[TerminalEmulatorWrapper] Workspace assistant error:', err);
           return {
-            error: typeof err === 'string' ? err : (err?.message || 'Assistant request failed.'),
+            error: isRunInFlightError(err)
+              ? 'The agent is still working on the previous turn — wait for it to finish.'
+              : typeof err === 'string' ? err : (err?.message || 'Assistant request failed.'),
           };
         }
       }
@@ -215,7 +255,12 @@ const TerminalEmulatorWrapper = () => {
 
   // If no active tab, render terminal without context
   if (!activeTab) {
-    return <TerminalEmulator onSendToChat={handleSendToAgent} />;
+    return (
+      <TerminalEmulator
+        onSendToChat={handleSendToAgent}
+        disabled={inputDisabled}
+      />
+    );
   }
 
   // Wrap terminal with the active tab's context
@@ -225,7 +270,10 @@ const TerminalEmulatorWrapper = () => {
       initialContext={activeTab.context}
       onContextChange={handleContextChange}
     >
-      <TerminalEmulator onSendToChat={handleSendToAgent} />
+      <TerminalEmulator
+        onSendToChat={handleSendToAgent}
+        disabled={inputDisabled}
+      />
     </TabContextProvider>
   );
 };

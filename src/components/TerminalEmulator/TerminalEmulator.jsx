@@ -13,7 +13,7 @@ import ContextPanel from '../ContextPanel/ContextPanel';
 import { SettingsModal } from '../Settings';
 import styles from './TerminalEmulator.module.css';
 
-const TerminalEmulator = ({ onSendToChat }) => {
+const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
   const { executeCommand, commandHistory } = useCommand();
   const { handleLayoutCommand, getActiveTab } = useTabManager();
   const { setActiveContext, openChat, isCurrentChatOpen } = useChatManager();
@@ -149,6 +149,18 @@ const TerminalEmulator = ({ onSendToChat }) => {
   const handleCommandExecution = async (input) => {
     const trimmed = input.trim();
     if (!trimmed) return;
+
+    // Chat is disabled while the active session has a run in flight. Slash
+    // commands stay live (they're local UI actions, not LLM turns) — so
+    // we only gate the free-text chat path. The server has a matching
+    // guard in `assistant_send_message`; this is the visual half.
+    if (disabled && !trimmed.startsWith('/')) {
+      addOutputMessage(
+        'The agent is still working on the previous turn — wait for it to finish.',
+        'warning',
+      );
+      return;
+    }
 
     // Clear input immediately and reset textarea height
     setInputValue('');
@@ -405,11 +417,14 @@ const TerminalEmulator = ({ onSendToChat }) => {
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
             onClick={(e) => e.stopPropagation()}
-            placeholder={isFleetRoute
-              ? 'Message the selected agent...'
-              : isWorkspaceRoute
-                ? 'Message this workspace...'
-                : 'Type to chat, or /help for commands...'}
+            aria-disabled={disabled || undefined}
+            placeholder={disabled
+              ? 'Agent is working — input will re-enable when the run completes…'
+              : isFleetRoute
+                ? 'Message the selected agent...'
+                : isWorkspaceRoute
+                  ? 'Message this workspace...'
+                  : 'Type to chat, or /help for commands...'}
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
