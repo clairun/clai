@@ -26,7 +26,14 @@ const isJsonLike = (viewer, path) => {
   return path.toLowerCase().endsWith('.json');
 };
 
-const renderBody = (file) => {
+const looksLikeHtml = (viewer, path) => {
+  if (viewer === 'html') return true;
+  if (!path) return false;
+  const lower = path.toLowerCase();
+  return lower.endsWith('.html') || lower.endsWith('.htm');
+};
+
+const renderBody = (file, htmlMode) => {
   if (!file) return null;
   if (file.error) {
     return <div className={styles.error}>{file.error}</div>;
@@ -38,6 +45,19 @@ const renderBody = (file) => {
     return (
       <div className={styles.markdownBody}>
         <MarkdownMessage content={file.content} />
+      </div>
+    );
+  }
+  if (looksLikeHtml(file.viewer, file.path) && htmlMode === 'preview') {
+    return (
+      <div className={styles.htmlBody}>
+        <iframe
+          className={styles.htmlFrame}
+          title={`${file.path} preview`}
+          srcDoc={file.content}
+          sandbox=""
+          referrerPolicy="no-referrer"
+        />
       </div>
     );
   }
@@ -57,6 +77,7 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [htmlMode, setHtmlMode] = useState('preview');
 
   useEffect(() => {
     if (!entry?.path) {
@@ -91,19 +112,22 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
     };
   }, [workspaceId, entry?.path, entry?.viewer]);
 
+  useEffect(() => {
+    setHtmlMode('preview');
+  }, [entry?.path]);
+
   if (!entry) return null;
 
   const kindLabel = kind === 'memory' ? 'Memory' : 'Artifact';
+  const isHtml = looksLikeHtml(file?.viewer || entry.viewer, file?.path || entry.path);
 
   return (
-    <aside
-      className={styles.panel}
-      role="region"
-      aria-label={`${kindLabel}: ${entry.name}`}
-    >
+    <aside className={styles.panel} role="region" aria-label={`${kindLabel}: ${entry.name}`}>
       <div className={styles.header}>
         <div className={styles.headerLeft}>
-          <span className={styles.title} title={entry.name}>{entry.name}</span>
+          <span className={styles.title} title={entry.name}>
+            {entry.name}
+          </span>
           <span className={styles.kindPill}>{kindLabel}</span>
         </div>
         <button
@@ -121,7 +145,9 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
         {(entry.path || entry.updatedAt) && (
           <div className={styles.bodyMeta}>
             {entry.path && (
-              <span className={styles.path} title={entry.path}>{entry.path}</span>
+              <span className={styles.path} title={entry.path}>
+                {entry.path}
+              </span>
             )}
             {entry.updatedAt && (
               <>
@@ -129,11 +155,29 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
                 <span>{formatTimestamp(entry.updatedAt)}</span>
               </>
             )}
+            {isHtml && (
+              <span className={styles.viewSwitch} role="group" aria-label="HTML view mode">
+                <button
+                  type="button"
+                  className={`${styles.viewSwitchButton} ${htmlMode === 'preview' ? styles.viewSwitchButtonActive : ''}`}
+                  onClick={() => setHtmlMode('preview')}
+                >
+                  Preview
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.viewSwitchButton} ${htmlMode === 'source' ? styles.viewSwitchButtonActive : ''}`}
+                  onClick={() => setHtmlMode('source')}
+                >
+                  Source
+                </button>
+              </span>
+            )}
           </div>
         )}
         {loading && <div className={styles.empty}>Loading…</div>}
         {!loading && error && <div className={styles.error}>{error}</div>}
-        {!loading && !error && renderBody(file)}
+        {!loading && !error && renderBody(file, htmlMode)}
       </div>
     </aside>
   );

@@ -458,6 +458,10 @@ fn viewer_for_path(path: &Path) -> String {
         return "markdown".to_string();
     }
 
+    if ext == "html" || ext == "htm" {
+        return "html".to_string();
+    }
+
     if ext == "json" {
         return "json".to_string();
     }
