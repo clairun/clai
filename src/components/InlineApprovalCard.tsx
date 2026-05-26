@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   listPendingPermissionRequests,
@@ -8,10 +8,42 @@ import styles from './InlineApprovalCard.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
 
-const allowOnce = () => ({ kind: 'allowOnce' });
-const denyOnce = () => ({ kind: 'denyOnce' });
-const allowAlways = (prefix) => ({ kind: 'allowAlways', scope: 'agent', prefix });
-const denyAlways = (prefix) => ({ kind: 'denyAlways', scope: 'agent', prefix });
+type DecisionKind = 'allowOnce' | 'denyOnce' | 'allowAlways' | 'denyAlways';
+interface Decision {
+  kind: DecisionKind;
+  scope?: 'agent';
+  prefix?: string;
+}
+
+interface PermissionSegment {
+  text: string;
+  kind: 'opaque' | string;
+  suggestedPrefix?: string | null;
+}
+
+interface PermissionRequest {
+  requestId: string;
+  workspaceId: string;
+  command: string;
+  segments: PermissionSegment[];
+  agentName?: string | null;
+}
+
+interface SegmentCellState {
+  prefix: string;
+  decision: DecisionKind | null;
+}
+
+type CardState = Record<number, SegmentCellState>;
+
+const allowOnce = (): Decision => ({ kind: 'allowOnce' });
+const denyOnce = (): Decision => ({ kind: 'denyOnce' });
+const allowAlways = (prefix: string): Decision => ({ kind: 'allowAlways', scope: 'agent', prefix });
+const denyAlways = (prefix: string): Decision => ({ kind: 'denyAlways', scope: 'agent', prefix });
+
+interface InlineApprovalCardProps {
+  workspaceId: string | null;
+}
 
 /**
  * Inline permission-approval UI, rendered directly inside a workspace's
@@ -26,12 +58,12 @@ const denyAlways = (prefix) => ({ kind: 'denyAlways', scope: 'agent', prefix });
  * chip near the input bar surfaces the count whenever there are
  * pending requests, with click-to-scroll into view.
  */
-const InlineApprovalCard = ({ workspaceId }) => {
-  const [requests, setRequests] = useState([]);
-  const [perCardState, setPerCardState] = useState({});
-  const [submittingId, setSubmittingId] = useState(null);
-  const [error, setError] = useState(null);
-  const firstCardRef = useRef(null);
+const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
+  const [requests, setRequests] = useState<PermissionRequest[]>([]);
+  const [perCardState, setPerCardState] = useState<Record<string, CardState>>({});
+  const [submittingId, setSubmittingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
 
   // Subscribe to backend approval-request events AND seed from the
@@ -61,7 +93,7 @@ const InlineApprovalCard = ({ workspaceId }) => {
         // Non-fatal: events will still populate as requests arrive.
       });
 
-    const unlistenPromise = listen(PERMISSION_REQUEST_EVENT, (event) => {
+    const unlistenPromise = listen<PermissionRequest>(PERMISSION_REQUEST_EVENT, (event) => {
       const req = event.payload;
       if (!req || !req.requestId || !Array.isArray(req.segments)) return;
       if (req.workspaceId !== workspaceId) return;
@@ -83,7 +115,7 @@ const InlineApprovalCard = ({ workspaceId }) => {
       let changed = false;
       for (const req of requests) {
         if (next[req.requestId]) continue;
-        const initial = {};
+        const initial: CardState = {};
         req.segments.forEach((seg, idx) => {
           initial[idx] = {
             prefix: seg.suggestedPrefix || '',
@@ -115,12 +147,12 @@ const InlineApprovalCard = ({ workspaceId }) => {
     }
   }, [requests.length]);
 
-  const dismissRequest = useCallback((requestId) => {
+  const dismissRequest = useCallback((requestId: string) => {
     setRequests((current) => current.filter((q) => q.requestId !== requestId));
   }, []);
 
   const sendDecisions = useCallback(
-    async (requestId, decisions) => {
+    async (requestId: string, decisions: Decision[]) => {
       if (submittingId) return;
       setSubmittingId(requestId);
       setError(null);
@@ -128,7 +160,9 @@ const InlineApprovalCard = ({ workspaceId }) => {
         await submitPermissionDecision(requestId, decisions);
         dismissRequest(requestId);
       } catch (e) {
-        setError(typeof e === 'string' ? e : e?.message || 'Failed to submit decision');
+        const message =
+          typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision';
+        setError(message);
       } finally {
         setSubmittingId(null);
       }
@@ -136,25 +170,26 @@ const InlineApprovalCard = ({ workspaceId }) => {
     [submittingId, dismissRequest],
   );
 
-  const setSegmentPrefix = useCallback((requestId, idx, prefix) => {
+  const setSegmentPrefix = useCallback((requestId: string, idx: number, prefix: string) => {
     setPerCardState((current) => ({
       ...current,
       [requestId]: {
         ...current[requestId],
-        [idx]: { ...current[requestId]?.[idx], prefix },
+        [idx]: { ...current[requestId]?.[idx], decision: current[requestId]?.[idx]?.decision ?? null, prefix },
       },
     }));
   }, []);
 
   const handleSegmentDecision = useCallback(
-    (req, idx, kind) => {
+    (req: PermissionRequest, idx: number, kind: DecisionKind) => {
       if (submittingId) return;
       setPerCardState((current) => {
-        const cardState = current[req.requestId] || {};
-        const updatedCard = {
-          ...cardState,
-          [idx]: { ...cardState[idx], decision: kind },
+        const cardState: CardState = current[req.requestId] || {};
+        const updatedCell: SegmentCellState = {
+          prefix: cardState[idx]?.prefix ?? '',
+          decision: kind,
         };
+        const updatedCard: CardState = { ...cardState, [idx]: updatedCell };
         const updated = { ...current, [req.requestId]: updatedCard };
 
         const allDecided = req.segments.every((_, i) => updatedCard[i]?.decision);
@@ -163,11 +198,16 @@ const InlineApprovalCard = ({ workspaceId }) => {
             const cell = updatedCard[i];
             const prefix = (cell.prefix || '').trim() || seg.text;
             switch (cell.decision) {
-              case 'allowOnce': return allowOnce();
-              case 'denyOnce': return denyOnce();
-              case 'allowAlways': return allowAlways(prefix);
-              case 'denyAlways': return denyAlways(prefix);
-              default: return denyOnce();
+              case 'allowOnce':
+                return allowOnce();
+              case 'denyOnce':
+                return denyOnce();
+              case 'allowAlways':
+                return allowAlways(prefix);
+              case 'denyAlways':
+                return denyAlways(prefix);
+              default:
+                return denyOnce();
             }
           });
           sendDecisions(req.requestId, decisions);
@@ -179,7 +219,7 @@ const InlineApprovalCard = ({ workspaceId }) => {
   );
 
   const denyAll = useCallback(
-    (req) => {
+    (req: PermissionRequest) => {
       const decisions = req.segments.map(() => denyOnce());
       sendDecisions(req.requestId, decisions);
     },

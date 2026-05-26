@@ -8,6 +8,33 @@ import styles from './InlinePathGrantCard.module.css';
 
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
 
+type PathAccess = 'read_only' | 'read_write';
+
+interface PathGrantDecision {
+  kind: 'deny' | 'allowOnce' | 'allowAlways';
+  path?: string;
+  access?: PathAccess;
+  scope?: 'agent';
+}
+
+interface PathGrantRequest {
+  requestId: string;
+  workspaceId: string;
+  requestedPath: string;
+  requestedAccess: PathAccess;
+  agentName?: string | null;
+  reason?: string | null;
+}
+
+interface PathGrantCardState {
+  path: string;
+  access: PathAccess;
+}
+
+interface InlinePathGrantCardProps {
+  workspaceId: string | null;
+}
+
 // Paths that historically hold credentials or secrets. Surfacing this in
 // the modal helps the user decide whether to approve a grant they didn't
 // initiate themselves. We match these as either an exact path or a path
@@ -33,33 +60,36 @@ const SENSITIVE_SUFFIXES = [
 // distinct red warning, separate from "credentials" yellow.
 const OVERLY_BROAD_PATHS = ['/', '/home', '/Users', '/etc', '/usr', '/var'];
 
-const isSensitivePath = (path) => {
+const isSensitivePath = (path: string | null | undefined): boolean => {
   if (!path) return false;
   return SENSITIVE_SUFFIXES.some(
-    (suffix) => path === suffix || path.endsWith(suffix) || path.includes(`${suffix}/`)
+    (suffix) => path === suffix || path.endsWith(suffix) || path.includes(`${suffix}/`),
   );
 };
 
-const isOverlyBroadPath = (path) => {
+const isOverlyBroadPath = (path: string | null | undefined): boolean => {
   if (!path) return false;
   const normalized = path.replace(/\/+$/, '') || '/';
-  // Exact match to a known broad path, OR a $HOME root (e.g. /home/foo
-  // with nothing else appended — covers user-typed `~` after expansion).
   if (OVERLY_BROAD_PATHS.includes(normalized)) return true;
   const homeRootMatch = /^\/(home|Users)\/[^/]+$/.test(normalized);
   return homeRootMatch;
 };
 
-const denyDecision = () => ({ kind: 'deny' });
-const allowOnceDecision = (path, access) => ({ kind: 'allowOnce', path, access });
-const allowAlwaysDecision = (path, access) => ({
+const denyDecision = (): PathGrantDecision => ({ kind: 'deny' });
+const allowOnceDecision = (path: string, access: PathAccess): PathGrantDecision => ({
+  kind: 'allowOnce',
+  path,
+  access,
+});
+const allowAlwaysDecision = (path: string, access: PathAccess): PathGrantDecision => ({
   kind: 'allowAlways',
   path,
   access,
   scope: 'agent',
 });
 
-const accessLabel = (access) => (access === 'read_write' ? 'Read + write' : 'Read only');
+const accessLabel = (access: PathAccess): string =>
+  access === 'read_write' ? 'Read + write' : 'Read only';
 
 /**
  * Inline path-grant approval card. Mirrors the structure of
@@ -72,12 +102,12 @@ const accessLabel = (access) => (access === 'read_write' ? 'Read + write' : 'Rea
  *   - enforces the narrowing invariants client-side (no widening, no
  *     upgrading RO→RW) so the user never gets a confusing backend rejection.
  */
-const InlinePathGrantCard = ({ workspaceId }) => {
-  const [requests, setRequests] = useState([]);
-  const [perCardState, setPerCardState] = useState({});
-  const [submittingId, setSubmittingId] = useState(null);
-  const [error, setError] = useState(null);
-  const firstCardRef = useRef(null);
+const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
+  const [requests, setRequests] = useState<PathGrantRequest[]>([]);
+  const [perCardState, setPerCardState] = useState<Record<string, PathGrantCardState>>({});
+  const [submittingId, setSubmittingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
 
   useEffect(() => {
@@ -99,7 +129,7 @@ const InlinePathGrantCard = ({ workspaceId }) => {
         // Non-fatal — events still populate as new requests arrive.
       });
 
-    const unlistenPromise = listen(PATH_GRANT_REQUEST_EVENT, (event) => {
+    const unlistenPromise = listen<PathGrantRequest>(PATH_GRANT_REQUEST_EVENT, (event) => {
       const req = event.payload;
       if (!req || !req.requestId || !req.requestedPath || !req.requestedAccess) return;
       if (req.workspaceId !== workspaceId) return;
@@ -147,12 +177,12 @@ const InlinePathGrantCard = ({ workspaceId }) => {
     }
   }, [requests.length]);
 
-  const dismissRequest = useCallback((requestId) => {
+  const dismissRequest = useCallback((requestId: string) => {
     setRequests((current) => current.filter((q) => q.requestId !== requestId));
   }, []);
 
   const sendDecision = useCallback(
-    async (requestId, decision) => {
+    async (requestId: string, decision: PathGrantDecision) => {
       if (submittingId) return;
       setSubmittingId(requestId);
       setError(null);
@@ -160,20 +190,29 @@ const InlinePathGrantCard = ({ workspaceId }) => {
         await submitPathGrantDecision(requestId, decision);
         dismissRequest(requestId);
       } catch (e) {
-        setError(typeof e === 'string' ? e : e?.message || 'Failed to submit decision');
+        const message =
+          typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision';
+        setError(message);
       } finally {
         setSubmittingId(null);
       }
     },
-    [submittingId, dismissRequest]
+    [submittingId, dismissRequest],
   );
 
-  const updateCardField = useCallback((requestId, field, value) => {
-    setPerCardState((current) => ({
-      ...current,
-      [requestId]: { ...current[requestId], [field]: value },
-    }));
-  }, []);
+  const updateCardField = useCallback(
+    <K extends keyof PathGrantCardState>(
+      requestId: string,
+      field: K,
+      value: PathGrantCardState[K],
+    ) => {
+      setPerCardState((current) => ({
+        ...current,
+        [requestId]: { ...current[requestId], [field]: value },
+      }));
+    },
+    [],
+  );
 
   if (requests.length === 0) {
     return null;
