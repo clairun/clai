@@ -32,7 +32,7 @@ We can call this work finished when **all** of the following are true:
 4. CI runs `typecheck` + `test` + `gen:bindings` (and fails if bindings drift). Every push is gated.
 5. The 4 highest-traffic UI surfaces (Workspace page, Fleet page, AskUserPanel, ChatMessageList) have component-level tests covering at least their happy path.
 
-We're roughly **50-60%** of the way there as of 2026-05-26. P0 closed cleanly; P1-3 and P1-5 are done; P1-1, P1-2, and P1-4 are partially landed (provider-connection bindings + typed client; AskUserPanel/InlineApprovalCard/InlinePathGrantCard converted to `.tsx`; AskUserPanel covered by component tests). Remaining: MCP/skill/path-grant bindings, the ChatMessageList + WorkspaceFilePreviewPanel + useAssistantSession conversions, and ChatMessageList/InlineApprovalCard tests. All of P2 is still ahead.
+We're roughly **65-70%** of the way there as of 2026-05-26. **P0 and P1 are complete** (the one deliberate carve-out: skill-catalog bindings, deferred under P1-1 because the SkillSourceConfig/SkillDefinition closure is heavy and low-regression-risk). All of P2 is still ahead — the bulk being the remaining `.jsx` → `.tsx` conversions, dropping `allowJs`, provider-adapter tests, and eventual E2E.
 
 ## House rules in effect today
 
@@ -53,55 +53,53 @@ These already apply — don't wait for the roadmap to finish:
 - [x] `src-tauri/tests/prompt_build.rs` covers selected bundled skill content and the no-skill raw-description path through `workspace_agent_runtime_description(...)`.
 - [x] `src/pages/Workspace.jsx` converted to `src/pages/Workspace.tsx` with typed snapshot/state/props around the Workspace page shell.
 
-### P1 — Partially completed 2026-05-26
+### P1 — Completed 2026-05-26
 
-**P1-1. More Tauri command bindings.** _Partial._
+**P1-1. More Tauri command bindings.** _Done (one carve-out)._
 
-- [x] Provider-connection request/response structs (`commands/provider_connections.rs`) + the assistant types they reference (`AuthMode`, `ProtocolFamily`, `ProviderConnection`, `ProviderDescriptor`, `ModelInfo`). `src/assistant/client.ts` provider commands are now typed end-to-end.
-- [ ] MCP server commands.
-- [ ] Skill commands.
-- [ ] Path-grant + permission commands.
+- [x] Provider-connection request/response structs + assistant types (`AuthMode`, `ProtocolFamily`, `ProviderConnection`, `ProviderDescriptor`, `ModelInfo`). `src/assistant/client.ts` typed end-to-end.
+- [x] MCP server commands (`Create/UpdateMcpServerRequest`, `McpServerAuthRequest/Response`, `McpServerResponse`, `McpServerTransport`, `McpServerIntegrationType`).
+- [x] Path-grant + permission commands (`PermissionRequest`, `SegmentDecision`, `SegmentApproval`, `PathGrantRequest`, `PathGrantDecision`, `FilesystemPathAccess`). `permissions/client.ts` + `pathGrantsClient.ts` converted + typed; inline cards now use the generated types.
+- [ ] **Skill catalog bindings — deferred.** `SkillSourceConfig` + `SkillDefinition` closure is heavy (`serde(flatten)` over the config struct) and the skills surface is low-regression-risk. Pick up when the skills settings screen needs hardening.
 
-**P1-2. Convert the highest-traffic remaining components.** _Partial._
+**P1-2. Convert the highest-traffic remaining components.** _Done._
 
-- [x] `AskUserPanel.jsx` → `.tsx`.
-- [x] `InlineApprovalCard.jsx` → `.tsx`.
-- [x] `InlinePathGrantCard.jsx` → `.tsx`.
-- [ ] `ChatMessageList.jsx` → `.tsx` (~700 lines, biggest remaining file).
-- [ ] `WorkspaceFilePreviewPanel.jsx` → `.tsx`.
-- [ ] `useAssistantSession.js` → `.ts`.
+- [x] `AskUserPanel.jsx`, `InlineApprovalCard.jsx`, `InlinePathGrantCard.jsx`, `WorkspaceFilePreviewPanel.jsx` → `.tsx`.
+- [x] `ChatMessageList.jsx` → `.tsx` (~700 lines; discriminated-union narrowing on `ContentPart`, full prop interfaces).
+- [x] `useAssistantSession.js` → `.ts`.
+- Note: `MarkdownMessage`, `StreamingMarkdown`, `VirtualizedList` remain `.jsx`; consumers pin them via typed casts. Converting those three is folded into P2-1.
 
 **P1-3. Convert `workspaceStore.js` to `.ts`.** _Done._
 
-- [x] Tile-tree discriminated union + tab/command/store interfaces typed; `Persist edWorkspaceState` pins the Tauri boundary.
+- [x] Tile-tree discriminated union + tab/command/store interfaces typed; `PersistedWorkspaceState` pins the Tauri boundary.
 
-**P1-4. Component-level tests for the chat surface.** _Partial._
+**P1-4. Component-level tests for the chat surface.** _Done._
 
-- [x] `src/test/mockTauri.ts` shared pattern.
-- [x] `AskUserPanel.test.tsx` (8 tests: render, options, submit, error-keeps-panel-mounted, snapshot-poll race guard).
-- [ ] `ChatMessageList.test.tsx`.
-- [ ] `InlineApprovalCard.test.tsx`.
+- [x] `src/test/mockTauri.ts` shared pattern + `src/test/setup.js` `scrollIntoView` stub.
+- [x] `AskUserPanel.test.tsx` (8), `ChatMessageList.test.tsx` (5), `InlineApprovalCard.test.tsx` (4). FE suite: 33 tests across 5 files.
 
 **P1-5. BE integration test for cancel-token registration.** _Done._
 
-- [x] Unit tests in `assistant/runtime.rs` (register+cancel signal, unknown returns false, unregister removes, double-register replaces).
-- [x] Integration tests in `src-tauri/tests/cancel_run.rs` pin the convention that all three spawn sites (chat, scheduler, workspace-task) register under DB `run.id`.
+- [x] Unit tests in `assistant/runtime.rs` + integration tests in `src-tauri/tests/cancel_run.rs` pinning the all-spawn-sites-use-run.id convention.
 
 ### P2 — Longer tail (multi-day, opportunistic)
 
 **P2-1. Convert the remaining `.jsx` files.** _Effort: ~1-2 days, depending on file size._
 Touch as you go, don't batch. Order roughly:
 
+- `src/components/Chat/MarkdownMessage.jsx` + `StreamingMarkdown.jsx` and `src/components/common/VirtualizedList.jsx` — currently pinned via typed casts in their `.tsx` consumers; converting them removes the casts. VirtualizedList is generic, type it as `<T,>(props: VirtualizedListProps<T>)`.
 - `src/pages/Fleet.jsx` (large, regression-prone).
-- `src/pages/Workspace.module.css`-adjacent components.
 - `src/components/Settings/*` (many files, each smallish).
-- `src/components/AssistantChat/*`.
+- `src/components/AssistantChat/*` (the rest beyond ChatMessageList).
 - `src/components/Canvas/*` (xyflow nodes — careful around d3 typing).
 - `src/contexts/*` (small).
 - `src/hooks/*`.
 - `src/utils/*`.
 - `src/stores/chatManagerStore.js`.
 - The remaining test files — rename `.test.js` → `.test.ts` and tighten the assertions where the new types help.
+
+**P2-1b. Skill-catalog bindings (carried over from P1-1).** _Effort: ~1h._
+Derive `TS` on `SkillSourceConfig`, `SkillSourceKind`, `SkillDefinition`, `SkillSourceDiagnostic`, and the `skills.rs` request/response structs (`AddSkillSourceRequest`, `SetSkillSourceEnabledRequest`, `SkillSourceResponse`, `SkillCatalogResponse`). Watch the `#[serde(flatten)]` on `SkillSourceResponse` — verify ts-rs flattens it correctly. Then type `src/api/client.js`'s skill commands.
 
 **P2-2. Drop `allowJs`; tighten compiler.** _Effort: ~30min once P2-1 is done._
 
