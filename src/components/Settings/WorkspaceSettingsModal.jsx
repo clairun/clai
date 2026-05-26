@@ -7,7 +7,7 @@
  * AgentFormModal(mode=workspace) leaky abstraction.
  */
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useImperativeHandle, useMemo, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import {
@@ -131,6 +131,20 @@ const serializeAgentPayload = ({
   enabled: !!enabled,
 });
 
+// Stable string identifier per sidebar selection. Used as a key for the
+// `visited`/`dirty` maps and the section-ref registry so the modal can
+// address each section without ad-hoc string formatting at every callsite.
+const selectionKey = (sel) => {
+  if (!sel) return 'general';
+  if (sel.kind === 'agent') return `agent:${sel.agentId}`;
+  return sel.kind;
+};
+
+const parseSelectionKey = (key) => {
+  if (key.startsWith('agent:')) return { kind: 'agent', agentId: key.slice('agent:'.length) };
+  return { kind: key };
+};
+
 // ──────────────────────────────────────────────────────────────────────────
 // Modal shell
 // ──────────────────────────────────────────────────────────────────────────
@@ -143,7 +157,17 @@ const WorkspaceSettingsModal = ({
   initialSelection,
   onChanged,
 }) => {
-  const [selection, setSelection] = useState(initialSelection || { kind: 'general' });
+  // Structural compare via a stringified key — parents commonly pass
+  // inline literals like `{ kind: 'general' }`, which have fresh JS
+  // identity every render. A pure reference dep would snap the modal
+  // back to the initial section on every parent re-render.
+  const initialSelectionKey = JSON.stringify(initialSelection || { kind: 'general' });
+  const initialSel = useMemo(
+    () => JSON.parse(initialSelectionKey),
+    [initialSelectionKey],
+  );
+
+  const [selection, setSelection] = useState(initialSel);
   const [deps, setDeps] = useState({
     mcpServers: [],
     skills: [],
@@ -158,17 +182,85 @@ const WorkspaceSettingsModal = ({
     defaultExecution: undefined,
   });
 
-  // Reset selection when the modal is (re)opened or the caller hands a
-  // *meaningfully different* initialSelection (e.g., gear icon -> general,
-  // drawer edit -> agent). Structural compare via a stringified key —
-  // parents commonly pass inline literals like `{ kind: 'general' }`,
-  // which have a fresh JS identity every render. A pure reference
-  // dependency would snap the modal back to the initial section every
-  // time the parent re-renders (e.g., Fleet's 5-second poll refresh).
-  const initialSelectionKey = JSON.stringify(initialSelection || { kind: 'general' });
+  // Sections the user has navigated to during this modal lifetime. Once a
+  // section is mounted it stays mounted (just hidden via CSS when
+  // inactive) so its draft state survives tab switches — that's the whole
+  // point of the global Save: you can edit in General, jump to Schedule,
+  // change a cron expression, hit Save once, and both persist.
+  const [visited, setVisited] = useState(() => new Set([selectionKey(initialSel)]));
+
+  // Per-section dirty flags reported up via onDirtyChange. Drives the
+  // global Save button's enabled state and the sidebar dot indicators.
+  const [dirty, setDirty] = useState({});
+
+  // Coordination state for the global save flow.
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  // Imperative refs for each mounted section. Section components expose
+  // `{ validate, submit }` via useImperativeHandle and the modal invokes
+  // them in two phases (validate-all-first, then submit-all).
+  const sectionRefs = useRef(new Map());
+
+  // Per-section dirty callback factory. Memoized per key so each section
+  // gets a stable callback identity across renders — otherwise a fresh
+  // arrow on every render would retrigger the section's useEffect.
+  const dirtyCallbacks = useRef(new Map());
+
+  // Same idea for the callback refs that populate `sectionRefs`. Caching
+  // avoids re-running the section's useImperativeHandle bookkeeping on
+  // every modal re-render.
+  const sectionRefCallbacks = useRef(new Map());
+
+  const updateDirty = useCallback((key, isDirtyNow) => {
+    setDirty((prev) => {
+      const next = Boolean(isDirtyNow);
+      if (Boolean(prev[key]) === next) return prev;
+      return { ...prev, [key]: next };
+    });
+  }, []);
+
+  const getDirtyCallback = useCallback((key) => {
+    if (!dirtyCallbacks.current.has(key)) {
+      dirtyCallbacks.current.set(key, (isDirtyNow) => updateDirty(key, isDirtyNow));
+    }
+    return dirtyCallbacks.current.get(key);
+  }, [updateDirty]);
+
+  const setSectionRef = useCallback((key) => {
+    if (!sectionRefCallbacks.current.has(key)) {
+      sectionRefCallbacks.current.set(key, (node) => {
+        if (node) sectionRefs.current.set(key, node);
+        else sectionRefs.current.delete(key);
+      });
+    }
+    return sectionRefCallbacks.current.get(key);
+  }, []);
+
+  const navigateTo = useCallback((sel) => {
+    setSelection(sel);
+    setVisited((prev) => {
+      const key = selectionKey(sel);
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
+  // Fresh state when the modal re-opens (or when the caller hands a
+  // meaningfully different initialSelection).
   useEffect(() => {
-    if (isOpen) setSelection(JSON.parse(initialSelectionKey));
-  }, [isOpen, initialSelectionKey]);
+    if (!isOpen) return;
+    setSelection(initialSel);
+    setVisited(new Set([selectionKey(initialSel)]));
+    setDirty({});
+    setSaving(false);
+    setSaveError(null);
+    sectionRefs.current = new Map();
+    dirtyCallbacks.current = new Map();
+    sectionRefCallbacks.current = new Map();
+  }, [isOpen, initialSel]);
 
   // Load static dependencies once per open.
   useEffect(() => {
@@ -194,13 +286,73 @@ const WorkspaceSettingsModal = ({
     return () => { cancelled = true; };
   }, [isOpen]);
 
+  const anyDirty = useMemo(() => Object.values(dirty).some(Boolean), [dirty]);
+
+  // Save flow: validate every dirty section first (atomic gate), then
+  // submit them in order. First failure aborts the rest with their drafts
+  // intact. On full success we refresh the parent snapshot and close.
+  const handleSave = useCallback(async () => {
+    if (saving) return;
+    const dirtyKeys = Object.keys(dirty).filter((k) => dirty[k]);
+    if (dirtyKeys.length === 0) return;
+
+    setSaveError(null);
+
+    // Phase 1 — validate everything. Don't write anything yet, so a
+    // failure in one section can't leave a partially-saved workspace.
+    for (const key of dirtyKeys) {
+      const api = sectionRefs.current.get(key);
+      const v = api?.validate?.();
+      if (v && !v.ok) {
+        setSaveError({ key, message: v.error });
+        navigateTo(parseSelectionKey(key));
+        return;
+      }
+    }
+
+    // Phase 2 — submit. We still bail on the first failure so the user
+    // can fix the offending section before retrying, but the drafts for
+    // anything not-yet-saved are preserved (sections own their own state).
+    setSaving(true);
+    for (const key of dirtyKeys) {
+      const api = sectionRefs.current.get(key);
+      if (!api?.submit) continue;
+      try {
+        const result = await api.submit();
+        if (!result?.ok) {
+          setSaveError({ key, message: result?.error || 'Save failed.' });
+          navigateTo(parseSelectionKey(key));
+          setSaving(false);
+          return;
+        }
+      } catch (err) {
+        setSaveError({ key, message: err?.message || String(err) });
+        navigateTo(parseSelectionKey(key));
+        setSaving(false);
+        return;
+      }
+    }
+
+    setSaving(false);
+    await Promise.resolve(onChanged?.());
+    onClose();
+  }, [saving, dirty, navigateTo, onChanged, onClose]);
+
+  const handleClose = useCallback(() => {
+    if (saving) return;
+    if (anyDirty) {
+      if (!window.confirm('You have unsaved changes. Close without saving?')) return;
+    }
+    onClose();
+  }, [saving, anyDirty, onClose]);
+
   // Escape key
   useEffect(() => {
     if (!isOpen) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    const onKey = (e) => { if (e.key === 'Escape') handleClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [isOpen, onClose]);
+  }, [isOpen, handleClose]);
 
   // Prevent body scroll while open
   useEffect(() => {
@@ -213,15 +365,92 @@ const WorkspaceSettingsModal = ({
   }, [isOpen]);
 
   const handleOverlay = useCallback((e) => {
-    if (e.target === e.currentTarget) onClose();
-  }, [onClose]);
+    if (e.target === e.currentTarget) handleClose();
+  }, [handleClose]);
 
   const agents = snapshot?.assignedAgents || [];
   const sortedAgents = useMemo(() => (
     [...agents].sort((a, b) => (a.isDefault === b.isDefault ? 0 : a.isDefault ? -1 : 1))
   ), [agents]);
 
+  const handleAgentDeleted = useCallback((agentId) => {
+    const key = `agent:${agentId}`;
+    setDirty((prev) => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setVisited((prev) => {
+      if (!prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.delete(key);
+      return next;
+    });
+    sectionRefs.current.delete(key);
+    dirtyCallbacks.current.delete(key);
+    navigateTo({ kind: 'general' });
+    onChanged?.();
+  }, [navigateTo, onChanged]);
+
   if (!isOpen) return null;
+
+  const activeKey = selectionKey(selection);
+
+  const renderSection = (sel) => {
+    if (sel.kind === 'general') {
+      return (
+        <GeneralSection
+          ref={setSectionRef('general')}
+          workspaceId={workspaceId}
+          snapshot={snapshot}
+          saving={saving}
+          onDirtyChange={getDirtyCallback('general')}
+        />
+      );
+    }
+    if (sel.kind === 'schedule') {
+      return (
+        <ScheduleSection
+          ref={setSectionRef('schedule')}
+          workspaceId={workspaceId}
+          snapshot={snapshot}
+          saving={saving}
+          onDirtyChange={getDirtyCallback('schedule')}
+          onSnapshotRefresh={onChanged}
+        />
+      );
+    }
+    if (sel.kind === 'agent') {
+      const key = `agent:${sel.agentId}`;
+      return (
+        <AgentSection
+          ref={setSectionRef(key)}
+          workspaceId={workspaceId}
+          agentId={sel.agentId}
+          snapshot={snapshot}
+          deps={deps}
+          saving={saving}
+          onDirtyChange={getDirtyCallback(key)}
+          onDeleted={() => handleAgentDeleted(sel.agentId)}
+        />
+      );
+    }
+    if (sel.kind === 'new-agent') {
+      return (
+        <AgentSection
+          ref={setSectionRef('new-agent')}
+          workspaceId={workspaceId}
+          agentId={null}
+          snapshot={snapshot}
+          deps={deps}
+          saving={saving}
+          onDirtyChange={getDirtyCallback('new-agent')}
+        />
+      );
+    }
+    return null;
+  };
 
   return ReactDOM.createPortal(
     <div className={styles.overlay} onClick={handleOverlay}>
@@ -233,7 +462,7 @@ const WorkspaceSettingsModal = ({
           <button
             type="button"
             className={styles.closeButton}
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="Close settings"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -249,13 +478,15 @@ const WorkspaceSettingsModal = ({
               <h3 className={styles.sidebarGroupTitle}>Workspace</h3>
               <NavItem
                 active={selection.kind === 'general'}
-                onClick={() => setSelection({ kind: 'general' })}
+                dirty={!!dirty.general}
+                onClick={() => navigateTo({ kind: 'general' })}
               >
                 General
               </NavItem>
               <NavItem
                 active={selection.kind === 'schedule'}
-                onClick={() => setSelection({ kind: 'schedule' })}
+                dirty={!!dirty.schedule}
+                onClick={() => navigateTo({ kind: 'schedule' })}
               >
                 Schedule
               </NavItem>
@@ -267,7 +498,8 @@ const WorkspaceSettingsModal = ({
                 <NavItem
                   key={agent.id}
                   active={selection.kind === 'agent' && selection.agentId === agent.id}
-                  onClick={() => setSelection({ kind: 'agent', agentId: agent.id })}
+                  dirty={!!dirty[`agent:${agent.id}`]}
+                  onClick={() => navigateTo({ kind: 'agent', agentId: agent.id })}
                 >
                   {agent.isDefault ? 'Main' : (agent.displayName || agent.agentName || 'Untitled')}
                 </NavItem>
@@ -275,74 +507,60 @@ const WorkspaceSettingsModal = ({
               <NavItem
                 className={styles.navItemAddNew}
                 active={selection.kind === 'new-agent'}
-                onClick={() => setSelection({ kind: 'new-agent' })}
+                dirty={!!dirty['new-agent']}
+                onClick={() => navigateTo({ kind: 'new-agent' })}
               >
                 + Add agent
               </NavItem>
             </div>
           </aside>
 
-          <main className={styles.content}>
-            {selection.kind === 'general' && (
-              <GeneralSection
-                workspaceId={workspaceId}
-                snapshot={snapshot}
-                onSaved={onChanged}
-              />
-            )}
-            {selection.kind === 'schedule' && (
-              <ScheduleSection
-                workspaceId={workspaceId}
-                snapshot={snapshot}
-                onSaved={onChanged}
-              />
-            )}
-            {selection.kind === 'agent' && (
-              <AgentSection
-                key={selection.agentId}
-                workspaceId={workspaceId}
-                agentId={selection.agentId}
-                snapshot={snapshot}
-                deps={deps}
-                onSaved={onChanged}
-                onDeleted={() => {
-                  onChanged?.();
-                  setSelection({ kind: 'general' });
-                }}
-              />
-            )}
-            {selection.kind === 'new-agent' && (
-              <AgentSection
-                key="new-agent"
-                workspaceId={workspaceId}
-                agentId={null}
-                snapshot={snapshot}
-                deps={deps}
-                onSaved={(created) => {
-                  onChanged?.();
-                  if (created?.id) {
-                    setSelection({ kind: 'agent', agentId: created.id });
-                  } else {
-                    setSelection({ kind: 'general' });
-                  }
-                }}
-              />
-            )}
+          <main className={styles.contentArea}>
+            {Array.from(visited).map((key) => {
+              const sel = parseSelectionKey(key);
+              const isActive = key === activeKey;
+              return (
+                <div
+                  key={key}
+                  className={`${styles.content} ${isActive ? '' : styles.contentHidden}`}
+                  aria-hidden={!isActive}
+                >
+                  {renderSection(sel)}
+                </div>
+              );
+            })}
           </main>
         </div>
+
+        <footer className={styles.footer}>
+          {saveError && (
+            <div className={styles.footerError} role="alert">
+              {saveError.message}
+            </div>
+          )}
+          <button
+            type="button"
+            className={styles.primaryButton}
+            onClick={handleSave}
+            disabled={saving || !anyDirty}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </footer>
       </div>
     </div>,
     document.body
   );
 };
 
-const NavItem = ({ active, onClick, children, className }) => (
+const NavItem = ({ active, dirty, onClick, children, className }) => (
   <button
     type="button"
     className={`${styles.navItem} ${active ? styles.navItemActive : ''} ${className || ''}`}
     onClick={onClick}
   >
-    {children}
+    <span className={styles.navItemLabel}>{children}</span>
+    {dirty && <span className={styles.navItemDirtyDot} title="Unsaved changes" aria-hidden="true" />}
   </button>
 );
 
@@ -350,37 +568,53 @@ const NavItem = ({ active, onClick, children, className }) => (
 // Workspace / General
 // ──────────────────────────────────────────────────────────────────────────
 
-const GeneralSection = ({ workspaceId, snapshot, onSaved }) => {
+const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }) => {
   const [title, setTitle] = useState(snapshot?.title || '');
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
 
-  // Resync if the parent snapshot changes (e.g., another section saved).
+  // Resync if the parent snapshot changes (e.g., a save just completed and
+  // the parent refetched). Skipped when the local draft already matches
+  // the snapshot so we don't fight an in-flight save's loopback.
   useEffect(() => { setTitle(snapshot?.title || ''); }, [snapshot?.title]);
 
-  const handleSave = useCallback(async () => {
-    const trimmed = title.trim();
-    if (!trimmed) {
-      setError('Workspace title cannot be empty.');
-      return;
-    }
-    if (trimmed.length > 100) {
-      setError('Workspace title must be 100 characters or less.');
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    try {
-      await setWorkspaceTitle(workspaceId, trimmed);
-      onSaved?.();
-    } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to save title.'));
-    } finally {
-      setSaving(false);
-    }
-  }, [title, workspaceId, onSaved]);
-
   const isDirty = title.trim() !== (snapshot?.title || '').trim();
+
+  // Report dirty changes upward without depending on the callback's
+  // identity (the modal hands stable callbacks, but ref-storage is a
+  // belt-and-braces defense against closure staleness).
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
+  useEffect(() => { onDirtyChangeRef.current?.(isDirty); }, [isDirty]);
+
+  useImperativeHandle(ref, () => ({
+    validate: () => {
+      const trimmed = title.trim();
+      if (!trimmed) {
+        const msg = 'Workspace title cannot be empty.';
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+      if (trimmed.length > 100) {
+        const msg = 'Workspace title must be 100 characters or less.';
+        setError(msg);
+        return { ok: false, error: msg };
+      }
+      setError(null);
+      return { ok: true };
+    },
+    submit: async () => {
+      const trimmed = title.trim();
+      try {
+        await setWorkspaceTitle(workspaceId, trimmed);
+        setError(null);
+        return { ok: true };
+      } catch (err) {
+        const message = typeof err === 'string' ? err : (err?.message || 'Failed to save title.');
+        setError(message);
+        return { ok: false, error: message };
+      }
+    },
+  }));
 
   return (
     <div className={styles.sectionRoot}>
@@ -408,17 +642,6 @@ const GeneralSection = ({ workspaceId, snapshot, onSaved }) => {
       </div>
 
       {error && <div className={styles.errorBanner}>{error}</div>}
-
-      <div className={styles.actions}>
-        <button
-          type="button"
-          className={styles.primaryButton}
-          onClick={handleSave}
-          disabled={saving || !title.trim() || !isDirty}
-        >
-          {saving ? 'Saving…' : 'Save'}
-        </button>
-      </div>
     </div>
   );
 };
@@ -483,12 +706,24 @@ const formatPreviewRelative = (ms) => {
   return ''; // too far out — let the absolute side carry it
 };
 
-const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
+const ScheduleSection = ({
+  ref,
+  workspaceId,
+  snapshot,
+  saving,
+  onDirtyChange,
+  onSnapshotRefresh,
+}) => {
   const [enabled, setEnabled] = useState(!!snapshot?.scheduleEnabled);
   const [scheduleKind, setScheduleKind] = useState(() =>
     initialScheduleKindFromSnapshot(snapshot)
   );
-  const [busy, setBusy] = useState(false);
+  // Local busy flag for the imperative-only actions (Pause/Resume, Run
+  // now). Save goes through the modal's global flow, so we don't track
+  // its busy state here — the parent's `saving` prop handles the input
+  // disables for save.
+  const [localBusy, setLocalBusy] = useState(false);
+  const busy = saving || localBusy;
   const [error, setError] = useState(null);
   const [previewTimes, setPreviewTimes] = useState([]);
   const [previewError, setPreviewError] = useState(null);
@@ -571,70 +806,92 @@ const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
     }
   };
 
-  const handleSave = useCallback(async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      let payloadKind = null;
-      if (enabled) {
-        if (scheduleKind.type === 'interval') {
-          const mins = Number(scheduleKind.intervalMinutes);
-          if (!Number.isFinite(mins) || mins < 1 || mins > 1440) {
-            throw new Error('Interval must be between 1 minute and 24 hours.');
-          }
-          payloadKind = { type: 'interval', intervalMinutes: mins };
-        } else {
-          const expr = (scheduleKind.expression || '').trim();
-          const tz = (scheduleKind.timezone || '').trim();
-          if (!expr) throw new Error('Cron expression is required.');
-          if (!tz) throw new Error('Timezone is required.');
-          payloadKind = { type: 'cron', expression: expr, timezone: tz };
-        }
+  // Build the wire payload from current form state and surface validation
+  // errors. Returns `{ ok, payloadKind, error }` so both validate() and
+  // submit() can share the logic without double-coding the rules.
+  const buildPayload = useCallback(() => {
+    if (!enabled) return { ok: true, payloadKind: null };
+    if (scheduleKind.type === 'interval') {
+      const mins = Number(scheduleKind.intervalMinutes);
+      if (!Number.isFinite(mins) || mins < 1 || mins > 1440) {
+        return { ok: false, error: 'Interval must be between 1 minute and 24 hours.' };
       }
-      await invoke('workspace_set_schedule', {
-        workspaceId,
-        kind: payloadKind,
-      });
-      onSaved?.();
-    } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to save schedule.');
-    } finally {
-      setBusy(false);
+      return { ok: true, payloadKind: { type: 'interval', intervalMinutes: mins } };
     }
-  }, [enabled, scheduleKind, workspaceId, onSaved]);
+    const expr = (scheduleKind.expression || '').trim();
+    const tz = (scheduleKind.timezone || '').trim();
+    if (!expr) return { ok: false, error: 'Cron expression is required.' };
+    if (!tz) return { ok: false, error: 'Timezone is required.' };
+    return { ok: true, payloadKind: { type: 'cron', expression: expr, timezone: tz } };
+  }, [enabled, scheduleKind]);
 
   const handleTogglePaused = useCallback(async () => {
-    setBusy(true);
+    setLocalBusy(true);
     setError(null);
     try {
       await invoke('workspace_set_schedule_paused', {
         workspaceId,
         paused: !paused,
       });
-      onSaved?.();
+      onSnapshotRefresh?.();
     } catch (err) {
       setError(typeof err === 'string' ? err : (err?.message || 'Failed to update pause state.'));
     } finally {
-      setBusy(false);
+      setLocalBusy(false);
     }
-  }, [paused, workspaceId, onSaved]);
+  }, [paused, workspaceId, onSnapshotRefresh]);
 
   const handleRunNow = useCallback(async () => {
-    setBusy(true);
+    setLocalBusy(true);
     setError(null);
     try {
       await invoke('workspace_run_now', { workspaceId });
-      onSaved?.();
+      onSnapshotRefresh?.();
     } catch (err) {
       setError(typeof err === 'string' ? err : (err?.message || 'Failed to trigger run.'));
     } finally {
-      setBusy(false);
+      setLocalBusy(false);
     }
-  }, [workspaceId, onSaved]);
+  }, [workspaceId, onSnapshotRefresh]);
 
-  const dirty =
+  const isDirty =
     enabled !== !!snapshot?.scheduleEnabled
     || JSON.stringify(scheduleKind) !== JSON.stringify(initialScheduleKindFromSnapshot(snapshot));
+
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
+  useEffect(() => { onDirtyChangeRef.current?.(isDirty); }, [isDirty]);
+
+  useImperativeHandle(ref, () => ({
+    validate: () => {
+      const built = buildPayload();
+      if (!built.ok) {
+        setError(built.error);
+        return { ok: false, error: built.error };
+      }
+      setError(null);
+      return { ok: true };
+    },
+    submit: async () => {
+      const built = buildPayload();
+      if (!built.ok) {
+        setError(built.error);
+        return { ok: false, error: built.error };
+      }
+      try {
+        await invoke('workspace_set_schedule', {
+          workspaceId,
+          kind: built.payloadKind,
+        });
+        setError(null);
+        return { ok: true };
+      } catch (err) {
+        const message = typeof err === 'string' ? err : (err?.message || 'Failed to save schedule.');
+        setError(message);
+        return { ok: false, error: message };
+      }
+    },
+  }));
 
   return (
     <div className={styles.sectionRoot}>
@@ -846,8 +1103,8 @@ const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <div className={styles.actions}>
-        {snapshot?.scheduleEnabled && !paused && (
+      {snapshot?.scheduleEnabled && !paused && (
+        <div className={styles.actions}>
           <button
             type="button"
             className={styles.secondaryButton}
@@ -856,16 +1113,8 @@ const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
           >
             Run now
           </button>
-        )}
-        <button
-          type="button"
-          className={styles.primaryButton}
-          onClick={handleSave}
-          disabled={busy || !dirty}
-        >
-          {busy ? 'Saving…' : 'Save'}
-        </button>
-      </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -875,11 +1124,13 @@ const ScheduleSection = ({ workspaceId, snapshot, onSaved }) => {
 // ──────────────────────────────────────────────────────────────────────────
 
 const AgentSection = ({
+  ref,
   workspaceId,
   agentId,             // string for edit; null for create
   snapshot: _snapshot, // unused; kept in signature for future use (e.g., showing peer agents)
   deps,
-  onSaved,
+  saving,              // global save in flight — disables inputs
+  onDirtyChange,
   onDeleted,
 }) => {
   const isCreate = !agentId;
@@ -888,7 +1139,10 @@ const AgentSection = ({
   // backend's `$HOME` RO grant pre-populated instead of an empty list.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [saving, setSaving] = useState(false);
+  // Local busy flag for the Delete imperative action. Save goes through
+  // the parent's `saving` prop.
+  const [deleting, setDeleting] = useState(false);
+  const busy = saving || deleting;
 
   // Source-of-truth agent payload (loaded for edit, blank draft for create
   // — populated once `deps.defaultExecution` arrives).
@@ -1082,84 +1336,99 @@ const AgentSection = ({
     setExtraPathDraft('');
   };
 
-  const handleSubmit = useCallback(async (e) => {
-    e.preventDefault();
-    setError(null);
-
+  // Validation rules surfaced both as an imperative `validate()` and from
+  // inside `submit()`. Keeping them in one place avoids drift when we add
+  // a new rule.
+  const validateAgent = useCallback(() => {
     const trimmedName = name.trim();
     if (!isManager && !trimmedName) {
-      setError('Agent name is required.');
-      return;
+      return { ok: false, error: 'Agent name is required.' };
     }
     if (trimmedName.length > 100) {
-      setError('Name must be 100 characters or less.');
-      return;
+      return { ok: false, error: 'Name must be 100 characters or less.' };
     }
     if (providerConnectionIds.length === 0) {
-      setError('Select at least one provider connection.');
-      return;
+      return { ok: false, error: 'Select at least one provider connection.' };
     }
+    return { ok: true };
+  }, [name, isManager, providerConnectionIds]);
 
-    const execution = {
-      sandbox: {
-        network: 'enabled',
-        sessionBus: sessionBusAllowed ? 'allow' : 'deny',
-      },
-      filesystem: { extraPaths: extraPathGrants },
-      shell: {
-        mode: shellMode,
-        allowedCommandPrefixes: allowedCommands,
-        blockedCommandPrefixes: blockedCommands,
-      },
-      web: { enabled: webEnabled },
-    };
+  // Report dirty changes up to the modal so the global Save button and
+  // the sidebar dot indicators reflect current state.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
+  useEffect(() => { onDirtyChangeRef.current?.(isDirty); }, [isDirty]);
 
-    setSaving(true);
-    try {
-      if (isCreate) {
-        const created = await workspaceCreateAgent({
-          workspaceId,
-          name: trimmedName,
-          description: description.trim(),
-          selectedSkillIds,
-          selectedMcpServerIds,
-          providerConnectionIds,
-          execution,
-          enabled,
-        });
-        onSaved?.(created);
-      } else {
-        await workspaceUpdateAgent({
-          workspaceId,
-          agentId: agent.id,
-          name: isManager ? (agent.name || 'Manager') : trimmedName,
-          description: description.trim(),
-          selectedSkillIds,
-          selectedMcpServerIds,
-          providerConnectionIds,
-          execution,
-          enabled: isManager ? true : enabled,
-        });
-        // Mark form clean: the values we just persisted are now the
-        // baseline, so Save disables until the user edits something.
-        baselinePayloadRef.current = currentPayload;
-        onSaved?.();
+  useImperativeHandle(ref, () => ({
+    validate: () => {
+      const v = validateAgent();
+      if (!v.ok) setError(v.error);
+      else setError(null);
+      return v;
+    },
+    submit: async () => {
+      const v = validateAgent();
+      if (!v.ok) {
+        setError(v.error);
+        return v;
       }
-    } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to save agent.'));
-    } finally {
-      setSaving(false);
-    }
-  }, [
-    name, description, selectedSkillIds, selectedMcpServerIds, providerConnectionIds,
-    extraPathGrants, sessionBusAllowed, shellMode, allowedCommands, blockedCommands,
-    webEnabled, enabled, isCreate, isManager, workspaceId, agent, onSaved, currentPayload,
-  ]);
+      const trimmedName = name.trim();
+      const execution = {
+        sandbox: {
+          network: 'enabled',
+          sessionBus: sessionBusAllowed ? 'allow' : 'deny',
+        },
+        filesystem: { extraPaths: extraPathGrants },
+        shell: {
+          mode: shellMode,
+          allowedCommandPrefixes: allowedCommands,
+          blockedCommandPrefixes: blockedCommands,
+        },
+        web: { enabled: webEnabled },
+      };
+      try {
+        if (isCreate) {
+          await workspaceCreateAgent({
+            workspaceId,
+            name: trimmedName,
+            description: description.trim(),
+            selectedSkillIds,
+            selectedMcpServerIds,
+            providerConnectionIds,
+            execution,
+            enabled,
+          });
+        } else {
+          await workspaceUpdateAgent({
+            workspaceId,
+            agentId: agent.id,
+            name: isManager ? (agent.name || 'Manager') : trimmedName,
+            description: description.trim(),
+            selectedSkillIds,
+            selectedMcpServerIds,
+            providerConnectionIds,
+            execution,
+            enabled: isManager ? true : enabled,
+          });
+          // Mark form clean: the values we just persisted are now the
+          // baseline. isDirty flips false and reports up so the sidebar
+          // dot clears even though the modal will close on full success.
+          baselinePayloadRef.current = currentPayload;
+        }
+        setError(null);
+        return { ok: true };
+      } catch (err) {
+        const message = typeof err === 'string' ? err : (err?.message || 'Failed to save agent.');
+        setError(message);
+        return { ok: false, error: message };
+      }
+    },
+  }));
 
   const handleDelete = useCallback(async () => {
     if (!canDelete) return;
     if (!window.confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) return;
-    setSaving(true);
+    setDeleting(true);
     setError(null);
     try {
       await workspaceDeleteAgent(workspaceId, agent.id);
@@ -1167,7 +1436,7 @@ const AgentSection = ({
     } catch (err) {
       setError(typeof err === 'string' ? err : (err?.message || 'Failed to delete agent.'));
     } finally {
-      setSaving(false);
+      setDeleting(false);
     }
   }, [canDelete, agent, workspaceId, onDeleted]);
 
@@ -1176,7 +1445,7 @@ const AgentSection = ({
   }
 
   return (
-    <form className={styles.sectionRoot} onSubmit={handleSubmit}>
+    <div className={styles.sectionRoot}>
       <h3 className={styles.sectionTitle}>
         {isCreate ? 'Add agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
       </h3>
@@ -1197,7 +1466,7 @@ const AgentSection = ({
               className={styles.select}
               value={selectedTemplateId}
               onChange={(e) => setSelectedTemplateId(e.target.value)}
-              disabled={saving}
+              disabled={busy}
             >
               <option value="">(no template)</option>
               {(deps.agentTemplates || []).map((tpl) => (
@@ -1228,7 +1497,7 @@ const AgentSection = ({
             className={styles.input}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            disabled={saving}
+            disabled={busy}
             maxLength={100}
           />
         </div>
@@ -1241,7 +1510,7 @@ const AgentSection = ({
           className={styles.textarea}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          disabled={saving}
+          disabled={busy}
           rows={5}
           placeholder={isManager
             ? 'Instructions for how the main agent behaves in this workspace…'
@@ -1273,7 +1542,7 @@ const AgentSection = ({
                         setSelectedSkillIds((s) => s.filter((id) => id !== skill.id));
                       }
                     }}
-                    disabled={saving}
+                    disabled={busy}
                   />
                   <span>
                     <strong>{skill.name}</strong>
@@ -1307,7 +1576,7 @@ const AgentSection = ({
                         setSelectedMcpServerIds((s) => s.filter((id) => id !== server.id));
                       }
                     }}
-                    disabled={saving}
+                    disabled={busy}
                   />
                   <span>{server.name}</span>
                 </label>
@@ -1333,7 +1602,7 @@ const AgentSection = ({
                     type="button"
                     className={styles.chipRemove}
                     onClick={() => setProviderConnectionIds((s) => s.filter((x) => x !== id))}
-                    disabled={saving}
+                    disabled={busy}
                     aria-label={`Remove ${conn?.name || id}`}
                   >
                     ×
@@ -1349,7 +1618,7 @@ const AgentSection = ({
               className={styles.select}
               value={providerConnectionDraft}
               onChange={(e) => setProviderConnectionDraft(e.target.value)}
-              disabled={saving}
+              disabled={busy}
             >
               {availableProviderConnections.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
@@ -1391,7 +1660,7 @@ const AgentSection = ({
                   type="button"
                   className={styles.chipRemove}
                   onClick={() => setExtraPathGrants((s) => s.filter((g) => g.path !== grant.path))}
-                  disabled={saving}
+                  disabled={busy}
                   aria-label={`Remove grant for ${grant.path}`}
                 >
                   ×
@@ -1407,14 +1676,14 @@ const AgentSection = ({
             value={extraPathDraft}
             onChange={(e) => setExtraPathDraft(e.target.value)}
             placeholder="/home/user/project"
-            disabled={saving}
+            disabled={busy}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddPathGrant(); } }}
           />
           <select
             className={styles.select}
             value={extraPathAccess}
             onChange={(e) => setExtraPathAccess(e.target.value)}
-            disabled={saving}
+            disabled={busy}
           >
             <option value="read_only">Read only</option>
             <option value="read_write">Read &amp; write</option>
@@ -1437,7 +1706,7 @@ const AgentSection = ({
           className={styles.select}
           value={shellMode}
           onChange={(e) => setShellMode(e.target.value)}
-          disabled={saving}
+          disabled={busy}
         >
           <option value="off">Off</option>
           <option value="restricted">Restricted (allow/block lists)</option>
@@ -1458,7 +1727,7 @@ const AgentSection = ({
                       type="button"
                       className={styles.chipRemove}
                       onClick={() => setAllowedCommands((s) => s.filter((c) => c !== cmd))}
-                      disabled={saving}
+                      disabled={busy}
                       aria-label={`Remove ${cmd}`}
                     >
                       ×
@@ -1474,7 +1743,7 @@ const AgentSection = ({
                 value={allowedCommandDraft}
                 onChange={(e) => setAllowedCommandDraft(e.target.value)}
                 placeholder="git status"
-                disabled={saving}
+                disabled={busy}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
@@ -1508,7 +1777,7 @@ const AgentSection = ({
                       type="button"
                       className={styles.chipRemove}
                       onClick={() => setBlockedCommands((s) => s.filter((c) => c !== cmd))}
-                      disabled={saving}
+                      disabled={busy}
                       aria-label={`Remove ${cmd}`}
                     >
                       ×
@@ -1524,7 +1793,7 @@ const AgentSection = ({
                 value={blockedCommandDraft}
                 onChange={(e) => setBlockedCommandDraft(e.target.value)}
                 placeholder="rm -rf"
-                disabled={saving}
+                disabled={busy}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
@@ -1558,7 +1827,7 @@ const AgentSection = ({
               className={styles.toggleInput}
               checked={webEnabled}
               onChange={(e) => setWebEnabled(e.target.checked)}
-              disabled={saving}
+              disabled={busy}
             />
             <span className={styles.toggleTrack}>
               <span className={styles.toggleThumb} />
@@ -1576,7 +1845,7 @@ const AgentSection = ({
               className={styles.toggleInput}
               checked={sessionBusAllowed}
               onChange={(e) => setSessionBusAllowed(e.target.checked)}
-              disabled={saving}
+              disabled={busy}
             />
             <span className={styles.toggleTrack}>
               <span className={styles.toggleThumb} />
@@ -1596,7 +1865,7 @@ const AgentSection = ({
                 className={styles.toggleInput}
                 checked={enabled}
                 onChange={(e) => setEnabled(e.target.checked)}
-                disabled={saving}
+                disabled={busy}
               />
               <span className={styles.toggleTrack}>
                 <span className={styles.toggleThumb} />
@@ -1608,26 +1877,19 @@ const AgentSection = ({
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <div className={styles.actions}>
-        {canDelete && (
+      {canDelete && (
+        <div className={styles.actions}>
           <button
             type="button"
-            className={`${styles.dangerButton} ${styles.deleteSpacer}`}
+            className={styles.dangerButton}
             onClick={handleDelete}
-            disabled={saving}
+            disabled={busy}
           >
-            Delete agent
+            {deleting ? 'Deleting…' : 'Delete agent'}
           </button>
-        )}
-        <button
-          type="submit"
-          className={styles.primaryButton}
-          disabled={saving || !isDirty}
-        >
-          {saving ? 'Saving…' : (isCreate ? 'Create' : 'Save')}
-        </button>
-      </div>
-    </form>
+        </div>
+      )}
+    </div>
   );
 };
 

@@ -106,9 +106,29 @@
   font-family: inherit;
   color: var(--color-text-secondary);
   cursor: pointer;
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-bottom: 2px;
   transition: background 120ms ease, color 120ms ease;
+}
+
+.navItemLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navItemDirtyDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--color-bg-secondary);
 }
 
 .navItem:hover {
@@ -131,12 +151,48 @@
   font-style: normal;
 }
 
+/* Outer wrapper for the right-hand panes. We "sticky-mount" every section
+ * the user has visited, so their draft state survives tab switches and a
+ * single global Save commits everything. Inactive panes are hidden via
+ * `.contentHidden` (display: none) so they take no layout space. */
+.contentArea {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .content {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+}
+
+.contentHidden {
+  display: none;
+}
+
+/* Modal footer — global Save button. Replaces the per-section Save
+ * buttons so changes across sections commit atomically. */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--color-border-light);
+  background: var(--color-bg-secondary, #F6F4F0);
+  flex-shrink: 0;
+}
+
+.footerError {
+  flex: 1;
+  font-size: 12px;
+  color: var(--color-critical, #b91c1c);
+  text-align: left;
 }
 
 /* Each section's outer wrapper. Owns the scroll + padding so .actions can
