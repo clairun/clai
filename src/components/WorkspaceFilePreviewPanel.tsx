@@ -2,18 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { save } from '@tauri-apps/plugin-dialog';
-import MarkdownMessageRaw from './Chat/MarkdownMessage';
+import MarkdownMessage from './Chat/MarkdownMessage';
 import { downloadWorkspaceFile, readWorkspaceFile } from '../workspace/client';
 import { openExternal } from '../utils/openExternal';
 import type { WorkspaceFileContent, WorkspaceFileEntry } from '../generated/bindings';
 import styles from './WorkspaceFilePreviewPanel.module.css';
-
-// MarkdownMessage is still a .jsx with no exported prop types; pin the
-// shape we rely on here until it's converted.
-const MarkdownMessage = MarkdownMessageRaw as React.ComponentType<{
-  content: string;
-  isStreaming?: boolean;
-}>;
 
 type HtmlMode = 'preview' | 'source';
 

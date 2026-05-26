@@ -1,12 +1,19 @@
 import React, { memo, useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import styles from './MarkdownMessage.module.css';
 
+interface MarkdownMessageProps {
+  content: string;
+  // Accepted for API parity with StreamingMarkdown; this component
+  // renders the same regardless of streaming state.
+  isStreaming?: boolean;
+}
+
 // Memoized code block styles to prevent recreation
-const codeBlockStyle = {
+const codeBlockStyle: React.CSSProperties = {
   margin: '12px 0',
   padding: '12px 16px',
   background: 'rgba(0, 0, 0, 0.04)',
@@ -16,7 +23,7 @@ const codeBlockStyle = {
   lineHeight: '1.5',
 };
 
-const codeTagStyle = {
+const codeTagStyle: React.CSSProperties = {
   fontFamily: "'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace",
 };
 
@@ -41,12 +48,15 @@ const remarkPlugins = [remarkGfm];
  * The components object is also memoized to prevent ReactMarkdown from
  * re-processing on every render.
  */
-const MarkdownMessage = memo(({ content, isStreaming = false }) => {
+const MarkdownMessage = memo(({ content }: MarkdownMessageProps) => {
   // Memoize the components object to prevent ReactMarkdown from re-rendering
   // when the parent re-renders but content hasn't changed
-  const components = useMemo(() => ({
-    // Customize rendering of specific elements
-    code: ({ node, inline, className, children, ...props }) => {
+  const components = useMemo<Components>(() => ({
+    // Customize rendering of specific elements. react-markdown v10 dropped
+    // `inline` from the official code-renderer prop type, but still passes
+    // it at runtime; read it through a widened local type.
+    code: ({ className, children, ...props }) => {
+      const { inline } = props as { inline?: boolean };
       // More reliable check: inline code doesn't have className and children is simple text
       const isInline = inline !== false && !className;
       const match = /language-(\w+)/.exec(className || '');

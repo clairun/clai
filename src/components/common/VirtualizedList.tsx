@@ -12,8 +12,21 @@ const DEFAULT_ESTIMATE_SIZE = 160;
 const DEFAULT_OVERSCAN = 900;
 const NEAR_BOTTOM_THRESHOLD = 180;
 
-const MeasuredItem = memo(({ cacheKey, top, children, onMeasure }) => {
-  const ref = useRef(null);
+interface Position {
+  top: number;
+  size: number;
+  key: string;
+}
+
+interface MeasuredItemProps {
+  cacheKey: string;
+  top: number;
+  children: React.ReactNode;
+  onMeasure: (key: string, height: number) => void;
+}
+
+const MeasuredItem = memo(({ cacheKey, top, children, onMeasure }: MeasuredItemProps) => {
+  const ref = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
     const node = ref.current;
@@ -52,7 +65,12 @@ const MeasuredItem = memo(({ cacheKey, top, children, onMeasure }) => {
 
 MeasuredItem.displayName = 'MeasuredItem';
 
-const findWindow = (positions, scrollTop, viewportHeight, overscan) => {
+const findWindow = (
+  positions: Position[],
+  scrollTop: number,
+  viewportHeight: number,
+  overscan: number,
+): { start: number; end: number } => {
   if (positions.length === 0) {
     return { start: 0, end: -1 };
   }
@@ -79,7 +97,33 @@ const findWindow = (positions, scrollTop, viewportHeight, overscan) => {
   };
 };
 
-const VirtualizedList = memo(({
+interface LayoutResult {
+  positions: Position[];
+  positionsByKey: Map<string, Position>;
+  totalHeight: number;
+  start: number;
+  end: number;
+  footerTop: number;
+}
+
+interface VirtualizedListProps<T> {
+  items: T[];
+  itemKey: (item: T, index?: number) => string;
+  renderItem: (item: T, index: number) => React.ReactNode;
+  className?: string;
+  estimateSize?: number;
+  overscan?: number;
+  gap?: number;
+  footer?: React.ReactNode;
+  footerEstimateSize?: number;
+  initialScrollToBottom?: boolean;
+  scrollToBottomSignal?: number | null;
+  scrollToBottomBehavior?: ScrollBehavior;
+  stickToBottom?: boolean;
+  onNearBottomChange?: (isNearBottom: boolean) => void;
+}
+
+const VirtualizedListInner = <T,>({
   items,
   itemKey,
   renderItem,
@@ -94,17 +138,17 @@ const VirtualizedList = memo(({
   scrollToBottomBehavior = 'auto',
   stickToBottom = false,
   onNearBottomChange,
-}) => {
-  const scrollRef = useRef(null);
-  const heightsRef = useRef(new Map());
-  const rafRef = useRef(null);
+}: VirtualizedListProps<T>) => {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const heightsRef = useRef<Map<string, number>>(new Map());
+  const rafRef = useRef<number | null>(null);
   const didInitialScrollRef = useRef(false);
-  const prevLayoutRef = useRef(null);
+  const prevLayoutRef = useRef<LayoutResult | null>(null);
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
   const [footerHeight, setFooterHeight] = useState(footer ? footerEstimateSize : 0);
 
-  const scrollToBottom = useCallback((behavior = 'auto') => {
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const node = scrollRef.current;
     if (!node) return;
 
@@ -173,7 +217,7 @@ const VirtualizedList = memo(({
     }
   }, [items, itemKey]);
 
-  const handleMeasure = useCallback((key, height) => {
+  const handleMeasure = useCallback((key: string, height: number) => {
     if (!Number.isFinite(height) || height <= 0) return;
 
     const current = heightsRef.current.get(key);
@@ -183,14 +227,14 @@ const VirtualizedList = memo(({
     setMeasurementVersion((version) => version + 1);
   }, []);
 
-  const handleFooterMeasure = useCallback((height) => {
+  const handleFooterMeasure = useCallback((height: number) => {
     if (!Number.isFinite(height) || height < 0) return;
     setFooterHeight((current) => (Math.abs(current - height) < 1 ? current : height));
   }, []);
 
-  const layout = useMemo(() => {
-    const positions = [];
-    const positionsByKey = new Map();
+  const layout = useMemo<LayoutResult>(() => {
+    const positions: Position[] = [];
+    const positionsByKey = new Map<string, Position>();
     let top = 0;
 
     for (let index = 0; index < items.length; index += 1) {
@@ -281,7 +325,7 @@ const VirtualizedList = memo(({
     }
   }, [layout.totalHeight, scrollToBottom, stickToBottom]);
 
-  const visibleItems = [];
+  const visibleItems: { item: T; index: number; position: Position }[] = [];
   for (let index = layout.start; index <= layout.end; index += 1) {
     if (!items[index]) continue;
     visibleItems.push({ item: items[index], index, position: layout.positions[index] });
@@ -329,8 +373,11 @@ const VirtualizedList = memo(({
       </div>
     </div>
   );
-});
+};
 
-VirtualizedList.displayName = 'VirtualizedList';
+// memo erases the generic signature, so re-assert it on the export.
+// The cast is sound: VirtualizedListInner is already generic and memo
+// only adds prop-equality short-circuiting, not a type change.
+const VirtualizedList = memo(VirtualizedListInner) as typeof VirtualizedListInner;
 
 export default VirtualizedList;

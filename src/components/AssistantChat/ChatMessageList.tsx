@@ -6,9 +6,9 @@
  */
 
 import React, { useState, useCallback, useMemo, memo } from 'react';
-import MarkdownMessageRaw from '../Chat/MarkdownMessage';
-import StreamingMarkdownRaw from '../Chat/StreamingMarkdown';
-import VirtualizedListRaw from '../common/VirtualizedList';
+import MarkdownMessage from '../Chat/MarkdownMessage';
+import StreamingMarkdown from '../Chat/StreamingMarkdown';
+import VirtualizedList from '../common/VirtualizedList';
 import type {
   AssistantMessage,
   ContentPart,
@@ -16,36 +16,6 @@ import type {
   ToolInvocation,
 } from '../../generated/bindings';
 import styles from './AssistantChat.module.css';
-
-// These siblings are still .jsx with no exported prop types; pin the
-// shapes we rely on until they're converted.
-const MarkdownMessage = MarkdownMessageRaw as React.ComponentType<{
-  content: string;
-  isStreaming?: boolean;
-}>;
-const StreamingMarkdown = StreamingMarkdownRaw as React.ComponentType<{
-  content: string;
-  isStreaming?: boolean;
-}>;
-interface VirtualizedListProps<T> {
-  items: T[];
-  itemKey: (item: T) => string;
-  renderItem: (item: T, index: number) => React.ReactNode;
-  className?: string;
-  estimateSize?: number;
-  overscan?: number;
-  gap?: number;
-  footer?: React.ReactNode;
-  footerEstimateSize?: number;
-  initialScrollToBottom?: boolean;
-  scrollToBottomSignal?: number;
-  scrollToBottomBehavior?: 'auto' | 'smooth';
-  stickToBottom?: boolean;
-  onNearBottomChange?: (isNearBottom: boolean) => void;
-}
-const VirtualizedList = VirtualizedListRaw as <T>(
-  props: VirtualizedListProps<T>,
-) => React.ReactElement;
 
 // Narrowed ContentPart variants — `Extract` pulls the specific shape out
 // of the generated discriminated union so `.text` / `.tool_name` etc.

@@ -29,7 +29,7 @@ const TYPEWRITER_MIN_ADVANCE = Math.max(2, Math.ceil(TYPEWRITER_BASE_CPS / TYPEW
 const TYPEWRITER_CATCHUP_FRACTION = 0.18;       // while streaming
 const TYPEWRITER_DRAIN_FRACTION   = 0.35;       // after stream ends — drain faster
 
-const useTypewriterBuffer = (accumulated, isStreaming) => {
+const useTypewriterBuffer = (accumulated: string, isStreaming: boolean): string => {
   const [displayed, setDisplayed] = useState(() => (isStreaming ? '' : accumulated || ''));
   const accRef = useRef(accumulated || '');
   const lenRef = useRef(displayed.length);
@@ -49,7 +49,7 @@ const useTypewriterBuffer = (accumulated, isStreaming) => {
     }
 
     let cancelled = false;
-    let frame = null;
+    let frame: number | null = null;
 
     const tick = () => {
       if (cancelled) return;
@@ -105,7 +105,7 @@ const useTypewriterBuffer = (accumulated, isStreaming) => {
  * block shouldn't appear, disappear, and reappear because closing
  * syntax was mid-arrival.
  */
-const stabilizePartialMarkdown = (text) => {
+const stabilizePartialMarkdown = (text: string): string => {
   if (!text) return text;
   let out = text;
 
@@ -145,7 +145,12 @@ const stabilizePartialMarkdown = (text) => {
   return out;
 };
 
-const StreamingMarkdown = memo(({ content, isStreaming = false }) => {
+interface StreamingMarkdownProps {
+  content: string;
+  isStreaming?: boolean;
+}
+
+const StreamingMarkdown = memo(({ content, isStreaming = false }: StreamingMarkdownProps) => {
   const source = content || '';
   const displayed = useTypewriterBuffer(source, isStreaming);
   // Use the typewriter output whenever it's behind (still streaming or
