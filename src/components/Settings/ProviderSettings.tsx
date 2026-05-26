@@ -13,6 +13,35 @@ import {
 } from '../../api/client';
 import styles from './ProviderSettings.module.css';
 
+// Legacy AI-CLI provider shapes (the `ai_provider` commands, distinct
+// from the typed provider_connections surface). No generated binding;
+// declared locally.
+interface AiProviderSpec {
+  type: string;
+  model?: string | null;
+}
+
+interface AiProviderInfo {
+  name: string;
+  command: string;
+  version?: string | null;
+  available: boolean;
+  error?: string | null;
+  provider: AiProviderSpec;
+}
+
+interface CurrentAiProvider {
+  provider: AiProviderSpec;
+  is_configured?: boolean;
+}
+
+interface AiModel {
+  id: string;
+  name: string;
+  recommended?: boolean;
+  description?: string;
+}
+
 /**
  * Loading spinner icon
  */
@@ -47,14 +76,14 @@ const WarningIcon = () => (
  * ProviderSettings - AI Provider and Model selection interface
  */
 const ProviderSettings = () => {
-  const [providers, setProviders] = useState([]);
-  const [currentProvider, setCurrentProvider] = useState(null);
-  const [models, setModels] = useState([]);
-  const [selectedModel, setSelectedModel] = useState(null);
+  const [providers, setProviders] = useState<AiProviderInfo[]>([]);
+  const [currentProvider, setCurrentProvider] = useState<CurrentAiProvider | null>(null);
+  const [models, setModels] = useState<AiModel[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingModels, setLoadingModels] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Fetch providers and current selection on mount
   useEffect(() => {
@@ -63,10 +92,11 @@ const ProviderSettings = () => {
       setError(null);
 
       try {
-        // Fetch available providers and current selection in parallel
+        // Fetch available providers and current selection in parallel.
+        // The api/client.js helpers are untyped JS; cast their results.
         const [providersResult, currentResult] = await Promise.all([
-          getAvailableAiProviders(),
-          getAiProvider().catch(() => null), // Ignore error if no provider set
+          getAvailableAiProviders() as Promise<AiProviderInfo[]>,
+          getAiProvider().catch(() => null) as Promise<CurrentAiProvider | null>,
         ]);
 
         setProviders(providersResult);
@@ -75,7 +105,7 @@ const ProviderSettings = () => {
         // If a provider is already selected, fetch its models
         if (currentResult?.provider?.type) {
           const providerType = currentResult.provider.type;
-          const modelsResult = await getProviderModels(providerType);
+          const modelsResult = (await getProviderModels(providerType)) as AiModel[];
           setModels(modelsResult);
           // Set the currently selected model
           setSelectedModel(currentResult.provider.model || null);
@@ -92,7 +122,7 @@ const ProviderSettings = () => {
   }, []);
 
   // Handle provider selection
-  const handleSelect = async (providerInfo) => {
+  const handleSelect = async (providerInfo: AiProviderInfo) => {
     if (!providerInfo.available || saving) return;
 
     setSaving(true);
@@ -123,7 +153,7 @@ const ProviderSettings = () => {
   };
 
   // Handle model selection
-  const handleModelChange = async (modelId) => {
+  const handleModelChange = async (modelId: string) => {
     if (saving || !currentProvider?.provider) return;
 
     setSaving(true);
