@@ -23,14 +23,90 @@ import {
 import { assistantClient } from '../../assistant';
 import { setWorkspaceTitle } from '../../workspace/client';
 import IntervalSelect from './IntervalSelect';
+import type { ProviderConnection, WorkspaceSnapshot } from '../../generated/bindings';
 import styles from './WorkspaceSettingsModal.module.css';
+
+// ──────────────────────────────────────────────────────────────────────────
+// Local shapes. The execution-config tree and agent/template payloads are
+// ad-hoc (sourced from untyped api/client.js commands); modeled loosely
+// here rather than dragging the full config module into the FE types.
+// ──────────────────────────────────────────────────────────────────────────
+
+type SectionKind = 'general' | 'schedule' | 'agent' | 'new-agent';
+interface Selection {
+  kind: SectionKind;
+  agentId?: string | null;
+}
+
+interface SectionResult {
+  ok: boolean;
+  error?: string;
+}
+interface SectionHandle {
+  validate: () => SectionResult;
+  submit: () => Promise<SectionResult>;
+}
+
+interface GrantOrigin {
+  kind: string;
+  grantedAtUnixMs?: number;
+  reason?: string;
+}
+interface PathGrant {
+  path: string;
+  access: string;
+  origin?: GrantOrigin | null;
+}
+interface ExecutionConfig {
+  sandbox: { network: string; sessionBus: string };
+  filesystem: { extraPaths: PathGrant[] };
+  shell: { mode: string; allowedCommandPrefixes: string[]; blockedCommandPrefixes: string[] };
+  web: { enabled: boolean };
+}
+
+type ScheduleKindDraft =
+  | { type: 'interval'; intervalMinutes: number }
+  | { type: 'cron'; expression: string; timezone: string };
+
+interface NamedRef {
+  id: string;
+  name: string;
+  description?: string | null;
+}
+interface AgentTemplate {
+  id: string;
+  name: string;
+  description?: string | null;
+  defaultSkillIds?: string[];
+  defaultExecution?: Partial<ExecutionConfig>;
+}
+// Agent detail loaded from workspaceGetAgent (untyped command).
+interface AgentDetail {
+  id: string;
+  name?: string;
+  description?: string;
+  isDefault?: boolean;
+  enabled?: boolean;
+  selectedSkillIds?: string[];
+  selectedMcpServerIds?: string[];
+  providerConnectionIds?: string[];
+  execution?: Partial<ExecutionConfig>;
+}
+
+interface ModalDeps {
+  mcpServers: NamedRef[];
+  skills: NamedRef[];
+  providerConnections: ProviderConnection[];
+  agentTemplates: AgentTemplate[];
+  defaultExecution: Partial<ExecutionConfig> | null | undefined;
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // Shared helpers (carried over from AgentFormModal — will be the only copy
 // once that file is deleted)
 // ──────────────────────────────────────────────────────────────────────────
 
-const defaultExecution = () => ({
+const defaultExecution = (): ExecutionConfig => ({
   sandbox: { network: 'enabled', sessionBus: 'allow' },
   filesystem: { extraPaths: [] },
   shell: {
@@ -43,15 +119,16 @@ const defaultExecution = () => ({
   web: { enabled: false },
 });
 
-const normalizeItems = (items = []) => items.map((item) => item.trim()).filter(Boolean);
+const normalizeItems = (items: string[] = []): string[] =>
+  items.map((item) => item.trim()).filter(Boolean);
 
-const addUniqueItem = (items, value) => {
+const addUniqueItem = (items: string[], value: string): string[] => {
   const trimmed = value.trim();
   if (!trimmed || items.includes(trimmed)) return items;
   return [...items, trimmed];
 };
 
-const normalizePathGrants = (items = []) =>
+const normalizePathGrants = (items: PathGrant[] = []): PathGrant[] =>
   items
     .map((item) => ({
       path: item.path?.trim() || '',
@@ -60,7 +137,7 @@ const normalizePathGrants = (items = []) =>
     }))
     .filter((item) => item.path);
 
-const grantOriginLabel = (origin) => {
+const grantOriginLabel = (origin: GrantOrigin | null | undefined): string => {
   if (!origin || origin.kind === 'manual') return 'Manual';
   if (origin.kind === 'credentialsPreset') return 'Preset';
   if (origin.kind === 'approval') {
@@ -76,7 +153,7 @@ const grantOriginLabel = (origin) => {
   return 'Manual';
 };
 
-const normalizeExecution = (execution = {}) => {
+const normalizeExecution = (execution: Partial<ExecutionConfig> = {}): ExecutionConfig => {
   const d = defaultExecution();
   return {
     sandbox: {
@@ -99,6 +176,21 @@ const normalizeExecution = (execution = {}) => {
 // form state against the loaded baseline so the Save button can disable
 // itself when there are no pending changes. Pure function — pass already
 // normalized values (e.g., execution coming from normalizeExecution).
+interface AgentPayloadInput {
+  name?: string;
+  description?: string;
+  selectedSkillIds?: string[];
+  selectedMcpServerIds?: string[];
+  providerConnectionIds?: string[];
+  sessionBusAllowed?: boolean;
+  extraPathGrants?: PathGrant[];
+  shellMode?: string;
+  allowedCommands?: string[];
+  blockedCommands?: string[];
+  webEnabled?: boolean;
+  enabled?: boolean;
+}
+
 const serializeAgentPayload = ({
   name,
   description,
@@ -112,7 +204,7 @@ const serializeAgentPayload = ({
   blockedCommands,
   webEnabled,
   enabled,
-}) => JSON.stringify({
+}: AgentPayloadInput): string => JSON.stringify({
   name: (name || '').trim(),
   description: (description || '').trim(),
   selectedSkillIds: [...(selectedSkillIds || [])],
@@ -134,20 +226,29 @@ const serializeAgentPayload = ({
 // Stable string identifier per sidebar selection. Used as a key for the
 // `visited`/`dirty` maps and the section-ref registry so the modal can
 // address each section without ad-hoc string formatting at every callsite.
-const selectionKey = (sel) => {
+const selectionKey = (sel: Selection | null | undefined): string => {
   if (!sel) return 'general';
   if (sel.kind === 'agent') return `agent:${sel.agentId}`;
   return sel.kind;
 };
 
-const parseSelectionKey = (key) => {
+const parseSelectionKey = (key: string): Selection => {
   if (key.startsWith('agent:')) return { kind: 'agent', agentId: key.slice('agent:'.length) };
-  return { kind: key };
+  return { kind: key as SectionKind };
 };
 
 // ──────────────────────────────────────────────────────────────────────────
 // Modal shell
 // ──────────────────────────────────────────────────────────────────────────
+
+interface WorkspaceSettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  workspaceId: string;
+  snapshot: WorkspaceSnapshot | null;
+  initialSelection?: Selection | null;
+  onChanged?: () => void;
+}
 
 const WorkspaceSettingsModal = ({
   isOpen,
@@ -156,7 +257,7 @@ const WorkspaceSettingsModal = ({
   snapshot,
   initialSelection,
   onChanged,
-}) => {
+}: WorkspaceSettingsModalProps) => {
   // Structural compare via a stringified key — parents commonly pass
   // inline literals like `{ kind: 'general' }`, which have fresh JS
   // identity every render. A pure reference dep would snap the modal
@@ -167,8 +268,8 @@ const WorkspaceSettingsModal = ({
     [initialSelectionKey],
   );
 
-  const [selection, setSelection] = useState(initialSel);
-  const [deps, setDeps] = useState({
+  const [selection, setSelection] = useState<Selection>(initialSel);
+  const [deps, setDeps] = useState<ModalDeps>({
     mcpServers: [],
     skills: [],
     providerConnections: [],
@@ -187,32 +288,32 @@ const WorkspaceSettingsModal = ({
   // inactive) so its draft state survives tab switches — that's the whole
   // point of the global Save: you can edit in General, jump to Schedule,
   // change a cron expression, hit Save once, and both persist.
-  const [visited, setVisited] = useState(() => new Set([selectionKey(initialSel)]));
+  const [visited, setVisited] = useState<Set<string>>(() => new Set([selectionKey(initialSel)]));
 
   // Per-section dirty flags reported up via onDirtyChange. Drives the
   // global Save button's enabled state and the sidebar dot indicators.
-  const [dirty, setDirty] = useState({});
+  const [dirty, setDirty] = useState<Record<string, boolean>>({});
 
   // Coordination state for the global save flow.
   const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState(null);
+  const [saveError, setSaveError] = useState<{ key: string; message: string } | null>(null);
 
   // Imperative refs for each mounted section. Section components expose
   // `{ validate, submit }` via useImperativeHandle and the modal invokes
   // them in two phases (validate-all-first, then submit-all).
-  const sectionRefs = useRef(new Map());
+  const sectionRefs = useRef<Map<string, SectionHandle>>(new Map());
 
   // Per-section dirty callback factory. Memoized per key so each section
   // gets a stable callback identity across renders — otherwise a fresh
   // arrow on every render would retrigger the section's useEffect.
-  const dirtyCallbacks = useRef(new Map());
+  const dirtyCallbacks = useRef<Map<string, (isDirty: boolean) => void>>(new Map());
 
   // Same idea for the callback refs that populate `sectionRefs`. Caching
   // avoids re-running the section's useImperativeHandle bookkeeping on
   // every modal re-render.
-  const sectionRefCallbacks = useRef(new Map());
+  const sectionRefCallbacks = useRef<Map<string, (node: SectionHandle | null) => void>>(new Map());
 
-  const updateDirty = useCallback((key, isDirtyNow) => {
+  const updateDirty = useCallback((key: string, isDirtyNow: boolean) => {
     setDirty((prev) => {
       const next = Boolean(isDirtyNow);
       if (Boolean(prev[key]) === next) return prev;
@@ -220,24 +321,24 @@ const WorkspaceSettingsModal = ({
     });
   }, []);
 
-  const getDirtyCallback = useCallback((key) => {
+  const getDirtyCallback = useCallback((key: string) => {
     if (!dirtyCallbacks.current.has(key)) {
-      dirtyCallbacks.current.set(key, (isDirtyNow) => updateDirty(key, isDirtyNow));
+      dirtyCallbacks.current.set(key, (isDirtyNow: boolean) => updateDirty(key, isDirtyNow));
     }
     return dirtyCallbacks.current.get(key);
   }, [updateDirty]);
 
-  const setSectionRef = useCallback((key) => {
+  const setSectionRef = useCallback((key: string) => {
     if (!sectionRefCallbacks.current.has(key)) {
-      sectionRefCallbacks.current.set(key, (node) => {
+      sectionRefCallbacks.current.set(key, (node: SectionHandle | null) => {
         if (node) sectionRefs.current.set(key, node);
         else sectionRefs.current.delete(key);
       });
     }
-    return sectionRefCallbacks.current.get(key);
+    return sectionRefCallbacks.current.get(key)!;
   }, []);
 
-  const navigateTo = useCallback((sel) => {
+  const navigateTo = useCallback((sel: Selection) => {
     setSelection(sel);
     setVisited((prev) => {
       const key = selectionKey(sel);
@@ -304,7 +405,7 @@ const WorkspaceSettingsModal = ({
       const api = sectionRefs.current.get(key);
       const v = api?.validate?.();
       if (v && !v.ok) {
-        setSaveError({ key, message: v.error });
+        setSaveError({ key, message: v.error ?? 'Validation failed.' });
         navigateTo(parseSelectionKey(key));
         return;
       }
@@ -326,7 +427,7 @@ const WorkspaceSettingsModal = ({
           return;
         }
       } catch (err) {
-        setSaveError({ key, message: err?.message || String(err) });
+        setSaveError({ key, message: err instanceof Error ? err.message : String(err) });
         navigateTo(parseSelectionKey(key));
         setSaving(false);
         return;
@@ -349,7 +450,7 @@ const WorkspaceSettingsModal = ({
   // Escape key
   useEffect(() => {
     if (!isOpen) return undefined;
-    const onKey = (e) => { if (e.key === 'Escape') handleClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') handleClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [isOpen, handleClose]);
@@ -364,7 +465,7 @@ const WorkspaceSettingsModal = ({
     return () => { document.body.style.overflow = ''; };
   }, [isOpen]);
 
-  const handleOverlay = useCallback((e) => {
+  const handleOverlay = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) handleClose();
   }, [handleClose]);
 
@@ -373,7 +474,7 @@ const WorkspaceSettingsModal = ({
     [...agents].sort((a, b) => (a.isDefault === b.isDefault ? 0 : a.isDefault ? -1 : 1))
   ), [agents]);
 
-  const handleAgentDeleted = useCallback((agentId) => {
+  const handleAgentDeleted = useCallback((agentId: string) => {
     const key = `agent:${agentId}`;
     setDirty((prev) => {
       if (!(key in prev)) return prev;
@@ -397,7 +498,7 @@ const WorkspaceSettingsModal = ({
 
   const activeKey = selectionKey(selection);
 
-  const renderSection = (sel) => {
+  const renderSection = (sel: Selection) => {
     if (sel.kind === 'general') {
       return (
         <GeneralSection
@@ -427,12 +528,12 @@ const WorkspaceSettingsModal = ({
         <AgentSection
           ref={setSectionRef(key)}
           workspaceId={workspaceId}
-          agentId={sel.agentId}
+          agentId={sel.agentId ?? null}
           snapshot={snapshot}
           deps={deps}
           saving={saving}
           onDirtyChange={getDirtyCallback(key)}
-          onDeleted={() => handleAgentDeleted(sel.agentId)}
+          onDeleted={() => handleAgentDeleted(sel.agentId ?? '')}
         />
       );
     }
@@ -553,7 +654,7 @@ const WorkspaceSettingsModal = ({
   );
 };
 
-const NavItem = ({ active, dirty, onClick, children, className }) => (
+const NavItem = ({ active, dirty, onClick, children, className }: { active: boolean; dirty: boolean; onClick: () => void; children: React.ReactNode; className?: string }) => (
   <button
     type="button"
     className={`${styles.navItem} ${active ? styles.navItemActive : ''} ${className || ''}`}
@@ -568,9 +669,15 @@ const NavItem = ({ active, dirty, onClick, children, className }) => (
 // Workspace / General
 // ──────────────────────────────────────────────────────────────────────────
 
-const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }) => {
+const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }: {
+  ref: React.Ref<SectionHandle>;
+  workspaceId: string;
+  snapshot: WorkspaceSnapshot | null;
+  saving: boolean;
+  onDirtyChange?: (isDirty: boolean) => void;
+}) => {
   const [title, setTitle] = useState(snapshot?.title || '');
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
   // Brief "Copied!" affordance after the workspace-id chip is clicked.
   // Auto-resets so a second click can confirm again.
   const [idCopied, setIdCopied] = useState(false);
@@ -623,7 +730,7 @@ const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }) =
         setError(null);
         return { ok: true };
       } catch (err) {
-        const message = typeof err === 'string' ? err : (err?.message || 'Failed to save title.');
+        const message = typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to save title.';
         setError(message);
         return { ok: false, error: message };
       }
@@ -688,7 +795,7 @@ const CRON_PRESETS = [
   { label: 'Monthly', value: '0 0 1 * *' },
 ];
 
-const initialScheduleKindFromSnapshot = (snapshot) => {
+const initialScheduleKindFromSnapshot = (snapshot: WorkspaceSnapshot | null | undefined): ScheduleKindDraft => {
   const kind = snapshot?.scheduleKind;
   if (kind?.type === 'cron') {
     return { type: 'cron', expression: kind.expression || '', timezone: kind.timezone || '' };
@@ -701,7 +808,7 @@ const initialScheduleKindFromSnapshot = (snapshot) => {
 
 // Compact absolute time — drops seconds and the year if it matches
 // today's so the preview list stays scannable.
-const formatPreviewAbsolute = (ms) => {
+const formatPreviewAbsolute = (ms: number): string => {
   try {
     const d = new Date(ms);
     const sameYear = d.getFullYear() === new Date().getFullYear();
@@ -719,7 +826,7 @@ const formatPreviewAbsolute = (ms) => {
 
 // Coarse "in 3h" / "in 2d" string. Anything past 30 days falls back
 // to the absolute date so the relative side stays meaningful.
-const formatPreviewRelative = (ms) => {
+const formatPreviewRelative = (ms: number): string => {
   const delta = ms - Date.now();
   if (!Number.isFinite(delta) || delta <= 0) return 'now';
   const min = Math.round(delta / 60_000);
@@ -738,6 +845,13 @@ const ScheduleSection = ({
   saving,
   onDirtyChange,
   onSnapshotRefresh,
+}: {
+  ref: React.Ref<SectionHandle>;
+  workspaceId: string;
+  snapshot: WorkspaceSnapshot | null;
+  saving: boolean;
+  onDirtyChange?: (isDirty: boolean) => void;
+  onSnapshotRefresh?: () => void;
 }) => {
   const [enabled, setEnabled] = useState(!!snapshot?.scheduleEnabled);
   const [scheduleKind, setScheduleKind] = useState(() =>
@@ -749,9 +863,9 @@ const ScheduleSection = ({
   // disables for save.
   const [localBusy, setLocalBusy] = useState(false);
   const busy = saving || localBusy;
-  const [error, setError] = useState(null);
-  const [previewTimes, setPreviewTimes] = useState([]);
-  const [previewError, setPreviewError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
+  const [previewTimes, setPreviewTimes] = useState<number[]>([]);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   // Resolve the host timezone once and use it as the default when the
   // user first switches to cron mode. Falls back to the browser's own
@@ -810,14 +924,14 @@ const ScheduleSection = ({
       .catch((err) => {
         if (cancelled) return;
         setPreviewTimes([]);
-        setPreviewError(typeof err === 'string' ? err : err?.message || 'Invalid schedule.');
+        setPreviewError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Invalid schedule.');
       });
     return () => {
       cancelled = true;
     };
   }, [enabled, scheduleKind]);
 
-  const updateKindType = (type) => {
+  const updateKindType = (type: 'interval' | 'cron') => {
     if (type === 'cron') {
       setScheduleKind((prev) =>
         prev.type === 'cron'
@@ -860,7 +974,7 @@ const ScheduleSection = ({
       });
       onSnapshotRefresh?.();
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to update pause state.'));
+      setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to update pause state.');
     } finally {
       setLocalBusy(false);
     }
@@ -873,7 +987,7 @@ const ScheduleSection = ({
       await invoke('workspace_run_now', { workspaceId });
       onSnapshotRefresh?.();
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to trigger run.'));
+      setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to trigger run.');
     } finally {
       setLocalBusy(false);
     }
@@ -891,7 +1005,7 @@ const ScheduleSection = ({
     validate: () => {
       const built = buildPayload();
       if (!built.ok) {
-        setError(built.error);
+        setError(built.error ?? null);
         return { ok: false, error: built.error };
       }
       setError(null);
@@ -900,7 +1014,7 @@ const ScheduleSection = ({
     submit: async () => {
       const built = buildPayload();
       if (!built.ok) {
-        setError(built.error);
+        setError(built.error ?? null);
         return { ok: false, error: built.error };
       }
       try {
@@ -911,7 +1025,7 @@ const ScheduleSection = ({
         setError(null);
         return { ok: true };
       } catch (err) {
-        const message = typeof err === 'string' ? err : (err?.message || 'Failed to save schedule.');
+        const message = typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to save schedule.';
         setError(message);
         return { ok: false, error: message };
       }
@@ -1157,13 +1271,22 @@ const AgentSection = ({
   saving,              // global save in flight — disables inputs
   onDirtyChange,
   onDeleted,
+}: {
+  ref: React.Ref<SectionHandle>;
+  workspaceId: string;
+  agentId: string | null;
+  snapshot: WorkspaceSnapshot | null;
+  deps: ModalDeps;
+  saving: boolean;
+  onDirtyChange?: (isDirty: boolean) => void;
+  onDeleted?: () => void;
 }) => {
   const isCreate = !agentId;
   // Both flows start in a loading state: edit waits on `workspaceGetAgent`,
   // create waits on `deps.defaultExecution` so the form opens with the
   // backend's `$HOME` RO grant pre-populated instead of an empty list.
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
   // Local busy flag for the Delete imperative action. Save goes through
   // the parent's `saving` prop.
   const [deleting, setDeleting] = useState(false);
@@ -1171,23 +1294,23 @@ const AgentSection = ({
 
   // Source-of-truth agent payload (loaded for edit, blank draft for create
   // — populated once `deps.defaultExecution` arrives).
-  const [agent, setAgent] = useState(null);
+  const [agent, setAgent] = useState<AgentDetail | null>(null);
   const isManager = agent?.isDefault === true;
   const canDelete = !isCreate && !isManager;
 
   // Form state
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [selectedMcpServerIds, setSelectedMcpServerIds] = useState([]);
-  const [selectedSkillIds, setSelectedSkillIds] = useState([]);
-  const [providerConnectionIds, setProviderConnectionIds] = useState([]);
+  const [selectedMcpServerIds, setSelectedMcpServerIds] = useState<string[]>([]);
+  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+  const [providerConnectionIds, setProviderConnectionIds] = useState<string[]>([]);
   const [providerConnectionDraft, setProviderConnectionDraft] = useState('');
-  const [extraPathGrants, setExtraPathGrants] = useState([]);
+  const [extraPathGrants, setExtraPathGrants] = useState<PathGrant[]>([]);
   const [extraPathDraft, setExtraPathDraft] = useState('');
   const [extraPathAccess, setExtraPathAccess] = useState('read_only');
   const [sessionBusAllowed, setSessionBusAllowed] = useState(true);
   const [shellMode, setShellMode] = useState('off');
-  const [allowedCommands, setAllowedCommands] = useState([]);
+  const [allowedCommands, setAllowedCommands] = useState<string[]>([]);
   const [blockedCommands, setBlockedCommands] = useState(defaultExecution().shell.blockedCommandPrefixes);
   const [allowedCommandDraft, setAllowedCommandDraft] = useState('');
   const [blockedCommandDraft, setBlockedCommandDraft] = useState('');
@@ -1198,13 +1321,13 @@ const AgentSection = ({
   // Track which agentId we last fetched, so the effect doesn't refetch on
   // every re-render. setting key={agentId} on the parent already remounts
   // but this is a belt-and-braces for future callers.
-  const lastFetchedId = useRef(null);
+  const lastFetchedId = useRef<string | null>(null);
 
   // Baseline payload captured at load time. The Save button compares
   // current form state against this to decide whether anything is pending.
   // Updated after a successful save so Save re-disables until the user
   // edits again.
-  const baselinePayloadRef = useRef(null);
+  const baselinePayloadRef = useRef<string | null>(null);
 
   // Load the agent for the edit flow.
   useEffect(() => {
@@ -1221,7 +1344,7 @@ const AgentSection = ({
       })
       .catch((err) => {
         if (cancelled) return;
-        setError(typeof err === 'string' ? err : (err?.message || 'Failed to load agent.'));
+        setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to load agent.');
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -1387,14 +1510,14 @@ const AgentSection = ({
   useImperativeHandle(ref, () => ({
     validate: () => {
       const v = validateAgent();
-      if (!v.ok) setError(v.error);
+      if (!v.ok) setError(v.error ?? null);
       else setError(null);
       return v;
     },
     submit: async () => {
       const v = validateAgent();
       if (!v.ok) {
-        setError(v.error);
+        setError(v.error ?? null);
         return v;
       }
       const trimmedName = name.trim();
@@ -1426,8 +1549,8 @@ const AgentSection = ({
         } else {
           await workspaceUpdateAgent({
             workspaceId,
-            agentId: agent.id,
-            name: isManager ? (agent.name || 'Manager') : trimmedName,
+            agentId: agent?.id,
+            name: isManager ? (agent?.name || 'Manager') : trimmedName,
             description: description.trim(),
             selectedSkillIds,
             selectedMcpServerIds,
@@ -1443,7 +1566,7 @@ const AgentSection = ({
         setError(null);
         return { ok: true };
       } catch (err) {
-        const message = typeof err === 'string' ? err : (err?.message || 'Failed to save agent.');
+        const message = typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to save agent.';
         setError(message);
         return { ok: false, error: message };
       }
@@ -1452,14 +1575,14 @@ const AgentSection = ({
 
   const handleDelete = useCallback(async () => {
     if (!canDelete) return;
-    if (!window.confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete agent "${agent?.name}"? This cannot be undone.`)) return;
     setDeleting(true);
     setError(null);
     try {
-      await workspaceDeleteAgent(workspaceId, agent.id);
+      await workspaceDeleteAgent(workspaceId, agent?.id);
       onDeleted?.();
     } catch (err) {
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to delete agent.'));
+      setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to delete agent.');
     } finally {
       setDeleting(false);
     }
@@ -1923,7 +2046,8 @@ const AgentSection = ({
 // user sees the granted paths up front. Falls back to the local empty
 // execution if the fetch failed — better to show an empty list than to
 // block the whole create flow.
-const blankAgentDraft = (defaultExecutionFromBackend) => ({
+const blankAgentDraft = (defaultExecutionFromBackend?: Partial<ExecutionConfig>): AgentDetail => ({
+  id: '',
   isDefault: false,
   name: '',
   description: '',

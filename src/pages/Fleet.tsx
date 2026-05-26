@@ -821,7 +821,7 @@ const Fleet = () => {
       <WorkspaceSettingsModal
         isOpen={settingsState.open}
         onClose={handleSettingsClose}
-        workspaceId={settingsState.workspaceId}
+        workspaceId={settingsState.workspaceId || ''}
         snapshot={settingsState.snapshot}
         initialSelection={{ kind: 'general' }}
         onChanged={handleSettingsChanged}
