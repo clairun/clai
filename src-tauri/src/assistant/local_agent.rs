@@ -280,6 +280,13 @@ async fn run_claude_turn(
         .filter(|value| !value.is_empty())
         .unwrap_or("claude");
     let mut command = Command::new(binary);
+    // Default MCP_TIMEOUT in Claude Code is ~30s, which is shorter than a
+    // human typically takes to answer an `ask_user` prompt. When the user
+    // takes longer the MCP HTTP request times out client-side and Claude
+    // reports `MCP server "clai" transport dropped mid-call; response for
+    // tool "ask_user" was lost`. Bump to 1h — runs are already bounded by
+    // `cancel_token`, so an actually-stuck tool doesn't sit indefinitely.
+    command.env("MCP_TIMEOUT", "3600000");
     command
         .arg("-p")
         .arg("--output-format")
