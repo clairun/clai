@@ -2,17 +2,44 @@ import React, { useEffect, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { save } from '@tauri-apps/plugin-dialog';
-import MarkdownMessage from './Chat/MarkdownMessage';
+import MarkdownMessageRaw from './Chat/MarkdownMessage';
 import { downloadWorkspaceFile, readWorkspaceFile } from '../workspace/client';
 import { openExternal } from '../utils/openExternal';
+import type { WorkspaceFileContent, WorkspaceFileEntry } from '../generated/bindings';
 import styles from './WorkspaceFilePreviewPanel.module.css';
+
+// MarkdownMessage is still a .jsx with no exported prop types; pin the
+// shape we rely on here until it's converted.
+const MarkdownMessage = MarkdownMessageRaw as React.ComponentType<{
+  content: string;
+  isStreaming?: boolean;
+}>;
+
+type HtmlMode = 'preview' | 'source';
+
+// The loaded-file shape this panel renders. `viewer`/`path` mirror the
+// WorkspaceFileContent payload from `readWorkspaceFile`; `error` is set
+// locally when the read fails.
+interface LoadedFile {
+  content: string;
+  viewer: string;
+  path: string;
+  error?: string;
+}
+
+interface WorkspaceFilePreviewPanelProps {
+  workspaceId: string;
+  kind: 'memory' | 'artifact';
+  entry: WorkspaceFileEntry | null;
+  onClose: () => void;
+}
 
 // ── Syntax-highlighting setup ──────────────────────────────────────────────
 // Reuses the same Prism instance + oneLight theme that MarkdownMessage uses
 // for fenced code blocks, so standalone file previews and inline markdown
 // snippets render with a consistent look.
 
-const PREVIEW_CODE_STYLE = {
+const PREVIEW_CODE_STYLE: React.CSSProperties = {
   margin: 0,
   padding: '12px 14px',
   fontSize: '12px',
@@ -23,12 +50,12 @@ const PREVIEW_CODE_STYLE = {
   overflow: 'auto',
 };
 
-const PREVIEW_CODE_TAG_STYLE = {
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+const PREVIEW_CODE_TAG_STYLE: React.CSSProperties = {
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
   fontSize: '12px',
 };
 
-const PREVIEW_LINE_NUMBER_STYLE = {
+const PREVIEW_LINE_NUMBER_STYLE: React.CSSProperties = {
   minWidth: '2.5em',
   paddingRight: '12px',
   marginRight: '4px',
@@ -41,7 +68,7 @@ const PREVIEW_LINE_NUMBER_STYLE = {
 // Maps file extensions to Prism language identifiers. Keep this list curated
 // — every entry corresponds to a Prism grammar already bundled by
 // react-syntax-highlighter's default Prism build.
-const EXT_TO_LANG = {
+const EXT_TO_LANG: Record<string, string> = {
   // Web
   js: 'javascript', mjs: 'javascript', cjs: 'javascript',
   jsx: 'jsx',
@@ -85,7 +112,7 @@ const EXT_TO_LANG = {
 // Some files have meaningful names but no extension (Dockerfile, Makefile) —
 // or have a leading-dot name (.gitignore, .env). Match by full lowercase
 // basename before falling back to extension.
-const FILENAME_TO_LANG = {
+const FILENAME_TO_LANG: Record<string, string> = {
   'dockerfile': 'docker',
   'containerfile': 'docker',
   'makefile': 'makefile',
@@ -103,7 +130,7 @@ const FILENAME_TO_LANG = {
   'go.mod': 'go',
 };
 
-const detectLanguage = (path) => {
+const detectLanguage = (path: string | null | undefined): string | null => {
   if (!path) return null;
   const lastSlash = path.lastIndexOf('/');
   const name = (lastSlash === -1 ? path : path.slice(lastSlash + 1)).toLowerCase();
@@ -118,7 +145,7 @@ const detectLanguage = (path) => {
   return EXT_TO_LANG[name.slice(dot + 1)] || null;
 };
 
-const CodeView = ({ content, language }) => (
+const CodeView = ({ content, language }: { content: string; language: string | null }) => (
   <SyntaxHighlighter
     language={language || 'text'}
     style={oneLight}
@@ -189,7 +216,7 @@ const EXTERNAL_LINK_INTERCEPTOR_SCRIPT = `
 </script>
 `;
 
-const augmentHtmlForPreview = (rawHtml) => {
+const augmentHtmlForPreview = (rawHtml: string): string => {
   if (typeof rawHtml !== 'string' || rawHtml.length === 0) return rawHtml;
   // Inject the interceptor just before </body> when present, so the
   // listener attaches after the rest of the document parses. If there's
@@ -203,9 +230,9 @@ const augmentHtmlForPreview = (rawHtml) => {
   return rawHtml + insertion;
 };
 
-const formatTimestamp = (timestamp) => {
+const formatTimestamp = (timestamp: number | bigint | null | undefined): string => {
   if (!timestamp) return '';
-  return new Date(timestamp).toLocaleString([], {
+  return new Date(Number(timestamp)).toLocaleString([], {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
@@ -213,27 +240,27 @@ const formatTimestamp = (timestamp) => {
   });
 };
 
-const looksLikeMarkdown = (viewer, path) => {
+const looksLikeMarkdown = (viewer: string | undefined, path: string | undefined): boolean => {
   if (viewer === 'markdown') return true;
   if (!path) return false;
   const lower = path.toLowerCase();
   return lower.endsWith('.md') || lower.endsWith('.markdown');
 };
 
-const isJsonLike = (viewer, path) => {
+const isJsonLike = (viewer: string | undefined, path: string | undefined): boolean => {
   if (viewer === 'json') return true;
   if (!path) return false;
   return path.toLowerCase().endsWith('.json');
 };
 
-const looksLikeHtml = (viewer, path) => {
+const looksLikeHtml = (viewer: string | undefined, path: string | undefined): boolean => {
   if (viewer === 'html') return true;
   if (!path) return false;
   const lower = path.toLowerCase();
   return lower.endsWith('.html') || lower.endsWith('.htm');
 };
 
-const renderBody = (file, htmlMode) => {
+const renderBody = (file: LoadedFile | null, htmlMode: HtmlMode) => {
   if (!file) return null;
   if (file.error) {
     return <div className={styles.error}>{file.error}</div>;
@@ -282,11 +309,16 @@ const renderBody = (file, htmlMode) => {
   return <CodeView content={file.content} language={detectLanguage(file.path)} />;
 };
 
-export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, onClose }) {
-  const [file, setFile] = useState(null);
+export default function WorkspaceFilePreviewPanel({
+  workspaceId,
+  kind,
+  entry,
+  onClose,
+}: WorkspaceFilePreviewPanelProps) {
+  const [file, setFile] = useState<LoadedFile | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [htmlMode, setHtmlMode] = useState('preview');
+  const [htmlMode, setHtmlMode] = useState<HtmlMode>('preview');
   // `justCopied` flips for ~1.2s after a successful copy so the button can
   // swap its icon/label to a checkmark — purely a visual confirmation, not
   // gating the action. Cleared on file change so reopening a preview
@@ -299,6 +331,7 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
       setLoading(false);
       return undefined;
     }
+    const path = entry.path;
 
     let cancelled = false;
     setLoading(true);
@@ -307,16 +340,16 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
 
     const load = async () => {
       try {
-        const result = await readWorkspaceFile(workspaceId, entry.path);
+        const result = (await readWorkspaceFile(workspaceId, path)) as WorkspaceFileContent | null;
         if (cancelled) return;
         setFile({
           content: result?.content || '',
           viewer: result?.viewer || entry.viewer || 'text',
-          path: entry.path,
+          path,
         });
       } catch (err) {
         if (cancelled) return;
-        setError(typeof err === 'string' ? err : err?.message || 'Failed to read file.');
+        setError(err instanceof Error ? err.message : 'Failed to read file.');
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -332,16 +365,18 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
     setJustCopied(false);
   }, [entry?.path]);
 
-  const canAct = !loading && !error && file && typeof file.content === 'string' && file.content.length > 0;
+  const canAct = Boolean(
+    !loading && !error && file && typeof file.content === 'string' && file.content.length > 0,
+  );
 
   const handleCopy = async () => {
-    if (!canAct) return;
+    if (!canAct || !file) return;
     try {
       await navigator.clipboard.writeText(file.content);
       setJustCopied(true);
       window.setTimeout(() => setJustCopied(false), 1200);
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to copy.');
+      setError(err instanceof Error ? err.message : 'Failed to copy.');
     }
   };
 
@@ -353,14 +388,14 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
   })();
 
   const handleDownload = async () => {
-    if (!canAct || downloading) return;
+    if (!canAct || downloading || !entry?.path) return;
     setDownloading(true);
     try {
       const dest = await save({ defaultPath: defaultDownloadName });
       if (!dest) return; // user cancelled
       await downloadWorkspaceFile(workspaceId, entry.path, dest);
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to download.');
+      setError(err instanceof Error ? err.message : 'Failed to download.');
     } finally {
       setDownloading(false);
     }
@@ -371,8 +406,8 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
   // instead of replacing the iframe's content (which is what a sandboxed
   // iframe does for top-level `<a>` clicks by default).
   useEffect(() => {
-    const handler = (event) => {
-      const data = event?.data;
+    const handler = (event: MessageEvent) => {
+      const data = event?.data as { type?: string; url?: string } | null;
       if (!data || data.type !== EXTERNAL_LINK_MESSAGE_TYPE) return;
       const { url } = data;
       if (typeof url !== 'string' || url.length === 0) return;
