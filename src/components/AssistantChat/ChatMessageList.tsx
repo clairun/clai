@@ -6,47 +6,109 @@
  */
 
 import React, { useState, useCallback, useMemo, memo } from 'react';
-import MarkdownMessage from '../Chat/MarkdownMessage';
-import StreamingMarkdown from '../Chat/StreamingMarkdown';
-import VirtualizedList from '../common/VirtualizedList';
+import MarkdownMessageRaw from '../Chat/MarkdownMessage';
+import StreamingMarkdownRaw from '../Chat/StreamingMarkdown';
+import VirtualizedListRaw from '../common/VirtualizedList';
+import type {
+  AssistantMessage,
+  ContentPart,
+  RunNotice,
+  ToolInvocation,
+} from '../../generated/bindings';
 import styles from './AssistantChat.module.css';
 
-const EMPTY_STREAMING = {};
-const EMPTY_TOOL_CALLS = [];
+// These siblings are still .jsx with no exported prop types; pin the
+// shapes we rely on until they're converted.
+const MarkdownMessage = MarkdownMessageRaw as React.ComponentType<{
+  content: string;
+  isStreaming?: boolean;
+}>;
+const StreamingMarkdown = StreamingMarkdownRaw as React.ComponentType<{
+  content: string;
+  isStreaming?: boolean;
+}>;
+interface VirtualizedListProps<T> {
+  items: T[];
+  itemKey: (item: T) => string;
+  renderItem: (item: T, index: number) => React.ReactNode;
+  className?: string;
+  estimateSize?: number;
+  overscan?: number;
+  gap?: number;
+  footer?: React.ReactNode;
+  footerEstimateSize?: number;
+  initialScrollToBottom?: boolean;
+  scrollToBottomSignal?: number;
+  scrollToBottomBehavior?: 'auto' | 'smooth';
+  stickToBottom?: boolean;
+  onNearBottomChange?: (isNearBottom: boolean) => void;
+}
+const VirtualizedList = VirtualizedListRaw as <T>(
+  props: VirtualizedListProps<T>,
+) => React.ReactElement;
 
-const formatTimestamp = (timestamp) => {
+// Narrowed ContentPart variants — `Extract` pulls the specific shape out
+// of the generated discriminated union so `.text` / `.tool_name` etc.
+// are accessible after a `type ===` guard.
+type TextPart = Extract<ContentPart, { type: 'text' }>;
+type ToolUsePart = Extract<ContentPart, { type: 'tool_use' }>;
+
+// A tool_use enriched with the matching ToolInvocation record (status,
+// params, result, error) for rendering.
+interface EnrichedToolUse {
+  toolCallId: string;
+  toolName: string;
+  arguments?: unknown;
+  status: string;
+  params?: unknown;
+  result?: unknown;
+  error?: string | null;
+}
+
+type AssistantSegment =
+  | { kind: 'text'; text: string; streaming?: boolean }
+  | { kind: 'thinking'; text: string }
+  | { kind: 'tools'; toolUses: EnrichedToolUse[] };
+
+type RenderItem =
+  | { type: 'message'; message: AssistantMessage }
+  | {
+      type: 'tool-group';
+      id: string;
+      createdAt: number | bigint;
+      messages: AssistantMessage[];
+      toolUses: ToolUsePart[];
+    };
+
+const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+
+const formatTimestamp = (timestamp: number | bigint | null | undefined): string => {
   if (!timestamp) return '';
-  const date = new Date(timestamp);
+  const date = new Date(Number(timestamp));
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-const getTextContent = (message) => {
+const getTextContent = (message: AssistantMessage): string => {
   if (!message.content || !Array.isArray(message.content)) return '';
   return message.content
-    .filter((part) => part.type === 'text')
+    .filter((part): part is TextPart => part.type === 'text')
     .map((part) => part.text)
     .join('');
 };
 
-const getToolUses = (message) => {
+const getToolUses = (message: AssistantMessage): ToolUsePart[] => {
   if (!message.content || !Array.isArray(message.content)) return [];
-  return message.content.filter((part) => part.type === 'tool_use');
+  return message.content.filter((part): part is ToolUsePart => part.type === 'tool_use');
 };
 
-const getThinkingContent = (message) => {
-  if (!message.content || !Array.isArray(message.content)) return '';
-  return message.content
-    .filter((part) => part.type === 'thinking')
-    .map((part) => part.text)
-    .join('');
-};
 
 /**
  * Collapsible "thinking" block — renders the model's reasoning_content
  * with a distinct muted/italic style so it doesn't compete with the
  * user-facing response. Collapsed by default; click to expand.
  */
-const ThinkingBlock = memo(({ content }) => {
+const ThinkingBlock = memo(({ content }: { content: string }) => {
   const [expanded, setExpanded] = useState(false);
   if (!content) return null;
   const preview = content.slice(0, 120).replace(/\s+/g, ' ').trim();
@@ -74,7 +136,7 @@ ThinkingBlock.displayName = 'ThinkingBlock';
 /**
  * Clean MCP-style tool names: "mcp.<uuid>.get_metric_data" → "get_metric_data"
  */
-const cleanToolName = (name) => {
+const cleanToolName = (name: string): string => {
   if (!name) return name;
   // Match mcp.<uuid-or-id>.<actual_tool_name>
   const match = name.match(/^mcp\.[^.]+\.(.+)$/);
@@ -95,9 +157,12 @@ const cleanToolName = (name) => {
  * The output order mirrors the source order, so callers see exactly
  * the text↔tool interleaving the agent produced.
  */
-const groupAssistantContent = (content, toolCallsById) => {
+const groupAssistantContent = (
+  content: ContentPart[],
+  toolCallsById: Map<string, ToolInvocation> | undefined,
+): AssistantSegment[] => {
   if (!Array.isArray(content)) return [];
-  const segments = [];
+  const segments: AssistantSegment[] = [];
   for (const part of content) {
     if (!part || typeof part !== 'object') continue;
     if (part.type === 'text') {
@@ -146,14 +211,14 @@ const groupAssistantContent = (content, toolCallsById) => {
 /**
  * Check if an assistant message contains only tool calls (no text).
  */
-const isToolOnlyMessage = (message) => {
+const isToolOnlyMessage = (message: AssistantMessage): boolean => {
   if (message.role !== 'assistant') return false;
   const text = getTextContent(message);
   const tools = getToolUses(message);
   return !text.trim() && tools.length > 0;
 };
 
-const isHiddenMessage = (message) => {
+const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
   if (!message) return true;
   if (message.role === 'tool') return true;
 
@@ -172,8 +237,8 @@ const isHiddenMessage = (message) => {
  * - { type: 'message', message } for normal messages
  * - { type: 'tool-group', messages: [...], toolUses: [...] } for merged tool-only turns
  */
-const groupMessages = (messages) => {
-  const result = [];
+const groupMessages = (messages: AssistantMessage[]): RenderItem[] => {
+  const result: RenderItem[] = [];
   let i = 0;
 
   while (i < messages.length) {
@@ -240,34 +305,41 @@ const groupMessages = (messages) => {
  * - A plain string
  * - A generic JSON object
  */
-const extractMcpText = (result) => {
+interface McpTextPart {
+  type?: string;
+  text?: string;
+}
+
+const extractMcpText = (result: unknown): string | null => {
   if (!result || typeof result !== 'object') return null;
 
+  const envelope = result as { content?: unknown; text?: unknown };
+
   // Envelope object with content array
-  if (result.content && Array.isArray(result.content)) {
-    const textParts = result.content
+  if (Array.isArray(envelope.content)) {
+    const textParts = (envelope.content as McpTextPart[])
       .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-      .map((p) => p.text);
+      .map((p) => p.text as string);
     if (textParts.length > 0) return textParts.join('\n\n');
   }
 
   // Envelope object with top-level text field
-  if (typeof result.text === 'string' && result.text.trim()) {
-    return result.text;
+  if (typeof envelope.text === 'string' && envelope.text.trim()) {
+    return envelope.text;
   }
 
   // Direct content array
   if (Array.isArray(result)) {
-    const textParts = result
+    const textParts = (result as McpTextPart[])
       .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-      .map((p) => p.text);
+      .map((p) => p.text as string);
     if (textParts.length > 0) return textParts.join('\n\n');
   }
 
   return null;
 };
 
-const renderToolResult = (result) => {
+const renderToolResult = (result: unknown): React.ReactNode => {
   if (result == null) return null;
 
   // Try MCP text extraction first (handles envelope objects and content arrays)
@@ -300,7 +372,7 @@ const renderToolResult = (result) => {
  * Format tool parameters for display.
  * Returns null if params are empty/null.
  */
-const formatParams = (params) => {
+const formatParams = (params: unknown): string | null => {
   if (!params) return null;
   if (typeof params === 'object' && Object.keys(params).length === 0) return null;
   if (typeof params === 'string') {
@@ -318,6 +390,14 @@ const formatParams = (params) => {
 /**
  * ChatMessageList - Renders a list of assistant messages with markdown and tool calls
  */
+interface ChatMessageListProps {
+  messages: AssistantMessage[];
+  streamingText?: Record<string, string>;
+  isStreaming?: boolean;
+  toolCalls?: ToolInvocation[];
+  userLabel?: string;
+}
+
 const ChatMessageList = ({
   messages,
   streamingText = EMPTY_STREAMING,
@@ -328,7 +408,7 @@ const ChatMessageList = ({
   // transcript — those `user` messages are the parent's task instructions,
   // not anything the human typed.
   userLabel = 'You',
-}) => {
+}: ChatMessageListProps) => {
   const [isNearBottom, setIsNearBottom] = useState(true);
 
   // Build a Map of toolCalls keyed by id once per render, so every
@@ -336,7 +416,7 @@ const ChatMessageList = ({
   // on the toolCalls reference so the Map is stable while toolCalls
   // doesn't change, which keeps memoized children from re-rendering.
   const toolCallsById = useMemo(() => {
-    const map = new Map();
+    const map = new Map<string, ToolInvocation>();
     for (const tc of toolCalls) map.set(tc.id, tc);
     return map;
   }, [toolCalls]);
@@ -351,7 +431,7 @@ const ChatMessageList = ({
   // the full header and card framing so the turn boundary stays
   // legible.
   const continuationFlags = useMemo(() => {
-    const isAssistantItem = (it) => {
+    const isAssistantItem = (it: RenderItem | undefined) => {
       if (!it) return false;
       if (it.type === 'tool-group') return true;
       return it.message?.role === 'assistant';
@@ -362,13 +442,13 @@ const ChatMessageList = ({
     );
   }, [grouped]);
 
-  const itemKey = useCallback((item) => (
+  const itemKey = useCallback((item: RenderItem) => (
     item.type === 'tool-group'
       ? `tool-group:${item.id}`
       : `message:${item.message.id}`
   ), []);
 
-  const renderItem = useCallback((item, idx) => (
+  const renderItem = useCallback((item: RenderItem, idx: number) => (
     item.type === 'tool-group' ? (
       <MergedToolGroup
         item={item}
@@ -396,7 +476,7 @@ const ChatMessageList = ({
     </div>
   ) : null;
 
-  const handleNearBottomChange = useCallback((isNearBottom) => {
+  const handleNearBottomChange = useCallback((isNearBottom: boolean) => {
     setIsNearBottom((current) => (current === isNearBottom ? current : isNearBottom));
   }, []);
 
@@ -420,7 +500,16 @@ const ChatMessageList = ({
   );
 };
 
-const MessageBlock = memo(({ message, streamingText, toolCallsById, userLabel = 'You', isContinuation = false }) => {
+interface MessageBlockProps {
+  message: AssistantMessage;
+  streamingText?: string;
+  toolCallsById: Map<string, ToolInvocation>;
+  userLabel?: string;
+  isContinuation?: boolean;
+}
+
+const MessageBlock = memo(
+  ({ message, streamingText, toolCallsById, userLabel = 'You', isContinuation = false }: MessageBlockProps) => {
   const { role, createdAt } = message;
 
   if (role === 'user') {
@@ -504,8 +593,14 @@ const MessageBlock = memo(({ message, streamingText, toolCallsById, userLabel = 
  * MergedToolGroup — renders tool calls from multiple consecutive assistant turns
  * as a single collapsed group, avoiding repeated "CLAI" headers for tool-only turns.
  */
-const MergedToolGroup = memo(({ item, toolCallsById, isContinuation = false }) => {
-  const enrichedToolUses = useMemo(
+interface MergedToolGroupProps {
+  item: Extract<RenderItem, { type: 'tool-group' }>;
+  toolCallsById: Map<string, ToolInvocation>;
+  isContinuation?: boolean;
+}
+
+const MergedToolGroup = memo(({ item, toolCallsById, isContinuation = false }: MergedToolGroupProps) => {
+  const enrichedToolUses = useMemo<EnrichedToolUse[]>(
     () => item.toolUses.map((tu) => {
       const tc = toolCallsById?.get(tu.tool_call_id);
       return {
@@ -541,7 +636,7 @@ const MergedToolGroup = memo(({ item, toolCallsById, isContinuation = false }) =
  * Single tool call: shown inline (always visible header).
  * Multiple tool calls: collapsed behind a summary row.
  */
-const ToolCallGroup = memo(({ toolUses }) => {
+const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
   const [isGroupExpanded, setIsGroupExpanded] = useState(false);
 
   if (toolUses.length === 0) return null;
@@ -616,9 +711,17 @@ const ToolCallGroup = memo(({ toolUses }) => {
 /**
  * ToolCallBlock — renders a single tool call with status, params, and result
  */
-const ToolCallBlock = memo(({ toolName, params, status, result, error }) => {
+interface ToolCallBlockProps {
+  toolName: string;
+  params?: unknown;
+  status: string;
+  result?: unknown;
+  error?: string | null;
+}
+
+const ToolCallBlock = memo(({ toolName, params, status, result, error }: ToolCallBlockProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState('output');
+  const [activeTab, setActiveTab] = useState<'output' | 'input'>('output');
 
   const handleToggle = useCallback(() => {
     setIsExpanded((prev) => !prev);
@@ -706,7 +809,7 @@ const ToolCallBlock = memo(({ toolName, params, status, result, error }) => {
   );
 });
 
-const StatusIndicator = memo(({ status }) => {
+const StatusIndicator = memo(({ status }: { status: string }) => {
   switch (status) {
     case 'pending':
       return (
@@ -742,7 +845,7 @@ const StatusIndicator = memo(({ status }) => {
 /**
  * NoticesBanner — expandable banner showing policy warnings for a run
  */
-const NoticesBanner = memo(({ notices }) => {
+const NoticesBanner = memo(({ notices }: { notices: RunNotice[] | undefined }) => {
   const [expanded, setExpanded] = useState(false);
 
   if (!notices || notices.length === 0) return null;
