@@ -12,7 +12,13 @@ import type {
   AssistantMessage,
   AssistantRun,
   AssistantSession,
+  CreateProviderConnectionRequest,
+  ModelInfo,
+  ProviderConnection,
+  ProviderDescriptor,
+  TestResult,
   ToolInvocation,
+  UpdateProviderConnectionRequest,
 } from '../generated/bindings';
 
 export async function createSession(params: unknown): Promise<AssistantSession> {
@@ -68,24 +74,28 @@ export async function cancelRun(runId: string): Promise<AssistantRun> {
 }
 
 // ── Provider-connection commands ────────────────────────────────────
-// These don't have generated bindings yet (their request/response
-// structs would need `#[derive(TS)]` on the BE). Typed loosely at the
-// boundary; convert when one of these surfaces gets involved in a
-// regression worth pinning down.
+// Typed end-to-end via the generated bindings. Request shapes
+// (CreateProviderConnectionRequest, UpdateProviderConnectionRequest)
+// and response shapes (ProviderConnection, ProviderDescriptor,
+// ModelInfo, TestResult) all come from #[derive(TS)] on the Rust side.
 
-export async function listProviderConnections(): Promise<unknown[]> {
+export async function listProviderConnections(): Promise<ProviderConnection[]> {
   return invoke('provider_connection_list');
 }
 
-export async function getProviderConnection(id: string): Promise<unknown> {
+export async function getProviderConnection(id: string): Promise<ProviderConnection | null> {
   return invoke('provider_connection_get', { id });
 }
 
-export async function createProviderConnection(request: unknown): Promise<unknown> {
+export async function createProviderConnection(
+  request: CreateProviderConnectionRequest,
+): Promise<ProviderConnection> {
   return invoke('provider_connection_create', { request });
 }
 
-export async function updateProviderConnection(request: unknown): Promise<unknown> {
+export async function updateProviderConnection(
+  request: UpdateProviderConnectionRequest,
+): Promise<ProviderConnection> {
   return invoke('provider_connection_update', { request });
 }
 
@@ -93,18 +103,18 @@ export async function deleteProviderConnection(id: string): Promise<void> {
   return invoke('provider_connection_delete', { id });
 }
 
-export async function listProviderModels(id: string): Promise<unknown[]> {
+export async function listProviderModels(id: string): Promise<ModelInfo[]> {
   return invoke('provider_connection_list_models', { id });
 }
 
-export async function listProviderDescriptorModels(providerId: string): Promise<unknown[]> {
+export async function listProviderDescriptorModels(providerId: string): Promise<ModelInfo[]> {
   return invoke('provider_descriptor_models', { providerId });
 }
 
-export async function testProviderConnection(id: string): Promise<unknown> {
+export async function testProviderConnection(id: string): Promise<TestResult> {
   return invoke('provider_connection_test', { id });
 }
 
-export async function listAvailableProviderAdapters(): Promise<unknown[]> {
+export async function listAvailableProviderAdapters(): Promise<ProviderDescriptor[]> {
   return invoke('provider_connection_list_available');
 }

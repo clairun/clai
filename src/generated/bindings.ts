@@ -19,11 +19,23 @@ export type AssistantSession = { id: string, kind: SessionKind, title: string | 
 
 export type AssistantUiEvent = { "type": "session_created", "payload": { session: AssistantSession, } } | { "type": "message_created", "payload": { message: AssistantMessage, } } | { "type": "run_queued", "payload": { run: AssistantRun, } } | { "type": "run_started", "payload": { run: AssistantRun, } } | { "type": "assistant_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_thinking_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_message_completed", "payload": { message: AssistantMessage, } } | { "type": "assistant_message_updated", "payload": { message: AssistantMessage, } } | { "type": "tool_call_started", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_completed", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_failed", "payload": { tool_call: ToolInvocation, } } | { "type": "run_completed", "payload": { run: AssistantRun, } } | { "type": "run_failed", "payload": { run: AssistantRun, } } | { "type": "run_cancelled", "payload": { run: AssistantRun, } } | { "type": "ask_user_requested", "payload": { pending_id: string, question: string, options: Array<AskUserOption> | null, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } };
 
+export type AuthMode = "subscription_login" | "subscription_api_key" | "developer_api_key" | "workspace_token";
+
 export type ContentPart = { "type": "text", text: string, } | { "type": "thinking", text: string, } | { "type": "tool_use", tool_call_id: string, tool_name: string, arguments: JsonValue, } | { "type": "tool_result", tool_call_id: string, payload: JsonValue, started_at?: bigint | null, completed_at?: bigint | null, };
+
+export type CreateProviderConnectionRequest = { name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
 export type InterAgentCallContext = { callId: string, callerAgentId: string | null, callerSessionId: string, callerRunId: string, callerToolCallId: string | null, calleeAgentId: string, exposedToolName: string, };
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
+
+export type ModelInfo = { id: string, displayName: string, supportsTools: boolean, };
+
+export type ProtocolFamily = "open_ai_compatible" | "anthropic" | "custom";
+
+export type ProviderConnection = { id: string, name: string, providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
+
+export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
 export type RunNotice = { kind: RunNoticeKind, message: string, timestamp: bigint, };
 
@@ -65,9 +77,13 @@ export type SessionContext = { spaceId: string | null, roomId: string | null, wo
 
 export type SessionKind = "interactive" | "background_job";
 
+export type TestResult = { success: boolean, error: string | null, };
+
 export type ToolCallStatus = "pending" | "running" | "completed" | "failed";
 
 export type ToolInvocation = { id: string, runId: string, sessionId: string, toolName: string, params: JsonValue, status: ToolCallStatus, result: JsonValue | null, error: string | null, startedAt: bigint, completedAt: bigint | null, };
+
+export type UpdateProviderConnectionRequest = { id: string, name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 
 export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, role: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
 /**

@@ -1,14 +1,16 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::process::Command;
+use ts_rs::TS;
 
 use crate::assistant::auth::ProviderSecretStorage;
 use crate::assistant::providers::{self, cli};
 use crate::assistant::types::{AuthMode, ModelInfo, ProviderConnection, ProviderDescriptor};
 use crate::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct CreateProviderConnectionRequest {
     pub name: String,
     pub provider_id: String,
@@ -23,8 +25,9 @@ pub struct CreateProviderConnectionRequest {
     pub account_label: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct UpdateProviderConnectionRequest {
     pub id: String,
     pub name: String,
@@ -41,8 +44,9 @@ pub struct UpdateProviderConnectionRequest {
     pub enabled: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct TestResult {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -8,16 +8,18 @@ pub type MessageId = String;
 pub type RunId = String;
 pub type ToolCallId = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum ProtocolFamily {
     OpenAiCompatible,
     Anthropic,
     Custom,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum AuthMode {
     SubscriptionLogin,
     SubscriptionApiKey,
@@ -294,8 +296,9 @@ pub struct ToolInvocation {
     pub completed_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ProviderConnection {
     pub id: String,
     pub name: String,
@@ -312,8 +315,9 @@ pub struct ProviderConnection {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ProviderDescriptor {
     pub id: String,
     pub display_name: String,
@@ -325,9 +329,10 @@ pub struct ProviderDescriptor {
     pub is_cli_backed: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ModelInfo {
     pub id: String,
     pub display_name: String,
