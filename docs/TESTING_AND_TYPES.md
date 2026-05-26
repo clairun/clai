@@ -32,7 +32,7 @@ We can call this work finished when **all** of the following are true:
 4. CI runs `typecheck` + `test` + `gen:bindings` (and fails if bindings drift). Every push is gated.
 5. The 4 highest-traffic UI surfaces (Workspace page, Fleet page, AskUserPanel, ChatMessageList) have component-level tests covering at least their happy path.
 
-We're roughly **65-70%** of the way there as of 2026-05-26. **P0 and P1 are complete** (the one deliberate carve-out: skill-catalog bindings, deferred under P1-1 because the SkillSourceConfig/SkillDefinition closure is heavy and low-regression-risk). All of P2 is still ahead — the bulk being the remaining `.jsx` → `.tsx` conversions, dropping `allowJs`, provider-adapter tests, and eventual E2E.
+We're roughly **70-75%** of the way there as of 2026-05-26. **P0 and P1 complete; P1-1's skill-binding carve-out closed under P2-1b.** P2 is underway: the three pinned leaf components + a batch of trivial leaves/indexes are converted (30 `.ts`/`.tsx` files now). Remaining: ~53 `.jsx` + ~22 non-test `.js` to convert (the bulk of the effort — Fleet, Settings, Canvas, the chat/chart components, contexts, `api/client.js`), then drop `allowJs` (P2-2), coverage (P2-3), provider-adapter tests (P2-5), and E2E (P2-6).
 
 ## House rules in effect today
 
@@ -84,22 +84,28 @@ These already apply — don't wait for the roadmap to finish:
 
 ### P2 — Longer tail (multi-day, opportunistic)
 
-**P2-1. Convert the remaining `.jsx` files.** _Effort: ~1-2 days, depending on file size._
-Touch as you go, don't batch. Order roughly:
+**P2-1. Convert the remaining `.jsx` files.** _In progress — ~53 `.jsx` + ~22 non-test `.js` left as of 2026-05-26 (30 files already `.ts`/`.tsx`)._
+Touch as you go, don't batch. Done so far this pass:
 
-- `src/components/Chat/MarkdownMessage.jsx` + `StreamingMarkdown.jsx` and `src/components/common/VirtualizedList.jsx` — currently pinned via typed casts in their `.tsx` consumers; converting them removes the casts. VirtualizedList is generic, type it as `<T,>(props: VirtualizedListProps<T>)`.
+- [x] Pinned leaf components: `MarkdownMessage`, `StreamingMarkdown`, `VirtualizedList` (`<T,>` generic, `memo(Inner) as typeof Inner` export). Casts removed from consumers.
+- [x] Trivial leaves: `utils/openExternal`, `hooks/useDebounce`, `hooks/usePlatform`, and pure re-export indexes (assistant, commands, Dashboard, TerminalEmulator, TileView, ContextPanel, Settings).
+
+Remaining, order roughly:
+
 - `src/pages/Fleet.jsx` (large, regression-prone).
 - `src/components/Settings/*` (many files, each smallish).
 - `src/components/AssistantChat/*` (the rest beyond ChatMessageList).
-- `src/components/Canvas/*` (xyflow nodes — careful around d3 typing).
-- `src/contexts/*` (small).
-- `src/hooks/*`.
-- `src/utils/*`.
-- `src/stores/chatManagerStore.js`.
-- The remaining test files — rename `.test.js` → `.test.ts` and tighten the assertions where the new types help.
+- `src/components/Chat/*` chart blocks + `ToolBlock`, `DesktopChatPanel`.
+- `src/components/ContextPanel/*`, `TabBar`, `TabContent`, `TabView`, `TileView`, `TerminalEmulator/*`, `Dashboard`, `Canvas/*`.
+- `src/components/Canvas/*` — **gotcha**: `Canvas/index.js` re-exports a nonexistent `TextNode`; drop it when converting. xyflow/d3 typing needs care.
+- `src/contexts/*`, remaining `src/hooks/*`, `src/utils/*`, `src/stores/chatManagerStore.js`.
+- `src/api/client.js` (486 lines, mixed concern) — also where the skill-command consumer typing lands.
+- `src/App.jsx`, `src/main.jsx`, `src/Routes.jsx`, `src/layouts/MainLayout.jsx`, `src/pages/NotFound.jsx`.
+- The remaining test files — rename `.test.js` → `.test.ts`.
 
-**P2-1b. Skill-catalog bindings (carried over from P1-1).** _Effort: ~1h._
-Derive `TS` on `SkillSourceConfig`, `SkillSourceKind`, `SkillDefinition`, `SkillSourceDiagnostic`, and the `skills.rs` request/response structs (`AddSkillSourceRequest`, `SetSkillSourceEnabledRequest`, `SkillSourceResponse`, `SkillCatalogResponse`). Watch the `#[serde(flatten)]` on `SkillSourceResponse` — verify ts-rs flattens it correctly. Then type `src/api/client.js`'s skill commands.
+**P2-1b. Skill-catalog bindings.** _Done 2026-05-26._
+
+- [x] `SkillSourceKind/Config`, `SkillDefinition`, `SkillSourceDiagnostic`, and the `skills.rs` request/response structs derive `TS`. `#[ts(flatten)]` added alongside `#[serde(flatten)]` on `SkillSourceResponse`. Consumer typing (`api/client.js` skill commands) lands when that file is converted under P2-1.
 
 **P2-2. Drop `allowJs`; tighten compiler.** _Effort: ~30min once P2-1 is done._
 
