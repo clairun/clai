@@ -6,7 +6,6 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom';
-import ProviderSettings from './ProviderSettings';
 // AgentsSettings was the global-agent CRUD; agents are workspace-local now
 // and edited inside each workspace, not from the global Settings modal.
 import AssistantProviderSettings from './AssistantProviderSettings';
@@ -61,18 +60,18 @@ const TABS = {
   PROVIDER: 'provider',
   SKILLS: 'skills',
   MCP_SERVERS: 'mcp_servers',
-};
+} as const;
 
-/**
- * SettingsModal - Main settings interface
- *
- * @param {Object} props
- * @param {boolean} props.isOpen - Whether the modal is open
- * @param {Function} props.onClose - Callback when modal closes
- * @param {string} props.initialTab - Initial tab to show (default: 'provider')
- */
-const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }) => {
-  const [activeTab, setActiveTab] = useState(initialTab);
+type TabValue = (typeof TABS)[keyof typeof TABS];
+
+interface SettingsModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  initialTab?: TabValue;
+}
+
+const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }: SettingsModalProps) => {
+  const [activeTab, setActiveTab] = useState<TabValue>(initialTab);
 
   // Reset to initial tab when modal opens
   useEffect(() => {
@@ -83,7 +82,7 @@ const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }) => {
 
   // Handle escape key
   useEffect(() => {
-    const handleEscape = (e) => {
+    const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
         onClose();
       }
@@ -105,7 +104,7 @@ const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }) => {
     };
   }, [isOpen]);
 
-  const handleOverlayClick = useCallback((e) => {
+  const handleOverlayClick = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) {
       onClose();
     }

@@ -47,7 +47,7 @@ const PowerIcon = () => (
 /**
  * Format interval for display
  */
-const formatInterval = (minutes) => {
+const formatInterval = (minutes: number): string => {
   if (minutes < 60) {
     return `${minutes} min`;
   }
@@ -62,7 +62,7 @@ const formatInterval = (minutes) => {
 /**
  * Truncate description for preview
  */
-const truncateDescription = (text, maxLength = 120) => {
+const truncateDescription = (text: string | undefined | null, maxLength = 120): string => {
   if (!text) return '';
   // Remove markdown syntax for preview
   const plainText = text
@@ -78,18 +78,49 @@ const truncateDescription = (text, maxLength = 120) => {
   return plainText.substring(0, maxLength).trim() + '...';
 };
 
-/**
- * AgentCard - Individual agent display
- *
- * @param {Object} props
- * @param {Object} props.agent - The agent data
- * @param {Function} props.onEdit - Callback when edit is clicked
- * @param {Function} props.onDelete - Callback when delete is clicked
- * @param {Function} props.onToggleEnabled - Callback when enable state toggles
- * @param {boolean} props.isDeleting - Whether deletion is in progress
- * @param {boolean} props.isToggling - Whether enable/disable is in progress
- */
-const AgentCard = ({ agent, mcpServers = [], skills = [], onEdit, onDelete, onToggleEnabled, isDeleting, isToggling }) => {
+// The UI "agent" here is the loose legacy card shape (not a generated
+// binding) — many optional fields surfaced from various sources.
+interface AgentCardAgent {
+  name: string;
+  enabled?: boolean;
+  description?: string | null;
+  selectedMcpServerIds?: string[];
+  selectedSkillIds?: string[];
+  execution?: {
+    filesystem?: { mode?: string };
+    shell?: { mode?: string };
+  };
+  scheduleEnabled?: boolean;
+  intervalMinutes?: number;
+  exposedTools?: unknown[];
+}
+
+interface NamedRef {
+  id: string;
+  name: string;
+}
+
+interface AgentCardProps {
+  agent: AgentCardAgent;
+  mcpServers?: NamedRef[];
+  skills?: NamedRef[];
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggleEnabled: () => void;
+  isDeleting?: boolean;
+  isToggling?: boolean;
+}
+
+const AgentCard = ({
+  agent,
+  mcpServers = [],
+  skills = [],
+  onEdit,
+  onDelete,
+  onToggleEnabled,
+  isDeleting,
+  isToggling,
+}: AgentCardProps) => {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const handleDeleteClick = () => {
@@ -114,7 +145,7 @@ const AgentCard = ({ agent, mcpServers = [], skills = [], onEdit, onDelete, onTo
     .filter(Boolean);
   const filesystemMode = agent.execution?.filesystem?.mode || 'off';
   const shellMode = agent.execution?.shell?.mode || 'off';
-  const scheduleLabel = agent.scheduleEnabled === false ? 'On demand' : `Every ${formatInterval(agent.intervalMinutes)}`;
+  const scheduleLabel = agent.scheduleEnabled === false ? 'On demand' : `Every ${formatInterval(agent.intervalMinutes ?? 0)}`;
   const exposedToolCount = agent.exposedTools?.length || 0;
 
   return (

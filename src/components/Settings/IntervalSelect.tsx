@@ -11,7 +11,7 @@ import styles from './IntervalSelect.module.css';
 /**
  * Chevron down icon
  */
-const ChevronIcon = ({ isOpen }) => (
+const ChevronIcon = ({ isOpen }: { isOpen: boolean }) => (
   <svg
     width="14"
     height="14"
@@ -39,7 +39,12 @@ const CheckIcon = () => (
 /**
  * Interval presets
  */
-const INTERVAL_OPTIONS = [
+interface IntervalOption {
+  value: number;
+  label: string;
+}
+
+const INTERVAL_OPTIONS: IntervalOption[] = [
   { value: 5, label: '5 minutes' },
   { value: 15, label: '15 minutes' },
   { value: 30, label: '30 minutes' },
@@ -59,12 +64,19 @@ const INTERVAL_OPTIONS = [
  * @param {boolean} props.disabled - Whether the select is disabled
  * @param {string} props.id - ID for accessibility
  */
-const IntervalSelect = ({ value, onChange, disabled, id }) => {
+interface IntervalSelectProps {
+  value: number;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+  id?: string;
+}
+
+const IntervalSelect = ({ value, onChange, disabled, id }: IntervalSelectProps) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [dropdownStyle, setDropdownStyle] = useState({});
-  const containerRef = useRef(null);
-  const triggerRef = useRef(null);
-  const dropdownRef = useRef(null);
+  const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
 
   // Find the label for current value
   const selectedOption = value === 0
@@ -95,9 +107,10 @@ const IntervalSelect = ({ value, onChange, disabled, id }) => {
 
   // Close dropdown when clicking outside
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      const isOutsideContainer = containerRef.current && !containerRef.current.contains(event.target);
-      const isOutsideDropdown = dropdownRef.current && !dropdownRef.current.contains(event.target);
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      const isOutsideContainer = containerRef.current && !containerRef.current.contains(target);
+      const isOutsideDropdown = dropdownRef.current && !dropdownRef.current.contains(target);
       if (isOutsideContainer && isOutsideDropdown) {
         setIsOpen(false);
       }
@@ -113,7 +126,7 @@ const IntervalSelect = ({ value, onChange, disabled, id }) => {
   }, [isOpen]);
 
   // Handle keyboard navigation
-  const handleKeyDown = (e) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if (disabled) return;
 
     switch (e.key) {
@@ -148,7 +161,7 @@ const IntervalSelect = ({ value, onChange, disabled, id }) => {
     }
   };
 
-  const handleOptionClick = (optionValue) => {
+  const handleOptionClick = (optionValue: number) => {
     onChange(optionValue);
     setIsOpen(false);
   };

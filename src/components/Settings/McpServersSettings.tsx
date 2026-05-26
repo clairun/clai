@@ -6,6 +6,12 @@ import {
   updateMcpServer,
 } from '../../api/client';
 import McpServerFormModal from './McpServerFormModal';
+import type {
+  McpServerAuthResponse,
+  McpServerIntegrationType,
+  McpServerResponse,
+  McpServerTransport,
+} from '../../generated/bindings';
 import styles from './McpServersSettings.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
@@ -17,7 +23,7 @@ const PlusIcon = () => (
   </svg>
 );
 
-const transportSummary = (transport) => {
+const transportSummary = (transport: McpServerTransport | null | undefined): string => {
   if (!transport) return 'Unknown transport';
   if (transport.type === 'http') {
     return transport.url;
@@ -25,17 +31,19 @@ const transportSummary = (transport) => {
   return `${transport.command}${transport.args?.length ? ` ${transport.args.join(' ')}` : ''}`;
 };
 
-const authSummary = (auth) => {
+const authSummary = (auth: McpServerAuthResponse | null | undefined): string => {
   if (!auth || auth.type === 'none') {
     return 'No auth';
   }
   if (auth.type === 'bearer_token') {
-    return auth.hasSecret ? 'Bearer token configured' : 'Bearer token missing';
+    // Binding field is snake_case (`has_secret`); the old .jsx read
+    // `auth.hasSecret` and always rendered "missing".
+    return auth.has_secret ? 'Bearer token configured' : 'Bearer token missing';
   }
-  return auth.type;
+  return 'No auth';
 };
 
-const integrationSummary = (integrationType) => {
+const integrationSummary = (integrationType: McpServerIntegrationType | undefined): string => {
   if (integrationType === 'netdata_cloud') {
     return 'Netdata Cloud';
   }
@@ -43,11 +51,11 @@ const integrationSummary = (integrationType) => {
 };
 
 const McpServersSettings = () => {
-  const [servers, setServers] = useState([]);
+  const [servers, setServers] = useState<McpServerResponse[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [editingServer, setEditingServer] = useState(null);
+  const [editingServer, setEditingServer] = useState<McpServerResponse | null>(null);
 
   useEffect(() => {
     loadServers();
@@ -73,12 +81,12 @@ const McpServersSettings = () => {
     setIsFormOpen(true);
   };
 
-  const handleEdit = (server) => {
+  const handleEdit = (server: McpServerResponse) => {
     setEditingServer(server);
     setIsFormOpen(true);
   };
 
-  const handleDelete = async (serverId) => {
+  const handleDelete = async (serverId: string) => {
     setError(null);
     try {
       await deleteMcpServer(serverId);
@@ -86,11 +94,11 @@ const McpServersSettings = () => {
       window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
     } catch (deleteError) {
       console.error('[McpServersSettings] Failed to delete server:', deleteError);
-      setError(deleteError?.message || 'Failed to delete MCP server.');
+      setError(deleteError instanceof Error ? deleteError.message : 'Failed to delete MCP server.');
     }
   };
 
-  const handleSubmit = async (formData) => {
+  const handleSubmit = async (formData: Record<string, unknown>) => {
     setError(null);
     try {
       if (editingServer) {
