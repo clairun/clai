@@ -68,8 +68,9 @@ fn sweep_workspace_agent_skill_ids(state: &AppState, source_id: &str) -> Result<
     Ok(())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct AddSkillSourceRequest {
     pub name: String,
     #[serde(default)]
@@ -82,24 +83,28 @@ pub struct AddSkillSourceRequest {
     pub reference: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SetSkillSourceEnabledRequest {
     pub id: String,
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SkillSourceResponse {
     #[serde(flatten)]
+    #[ts(flatten)]
     pub source: SkillSourceConfig,
     pub managed_kind: Option<String>,
     pub read_only: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SkillCatalogResponse {
     pub sources: Vec<SkillSourceResponse>,
     pub skills: Vec<SkillDefinition>,

@@ -352,8 +352,9 @@ impl McpServerConfig {
 // =============================================================================
 
 /// Configured source of reusable skills.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum SkillSourceKind {
     Local {
         path: String,
@@ -368,8 +369,9 @@ pub enum SkillSourceKind {
 }
 
 /// User-configured skill source persisted in app config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SkillSourceConfig {
     pub id: String,
     pub name: String,

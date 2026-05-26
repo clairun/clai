@@ -31,8 +31,9 @@ pub struct ConfigManager {
     config_path: PathBuf,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SkillDefinition {
     pub id: String,
     pub name: String,
@@ -43,8 +44,9 @@ pub struct SkillDefinition {
     pub content: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SkillSourceDiagnostic {
     pub source_id: String,
     pub source_name: String,
