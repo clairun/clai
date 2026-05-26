@@ -183,6 +183,12 @@ const useAssistantStore = create(
             // setRunStatus when the run terminates.
             streamingTextByMessageId: existing?.streamingTextByMessageId || {},
             isStreaming: existing?.isStreaming || false,
+            // Same rationale for the pending ask_user request: it's
+            // FE-only state that the BE snapshot doesn't carry, so a
+            // poll tick landing while a question is open would unmount
+            // AskUserPanel within ~5s and the user could never reach the
+            // textarea/options. Cleared on ask_user_resolved.
+            pendingAskUser: existing?.pendingAskUser || null,
           };
         }),
 
