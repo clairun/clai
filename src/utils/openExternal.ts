@@ -10,10 +10,9 @@
  * we don't wire up here. Accepting the limitation keeps this path a
  * one-liner.
  *
- * @param {string} url - The URL to open
- * @returns {Promise<void>}
+ * @param url - The URL to open
  */
-export async function openExternal(url) {
+export async function openExternal(url: string): Promise<void> {
   try {
     const { openUrl } = await import('@tauri-apps/plugin-opener');
     await openUrl(url);

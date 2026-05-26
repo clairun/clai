@@ -1,7 +1,13 @@
 import { useState, useEffect } from 'react';
 
-export function usePlatform() {
-  const [platform, setPlatform] = useState({
+type OsName = 'windows' | 'macos' | 'linux' | 'unknown';
+
+interface PlatformInfo {
+  os: OsName;
+}
+
+export function usePlatform(): PlatformInfo {
+  const [platform, setPlatform] = useState<PlatformInfo>({
     os: 'unknown',
   });
 
@@ -12,10 +18,10 @@ export function usePlatform() {
         const { platform: tauriPlatform } = await import('@tauri-apps/plugin-os');
         const osType = await tauriPlatform();
 
-        const platformMap = {
-          'windows': 'windows',
-          'macos': 'macos',
-          'linux': 'linux',
+        const platformMap: Record<string, OsName> = {
+          windows: 'windows',
+          macos: 'macos',
+          linux: 'linux',
         };
 
         setPlatform({
@@ -25,7 +31,7 @@ export function usePlatform() {
         console.warn('Tauri platform detection failed, falling back to user agent:', error);
 
         const ua = navigator.userAgent.toLowerCase();
-        let detectedOs = 'unknown';
+        let detectedOs: OsName = 'unknown';
 
         if (/win/.test(ua)) {
           detectedOs = 'windows';
