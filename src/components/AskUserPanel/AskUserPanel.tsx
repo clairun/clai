@@ -19,17 +19,21 @@ const OTHER_INDEX = -1;
  * a oneshot channel keyed by pendingId. The run resumes in the same
  * MCP turn — no separate session, no follow-up run spawning.
  */
-const AskUserPanel = ({ sessionId }) => {
+interface AskUserPanelProps {
+  sessionId: string | null;
+}
+
+const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
   const pending = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.pendingAskUser || null : null
   );
 
-  const [selectedIndex, setSelectedIndex] = useState(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [otherText, setOtherText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const containerRef = useRef(null);
-  const previousPendingIdRef = useRef(null);
+  const containerRef = useRef<HTMLElement | null>(null);
+  const previousPendingIdRef = useRef<string | null>(null);
 
   // Reset editable state when a new request arrives so a stale draft
   // from a previously-answered (or cancelled) question doesn't carry
@@ -69,9 +73,9 @@ const AskUserPanel = ({ sessionId }) => {
     setError('');
     setSubmitting(true);
     try {
-      let answer;
-      let selectedOptionIndex = null;
-      if (!hasOptions || selectedIndex === OTHER_INDEX) {
+      let answer: string;
+      let selectedOptionIndex: number | null = null;
+      if (!hasOptions || selectedIndex === OTHER_INDEX || selectedIndex === null) {
         answer = otherText.trim();
       } else {
         answer = options[selectedIndex].label;
@@ -89,7 +93,13 @@ const AskUserPanel = ({ sessionId }) => {
       // panel stays visible if the backend rejects (e.g. the run was
       // already cancelled and the channel is gone).
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to submit answer.');
+      const message =
+        typeof err === 'string'
+          ? err
+          : err instanceof Error
+            ? err.message
+            : 'Failed to submit answer.';
+      setError(message);
       setSubmitting(false);
     }
   };
