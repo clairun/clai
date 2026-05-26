@@ -37,7 +37,6 @@
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
-use uuid::Uuid;
 
 use crate::agents::{SchedulerState, SharedScheduler};
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
@@ -278,7 +277,6 @@ async fn run_next_agent(
     let result = run_scheduled_agent_with_fallback(
         app_handle,
         &workspace_pool,
-        &instance_id,
         &session,
         &connections,
     )
@@ -647,7 +645,6 @@ fn resolve_agent_connections(
 async fn run_scheduled_agent_with_fallback(
     app_handle: &AppHandle,
     pool: &DbPool,
-    instance_id: &str,
     session: &crate::assistant::types::AssistantSession,
     connections: &[ProviderConnection],
 ) -> Result<(), RunnerError> {
@@ -683,8 +680,12 @@ async fn run_scheduled_agent_with_fallback(
         .await
         .map_err(RunnerError::AssistantPersistence)?;
 
-        let runtime_run_id = format!("scheduled:{}:{}", instance_id, Uuid::new_v4());
-        let cancel_token = runtime::register_run(&runtime_run_id);
+        // Register the cancel token under the DB run.id (the same key the
+        // chat and workspace-task paths use). Previously this was a
+        // synthetic `scheduled:{instance_id}:{uuid}` string, which meant
+        // `assistant_cancel_run(run.id)` couldn't find the token and
+        // scheduled runs were effectively un-cancellable from the UI.
+        let cancel_token = runtime::register_run(&run.id);
         let input = RunTurnInput {
             session_id: session.id.clone(),
             run_id: Some(run.id.clone()),
@@ -694,7 +695,7 @@ async fn run_scheduled_agent_with_fallback(
             inter_agent_call_depth: None,
         };
         let result = engine::run_session_turn(&deps, input).await;
-        runtime::unregister_run(&runtime_run_id);
+        runtime::unregister_run(&run.id);
 
         match result {
             Ok(()) => return Ok(()),

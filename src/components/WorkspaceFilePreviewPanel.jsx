@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { save } from '@tauri-apps/plugin-dialog';
 import MarkdownMessage from './Chat/MarkdownMessage';
-import { readWorkspaceFile } from '../workspace/client';
+import { downloadWorkspaceFile, readWorkspaceFile } from '../workspace/client';
 import { openExternal } from '../utils/openExternal';
 import styles from './WorkspaceFilePreviewPanel.module.css';
 
@@ -286,6 +287,12 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [htmlMode, setHtmlMode] = useState('preview');
+  // `justCopied` flips for ~1.2s after a successful copy so the button can
+  // swap its icon/label to a checkmark — purely a visual confirmation, not
+  // gating the action. Cleared on file change so reopening a preview
+  // resets the affordance.
+  const [justCopied, setJustCopied] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     if (!entry?.path) {
@@ -322,7 +329,42 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
 
   useEffect(() => {
     setHtmlMode('preview');
+    setJustCopied(false);
   }, [entry?.path]);
+
+  const canAct = !loading && !error && file && typeof file.content === 'string' && file.content.length > 0;
+
+  const handleCopy = async () => {
+    if (!canAct) return;
+    try {
+      await navigator.clipboard.writeText(file.content);
+      setJustCopied(true);
+      window.setTimeout(() => setJustCopied(false), 1200);
+    } catch (err) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to copy.');
+    }
+  };
+
+  const defaultDownloadName = (() => {
+    if (entry?.name) return entry.name;
+    if (!entry?.path) return 'file';
+    const slash = entry.path.lastIndexOf('/');
+    return slash === -1 ? entry.path : entry.path.slice(slash + 1);
+  })();
+
+  const handleDownload = async () => {
+    if (!canAct || downloading) return;
+    setDownloading(true);
+    try {
+      const dest = await save({ defaultPath: defaultDownloadName });
+      if (!dest) return; // user cancelled
+      await downloadWorkspaceFile(workspaceId, entry.path, dest);
+    } catch (err) {
+      setError(typeof err === 'string' ? err : err?.message || 'Failed to download.');
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   // Route external-link clicks inside the HTML preview iframe through
   // Tauri's opener so they always launch the OS default browser
@@ -357,15 +399,50 @@ export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, on
           </span>
           <span className={styles.kindPill}>{kindLabel}</span>
         </div>
-        <button
-          type="button"
-          className={styles.closeButton}
-          onClick={onClose}
-          title="Close preview"
-          aria-label="Close preview"
-        >
-          ×
-        </button>
+        <div className={styles.headerActions}>
+          <button
+            type="button"
+            className={styles.iconButton}
+            onClick={handleCopy}
+            disabled={!canAct}
+            title={justCopied ? 'Copied!' : 'Copy raw content'}
+            aria-label="Copy raw content"
+          >
+            {justCopied ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="11" height="11" rx="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+            )}
+          </button>
+          <button
+            type="button"
+            className={styles.iconButton}
+            onClick={handleDownload}
+            disabled={!canAct || downloading}
+            title={downloading ? 'Saving…' : 'Download file'}
+            aria-label="Download file"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={styles.closeButton}
+            onClick={onClose}
+            title="Close preview"
+            aria-label="Close preview"
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       <div className={styles.body}>

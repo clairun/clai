@@ -80,6 +80,38 @@
   text-transform: uppercase;
 }
 
+.headerActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.iconButton {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  padding: 0;
+}
+
+.iconButton:hover:not(:disabled) {
+  background: var(--color-overlay-08, rgba(0, 0, 0, 0.06));
+  color: var(--color-text-primary);
+}
+
+.iconButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .closeButton {
   appearance: none;
   background: transparent;

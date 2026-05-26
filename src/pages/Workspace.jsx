@@ -615,8 +615,12 @@ const WorkspaceHeader = ({
   onOpenWorkspaceSettings,
   onRunNow,
   onTogglePause,
+  onStop,
+  activeRunId,
+  hasActiveRun,
   runNowBusy,
   pauseBusy,
+  stopBusy,
 }) => {
   const isAgent = snapshot?.kind === 'agent';
   const lastRun = getLastRunInfo(snapshot?.runs);
@@ -694,46 +698,62 @@ const WorkspaceHeader = ({
             {schedulePillText}
           </span>
         )}
+        {hasActiveRun && (
+          <button
+            type="button"
+            className={styles.stopBtn}
+            onClick={() => onStop?.(activeRunId)}
+            disabled={!onStop || !activeRunId || stopBusy}
+            title={stopBusy ? 'Stopping…' : 'Stop current run'}
+            aria-label="Stop current run"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+          </button>
+        )}
+        {scheduleEnabled && !schedulePaused && !hasActiveRun && (
+          <button
+            type="button"
+            className={styles.runNowBtn}
+            onClick={onRunNow}
+            disabled={!onRunNow || hasRunningTask || runNowBusy}
+            title={
+              hasRunningTask
+                ? 'Already running'
+                : runNowBusy
+                ? 'Starting…'
+                : 'Run now'
+            }
+            aria-label="Run now"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </button>
+        )}
         {scheduleEnabled && !schedulePaused && (
-          <>
-            <button
-              type="button"
-              className={styles.runNowBtn}
-              onClick={onRunNow}
-              disabled={!onRunNow || hasRunningTask || runNowBusy}
-              title={
-                hasRunningTask
-                  ? 'Already running'
-                  : runNowBusy
-                  ? 'Starting…'
-                  : 'Run now'
-              }
-              aria-label="Run now"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              className={styles.pauseBtn}
-              onClick={() => onTogglePause?.(true)}
-              disabled={!onTogglePause || pauseBusy}
-              title={
-                pauseBusy
-                  ? 'Updating…'
-                  : hasRunningTask
-                  ? 'Pause schedule (current run will finish)'
-                  : 'Pause schedule'
-              }
-              aria-label="Pause schedule"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <rect x="6" y="5" width="4" height="14" rx="1" />
-                <rect x="14" y="5" width="4" height="14" rx="1" />
-              </svg>
-            </button>
-          </>
+          <button
+            type="button"
+            className={styles.pauseBtn}
+            onClick={() => onTogglePause?.(true)}
+            disabled={!onTogglePause || pauseBusy}
+            title={
+              pauseBusy
+                ? 'Updating…'
+                : hasActiveRun
+                ? 'Pause schedule (current run will keep going — use Stop to cancel it)'
+                : hasRunningTask
+                ? 'Pause schedule (current run will finish)'
+                : 'Pause schedule'
+            }
+            aria-label="Pause schedule"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <rect x="6" y="5" width="4" height="14" rx="1" />
+              <rect x="14" y="5" width="4" height="14" rx="1" />
+            </svg>
+          </button>
         )}
         {scheduleEnabled && schedulePaused && (
           <button
@@ -1008,6 +1028,26 @@ const Workspace = () => {
     }
   }, [loadSnapshot, runNowBusy, workspaceId]);
 
+  // Track the run id we asked to cancel so the Stop button stays in a
+  // "stopping…" state until the snapshot confirms the run flipped to a
+  // terminal state. `assistant_cancel_run` only *signals* the cancel
+  // token — the engine flips RunStatus on its next checkpoint — so
+  // clearing busy on resolve would re-arm the button while the run is
+  // still streaming.
+  const [cancellingRunId, setCancellingRunId] = useState(null);
+  const handleStop = useCallback(async (runId) => {
+    if (!runId || cancellingRunId) return;
+    setCancellingRunId(runId);
+    try {
+      await assistantClient.cancelRun(runId);
+      setError('');
+      await loadSnapshot(false);
+    } catch (err) {
+      setError(typeof err === 'string' ? err : (err?.message || 'Failed to stop run.'));
+      setCancellingRunId(null);
+    }
+  }, [cancellingRunId, loadSnapshot]);
+
   const [pauseBusy, setPauseBusy] = useState(false);
   const handleTogglePause = useCallback(async (nextPaused) => {
     if (pauseBusy) return;
@@ -1061,6 +1101,26 @@ const Workspace = () => {
   const streamingText = sessionState?.streamingTextByMessageId || {};
   const isStreaming = sessionState?.isStreaming || false;
   const tasks = snapshot?.tasks || [];
+  // The manager session's currently-in-flight run, if any. Drives the
+  // header Stop button + hides Run-now while a run is mid-stream.
+  // `snapshot.runs` is sorted newest-first by the backend; pick the first
+  // non-terminal entry so we cancel the most recent activation.
+  const activeRun = (snapshot?.runs || []).find((run) =>
+    ['queued', 'running', 'waiting_for_tool'].includes(run?.status)
+  ) || null;
+  const hasActiveRun = !!activeRun;
+  // Clear the "stopping…" lock once the cancelled run leaves the active
+  // set. The cancel propagation is async (engine checkpoints), so we
+  // can't clear on the cancel call returning.
+  useEffect(() => {
+    if (!cancellingRunId) return;
+    const stillActive = (snapshot?.runs || []).some(
+      (run) => run.id === cancellingRunId
+        && ['queued', 'running', 'waiting_for_tool'].includes(run.status)
+    );
+    if (!stillActive) setCancellingRunId(null);
+  }, [snapshot, cancellingRunId]);
+  const stopBusy = cancellingRunId !== null;
 
   return (
     <div className={styles.workspacePage}>
@@ -1077,8 +1137,12 @@ const Workspace = () => {
         onOpenWorkspaceSettings={openWorkspaceSettings}
         onRunNow={handleRunNow}
         onTogglePause={handleTogglePause}
+        onStop={handleStop}
+        activeRunId={activeRun?.id || null}
+        hasActiveRun={hasActiveRun}
         runNowBusy={runNowBusy}
         pauseBusy={pauseBusy}
+        stopBusy={stopBusy}
       />
 
       {error && <div className={styles.errorBanner}>{error}</div>}

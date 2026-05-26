@@ -1116,6 +1116,31 @@
   transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
 }
 
+.stopBtn {
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-error-alpha-20, rgba(220, 38, 38, 0.2));
+  border-radius: var(--radius-sm);
+  background: var(--color-error-alpha-06, rgba(220, 38, 38, 0.06));
+  color: var(--color-critical, #dc2626);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
+}
+
+.stopBtn:hover:not(:disabled) {
+  background: var(--color-error-alpha-10, rgba(220, 38, 38, 0.1));
+  border-color: var(--color-critical, #dc2626);
+  color: var(--color-critical, #dc2626);
+}
+
+.stopBtn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .pauseBtn:hover:not(:disabled) {
   background: var(--color-overlay-06);
   border-color: var(--color-overlay-12, rgba(255, 255, 255, 0.18));
