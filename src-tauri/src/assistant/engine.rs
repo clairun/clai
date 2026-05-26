@@ -165,8 +165,17 @@ pub async fn run_session_turn(
     let mut usage: Option<RunUsage> = None;
 
     // === Tool execution loop ===
-    // Build system prompt (prepended to every API call, not persisted)
-    let system_message = build_system_prompt(&session.context, &tool_defs, &input.trigger);
+    // Build system prompt (prepended to every API call, not persisted).
+    // The agent description (user-set seed + skill content) is computed
+    // fresh from the workspace config on every turn — see
+    // workspace_agent_runtime_description for the rationale.
+    let agent_description = live_agent_description(&deps.app, &session.context);
+    let system_message = build_system_prompt(
+        &session.context,
+        agent_description.as_deref(),
+        &tool_defs,
+        &input.trigger,
+    );
 
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
@@ -595,9 +604,37 @@ fn usage_none() -> Option<&'static RunUsage> {
     None
 }
 
+/// Resolve the live agent description for the session's owning agent.
+///
+/// Returns the user-set description plus assembled skill content read fresh
+/// from disk on each call. `None` when the session has no workspace/agent
+/// binding, AppState is unavailable, or the workspace/agent has been
+/// deleted — all "no agent instructions" scenarios.
+pub(crate) fn live_agent_description(
+    app: &AppHandle,
+    context: &crate::assistant::types::SessionContext,
+) -> Option<String> {
+    let workspace_id = context.workspace_id.as_deref()?;
+    let agent_id = context.automation_id.as_deref()?;
+    let state = app.try_state::<AppState>()?;
+    crate::commands::workspace::workspace_agent_runtime_description(
+        state.inner(),
+        workspace_id,
+        agent_id,
+    )
+}
+
 /// Build the system prompt for the assistant.
+///
+/// `agent_description` is the live-computed seed (user-set description plus
+/// resolved skill content) for the agent owning this session. It is NOT
+/// persisted on the session — callers re-derive it at turn start so toggling
+/// a skill or editing a description is immediately visible to the model.
+/// Pass `None` only for sessions that have no associated agent (e.g. tests,
+/// or sessions whose underlying agent has been deleted).
 pub(crate) fn build_system_prompt(
     context: &crate::assistant::types::SessionContext,
+    agent_description: Option<&str>,
     tool_defs: &[crate::assistant::types::ToolDefinition],
     trigger: &RunTrigger,
 ) -> ProviderInputMessage {
@@ -753,7 +790,7 @@ pub(crate) fn build_system_prompt(
              Prefer updating existing visuals over recreating duplicate panels when the topic is unchanged.\n",
         );
 
-        if let Some(description) = context.automation_description.as_deref() {
+        if let Some(description) = agent_description.filter(|s| !s.is_empty()) {
             prompt.push_str("\nAgent instructions:\n");
             prompt.push_str(description);
             prompt.push('\n');
@@ -969,7 +1006,7 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::Scheduled);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1008,7 +1045,7 @@ mod tests {
     fn build_system_prompt_omits_agent_memory_guidance_without_workspace() {
         let context = SessionContext::default();
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::Scheduled);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1029,7 +1066,7 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::Scheduled);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1047,7 +1084,7 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::Scheduled);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1065,7 +1102,7 @@ mod tests {
     fn build_system_prompt_includes_current_datetime() {
         let context = SessionContext::default();
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::Scheduled);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1078,7 +1115,7 @@ mod tests {
     fn build_system_prompt_warns_that_prior_tool_results_may_be_stale() {
         let context = SessionContext::default();
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::Scheduled);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1098,7 +1135,7 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::Scheduled);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1121,7 +1158,7 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::UserMessage);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1157,7 +1194,7 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, &[], &RunTrigger::UserMessage);
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1178,7 +1215,7 @@ mod tests {
         };
 
         for trigger in &[RunTrigger::Scheduled, RunTrigger::UserMessage] {
-            let message = build_system_prompt(&context, &[], trigger);
+            let message = build_system_prompt(&context, None, &[], trigger);
             let text = match &message.content[0] {
                 ContentPart::Text { text } => text,
                 other => panic!("expected text content, got {:?}", other),

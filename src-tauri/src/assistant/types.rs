@@ -150,8 +150,6 @@ pub struct SessionContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automation_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub automation_description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub inter_agent_call: Option<InterAgentCallContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_agents: Vec<WorkspaceAgentSummary>,

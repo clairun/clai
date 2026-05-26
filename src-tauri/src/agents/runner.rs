@@ -47,7 +47,7 @@ use crate::assistant::types::{
     AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
     SessionContext, SessionKind,
 };
-use crate::config::{agent_instructions_with_skills, workspace_config, AgentConfig};
+use crate::config::{workspace_config, AgentConfig};
 use crate::db::DbPool;
 use crate::AppState;
 
@@ -454,15 +454,6 @@ async fn ensure_workspace_manager_session(
         Some(room_id.to_string())
     };
     let state = app_handle.state::<AppState>();
-    let config = state
-        .config_manager
-        .lock()
-        .ok()
-        .map(|manager| manager.get());
-    let automation_description = match config {
-        Some(config) => agent_instructions_with_skills(&config, agent_config),
-        None => agent_config.description.clone(),
-    };
 
     // Load the workspace's agent roster so the manager session knows
     // who it can delegate to. Without this, `is_workspace_manager_context`
@@ -513,7 +504,6 @@ async fn ensure_workspace_manager_session(
         // here via `desired_workspace_context`; this matches them.
         agent_workspace_id: Some(agent_config.workspace_id.clone()),
         automation_name: Some(agent_config.name.clone()),
-        automation_description: Some(automation_description),
         inter_agent_call: None,
         workspace_agents,
     };

@@ -110,7 +110,6 @@ fn sample_context() -> SessionContext {
         automation_id: None,
         agent_workspace_id: None,
         automation_name: None,
-        automation_description: None,
         inter_agent_call: None,
         workspace_agents: vec![],
     }

@@ -9,7 +9,7 @@ use crate::assistant::types::{
     WorkspaceAgentSummary,
 };
 use crate::config::{
-    agent_instructions_with_skills, workspace_config, AgentConfig, AppConfig,
+    workspace_config, AgentConfig, AppConfig,
     ExecutionCapabilityConfig, WorkspaceAgent, WorkspaceConfig,
 };
 use crate::db::DbPool;
@@ -319,7 +319,6 @@ struct WorkspaceDescriptor {
     execution: ExecutionCapabilityConfig,
     tool_scopes: Vec<String>,
     automation_name: Option<String>,
-    automation_description: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -721,7 +720,6 @@ fn resolve_workspace_descriptor(
         execution,
         tool_scopes: vec!["fs".to_string(), "web".to_string()],
         automation_name: manager.map(|agent| agent.name.clone()),
-        automation_description: manager.map(|agent| agent.description.clone()),
     })
 }
 
@@ -774,13 +772,31 @@ fn resolve_workspace_provider_selection(
     })
 }
 
-fn agent_runtime_description(state: &AppState, agent: &AgentConfig) -> String {
-    let config = state.config_manager.lock().map(|manager| manager.get());
-
-    match config {
-        Ok(config) => agent_instructions_with_skills(&config, agent),
-        Err(_) => agent.description.clone(),
-    }
+/// Live-compute the system-prompt seed for a workspace agent, reading the
+/// current workspace config + the user's enabled skills. Returns `None` when
+/// the workspace or agent has been deleted (the session is half-broken; the
+/// engine treats it as "no agent instructions" rather than panicking).
+///
+/// This is the canonical lookup used at prompt-build time. Skills are no
+/// longer snapshotted onto `SessionContext.automation_description`; we read
+/// fresh on every turn so toggling a skill in the workspace settings
+/// modal is immediately visible to the model on the next message.
+pub fn workspace_agent_runtime_description(
+    state: &AppState,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Option<String> {
+    let root = state.workspace_root(workspace_id)?;
+    let workspace_cfg = workspace_config::load(&root).ok()?;
+    let agent = workspace_cfg.agents.iter().find(|a| a.id == agent_id)?;
+    let app_cfg = state.config_manager.lock().ok()?.get();
+    let selected_skill_ids =
+        workspace_config::refs_to_skill_ids(&app_cfg, &agent.selected_skills);
+    Some(crate::config::compose_agent_instructions(
+        &app_cfg,
+        &agent.description,
+        &selected_skill_ids,
+    ))
 }
 
 fn workspace_default_agent_id(
@@ -1169,7 +1185,6 @@ async fn find_workspace_session(
 }
 
 fn desired_workspace_context(
-    state: &AppState,
     descriptor: &WorkspaceDescriptor,
     existing_session: Option<&AssistantSession>,
     workspace_agents: Vec<WorkspaceAgentSummary>,
@@ -1211,10 +1226,6 @@ fn desired_workspace_context(
         .automation_name
         .clone()
         .or_else(|| workspace_manager.map(|agent| agent.name.clone()));
-    let automation_description = descriptor
-        .automation_description
-        .clone()
-        .or_else(|| workspace_manager.map(|agent| agent_runtime_description(state, agent)));
 
     SessionContext {
         space_id: existing_session.and_then(|session| session.context.space_id.clone()),
@@ -1229,7 +1240,6 @@ fn desired_workspace_context(
         automation_id,
         agent_workspace_id,
         automation_name,
-        automation_description,
         inter_agent_call: existing_session
             .and_then(|session| session.context.inter_agent_call.clone()),
         workspace_agents,
@@ -1480,7 +1490,6 @@ pub async fn workspace_get_or_create_session(
         resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id).await?;
     let session = if let Some(existing) = existing {
         let desired_context = desired_workspace_context(
-            state.inner(),
             &descriptor,
             Some(&existing),
             workspace_agents.clone(),
@@ -1510,7 +1519,6 @@ pub async fn workspace_get_or_create_session(
                 kind: SessionKind::Interactive,
                 title: Some(descriptor.title.clone()),
                 context: desired_workspace_context(
-                    state.inner(),
                     &descriptor,
                     None,
                     workspace_agents,
@@ -1680,7 +1688,6 @@ pub async fn workspace_update_session_mcp(
                 },
                 title: Some(descriptor.title.clone()),
                 context: desired_workspace_context(
-                    state.inner(),
                     &descriptor,
                     None,
                     workspace_agents.clone(),
@@ -1703,8 +1710,6 @@ pub async fn workspace_update_session_mcp(
                 .as_ref()
                 .map(|_| descriptor.workspace_id.clone());
             updated.context.automation_name = Some(manager.name.clone());
-            updated.context.automation_description =
-                Some(agent_runtime_description(state.inner(), manager));
 
             // Persist the MCP selection onto the workspace's manager row so
             // it survives across sessions and shows in Workspace Settings.

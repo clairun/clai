@@ -152,7 +152,6 @@ const TerminalEmulatorWrapper = () => {
                 automationId: selectedAgent.agentId,
                 agentWorkspaceId: selectedAgent.workspaceId,
                 automationName: selectedAgent.name,
-                automationDescription: selectedAgent.description || null,
               },
             });
             sessionId = createdSession.id;

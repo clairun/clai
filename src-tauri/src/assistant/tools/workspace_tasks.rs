@@ -8,7 +8,7 @@ use crate::assistant::types::{
     SessionKind,
 };
 use crate::config::{
-    agent_instructions_with_skills, workspace_config, AgentConfig, AppConfig, WorkspaceAgent,
+    workspace_config, AgentConfig, AppConfig, WorkspaceAgent,
     WorkspaceConfig,
 };
 use crate::db::DbPool;
@@ -459,7 +459,7 @@ fn workspace_id_from_context(context: &ToolExecutionContext) -> Result<String, S
 }
 
 fn task_session_context(
-    deps: &AssistantDeps,
+    _deps: &AssistantDeps,
     context: &ToolExecutionContext,
     workspace_id: &str,
     target_config: &AgentConfig,
@@ -468,15 +468,6 @@ fn task_session_context(
         target_config.selected_mcp_server_ids.clone()
     } else {
         context.mcp_server_ids.clone()
-    };
-
-    let automation_description = {
-        let state = deps.app.state::<AppState>();
-        let config = state.config_manager.lock().map(|manager| manager.get());
-        match config {
-            Ok(config) => agent_instructions_with_skills(&config, target_config),
-            Err(_) => target_config.description.clone(),
-        }
     };
 
     SessionContext {
@@ -495,7 +486,6 @@ fn task_session_context(
         automation_id: Some(target_config.id.clone()),
         agent_workspace_id: Some(workspace_id.to_string()),
         automation_name: Some(target_config.name.clone()),
-        automation_description: Some(automation_description),
         inter_agent_call: None,
         workspace_agents: context.workspace_agents.clone(),
     }

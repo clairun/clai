@@ -249,7 +249,7 @@ async fn run_claude_turn(
     trigger: &crate::assistant::types::RunTrigger,
 ) -> Result<Option<RunUsage>, LocalAgentRunError> {
     let prompt = prepare_prompt(deps, session, run_id, trigger).await?;
-    let system_prompt = system_prompt_text(session, trigger).await;
+    let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
     let assistant_message = repository::create_message(
         &deps.pool,
         CreateMessageParams {
@@ -473,11 +473,18 @@ async fn prepare_prompt(
 }
 
 async fn system_prompt_text(
+    app: &tauri::AppHandle,
     session: &AssistantSession,
     trigger: &crate::assistant::types::RunTrigger,
 ) -> String {
     let tool_defs = crate::assistant::tools::available_tools(&session.context, &[]);
-    provider_message_text(&build_system_prompt(&session.context, &tool_defs, trigger))
+    let description = crate::assistant::engine::live_agent_description(app, &session.context);
+    provider_message_text(&build_system_prompt(
+        &session.context,
+        description.as_deref(),
+        &tool_defs,
+        trigger,
+    ))
 }
 
 /// In-flight state of a Claude Code stream.

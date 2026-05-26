@@ -400,13 +400,20 @@ pub fn discover_skills_with_diagnostics(
     (skills, diagnostics)
 }
 
-pub fn agent_instructions_with_skills(config: &ClaiConfig, agent: &AgentConfig) -> String {
-    let base = agent.description.clone();
+/// Build the "system prompt seed" for an agent: the user-set description
+/// plus content of every selected skill, rendered as a single string.
+/// Called fresh on each turn at prompt-build time — see
+/// [`crate::commands::workspace::workspace_agent_runtime_description`].
+pub fn compose_agent_instructions(
+    config: &ClaiConfig,
+    description: &str,
+    selected_skill_ids: &[String],
+) -> String {
+    let base = description.to_string();
     let Ok(skills) = discover_skills(config) else {
         return base;
     };
-    let selected: Vec<_> = agent
-        .selected_skill_ids
+    let selected: Vec<_> = selected_skill_ids
         .iter()
         .filter_map(|skill_id| skills.iter().find(|skill| &skill.id == skill_id))
         .collect();
@@ -659,7 +666,8 @@ mod tests {
             },
         );
         agent.selected_skill_ids = vec![skills[0].id.clone()];
-        let prompt = agent_instructions_with_skills(&config, &agent);
+        let prompt =
+            compose_agent_instructions(&config, &agent.description, &agent.selected_skill_ids);
 
         assert!(prompt.contains("Base prompt"));
         assert!(prompt.contains("## Selected Skills"));
@@ -921,38 +929,27 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // agent_instructions_with_skills
+    // compose_agent_instructions
     // -------------------------------------------------------------------
 
     #[test]
-    fn agent_instructions_returns_base_when_no_skills_selected() {
+    fn compose_returns_base_when_no_skills_selected() {
         let config = ClaiConfig::default();
-        let agent = AgentConfig::new(
-            "R".to_string(),
-            "BASE-PROMPT".to_string(),
-            crate::config::workspace_config::ScheduleKind::Interval {
-                interval_minutes: 5,
-            },
-        );
-        let prompt = agent_instructions_with_skills(&config, &agent);
+        let prompt = compose_agent_instructions(&config, "BASE-PROMPT", &[]);
         assert_eq!(prompt, "BASE-PROMPT");
         assert!(!prompt.contains("Selected Skills"));
     }
 
     #[test]
-    fn agent_instructions_returns_base_when_selected_id_is_unknown() {
+    fn compose_returns_base_when_selected_id_is_unknown() {
         // Stale skill id in agent config must not corrupt the prompt — it
         // should silently fall through to the base description.
         let config = ClaiConfig::default();
-        let mut agent = AgentConfig::new(
-            "R".to_string(),
-            "BASE".to_string(),
-            crate::config::workspace_config::ScheduleKind::Interval {
-                interval_minutes: 5,
-            },
+        let prompt = compose_agent_instructions(
+            &config,
+            "BASE",
+            &["nonexistent:skill-id".to_string()],
         );
-        agent.selected_skill_ids = vec!["nonexistent:skill-id".to_string()];
-        let prompt = agent_instructions_with_skills(&config, &agent);
         assert_eq!(prompt, "BASE");
     }
 }
