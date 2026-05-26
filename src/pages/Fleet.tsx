@@ -17,42 +17,65 @@ import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModa
 import { useFleet } from '../contexts/FleetContext';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
+import type { ScheduleKind, WorkspaceListEntry, WorkspaceSnapshot } from '../generated/bindings';
 import styles from './Fleet.module.css';
 
 const REFRESH_INTERVAL_MS = 5000;
 
-const EMPTY_TOOL_CALLS = [];
-const EMPTY_STREAMING = {};
+const EMPTY_TOOL_CALLS: never[] = [];
+const EMPTY_STREAMING: Record<string, string> = {};
 
-const formatNextRun = (seconds) => {
+type CardStatus = 'idle' | 'running' | 'attention' | 'critical';
+
+interface AttentionPillDef {
+  key: string;
+  countField: keyof Pick<WorkspaceListEntry, 'failedTaskCount' | 'blockedTaskCount'>;
+  label: string;
+  tone: string;
+}
+
+// Fleet card counts are i64 on the wire (ts-rs types them bigint) but
+// arrive as JS numbers. Coerce before arithmetic to dodge bigint/number
+// operator friction.
+const n = (value: number | bigint | null | undefined): number => Number(value ?? 0);
+
+const errText = (err: unknown, fallback: string): string =>
+  typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
+
+const formatNextRun = (seconds: number | bigint | null | undefined): string => {
   if (seconds == null) return '';
-  if (seconds <= 0) return 'Due now';
-  if (seconds < 60) return `Next run in ${seconds}s`;
-  if (seconds < 3600) return `Next run in ${Math.floor(seconds / 60)}m`;
-  if (seconds < 86400) return `Next run in ${Math.floor(seconds / 3600)}h`;
-  return `Next run in ${Math.floor(seconds / 86400)}d`;
+  const s = Number(seconds);
+  if (s <= 0) return 'Due now';
+  if (s < 60) return `Next run in ${s}s`;
+  if (s < 3600) return `Next run in ${Math.floor(s / 60)}m`;
+  if (s < 86400) return `Next run in ${Math.floor(s / 3600)}h`;
+  return `Next run in ${Math.floor(s / 86400)}d`;
 };
 
-const TASK_STATUS_LABEL = {
+const TASK_STATUS_LABEL: Record<string, string> = {
   blocked: 'Blocked',
   failed: 'Failed',
 };
 
-const CARD_STATUS_LABEL = {
+const CARD_STATUS_LABEL: Record<CardStatus, string> = {
   idle: 'Idle',
   running: 'Running',
   attention: 'Needs attention',
   critical: 'Failed task',
 };
 
-const deriveCardStatus = (ws, isProcessing, hasPendingApprovals) => {
-  if ((ws.failedTaskCount || 0) > 0) return 'critical';
-  if (hasPendingApprovals || (ws.blockedTaskCount || 0) > 0) return 'attention';
+const deriveCardStatus = (
+  ws: WorkspaceListEntry,
+  isProcessing: boolean,
+  hasPendingApprovals: boolean,
+): CardStatus => {
+  if (n(ws.failedTaskCount) > 0) return 'critical';
+  if (hasPendingApprovals || n(ws.blockedTaskCount) > 0) return 'attention';
   if (isProcessing) return 'running';
   return 'idle';
 };
 
-const ATTENTION_PILLS = [
+const ATTENTION_PILLS: AttentionPillDef[] = [
   { key: 'failed', countField: 'failedTaskCount', label: 'failed', tone: 'critical' },
   { key: 'blocked', countField: 'blockedTaskCount', label: 'blocked', tone: 'attention' },
 ];
@@ -62,12 +85,12 @@ const ATTENTION_PILLS = [
 // hide the cadence row in that case). Mirrors the backend's
 // `ScheduleKind` tagged union and falls back to the raw expression for
 // cron — the workspace settings modal has the full friendly editor.
-const formatScheduleLabel = (kind) => {
+const formatScheduleLabel = (kind: ScheduleKind | null | undefined): string | null => {
   if (!kind || typeof kind !== 'object') return null;
   if (kind.type === 'interval') {
-    const n = Number(kind.intervalMinutes ?? 0);
-    if (!Number.isFinite(n) || n <= 0) return null;
-    return `every ${n}m`;
+    const minutes = Number(kind.intervalMinutes ?? 0);
+    if (!Number.isFinite(minutes) || minutes <= 0) return null;
+    return `every ${minutes}m`;
   }
   if (kind.type === 'cron') {
     const expr = (kind.expression || '').trim();
@@ -77,20 +100,31 @@ const formatScheduleLabel = (kind) => {
   return null;
 };
 
+interface PendingDelete {
+  id: string;
+  title: string;
+}
+
+interface SettingsState {
+  open: boolean;
+  workspaceId: string | null;
+  snapshot: WorkspaceSnapshot | null;
+}
+
 const Fleet = () => {
   const navigate = useNavigate();
-  const [workspaces, setWorkspaces] = useState([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceListEntry[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState(null);
-  const [selectedSnapshot, setSelectedSnapshot] = useState(null);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
+  const [selectedSnapshot, setSelectedSnapshot] = useState<WorkspaceSnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState('');
   // Workspace settings modal — opened by the cog icon on each card. We
   // mount the same `WorkspaceSettingsModal` used by the workspace page
   // here so users can edit settings without leaving Fleet. Snapshot is
   // fetched on demand because Fleet's card payload is intentionally
   // lighter than a full snapshot.
-  const [settingsState, setSettingsState] = useState({
+  const [settingsState, setSettingsState] = useState<SettingsState>({
     open: false,
     workspaceId: null,
     snapshot: null,
@@ -98,12 +132,18 @@ const Fleet = () => {
   // Pending delete confirmation. `null` when no dialog is open. Captures
   // title at request time so the dialog body stays stable even if the
   // workspace list refreshes mid-confirmation.
-  const [pendingDelete, setPendingDelete] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const { closeChat, isCurrentChatOpen } = useChatManager();
-  const { selectAgent } = useFleet();
-  const pendingPermissionCounts = usePermissionAttention();
-  const activeRunsByWorkspace = useFleetActivity();
+  // These hooks live in untyped .jsx/.js context files; cast their
+  // results to the minimal shapes Fleet consumes. Drop the casts when
+  // those files are converted under P2-1.
+  const { closeChat, isCurrentChatOpen } = useChatManager() as {
+    closeChat: () => void;
+    isCurrentChatOpen: () => boolean;
+  };
+  const { selectAgent } = useFleet() as { selectAgent: (agent: unknown) => void };
+  const pendingPermissionCounts = usePermissionAttention() as Record<string, number>;
+  const activeRunsByWorkspace = useFleetActivity() as Record<string, number>;
 
   // Close the sidebar chat when entering Fleet
   useEffect(() => {
@@ -119,7 +159,7 @@ const Fleet = () => {
       setWorkspaces(all || []);
       setError('');
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to load workspaces.');
+      setError(errText(err, 'Failed to load workspaces.'));
       setWorkspaces([]);
     } finally {
       setIsLoading(false);
@@ -138,7 +178,7 @@ const Fleet = () => {
       const aSched = !!a.scheduleEnabled;
       const bSched = !!b.scheduleEnabled;
       if (aSched !== bSched) return aSched ? -1 : 1;
-      return (b.updatedAt || 0) - (a.updatedAt || 0);
+      return n(b.updatedAt) - n(a.updatedAt);
     })
   ), [workspaces]);
 
@@ -195,7 +235,7 @@ const Fleet = () => {
       })
       .catch((err) => {
         if (cancelled) return;
-        setSnapshotError(typeof err === 'string' ? err : err?.message || 'Failed to load workspace.');
+        setSnapshotError(errText(err, 'Failed to load workspace.'));
         setSelectedSnapshot(null);
       });
     return () => { cancelled = true; };
@@ -226,7 +266,7 @@ const Fleet = () => {
     return null;
   });
 
-  const [pinnedSessionId, setPinnedSessionId] = useState(null);
+  const [pinnedSessionId, setPinnedSessionId] = useState<string | null>(null);
   useEffect(() => {
     setPinnedSessionId(null);
   }, [selectedWorkspaceId]);
@@ -242,18 +282,18 @@ const Fleet = () => {
     detailSessionId ? state.sessions[detailSessionId] : null
   );
 
-  const handleOpenWorkspace = useCallback((id) => {
+  const handleOpenWorkspace = useCallback((id: string) => {
     if (!id) return;
     navigate(`/workspace/${id}`);
   }, [navigate]);
 
-  const handleOpenSettings = useCallback(async (id) => {
+  const handleOpenSettings = useCallback(async (id: string) => {
     if (!id) return;
     try {
       const snapshot = await getWorkspaceSnapshot(id);
       setSettingsState({ open: true, workspaceId: id, snapshot });
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to open workspace settings.');
+      setError(errText(err, 'Failed to open workspace settings.'));
     }
   }, []);
 
@@ -274,7 +314,7 @@ const Fleet = () => {
     loadWorkspaces();
   }, [settingsState.workspaceId, loadWorkspaces]);
 
-  const handleRequestDeleteWorkspace = useCallback((id, title) => {
+  const handleRequestDeleteWorkspace = useCallback((id: string, title?: string) => {
     if (!id) return;
     setPendingDelete({ id, title: title || 'this workspace' });
   }, []);
@@ -296,7 +336,7 @@ const Fleet = () => {
       await loadWorkspaces();
       setPendingDelete(null);
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to delete workspace.');
+      setError(errText(err, 'Failed to delete workspace.'));
     } finally {
       setDeleting(false);
     }
@@ -306,15 +346,15 @@ const Fleet = () => {
   // button and avoid double-firing. The scheduler itself refuses a second
   // force_ready while a run is active, but UI feedback should reflect that
   // before the round-trip completes.
-  const [runNowBusyId, setRunNowBusyId] = useState(null);
-  const handleRunNow = useCallback(async (id) => {
+  const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
+  const handleRunNow = useCallback(async (id: string) => {
     if (!id || runNowBusyId) return;
     setRunNowBusyId(id);
     try {
       await runWorkspaceNow(id);
       setError('');
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to start run.');
+      setError(errText(err, 'Failed to start run.'));
     } finally {
       setRunNowBusyId(null);
     }
@@ -323,8 +363,8 @@ const Fleet = () => {
   // Pause/resume the workspace's periodic schedule. Optimistically flip the
   // local row so the button swaps immediately; the next loadWorkspaces tick
   // will reconcile if the backend disagrees.
-  const [pauseBusyId, setPauseBusyId] = useState(null);
-  const handleTogglePause = useCallback(async (id, currentlyPaused) => {
+  const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
+  const handleTogglePause = useCallback(async (id: string, currentlyPaused: boolean) => {
     if (!id || pauseBusyId) return;
     setPauseBusyId(id);
     const nextPaused = !currentlyPaused;
@@ -336,7 +376,7 @@ const Fleet = () => {
       setError('');
       await loadWorkspaces();
     } catch (err) {
-      setError(typeof err === 'string' ? err : err?.message || 'Failed to update pause state.');
+      setError(errText(err, 'Failed to update pause state.'));
       setWorkspaces((prev) =>
         prev.map((w) => (w.id === id ? { ...w, schedulePaused: currentlyPaused } : w))
       );
@@ -463,7 +503,7 @@ const Fleet = () => {
               <div className={styles.attentionList}>
                 {attentionWorkspaces.slice(0, 6).map((workspace) => {
                   const status = workspace.latestAttentionTaskStatus;
-                  const statusLabel = TASK_STATUS_LABEL[status] || status || 'Task';
+                  const statusLabel = (status && TASK_STATUS_LABEL[status]) || status || 'Task';
                   return (
                     <button
                       key={workspace.id}
