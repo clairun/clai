@@ -1,8 +1,135 @@
 import React, { useEffect, useState } from 'react';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import MarkdownMessage from './Chat/MarkdownMessage';
 import { readWorkspaceFile } from '../workspace/client';
 import { openExternal } from '../utils/openExternal';
 import styles from './WorkspaceFilePreviewPanel.module.css';
+
+// ── Syntax-highlighting setup ──────────────────────────────────────────────
+// Reuses the same Prism instance + oneLight theme that MarkdownMessage uses
+// for fenced code blocks, so standalone file previews and inline markdown
+// snippets render with a consistent look.
+
+const PREVIEW_CODE_STYLE = {
+  margin: 0,
+  padding: '12px 14px',
+  fontSize: '12px',
+  lineHeight: '1.5',
+  borderRadius: '6px',
+  background: 'rgba(0, 0, 0, 0.04)',
+  border: '1px solid rgba(0, 0, 0, 0.1)',
+  overflow: 'auto',
+};
+
+const PREVIEW_CODE_TAG_STYLE = {
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  fontSize: '12px',
+};
+
+const PREVIEW_LINE_NUMBER_STYLE = {
+  minWidth: '2.5em',
+  paddingRight: '12px',
+  marginRight: '4px',
+  color: 'rgba(0, 0, 0, 0.32)',
+  textAlign: 'right',
+  userSelect: 'none',
+  borderRight: '1px solid rgba(0, 0, 0, 0.06)',
+};
+
+// Maps file extensions to Prism language identifiers. Keep this list curated
+// — every entry corresponds to a Prism grammar already bundled by
+// react-syntax-highlighter's default Prism build.
+const EXT_TO_LANG = {
+  // Web
+  js: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  jsx: 'jsx',
+  ts: 'typescript',
+  tsx: 'tsx',
+  html: 'markup', htm: 'markup', xml: 'markup', svg: 'markup',
+  css: 'css', scss: 'scss', sass: 'sass', less: 'less',
+  // Backend / systems
+  go: 'go',
+  rs: 'rust',
+  py: 'python',
+  rb: 'ruby',
+  java: 'java',
+  kt: 'kotlin', kts: 'kotlin',
+  swift: 'swift',
+  c: 'c', h: 'c',
+  cpp: 'cpp', cc: 'cpp', cxx: 'cpp', hpp: 'cpp', hxx: 'cpp',
+  cs: 'csharp',
+  php: 'php',
+  lua: 'lua',
+  ex: 'elixir', exs: 'elixir',
+  hs: 'haskell',
+  scala: 'scala',
+  // Shell / config
+  sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash',
+  ps1: 'powershell',
+  yaml: 'yaml', yml: 'yaml',
+  toml: 'toml',
+  ini: 'ini',
+  json: 'json', jsonc: 'json',
+  // Data / proto / queries
+  proto: 'protobuf',
+  sql: 'sql',
+  graphql: 'graphql', gql: 'graphql',
+  // Docs & misc
+  md: 'markdown', markdown: 'markdown',
+  tex: 'latex',
+  diff: 'diff', patch: 'diff',
+};
+
+// Some files have meaningful names but no extension (Dockerfile, Makefile) —
+// or have a leading-dot name (.gitignore, .env). Match by full lowercase
+// basename before falling back to extension.
+const FILENAME_TO_LANG = {
+  'dockerfile': 'docker',
+  'containerfile': 'docker',
+  'makefile': 'makefile',
+  'gnumakefile': 'makefile',
+  '.bashrc': 'bash',
+  '.zshrc': 'bash',
+  '.profile': 'bash',
+  '.gitignore': 'bash',
+  '.dockerignore': 'bash',
+  '.gitattributes': 'bash',
+  '.editorconfig': 'ini',
+  'cmakelists.txt': 'cmake',
+  'rakefile': 'ruby',
+  'gemfile': 'ruby',
+  'go.mod': 'go',
+};
+
+const detectLanguage = (path) => {
+  if (!path) return null;
+  const lastSlash = path.lastIndexOf('/');
+  const name = (lastSlash === -1 ? path : path.slice(lastSlash + 1)).toLowerCase();
+  if (FILENAME_TO_LANG[name]) return FILENAME_TO_LANG[name];
+  const dot = name.lastIndexOf('.');
+  // Leading-dot files (.env, .prettierrc): treat the part after the dot
+  // like an extension so we still get useful coloring.
+  if (dot <= 0) {
+    const cleaned = name.replace(/^\./, '');
+    return EXT_TO_LANG[cleaned] || null;
+  }
+  return EXT_TO_LANG[name.slice(dot + 1)] || null;
+};
+
+const CodeView = ({ content, language }) => (
+  <SyntaxHighlighter
+    language={language || 'text'}
+    style={oneLight}
+    showLineNumbers
+    wrapLongLines={false}
+    customStyle={PREVIEW_CODE_STYLE}
+    codeTagProps={{ style: PREVIEW_CODE_TAG_STYLE }}
+    lineNumberStyle={PREVIEW_LINE_NUMBER_STYLE}
+  >
+    {content}
+  </SyntaxHighlighter>
+);
 
 // postMessage `type` used by the HTML-preview iframe to ask the parent
 // to open an external URL in the OS default browser. Keep in sync with
@@ -138,6 +265,10 @@ const renderBody = (file, htmlMode) => {
       </div>
     );
   }
+  if (looksLikeHtml(file.viewer, file.path)) {
+    // Source-mode HTML — render the raw markup with syntax highlighting.
+    return <CodeView content={file.content} language="markup" />;
+  }
   if (isJsonLike(file.viewer, file.path)) {
     let pretty = file.content;
     try {
@@ -145,9 +276,9 @@ const renderBody = (file, htmlMode) => {
     } catch {
       // Leave raw content if parse fails.
     }
-    return <pre className={styles.codeBody}>{pretty}</pre>;
+    return <CodeView content={pretty} language="json" />;
   }
-  return <pre className={styles.codeBody}>{file.content}</pre>;
+  return <CodeView content={file.content} language={detectLanguage(file.path)} />;
 };
 
 export default function WorkspaceFilePreviewPanel({ workspaceId, kind, entry, onClose }) {
