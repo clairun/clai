@@ -274,13 +274,9 @@ async fn run_next_agent(
     )
     .await?;
 
-    let result = run_scheduled_agent_with_fallback(
-        app_handle,
-        &workspace_pool,
-        &session,
-        &connections,
-    )
-    .await;
+    let result =
+        run_scheduled_agent_with_fallback(app_handle, &workspace_pool, &session, &connections)
+            .await;
 
     // Mark agent complete
     let success = match &result {
