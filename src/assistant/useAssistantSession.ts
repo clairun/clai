@@ -8,10 +8,16 @@
 import { useCallback, useRef } from 'react';
 import useAssistantStore from './sessionStore';
 import * as client from './client';
+import type { AssistantSession } from '../generated/bindings';
 
-const normalizeIdList = (ids) => [...(ids || [])].sort();
+interface EnsureSessionContext {
+  mcpServerIds?: string[];
+  [key: string]: unknown;
+}
 
-export function useAssistantSession(tabId) {
+const normalizeIdList = (ids: string[] | undefined | null): string[] => [...(ids || [])].sort();
+
+export function useAssistantSession(tabId: string) {
   const sessionId = useAssistantStore(
     (state) => state.activeSessionByTab[tabId]
   );
@@ -29,16 +35,16 @@ export function useAssistantSession(tabId) {
    * Returns the session ID.
    */
   const ensureSession = useCallback(
-    async (context = {}) => {
+    async (context: EnsureSessionContext = {}) => {
       const store = useAssistantStore.getState();
 
       // Match on MCP selection for interactive tabs.
       // Integration-specific targeting should be explicit in tool params, not hidden in tab context.
       const contextMcpServerIds = normalizeIdList(context.mcpServerIds || []);
 
-      const sessionMatches = (s) =>
+      const sessionMatches = (s: AssistantSession) =>
         JSON.stringify(normalizeIdList(s.context?.mcpServerIds || [])) ===
-          JSON.stringify(contextMcpServerIds);
+        JSON.stringify(contextMcpServerIds);
 
       // Check if we already have a matching session for this tab
       const existingId = store.activeSessionByTab[tabId];
@@ -85,14 +91,11 @@ export function useAssistantSession(tabId) {
    * Send a message in the current session.
    * The engine handles everything — events update the store.
    */
-  const sendMessage = useCallback(
-    async (text, connectionId) => {
-      const sid = sessionIdRef.current;
-      if (!sid) throw new Error('No active assistant session for this tab');
-      return client.sendMessage(sid, text, connectionId);
-    },
-    []
-  );
+  const sendMessage = useCallback(async (text: string, connectionId: string) => {
+    const sid = sessionIdRef.current;
+    if (!sid) throw new Error('No active assistant session for this tab');
+    return client.sendMessage(sid, text, connectionId);
+  }, []);
 
   /**
    * Clear all assistant sessions attached to this tab.
