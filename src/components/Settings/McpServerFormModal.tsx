@@ -1,6 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom';
+import type { McpServerResponse } from '../../generated/bindings';
 import styles from './McpServerFormModal.module.css';
+
+interface McpServerFormModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  // Receives the assembled form payload (name/enabled/integrationType/
+  // transport/auth). Loosely typed to match McpServersSettings' handler.
+  onSubmit: (data: Record<string, unknown>) => Promise<void>;
+  server?: McpServerResponse | null;
+}
 
 const CloseIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -9,11 +19,11 @@ const CloseIcon = () => (
   </svg>
 );
 
-const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
+const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }: McpServerFormModalProps) => {
   const isEditing = !!server;
   const [name, setName] = useState('');
   const [enabled, setEnabled] = useState(true);
-  const [transportType, setTransportType] = useState('stdio');
+  const [transportType, setTransportType] = useState<'stdio' | 'http'>('stdio');
   const [integrationType, setIntegrationType] = useState('generic');
   const [authType, setAuthType] = useState('none');
   const [bearerToken, setBearerToken] = useState('');
@@ -22,7 +32,7 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
   const [argsText, setArgsText] = useState('');
   const [url, setUrl] = useState('');
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) {
@@ -37,7 +47,9 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
         setTransportType('http');
         setUrl(server.transport.url || '');
         setAuthType(server.auth?.type || 'none');
-        setHasStoredSecret(Boolean(server.auth?.hasSecret));
+        // Binding field is snake_case (`has_secret`) and only exists on
+        // the bearer_token variant; narrow before reading.
+        setHasStoredSecret(server.auth?.type === 'bearer_token' ? server.auth.has_secret : false);
         setBearerToken('');
         setCommand('');
         setArgsText('');
@@ -67,7 +79,7 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
   }, [isOpen, server]);
 
   useEffect(() => {
-    const handleEscape = (event) => {
+    const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && isOpen && !saving) {
         onClose();
       }
@@ -93,7 +105,7 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
     return null;
   }
 
-  const handleSubmit = async (event) => {
+  const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setError(null);
 
@@ -103,7 +115,7 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
       return;
     }
 
-    let transport;
+    let transport: Record<string, unknown>;
     if (transportType === 'http') {
       const trimmedUrl = url.trim();
       if (!trimmedUrl) {
@@ -127,7 +139,7 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
       };
     }
 
-    let auth = { type: 'none' };
+    let auth: Record<string, unknown> = { type: 'none' };
     if (transportType === 'http' && authType === 'bearer_token') {
       auth = {
         type: 'bearer_token',
@@ -145,7 +157,7 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
         auth,
       });
     } catch (submitError) {
-      setError(submitError?.message || 'Failed to save MCP server');
+      setError(submitError instanceof Error ? submitError.message : 'Failed to save MCP server');
     } finally {
       setSaving(false);
     }
@@ -198,7 +210,7 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }) => {
               id="mcp-transport-type"
               className={styles.select}
               value={transportType}
-              onChange={(event) => setTransportType(event.target.value)}
+              onChange={(event) => setTransportType(event.target.value as 'stdio' | 'http')}
               disabled={saving}
             >
               <option value="stdio">Stdio</option>

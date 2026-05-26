@@ -8,7 +8,15 @@ import {
   refreshSkillSource,
   setSkillSourceEnabled,
 } from '../../api/client';
+import type {
+  SkillDefinition,
+  SkillSourceDiagnostic,
+  SkillSourceResponse,
+} from '../../generated/bindings';
 import styles from './SkillsSettings.module.css';
+
+const errText = (err: unknown, fallback: string): string =>
+  typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
 const PlusIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -23,42 +31,45 @@ const FolderIcon = () => (
   </svg>
 );
 
-const sourcePath = (source) => {
+const sourcePath = (source: SkillSourceResponse | undefined): string => {
   if (!source?.source) return '';
   if (source.source.kind === 'local') return source.source.path || '';
-  return source.source.uri || source.source.localPath || '';
+  // Binding field is snake_case (`local_path`); the .jsx read `localPath`.
+  return source.source.uri || source.source.local_path || '';
 };
 
-const basename = (path) => {
+const basename = (path: string): string => {
   const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
   return normalized.split('/').pop() || path;
 };
 
-const repoNameFromUri = (uri) => basename(uri).replace(/\.git$/, '') || 'Skills repo';
-const isBundledSource = (source) => source?.managedKind === 'bundled';
-const isPersonalSource = (source) => source?.managedKind === 'personal';
-const managedLabel = (source) => {
+const repoNameFromUri = (uri: string): string => basename(uri).replace(/\.git$/, '') || 'Skills repo';
+const isBundledSource = (source: SkillSourceResponse | undefined): boolean =>
+  source?.managedKind === 'bundled';
+const isPersonalSource = (source: SkillSourceResponse | undefined): boolean =>
+  source?.managedKind === 'personal';
+const managedLabel = (source: SkillSourceResponse | undefined): string | null => {
   if (isBundledSource(source)) return 'Bundled';
   if (isPersonalSource(source)) return 'Personal';
   return null;
 };
 
 const SkillsSettings = () => {
-  const [sources, setSources] = useState([]);
-  const [skills, setSkills] = useState([]);
-  const [diagnostics, setDiagnostics] = useState([]);
+  const [sources, setSources] = useState<SkillSourceResponse[]>([]);
+  const [skills, setSkills] = useState<SkillDefinition[]>([]);
+  const [diagnostics, setDiagnostics] = useState<SkillSourceDiagnostic[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [sourceKind, setSourceKind] = useState('local');
+  const [error, setError] = useState<string | null>(null);
+  const [sourceKind, setSourceKind] = useState<'local' | 'git'>('local');
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [uri, setUri] = useState('');
   const [reference, setReference] = useState('');
   const [saving, setSaving] = useState(false);
-  const [deletingId, setDeletingId] = useState(null);
-  const [refreshingId, setRefreshingId] = useState(null);
-  const [togglingId, setTogglingId] = useState(null);
-  const [forkingSkillId, setForkingSkillId] = useState(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [refreshingId, setRefreshingId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [forkingSkillId, setForkingSkillId] = useState<string | null>(null);
 
   const skillsBySource = useMemo(() => {
     const counts = new Map();
@@ -86,13 +97,17 @@ const SkillsSettings = () => {
     setLoading(true);
     setError(null);
     try {
-      const catalog = await getSkillsCatalog();
+      const catalog = (await getSkillsCatalog()) as {
+        sources?: SkillSourceResponse[];
+        skills?: SkillDefinition[];
+        diagnostics?: SkillSourceDiagnostic[];
+      } | null;
       setSources(catalog?.sources || []);
       setSkills(catalog?.skills || []);
       setDiagnostics(catalog?.diagnostics || []);
     } catch (loadError) {
       console.error('[SkillsSettings] Failed to load skills catalog:', loadError);
-      setError(loadError?.message || 'Failed to load skill catalog.');
+      setError(errText(loadError, 'Failed to load skill catalog.'));
     } finally {
       setLoading(false);
     }
@@ -115,7 +130,7 @@ const SkillsSettings = () => {
     setName((current) => current.trim() || basename(selectedPath));
   };
 
-  const handleAddSource = async (event) => {
+  const handleAddSource = async (event: React.FormEvent) => {
     event.preventDefault();
     const trimmedName = name.trim();
     const trimmedPath = path.trim();
@@ -148,13 +163,13 @@ const SkillsSettings = () => {
       await loadCatalog();
     } catch (saveError) {
       console.error('[SkillsSettings] Failed to add skill source:', saveError);
-      setError(saveError?.message || 'Failed to add skill source.');
+      setError(errText(saveError, 'Failed to add skill source.'));
     } finally {
       setSaving(false);
     }
   };
 
-  const handleRefreshSource = async (sourceId) => {
+  const handleRefreshSource = async (sourceId: string) => {
     if (refreshingId) {
       return;
     }
@@ -165,13 +180,13 @@ const SkillsSettings = () => {
       await loadCatalog();
     } catch (refreshError) {
       console.error('[SkillsSettings] Failed to refresh skill source:', refreshError);
-      setError(refreshError?.message || 'Failed to refresh skill source.');
+      setError(errText(refreshError, 'Failed to refresh skill source.'));
     } finally {
       setRefreshingId(null);
     }
   };
 
-  const handleToggleSource = async (source) => {
+  const handleToggleSource = async (source: SkillSourceResponse) => {
     if (togglingId) {
       return;
     }
@@ -182,13 +197,13 @@ const SkillsSettings = () => {
       await loadCatalog();
     } catch (toggleError) {
       console.error('[SkillsSettings] Failed to update skill source:', toggleError);
-      setError(toggleError?.message || 'Failed to update skill source.');
+      setError(errText(toggleError, 'Failed to update skill source.'));
     } finally {
       setTogglingId(null);
     }
   };
 
-  const handleDeleteSource = async (sourceId) => {
+  const handleDeleteSource = async (sourceId: string) => {
     if (deletingId) {
       return;
     }
@@ -199,13 +214,13 @@ const SkillsSettings = () => {
       await loadCatalog();
     } catch (deleteError) {
       console.error('[SkillsSettings] Failed to delete skill source:', deleteError);
-      setError(deleteError?.message || 'Failed to delete skill source.');
+      setError(errText(deleteError, 'Failed to delete skill source.'));
     } finally {
       setDeletingId(null);
     }
   };
 
-  const handleForkSkill = async (skill) => {
+  const handleForkSkill = async (skill: SkillDefinition) => {
     if (forkingSkillId) {
       return;
     }
@@ -222,7 +237,7 @@ const SkillsSettings = () => {
       await loadCatalog();
     } catch (forkError) {
       console.error('[SkillsSettings] Failed to fork bundled skill:', forkError);
-      setError(forkError?.message || 'Failed to fork bundled skill.');
+      setError(errText(forkError, 'Failed to fork bundled skill.'));
     } finally {
       setForkingSkillId(null);
     }
@@ -373,15 +388,15 @@ const SkillsSettings = () => {
                       {source.source?.kind === 'git' && source.source?.reference && (
                         <div className={styles.sourceMeta}>Ref: {source.source.reference}</div>
                       )}
-                      {source.source?.kind === 'git' && source.source?.localPath && (
-                        <div className={styles.sourceMeta}>Cache: {source.source.localPath}</div>
+                      {source.source?.kind === 'git' && source.source?.local_path && (
+                        <div className={styles.sourceMeta}>Cache: {source.source.local_path}</div>
                       )}
                       <div className={styles.sourceMeta}>
                         {skillsBySource.get(source.id) || 0} skill{(skillsBySource.get(source.id) || 0) === 1 ? '' : 's'}
                       </div>
                       {diagnosticsBySource.get(source.id)?.message && (
                         <div className={`${styles.sourceDiagnostic} ${diagnosticsBySource.get(source.id)?.ok ? styles.sourceDiagnosticMuted : styles.sourceDiagnosticError}`}>
-                          {diagnosticsBySource.get(source.id).message}
+                          {diagnosticsBySource.get(source.id)?.message}
                         </div>
                       )}
                     </div>

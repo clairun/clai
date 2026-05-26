@@ -1,8 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { assistantClient } from '../../assistant';
+import type {
+  AuthMode,
+  ModelInfo,
+  ProviderConnection,
+  ProviderDescriptor,
+} from '../../generated/bindings';
 import styles from './ProviderSettings.module.css';
 
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
+
+interface ConnectionForm {
+  id: string | null;
+  name: string;
+  providerId: string;
+  apiKey: string;
+  baseUrl: string;
+  modelId: string;
+  enabled: boolean;
+  authMode: AuthMode | null;
+}
 
 const LoadingIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={styles.spinner}>
@@ -17,7 +34,7 @@ const CheckIcon = () => (
   </svg>
 );
 
-const inputStyle = {
+const inputStyle: React.CSSProperties = {
   width: '100%',
   padding: '10px 12px',
   fontSize: '14px',
@@ -30,7 +47,7 @@ const inputStyle = {
   boxSizing: 'border-box',
 };
 
-const labelStyle = {
+const labelStyle: React.CSSProperties = {
   display: 'block',
   fontSize: '13px',
   fontWeight: 500,
@@ -38,7 +55,7 @@ const labelStyle = {
   marginBottom: '6px',
 };
 
-const secondaryButtonStyle = {
+const secondaryButtonStyle: React.CSSProperties = {
   appearance: 'none',
   border: '1px solid var(--color-border-medium)',
   background: 'var(--color-bg-elevated)',
@@ -50,7 +67,7 @@ const secondaryButtonStyle = {
   cursor: 'pointer',
 };
 
-const initialForm = {
+const initialForm: ConnectionForm = {
   id: null,
   name: '',
   providerId: 'openai',
@@ -61,24 +78,24 @@ const initialForm = {
   authMode: null,
 };
 
-const CLI_BINARY_PLACEHOLDERS = {
+const CLI_BINARY_PLACEHOLDERS: Record<string, string> = {
   'claude-code': 'claude',
   codex: 'codex',
   opencode: 'opencode',
 };
 
 const AssistantProviderSettings = () => {
-  const [connections, setConnections] = useState([]);
-  const [adapters, setAdapters] = useState([]);
+  const [connections, setConnections] = useState<ProviderConnection[]>([]);
+  const [adapters, setAdapters] = useState<ProviderDescriptor[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [testingId, setTestingId] = useState(null);
-  const [deletingId, setDeletingId] = useState(null);
-  const [editingId, setEditingId] = useState(null);
-  const [form, setForm] = useState(initialForm);
-  const [error, setError] = useState(null);
-  const [success, setSuccess] = useState(null);
-  const [descriptorModels, setDescriptorModels] = useState([]);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState<ConnectionForm>(initialForm);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [descriptorModels, setDescriptorModels] = useState<ModelInfo[]>([]);
 
   const selectedAdapter = useMemo(
     () => adapters.find((adapter) => adapter.id === form.providerId) || null,
@@ -151,7 +168,7 @@ const AssistantProviderSettings = () => {
     });
   }, [adapters]);
 
-  const beginEdit = useCallback((connection) => {
+  const beginEdit = useCallback((connection: ProviderConnection) => {
     setEditingId(connection.id);
     setForm({
       id: connection.id,
@@ -185,20 +202,21 @@ const AssistantProviderSettings = () => {
     setError(null);
     setSuccess(null);
 
-    const authMode = isCliAdapter
+    const authMode: AuthMode | null = isCliAdapter
       ? 'subscription_login'
-      : form.authMode || undefined;
+      : form.authMode ?? null;
 
     try {
       if (editingId) {
         await assistantClient.updateProviderConnection({
-          id: form.id,
+          id: editingId,
           name: form.name.trim(),
           providerId: form.providerId,
           apiKey: isCliAdapter ? null : form.apiKey.trim() || null,
           authMode,
           baseUrl: form.baseUrl.trim() || null,
           modelId: form.modelId.trim(),
+          accountLabel: null,
           enabled: form.enabled,
         });
         setSuccess('Connection updated.');
@@ -210,6 +228,7 @@ const AssistantProviderSettings = () => {
           authMode,
           baseUrl: form.baseUrl.trim() || null,
           modelId: form.modelId.trim(),
+          accountLabel: null,
         });
         setSuccess('Connection created.');
       }
@@ -219,13 +238,13 @@ const AssistantProviderSettings = () => {
       window.dispatchEvent(new CustomEvent(CONNECTIONS_CHANGED_EVENT));
     } catch (err) {
       console.error('[AssistantProviderSettings] Save failed:', err);
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to save provider connection.'));
+      setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to save provider connection.');
     } finally {
       setSaving(false);
     }
   }, [editingId, form, isCliAdapter, loadData, resetForm]);
 
-  const handleDelete = useCallback(async (connection) => {
+  const handleDelete = useCallback(async (connection: ProviderConnection) => {
     if (!window.confirm(`Delete provider connection "${connection.name}"?`)) {
       return;
     }
@@ -243,13 +262,13 @@ const AssistantProviderSettings = () => {
       setSuccess('Connection deleted.');
     } catch (err) {
       console.error('[AssistantProviderSettings] Delete failed:', err);
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to delete provider connection.'));
+      setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to delete provider connection.');
     } finally {
       setDeletingId(null);
     }
   }, [editingId, loadData, resetForm]);
 
-  const handleTest = useCallback(async (connectionId) => {
+  const handleTest = useCallback(async (connectionId: string) => {
     setTestingId(connectionId);
     setError(null);
     setSuccess(null);
@@ -262,7 +281,7 @@ const AssistantProviderSettings = () => {
       }
     } catch (err) {
       console.error('[AssistantProviderSettings] Test failed:', err);
-      setError(typeof err === 'string' ? err : (err?.message || 'Failed to test provider connection.'));
+      setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to test provider connection.');
     } finally {
       setTestingId(null);
     }
