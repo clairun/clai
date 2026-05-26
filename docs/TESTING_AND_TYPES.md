@@ -32,7 +32,7 @@ We can call this work finished when **all** of the following are true:
 4. CI runs `typecheck` + `test` + `gen:bindings` (and fails if bindings drift). Every push is gated.
 5. The 4 highest-traffic UI surfaces (Workspace page, Fleet page, AskUserPanel, ChatMessageList) have component-level tests covering at least their happy path.
 
-We're roughly **35-45%** of the way there. The expensive remaining piece is the .jsx → .tsx conversion of the remaining FE files. The next high-value slice is extending generated bindings to provider/MCP/skill/path-grant command surfaces and adding component tests around the chat UI.
+We're roughly **50-60%** of the way there as of 2026-05-26. P0 closed cleanly; P1-3 and P1-5 are done; P1-1, P1-2, and P1-4 are partially landed (provider-connection bindings + typed client; AskUserPanel/InlineApprovalCard/InlinePathGrantCard converted to `.tsx`; AskUserPanel covered by component tests). Remaining: MCP/skill/path-grant bindings, the ChatMessageList + WorkspaceFilePreviewPanel + useAssistantSession conversions, and ChatMessageList/InlineApprovalCard tests. All of P2 is still ahead.
 
 ## House rules in effect today
 
@@ -53,44 +53,39 @@ These already apply — don't wait for the roadmap to finish:
 - [x] `src-tauri/tests/prompt_build.rs` covers selected bundled skill content and the no-skill raw-description path through `workspace_agent_runtime_description(...)`.
 - [x] `src/pages/Workspace.jsx` converted to `src/pages/Workspace.tsx` with typed snapshot/state/props around the Workspace page shell.
 
-### P1 — Next 1-2 sessions (1-2 days total)
+### P1 — Partially completed 2026-05-26
 
-**P1-1. More Tauri command bindings.** _Effort: ~2-3h._
-Generate bindings for the remaining command surfaces the FE consumes. Order by traffic:
+**P1-1. More Tauri command bindings.** _Partial._
 
-- Provider-connection commands (request/response structs in `src-tauri/src/commands/provider_connections.rs`).
-- MCP server commands.
-- Skill commands.
-- Path-grant + permission commands.
-  After this lands, `src/assistant/client.ts` and the various provider-config screens can drop their `unknown` shapes.
+- [x] Provider-connection request/response structs (`commands/provider_connections.rs`) + the assistant types they reference (`AuthMode`, `ProtocolFamily`, `ProviderConnection`, `ProviderDescriptor`, `ModelInfo`). `src/assistant/client.ts` provider commands are now typed end-to-end.
+- [ ] MCP server commands.
+- [ ] Skill commands.
+- [ ] Path-grant + permission commands.
 
-**P1-2. Convert the highest-traffic remaining components.** _Effort: ~3-4h total._
-Per file: ~30-60min for the small ones, ~1-2h for the ChatMessageList.
+**P1-2. Convert the highest-traffic remaining components.** _Partial._
 
-- `AskUserPanel.jsx` — small (~190 lines), directly consumes `PendingAskUser` from the typed store. ~30min.
-- `ChatMessageList.jsx` — ~700 lines, consumes most assistant types. ~1.5h.
-- `InlineApprovalCard.jsx`, `InlinePathGrantCard.jsx` — ~45min each.
-- `WorkspaceFilePreviewPanel.jsx` — already touched recently; ~45min.
-- `useAssistantSession.js` — small hook, ~30min.
+- [x] `AskUserPanel.jsx` → `.tsx`.
+- [x] `InlineApprovalCard.jsx` → `.tsx`.
+- [x] `InlinePathGrantCard.jsx` → `.tsx`.
+- [ ] `ChatMessageList.jsx` → `.tsx` (~700 lines, biggest remaining file).
+- [ ] `WorkspaceFilePreviewPanel.jsx` → `.tsx`.
+- [ ] `useAssistantSession.js` → `.ts`.
 
-**P1-3. Convert `workspaceStore.js` to `.ts`.** _Effort: ~45min._
-Smaller than `sessionStore.ts`; similar shape. Useful because Workspace.jsx (P0-4) consumes it.
+**P1-3. Convert `workspaceStore.js` to `.ts`.** _Done._
 
-**P1-4. Component-level tests for the chat surface.** _Effort: ~2-3h._
+- [x] Tile-tree discriminated union + tab/command/store interfaces typed; `Persist edWorkspaceState` pins the Tauri boundary.
 
-- `AskUserPanel.test.tsx`: render with a mock store carrying a `PendingAskUser`; assert the question/options render; click submit; assert `invoke('assistant_submit_user_input', ...)` was called with the right payload.
-- `ChatMessageList.test.tsx`: render with messages containing `ToolUse` + `ToolResult` parts; assert both appear; assert thinking blocks render distinctly from text.
-- `InlineApprovalCard.test.tsx`: render with a pending approval; click approve; assert the invoke and the store mutation.
-- These need a tiny shared mock helper for `@tauri-apps/api/core`'s `invoke`. Add `src/test/mockTauri.ts`.
+**P1-4. Component-level tests for the chat surface.** _Partial._
 
-**P1-5. BE integration test for cancel-token registration.** _Effort: ~1h._
-Would have caught the scheduled-runs-uncancellable bug.
+- [x] `src/test/mockTauri.ts` shared pattern.
+- [x] `AskUserPanel.test.tsx` (8 tests: render, options, submit, error-keeps-panel-mounted, snapshot-poll race guard).
+- [ ] `ChatMessageList.test.tsx`.
+- [ ] `InlineApprovalCard.test.tsx`.
 
-- Add `src-tauri/tests/cancel_run.rs`.
-- Spawn a fake `run_session_turn` that registers under a known `run.id`.
-- Call `runtime::cancel_run(run.id)`.
-- Assert the cancel token is signaled.
-- Repeat against the scheduler-runner path (force a synthetic scheduled run by calling the spawn helper).
+**P1-5. BE integration test for cancel-token registration.** _Done._
+
+- [x] Unit tests in `assistant/runtime.rs` (register+cancel signal, unknown returns false, unregister removes, double-register replaces).
+- [x] Integration tests in `src-tauri/tests/cancel_run.rs` pin the convention that all three spawn sites (chat, scheduler, workspace-task) register under DB `run.id`.
 
 ### P2 — Longer tail (multi-day, opportunistic)
 
