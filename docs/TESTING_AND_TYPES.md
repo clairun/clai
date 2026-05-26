@@ -32,7 +32,7 @@ We can call this work finished when **all** of the following are true:
 4. CI runs `typecheck` + `test` + `gen:bindings` (and fails if bindings drift). Every push is gated.
 5. The 4 highest-traffic UI surfaces (Workspace page, Fleet page, AskUserPanel, ChatMessageList) have component-level tests covering at least their happy path.
 
-We're roughly **70-75%** of the way there as of 2026-05-26. **P0 and P1 complete; P1-1's skill-binding carve-out closed under P2-1b.** P2 is underway: the three pinned leaf components + a batch of trivial leaves/indexes are converted (30 `.ts`/`.tsx` files now). Remaining: ~52 `.jsx` + ~22 non-test `.js` to convert (Fleet done; next in order is the Settings cluster, then Canvas, the chat/chart components, contexts, `api/client.js`), then drop `allowJs` (P2-2), coverage (P2-3), provider-adapter tests (P2-5), and E2E (P2-6).
+We're roughly **70-75%** of the way there as of 2026-05-26. **P0 and P1 complete; P1-1's skill-binding carve-out closed under P2-1b.** P2 is underway: the three pinned leaf components + a batch of trivial leaves/indexes are converted (30 `.ts`/`.tsx` files now). Remaining: ~47 `.jsx` + ~22 non-test `.js` to convert (Fleet + 5/9 Settings done; next: the 4 remaining Settings files incl. the big WorkspaceSettingsModal, then Canvas, the chat/chart components, contexts, `api/client.js`), then drop `allowJs` (P2-2), coverage (P2-3), provider-adapter tests (P2-5), and E2E (P2-6).
 
 ## House rules in effect today
 
@@ -93,7 +93,7 @@ Touch as you go, don't batch. Done so far this pass:
 Remaining, order roughly:
 
 - [x] `src/pages/Fleet.jsx` → `.tsx` (typed against WorkspaceListEntry/Snapshot/ScheduleKind; `n()` coercion for the bigint counts; context hooks cast at call site).
-- `src/components/Settings/*` (many files, each smallish; `WorkspaceSettingsModal.jsx` is the large one, used by both Fleet and Workspace).
+- `src/components/Settings/*` — **5 of 9 done**: SettingsModal, McpServersSettings (fixed the `has_secret` bug), AgentCard, IntervalSelect, ProviderSettings. **Remaining: McpServerFormModal (319), SkillsSettings (475), AssistantProviderSettings (539), WorkspaceSettingsModal (1937 — the big one, used by both Fleet and Workspace; deserves its own focused pass).**
 - `src/components/AssistantChat/*` (the rest beyond ChatMessageList).
 - `src/components/Chat/*` chart blocks + `ToolBlock`, `DesktopChatPanel`.
 - `src/components/ContextPanel/*`, `TabBar`, `TabContent`, `TabView`, `TileView`, `TerminalEmulator/*`, `Dashboard`, `Canvas/*`.
