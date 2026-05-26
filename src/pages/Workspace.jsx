@@ -310,39 +310,262 @@ const WorkspaceFileEntryList = ({ entries, emptyMessage, onSelect }) => {
   );
 };
 
+// ── Artifact file-tree browser ────────────────────────────────────────────
+// Artifacts arrive as a flat list of { name, path, updatedAt }. For large
+// workspaces (hundreds of files) a flat list is hard to navigate, so we
+// reconstruct the folder hierarchy from each entry's `path` and render it
+// as a collapsible tree with one folder/file per row.
+
+const buildArtifactTree = (artifacts) => {
+  const root = {
+    kind: 'folder', name: '', path: '', depth: -1, children: new Map(),
+  };
+  for (const entry of artifacts) {
+    const parts = (entry.path || entry.name || '').split('/').filter(Boolean);
+    if (parts.length === 0) continue;
+    let node = root;
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      const isLeaf = i === parts.length - 1;
+      const childPath = node.path ? `${node.path}/${part}` : part;
+      let child = node.children.get(part);
+      if (!child) {
+        child = isLeaf
+          ? { kind: 'file', name: part, path: childPath, depth: i, entry }
+          : { kind: 'folder', name: part, path: childPath, depth: i, children: new Map() };
+        node.children.set(part, child);
+      } else if (!isLeaf && child.kind === 'file') {
+        // Rare: a segment was registered as a file, but a deeper path now
+        // uses it as a folder. Promote to folder so traversal continues.
+        child = { kind: 'folder', name: part, path: childPath, depth: i, children: new Map() };
+        node.children.set(part, child);
+      }
+      node = child;
+    }
+  }
+
+  const finalize = (node) => {
+    if (node.kind === 'file') return 1;
+    const arr = [...node.children.values()];
+    arr.sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
+      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    });
+    node.children = arr;
+    let count = 0;
+    for (const child of arr) count += finalize(child);
+    node.fileCount = count;
+    return count;
+  };
+  finalize(root);
+  return root;
+};
+
+// When the search box has content, walk the tree once and collect every
+// matching file path plus every ancestor folder path. The flatten pass then
+// uses this set both as a visibility filter and (since it contains all
+// ancestor folders) as the effective "expanded" set — so matches always
+// reveal themselves without disturbing the user's manual expansion state.
+const computeArtifactMatches = (root, query) => {
+  if (!query) return null;
+  const q = query.toLowerCase();
+  const matched = new Set();
+  const walk = (node) => {
+    if (node.kind === 'file') {
+      if (node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q)) {
+        matched.add(node.path);
+        const parts = node.path.split('/');
+        parts.pop();
+        while (parts.length > 0) {
+          matched.add(parts.join('/'));
+          parts.pop();
+        }
+        return true;
+      }
+      return false;
+    }
+    let any = false;
+    for (const child of node.children) {
+      if (walk(child)) any = true;
+    }
+    return any;
+  };
+  for (const child of root.children) walk(child);
+  return matched;
+};
+
+const flattenArtifactTree = (root, expanded, matches) => {
+  const out = [];
+  const walk = (node) => {
+    for (const child of node.children) {
+      if (matches && !matches.has(child.path)) continue;
+      out.push(child);
+      if (child.kind === 'folder' && expanded.has(child.path)) {
+        walk(child);
+      }
+    }
+  };
+  walk(root);
+  return out;
+};
+
+const HighlightedText = ({ text, query }) => {
+  if (!query) return text;
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className={styles.fileTreeMark}>{text.slice(idx, idx + query.length)}</mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
+};
+
+const ChevronIcon = ({ open }) => (
+  <svg
+    className={`${styles.fileTreeChevron} ${open ? styles.fileTreeChevronOpen : ''}`}
+    width="10" height="10" viewBox="0 0 24 24"
+    fill="none" stroke="currentColor" strokeWidth="2.5"
+    strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <polyline points="9 6 15 12 9 18" />
+  </svg>
+);
+
+const FolderGlyph = () => (
+  <svg
+    width="14" height="14" viewBox="0 0 24 24"
+    fill="none" stroke="currentColor" strokeWidth="2"
+    strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+  </svg>
+);
+
+const FileGlyph = () => (
+  <svg
+    width="14" height="14" viewBox="0 0 24 24"
+    fill="none" stroke="currentColor" strokeWidth="2"
+    strokeLinecap="round" strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+    <polyline points="14 2 14 8 20 8" />
+  </svg>
+);
+
+const ArtifactTreeRow = ({ node, isExpanded, query, onToggle, onSelect }) => {
+  const isFolder = node.kind === 'folder';
+  const handleClick = () => {
+    if (isFolder) onToggle(node.path);
+    else onSelect?.(node.entry);
+  };
+  return (
+    <button
+      type="button"
+      className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}`}
+      style={{ paddingInlineStart: 8 + node.depth * 14 }}
+      onClick={handleClick}
+      title={node.path}
+      aria-expanded={isFolder ? isExpanded : undefined}
+    >
+      <span className={styles.fileTreeChevronSlot}>
+        {isFolder && <ChevronIcon open={isExpanded} />}
+      </span>
+      <span className={styles.fileTreeIcon}>
+        {isFolder ? <FolderGlyph /> : <FileGlyph />}
+      </span>
+      <span className={styles.fileTreeName}>
+        <HighlightedText text={node.name} query={query} />
+      </span>
+      <span className={styles.fileTreeMeta}>
+        {isFolder
+          ? node.fileCount
+          : (node.entry?.updatedAt ? formatTimestamp(node.entry.updatedAt) : '')}
+      </span>
+    </button>
+  );
+};
+
 const ArtifactsList = ({ artifacts, onSelect }) => {
   const [query, setQuery] = useState('');
-  const list = artifacts || [];
-  const normalized = query.trim().toLowerCase();
-  const filtered = useMemo(() => (
-    normalized
-      ? list.filter((entry) =>
-        (entry.name || '').toLowerCase().includes(normalized)
-        || (entry.path || '').toLowerCase().includes(normalized))
-      : list
-  ), [list, normalized]);
+  const [expanded, setExpanded] = useState(() => new Set());
+  const initializedRef = useRef(false);
+
+  const tree = useMemo(() => buildArtifactTree(artifacts || []), [artifacts]);
+  const total = (artifacts || []).length;
+
+  // On first non-empty load, auto-expand the sole top-level folder so the
+  // user doesn't have to click once to see anything — common case for
+  // repo-rooted artifacts like `work/<repo>/...`.
+  useEffect(() => {
+    if (initializedRef.current) return;
+    if (tree.children.length === 0) return;
+    initializedRef.current = true;
+    if (tree.children.length === 1 && tree.children[0].kind === 'folder') {
+      setExpanded(new Set([tree.children[0].path]));
+    }
+  }, [tree]);
+
+  const trimmedQuery = query.trim();
+  const matches = useMemo(
+    () => computeArtifactMatches(tree, trimmedQuery),
+    [tree, trimmedQuery]
+  );
+
+  const visibleNodes = useMemo(
+    () => flattenArtifactTree(tree, matches || expanded, matches),
+    [tree, expanded, matches]
+  );
+
+  const handleToggle = useCallback((path) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const itemKey = useCallback((node) => node.path, []);
+  const renderItem = useCallback((node) => (
+    <ArtifactTreeRow
+      node={node}
+      isExpanded={matches ? true : expanded.has(node.path)}
+      query={trimmedQuery}
+      onToggle={handleToggle}
+      onSelect={onSelect}
+    />
+  ), [expanded, matches, trimmedQuery, handleToggle, onSelect]);
 
   return (
     <div className={styles.searchableList}>
-      {list.length > 0 && (
+      {total > 0 && (
         <input
           type="text"
           className={styles.searchInput}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder={`Search artifacts (${list.length})`}
+          placeholder={`Search artifacts (${total})`}
           aria-label="Search artifacts"
         />
       )}
-      {list.length === 0 ? (
+      {total === 0 ? (
         <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
-      ) : filtered.length === 0 ? (
+      ) : visibleNodes.length === 0 ? (
         <div className={styles.drawerEmpty}>No artifacts match &quot;{query}&quot;.</div>
       ) : (
-        <WorkspaceFileEntryList
-          entries={filtered}
-          emptyMessage="No artifacts in this workspace yet."
-          onSelect={onSelect}
+        <VirtualizedList
+          items={visibleNodes}
+          itemKey={itemKey}
+          renderItem={renderItem}
+          className={styles.drawerVirtualList}
+          estimateSize={28}
+          overscan={400}
+          gap={0}
         />
       )}
     </div>
