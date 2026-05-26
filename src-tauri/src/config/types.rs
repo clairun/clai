@@ -128,8 +128,9 @@ impl AiProvider {
 // =============================================================================
 
 /// User-configured MCP server transport.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum McpServerTransport {
     Stdio {
         command: String,
@@ -153,8 +154,9 @@ pub enum McpServerAuth {
 }
 
 /// Optional integration classification for a configured MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum McpServerIntegrationType {
     #[default]
     Generic,
@@ -181,8 +183,9 @@ pub struct McpServerConfig {
 // Local Execution Capability Config
 // =============================================================================
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum FilesystemPathAccess {
     ReadOnly,
     ReadWrite,

@@ -47,8 +47,9 @@ pub const PATH_GRANT_ATTENTION_EVENT: &str = "path-grants://attention";
 /// for abandoned pending state.
 pub const PATH_GRANT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct PathGrantRequest {
     pub request_id: String,
     pub workspace_id: Option<String>,
@@ -59,8 +60,9 @@ pub struct PathGrantRequest {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct PathGrantAttentionUpdate {
     pub workspace_id: Option<String>,
     pub pending_count: u32,
@@ -74,8 +76,9 @@ pub struct PathGrantAttentionUpdate {
 /// or a descendant of the requested path, and whose access is not equal to
 /// or weaker than the requested access. This keeps the trust model clear:
 /// the modal can ratify or shrink what the agent asked for, never extend.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum PathGrantDecision {
     Deny,
     AllowOnce {

@@ -109,8 +109,9 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
     Ok(())
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct CreateMcpServerRequest {
     pub name: String,
     pub enabled: bool,
@@ -121,8 +122,9 @@ pub struct CreateMcpServerRequest {
     pub auth: McpServerAuthRequest,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct UpdateMcpServerRequest {
     pub id: String,
     pub name: String,
@@ -134,8 +136,9 @@ pub struct UpdateMcpServerRequest {
     pub auth: McpServerAuthRequest,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum McpServerAuthRequest {
     #[default]
     None,
@@ -145,15 +148,17 @@ pub enum McpServerAuthRequest {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum McpServerAuthResponse {
     None,
     BearerToken { has_secret: bool },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct McpServerResponse {
     pub id: String,
     pub name: String,

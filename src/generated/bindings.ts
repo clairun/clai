@@ -19,17 +19,67 @@ export type AssistantSession = { id: string, kind: SessionKind, title: string | 
 
 export type AssistantUiEvent = { "type": "session_created", "payload": { session: AssistantSession, } } | { "type": "message_created", "payload": { message: AssistantMessage, } } | { "type": "run_queued", "payload": { run: AssistantRun, } } | { "type": "run_started", "payload": { run: AssistantRun, } } | { "type": "assistant_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_thinking_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_message_completed", "payload": { message: AssistantMessage, } } | { "type": "assistant_message_updated", "payload": { message: AssistantMessage, } } | { "type": "tool_call_started", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_completed", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_failed", "payload": { tool_call: ToolInvocation, } } | { "type": "run_completed", "payload": { run: AssistantRun, } } | { "type": "run_failed", "payload": { run: AssistantRun, } } | { "type": "run_cancelled", "payload": { run: AssistantRun, } } | { "type": "ask_user_requested", "payload": { pending_id: string, question: string, options: Array<AskUserOption> | null, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } };
 
+export type AttentionUpdate = { workspaceId: string | null, pendingCount: number, };
+
 export type AuthMode = "subscription_login" | "subscription_api_key" | "developer_api_key" | "workspace_token";
 
 export type ContentPart = { "type": "text", text: string, } | { "type": "thinking", text: string, } | { "type": "tool_use", tool_call_id: string, tool_name: string, arguments: JsonValue, } | { "type": "tool_result", tool_call_id: string, payload: JsonValue, started_at?: bigint | null, completed_at?: bigint | null, };
 
+export type CreateMcpServerRequest = { name: string, enabled: boolean, transport: McpServerTransport, integrationType: McpServerIntegrationType, auth: McpServerAuthRequest, };
+
 export type CreateProviderConnectionRequest = { name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
+export type FilesystemPathAccess = "read_only" | "read_write";
+
 export type InterAgentCallContext = { callId: string, callerAgentId: string | null, callerSessionId: string, callerRunId: string, callerToolCallId: string | null, calleeAgentId: string, exposedToolName: string, };
+
+export type McpServerAuthRequest = { "type": "none" } | { "type": "bearer_token", token: string | null, };
+
+export type McpServerAuthResponse = { "type": "none" } | { "type": "bearer_token", has_secret: boolean, };
+
+/**
+ * Optional integration classification for a configured MCP server.
+ */
+export type McpServerIntegrationType = "generic" | "netdata_cloud";
+
+export type McpServerResponse = { id: string, name: string, enabled: boolean, transport: McpServerTransport, integrationType: McpServerIntegrationType, auth: McpServerAuthResponse, createdAt: string, updatedAt: string, };
+
+/**
+ * User-configured MCP server transport.
+ */
+export type McpServerTransport = { "type": "stdio", command: string, args: Array<string>, } | { "type": "http", url: string, };
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
 export type ModelInfo = { id: string, displayName: string, supportsTools: boolean, };
+
+export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
+
+/**
+ * User's response to a `PathGrantRequest`.
+ *
+ * The frontend may narrow `path` (e.g. agent asked for `~/.config`, user
+ * approves only `~/.config/gh`) and downgrade `access` (RW → RO). It must
+ * never widen — the backend rejects approvals whose path is not equal to
+ * or a descendant of the requested path, and whose access is not equal to
+ * or weaker than the requested access. This keeps the trust model clear:
+ * the modal can ratify or shrink what the agent asked for, never extend.
+ */
+export type PathGrantDecision = { "kind": "deny" } | { "kind": "allowOnce", 
+/**
+ * May narrow (descendant of requested_path) but not widen.
+ */
+path: string, 
+/**
+ * May downgrade (RW→RO) but not upgrade (RO→RW).
+ */
+access: FilesystemPathAccess, } | { "kind": "allowAlways", path: string, access: FilesystemPathAccess, scope: PermissionScope, };
+
+export type PathGrantRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, requestedPath: string, requestedAccess: FilesystemPathAccess, reason: string, };
+
+export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, };
+
+export type PermissionScope = "agent";
 
 export type ProtocolFamily = "open_ai_compatible" | "anthropic" | "custom";
 
@@ -73,6 +123,12 @@ export type ScheduleKind = { "type": "interval", intervalMinutes: number, } | { 
  */
 timezone: string, };
 
+export type SegmentApproval = { text: string, kind: SegmentKind, suggestedPrefix: string, };
+
+export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways", scope: PermissionScope, prefix: string, } | { "kind": "denyOnce" } | { "kind": "denyAlways", scope: PermissionScope, prefix: string, };
+
+export type SegmentKind = "simple" | "opaque";
+
 export type SessionContext = { spaceId: string | null, roomId: string | null, workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, netdataConversationId: string | null, cliSessionId: string | null, automationId: string | null, agentWorkspaceId: string | null, automationName: string | null, interAgentCall: InterAgentCallContext | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
 
 export type SessionKind = "interactive" | "background_job";
@@ -82,6 +138,8 @@ export type TestResult = { success: boolean, error: string | null, };
 export type ToolCallStatus = "pending" | "running" | "completed" | "failed";
 
 export type ToolInvocation = { id: string, runId: string, sessionId: string, toolName: string, params: JsonValue, status: ToolCallStatus, result: JsonValue | null, error: string | null, startedAt: bigint, completedAt: bigint | null, };
+
+export type UpdateMcpServerRequest = { id: string, name: string, enabled: boolean, transport: McpServerTransport, integrationType: McpServerIntegrationType, auth: McpServerAuthRequest, };
 
 export type UpdateProviderConnectionRequest = { id: string, name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 

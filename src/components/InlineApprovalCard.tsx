@@ -4,30 +4,16 @@ import {
   listPendingPermissionRequests,
   submitPermissionDecision,
 } from '../permissions/client';
+import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
 import styles from './InlineApprovalCard.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
 
+// Local UI alias matching the discriminator on SegmentDecision. Kept
+// in its own type because the per-segment radio buttons need a flat
+// enum, not the full discriminated union (the scope/prefix only enter
+// at submit time).
 type DecisionKind = 'allowOnce' | 'denyOnce' | 'allowAlways' | 'denyAlways';
-interface Decision {
-  kind: DecisionKind;
-  scope?: 'agent';
-  prefix?: string;
-}
-
-interface PermissionSegment {
-  text: string;
-  kind: 'opaque' | string;
-  suggestedPrefix?: string | null;
-}
-
-interface PermissionRequest {
-  requestId: string;
-  workspaceId: string;
-  command: string;
-  segments: PermissionSegment[];
-  agentName?: string | null;
-}
 
 interface SegmentCellState {
   prefix: string;
@@ -36,10 +22,18 @@ interface SegmentCellState {
 
 type CardState = Record<number, SegmentCellState>;
 
-const allowOnce = (): Decision => ({ kind: 'allowOnce' });
-const denyOnce = (): Decision => ({ kind: 'denyOnce' });
-const allowAlways = (prefix: string): Decision => ({ kind: 'allowAlways', scope: 'agent', prefix });
-const denyAlways = (prefix: string): Decision => ({ kind: 'denyAlways', scope: 'agent', prefix });
+const allowOnce = (): SegmentDecision => ({ kind: 'allowOnce' });
+const denyOnce = (): SegmentDecision => ({ kind: 'denyOnce' });
+const allowAlways = (prefix: string): SegmentDecision => ({
+  kind: 'allowAlways',
+  scope: 'agent',
+  prefix,
+});
+const denyAlways = (prefix: string): SegmentDecision => ({
+  kind: 'denyAlways',
+  scope: 'agent',
+  prefix,
+});
 
 interface InlineApprovalCardProps {
   workspaceId: string | null;
@@ -152,7 +146,7 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
   }, []);
 
   const sendDecisions = useCallback(
-    async (requestId: string, decisions: Decision[]) => {
+    async (requestId: string, decisions: SegmentDecision[]) => {
       if (submittingId) return;
       setSubmittingId(requestId);
       setError(null);

@@ -4,27 +4,16 @@ import {
   listPendingPathGrantRequests,
   submitPathGrantDecision,
 } from '../permissions/pathGrantsClient';
+import type {
+  FilesystemPathAccess,
+  PathGrantDecision,
+  PathGrantRequest,
+} from '../generated/bindings';
 import styles from './InlinePathGrantCard.module.css';
 
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
 
-type PathAccess = 'read_only' | 'read_write';
-
-interface PathGrantDecision {
-  kind: 'deny' | 'allowOnce' | 'allowAlways';
-  path?: string;
-  access?: PathAccess;
-  scope?: 'agent';
-}
-
-interface PathGrantRequest {
-  requestId: string;
-  workspaceId: string;
-  requestedPath: string;
-  requestedAccess: PathAccess;
-  agentName?: string | null;
-  reason?: string | null;
-}
+type PathAccess = FilesystemPathAccess;
 
 interface PathGrantCardState {
   path: string;

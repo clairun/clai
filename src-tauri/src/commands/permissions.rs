@@ -44,8 +44,9 @@ pub const PERMISSION_ATTENTION_EVENT: &str = "permissions://attention";
 /// abandoned-pending state).
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum PermissionScope {
     /// Persist for this workspace agent only, in
     /// `WorkspaceConfig.agents[].execution.shell`.
@@ -55,8 +56,9 @@ pub enum PermissionScope {
     //             // populates workspace_id with the agent's own id).
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum SegmentKind {
     /// A plain command segment whose prefix can be safely allowlisted.
     Simple,
@@ -65,16 +67,18 @@ pub enum SegmentKind {
     Opaque,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct SegmentApproval {
     pub text: String,
     pub kind: SegmentKind,
     pub suggested_prefix: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct PermissionRequest {
     pub request_id: String,
     pub workspace_id: Option<String>,
@@ -84,15 +88,17 @@ pub struct PermissionRequest {
     pub segments: Vec<SegmentApproval>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct AttentionUpdate {
     pub workspace_id: Option<String>,
     pub pending_count: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum SegmentDecision {
     AllowOnce,
     AllowAlways {

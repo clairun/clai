@@ -1,12 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { PathGrantDecision, PathGrantRequest } from '../generated/bindings';
 
 /**
  * Resolve a pending fs_request_grant request.
- *
- * decision is one of:
- *   { kind: 'deny' }
- *   { kind: 'allowOnce', path: string, access: 'read_only' | 'read_write' }
- *   { kind: 'allowAlways', path: string, access: 'read_only' | 'read_write', scope: 'agent' }
  *
  * Narrowing rules (enforced backend-side; the UI should mirror them so
  * the user never sees a confusing rejection):
@@ -18,7 +14,10 @@ import { invoke } from '@tauri-apps/api/core';
  * in the workspace_agents DB row before delivery, with origin tagged as
  * {kind: 'approval', reason, grantedAtUnixMs}.
  */
-export async function submitPathGrantDecision(requestId, decision) {
+export async function submitPathGrantDecision(
+  requestId: string,
+  decision: PathGrantDecision,
+): Promise<void> {
   return invoke('submit_path_grant_decision', {
     requestId,
     decision,
@@ -30,6 +29,8 @@ export async function submitPathGrantDecision(requestId, decision) {
  * workspace. Used by the inline card to discover requests registered
  * before it mounted.
  */
-export async function listPendingPathGrantRequests(workspaceId) {
+export async function listPendingPathGrantRequests(
+  workspaceId: string,
+): Promise<PathGrantRequest[]> {
   return invoke('list_pending_path_grant_requests', { workspaceId });
 }

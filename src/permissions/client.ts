@@ -1,18 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
+import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
 
 /**
  * Send the user's per-segment decisions for a pending shell-permission
  * approval. The backend persists any AllowAlways/DenyAlways entries to
  * disk before resolving the awaiting bash tool, so grants are durable
  * across crashes between user click and command execution.
- *
- * decisions: Array of one of:
- *   { kind: 'allowOnce' }
- *   { kind: 'allowAlways', scope: 'agent', prefix: string }
- *   { kind: 'denyOnce' }
- *   { kind: 'denyAlways', scope: 'agent', prefix: string }
  */
-export async function submitPermissionDecision(requestId, decisions) {
+export async function submitPermissionDecision(
+  requestId: string,
+  decisions: SegmentDecision[],
+): Promise<void> {
   return invoke('submit_permission_decision', {
     requestId,
     decisions,
@@ -25,6 +23,8 @@ export async function submitPermissionDecision(requestId, decisions) {
  * that were registered before it mounted (e.g., the user navigates
  * to the workspace after the original event fired).
  */
-export async function listPendingPermissionRequests(workspaceId) {
+export async function listPendingPermissionRequests(
+  workspaceId: string,
+): Promise<PermissionRequest[]> {
   return invoke('list_pending_permission_requests', { workspaceId });
 }
