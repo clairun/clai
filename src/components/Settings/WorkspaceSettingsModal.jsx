@@ -571,6 +571,20 @@ const NavItem = ({ active, dirty, onClick, children, className }) => (
 const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }) => {
   const [title, setTitle] = useState(snapshot?.title || '');
   const [error, setError] = useState(null);
+  // Brief "Copied!" affordance after the workspace-id chip is clicked.
+  // Auto-resets so a second click can confirm again.
+  const [idCopied, setIdCopied] = useState(false);
+  const handleCopyId = useCallback(async () => {
+    const id = snapshot?.workspaceId;
+    if (!id) return;
+    try {
+      await navigator.clipboard.writeText(id);
+      setIdCopied(true);
+      window.setTimeout(() => setIdCopied(false), 1200);
+    } catch {
+      // Stay silent on failure — the UUID is still selectable as text.
+    }
+  }, [snapshot?.workspaceId]);
 
   // Resync if the parent snapshot changes (e.g., a save just completed and
   // the parent refetched). Skipped when the local draft already matches
@@ -637,7 +651,18 @@ const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }) =
           maxLength={100}
         />
         <span className={styles.hint}>
-          Workspace ID: <code>{snapshot?.workspaceId}</code>
+          Workspace ID:{' '}
+          <button
+            type="button"
+            className={`${styles.copyableId} ${idCopied ? styles.copyableIdCopied : ''}`}
+            onClick={handleCopyId}
+            disabled={!snapshot?.workspaceId}
+            title={idCopied ? 'Copied!' : 'Click to copy'}
+            aria-label={idCopied ? 'Workspace ID copied' : 'Copy workspace ID'}
+          >
+            <code>{snapshot?.workspaceId}</code>
+            {idCopied && <span className={styles.copyableIdBadge}>Copied!</span>}
+          </button>
         </span>
       </div>
 

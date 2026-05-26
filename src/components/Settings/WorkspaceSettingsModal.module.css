@@ -272,6 +272,60 @@
   line-height: 1.4;
 }
 
+/* Inline click-to-copy chip for the workspace UUID. Looks like the old
+   <code> element it replaced, plus a hover/active affordance so users
+   discover it's interactive. */
+.copyableId {
+  appearance: none;
+  border: 1px solid transparent;
+  background: var(--color-overlay-06, rgba(0, 0, 0, 0.04));
+  color: inherit;
+  font: inherit;
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  vertical-align: baseline;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.copyableId code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  background: transparent;
+  padding: 0;
+}
+
+.copyableId:hover:not(:disabled) {
+  background: var(--color-overlay-12, rgba(0, 0, 0, 0.08));
+  border-color: var(--color-border-light);
+}
+
+.copyableId:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+.copyableId:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.copyableIdCopied {
+  background: var(--color-primary-alpha-08);
+  border-color: var(--color-primary-alpha-30);
+}
+
+.copyableIdBadge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-primary);
+  text-transform: uppercase;
+}
+
 .errorBanner {
   background: var(--color-critical-alpha-08, rgba(220, 38, 38, 0.12));
   color: var(--color-critical, #b91c1c);
