@@ -10,14 +10,35 @@
  * - Duplicating tabs
  */
 
+import type { ParsedCommand } from './commandParser';
+import type { CommandResult } from './contextCommandHandler';
+
+interface TabInfo {
+  id: string;
+  title: string;
+}
+
+/** Tab-manager API the tab handler drives (from useTabManager). */
+export interface TabCommandApi {
+  tabs: TabInfo[];
+  activeTabId: string | null;
+  createTab: (title?: string) => TabInfo;
+  switchToTab: (tabId: string) => void;
+  switchToNextTab: () => string | null;
+  switchToPrevTab: () => string | null;
+  closeTab: (tabId: string) => void;
+  renameTab: (tabId: string, title: string) => void;
+  resetTab: (tabId: string) => CommandResult | void;
+  duplicateTab: (tabId: string) => TabInfo;
+}
+
 /**
  * Handle tab command execution
- *
- * @param {Object} command - Parsed command object
- * @param {Object} tabManager - Tab manager from useTabManager hook
- * @returns {Object} Result with success status and message
  */
-export function handleTabCommand(command, tabManager) {
+export function handleTabCommand(
+  command: Pick<ParsedCommand, 'args'>,
+  tabManager: TabCommandApi
+): CommandResult {
   const { args } = command;
   const { positional } = args;
 
@@ -62,7 +83,7 @@ export function handleTabCommand(command, tabManager) {
       default:
         return {
           success: false,
-          message: `Unknown tab subcommand: ${subcommand}\nUsage: tab [new|close|rename|list|reset|duplicate|next|prev] [args...]`
+          message: `Unknown tab subcommand: ${subcommand}\nUsage: tab [new|close|rename|list|reset|duplicate|next|prev] [args...]`,
         };
     }
   }
@@ -76,7 +97,7 @@ export function handleTabCommand(command, tabManager) {
   // If not a subcommand or number, show error
   return {
     success: false,
-    message: `Invalid tab command. Use "tab new <title>" to create a tab with a custom title.\nUsage: tab [new|close|rename|list|reset|duplicate|next|prev|<index>] [args...]`
+    message: `Invalid tab command. Use "tab new <title>" to create a tab with a custom title.\nUsage: tab [new|close|rename|list|reset|duplicate|next|prev|<index>] [args...]`,
   };
 }
 
@@ -84,7 +105,7 @@ export function handleTabCommand(command, tabManager) {
  * Handle tab new <title>
  * Create a new tab with custom title or default title
  */
-function handleNewTab(args, tabManager) {
+function handleNewTab(args: string[], tabManager: TabCommandApi): CommandResult {
   const { createTab } = tabManager;
 
   // If no title provided, create with default
@@ -92,7 +113,7 @@ function handleNewTab(args, tabManager) {
     const newTab = createTab();
     return {
       success: true,
-      message: `Created new tab: ${newTab.title}`
+      message: `Created new tab: ${newTab.title}`,
     };
   }
 
@@ -101,7 +122,7 @@ function handleNewTab(args, tabManager) {
   const newTab = createTab(title);
   return {
     success: true,
-    message: `Created new tab: ${newTab.title}`
+    message: `Created new tab: ${newTab.title}`,
   };
 }
 
@@ -109,13 +130,13 @@ function handleNewTab(args, tabManager) {
  * Handle tab <index>
  * Switch to tab by numeric index (1-based)
  */
-function handleSwitchTab(index, tabManager) {
+function handleSwitchTab(index: number, tabManager: TabCommandApi): CommandResult {
   const { tabs, switchToTab } = tabManager;
 
   if (index < 1 || index > tabs.length) {
     return {
       success: false,
-      message: `Tab index out of range. Valid range: 1-${tabs.length}`
+      message: `Tab index out of range. Valid range: 1-${tabs.length}`,
     };
   }
 
@@ -123,7 +144,7 @@ function handleSwitchTab(index, tabManager) {
   switchToTab(targetTab.id);
   return {
     success: true,
-    message: `Switched to tab ${index}: ${targetTab.title}`
+    message: `Switched to tab ${index}: ${targetTab.title}`,
   };
 }
 
@@ -131,20 +152,20 @@ function handleSwitchTab(index, tabManager) {
  * Handle tab next
  * Navigate to next tab
  */
-function handleNextTab(tabManager) {
+function handleNextTab(tabManager: TabCommandApi): CommandResult {
   const { tabs, switchToNextTab } = tabManager;
 
   const result = switchToNextTab();
   if (result) {
-    const tab = tabs.find(t => t.id === result);
+    const tab = tabs.find((t) => t.id === result);
     return {
       success: true,
-      message: `Switched to next tab: ${tab?.title || result}`
+      message: `Switched to next tab: ${tab?.title || result}`,
     };
   }
   return {
     success: false,
-    message: 'Already at the last tab'
+    message: 'Already at the last tab',
   };
 }
 
@@ -152,20 +173,20 @@ function handleNextTab(tabManager) {
  * Handle tab prev
  * Navigate to previous tab
  */
-function handlePrevTab(tabManager) {
+function handlePrevTab(tabManager: TabCommandApi): CommandResult {
   const { tabs, switchToPrevTab } = tabManager;
 
   const result = switchToPrevTab();
   if (result) {
-    const tab = tabs.find(t => t.id === result);
+    const tab = tabs.find((t) => t.id === result);
     return {
       success: true,
-      message: `Switched to previous tab: ${tab?.title || result}`
+      message: `Switched to previous tab: ${tab?.title || result}`,
     };
   }
   return {
     success: false,
-    message: 'Already at the first tab'
+    message: 'Already at the first tab',
   };
 }
 
@@ -173,24 +194,24 @@ function handlePrevTab(tabManager) {
  * Handle tab close [index]
  * Close current tab or specified tab by index
  */
-function handleCloseTab(args, tabManager) {
+function handleCloseTab(args: string[], tabManager: TabCommandApi): CommandResult {
   const { tabs, activeTabId, closeTab } = tabManager;
 
   // No arguments - close current tab
   if (args.length === 0) {
-    const currentTab = tabs.find(t => t.id === activeTabId);
+    const currentTab = tabs.find((t) => t.id === activeTabId);
 
     if (tabs.length === 1) {
       return {
         success: false,
-        message: 'Cannot close the last tab'
+        message: 'Cannot close the last tab',
       };
     }
 
-    closeTab(activeTabId);
+    if (activeTabId) closeTab(activeTabId);
     return {
       success: true,
-      message: `Closed tab: ${currentTab?.title || activeTabId}`
+      message: `Closed tab: ${currentTab?.title || activeTabId}`,
     };
   }
 
@@ -201,21 +222,21 @@ function handleCloseTab(args, tabManager) {
   if (isNaN(index)) {
     return {
       success: false,
-      message: 'Usage: tab close [index]'
+      message: 'Usage: tab close [index]',
     };
   }
 
   if (index < 1 || index > tabs.length) {
     return {
       success: false,
-      message: `Tab index out of range. Valid range: 1-${tabs.length}`
+      message: `Tab index out of range. Valid range: 1-${tabs.length}`,
     };
   }
 
   if (tabs.length === 1) {
     return {
       success: false,
-      message: 'Cannot close the last tab'
+      message: 'Cannot close the last tab',
     };
   }
 
@@ -224,7 +245,7 @@ function handleCloseTab(args, tabManager) {
 
   return {
     success: true,
-    message: `Closed tab ${index}: ${targetTab.title}`
+    message: `Closed tab ${index}: ${targetTab.title}`,
   };
 }
 
@@ -232,25 +253,25 @@ function handleCloseTab(args, tabManager) {
  * Handle tab rename <title>
  * Rename current tab
  */
-function handleRenameTab(args, tabManager) {
+function handleRenameTab(args: string[], tabManager: TabCommandApi): CommandResult {
   if (args.length === 0) {
     return {
       success: false,
-      message: 'Usage: tab rename <title>'
+      message: 'Usage: tab rename <title>',
     };
   }
 
   const { tabs, activeTabId, renameTab } = tabManager;
   const newTitle = args.join(' ');
 
-  const currentTab = tabs.find(t => t.id === activeTabId);
+  const currentTab = tabs.find((t) => t.id === activeTabId);
   const oldTitle = currentTab?.title || 'Untitled';
 
-  renameTab(activeTabId, newTitle);
+  if (activeTabId) renameTab(activeTabId, newTitle);
 
   return {
     success: true,
-    message: `Renamed tab from "${oldTitle}" to "${newTitle}"`
+    message: `Renamed tab from "${oldTitle}" to "${newTitle}"`,
   };
 }
 
@@ -258,17 +279,17 @@ function handleRenameTab(args, tabManager) {
  * Handle tab list
  * List all tabs with their indices
  */
-function handleListTabs(tabManager) {
+function handleListTabs(tabManager: TabCommandApi): CommandResult {
   const { tabs, activeTabId } = tabManager;
 
   if (tabs.length === 0) {
     return {
       success: true,
-      message: 'No tabs available'
+      message: 'No tabs available',
     };
   }
 
-  const lines = [];
+  const lines: string[] = [];
   lines.push('=== Tabs ===');
   lines.push('');
 
@@ -284,7 +305,7 @@ function handleListTabs(tabManager) {
 
   return {
     success: true,
-    message: lines.join('\n')
+    message: lines.join('\n'),
   };
 }
 
@@ -292,15 +313,15 @@ function handleListTabs(tabManager) {
  * Handle tab reset
  * Reset current tab layout (clear tiles)
  */
-function handleResetTab(tabManager) {
+function handleResetTab(tabManager: TabCommandApi): CommandResult {
   const { tabs, activeTabId, resetTab } = tabManager;
 
-  const currentTab = tabs.find(t => t.id === activeTabId);
-  resetTab(activeTabId);
+  const currentTab = tabs.find((t) => t.id === activeTabId);
+  if (activeTabId) resetTab(activeTabId);
 
   return {
     success: true,
-    message: `Reset tab layout: ${currentTab?.title || activeTabId}`
+    message: `Reset tab layout: ${currentTab?.title || activeTabId}`,
   };
 }
 
@@ -308,22 +329,21 @@ function handleResetTab(tabManager) {
  * Handle tab duplicate
  * Duplicate current tab
  */
-function handleDuplicateTab(tabManager) {
+function handleDuplicateTab(tabManager: TabCommandApi): CommandResult {
   const { tabs, activeTabId, duplicateTab } = tabManager;
 
-  const currentTab = tabs.find(t => t.id === activeTabId);
-  const newTab = duplicateTab(activeTabId);
+  const currentTab = tabs.find((t) => t.id === activeTabId);
+  const newTab = activeTabId ? duplicateTab(activeTabId) : null;
 
   return {
     success: true,
-    message: `Duplicated tab "${currentTab?.title || 'Untitled'}" as "${newTab.title}"`
+    message: `Duplicated tab "${currentTab?.title || 'Untitled'}" as "${newTab?.title ?? 'Untitled'}"`,
   };
 }
 
 /**
  * Check if a command is a tab command
  */
-export function isTabCommand(command) {
+export function isTabCommand(command: { type?: string; name?: string }): boolean {
   return command.type === 'tab' || command.name === 'tab';
 }
-

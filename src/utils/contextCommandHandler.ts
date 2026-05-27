@@ -7,14 +7,29 @@
  * - Array-based context values
  */
 
+import type { ParsedCommand } from './commandParser';
+
+export interface CommandResult {
+  success: boolean;
+  message: string;
+}
+
+/** Tab-context API the ctx handler reads/writes (from useTabContext). */
+export interface ContextCommandApi {
+  selectedMcpServerIds?: string[];
+  disabledMcpServerIds?: string[];
+  customContext: Record<string, unknown>;
+  setCustomContext: (key: string, value: unknown) => void;
+  deleteCustomContext: (key: string) => void;
+}
+
 /**
  * Handle ctx command execution
- *
- * @param {Object} command - Parsed command object
- * @param {Object} tabContext - Tab context from useTabContext hook
- * @returns {Object} Result with success status and message
  */
-export function handleContextCommand(command, tabContext) {
+export function handleContextCommand(
+  command: Pick<ParsedCommand, 'args'>,
+  tabContext: ContextCommandApi
+): CommandResult {
   const { args } = command;
   const { positional } = args;
 
@@ -40,7 +55,7 @@ export function handleContextCommand(command, tabContext) {
     default:
       return {
         success: false,
-        message: `Unknown ctx subcommand: ${subcommand}\nUsage: ctx [set|add|del] [args...]`
+        message: `Unknown ctx subcommand: ${subcommand}\nUsage: ctx [set|add|del] [args...]`,
       };
   }
 }
@@ -48,14 +63,10 @@ export function handleContextCommand(command, tabContext) {
 /**
  * Print current context
  */
-function printContext(tabContext) {
-  const {
-    selectedMcpServerIds,
-    disabledMcpServerIds,
-    customContext,
-  } = tabContext;
+function printContext(tabContext: ContextCommandApi): CommandResult {
+  const { selectedMcpServerIds, disabledMcpServerIds, customContext } = tabContext;
 
-  const lines = [];
+  const lines: string[] = [];
 
   lines.push('=== Current Context ===');
   lines.push('');
@@ -64,13 +75,13 @@ function printContext(tabContext) {
   if ((selectedMcpServerIds || []).length === 0) {
     lines.push('  Attached: (none)');
   } else {
-    lines.push(`  Attached: ${selectedMcpServerIds.join(', ')}`);
+    lines.push(`  Attached: ${selectedMcpServerIds!.join(', ')}`);
   }
 
   if ((disabledMcpServerIds || []).length === 0) {
     lines.push('  Disabled: (none)');
   } else {
-    lines.push(`  Disabled: ${disabledMcpServerIds.join(', ')}`);
+    lines.push(`  Disabled: ${disabledMcpServerIds!.join(', ')}`);
   }
 
   lines.push('');
@@ -81,32 +92,32 @@ function printContext(tabContext) {
   if (contextKeys.length === 0) {
     lines.push('  (empty)');
   } else {
-    contextKeys.sort().forEach(key => {
+    contextKeys.sort().forEach((key) => {
       const value = customContext[key];
       if (Array.isArray(value)) {
         lines.push(`  ${key}: [${value.join(', ')}]`);
       } else if (typeof value === 'object' && value !== null) {
         lines.push(`  ${key}: ${JSON.stringify(value)}`);
       } else {
-        lines.push(`  ${key}: ${value}`);
+        lines.push(`  ${key}: ${String(value)}`);
       }
     });
   }
 
   return {
     success: true,
-    message: lines.join('\n')
+    message: lines.join('\n'),
   };
 }
 
 /**
  * Handle ctx set <key> <value>
  */
-function handleSetContext(args, tabContext) {
+function handleSetContext(args: string[], tabContext: ContextCommandApi): CommandResult {
   if (args.length < 2) {
     return {
       success: false,
-      message: 'Usage: ctx set <key> <value>'
+      message: 'Usage: ctx set <key> <value>',
     };
   }
 
@@ -116,12 +127,14 @@ function handleSetContext(args, tabContext) {
   const { setCustomContext } = tabContext;
 
   // Try to parse as JSON if it looks like JSON
-  let parsedValue = value;
-  if ((value.startsWith('{') && value.endsWith('}')) ||
-      (value.startsWith('[') && value.endsWith(']'))) {
+  let parsedValue: unknown = value;
+  if (
+    (value.startsWith('{') && value.endsWith('}')) ||
+    (value.startsWith('[') && value.endsWith(']'))
+  ) {
     try {
       parsedValue = JSON.parse(value);
-    } catch (e) {
+    } catch {
       // Keep as string if JSON parsing fails
     }
   }
@@ -130,7 +143,7 @@ function handleSetContext(args, tabContext) {
 
   return {
     success: true,
-    message: `Set ${key} = ${Array.isArray(parsedValue) ? `[${parsedValue.join(', ')}]` : parsedValue}`
+    message: `Set ${key} = ${Array.isArray(parsedValue) ? `[${parsedValue.join(', ')}]` : String(parsedValue)}`,
   };
 }
 
@@ -138,11 +151,11 @@ function handleSetContext(args, tabContext) {
  * Handle ctx add <key> <value>
  * Adds value to key (converts to array if needed)
  */
-function handleAddContext(args, tabContext) {
+function handleAddContext(args: string[], tabContext: ContextCommandApi): CommandResult {
   if (args.length < 2) {
     return {
       success: false,
-      message: 'Usage: ctx add <key> <value>'
+      message: 'Usage: ctx add <key> <value>',
     };
   }
 
@@ -153,7 +166,7 @@ function handleAddContext(args, tabContext) {
 
   const currentValue = customContext[key];
 
-  let newValue;
+  let newValue: unknown;
   if (currentValue === undefined) {
     // Key doesn't exist, create as single value
     newValue = value;
@@ -169,7 +182,7 @@ function handleAddContext(args, tabContext) {
 
   return {
     success: true,
-    message: `Added ${value} to ${key}${Array.isArray(newValue) ? ` (now: [${newValue.join(', ')}])` : ''}`
+    message: `Added ${value} to ${key}${Array.isArray(newValue) ? ` (now: [${newValue.join(', ')}])` : ''}`,
   };
 }
 
@@ -178,11 +191,11 @@ function handleAddContext(args, tabContext) {
  * If value provided, removes value from array
  * If no value, deletes entire key
  */
-function handleDeleteContext(args, tabContext) {
+function handleDeleteContext(args: string[], tabContext: ContextCommandApi): CommandResult {
   if (args.length === 0) {
     return {
       success: false,
-      message: 'Usage: ctx del <key> [value]'
+      message: 'Usage: ctx del <key> [value]',
     };
   }
 
@@ -192,7 +205,7 @@ function handleDeleteContext(args, tabContext) {
   if (!(key in customContext)) {
     return {
       success: false,
-      message: `Key not found: ${key}`
+      message: `Key not found: ${key}`,
     };
   }
 
@@ -201,7 +214,7 @@ function handleDeleteContext(args, tabContext) {
     deleteCustomContext(key);
     return {
       success: true,
-      message: `Deleted key: ${key}`
+      message: `Deleted key: ${key}`,
     };
   }
 
@@ -215,23 +228,23 @@ function handleDeleteContext(args, tabContext) {
       deleteCustomContext(key);
       return {
         success: true,
-        message: `Deleted ${key} (value matched)`
+        message: `Deleted ${key} (value matched)`,
       };
     } else {
       return {
         success: false,
-        message: `Value ${value} not found in ${key}`
+        message: `Value ${value} not found in ${key}`,
       };
     }
   }
 
   // Remove value from array
-  const newValue = currentValue.filter(v => v !== value);
+  const newValue = currentValue.filter((v) => v !== value);
 
   if (newValue.length === currentValue.length) {
     return {
       success: false,
-      message: `Value ${value} not found in ${key}`
+      message: `Value ${value} not found in ${key}`,
     };
   }
 
@@ -240,21 +253,21 @@ function handleDeleteContext(args, tabContext) {
     deleteCustomContext(key);
     return {
       success: true,
-      message: `Deleted ${key} (array now empty)`
+      message: `Deleted ${key} (array now empty)`,
     };
   } else if (newValue.length === 1) {
     // Array has one element, convert to single value
     setCustomContext(key, newValue[0]);
     return {
       success: true,
-      message: `Removed ${value} from ${key} (now: ${newValue[0]})`
+      message: `Removed ${value} from ${key} (now: ${String(newValue[0])})`,
     };
   } else {
     // Array still has multiple elements
     setCustomContext(key, newValue);
     return {
       success: true,
-      message: `Removed ${value} from ${key} (now: [${newValue.join(', ')}])`
+      message: `Removed ${value} from ${key} (now: [${newValue.join(', ')}])`,
     };
   }
 }
@@ -262,6 +275,6 @@ function handleDeleteContext(args, tabContext) {
 /**
  * Check if a command is a context command
  */
-export function isContextCommand(command) {
+export function isContextCommand(command: { type?: string; name?: string }): boolean {
   return command.type === 'ctx' || command.name === 'ctx';
 }
