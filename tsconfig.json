@@ -25,6 +25,11 @@
     "forceConsistentCasingInFileNames": true,
     "noImplicitOverride": true,
     "noUncheckedIndexedAccess": true,
+    // exactOptionalPropertyTypes evaluated and intentionally left OFF: on this
+    // codebase it surfaced ~24 errors that were all "widen an optional prop to
+    // `| undefined`" — i.e. modelling React's `prop={cond ? v : undefined}`
+    // idiom rather than catching real bugs. Poor cost/benefit; revisit only if
+    // a concrete undefined-vs-absent bug motivates it.
 
     // Build hygiene
     "noEmit": true,
