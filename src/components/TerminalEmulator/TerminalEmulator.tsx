@@ -246,7 +246,7 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
     else {
       // Validate command type using registry - no hardcoded list needed!
       if (!isCommandSupported(command.type)) {
-        addOutputMessage(`Unknown command: /${command.type}. Type /help for available commands.`, 'error');
+        addOutputMessage(`Unknown command: /${command.type}. Available: /tab, /ctx, /reset-all.`, 'error');
         return;
       }
 
@@ -445,7 +445,7 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
                 ? 'Message the selected agent...'
                 : isWorkspaceRoute
                   ? 'Message this workspace...'
-                  : 'Type to chat, or /help for commands...'}
+                  : 'Type to chat, or run a /command (/tab, /ctx)...'}
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"

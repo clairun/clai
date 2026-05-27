@@ -1,12 +1,20 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import useAssistantStore from './sessionStore';
+import type { AssistantMessage, AssistantRun, AssistantSession } from '../generated/bindings';
 
+// Minimal typed fixtures — the store only reads ids/status/content, so we
+// cast partial shapes rather than spell out every required field.
 const SESSION = {
   id: 'sess-1',
   kind: 'interactive',
   title: 'Test session',
   tabId: null,
-};
+} as unknown as AssistantSession & { tabId?: string | null };
+
+const msg = (id: string): AssistantMessage =>
+  ({ id, content: [] }) as unknown as AssistantMessage;
+const run = (id: string, status: string): AssistantRun =>
+  ({ id, status }) as unknown as AssistantRun;
 
 const ASK_REQUEST = {
   pendingId: 'pending-abc',
@@ -109,12 +117,12 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
   it('overwrites messages/runs/toolCalls with the snapshot payload', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
-    store.addMessage(SESSION.id, { id: 'old-msg', content: [] });
+    store.addMessage(SESSION.id, msg('old-msg'));
     store.loadSessionData(
       SESSION.id,
       SESSION,
-      [{ id: 'new-msg-1' }, { id: 'new-msg-2' }],
-      [{ id: 'run-1', status: 'completed' }],
+      [msg('new-msg-1'), msg('new-msg-2')],
+      [run('run-1', 'completed')],
       [],
     );
     const s = useAssistantStore.getState().sessions[SESSION.id];
@@ -127,8 +135,8 @@ describe('addMessage', () => {
   it('deduplicates by id', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
-    store.addMessage(SESSION.id, { id: 'msg-1', content: [] });
-    store.addMessage(SESSION.id, { id: 'msg-1', content: [] });
+    store.addMessage(SESSION.id, msg('msg-1'));
+    store.addMessage(SESSION.id, msg('msg-1'));
     expect(useAssistantStore.getState().sessions[SESSION.id].messages).toHaveLength(1);
   });
 });
@@ -138,7 +146,7 @@ describe('setRunStatus', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
     store.appendDelta(SESSION.id, 'msg-1', 'partial');
-    store.setRunStatus(SESSION.id, { id: 'run-1', status: 'completed' });
+    store.setRunStatus(SESSION.id, run('run-1', 'completed'));
     const s = useAssistantStore.getState().sessions[SESSION.id];
     expect(s.isStreaming).toBe(false);
     expect(s.streamingTextByMessageId).toEqual({});
@@ -147,7 +155,7 @@ describe('setRunStatus', () => {
   it('sets streaming on queued/running/waiting_for_tool', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
-    store.setRunStatus(SESSION.id, { id: 'run-1', status: 'queued' });
+    store.setRunStatus(SESSION.id, run('run-1', 'queued'));
     expect(useAssistantStore.getState().sessions[SESSION.id].isStreaming).toBe(true);
   });
 });

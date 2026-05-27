@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import useAssistantStore from './sessionStore';
+import type { AssistantSession } from '../generated/bindings';
+
+type EventHandler = (event: { payload: unknown }) => void;
 
 // Tauri's `listen` returns a Promise<UnlistenFn>; we mock it so the hook
 // receives our synthetic envelopes. Each test calls the captured handler
 // directly — no real event bus required.
-let capturedHandler;
-let unlisten;
+let capturedHandler: EventHandler | null;
+let unlisten: () => void;
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn((_name, handler) => {
     capturedHandler = handler;
@@ -19,9 +22,13 @@ vi.mock('@tauri-apps/api/event', () => ({
 // Imported AFTER vi.mock so the hook picks up the mocked listen().
 const { useAssistantEvents } = await import('./useAssistantEvents');
 
-const SESSION = { id: 'sess-1', kind: 'interactive', title: 'T' };
-const fire = (event, runId = null) => {
-  capturedHandler({
+const SESSION = {
+  id: 'sess-1',
+  kind: 'interactive',
+  title: 'T',
+} as unknown as AssistantSession & { tabId?: string | null };
+const fire = (event: unknown, runId: string | null = null) => {
+  capturedHandler?.({
     payload: {
       sessionId: SESSION.id,
       runId,
