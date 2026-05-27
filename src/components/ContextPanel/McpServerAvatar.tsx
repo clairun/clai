@@ -1,21 +1,25 @@
 import React, { useMemo, useState } from 'react';
+import type { McpServerResponse } from '../../generated/bindings';
 import styles from './McpServerAvatar.module.css';
 
-const getOriginFaviconUrl = (server) => {
-  if (server?.transport?.type !== 'http' || !server?.transport?.url) {
+const getOriginFaviconUrl = (server?: McpServerResponse | null): string | null => {
+  const transport = server?.transport;
+  if (!transport || transport.type !== 'http' || !transport.url) {
     return null;
   }
 
   try {
-    const url = new URL(server.transport.url);
+    const url = new URL(transport.url);
     return `${url.origin}/favicon.ico`;
   } catch {
     return null;
   }
 };
 
-const getFallbackLabel = (server) => {
-  const source = server?.name || server?.transport?.command || 'M';
+const getFallbackLabel = (server?: McpServerResponse | null): string => {
+  const transport = server?.transport;
+  const command = transport && transport.type === 'stdio' ? transport.command : undefined;
+  const source = server?.name || command || 'M';
   const parts = source.trim().split(/\s+/).filter(Boolean);
   if (parts.length >= 2) {
     return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
@@ -23,7 +27,12 @@ const getFallbackLabel = (server) => {
   return source.slice(0, 2).toUpperCase();
 };
 
-const McpServerAvatar = ({ server, disabled = false }) => {
+interface McpServerAvatarProps {
+  server?: McpServerResponse | null;
+  disabled?: boolean;
+}
+
+const McpServerAvatar = ({ server, disabled = false }: McpServerAvatarProps) => {
   const faviconUrl = useMemo(() => getOriginFaviconUrl(server), [server]);
   const fallbackLabel = useMemo(() => getFallbackLabel(server), [server]);
   const [imageFailed, setImageFailed] = useState(false);

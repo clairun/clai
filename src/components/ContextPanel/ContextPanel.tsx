@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom';
 import { useTabManager } from '../../contexts/TabManagerContext';
 import { getMcpServers } from '../../api/client';
 import { assistantClient } from '../../assistant';
+import type { McpServerResponse, ProviderConnection } from '../../generated/bindings';
 import ContextBadge from './ContextBadge';
 import McpServerAvatar from './McpServerAvatar';
 import McpServerSelector from './McpServerSelector';
@@ -11,21 +12,44 @@ import styles from './ContextPanel.module.css';
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
 
-const getAttachedMcpServerIds = (context) =>
+// Loose shapes for the still-untyped TabManagerContext. Tightened when that
+// context is converted under P2-1.
+interface TabMcpServers {
+  attachedServerIds?: string[];
+  selectedServerIds?: string[];
+  disabledServerIds?: string[];
+}
+interface TabContext {
+  customContext?: Record<string, unknown>;
+  mcpServers?: TabMcpServers;
+  agent?: { agentId?: string | null } | null;
+  assistantConnectionId?: string | null;
+}
+interface Tab {
+  id: string;
+  context?: TabContext | null;
+}
+interface TabManager {
+  getActiveTab: () => Tab | null;
+  updateTabContext: (tabId: string, patch: Partial<TabContext>) => void;
+}
+
+const getAttachedMcpServerIds = (context?: TabContext | null): string[] =>
   context?.mcpServers?.attachedServerIds || context?.mcpServers?.selectedServerIds || [];
 
-const getDisabledMcpServerIds = (context) => context?.mcpServers?.disabledServerIds || [];
+const getDisabledMcpServerIds = (context?: TabContext | null): string[] =>
+  context?.mcpServers?.disabledServerIds || [];
 
-const getEnabledMcpServerIds = (context) => {
+const getEnabledMcpServerIds = (context?: TabContext | null): string[] => {
   const disabled = new Set(getDisabledMcpServerIds(context));
   return getAttachedMcpServerIds(context).filter((id) => !disabled.has(id));
 };
 
 const ContextPanel = () => {
-  const { getActiveTab, updateTabContext } = useTabManager();
+  const { getActiveTab, updateTabContext } = useTabManager() as TabManager;
   const [showMcpSelector, setShowMcpSelector] = useState(false);
-  const [availableMcpServers, setAvailableMcpServers] = useState([]);
-  const [providerConnections, setProviderConnections] = useState([]);
+  const [availableMcpServers, setAvailableMcpServers] = useState<McpServerResponse[]>([]);
+  const [providerConnections, setProviderConnections] = useState<ProviderConnection[]>([]);
 
   const activeTab = getActiveTab();
   const tabContext = activeTab?.context;
@@ -46,8 +70,8 @@ const ContextPanel = () => {
     const loadContextData = async () => {
       try {
         const [servers, connections] = await Promise.all([
-          getMcpServers(),
-          assistantClient.listProviderConnections().catch(() => []),
+          getMcpServers() as Promise<McpServerResponse[]>,
+          assistantClient.listProviderConnections().catch(() => [] as ProviderConnection[]),
         ]);
         if (!cancelled) {
           setAvailableMcpServers(servers || []);
@@ -81,7 +105,7 @@ const ContextPanel = () => {
     () =>
       attachedMcpServerIds
         .map((id) => availableMcpServers.find((server) => server.id === id))
-        .filter(Boolean),
+        .filter((server): server is McpServerResponse => Boolean(server)),
     [attachedMcpServerIds, availableMcpServers]
   );
 
@@ -101,7 +125,7 @@ const ContextPanel = () => {
     }
   }, [activeTab, enabledProviderConnections, isAgentManagedTab, tabContext?.assistantConnectionId, updateTabContext]);
 
-  const handleAddMcpServer = useCallback((serverId) => {
+  const handleAddMcpServer = useCallback((serverId: string) => {
     if (!activeTab || isAgentManagedTab) return;
 
     const nextAttachedIds = attachedMcpServerIds.includes(serverId)
@@ -116,7 +140,7 @@ const ContextPanel = () => {
     });
   }, [activeTab, attachedMcpServerIds, disabledMcpServerIds, isAgentManagedTab, updateTabContext]);
 
-  const handleRemoveMcpServer = useCallback((serverId) => {
+  const handleRemoveMcpServer = useCallback((serverId: string) => {
     if (!activeTab || isAgentManagedTab) return;
 
     updateTabContext(activeTab.id, {
@@ -127,7 +151,7 @@ const ContextPanel = () => {
     });
   }, [activeTab, attachedMcpServerIds, disabledMcpServerIds, isAgentManagedTab, updateTabContext]);
 
-  const handleToggleMcpServer = useCallback((serverId) => {
+  const handleToggleMcpServer = useCallback((serverId: string) => {
     if (!activeTab || isAgentManagedTab || !attachedMcpServerIds.includes(serverId)) return;
 
     const isDisabled = disabledMcpServerIds.includes(serverId);

@@ -1,10 +1,27 @@
 import React, { useEffect, useRef, useState } from 'react';
+import type { McpServerResponse } from '../../generated/bindings';
 import McpServerAvatar from './McpServerAvatar';
 import styles from './McpServerSelector.module.css';
 
-const McpServerSelector = ({ servers, attachedIds, disabledIds, onAdd, onRemove, onClose }) => {
-  const selectorRef = useRef(null);
-  const [busyServerId, setBusyServerId] = useState(null);
+interface McpServerSelectorProps {
+  servers: McpServerResponse[];
+  attachedIds: string[];
+  disabledIds: string[];
+  onAdd: (serverId: string) => void | Promise<void>;
+  onRemove: (serverId: string) => void | Promise<void>;
+  onClose: () => void;
+}
+
+const McpServerSelector = ({
+  servers,
+  attachedIds,
+  disabledIds,
+  onAdd,
+  onRemove,
+  onClose,
+}: McpServerSelectorProps) => {
+  const selectorRef = useRef<HTMLDivElement>(null);
+  const [busyServerId, setBusyServerId] = useState<string | null>(null);
 
   useEffect(() => {
     const rafId = requestAnimationFrame(() => {
@@ -16,13 +33,13 @@ const McpServerSelector = ({ servers, attachedIds, disabledIds, onAdd, onRemove,
   }, []);
 
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (selectorRef.current && !selectorRef.current.contains(event.target)) {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (selectorRef.current && !selectorRef.current.contains(event.target as Node)) {
         onClose();
       }
     };
 
-    const handleEscape = (event) => {
+    const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         onClose();
       }
@@ -40,7 +57,7 @@ const McpServerSelector = ({ servers, attachedIds, disabledIds, onAdd, onRemove,
     };
   }, [onClose]);
 
-  const handleAdd = async (serverId) => {
+  const handleAdd = async (serverId: string) => {
     setBusyServerId(serverId);
     try {
       await onAdd(serverId);
@@ -49,7 +66,7 @@ const McpServerSelector = ({ servers, attachedIds, disabledIds, onAdd, onRemove,
     }
   };
 
-  const handleRemove = async (serverId) => {
+  const handleRemove = async (serverId: string) => {
     setBusyServerId(serverId);
     try {
       await onRemove(serverId);

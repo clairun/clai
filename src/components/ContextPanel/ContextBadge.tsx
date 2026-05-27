@@ -54,17 +54,26 @@ const McpIcon = () => (
   </svg>
 );
 
-/**
- * ContextBadge displays a single context item
- *
- * @param {Object} props
- * @param {string} props.type - Type of badge: 'space', 'room', 'credits', 'mcp', or 'custom'
- * @param {string} props.label - Label to display (for custom badges, this is the key)
- * @param {string} props.value - Value to display
- * @param {Function} props.onClick - Optional click handler for interactive badges
- * @param {boolean} props.clickable - Whether the badge is clickable (default: false)
- * @param {string} props.variant - Optional variant for styling: 'warning', 'danger', 'disabled', 'add'
- */
+type BadgeType = 'space' | 'room' | 'credits' | 'mcp' | 'custom';
+type BadgeVariant = 'warning' | 'danger' | 'disabled' | 'add';
+
+interface ContextBadgeProps {
+  /** Type of badge: 'space', 'room', 'credits', 'mcp', or 'custom' */
+  type?: BadgeType;
+  /** Label to display (for custom badges, this is the key) */
+  label?: string;
+  /** Value to display */
+  value?: string;
+  /** Optional click handler for interactive badges */
+  onClick?: () => void;
+  /** Whether the badge is clickable (default: false) */
+  clickable?: boolean;
+  /** Optional variant for styling */
+  variant?: BadgeVariant;
+  titleOverride?: string;
+  iconElement?: React.ReactNode;
+}
+
 const ContextBadge = ({
   type = 'custom',
   label,
@@ -74,7 +83,7 @@ const ContextBadge = ({
   variant,
   titleOverride,
   iconElement,
-}) => {
+}: ContextBadgeProps) => {
   // Determine badge style based on type and variant
   const typeClass = type.charAt(0).toUpperCase() + type.slice(1);
   const variantClass = variant ? variant.charAt(0).toUpperCase() + variant.slice(1) : '';
@@ -98,7 +107,7 @@ const ContextBadge = ({
     : `${label}=${value}`;
 
   // Handle click if clickable
-  const handleClick = (e) => {
+  const handleClick = (e: React.SyntheticEvent) => {
     if (clickable && onClick) {
       e.stopPropagation();
       onClick();
