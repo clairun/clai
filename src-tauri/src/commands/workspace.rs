@@ -1951,6 +1951,105 @@ pub async fn workspace_create(
     Ok(id)
 }
 
+/// Clone a workspace's *configuration* into a brand-new, empty workspace.
+///
+/// Copies the agents (each with a fresh id), the default-agent selection,
+/// preferred provider, and every per-agent setting — skills, MCP servers,
+/// provider connections, and sandbox/execution policy — but NOT any data:
+/// the clone gets a fresh empty `data.sqlite` (no sessions, messages, runs,
+/// tasks) and empty memory/artifacts. Use it to spin up a clean workspace
+/// for a similar task without reconfiguring from scratch.
+///
+/// Agent ids are workspace-local, so they're regenerated and the
+/// `default_agent_id` pointer is remapped; skill/MCP/provider references are
+/// global and carry over unchanged. The schedule cadence (`kind`) is
+/// preserved but left **disabled** so a fresh clone never auto-runs on
+/// creation — re-enabling it in settings is a single toggle. Returns the new
+/// workspace id.
+#[tauri::command]
+pub async fn workspace_clone_config(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let source_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    let (_source_root, source_config) = load_workspace_config_for_id(state.inner(), &source_id)?;
+
+    let now = now_millis();
+    let new_id = uuid::Uuid::new_v4().to_string();
+
+    // Regenerate every (workspace-local) agent id and remember old→new so we
+    // can remap the default-agent pointer. Everything else on the agent —
+    // skills, MCP, providers, execution — is copied as-is via `..agent`.
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    let agents: Vec<WorkspaceAgent> = source_config
+        .agents
+        .iter()
+        .map(|agent| {
+            let cloned_id = uuid::Uuid::new_v4().to_string();
+            id_map.insert(agent.id.clone(), cloned_id.clone());
+            WorkspaceAgent {
+                id: cloned_id,
+                created_at: now,
+                updated_at: now,
+                ..agent.clone()
+            }
+        })
+        .collect();
+
+    let default_agent_id = id_map
+        .get(&source_config.default_agent_id)
+        .cloned()
+        .or_else(|| agents.first().map(|a| a.id.clone()))
+        .ok_or_else(|| "Source workspace has no agents to clone".to_string())?;
+
+    // Preserve the cadence but never auto-run a fresh clone.
+    let mut schedule = source_config.schedule.clone();
+    schedule.enabled = false;
+    schedule.paused = false;
+    schedule.next_run_at_unix_ms = None;
+
+    let cloned = WorkspaceConfig {
+        id: new_id.clone(),
+        title: format!("{} (Copy)", source_config.title),
+        created_at: now,
+        updated_at: now,
+        default_agent_id,
+        schedule,
+        agents,
+        // Carries version + preferred_provider_connection_id (+ any future
+        // top-level config fields) over unchanged.
+        ..source_config.clone()
+    };
+
+    // Mirror workspace_create's filesystem + index + pool plumbing.
+    let root = state.workspace_create_target(None)?.join(&new_id);
+    let memory_dir = root.join(".clai").join("memory").join("journal");
+    fs::create_dir_all(&memory_dir)
+        .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
+
+    workspace_config::save(&root, &cloned).map_err(|e| e.to_string())?;
+    let workspace_pool = crate::db::init_workspace_db(&root).await?;
+    state
+        .workspace_index
+        .write()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .insert_config(root.clone(), &cloned);
+    state
+        .workspace_index
+        .write()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .attach_pool(new_id.clone(), workspace_pool);
+
+    tracing::info!(
+        source_workspace_id = %source_id,
+        workspace_id = %new_id,
+        agents = cloned.agents.len(),
+        "Cloned workspace config into a new empty workspace"
+    );
+
+    Ok(new_id)
+}
+
 /// List all file-backed workspaces.
 #[tauri::command]
 pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceListEntry>, String> {

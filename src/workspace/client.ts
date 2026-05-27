@@ -101,6 +101,15 @@ export async function createWorkspace(title?: string | null): Promise<string> {
   return invoke('workspace_create', { title: title || null });
 }
 
+/**
+ * Clone a workspace's configuration (agents, skills, MCP, providers, sandbox,
+ * schedule cadence) into a new empty workspace — no sessions/messages/tasks/
+ * memory/artifacts. Returns the new workspace id.
+ */
+export async function cloneWorkspaceConfig(workspaceId: string): Promise<string> {
+  return invoke('workspace_clone_config', { workspaceId });
+}
+
 export async function listWorkspaces(): Promise<WorkspaceListEntry[]> {
   return invoke('workspace_list');
 }
