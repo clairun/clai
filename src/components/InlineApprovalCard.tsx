@@ -8,6 +8,10 @@ import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
 import styles from './InlineApprovalCard.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
+// Backend cleared a pending request without a user decision (the tool call
+// was abandoned — CLI transport dropped mid-call — or it timed out). Drop
+// the now-useless card. Payload: { requestId }.
+const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
 
 // Local UI alias matching the discriminator on SegmentDecision. Kept
 // in its own type because the per-segment radio buttons need a flat
@@ -96,9 +100,23 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
         return [...current, req];
       });
     });
+
+    // Remove a card the backend cleared without a user decision. requestId
+    // is globally unique, so no workspace filter is needed — if it isn't in
+    // this card's list, the filter is a no-op.
+    const unlistenResolvedPromise = listen<{ requestId?: string }>(
+      PERMISSION_RESOLVED_EVENT,
+      (event) => {
+        const requestId = event.payload?.requestId;
+        if (!requestId) return;
+        setRequests((current) => current.filter((q) => q.requestId !== requestId));
+      },
+    );
+
     return () => {
       cancelled = true;
       unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
+      unlistenResolvedPromise.then((unlisten) => unlisten()).catch(() => {});
     };
   }, [workspaceId]);
 

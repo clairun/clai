@@ -952,6 +952,49 @@ pub(crate) fn evaluate_command_policy(
     }
 }
 
+/// Cleans up an abandoned permission request when the approval-wait future
+/// is dropped without a user decision — the Claude Code CLI dropping the MCP
+/// transport mid-call (its "response for tool bash_exec was lost" message),
+/// or the run being cancelled. In either case the awaiting future below is
+/// dropped, so this guard runs: it removes the still-pending registry entry
+/// and tells the frontend to drop the now-useless approval card. Disarmed on
+/// a normal decision, where the submit command already removed the entry.
+///
+/// Cleanup is async (registry lock) so it's spawned onto the app runtime;
+/// `Drop` can't await. `take` is a no-op if the entry was already removed
+/// (e.g. a decision raced in), so the guard is safe even if it fires late.
+struct AbandonedApprovalGuard {
+    app: tauri::AppHandle,
+    request_id: String,
+    workspace_id: Option<String>,
+    armed: bool,
+}
+
+impl AbandonedApprovalGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbandonedApprovalGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        use tauri::Manager;
+        let app = self.app.clone();
+        let request_id = std::mem::take(&mut self.request_id);
+        let workspace_id = self.workspace_id.take();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<crate::AppState>();
+            if let Some((_, remaining)) = state.pending_approvals.take(&request_id).await {
+                crate::commands::permissions::emit_permission_resolved(&app, &request_id);
+                crate::commands::permissions::emit_attention(&app, workspace_id, remaining);
+            }
+        });
+    }
+}
+
 /// Runs the interactive approval round-trip for a command that needs
 /// user input. Registers the request in app state, emits the request
 /// and attention events, waits (with timeout) for the user's decisions,
@@ -995,19 +1038,32 @@ async fn await_user_permission(
     }
     emit_attention(&deps.app, workspace_id.clone(), count);
 
+    // Cleans up if this future is abandoned before a decision (CLI transport
+    // drop mid-call, or run cancellation): clears the pending entry and tells
+    // the frontend to drop the now-useless approval card. Disarmed below on a
+    // normal decision; the timeout / channel-closed arms let it fire on drop.
+    let mut abandon_guard = AbandonedApprovalGuard {
+        app: deps.app.clone(),
+        request_id: request_id.clone(),
+        workspace_id: workspace_id.clone(),
+        armed: true,
+    };
+
     let decisions = match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
-        Ok(Ok(d)) => d,
+        Ok(Ok(d)) => {
+            // The submit command already removed the registry entry and the
+            // frontend cleared the card optimistically.
+            abandon_guard.disarm();
+            d
+        }
         Ok(Err(_)) => {
             let msg = "Permission approval channel closed before a decision was made";
             context.add_notice(RunNoticeKind::CommandDenied, msg.to_string());
             return Err(msg.to_string());
         }
         Err(_) => {
-            // Timeout — clean the pending entry and emit attention so the
-            // fleet card clears its badge.
-            if let Some((_, remaining)) = app_state.pending_approvals.take(&request_id).await {
-                emit_attention(&deps.app, workspace_id.clone(), remaining);
-            }
+            // 24h hygiene timeout. `abandon_guard` clears the pending entry,
+            // emits attention, and drops the card when it goes out of scope.
             let msg = "Permission approval timed out (24h)";
             context.add_notice(RunNoticeKind::CommandDenied, msg.to_string());
             return Err(msg.to_string());

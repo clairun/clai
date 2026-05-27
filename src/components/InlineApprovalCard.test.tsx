@@ -8,10 +8,12 @@ import userEvent from '@testing-library/user-event';
 const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
-let listenHandler: ((event: { payload: unknown }) => void) | null = null;
+// The component registers one listener per event name (request + resolved),
+// so capture handlers keyed by event name rather than a single slot.
+let listenHandlers: Record<string, (event: { payload: unknown }) => void> = {};
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn((_name: string, handler: (event: { payload: unknown }) => void) => {
-    listenHandler = handler;
+  listen: vi.fn((name: string, handler: (event: { payload: unknown }) => void) => {
+    listenHandlers[name] = handler;
     return Promise.resolve(() => {});
   }),
 }));
@@ -29,15 +31,22 @@ const SINGLE_SEGMENT_REQUEST = {
 
 beforeEach(() => {
   mockInvoke.mockReset();
-  listenHandler = null;
+  listenHandlers = {};
   // list_pending_permission_requests seed returns empty so only the
   // fired event populates the card.
   mockInvoke.mockResolvedValue([]);
 });
 
 const fireRequest = (req: unknown) => {
-  if (!listenHandler) throw new Error('listen handler not registered');
-  listenHandler({ payload: req });
+  const handler = listenHandlers['permissions://request'];
+  if (!handler) throw new Error('request listener not registered');
+  handler({ payload: req });
+};
+
+const fireResolved = (requestId: string) => {
+  const handler = listenHandlers['permissions://resolved'];
+  if (!handler) throw new Error('resolved listener not registered');
+  handler({ payload: { requestId } });
 };
 
 describe('InlineApprovalCard', () => {
@@ -48,7 +57,7 @@ describe('InlineApprovalCard', () => {
 
   it('renders a card when a matching permission request fires', async () => {
     render(<InlineApprovalCard workspaceId="ws-1" />);
-    await waitFor(() => expect(listenHandler).not.toBeNull());
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
     fireRequest(SINGLE_SEGMENT_REQUEST);
 
     expect(await screen.findByText('rg --files')).toBeInTheDocument();
@@ -57,7 +66,7 @@ describe('InlineApprovalCard', () => {
 
   it('ignores requests for a different workspace', async () => {
     render(<InlineApprovalCard workspaceId="ws-1" />);
-    await waitFor(() => expect(listenHandler).not.toBeNull());
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
     fireRequest({ ...SINGLE_SEGMENT_REQUEST, requestId: 'req-other', workspaceId: 'ws-2' });
 
     expect(screen.queryByText('rg --files')).toBeNull();
@@ -66,7 +75,7 @@ describe('InlineApprovalCard', () => {
   it('submits an allow-once decision via submit_permission_decision', async () => {
     const user = userEvent.setup();
     render(<InlineApprovalCard workspaceId="ws-1" />);
-    await waitFor(() => expect(listenHandler).not.toBeNull());
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
     fireRequest(SINGLE_SEGMENT_REQUEST);
     await screen.findByText('rg --files');
 
@@ -80,5 +89,20 @@ describe('InlineApprovalCard', () => {
         decisions: [{ kind: 'allowOnce' }],
       });
     });
+  });
+
+  it('drops the card when permissions://resolved fires for it (abandoned tool call)', async () => {
+    // Regression: when the agent's bash_exec call is abandoned mid-wait
+    // (the CLI drops the MCP transport, "response for tool bash_exec was
+    // lost"), the backend clears the request and emits resolved; the now-
+    // useless card must disappear instead of lingering.
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    fireRequest(SINGLE_SEGMENT_REQUEST);
+    expect(await screen.findByText('rg --files')).toBeInTheDocument();
+
+    fireResolved('req-1');
+
+    await waitFor(() => expect(screen.queryByText('rg --files')).toBeNull());
   });
 });

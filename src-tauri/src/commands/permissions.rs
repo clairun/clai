@@ -37,6 +37,12 @@ use crate::AppState;
 
 pub const PERMISSION_REQUEST_EVENT: &str = "permissions://request";
 pub const PERMISSION_ATTENTION_EVENT: &str = "permissions://attention";
+/// Emitted when a pending request is cleared *without* a user decision —
+/// the tool call was abandoned (CLI transport dropped mid-call, run
+/// cancelled) or it timed out. The inline approval card removes the now-
+/// useless card on this. Normal user submissions remove the card
+/// optimistically on the frontend, so they don't emit this.
+pub const PERMISSION_RESOLVED_EVENT: &str = "permissions://resolved";
 
 /// Maximum time the bash handler waits for a user response. Past this
 /// point we treat the request as fully denied (24h is generous enough
@@ -393,6 +399,17 @@ pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pend
     };
     if let Err(e) = app.emit(PERMISSION_ATTENTION_EVENT, payload) {
         tracing::warn!("Failed to emit permission attention event: {}", e);
+    }
+}
+
+/// Tell the frontend to drop the inline approval card for `request_id`
+/// because the request was cleared backend-side without a user decision.
+pub fn emit_permission_resolved(app: &tauri::AppHandle, request_id: &str) {
+    if let Err(e) = app.emit(
+        PERMISSION_RESOLVED_EVENT,
+        serde_json::json!({ "requestId": request_id }),
+    ) {
+        tracing::warn!("Failed to emit permission resolved event: {}", e);
     }
 }
 
