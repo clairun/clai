@@ -11,12 +11,10 @@
     "jsx": "react-jsx",
     "useDefineForClassFields": true,
 
-    // Allow .js next to .ts during the incremental migration.
-    "allowJs": true,
-    // Don't type-check the .js files themselves — they remain untyped
-    // until they get converted. (Type errors in still-JS files would
-    // drown out real signal.)
-    "checkJs": false,
+    // The migration is complete — src/ is 100% TypeScript. allowJs is off,
+    // so a stray .js under src/ silently won't be type-checked; the include
+    // glob is also restricted to .ts/.tsx to keep that explicit.
+    "allowJs": false,
 
     // Strict mode on the TS surface that exists today. Cheap to keep
     // on because the migration starts small.
@@ -25,6 +23,7 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true,
+    "noImplicitOverride": true,
 
     // Build hygiene
     "noEmit": true,
@@ -37,6 +36,6 @@
     // No baseUrl/paths yet — keep imports relative to avoid invisible
     // aliasing that Vite + tsc + ESLint all have to agree on.
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.js", "src/**/*.jsx"],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["node_modules", "dist", "src-tauri"]
 }
