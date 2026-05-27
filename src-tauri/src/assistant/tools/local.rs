@@ -1262,6 +1262,41 @@ fn access_to_str(access: FilesystemPathAccess) -> &'static str {
 /// [`await_user_permission`] for shape; the only differences are the
 /// request type, the registry it talks to, and the single-decision
 /// return shape (path grants aren't per-segment).
+/// Path-grant analogue of [`AbandonedApprovalGuard`]: clears a pending
+/// filesystem path-grant request and drops its card when the approval-wait
+/// future is abandoned (CLI transport drop mid-call, or run cancellation).
+struct AbandonedPathGrantGuard {
+    app: tauri::AppHandle,
+    request_id: String,
+    workspace_id: Option<String>,
+    armed: bool,
+}
+
+impl AbandonedPathGrantGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbandonedPathGrantGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        use tauri::Manager;
+        let app = self.app.clone();
+        let request_id = std::mem::take(&mut self.request_id);
+        let workspace_id = self.workspace_id.take();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<crate::AppState>();
+            if let Some((_, remaining)) = state.pending_path_grants.take(&request_id).await {
+                crate::commands::path_grants::emit_path_grant_resolved(&app, &request_id);
+                crate::commands::path_grants::emit_attention(&app, workspace_id, remaining);
+            }
+        });
+    }
+}
+
 async fn await_path_grant_decision(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
@@ -1286,17 +1321,29 @@ async fn await_path_grant_decision(
     }
     emit_attention(&deps.app, workspace_id.clone(), count);
 
+    // See `AbandonedApprovalGuard`: clears the pending entry and drops the
+    // card if this future is abandoned before a decision. Disarmed on a
+    // normal decision; the timeout / channel-closed arms let it fire on drop.
+    let mut abandon_guard = AbandonedPathGrantGuard {
+        app: deps.app.clone(),
+        request_id: request_id.clone(),
+        workspace_id: workspace_id.clone(),
+        armed: true,
+    };
+
     match tokio::time::timeout(PATH_GRANT_TIMEOUT, rx).await {
-        Ok(Ok(decision)) => Ok(decision),
+        Ok(Ok(decision)) => {
+            abandon_guard.disarm();
+            Ok(decision)
+        }
         Ok(Err(_)) => {
             let msg = "Path-grant approval channel closed before a decision was made".to_string();
             context.add_notice(RunNoticeKind::PathGrantDenied, msg.clone());
             Err(msg)
         }
         Err(_) => {
-            if let Some((_, remaining)) = app_state.pending_path_grants.take(&request_id).await {
-                emit_attention(&deps.app, workspace_id.clone(), remaining);
-            }
+            // 24h hygiene timeout. `abandon_guard` clears the pending entry,
+            // emits attention, and drops the card when it goes out of scope.
             let msg = "Path-grant approval timed out (24h)".to_string();
             context.add_notice(RunNoticeKind::PathGrantDenied, msg.clone());
             Err(msg)

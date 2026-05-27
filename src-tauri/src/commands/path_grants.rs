@@ -41,6 +41,12 @@ use crate::AppState;
 
 pub const PATH_GRANT_REQUEST_EVENT: &str = "path-grants://request";
 pub const PATH_GRANT_ATTENTION_EVENT: &str = "path-grants://attention";
+/// Emitted when a pending path-grant request is cleared *without* a user
+/// decision — the tool call was abandoned (CLI transport dropped mid-call,
+/// run cancelled) or it timed out. The inline path-grant card removes the
+/// now-useless card on this. Normal submissions clear the card optimistically
+/// on the frontend, so they don't emit this.
+pub const PATH_GRANT_RESOLVED_EVENT: &str = "path-grants://resolved";
 
 /// Same bound as the command-approval flow: 24h is generous enough that
 /// it never fires under normal interactive use and acts as a hygiene cap
@@ -371,6 +377,17 @@ pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pend
     };
     if let Err(e) = app.emit(PATH_GRANT_ATTENTION_EVENT, payload) {
         tracing::warn!("Failed to emit path-grant attention event: {}", e);
+    }
+}
+
+/// Tell the frontend to drop the inline path-grant card for `request_id`
+/// because the request was cleared backend-side without a user decision.
+pub fn emit_path_grant_resolved(app: &tauri::AppHandle, request_id: &str) {
+    if let Err(e) = app.emit(
+        PATH_GRANT_RESOLVED_EVENT,
+        serde_json::json!({ "requestId": request_id }),
+    ) {
+        tracing::warn!("Failed to emit path-grant resolved event: {}", e);
     }
 }
 
