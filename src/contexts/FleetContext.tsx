@@ -2,10 +2,36 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import { useLocation } from 'react-router-dom';
 import { getFleetSnapshot } from '../fleet/client';
 
-const FleetContext = createContext(null);
+// No generated binding for the fleet snapshot yet; modelled loosely from
+// the fields the Fleet page reads.
+interface FleetSnapshot {
+  summary?: unknown;
+  agents?: unknown[];
+  [key: string]: unknown;
+}
+
+interface SelectedAgent {
+  agentId?: string;
+  [key: string]: unknown;
+}
+
+interface FleetContextValue {
+  snapshot: FleetSnapshot | null;
+  summary: unknown;
+  agents: unknown[];
+  selectedAgentId: string | null;
+  selectedAgent: SelectedAgent | null;
+  selectAgent: React.Dispatch<React.SetStateAction<SelectedAgent | null>>;
+  isLoading: boolean;
+  error: string | null;
+  refresh: () => Promise<FleetSnapshot | null>;
+  isFleetRoute: boolean;
+}
+
+const FleetContext = createContext<FleetContextValue | null>(null);
 const FLEET_REFRESH_INTERVAL_MS = 5000;
 
-export const useFleet = () => {
+export const useFleet = (): FleetContextValue => {
   const context = useContext(FleetContext);
   if (!context) {
     throw new Error('useFleet must be used within a FleetProvider');
@@ -13,29 +39,30 @@ export const useFleet = () => {
   return context;
 };
 
-export const FleetProvider = ({ children }) => {
+export const FleetProvider = ({ children }: { children: React.ReactNode }) => {
   const location = useLocation();
   const isFleetRoute = location.pathname === '/fleet';
-  const [snapshot, setSnapshot] = useState(null);
+  const [snapshot, setSnapshot] = useState<FleetSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
   // `selectedAgent` is now stored directly (not derived from a lookup
   // table). The Fleet page sets it when the user picks a workspace
   // card — to that workspace's default agent — and clears it when the
   // workspace is deselected. Pre-existing global-fleet agent-picking
   // behavior is gone because `fleet_get_snapshot` no longer enumerates
   // agents (they're workspace-local now).
-  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [selectedAgent, setSelectedAgent] = useState<SelectedAgent | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<FleetSnapshot | null> => {
     setIsLoading(true);
     try {
-      const nextSnapshot = await getFleetSnapshot();
+      const nextSnapshot = (await getFleetSnapshot()) as FleetSnapshot | null;
       setSnapshot(nextSnapshot);
       setError(null);
       return nextSnapshot;
     } catch (err) {
-      const message = typeof err === 'string' ? err : (err?.message || 'Failed to load fleet');
+      const message =
+        typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to load fleet';
       setError(message);
       throw err;
     } finally {
@@ -68,7 +95,7 @@ export const FleetProvider = ({ children }) => {
     };
   }, [isFleetRoute, refresh]);
 
-  const value = useMemo(() => ({
+  const value = useMemo<FleetContextValue>(() => ({
     snapshot,
     summary: snapshot?.summary || null,
     agents: snapshot?.agents || [],

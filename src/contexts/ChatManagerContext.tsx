@@ -10,9 +10,30 @@ import React, { createContext, useContext, useState, useCallback, useRef, useMem
  * This context only handles the UI visibility of the chat panel.
  */
 
-const ChatManagerContext = createContext(null);
+interface PanelState {
+  isOpen: boolean;
+}
+type PanelStates = Record<string, PanelState>;
 
-export const useChatManager = () => {
+interface ChatManagerValue {
+  panelStates: PanelStates;
+  activeSpaceRoom: string | null;
+  setActiveContext: (space: string | null | undefined, room: string | null | undefined) => void;
+  toggleChat: () => void;
+  openChat: () => void;
+  closeChat: () => void;
+  isCurrentChatOpen: () => boolean;
+  getPanelState: (space: string | null | undefined, room: string | null | undefined) => PanelState;
+  clearAllChats: () => void;
+  // Legacy aliases for compatibility
+  chatInstances: PanelStates;
+  getCurrentChatInstance: () => PanelState | null;
+  getChatInstance: (space: string | null | undefined, room: string | null | undefined) => PanelState;
+}
+
+const ChatManagerContext = createContext<ChatManagerValue | null>(null);
+
+export const useChatManager = (): ChatManagerValue => {
   const context = useContext(ChatManagerContext);
   if (!context) {
     throw new Error('useChatManager must be used within a ChatManagerProvider');
@@ -20,13 +41,13 @@ export const useChatManager = () => {
   return context;
 };
 
-export const ChatManagerProvider = ({ children }) => {
+export const ChatManagerProvider = ({ children }: { children: React.ReactNode }) => {
   // Store panel state by context key.
   // Format: { 'tab-id--context': { isOpen: boolean } }
-  const [panelStates, setPanelStates] = useState({});
+  const [panelStates, setPanelStates] = useState<PanelStates>({});
 
   // Track the currently active chat context
-  const [activeSpaceRoom, setActiveSpaceRoom] = useState(null);
+  const [activeSpaceRoom, setActiveSpaceRoom] = useState<string | null>(null);
 
   // Reference to prevent unnecessary re-renders
   const panelStatesRef = useRef(panelStates);
@@ -35,7 +56,7 @@ export const ChatManagerProvider = ({ children }) => {
   /**
    * Generate a unique key for a chat context
    */
-  const generateKey = useCallback((space, room) => {
+  const generateKey = useCallback((space: string | null | undefined, room: string | null | undefined) => {
     const spaceKey = space || 'no-space';
     const roomKey = room || 'no-room';
     return `${spaceKey}--${roomKey}`;
@@ -44,7 +65,7 @@ export const ChatManagerProvider = ({ children }) => {
   /**
    * Get panel state for a specific context
    */
-  const getPanelState = useCallback((space, room) => {
+  const getPanelState = useCallback((space: string | null | undefined, room: string | null | undefined) => {
     const key = generateKey(space, room);
     return panelStatesRef.current[key] || { isOpen: false };
   }, [generateKey]);
@@ -53,7 +74,7 @@ export const ChatManagerProvider = ({ children }) => {
    * Set the active chat context
    * This is called when switching tabs or when context changes
    */
-  const setActiveContext = useCallback((space, room) => {
+  const setActiveContext = useCallback((space: string | null | undefined, room: string | null | undefined) => {
     const key = generateKey(space, room);
 
     // Initialize panel state if it doesn't exist
@@ -121,7 +142,7 @@ export const ChatManagerProvider = ({ children }) => {
     setActiveSpaceRoom(null);
   }, []);
 
-  const value = useMemo(() => {
+  const value = useMemo<ChatManagerValue>(() => {
     return {
       panelStates,
       activeSpaceRoom,

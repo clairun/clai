@@ -4,21 +4,70 @@
  * Provides tab-specific capability context for MCP selection and custom key/value data.
  */
 
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 
-const TabContext = createContext(null);
+interface TabContextInitial {
+  mcpServers?: {
+    attachedServerIds?: string[];
+    selectedServerIds?: string[];
+    disabledServerIds?: string[];
+  };
+  customContext?: Record<string, unknown>;
+  assistantConnectionId?: string | null;
+}
 
-export function TabContextProvider({ children, tabId, initialContext, onContextChange }) {
-  const [selectedMcpServerIds, setSelectedMcpServerIds] = useState(
+interface TabContextChange {
+  mcpServers: {
+    attachedServerIds: string[];
+    disabledServerIds: string[];
+  };
+  assistantConnectionId: string | null;
+  customContext: Record<string, unknown>;
+}
+
+interface TabContextProviderProps {
+  children: React.ReactNode;
+  tabId: string;
+  initialContext?: TabContextInitial | null;
+  onContextChange?: (context: TabContextChange) => void;
+}
+
+type StringListUpdater = string[] | ((prev: string[]) => string[]);
+type ConnectionIdUpdater = string | null | ((prev: string | null) => string | null);
+
+export interface TabContextValue {
+  tabId: string;
+  selectedMcpServerIds: string[];
+  setSelectedMcpServerIds: (value: StringListUpdater) => void;
+  disabledMcpServerIds: string[];
+  setDisabledMcpServerIds: (value: StringListUpdater) => void;
+  assistantConnectionId: string | null;
+  setAssistantConnectionId: (value: ConnectionIdUpdater) => void;
+  customContext: Record<string, unknown>;
+  setCustomContext: (key: string, value: unknown) => void;
+  getCustomContext: (key: string) => unknown;
+  deleteCustomContext: (key: string) => void;
+  clearCustomContext: () => void;
+}
+
+const TabContext = createContext<TabContextValue | null>(null);
+
+export function TabContextProvider({
+  children,
+  tabId,
+  initialContext,
+  onContextChange,
+}: TabContextProviderProps) {
+  const [selectedMcpServerIds, setSelectedMcpServerIds] = useState<string[]>(
     initialContext?.mcpServers?.attachedServerIds || initialContext?.mcpServers?.selectedServerIds || []
   );
-  const [disabledMcpServerIds, setDisabledMcpServerIds] = useState(
+  const [disabledMcpServerIds, setDisabledMcpServerIds] = useState<string[]>(
     initialContext?.mcpServers?.disabledServerIds || []
   );
-  const [customContext, setCustomContextState] = useState(
+  const [customContext, setCustomContextState] = useState<Record<string, unknown>>(
     initialContext?.customContext || {}
   );
-  const [assistantConnectionId, setAssistantConnectionIdState] = useState(
+  const [assistantConnectionId, setAssistantConnectionIdState] = useState<string | null>(
     initialContext?.assistantConnectionId || null
   );
 
@@ -31,7 +80,12 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
     setCustomContextState(initialContext?.customContext || {});
   }, [tabId, initialContext]);
 
-  const emitContextChange = useCallback((nextMcpServerIds, nextDisabledIds, nextAssistantConnectionId, nextCustomContext) => {
+  const emitContextChange = useCallback((
+    nextMcpServerIds: string[],
+    nextDisabledIds: string[],
+    nextAssistantConnectionId: string | null,
+    nextCustomContext: Record<string, unknown>
+  ) => {
     if (!onContextChange) {
       return;
     }
@@ -46,7 +100,7 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
     });
   }, [onContextChange]);
 
-  const updateSelectedMcpServerIds = useCallback((value) => {
+  const updateSelectedMcpServerIds = useCallback((value: StringListUpdater) => {
     setSelectedMcpServerIds((prev) => {
       const nextValue = typeof value === 'function' ? value(prev) : value;
       emitContextChange(nextValue, disabledMcpServerIds, assistantConnectionId, customContext);
@@ -54,7 +108,7 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
     });
   }, [assistantConnectionId, customContext, disabledMcpServerIds, emitContextChange]);
 
-  const updateDisabledMcpServerIds = useCallback((value) => {
+  const updateDisabledMcpServerIds = useCallback((value: StringListUpdater) => {
     setDisabledMcpServerIds((prev) => {
       const nextValue = typeof value === 'function' ? value(prev) : value;
       emitContextChange(selectedMcpServerIds, nextValue, assistantConnectionId, customContext);
@@ -62,7 +116,7 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
     });
   }, [assistantConnectionId, customContext, emitContextChange, selectedMcpServerIds]);
 
-  const setAssistantConnectionId = useCallback((value) => {
+  const setAssistantConnectionId = useCallback((value: ConnectionIdUpdater) => {
     setAssistantConnectionIdState((prev) => {
       const nextValue = typeof value === 'function' ? value(prev) : value;
       emitContextChange(selectedMcpServerIds, disabledMcpServerIds, nextValue, customContext);
@@ -70,7 +124,7 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
     });
   }, [customContext, disabledMcpServerIds, emitContextChange, selectedMcpServerIds]);
 
-  const setCustomContext = useCallback((key, value) => {
+  const setCustomContext = useCallback((key: string, value: unknown) => {
     setCustomContextState((prev) => {
       const nextContext = { ...prev, [key]: value };
       emitContextChange(selectedMcpServerIds, disabledMcpServerIds, assistantConnectionId, nextContext);
@@ -78,11 +132,11 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
     });
   }, [assistantConnectionId, disabledMcpServerIds, emitContextChange, selectedMcpServerIds]);
 
-  const getCustomContext = useCallback((key) => {
+  const getCustomContext = useCallback((key: string) => {
     return customContext[key];
   }, [customContext]);
 
-  const deleteCustomContext = useCallback((key) => {
+  const deleteCustomContext = useCallback((key: string) => {
     setCustomContextState((prev) => {
       const nextContext = { ...prev };
       delete nextContext[key];
@@ -96,7 +150,7 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
     emitContextChange(selectedMcpServerIds, disabledMcpServerIds, assistantConnectionId, {});
   }, [assistantConnectionId, disabledMcpServerIds, emitContextChange, selectedMcpServerIds]);
 
-  const value = {
+  const value: TabContextValue = {
     tabId,
     selectedMcpServerIds,
     setSelectedMcpServerIds: updateSelectedMcpServerIds,
@@ -118,7 +172,7 @@ export function TabContextProvider({ children, tabId, initialContext, onContextC
   );
 }
 
-export function useTabContext() {
+export function useTabContext(): TabContextValue {
   const context = useContext(TabContext);
 
   if (!context) {
