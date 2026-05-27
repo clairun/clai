@@ -1,32 +1,26 @@
 /**
  * Command Registry
  *
- * Simple, lightweight command registration system.
- * Maps command names to their React components.
+ * Maps terminal command names to the React components that visualize them.
  *
- * To add a new command:
- * 1. Create your component
- * 2. Add it to COMMAND_COMPONENTS below
- * 3. That's it! No other files need to be updated.
+ * The legacy visualization commands (echo, dashboard, canvas, anomalies,
+ * help) rendered their component inside a tile via the TabContent/TileView
+ * grid. That grid was the pre-workspace Home UI and has been removed, so the
+ * registry is now empty: those commands report "Unknown command" and the
+ * live terminal commands (/ctx, /tab, /reset-all) are handled upstream as
+ * context/layout commands before this registry is ever consulted.
+ *
+ * `isCommandSupported` is the only consumer that remains (TerminalEmulator);
+ * it returns false for every name now. Re-add an entry here if a
+ * command-visualization surface is ever reintroduced.
  */
-
-import Echo from '../components/Echo';
-import Dashboard from '../components/Dashboard/Dashboard';
-import Canvas from '../components/Canvas/Canvas';
-import Anomalies from '../components/Anomalies/Anomalies';
-import Help from '../components/Help/Help';
 
 /**
  * Command Component Registry
- * Maps command names to their React components
+ * Maps command names to their React components.
+ * @type {Record<string, React.ComponentType<{ command: unknown }>>}
  */
-export const COMMAND_COMPONENTS = {
-  anomalies: Anomalies,
-  echo: Echo,
-  dashboard: Dashboard,
-  canvas: Canvas,
-  help: Help,
-};
+export const COMMAND_COMPONENTS = {};
 
 /**
  * Check if a command is supported (has a component)
@@ -35,21 +29,4 @@ export const COMMAND_COMPONENTS = {
  */
 export const isCommandSupported = (commandName) => {
   return commandName in COMMAND_COMPONENTS;
-};
-
-/**
- * Get the component for a command
- * @param {string} commandName - Command name
- * @returns {React.Component|null} Component or null if not found
- */
-export const getCommandComponent = (commandName) => {
-  return COMMAND_COMPONENTS[commandName] || null;
-};
-
-/**
- * Get all supported command names
- * @returns {string[]} Array of supported command names
- */
-export const getSupportedCommands = () => {
-  return Object.keys(COMMAND_COMPONENTS);
 };
