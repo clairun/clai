@@ -11,6 +11,7 @@
 import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import useAssistantStore from './sessionStore';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import type { AssistantEventEnvelope, AssistantUiEvent } from '../generated/bindings';
 
 const ASSISTANT_EVENT_NAME = 'assistant://event';
@@ -37,9 +38,22 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
     case 'run_started':
     case 'run_completed':
     case 'run_failed':
-    case 'run_cancelled':
+    case 'run_cancelled': {
       store.setRunStatus(sessionId, event.payload.run);
+      // Mirror run lifecycle into the global fleet-activity store so Fleet
+      // cards/counter reflect in-flight runs and survive navigation. Keyed
+      // by the envelope's workspace id (set for workspace/agent sessions).
+      const workspaceId = envelope.workspaceId;
+      if (workspaceId) {
+        const fleet = useFleetActivityStore.getState();
+        if (event.type === 'run_queued' || event.type === 'run_started') {
+          fleet.markRunStarted(workspaceId, event.payload.run.id);
+        } else {
+          fleet.markRunEnded(workspaceId, event.payload.run.id);
+        }
+      }
       break;
+    }
 
     case 'assistant_delta':
       store.appendDelta(sessionId, event.payload.message_id, event.payload.text);

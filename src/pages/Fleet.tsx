@@ -16,6 +16,7 @@ import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
 import { useFleet } from '../contexts/FleetContext';
 import { useFleetActivity } from '../hooks/useFleetActivity';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import type { ScheduleKind, WorkspaceListEntry, WorkspaceSnapshot } from '../generated/bindings';
 import styles from './Fleet.module.css';
@@ -24,6 +25,11 @@ const REFRESH_INTERVAL_MS = 5000;
 
 const EMPTY_TOOL_CALLS: never[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
+
+// How long an optimistic "run now" keeps a card marked running before
+// self-clearing. Comfortably covers the runner's ≤5s manual-run tick plus
+// run startup; the real RunStarted event takes over within that window.
+const OPTIMISTIC_RUN_TTL_MS = 12000;
 
 type CardStatus = 'idle' | 'running' | 'attention' | 'critical';
 
@@ -353,6 +359,16 @@ const Fleet = () => {
     try {
       await runWorkspaceNow(id);
       setError('');
+      // Optimistic feedback: the runner only picks up a manual run on its
+      // next tick (≤5s), so RunStarted won't arrive immediately. Show the
+      // card as running right away via a synthetic run id; the real
+      // RunStarted then adds the real id and keeps the card running. The
+      // synthetic id self-clears after a TTL that comfortably covers the
+      // tick + run startup, so a no-op run never sticks "running" forever.
+      const fleet = useFleetActivityStore.getState();
+      const optimisticId = `optimistic-runnow:${id}`;
+      fleet.markRunStarted(id, optimisticId);
+      setTimeout(() => fleet.markRunEnded(id, optimisticId), OPTIMISTIC_RUN_TTL_MS);
     } catch (err) {
       setError(errText(err, 'Failed to start run.'));
     } finally {
