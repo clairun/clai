@@ -1,11 +1,16 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { assistantClient, useAssistantSession } from '../../assistant';
 import useAssistantStore from '../../assistant/sessionStore';
+import type { ToolInvocation } from '../../generated/bindings';
 import ChatMessageList from './ChatMessageList';
 import styles from './AssistantChat.module.css';
 
-const EMPTY_TOOL_CALLS = [];
+const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
+
+interface AssistantChatProps {
+  tabId: string;
+}
 
 /**
  * AssistantChat Component
@@ -13,7 +18,7 @@ const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
  * Displays assistant session messages for a specific tab.
  * Sources data from the assistant Zustand store.
  */
-const AssistantChat = ({ tabId }) => {
+const AssistantChat = ({ tabId }: AssistantChatProps) => {
   const {
     messages,
     streamingText,

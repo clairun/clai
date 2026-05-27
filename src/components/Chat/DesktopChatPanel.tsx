@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useChatManager } from '../../contexts/ChatManagerContext';
 import { useTabManager } from '../../contexts/TabManagerContext';
@@ -6,9 +6,25 @@ import { useAssistantStore, assistantClient } from '../../assistant';
 import AssistantChat from '../AssistantChat/AssistantChat';
 import styles from './DesktopChatPanel.module.css';
 
-const normalizeIdList = (ids) => [...(ids || [])].sort();
-const getEnabledMcpServerIds = (context) => {
-  const attached = context?.mcpServers?.attachedServerIds || context?.mcpServers?.selectedServerIds || [];
+// Loose shapes for the still-untyped tab/context plumbing. Tightened when
+// TabManagerContext is converted under P2-1.
+interface McpServerSelection {
+  attachedServerIds?: string[];
+  selectedServerIds?: string[];
+  disabledServerIds?: string[];
+}
+interface TabContext {
+  mcpServers?: McpServerSelection;
+}
+interface Tab {
+  id: string;
+  context?: TabContext;
+}
+
+const normalizeIdList = (ids?: string[] | null): string[] => [...(ids || [])].sort();
+const getEnabledMcpServerIds = (context?: TabContext | null): string[] => {
+  const attached =
+    context?.mcpServers?.attachedServerIds || context?.mcpServers?.selectedServerIds || [];
   const disabled = new Set(context?.mcpServers?.disabledServerIds || []);
   return attached.filter((id) => !disabled.has(id));
 };
@@ -25,8 +41,13 @@ const getEnabledMcpServerIds = (context) => {
  */
 const DesktopChatPanel = () => {
   const location = useLocation();
-  const { isCurrentChatOpen } = useChatManager();
-  const { activeTabId, tabs } = useTabManager();
+  const { isCurrentChatOpen } = useChatManager() as {
+    isCurrentChatOpen: () => boolean;
+  };
+  const { activeTabId, tabs } = useTabManager() as {
+    activeTabId: string | null;
+    tabs: Tab[];
+  };
 
   const workspaceRouteMatch = location.pathname.match(/^\/workspace(?:\/([^/]+))?\/?$/);
   const isWorkspaceRoute = Boolean(workspaceRouteMatch);
@@ -40,7 +61,7 @@ const DesktopChatPanel = () => {
     : activeTabId;
 
   const assistantSessionId = useAssistantStore(
-    (state) => state.activeSessionByTab[effectiveTabId]
+    (state) => (effectiveTabId ? state.activeSessionByTab[effectiveTabId] : undefined)
   );
   const sessionKind = useAssistantStore(
     (state) => assistantSessionId ? state.sessions[assistantSessionId]?.session?.kind : null
@@ -49,12 +70,9 @@ const DesktopChatPanel = () => {
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
   // General workspaces embed chat in the page — don't show the side panel.
-  // Agent workspaces (background_job) use the side panel for chat.
+  // Agent workspaces (background_job) use the side panel for chat. The
+  // auto-close happens after the hooks below to keep hook order stable.
   const isGeneralWorkspace = isWorkspaceRoute && sessionKind && sessionKind !== 'background_job';
-  if (isGeneralWorkspace && isOpen) {
-    // Auto-close if it was opened
-    return null;
-  }
 
   // Restore existing assistant session from DB on tab change or when the
   // panel is opened after a background run attached a session later.
@@ -70,7 +88,7 @@ const DesktopChatPanel = () => {
         const sessions = await assistantClient.listSessions(activeTabId);
         if (cancelled || sessions.length === 0) return;
 
-          const contextMcpServerIds = normalizeIdList(getEnabledMcpServerIds(activeTab?.context));
+        const contextMcpServerIds = normalizeIdList(getEnabledMcpServerIds(activeTab?.context));
 
         const session =
           sessions.find((candidate) =>
@@ -104,6 +122,10 @@ const DesktopChatPanel = () => {
     };
   }, [activeTab, activeTabId, assistantSessionId, isOpen, isWorkspaceRoute]);
 
+  if (isGeneralWorkspace && isOpen) {
+    return null;
+  }
+
   return (
     <div
       id="desktop-chat-panel"
@@ -113,7 +135,7 @@ const DesktopChatPanel = () => {
       aria-hidden={!isOpen}
     >
       <div className={styles.chatContainer}>
-        <AssistantChat tabId={effectiveTabId} />
+        {effectiveTabId && <AssistantChat tabId={effectiveTabId} />}
       </div>
     </div>
   );

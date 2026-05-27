@@ -8,15 +8,27 @@ import styles from './ToolBlock.module.css';
  * Displays tool_use and tool_result content blocks in a collapsible format.
  * Similar to claude.ai's tool visualization.
  *
- * Props:
- * - toolUse: Object containing tool_use data { id, name, input }
- * - toolResult: Object containing tool_result data { id, text } (optional)
- *
  * The tool is considered "running" when we have toolUse but no toolResult.
  * Once toolResult is received, the tool is marked as "complete".
  */
 
-const ToolBlock = ({ toolUse, toolResult }) => {
+interface ToolUse {
+  id?: string;
+  name: string;
+  input?: Record<string, unknown> | null;
+}
+
+interface ToolResult {
+  id?: string;
+  text?: string | null;
+}
+
+interface ToolBlockProps {
+  toolUse: ToolUse;
+  toolResult?: ToolResult | null;
+}
+
+const ToolBlock = ({ toolUse, toolResult }: ToolBlockProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
 
   // Determine if the tool is currently running
@@ -28,10 +40,10 @@ const ToolBlock = ({ toolUse, toolResult }) => {
   };
 
   // Format JSON input for display
-  const formatJsonInput = (input) => {
+  const formatJsonInput = (input: unknown): string => {
     try {
       return JSON.stringify(input, null, 2);
-    } catch (error) {
+    } catch {
       return String(input);
     }
   };
@@ -109,4 +121,3 @@ const ToolBlock = ({ toolUse, toolResult }) => {
 };
 
 export default ToolBlock;
-
