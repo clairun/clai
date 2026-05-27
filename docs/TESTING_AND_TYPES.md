@@ -32,7 +32,7 @@ We can call this work finished when **all** of the following are true:
 4. CI runs `typecheck` + `test` + `gen:bindings` (and fails if bindings drift). Every push is gated.
 5. The 4 highest-traffic UI surfaces (Workspace page, Fleet page, AskUserPanel, ChatMessageList) have component-level tests covering at least their happy path.
 
-We're roughly **80%** of the way there as of 2026-05-27. **P0 and P1 complete; P1-1's skill-binding carve-out closed under P2-1b.** A **dead-code sweep (P2-0)** removed the orphaned pre-workspace tabs/tiles + command-visualization subsystem (~8800 lines / 36 files, −348KB bundle), which deleted most of the remaining conversion queue. P2-1 is underway: Fleet, the full Settings cluster, the ContextPanel cluster, and assorted leaves are converted (**44 `.ts`/`.tsx`**). Remaining: **14 `.jsx` + 12 non-test `.js`** — TerminalEmulator + workspace-task components, the contexts (incl. the deferred `TabManagerContext` tile-internal removal), remaining hooks/utils/stores, `api/client.js`, and the app shell — then drop `allowJs` (P2-2), coverage (P2-3), provider-adapter tests (P2-5), and E2E (P2-6). The conversion has caught 3 latent snake_case wire-field bugs so far — evidence the typing effort is worth it beyond pure hygiene.
+We're roughly **95%** of the way there as of 2026-05-27. **P0 and P1 complete; P1-1's skill-binding carve-out closed under P2-1b.** A **dead-code sweep (P2-0)** removed the orphaned pre-workspace tabs/tiles + command-visualization subsystem (~8800 lines / 36 files, −348KB bundle). P2-1 is nearly done: Fleet, the full Settings cluster, ContextPanel, the terminal + workspace-task components, the app shell, the leaf utils/hooks/handlers, `api/client`, `fleet/client`, and the FleetContext/TabContext/ChatManagerContext/CommandContext contexts are all converted (**68 `.ts`/`.tsx` files**). **Only one `.jsx` remains: `src/contexts/TabManagerContext.jsx`** (plus `src/commands/CommandRegistry.js` and `src/test/setup.js`). That last conversion is the deferred tile-internal untangle (see P2-0) — once it lands, drop `allowJs` (P2-2), then coverage (P2-3), provider-adapter tests (P2-5), and E2E (P2-6). The conversion has caught 3 latent snake_case wire-field bugs so far — evidence the typing effort is worth it beyond pure hygiene.
 
 ## House rules in effect today
 
@@ -102,16 +102,17 @@ Touch as you go, don't batch. Done so far this pass:
 - [x] `src/pages/Fleet.jsx` → `.tsx`.
 - [x] `src/components/Settings/*` — **9 of 9 done**. Surfaced + fixed 3 latent snake_case bugs (`has_secret` ×2, `local_path` ×1).
 - [x] `src/components/ContextPanel/*` (ContextBadge, ContextPanel, McpServerAvatar, McpServerSelector) — typed against `McpServerResponse`/`ProviderConnection`.
-- [x] Leaf components: `NotFound`, `ConfirmDialog`.
+- [x] Leaf components: `NotFound`, `ConfirmDialog`, `Echo`, `Help`, `TabView`.
+- [x] Leaf utils/hooks: `commandTypes`, `commandParser`, `commandRegistry`, `contextCommandHandler`, `tabCommandHandler`, `fleet/client`, `usePermissionAttention`, `useFleetActivity`, `useKeyboardShortcuts`.
+- [x] `src/api/client.js` → `.ts` (typed against bindings; deleted dead getData/getContexts).
+- [x] App shell: `main`, `Routes`, `App`, `MainLayout` (+ `index.html` entry).
+- [x] Contexts: `FleetContext`, `TabContext`, `ChatManagerContext`, `CommandContext`.
+- [x] Terminal + workspace-task: `TerminalEmulator`, `TerminalEmulatorWrapper`, `WorkspaceTaskNotifications`, `WorkspaceTaskTranscriptPanel`, `WorkspaceContextBar`.
 
-Remaining, order roughly:
+Remaining — **just one file** (the deferred capstone):
 
-- `src/components/TerminalEmulator/*` (TerminalEmulator, TerminalEmulatorWrapper) + `WorkspaceTaskNotifications`, `WorkspaceTaskTranscriptPanel`, `workspace/components/WorkspaceContextBar`.
-- `src/contexts/*` — **incl. the P2-0 deferred tile-internal removal** for `TabManagerContext`/`CommandContext`; also `TabContext`, `ChatManagerContext`, `FleetContext`.
-- remaining `src/hooks/*`, `src/utils/*`, `src/commands/CommandRegistry.js`, `src/fleet/client.js`, `src/stores/chatManagerStore.js`, `src/stores/workspaceStore.ts` (drop `rootTile`/`TileNode` here).
-- `src/api/client.js` (486 lines, mixed concern) — also where the skill-command consumer typing lands.
-- `src/App.jsx`, `src/main.jsx`, `src/Routes.jsx`, `src/layouts/MainLayout.jsx`.
-- The remaining test files — rename `.test.js` → `.test.ts`.
+- [ ] `src/contexts/TabManagerContext.jsx` → `.tsx` **with the P2-0 tile-internal removal**: strip `activeTileId`/`splitTile`/`closeTile`/`resizeTile`/tile-tree helpers/per-tab `CommandRegistry`/the `currentCommand` effect/`executeCommand('help')` init; keep tabs/activeTabId/context/`/tab`/`/ctx`/`/reset-all`. Then delete `src/commands/CommandRegistry.js` (only the per-tab registry used it) and drop `rootTile`/`TileNode` from `src/stores/workspaceStore.ts` (+ SQLite persistence migration). Remove the `useTabManager` call-site cast in `TerminalEmulator`/`TerminalEmulatorWrapper` once typed.
+- After it lands: `src/test/setup.js` stays `.js`; rename remaining `.test.js` → `.test.ts` (mechanical).
 
 **P2-1b. Skill-catalog bindings.** _Done 2026-05-26._
 
