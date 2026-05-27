@@ -12,6 +12,13 @@ interface FleetSnapshot {
 
 interface SelectedAgent {
   agentId?: string;
+  sessionId?: string | null;
+  providerConnectionIds?: string[];
+  tabId?: string | null;
+  name?: string;
+  workspaceId?: string;
+  selectedMcpServerIds?: string[];
+  execution?: unknown;
   [key: string]: unknown;
 }
 

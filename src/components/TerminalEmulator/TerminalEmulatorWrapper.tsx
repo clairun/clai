@@ -15,7 +15,19 @@ import { useAssistantSession, useAssistantStore, assistantClient } from '../../a
 import { getOrCreateWorkspaceSession } from '../../workspace/client';
 import TerminalEmulator from './TerminalEmulator';
 
-const getEnabledMcpServerIds = (tab) => {
+interface TabLike {
+  id: string;
+  context?: {
+    assistantConnectionId?: string | null;
+    mcpServers?: {
+      attachedServerIds?: string[];
+      selectedServerIds?: string[];
+      disabledServerIds?: string[];
+    };
+  } | null;
+}
+
+const getEnabledMcpServerIds = (tab: TabLike): string[] => {
   const attached = tab.context?.mcpServers?.attachedServerIds || tab.context?.mcpServers?.selectedServerIds || [];
   const disabled = new Set(tab.context?.mcpServers?.disabledServerIds || []);
   return attached.filter((id) => !disabled.has(id));
@@ -26,17 +38,26 @@ const getEnabledMcpServerIds = (tab) => {
 // `ASSISTANT_RUN_IN_FLIGHT_ERROR` in `commands/assistant.rs`.
 const RUN_IN_FLIGHT_ERROR_PREFIX = 'RUN_IN_FLIGHT: ';
 
-const isRunInFlightError = (err) => {
-  const msg = typeof err === 'string' ? err : (err?.message || '');
+const isRunInFlightError = (err: unknown): boolean => {
+  const msg = typeof err === 'string' ? err : err instanceof Error ? err.message : '';
   return msg.startsWith(RUN_IN_FLIGHT_ERROR_PREFIX);
 };
 
+const errorMessage = (err: unknown, fallback: string): string =>
+  typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
+
 const TerminalEmulatorWrapper = () => {
   const location = useLocation();
-  const { tabs, activeTabId, updateTabContext } = useTabManager();
+  // TabManagerContext is still untyped .jsx (createContext(null) ⇒ the hook
+  // return infers as `never`). Cast until it's converted under Batch 7.
+  const { tabs, activeTabId, updateTabContext } = useTabManager() as {
+    tabs: TabLike[];
+    activeTabId: string | null;
+    updateTabContext: (tabId: string, context: unknown) => void;
+  };
   const { openChat } = useChatManager();
   const { isFleetRoute, selectedAgent, refresh: refreshFleet } = useFleet();
-  const { ensureSession, isStreaming: tabIsStreaming } = useAssistantSession(activeTabId);
+  const { ensureSession, isStreaming: tabIsStreaming } = useAssistantSession(activeTabId || '');
   const workspaceRouteMatch = location.pathname.match(/^\/workspace(?:\/([^/]+))?\/?$/);
   const isWorkspaceRoute = Boolean(workspaceRouteMatch);
   const currentWorkspaceId = workspaceRouteMatch?.[1]
@@ -49,7 +70,7 @@ const TerminalEmulatorWrapper = () => {
   // cue belongs here so the user can see immediately that the agent is
   // busy. Per route:
   //  - workspace: the workspace's canonical manager session, looked up by
-  //    `workspace:<id>` tab-key (Workspace.jsx populates this on load).
+  //    `workspace:<id>` tab-key (Workspace.tsx populates this on load).
   //  - fleet: the selected agent's `sessionId` once it's been created.
   //  - default tab: the tab's own session via `useAssistantSession`.
   const workspaceSessionId = useAssistantStore(
@@ -70,10 +91,10 @@ const TerminalEmulatorWrapper = () => {
       : tabIsStreaming;
 
   // Get active tab
-  const activeTab = tabs.find(t => t.id === activeTabId);
+  const activeTab = tabs.find((t: TabLike) => t.id === activeTabId);
 
   // Handle context changes from the terminal
-  const handleContextChange = (context) => {
+  const handleContextChange = (context: unknown) => {
     if (activeTab) {
       updateTabContext(activeTab.id, context);
     }
@@ -93,7 +114,7 @@ const TerminalEmulatorWrapper = () => {
     }
   }, []);
 
-  const resolveTabConnectionId = useCallback(async (tab) => {
+  const resolveTabConnectionId = useCallback(async (tab: TabLike | undefined): Promise<string | null> => {
     if (!tab) {
       return null;
     }
@@ -117,7 +138,7 @@ const TerminalEmulatorWrapper = () => {
    * Handle sending a query through the assistant engine.
    */
   const handleSendToAgent = useCallback(
-    async (query) => {
+    async (query: string): Promise<{ error?: string }> => {
       if (location.pathname === '/fleet' && isFleetRoute) {
         if (!selectedAgent) {
           return {
@@ -168,7 +189,7 @@ const TerminalEmulatorWrapper = () => {
           return {
             error: isRunInFlightError(err)
               ? 'The agent is still working on the previous turn — wait for it to finish.'
-              : typeof err === 'string' ? err : (err?.message || 'Assistant request failed.'),
+              : errorMessage(err, 'Assistant request failed.'),
           };
         }
       }
@@ -204,7 +225,7 @@ const TerminalEmulatorWrapper = () => {
           return {
             error: isRunInFlightError(err)
               ? 'The agent is still working on the previous turn — wait for it to finish.'
-              : typeof err === 'string' ? err : (err?.message || 'Assistant request failed.'),
+              : errorMessage(err, 'Assistant request failed.'),
           };
         }
       }
@@ -234,7 +255,7 @@ const TerminalEmulatorWrapper = () => {
       } catch (err) {
         console.error('[TerminalEmulatorWrapper] Assistant error:', err);
         return {
-          error: typeof err === 'string' ? err : (err?.message || 'Assistant request failed.'),
+          error: errorMessage(err, 'Assistant request failed.'),
         };
       }
     },

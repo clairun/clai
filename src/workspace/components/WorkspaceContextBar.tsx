@@ -2,6 +2,7 @@ import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { getMcpServers } from '../../api/client';
 import { assistantClient } from '../../assistant';
+import type { McpServerResponse, ProviderConnection } from '../../generated/bindings';
 import ContextBadge from '../../components/ContextPanel/ContextBadge';
 import McpServerAvatar from '../../components/ContextPanel/McpServerAvatar';
 import McpServerSelector from '../../components/ContextPanel/McpServerSelector';
@@ -15,6 +16,10 @@ const SNAPSHOT_OPTIONS = {
   includeFiles: false,
 };
 
+interface WorkspaceContextBarProps {
+  workspaceId: string;
+}
+
 /**
  * WorkspaceContextBar — shows MCP server badges and provider info for workspaces.
  *
@@ -23,14 +28,14 @@ const SNAPSHOT_OPTIONS = {
  * Agent workspaces: read-only display (MCP configured via agent settings in Fleet).
  * General workspace: editable — user can add/remove/toggle MCP servers.
  */
-const WorkspaceContextBar = memo(({ workspaceId }) => {
+const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => {
   const [showMcpSelector, setShowMcpSelector] = useState(false);
-  const [availableMcpServers, setAvailableMcpServers] = useState([]);
-  const [providerConnections, setProviderConnections] = useState([]);
-  const [localMcpServerIds, setLocalMcpServerIds] = useState([]);
-  const [localDisabledIds, setLocalDisabledIds] = useState([]);
+  const [availableMcpServers, setAvailableMcpServers] = useState<McpServerResponse[]>([]);
+  const [providerConnections, setProviderConnections] = useState<ProviderConnection[]>([]);
+  const [localMcpServerIds, setLocalMcpServerIds] = useState<string[]>([]);
+  const [localDisabledIds, setLocalDisabledIds] = useState<string[]>([]);
   const [isAgent, setIsAgent] = useState(false);
-  const [agentMcpServerIds, setAgentMcpServerIds] = useState([]);
+  const [agentMcpServerIds, setAgentMcpServerIds] = useState<string[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState('');
 
   // Load workspace snapshot to determine type and MCP config
@@ -50,7 +55,7 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
           setLocalMcpServerIds(snap?.session?.context?.mcpServerIds || []);
         }
         // Pick up the preferred provider from the snapshot binding
-        if (!agent && snap?.providerConnectionIds?.length > 0) {
+        if (!agent && (snap?.providerConnectionIds?.length || 0) > 0) {
           setSelectedProviderId((prev) => prev || snap.providerConnectionIds[0]);
         }
       } catch {
@@ -70,7 +75,7 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
       try {
         const [servers, connections] = await Promise.all([
           getMcpServers(),
-          assistantClient.listProviderConnections().catch(() => []),
+          assistantClient.listProviderConnections().catch(() => [] as ProviderConnection[]),
         ]);
         if (!cancelled) {
           setAvailableMcpServers(servers || []);
@@ -105,12 +110,12 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
   const displayMcpServers = useMemo(
     () => displayMcpServerIds
       .map((id) => availableMcpServers.find((s) => s.id === id))
-      .filter(Boolean),
+      .filter((s): s is McpServerResponse => Boolean(s)),
     [displayMcpServerIds, availableMcpServers]
   );
 
   const persistMcpChange = useCallback(
-    async (nextIds) => {
+    async (nextIds: string[]) => {
       setLocalMcpServerIds(nextIds);
       try {
         await updateWorkspaceSessionMcp(workspaceId, nextIds);
@@ -122,7 +127,7 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
   );
 
   const handleAddMcp = useCallback(
-    (serverId) => {
+    (serverId: string) => {
       if (isAgent) return;
       const nextIds = localMcpServerIds.includes(serverId)
         ? localMcpServerIds
@@ -133,7 +138,7 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
   );
 
   const handleRemoveMcp = useCallback(
-    (serverId) => {
+    (serverId: string) => {
       if (isAgent) return;
       persistMcpChange(localMcpServerIds.filter((id) => id !== serverId));
     },
@@ -141,7 +146,7 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
   );
 
   const handleToggleMcp = useCallback(
-    (serverId) => {
+    (serverId: string) => {
       if (isAgent) return;
       const isDisabled = localDisabledIds.includes(serverId);
       setLocalDisabledIds(
@@ -159,7 +164,7 @@ const WorkspaceContextBar = memo(({ workspaceId }) => {
   );
 
   const handleProviderChange = useCallback(
-    async (e) => {
+    async (e: React.ChangeEvent<HTMLSelectElement>) => {
       const id = e.target.value;
       setSelectedProviderId(id);
       try {

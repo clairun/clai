@@ -5,6 +5,7 @@ import { useTabManager } from '../../contexts/TabManagerContext';
 import { useChatManager } from '../../contexts/ChatManagerContext';
 import TabContext from '../../contexts/TabContext';
 import { parseCommand, isLayoutCommand } from '../../utils/commandParser';
+import type { ParsedCommand } from '../../utils/commandParser';
 import { handleContextCommand, isContextCommand } from '../../utils/contextCommandHandler';
 import { isCommandSupported } from '../../utils/commandRegistry';
 import { createWorkspace } from '../../workspace/client';
@@ -13,9 +14,36 @@ import ContextPanel from '../ContextPanel/ContextPanel';
 import { SettingsModal } from '../Settings';
 import styles from './TerminalEmulator.module.css';
 
-const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
-  const { executeCommand, commandHistory } = useCommand();
-  const { handleLayoutCommand, getActiveTab } = useTabManager();
+type OutputType = 'info' | 'success' | 'error' | 'warning';
+
+interface OutputMessage {
+  id: number;
+  text: string;
+  type: OutputType;
+  timestamp: Date;
+}
+
+interface SendToChatResult {
+  error?: string;
+}
+
+interface TerminalEmulatorProps {
+  onSendToChat?: (text: string) => Promise<SendToChatResult | void>;
+  disabled?: boolean;
+}
+
+const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorProps) => {
+  // CommandContext / TabManagerContext are still untyped .jsx (their
+  // createContext(null) makes the hook return type infer as `never`).
+  // Cast at the call site until they're converted under Batch 7.
+  const { executeCommand, commandHistory } = useCommand() as {
+    executeCommand: (command: ParsedCommand) => void;
+    commandHistory: ParsedCommand[];
+  };
+  const { handleLayoutCommand, getActiveTab } = useTabManager() as {
+    handleLayoutCommand: (command: ParsedCommand) => { success?: boolean; message?: string } | null | void;
+    getActiveTab: () => { id: string } | null;
+  };
   const { setActiveContext, openChat, isCurrentChatOpen } = useChatManager();
   const location = useLocation();
   const navigate = useNavigate();
@@ -23,16 +51,16 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
   const tabContext = useContext(TabContext);
   const [inputValue, setInputValue] = useState('');
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const [outputMessages, setOutputMessages] = useState([]);
+  const [outputMessages, setOutputMessages] = useState<OutputMessage[]>([]);
   const [isOutputVisible, setIsOutputVisible] = useState(true);
   const [isHoveringOutput, setIsHoveringOutput] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const inputRef = useRef(null);
-  const outputRef = useRef(null);
-  const terminalRef = useRef(null);
-  const autoCollapseTimerRef = useRef(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const outputRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const autoCollapseTimerRef = useRef<number | null>(null);
   // CHANGED: Ref for the wrapper element instead of display to handle scrolling
-  const inputWrapperRef = useRef(null);
+  const inputWrapperRef = useRef<HTMLDivElement>(null);
 
   // Check if desktop chat panel is open
   const isChatOpen = isCurrentChatOpen();
@@ -84,18 +112,18 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
       clearTimeout(autoCollapseTimerRef.current);
     }
     // Set new timer
-    autoCollapseTimerRef.current = setTimeout(() => {
+    autoCollapseTimerRef.current = window.setTimeout(() => {
       setIsOutputVisible(false);
     }, AUTO_COLLAPSE_DELAY);
   }, [AUTO_COLLAPSE_DELAY]);
 
   // Helper function to add output messages
-  const addOutputMessage = useCallback((message, type = 'info') => {
-    const newMessage = {
+  const addOutputMessage = useCallback((message: string, type: OutputType = 'info') => {
+    const newMessage: OutputMessage = {
       id: Date.now() + Math.random(),
       text: message,
       type, // 'info', 'success', 'error', 'warning'
-      timestamp: new Date()
+      timestamp: new Date(),
     };
     setOutputMessages(prev => {
       const updated = [...prev, newMessage];
@@ -146,7 +174,7 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
   }, [getActiveTab, setActiveContext]);
 
   // Handle command execution
-  const handleCommandExecution = async (input) => {
+  const handleCommandExecution = async (input: string) => {
     const trimmed = input.trim();
     if (!trimmed) return;
 
@@ -209,7 +237,10 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
           addOutputMessage(result.message, 'error');
         }
       } catch (error) {
-        addOutputMessage(`Context command error: ${error.message}`, 'error');
+        addOutputMessage(
+          `Context command error: ${error instanceof Error ? error.message : String(error)}`,
+          'error',
+        );
       }
     }
     // Check if it's a layout command (tab/tile management)
@@ -234,7 +265,7 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
   };
 
   // Handle keyboard events
-  const handleKeyDown = (e) => {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter sends message (Shift+Enter for newline)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -280,7 +311,7 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
 
   // Global keyboard shortcut to focus terminal (Ctrl+L or Cmd+L)
   useEffect(() => {
-    const handleKeyDown = (e) => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
       // Check for Ctrl+L (Windows/Linux) or Cmd+L (Mac)
       if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
         e.preventDefault();
@@ -291,11 +322,11 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
     };
 
     // Add global event listener
-    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleGlobalKeyDown);
 
     // Cleanup on unmount
     return () => {
-      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('keydown', handleGlobalKeyDown);
     };
   }, []);
 
@@ -325,7 +356,7 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }) => {
     setIsSettingsOpen(true);
   };
 
-  const handleModeToggle = async (event) => {
+  const handleModeToggle = async (event: React.MouseEvent) => {
     event.stopPropagation();
     if (isFleetRoute) {
       // Create a new workspace and navigate to it

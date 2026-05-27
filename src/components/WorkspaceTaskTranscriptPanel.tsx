@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../assistant';
+import type { AssistantMessage, ToolInvocation, WorkspaceTaskResponse } from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
 
-const TASK_STATUS_LABEL = {
+const TASK_STATUS_LABEL: Record<string, string> = {
   pending: 'Pending',
   running: 'Running',
   completed: 'Completed',
@@ -11,11 +12,19 @@ const TASK_STATUS_LABEL = {
   cancelled: 'Cancelled',
 };
 
-const EMPTY_MESSAGES = [];
-const EMPTY_TOOL_CALLS = [];
-const EMPTY_STREAMING = {};
+const EMPTY_MESSAGES: AssistantMessage[] = [];
+const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+const EMPTY_STREAMING: Record<string, string> = {};
 
-export default function WorkspaceTaskTranscriptPanel({ task, onClose }) {
+interface WorkspaceTaskTranscriptPanelProps {
+  task: WorkspaceTaskResponse | null;
+  onClose: () => void;
+}
+
+export default function WorkspaceTaskTranscriptPanel({
+  task,
+  onClose,
+}: WorkspaceTaskTranscriptPanelProps) {
   const sessionId = task?.sessionId || null;
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] : null
@@ -62,7 +71,7 @@ export default function WorkspaceTaskTranscriptPanel({ task, onClose }) {
       } catch (err) {
         if (cancelled) return;
         setBootstrapError(
-          typeof err === 'string' ? err : err?.message || 'Failed to load transcript.'
+          typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to load transcript.'
         );
       } finally {
         if (!cancelled) setBootstrapping(false);

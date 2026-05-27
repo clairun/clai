@@ -8,22 +8,40 @@ const WORKSPACE_TASK_ATTENTION_EVENT = 'workspace://task-attention';
 const MAX_NOTIFICATIONS = 4;
 const AUTO_DISMISS_MS = 10000;
 
-const STATUS_LABEL = {
+const STATUS_LABEL: Record<string, string> = {
   blocked: 'Blocked',
   failed: 'Failed',
 };
 
-const notificationText = (payload) => (
-  payload?.error || payload?.summary || 'Open the workspace to inspect the task.'
-);
+interface TaskAttentionPayload {
+  taskId?: string;
+  workspaceId?: string;
+  updatedAt?: number;
+  title?: string;
+  status?: string;
+  error?: string;
+  summary?: string;
+}
+
+interface NotificationItem {
+  id: string;
+  taskId: string;
+  workspaceId: string;
+  title: string;
+  status: string;
+  text: string;
+}
+
+const notificationText = (payload: TaskAttentionPayload): string =>
+  payload?.error || payload?.summary || 'Open the workspace to inspect the task.';
 
 const WorkspaceTaskNotifications = () => {
   const navigate = useNavigate();
   const { refresh } = useFleet();
-  const [notifications, setNotifications] = useState([]);
-  const timersRef = useRef(new Map());
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const timersRef = useRef(new Map<string, number>());
 
-  const dismiss = useCallback((id) => {
+  const dismiss = useCallback((id: string) => {
     const timer = timersRef.current.get(id);
     if (timer) {
       window.clearTimeout(timer);
@@ -33,14 +51,14 @@ const WorkspaceTaskNotifications = () => {
   }, []);
 
   useEffect(() => {
-    const unlistenPromise = listen(WORKSPACE_TASK_ATTENTION_EVENT, (event) => {
+    const unlistenPromise = listen<TaskAttentionPayload>(WORKSPACE_TASK_ATTENTION_EVENT, (event) => {
       const payload = event.payload;
       if (!payload?.taskId || !payload?.workspaceId) {
         return;
       }
 
       const id = `${payload.taskId}:${payload.updatedAt || Date.now()}`;
-      const item = {
+      const item: NotificationItem = {
         id,
         taskId: payload.taskId,
         workspaceId: payload.workspaceId,
