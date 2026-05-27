@@ -4,7 +4,6 @@ import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmul
 import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import { CommandProvider } from '../contexts/CommandContext';
 import { TabManagerProvider } from '../contexts/TabManagerContext';
-import { CommandMessagingProvider } from '../contexts/CommandMessagingContext';
 import { ChatManagerProvider } from '../contexts/ChatManagerContext';
 import { FleetProvider } from '../contexts/FleetContext';
 import { useAssistantEvents } from '../assistant';
@@ -26,19 +25,17 @@ const MainLayout = () => {
     <CommandProvider>
       <TabManagerProvider>
         <AssistantEventListener>
-          <CommandMessagingProvider>
-            <ChatManagerProvider>
-              <FleetProvider>
-                <div className={styles.mainLayout}>
-                  <WorkspaceTaskNotifications />
-                  <TerminalEmulatorWrapper />
-                  <div className={styles.contentArea}>
-                    <Outlet />
-                  </div>
+          <ChatManagerProvider>
+            <FleetProvider>
+              <div className={styles.mainLayout}>
+                <WorkspaceTaskNotifications />
+                <TerminalEmulatorWrapper />
+                <div className={styles.contentArea}>
+                  <Outlet />
                 </div>
-              </FleetProvider>
-            </ChatManagerProvider>
-          </CommandMessagingProvider>
+              </div>
+            </FleetProvider>
+          </ChatManagerProvider>
         </AssistantEventListener>
       </TabManagerProvider>
     </CommandProvider>

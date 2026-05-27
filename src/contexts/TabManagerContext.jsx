@@ -7,7 +7,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useCommand } from './CommandContext';
 import { handleTabCommand } from '../utils/tabCommandHandler';
-import { handleTileCommand } from '../utils/tileCommandHandler';
 import { CommandRegistry } from '../commands/CommandRegistry';
 import { isContentCommand, isLayoutCommand } from '../utils/commandTypes';
 import { useWorkspaceStore } from '../stores/workspaceStore';
@@ -1379,35 +1378,8 @@ export const TabManagerProvider = ({ children }) => {
           };
         }
 
-        case 'tile': {
-          // Delegate to handleTileCommand with tileManager context
-          const tileManager = {
-            tabs,
-            activeTabId,
-            activeTileId,
-            splitTile,
-            closeTile,
-            resizeTile,
-            focusTile: setActiveTileId,
-            focusNextTile: () => {
-              const leafTiles = getLeafTiles();
-              if (leafTiles.length === 0) return false;
-              const currentIndex = leafTiles.findIndex(t => t.id === activeTileId);
-              const nextIndex = (currentIndex + 1) % leafTiles.length;
-              setActiveTileId(leafTiles[nextIndex].id);
-              return true;
-            },
-            focusPrevTile: () => {
-              const leafTiles = getLeafTiles();
-              if (leafTiles.length === 0) return false;
-              const currentIndex = leafTiles.findIndex(t => t.id === activeTileId);
-              const prevIndex = currentIndex === 0 ? leafTiles.length - 1 : currentIndex - 1;
-              setActiveTileId(leafTiles[prevIndex].id);
-              return true;
-            },
-          };
-          return handleTileCommand(command, tileManager);
-        }
+        // NOTE: the `/tile` command was removed alongside the tile-grid UI
+        // (TabContent/TileView). It now falls through to the default branch.
 
         default:
           return {
