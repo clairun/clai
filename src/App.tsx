@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import { useEffect } from 'react';
 import { BrowserRouter as Router } from 'react-router-dom';
 import { listen } from '@tauri-apps/api/event';
 import AppRoutes from './Routes';

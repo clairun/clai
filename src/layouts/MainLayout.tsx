@@ -9,15 +9,16 @@ import { FleetProvider } from '../contexts/FleetContext';
 import { useAssistantEvents } from '../assistant';
 import styles from './MainLayout.module.css';
 
-const AssistantEventListener = ({ children }) => {
+const AssistantEventListener = ({ children }: { children: React.ReactNode }) => {
   useAssistantEvents();
-  return children;
+  return <>{children}</>;
 };
 
 const MainLayout = () => {
   useEffect(() => {
-    if (window.hideSplashScreen) {
-      window.hideSplashScreen();
+    const splash = (window as Window & { hideSplashScreen?: () => void }).hideSplashScreen;
+    if (splash) {
+      splash();
     }
   }, []);
 
