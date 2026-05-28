@@ -31,9 +31,14 @@ import styles from './Workspace.module.css';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
+// Periodic poll skips the session payload (messages/runs/toolCalls are
+// kept in sync via the assistant event stream) but still re-walks the
+// workspace filesystem so memories/artifacts created by a running agent
+// surface without the user having to re-enter the workspace. The
+// backend caps the walk at MAX_ENTRY_COUNT (500) entries with a
+// skip-list, so the per-tick cost stays bounded.
 const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
   includeSessionPayload: false,
-  includeFiles: false,
 };
 
 type NumericTimestamp = number | bigint | null | undefined;
@@ -1148,12 +1153,15 @@ const Workspace = () => {
             return nextSnapshot;
           }
 
+          // Lightweight refresh: the backend skipped the session payload
+          // (messages/runs/toolCalls live in the assistant event store),
+          // so preserve those from the prior snapshot. Memories and
+          // artifacts ARE re-fetched so writes made by a running agent
+          // appear without the user having to re-enter the workspace.
           return {
             ...nextSnapshot,
             messages: current.messages || [],
             toolCalls: current.toolCalls || [],
-            memories: current.memories || [],
-            artifacts: current.artifacts || [],
           };
         });
         setError('');
