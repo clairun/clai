@@ -76,6 +76,14 @@ jobs:
           cp LICENSE flatpak-build/files/share/licenses/io.github.juacker.clai/
 
           # Finalize the build
+          #
+          # --talk-name=org.freedesktop.Flatpak is REQUIRED: clai runs the
+          # AI provider CLIs (claude/codex/…) and its bash_exec sandbox on
+          # the HOST via `flatpak-spawn --host`. The host-spawn portal is
+          # gated behind this name; without it both the provider CLIs and
+          # the sandboxed shell fail. The bash_exec sandbox runs the host's
+          # bwrap through flatpak-spawn because nested user namespaces are
+          # blocked inside Flatpak's own sandbox.
           flatpak build-finish flatpak-build \
             --command=clai \
             --share=ipc \
@@ -84,7 +92,8 @@ jobs:
             --socket=wayland \
             --device=dri \
             --filesystem=home \
-            --talk-name=org.freedesktop.secrets
+            --talk-name=org.freedesktop.secrets \
+            --talk-name=org.freedesktop.Flatpak
 
           # Export and bundle
           flatpak build-export repo flatpak-build

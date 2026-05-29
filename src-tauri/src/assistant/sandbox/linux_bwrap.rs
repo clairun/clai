@@ -10,17 +10,46 @@ use super::{
 };
 
 const BWRAP_BIN: &str = "bwrap";
+const FLATPAK_SPAWN_BIN: &str = "flatpak-spawn";
+
+/// Builds the program + argv to launch the sandbox.
+///
+/// On a normal host we exec `bwrap` directly. Inside Flatpak, however,
+/// the app itself already runs in a bubblewrap sandbox whose seccomp
+/// filter blocks creating *nested* user namespaces — a bwrap launched
+/// from here would fail with "creating new namespace failed" (and the
+/// runtime doesn't even ship `bwrap`). So inside Flatpak we run the same
+/// bwrap invocation ON THE HOST via `flatpak-spawn --host bwrap …`: the
+/// host's bwrap can create namespaces, so the sandbox profile and its
+/// security boundary are preserved unchanged. This path requires the
+/// Flatpak to hold the `org.freedesktop.Flatpak` talk permission.
+fn launch_argv(bwrap_args: Vec<OsString>, in_flatpak: bool) -> (&'static str, Vec<OsString>) {
+    if in_flatpak {
+        let mut args = Vec::with_capacity(bwrap_args.len() + 2);
+        args.push(os("--host"));
+        args.push(os(BWRAP_BIN));
+        args.extend(bwrap_args);
+        (FLATPAK_SPAWN_BIN, args)
+    } else {
+        (BWRAP_BIN, bwrap_args)
+    }
+}
 
 pub async fn run(command: SandboxCommand) -> Result<SandboxCommandOutput, String> {
     let args = bwrap_args(&command)?;
-    let mut child_command = Command::new(BWRAP_BIN);
-    child_command.args(args);
+    let in_flatpak = crate::providers::is_flatpak();
+    let (program, launch_args) = launch_argv(args, in_flatpak);
+    let mut child_command = Command::new(program);
+    child_command.args(launch_args);
     prepare_stdio(&mut child_command);
 
     let child = child_command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            "Sandboxed shell is unavailable: bubblewrap (`bwrap`) is not installed or not on PATH"
-                .to_string()
+            if in_flatpak {
+                "Sandboxed shell is unavailable: `flatpak-spawn` not found — the Flatpak needs the `org.freedesktop.Flatpak` talk permission to run the sandbox on the host.".to_string()
+            } else {
+                "Sandboxed shell is unavailable: bubblewrap (`bwrap`) is not installed or not on PATH".to_string()
+            }
         } else {
             format!("Failed to start sandboxed shell: {}", e)
         }
@@ -444,6 +473,29 @@ mod tests {
                 ),
             },
         }
+    }
+
+    #[test]
+    fn launch_argv_runs_bwrap_directly_on_host() {
+        let bwrap_args = vec![os("--die-with-parent"), os("--"), os("/bin/sh")];
+        let (program, args) = launch_argv(bwrap_args.clone(), false);
+        assert_eq!(program, "bwrap");
+        assert_eq!(args, bwrap_args);
+    }
+
+    #[test]
+    fn launch_argv_wraps_with_flatpak_spawn_in_flatpak() {
+        let bwrap_args = vec![os("--die-with-parent"), os("--"), os("/bin/sh")];
+        let (program, args) = launch_argv(bwrap_args.clone(), true);
+        assert_eq!(program, "flatpak-spawn");
+        // flatpak-spawn --host bwrap <original bwrap args...>
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(rendered[0], "--host");
+        assert_eq!(rendered[1], "bwrap");
+        assert_eq!(&rendered[2..], &["--die-with-parent", "--", "/bin/sh"]);
     }
 
     #[test]
