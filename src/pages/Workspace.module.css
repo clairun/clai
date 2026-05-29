@@ -95,27 +95,6 @@
   color: var(--color-border-medium);
 }
 
-.workspaceSettingsButton {
-  appearance: none;
-  background: transparent;
-  border: 1px solid transparent;
-  padding: 4px;
-  border-radius: 6px;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 4px;
-  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
-}
-
-.workspaceSettingsButton:hover {
-  background: var(--color-bg-elevated);
-  color: var(--color-text-primary);
-  border-color: var(--color-border-light);
-}
-
 .metricButton {
   appearance: none;
   background: transparent;

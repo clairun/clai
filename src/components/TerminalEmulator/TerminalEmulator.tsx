@@ -9,7 +9,6 @@ import { handleContextCommand, isContextCommand } from '../../utils/contextComma
 import { isCommandSupported } from '../../utils/commandRegistry';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import ContextPanel from '../ContextPanel/ContextPanel';
-import { SettingsModal } from '../Settings';
 import styles from './TerminalEmulator.module.css';
 
 type OutputType = 'info' | 'success' | 'error' | 'warning';
@@ -42,7 +41,6 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
   const [outputMessages, setOutputMessages] = useState<OutputMessage[]>([]);
   const [isOutputVisible, setIsOutputVisible] = useState(true);
   const [isHoveringOutput, setIsHoveringOutput] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -339,11 +337,6 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
     }
   };
 
-  // Handle settings menu click
-  const handleSettingsClick = () => {
-    setIsSettingsOpen(true);
-  };
-
 
   return (
     <div ref={terminalRef} className={`${styles.terminal} ${isChatOpen ? styles.chatOpen : ''}`} onClick={handleTerminalClick}>
@@ -368,26 +361,8 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
             the navigator and carries its own "＋ New" affordance, so the
             terminal no longer needs a route/mode toggle. */}
 
-        {/* Global Settings is only accessible from outside a workspace
-            (Fleet view). Inside a workspace, configuration belongs to the
-            workspace itself and is reached via the workspace's own settings UI. */}
-        {!isWorkspaceRoute && (
-          <button
-            type="button"
-            className={styles.settingsButton}
-            onClick={(e) => {
-              e.stopPropagation();
-              handleSettingsClick();
-            }}
-            title="Open settings"
-            aria-label="Open settings"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
-            </svg>
-          </button>
-        )}
+        {/* Global Settings moved to the Fleet top-bar gear (always
+            reachable now that every route lives inside FleetLayout). */}
 
         {/* Terminal Prompt Symbol */}
         <span className={styles.terminalPrompt}>%</span>
@@ -435,11 +410,6 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
         </div>
       )}
 
-      {/* Settings Modal */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-      />
     </div>
   );
 };

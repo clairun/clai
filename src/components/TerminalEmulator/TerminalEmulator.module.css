@@ -62,35 +62,6 @@
   background: transparent;
 }
 
-/* Settings button at the left side */
-.settingsButton {
-  appearance: none;
-  border: 1px solid var(--color-border-light);
-  background: var(--color-overlay-02);
-  color: var(--color-text-secondary);
-  border-radius: 999px;
-  width: 32px;
-  height: 32px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: 4px;
-  transition: all 0.2s ease;
-  cursor: pointer;
-}
-
-.settingsButton:hover {
-  background: var(--color-bg-elevated);
-  color: var(--color-primary);
-  border-color: var(--color-primary-alpha-30);
-}
-
-.settingsButton:focus-visible {
-  outline: none;
-  box-shadow: var(--shadow-ring-primary);
-}
-
 /* Terminal Prompt Symbol - Gradient text */
 .terminalPrompt {
   background: var(--gradient-primary);
