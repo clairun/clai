@@ -15,21 +15,28 @@
   min-width: 52px;
 }
 
+/* Header (48px) and filter row (42px) are both fixed-height so the
+   workspace list always starts at the same Y. When collapsed the filter
+   row is gone, so the collapsed header takes over its height (48 + 42 =
+   90px) and stacks the toggle + New centered — keeping the first row in
+   exactly the same place whether expanded or collapsed. */
 .railHeader {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 10px;
   border-bottom: 1px solid var(--color-border-light);
-  min-height: 48px;
+  height: 48px;
+  box-sizing: border-box;
+  flex-shrink: 0;
 }
 
-/* Collapsed: the 52px rail can't fit toggle + New side by side, so stack
-   them vertically and center each. */
 .railCollapsed .railHeader {
   flex-direction: column;
+  justify-content: center;
   gap: 6px;
   padding: 10px 0;
+  height: 90px;
 }
 
 .collapseToggle {
@@ -101,6 +108,8 @@
 .filterRow {
   position: relative;
   padding: 8px 8px 4px;
+  height: 42px;
+  box-sizing: border-box;
   flex-shrink: 0;
 }
 
