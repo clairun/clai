@@ -54,13 +54,18 @@ flatpak install --user clai.flatpak && flatpak run io.github.juacker.clai
 - [ ] `bash_exec` works: ask the agent to run a shell command and confirm
       it is NOT "Sandboxed shell is unavailable". This exercises
       `flatpak-spawn --host bwrap`.
-- [ ] **`$HOME` / `~`-grant resolution**: inside Flatpak, `$HOME` is the
-      sandbox home (`~/.var/app/io.github.juacker.clai/…`), but host bwrap
-      and host CLIs expect the *real* home. `providers::get_home_dir()`
-      already resolves the real home via `flatpak-spawn`; confirm the
-      sandbox profile's HOME env and any `~/...` path grants
-      (`~/.ssh`, `~/.gitconfig`, …) resolve to the real home when running
-      under Flatpak. This is the most likely thing still needing a fix.
+- [ ] **Shared `~/.clai`**: `paths::clai_home()` and `expand_tilde()` now
+      resolve the *real* host home under Flatpak (via
+      `providers::get_home_dir()`, cached), so app config
+      (`~/.clai/config.json`), skills, cache, and workspaces
+      (`~/.clai/workspaces/…`) are shared with the native `.deb` install
+      rather than isolated under `~/.var/app/…`. Confirm a workspace
+      created in the `.deb` shows up in the Flatpak and vice-versa.
+- [ ] **Agent `$HOME` reach** (separate from config): the default agent's
+      filesystem grant and the sandbox profile's HOME env still derive
+      from `dirs::home_dir()` (sandbox home). Confirm whether agents
+      running host-side bwrap need these pointed at the real home too
+      (e.g. to read `~/.gitconfig`, `~/.ssh`).
 
 ## Status / not-yet
 

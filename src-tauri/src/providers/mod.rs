@@ -108,8 +108,15 @@ const USER_BIN_PATHS: &[&str] = &[
     ".deno/bin",       // Deno
 ];
 
-/// Gets the user's home directory, even from within Flatpak.
-fn get_home_dir() -> Option<String> {
+/// Gets the user's **real** home directory, even from within Flatpak.
+///
+/// Inside Flatpak `$HOME` points at the sandboxed per-app home
+/// (`~/.var/app/<id>`); this resolves the real host home via
+/// `flatpak-spawn --host` so config that lives under `~` (e.g. `~/.clai`,
+/// shared with the native install) is found at its real path. Callers
+/// that hit this often should cache the result — it spawns a host process
+/// under Flatpak. Falls back to `$HOME` if the host lookup fails.
+pub fn get_home_dir() -> Option<String> {
     if is_flatpak() {
         // In Flatpak, HOME points to sandbox. Get real home from /etc/passwd via host
         let mut command = Command::new("flatpak-spawn");
