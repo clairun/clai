@@ -163,18 +163,20 @@
   gap: 2px;
 }
 
-/* Fixed height (not min-height): the content area (40px − 2px border =
-   38px, items vertically centered) is taller than the tallest inline
-   element — the 24px hover action buttons — so nothing that appears or
-   disappears per row (the hover run/pause/⋯ buttons, the attention
-   badge, the schedule clock) can change the row height. */
+/* Fixed height — every row is exactly this tall regardless of content:
+   scheduled (two-line: title + cadence) or not (title only, centered),
+   expanded or collapsed. The 42px content area (44 − 2px border) clears
+   both the two-line text and the 24px hover action buttons, so nothing
+   that appears or disappears per row (schedule line, attention badge,
+   hover buttons) changes the height. Non-scheduled rows show just the
+   title — no message count — centered in the same height. */
 .row {
   position: relative;
   display: flex;
   align-items: center;
   gap: 9px;
   padding: 0 9px;
-  height: 40px;
+  height: 44px;
   box-sizing: border-box;
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -250,9 +252,18 @@
   background: var(--color-warning-dark);
 }
 
-.rowTitle {
+/* Text block — vertically centered so a title-only (non-scheduled) row
+   sits centered in the same height as a two-line scheduled row. */
+.rowBody {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+}
+
+.rowTitle {
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-primary);
@@ -261,22 +272,16 @@
   text-overflow: ellipsis;
 }
 
-/* Scheduled marker — a small clock so a periodic workspace is
-   distinguishable on a single line. Hidden on hover to free room for the
-   run/pause/⋯ action buttons. */
-.scheduleIcon {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
+.rowMeta {
+  font-size: 11px;
   color: var(--color-accent-dark);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.scheduleIconPaused {
+.rowMetaPaused {
   color: var(--color-text-tertiary);
-}
-
-.row:hover .scheduleIcon {
-  display: none;
 }
 
 .attentionBadge {
