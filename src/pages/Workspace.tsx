@@ -44,6 +44,21 @@ const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
 type NumericTimestamp = number | bigint | null | undefined;
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry };
+// The per-workspace "view state": which drawer chip is open plus its
+// contextual slide-out (open artifact/memory preview, or task transcript).
+// Kept per workspaceId so switching workspaces neither leaks the previous
+// workspace's open artifact (which would fail to load here) nor forgets what
+// was open when you come back.
+type WorkspaceUiState = {
+  activePanel: ActivePanel;
+  previewEntry: PreviewEntry | null;
+  viewingTask: WorkspaceTaskResponse | null;
+};
+const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
+  activePanel: null,
+  previewEntry: null,
+  viewingTask: null,
+};
 type SettingsSelection =
   | { kind: 'general' }
   | { kind: 'agent'; agentId: string }
@@ -1047,36 +1062,70 @@ const Workspace = () => {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
   const [, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-  // Which "drawer" is open in response to a counter click in the header.
-  // null = chat-only. 'agents' | 'tasks' | 'memories' | 'artifacts' otherwise.
-  const [activePanel, setActivePanel] = useState<ActivePanel>(null);
-  // Slide-out side panels (only one may be open at a time):
+  // The drawer chip that's open plus its contextual slide-out panel. The
+  // Workspace component instance is REUSED across workspace→workspace
+  // navigations (both routes resolve to the same element), so a plain useState
+  // would leak one workspace's open artifact into the next — where it fails to
+  // load because the file lives elsewhere. Keying by workspaceId fixes that and
+  // restores whatever was open when you return to a workspace.
+  //   - activePanel:  null = chat-only; 'agents'|'tasks'|'memories'|'artifacts'
   //   - previewEntry: { kind: 'memory' | 'artifact', entry } — file preview
   //   - viewingTask:  task object — task transcript log
-  // Opening one clears the other; closing the drawer clears both.
-  const [previewEntry, setPreviewEntry] = useState<PreviewEntry | null>(null);
-  const [viewingTask, setViewingTask] = useState<WorkspaceTaskResponse | null>(null);
+  // Only one slide-out may be open at a time; opening one clears the other.
+  const [uiByWorkspace, setUiByWorkspace] = useState<Record<string, WorkspaceUiState>>({});
+  const { activePanel, previewEntry, viewingTask } =
+    uiByWorkspace[workspaceId] ?? EMPTY_WORKSPACE_UI;
 
-  const openPreviewEntry = useCallback((next: PreviewEntry) => {
-    setViewingTask(null);
-    setPreviewEntry(next);
-  }, []);
+  const patchWorkspaceUi = useCallback(
+    (patch: Partial<WorkspaceUiState>) => {
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        return { ...prev, [workspaceId]: { ...current, ...patch } };
+      });
+    },
+    [workspaceId]
+  );
 
-  const openTaskTranscript = useCallback((task: WorkspaceTaskResponse) => {
-    setPreviewEntry(null);
-    setViewingTask(task);
-  }, []);
+  // Side panels are contextual to the open drawer chip — switching to a panel
+  // that doesn't own the slide-out content clears it. Folding that invariant
+  // into the setter keeps it atomic (no stale flash between renders).
+  const setActivePanel = useCallback<React.Dispatch<React.SetStateAction<ActivePanel>>>(
+    (action) => {
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        const next = typeof action === 'function' ? action(current.activePanel) : action;
+        return {
+          ...prev,
+          [workspaceId]: {
+            activePanel: next,
+            previewEntry: next === 'memories' || next === 'artifacts' ? current.previewEntry : null,
+            viewingTask: next === 'tasks' ? current.viewingTask : null,
+          },
+        };
+      });
+    },
+    [workspaceId]
+  );
 
-  // The side panels are contextual to the open drawer chip — switching to a
-  // panel that doesn't own the slide-out content clears it.
-  useEffect(() => {
-    if (activePanel !== 'memories' && activePanel !== 'artifacts') {
-      setPreviewEntry(null);
-    }
-    if (activePanel !== 'tasks') {
-      setViewingTask(null);
-    }
-  }, [activePanel]);
+  const openPreviewEntry = useCallback(
+    (next: PreviewEntry) => {
+      patchWorkspaceUi({ previewEntry: next, viewingTask: null });
+    },
+    [patchWorkspaceUi]
+  );
+
+  const openTaskTranscript = useCallback(
+    (task: WorkspaceTaskResponse) => {
+      patchWorkspaceUi({ previewEntry: null, viewingTask: task });
+    },
+    [patchWorkspaceUi]
+  );
+
+  const closePreview = useCallback(() => patchWorkspaceUi({ previewEntry: null }), [patchWorkspaceUi]);
+  const closeTaskTranscript = useCallback(
+    () => patchWorkspaceUi({ viewingTask: null }),
+    [patchWorkspaceUi]
+  );
 
   const isSidePanelOpen = !!previewEntry || !!viewingTask;
 
@@ -1370,12 +1419,12 @@ const Workspace = () => {
             workspaceId={workspaceId}
             kind={previewEntry.kind}
             entry={previewEntry.entry}
-            onClose={() => setPreviewEntry(null)}
+            onClose={closePreview}
           />
         )}
 
         {snapshot && activePanel === 'tasks' && viewingTask && (
-          <WorkspaceTaskTranscriptPanel task={viewingTask} onClose={() => setViewingTask(null)} />
+          <WorkspaceTaskTranscriptPanel task={viewingTask} onClose={closeTaskTranscript} />
         )}
 
         {snapshot && activePanel && (
@@ -1400,11 +1449,7 @@ const Workspace = () => {
                 <button
                   type="button"
                   className={styles.workspaceDrawerClose}
-                  onClick={() => {
-                    setActivePanel(null);
-                    setPreviewEntry(null);
-                    setViewingTask(null);
-                  }}
+                  onClick={() => setActivePanel(null)}
                   title="Close panel"
                   aria-label="Close panel"
                 >
