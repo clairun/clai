@@ -10,7 +10,6 @@ import { useLocation } from 'react-router-dom';
 import { useTabManager } from '../../contexts/TabManagerContext';
 import { TabContextProvider } from '../../contexts/TabContext';
 import { useChatManager } from '../../contexts/ChatManagerContext';
-import { useFleet } from '../../contexts/FleetContext';
 import { useAssistantSession, useAssistantStore, assistantClient } from '../../assistant';
 import { getOrCreateWorkspaceSession } from '../../workspace/client';
 import TerminalEmulator from './TerminalEmulator';
@@ -50,7 +49,6 @@ const TerminalEmulatorWrapper = () => {
   const location = useLocation();
   const { tabs, activeTabId, updateTabContext } = useTabManager();
   const { openChat } = useChatManager();
-  const { isFleetRoute, selectedAgent, refresh: refreshFleet } = useFleet();
   const { ensureSession, isStreaming: tabIsStreaming } = useAssistantSession(activeTabId || '');
   const workspaceRouteMatch = location.pathname.match(/^\/workspace(?:\/([^/]+))?\/?$/);
   const isWorkspaceRoute = Boolean(workspaceRouteMatch);
@@ -65,7 +63,6 @@ const TerminalEmulatorWrapper = () => {
   // busy. Per route:
   //  - workspace: the workspace's canonical manager session, looked up by
   //    `workspace:<id>` tab-key (Workspace.tsx populates this on load).
-  //  - fleet: the selected agent's `sessionId` once it's been created.
   //  - default tab: the tab's own session via `useAssistantSession`.
   const workspaceSessionId = useAssistantStore(
     (state) => state.activeSessionByTab[`workspace:${currentWorkspaceId}`] || null
@@ -73,16 +70,8 @@ const TerminalEmulatorWrapper = () => {
   const workspaceIsStreaming = useAssistantStore(
     (state) => (workspaceSessionId ? !!state.sessions[workspaceSessionId]?.isStreaming : false)
   );
-  const fleetSessionId = selectedAgent?.sessionId || null;
-  const fleetIsStreaming = useAssistantStore(
-    (state) => (fleetSessionId ? !!state.sessions[fleetSessionId]?.isStreaming : false)
-  );
 
-  const inputDisabled = isWorkspaceRoute
-    ? workspaceIsStreaming
-    : isFleetRoute
-      ? fleetIsStreaming
-      : tabIsStreaming;
+  const inputDisabled = isWorkspaceRoute ? workspaceIsStreaming : tabIsStreaming;
 
   // Get active tab
   const activeTab = tabs.find((t: TabLike) => t.id === activeTabId);
@@ -133,61 +122,6 @@ const TerminalEmulatorWrapper = () => {
    */
   const handleSendToAgent = useCallback(
     async (query: string): Promise<{ error?: string }> => {
-      if (location.pathname === '/fleet' && isFleetRoute) {
-        if (!selectedAgent) {
-          return {
-            error:
-              'Select a workspace in Fleet to chat with its default agent. (If the workspace has no default agent set, open it from the card and configure one.)',
-          };
-        }
-
-        const connectionId = selectedAgent.providerConnectionIds?.[0] || null;
-        if (!connectionId) {
-          return {
-            error: 'Select a provider connection for this agent in Settings before sending prompts.',
-          };
-        }
-
-        try {
-          let sessionId = selectedAgent.sessionId;
-
-          if (!sessionId) {
-            const createdSession = await assistantClient.createSession({
-              tabId: selectedAgent.tabId || null,
-              kind: 'background_job',
-              title: selectedAgent.name,
-              context: {
-                // `workspaceId` opens the per-workspace DB on the backend;
-                // `automationId` / `agentWorkspaceId` identify the agent
-                // within it. These are distinct ids — keep them straight.
-                workspaceId: selectedAgent.workspaceId,
-                tabId: selectedAgent.tabId || null,
-                mcpServerIds: selectedAgent.selectedMcpServerIds || [],
-                execution: selectedAgent.execution || undefined,
-                automationId: selectedAgent.agentId,
-                agentWorkspaceId: selectedAgent.workspaceId,
-                automationName: selectedAgent.name,
-              },
-            });
-            sessionId = createdSession.id;
-            useAssistantStore.getState().initSession(createdSession);
-            await refreshFleet().catch(() => {});
-          }
-
-          const result = await assistantClient.sendMessage(sessionId, query, connectionId);
-          const store = useAssistantStore.getState();
-          store.addMessage(sessionId, result.message);
-          return {};
-        } catch (err) {
-          console.error('[TerminalEmulatorWrapper] Fleet assistant error:', err);
-          return {
-            error: isRunInFlightError(err)
-              ? 'The agent is still working on the previous turn — wait for it to finish.'
-              : errorMessage(err, 'Assistant request failed.'),
-          };
-        }
-      }
-
       if (isWorkspaceRoute) {
         try {
           const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
@@ -257,11 +191,7 @@ const TerminalEmulatorWrapper = () => {
       activeTab,
       ensureSession,
       resolveTabConnectionId,
-      isFleetRoute,
-      location.pathname,
       openChat,
-      refreshFleet,
-      selectedAgent,
       currentWorkspaceId,
       isWorkspaceRoute,
     ]

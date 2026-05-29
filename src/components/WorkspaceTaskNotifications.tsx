@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useNavigate } from 'react-router-dom';
-import { useFleet } from '../contexts/FleetContext';
 import styles from './WorkspaceTaskNotifications.module.css';
 
 const WORKSPACE_TASK_ATTENTION_EVENT = 'workspace://task-attention';
@@ -37,7 +36,6 @@ const notificationText = (payload: TaskAttentionPayload): string =>
 
 const WorkspaceTaskNotifications = () => {
   const navigate = useNavigate();
-  const { refresh } = useFleet();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const timersRef = useRef(new Map<string, number>());
 
@@ -77,8 +75,6 @@ const WorkspaceTaskNotifications = () => {
         window.clearTimeout(existingTimer);
       }
       timersRef.current.set(id, window.setTimeout(() => dismiss(id), AUTO_DISMISS_MS));
-
-      refresh().catch(() => {});
     });
 
     return () => {
@@ -88,7 +84,7 @@ const WorkspaceTaskNotifications = () => {
       }
       timersRef.current.clear();
     };
-  }, [dismiss, refresh]);
+  }, [dismiss]);
 
   if (notifications.length === 0) {
     return null;

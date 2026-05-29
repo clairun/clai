@@ -62,47 +62,6 @@
   background: transparent;
 }
 
-.modeButton {
-  appearance: none;
-  border: 1px solid var(--color-border-light);
-  background: var(--color-overlay-02);
-  color: var(--color-text-secondary);
-  border-radius: 999px;
-  height: 32px;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 12px;
-  margin-top: 4px;
-  transition: all 0.2s ease;
-  cursor: pointer;
-}
-
-.modeButton:hover {
-  background: var(--color-bg-elevated);
-  color: var(--color-primary);
-  border-color: var(--color-primary-alpha-30);
-}
-
-.modeButton:focus-visible {
-  outline: none;
-  box-shadow: var(--shadow-ring-primary);
-}
-
-.modeButtonIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.modeButtonLabel {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-
 /* Settings button at the left side */
 .settingsButton {
   appearance: none;

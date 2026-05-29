@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams, type NavigateFunction } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { workspaceDeleteAgent } from '../api/client';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
 import WorkspaceTaskTranscriptPanel from '../components/WorkspaceTaskTranscriptPanel';
@@ -776,7 +776,6 @@ const WorkspaceHeader = ({
   messages,
   memories,
   artifacts,
-  navigate,
   activePanel,
   setActivePanel,
   onOpenWorkspaceSettings,
@@ -795,7 +794,6 @@ const WorkspaceHeader = ({
   messages: AssistantMessage[];
   memories: WorkspaceFileEntry[];
   artifacts: WorkspaceFileEntry[];
-  navigate: NavigateFunction;
   activePanel: ActivePanel;
   setActivePanel: React.Dispatch<React.SetStateAction<ActivePanel>>;
   onOpenWorkspaceSettings: () => void;
@@ -875,10 +873,6 @@ const WorkspaceHeader = ({
   return (
     <div className={styles.header}>
       <div className={styles.headerLeft}>
-        <button type="button" className={styles.breadcrumb} onClick={() => navigate('/fleet')}>
-          Fleet
-        </button>
-        <span className={styles.breadcrumbSeparator}>/</span>
         <h1 className={styles.title}>
           {snapshot?.title || (isGenericWorkspace ? 'Workspace' : workspaceId)}
         </h1>
@@ -1072,7 +1066,6 @@ const ChatFirstLayout = ({
 
 const Workspace = () => {
   const params = useParams();
-  const navigate = useNavigate();
   const { toggleChat } = useChatManager() as { toggleChat: () => void };
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
@@ -1371,7 +1364,6 @@ const Workspace = () => {
         messages={messages}
         memories={memories}
         artifacts={artifacts}
-        navigate={navigate}
         activePanel={activePanel}
         setActivePanel={setActivePanel}
         onOpenWorkspaceSettings={openWorkspaceSettings}

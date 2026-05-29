@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useContext, useCallback } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { useCommand } from '../../contexts/CommandContext';
 import { useTabManager } from '../../contexts/TabManagerContext';
 import { useChatManager } from '../../contexts/ChatManagerContext';
@@ -7,7 +7,6 @@ import TabContext from '../../contexts/TabContext';
 import { parseCommand, isLayoutCommand } from '../../utils/commandParser';
 import { handleContextCommand, isContextCommand } from '../../utils/contextCommandHandler';
 import { isCommandSupported } from '../../utils/commandRegistry';
-import { createWorkspace } from '../../workspace/client';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import ContextPanel from '../ContextPanel/ContextPanel';
 import { SettingsModal } from '../Settings';
@@ -36,7 +35,6 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
   const { handleLayoutCommand, getActiveTab } = useTabManager();
   const { setActiveContext, openChat, isCurrentChatOpen } = useChatManager();
   const location = useLocation();
-  const navigate = useNavigate();
   // Try to get tab context, but don't throw error if not available
   const tabContext = useContext(TabContext);
   const [inputValue, setInputValue] = useState('');
@@ -346,20 +344,6 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
     setIsSettingsOpen(true);
   };
 
-  const handleModeToggle = async (event: React.MouseEvent) => {
-    event.stopPropagation();
-    if (isFleetRoute) {
-      // Create a new workspace and navigate to it
-      try {
-        const id = await createWorkspace();
-        navigate(`/workspace/${id}`, { state: { skipFleetRedirect: true } });
-      } catch (err) {
-        console.error('[TerminalEmulator] Failed to create workspace:', err);
-      }
-    } else {
-      navigate('/fleet');
-    }
-  };
 
   return (
     <div ref={terminalRef} className={`${styles.terminal} ${isChatOpen ? styles.chatOpen : ''}`} onClick={handleTerminalClick}>
@@ -379,30 +363,10 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
 
       {/* Input Line - Now at the top for better UX */}
       <div className={styles.terminalContent}>
-        <button
-          type="button"
-          className={styles.modeButton}
-          onClick={handleModeToggle}
-          title={isFleetRoute ? 'New workspace' : 'Open fleet'}
-          aria-label={isFleetRoute ? 'New workspace' : 'Open fleet'}
-        >
-          <span className={styles.modeButtonIcon} aria-hidden="true">
-            {isFleetRoute ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17 18a2 2 0 1 0-2-2 2 2 0 0 0 2 2Z" />
-                <path d="M7 18a2 2 0 1 0-2-2 2 2 0 0 0 2 2Z" />
-                <path d="M12 8a2 2 0 1 0-2-2 2 2 0 0 0 2 2Z" />
-                <path d="M7 14v-1a5 5 0 0 1 10 0v1" />
-              </svg>
-            )}
-          </span>
-          <span className={styles.modeButtonLabel}>{isFleetRoute ? 'New Workspace' : 'Fleet'}</span>
-        </button>
+        {/* The old Fleet / New-Workspace mode-toggle button lived here.
+            It's gone: the persistent workspace rail (FleetLayout) is now
+            the navigator and carries its own "＋ New" affordance, so the
+            terminal no longer needs a route/mode toggle. */}
 
         {/* Global Settings is only accessible from outside a workspace
             (Fleet view). Inside a workspace, configuration belongs to the

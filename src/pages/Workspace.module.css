@@ -33,26 +33,6 @@
   min-width: 0;
 }
 
-.breadcrumb {
-  border: none;
-  background: transparent;
-  padding: 2px 0;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--color-text-tertiary);
-  cursor: pointer;
-  transition: color var(--transition-fast);
-}
-
-.breadcrumb:hover {
-  color: var(--color-primary);
-}
-
-.breadcrumbSeparator {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-}
-
 .title {
   margin: 0;
   font-size: 18px;

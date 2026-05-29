@@ -6,7 +6,6 @@ import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications
 import { CommandProvider } from '../contexts/CommandContext';
 import { TabManagerProvider } from '../contexts/TabManagerContext';
 import { ChatManagerProvider } from '../contexts/ChatManagerContext';
-import { FleetProvider } from '../contexts/FleetContext';
 import { useAssistantEvents } from '../assistant';
 import styles from './MainLayout.module.css';
 
@@ -28,16 +27,14 @@ const MainLayout = () => {
       <TabManagerProvider>
         <AssistantEventListener>
           <ChatManagerProvider>
-            <FleetProvider>
-              <div className={styles.mainLayout}>
-                <WorkspaceTaskNotifications />
-                <PermissionAttentionNotifications />
-                <TerminalEmulatorWrapper />
-                <div className={styles.contentArea}>
-                  <Outlet />
-                </div>
+            <div className={styles.mainLayout}>
+              <WorkspaceTaskNotifications />
+              <PermissionAttentionNotifications />
+              <TerminalEmulatorWrapper />
+              <div className={styles.contentArea}>
+                <Outlet />
               </div>
-            </FleetProvider>
+            </div>
           </ChatManagerProvider>
         </AssistantEventListener>
       </TabManagerProvider>
