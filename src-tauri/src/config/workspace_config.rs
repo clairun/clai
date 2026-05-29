@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::config::{bundled, AppConfig, SkillSourceKind};
-use crate::config::{ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant};
+use crate::config::{
+    ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
+};
 
 const WORKSPACE_CONFIG_VERSION: u32 = 1;
 
@@ -237,6 +239,13 @@ pub fn default_agent_execution() -> ExecutionCapabilityConfig {
 
 impl WorkspaceAgent {
     pub fn new_manager(id: String, now: i64) -> Self {
+        // A freshly created workspace should be ready to work without a detour
+        // to Settings: give its manager restricted shell access (sandboxed
+        // bash_exec with the default blocklist) and web access by default. The
+        // user can still tighten either in agent settings.
+        let mut execution = default_agent_execution();
+        execution.shell.mode = ShellAccessMode::Restricted;
+        execution.web.enabled = true;
         Self {
             id,
             name: "Manager".to_string(),
@@ -245,7 +254,7 @@ impl WorkspaceAgent {
             selected_skills: Vec::new(),
             selected_mcp_servers: Vec::new(),
             provider_connection_ids: Vec::new(),
-            execution: default_agent_execution(),
+            execution,
             created_at: now,
             updated_at: now,
         }
@@ -420,12 +429,12 @@ mod attach_provider_tests {
     #[test]
     fn attaches_first_enabled_connection_to_manager_and_preferred() {
         let mut config = workspace();
-        config.attach_default_provider(
-            &[connection("a", true), connection("b", true)],
-            42,
-        );
+        config.attach_default_provider(&[connection("a", true), connection("b", true)], 42);
 
-        assert_eq!(config.preferred_provider_connection_id.as_deref(), Some("a"));
+        assert_eq!(
+            config.preferred_provider_connection_id.as_deref(),
+            Some("a")
+        );
         let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
         assert_eq!(manager.provider_connection_ids, vec!["a".to_string()]);
         assert_eq!(manager.updated_at, 42);
@@ -434,12 +443,12 @@ mod attach_provider_tests {
     #[test]
     fn skips_disabled_connections_and_picks_first_enabled() {
         let mut config = workspace();
-        config.attach_default_provider(
-            &[connection("a", false), connection("b", true)],
-            7,
-        );
+        config.attach_default_provider(&[connection("a", false), connection("b", true)], 7);
 
-        assert_eq!(config.preferred_provider_connection_id.as_deref(), Some("b"));
+        assert_eq!(
+            config.preferred_provider_connection_id.as_deref(),
+            Some("b")
+        );
         let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
         assert_eq!(manager.provider_connection_ids, vec!["b".to_string()]);
     }
@@ -452,5 +461,12 @@ mod attach_provider_tests {
         assert!(config.preferred_provider_connection_id.is_none());
         let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
         assert!(manager.provider_connection_ids.is_empty());
+    }
+
+    #[test]
+    fn new_manager_defaults_to_restricted_shell_and_web_enabled() {
+        let manager = WorkspaceAgent::new_manager("mgr".to_string(), 1);
+        assert_eq!(manager.execution.shell.mode, ShellAccessMode::Restricted);
+        assert!(manager.execution.web.enabled);
     }
 }
