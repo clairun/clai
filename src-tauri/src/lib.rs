@@ -202,6 +202,47 @@ pub fn run() {
         "Failed to initialize configuration manager. \
          Check that the config directory is accessible.",
     );
+
+    // First-run convenience: if the user has no provider connections yet,
+    // auto-detect the supported CLI providers (claude-code only) and register
+    // a connection for each one found, so the app is usable without a manual
+    // trip to Settings. The model is left empty so claude-code uses its own
+    // configured default. Runs before the default-workspace bootstrap so that
+    // first workspace picks the connection up.
+    if config_manager.get().provider_connections.is_empty() {
+        for provider_id in providers::detect_supported_cli_providers() {
+            let now = chrono::Utc::now().timestamp_millis();
+            let id = uuid::Uuid::new_v4().to_string();
+            let name = crate::assistant::providers::registry::get_provider_descriptor(provider_id)
+                .map(|d| d.display_name)
+                .unwrap_or_else(|| provider_id.to_string());
+            let connection = crate::assistant::types::ProviderConnection {
+                secret_ref: format!("provider-connection::{}", id),
+                id,
+                name,
+                provider_id: provider_id.to_string(),
+                auth_mode: crate::assistant::types::AuthMode::SubscriptionLogin,
+                base_url: None,
+                model_id: String::new(),
+                account_label: None,
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+            };
+            match config_manager.add_provider_connection(connection) {
+                Ok(()) => tracing::info!(
+                    provider_id,
+                    "Auto-detected supported provider CLI; registered a connection"
+                ),
+                Err(e) => tracing::warn!(
+                    provider_id,
+                    error = %e,
+                    "Failed to register auto-detected provider connection"
+                ),
+            }
+        }
+    }
+
     let initial_config = config_manager.get();
     let workspace_index = WorkspaceIndex::scan(&initial_config);
 
@@ -390,12 +431,20 @@ async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Res
         let now = chrono::Utc::now().timestamp_millis();
         let base = state.workspace_create_target(None)?;
         let root = base.join(&id);
-        let config = config::workspace_config::WorkspaceConfig::new(
+        let mut config = config::workspace_config::WorkspaceConfig::new(
             id.clone(),
             "Default".to_string(),
             now,
             manager_id,
         );
+        // Attach any existing (incl. just-auto-detected) provider so the very
+        // first workspace is usable out of the box.
+        let connections = state
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Config lock error: {}", e))?
+            .get_provider_connections();
+        config.attach_default_provider(&connections, now);
         config::workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(root.join(".clai").join("memory").join("journal"))
             .map_err(|e| format!("Failed to prepare default workspace: {}", e))?;

@@ -54,9 +54,12 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
         } else {
           setLocalMcpServerIds(snap?.session?.context?.mcpServerIds || []);
         }
-        // Pick up the preferred provider from the snapshot binding
-        if (!agent && (snap?.providerConnectionIds?.length || 0) > 0) {
-          setSelectedProviderId((prev) => prev || snap.providerConnectionIds[0]!);
+        // Reflect the workspace's actual provider. The backend lists it
+        // preferred-first, so [0] is the connection interactive sends and
+        // scheduled runs use. Set it directly (not `prev || …`) so switching
+        // workspaces doesn't retain the previous workspace's selection.
+        if (!agent) {
+          setSelectedProviderId(snap?.providerConnectionIds?.[0] || '');
         }
       } catch {
         // Snapshot not available yet — fine
@@ -199,7 +202,7 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
             >
               {enabledProviders.map((conn) => (
                 <option key={conn.id} value={conn.id}>
-                  {conn.name} — {conn.modelId}
+                  {conn.modelId ? `${conn.name} — ${conn.modelId}` : conn.name}
                 </option>
               ))}
             </select>

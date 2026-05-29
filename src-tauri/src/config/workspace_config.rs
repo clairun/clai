@@ -193,6 +193,28 @@ impl WorkspaceConfig {
             agents: vec![WorkspaceAgent::new_manager(manager_id, now)],
         }
     }
+
+    /// Attach the first enabled provider connection as this workspace's
+    /// default, so a freshly created workspace is immediately usable without a
+    /// trip to Settings. Sets both the workspace-level preferred provider and
+    /// the manager agent's provider list (the source of truth scheduled runs
+    /// read). No-op when there are no enabled connections.
+    pub fn attach_default_provider(
+        &mut self,
+        connections: &[crate::assistant::types::ProviderConnection],
+        now: i64,
+    ) {
+        let Some(first) = connections.iter().find(|c| c.enabled) else {
+            return;
+        };
+        self.preferred_provider_connection_id = Some(first.id.clone());
+        let default_agent_id = self.default_agent_id.clone();
+        if let Some(manager) = self.agents.iter_mut().find(|a| a.id == default_agent_id) {
+            manager.provider_connection_ids = vec![first.id.clone()];
+            manager.updated_at = now;
+        }
+        self.updated_at = now;
+    }
 }
 
 /// Build the default sandbox config for a new agent. Every fresh agent —
@@ -368,4 +390,67 @@ pub fn refs_to_mcp_ids(config: &AppConfig, refs: &[McpRef]) -> Vec<String> {
                 .unwrap_or_else(|| mcp_ref.name.clone())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod attach_provider_tests {
+    use super::*;
+    use crate::assistant::types::{AuthMode, ProviderConnection};
+
+    fn connection(id: &str, enabled: bool) -> ProviderConnection {
+        ProviderConnection {
+            id: id.to_string(),
+            name: format!("conn-{id}"),
+            provider_id: "claude-code".to_string(),
+            auth_mode: AuthMode::SubscriptionLogin,
+            base_url: None,
+            secret_ref: format!("provider-connection::{id}"),
+            model_id: String::new(),
+            account_label: None,
+            enabled,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn workspace() -> WorkspaceConfig {
+        WorkspaceConfig::new("ws".to_string(), "Title".to_string(), 1, "mgr".to_string())
+    }
+
+    #[test]
+    fn attaches_first_enabled_connection_to_manager_and_preferred() {
+        let mut config = workspace();
+        config.attach_default_provider(
+            &[connection("a", true), connection("b", true)],
+            42,
+        );
+
+        assert_eq!(config.preferred_provider_connection_id.as_deref(), Some("a"));
+        let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
+        assert_eq!(manager.provider_connection_ids, vec!["a".to_string()]);
+        assert_eq!(manager.updated_at, 42);
+    }
+
+    #[test]
+    fn skips_disabled_connections_and_picks_first_enabled() {
+        let mut config = workspace();
+        config.attach_default_provider(
+            &[connection("a", false), connection("b", true)],
+            7,
+        );
+
+        assert_eq!(config.preferred_provider_connection_id.as_deref(), Some("b"));
+        let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
+        assert_eq!(manager.provider_connection_ids, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn no_op_when_no_enabled_connections() {
+        let mut config = workspace();
+        config.attach_default_provider(&[connection("a", false)], 9);
+
+        assert!(config.preferred_provider_connection_id.is_none());
+        let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
+        assert!(manager.provider_connection_ids.is_empty());
+    }
 }

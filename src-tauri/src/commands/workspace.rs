@@ -767,12 +767,23 @@ fn resolve_workspace_provider_selection(
         .filter(|id| enabled_connections.iter().any(|c| c.id == *id))
         .or_else(|| enabled_connections.first().map(|c| c.id.clone()));
 
+    // Surface the preferred (actually-used) connection first so the terminal
+    // provider picker, which seeds its selection from the first id, reflects
+    // what interactive sends and scheduled runs actually use.
+    let mut ordered = enabled_connections;
+    if let Some(pref) = preferred_connection_id.as_ref() {
+        if let Some(pos) = ordered.iter().position(|c| &c.id == pref) {
+            let connection = ordered.remove(pos);
+            ordered.insert(0, connection);
+        }
+    }
+
     Ok(WorkspaceProviderSelection {
-        ids: enabled_connections
+        ids: ordered
             .iter()
             .map(|connection| connection.id.clone())
             .collect(),
-        names: enabled_connections
+        names: ordered
             .iter()
             .map(|connection| connection.name.clone())
             .collect(),
@@ -1932,7 +1943,10 @@ pub async fn workspace_create(
     fs::create_dir_all(&memory_dir)
         .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
 
-    let config = WorkspaceConfig::new(id.clone(), display_title.clone(), now, manager_id);
+    let mut config = WorkspaceConfig::new(id.clone(), display_title.clone(), now, manager_id);
+    // Pre-wire the workspace's main agent to an existing provider so the user
+    // can start chatting / scheduling without a detour to Settings.
+    config.attach_default_provider(&app_config(state.inner())?.provider_connections, now);
     workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
     let workspace_pool = crate::db::init_workspace_db(&root).await?;
     state
@@ -1946,7 +1960,7 @@ pub async fn workspace_create(
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .attach_pool(id.clone(), workspace_pool);
 
-    tracing::info!(workspace_id = %id, title = %display_title, "Created new general workspace with empty manager");
+    tracing::info!(workspace_id = %id, title = %display_title, "Created new general workspace");
 
     Ok(id)
 }

@@ -222,6 +222,19 @@ pub fn check_provider(provider: &AiProvider) -> AvailableProvider {
     AvailableProvider::available(provider.clone(), None)
 }
 
+/// First-run detection of the CLI providers clai supports. Currently
+/// claude-code only — the single fully-supported provider. Returns the
+/// `provider_id`s (matching `ProviderConnection.provider_id`) whose CLI is
+/// present on the host so the caller can auto-register connections, removing
+/// the need for the user to configure a provider manually before first use.
+pub fn detect_supported_cli_providers() -> Vec<&'static str> {
+    let mut found = Vec::new();
+    if check_provider(&AiProvider::Claude { model: None }).available {
+        found.push(crate::assistant::providers::cli::CLAUDE_CODE_PROVIDER_ID);
+    }
+    found
+}
+
 /// Gets all known providers with their availability status.
 /// Uses parallel threads for faster detection.
 pub fn get_available_providers() -> Vec<AvailableProvider> {
