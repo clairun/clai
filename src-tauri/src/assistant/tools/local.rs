@@ -688,22 +688,46 @@ fn resolve_allowed_path(
 ) -> Result<PathBuf, String> {
     let candidate = resolve_candidate_path(path, grants)?;
 
-    for grant in grants {
-        if candidate.starts_with(&grant.root) {
-            if require_write && grant.access != AccessKind::ReadWrite {
-                return Err(format!(
-                    "Path {} is not writable for this agent",
-                    candidate.display()
-                ));
-            }
-            return Ok(candidate);
+    // Resolve against the MOST SPECIFIC (deepest-rooted) grant that contains the
+    // candidate, not merely the first one in iteration order. Grants nest: a
+    // broad read-only `/home/me` can coexist with a narrower read-write
+    // `/home/me/project` accepted via `fs_request_grant`. The deeper grant is
+    // the more precise statement of intent for its subtree and must win —
+    // mirroring the last-writer-wins bind ordering in `linux_bwrap`. A
+    // first-match scan let a read-only ancestor shadow a read-write descendant
+    // and rejected legitimate writes (and vice-versa for read-only carve-outs).
+    let deepest = grants
+        .iter()
+        .filter(|grant| candidate.starts_with(&grant.root))
+        .map(|grant| grant.root.components().count())
+        .max();
+
+    let Some(depth) = deepest else {
+        return Err(format!(
+            "Path {} is outside the agent's allowed filesystem grants",
+            candidate.display()
+        ));
+    };
+
+    if require_write {
+        // Among equally-specific grants (same root, conflicting access), the
+        // read-write one wins: an explicit fresh grant must not be shadowed by
+        // a coincidental read-only entry at the same root.
+        let writable = grants
+            .iter()
+            .filter(|grant| {
+                candidate.starts_with(&grant.root) && grant.root.components().count() == depth
+            })
+            .any(|grant| grant.access == AccessKind::ReadWrite);
+        if !writable {
+            return Err(format!(
+                "Path {} is not writable for this agent",
+                candidate.display()
+            ));
         }
     }
 
-    Err(format!(
-        "Path {} is outside the agent's allowed filesystem grants",
-        candidate.display()
-    ))
+    Ok(candidate)
 }
 
 fn resolve_candidate_path(path: &str, grants: &[ResolvedGrant]) -> Result<PathBuf, String> {
@@ -1830,6 +1854,93 @@ mod tests {
             Path::new("/a/b"),
             FilesystemPathAccess::ReadOnly
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_allowed_path — most-specific grant wins over iteration order
+    // ------------------------------------------------------------------
+
+    // Regression: a read-write grant on a subdirectory must be honored even
+    // when a broader read-only grant on an ancestor appears earlier in the
+    // list. Previously the first-match scan let the read-only ancestor shadow
+    // the read-write descendant, rejecting legitimate writes (this is exactly
+    // what blocked `fs_write` after `fs_request_grant` returned read_write).
+    #[test]
+    fn rw_descendant_grant_is_writable_under_ro_ancestor() {
+        let grants = vec![
+            ResolvedGrant {
+                root: PathBuf::from("/home/me"),
+                access: AccessKind::ReadOnly,
+            },
+            ResolvedGrant {
+                root: PathBuf::from("/home/me/project"),
+                access: AccessKind::ReadWrite,
+            },
+        ];
+        let resolved = resolve_allowed_path("/home/me/project/src/main.rs", &grants, true).unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/me/project/src/main.rs"));
+    }
+
+    // The dual: a read-only carve-out on a subdirectory must override a broader
+    // read-write ancestor, so writes into the carve-out are denied.
+    #[test]
+    fn ro_descendant_carveout_denies_write_under_rw_ancestor() {
+        let grants = vec![
+            ResolvedGrant {
+                root: PathBuf::from("/home/me"),
+                access: AccessKind::ReadWrite,
+            },
+            ResolvedGrant {
+                root: PathBuf::from("/home/me/.ssh"),
+                access: AccessKind::ReadOnly,
+            },
+        ];
+        let err = resolve_allowed_path("/home/me/.ssh/id_ed25519", &grants, true).unwrap_err();
+        assert!(err.contains("not writable"), "unexpected error: {err}");
+    }
+
+    // Reads under a read-only ancestor still work when no deeper grant applies.
+    #[test]
+    fn read_is_allowed_under_ro_ancestor_without_deeper_grant() {
+        let grants = vec![ResolvedGrant {
+            root: PathBuf::from("/home/me"),
+            access: AccessKind::ReadOnly,
+        }];
+        let resolved = resolve_allowed_path("/home/me/notes.txt", &grants, false).unwrap();
+        assert_eq!(resolved, PathBuf::from("/home/me/notes.txt"));
+    }
+
+    // A read-write entry coexisting at the SAME root as a read-only one (the
+    // dedup in filesystem_grants only drops exact root+access duplicates) must
+    // resolve as writable.
+    #[test]
+    fn rw_grant_wins_over_ro_grant_at_same_root() {
+        let grants = vec![
+            ResolvedGrant {
+                root: PathBuf::from("/data"),
+                access: AccessKind::ReadOnly,
+            },
+            ResolvedGrant {
+                root: PathBuf::from("/data"),
+                access: AccessKind::ReadWrite,
+            },
+        ];
+        let resolved = resolve_allowed_path("/data/out.json", &grants, true).unwrap();
+        assert_eq!(resolved, PathBuf::from("/data/out.json"));
+    }
+
+    // Paths outside every grant root are still rejected as out-of-bounds.
+    #[test]
+    fn path_outside_all_grants_is_rejected() {
+        let grants = vec![ResolvedGrant {
+            root: PathBuf::from("/home/me"),
+            access: AccessKind::ReadWrite,
+        }];
+        let err = resolve_allowed_path("/etc/passwd", &grants, false).unwrap_err();
+        assert!(
+            err.contains("outside the agent's allowed filesystem grants"),
+            "unexpected error: {err}"
+        );
     }
 
     // ------------------------------------------------------------------
