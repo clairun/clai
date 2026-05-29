@@ -16,6 +16,13 @@
  */
 
 :root[data-theme="dark"] {
+  /* Render native controls (select value + <option> popups, default button
+     text, checkboxes, scrollbars) with the dark UA variant. This is the fix
+     for invisible dropdown text and dark-on-dark button labels: without it
+     WebKit draws form controls with light system colors (e.g. dark
+     `ButtonText`) regardless of our token-based foreground. */
+  color-scheme: dark;
+
   /* ============================================
      BACKGROUNDS - Deep space, layered (cards lift)
      ============================================ */

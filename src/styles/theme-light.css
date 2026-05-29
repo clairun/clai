@@ -17,6 +17,11 @@
  */
 
 :root {
+  /* Render native controls (select/option popups, buttons, checkboxes,
+     scrollbars) with the light UA variant. Without this WebKit picks a
+     default that may not match our surface; the dark theme flips it. */
+  color-scheme: light;
+
   /* ============================================
      BACKGROUNDS - Warm with Subtle Indigo Tint
      ============================================ */

@@ -531,6 +531,7 @@
 .addButton {
   appearance: none;
   background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
   border: 1px solid var(--color-border-medium);
   padding: 7px 12px;
   border-radius: 6px;
