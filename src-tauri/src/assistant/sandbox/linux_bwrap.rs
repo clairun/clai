@@ -205,12 +205,17 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
 }
 
 fn append_runtime_file_binds(args: &mut Vec<OsString>) {
-    for bind in runtime_file_binds() {
+    let in_flatpak = crate::providers::is_flatpak();
+    for bind in runtime_file_binds(in_flatpak) {
         for dir in private_parent_dirs_for(&bind.destination) {
             args.push(os("--dir"));
             args.push(dir.into_os_string());
         }
-        args.push(os("--ro-bind"));
+        // Use --ro-bind-try (not --ro-bind) so a runtime file that has
+        // vanished between resolve-time and bwrap-launch-time degrades
+        // gracefully (bind skipped) instead of aborting the whole sandbox
+        // before any command runs.
+        args.push(os("--ro-bind-try"));
         args.push(bind.source.into_os_string());
         args.push(bind.destination.into_os_string());
     }
@@ -347,7 +352,34 @@ struct RuntimeFileBind {
     destination: PathBuf,
 }
 
-fn runtime_file_binds() -> Vec<RuntimeFileBind> {
+fn runtime_file_binds(in_flatpak: bool) -> Vec<RuntimeFileBind> {
+    if in_flatpak {
+        // Inside Flatpak, `/etc/resolv.conf` and `/etc/localtime` are symlinks
+        // into the Flatpak runtime's own filesystem view — typically targeting
+        // paths under `/run/host/...` that the Flatpak fabricates for the
+        // sandboxed app (e.g. `/run/host/monitor/resolv.conf`). Resolving the
+        // symlink here therefore yields a bind whose source/destination only
+        // exist inside the Flatpak's mount namespace.
+        //
+        // bwrap, however, runs on the *host* via `flatpak-spawn --host bwrap …`
+        // (see `launch_argv`). The host has no such path, so feeding the
+        // resolved source to a bind aborts sandbox setup with
+        //   `bwrap: Can't find source path …: No such file or directory`
+        // before any inner command can run — leaving the sandboxed shell
+        // permanently unavailable in a Flatpak build.
+        //
+        // We can't safely probe the host's filesystem from inside Flatpak (it
+        // has its own view), so we don't chase the symlink chain. The wholesale
+        // `--ro-bind /etc /etc` line in `bwrap_args` is executed by the host's
+        // bwrap and already exposes the host's `/etc/resolv.conf` /
+        // `/etc/localtime` via the host's view. On systemd-resolved hosts where
+        // `/etc/resolv.conf` is a symlink to `/run/systemd/resolve/...` the
+        // target lives outside `/etc` and won't be bound — DNS via resolv.conf
+        // may degrade inside the sandbox, but the sandbox itself stays usable,
+        // which is the necessary condition for the agent to function at all in
+        // a Flatpak install.
+        return Vec::new();
+    }
     [Path::new("/etc/resolv.conf"), Path::new("/etc/localtime")]
         .into_iter()
         .filter_map(resolve_runtime_symlink_bind)
@@ -760,6 +792,18 @@ mod tests {
             bind.destination,
             temp.path().join("run/systemd/resolve/stub-resolv.conf")
         );
+    }
+
+    // Regression: inside Flatpak the runtime symlinks resolve to paths that
+    // exist only in the Flatpak's mount namespace (e.g.
+    // `/run/host/monitor/resolv.conf`), but bwrap runs on the host via
+    // `flatpak-spawn --host bwrap …` and has no such path. Feeding those
+    // sources to a bind aborts sandbox setup before any command runs, so we
+    // must emit no runtime-file binds at all inside Flatpak and rely on the
+    // wholesale `--ro-bind /etc /etc` line instead.
+    #[test]
+    fn runtime_file_binds_returns_empty_inside_flatpak() {
+        assert!(runtime_file_binds(true).is_empty());
     }
 
     #[tokio::test]
