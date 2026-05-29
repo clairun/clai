@@ -1,0 +1,348 @@
+/**
+ * CLAI - Dark Theme  ·  "Deep Space"
+ *
+ * A cockpit-at-night: deep near-black navy backgrounds, hairline borders,
+ * off-white (low-glare) text, and the brand's own indigo + Netdata green
+ * as the glowing "instrument" accents — so the logo dissolves into the
+ * palette rather than clashing with it.
+ *
+ * This file ONLY overrides color/gradient/shadow token VALUES. Structural
+ * tokens (radius, transitions, scale, z-index, blur, safe-area) live in
+ * theme-light.css under :root and are shared across themes.
+ *
+ * Scope: `:root[data-theme="dark"]` (specificity 0,2,0) outranks the light
+ * `:root` (0,1,0), so dark wins whenever <html data-theme="dark"> is set,
+ * regardless of stylesheet import order.
+ */
+
+:root[data-theme="dark"] {
+  /* ============================================
+     BACKGROUNDS - Deep space, layered (cards lift)
+     ============================================ */
+  --color-bg-primary: #0A0E14;       /* page — deepest */
+  --color-bg-secondary: #0E141C;     /* rails / secondary surfaces */
+  --color-bg-tertiary: #141B24;
+  --color-bg-hover: #1B2330;         /* hover LIGHTENS on dark */
+  --color-bg-active: #232C3A;
+
+  --color-bg-elevated: #161D28;      /* cards / panels — lifted above page */
+  --color-bg-elevated-hover: #1C2533;
+
+  --color-bg-glass: rgba(14, 20, 28, 0.85);
+  --color-bg-glass-strong: rgba(22, 29, 40, 0.95);
+
+  --color-bg-gradient: linear-gradient(180deg, #0A0E14 0%, #0B1018 50%, #0A1014 100%);
+
+  /* Overlays: low-alpha tints LIGHTEN (hover); high-alpha are scrims and
+     DARKEN (modal backdrops) — the two roles diverge on dark. */
+  --color-overlay-02: rgba(255, 255, 255, 0.02);
+  --color-overlay-04: rgba(255, 255, 255, 0.04);
+  --color-overlay-06: rgba(255, 255, 255, 0.06);
+  --color-overlay-08: rgba(255, 255, 255, 0.08);
+  --color-overlay-10: rgba(255, 255, 255, 0.10);
+  --color-overlay-20: rgba(255, 255, 255, 0.14);
+  --color-overlay-40: rgba(0, 0, 0, 0.45);
+  --color-overlay-60: rgba(0, 0, 0, 0.62);
+  --color-overlay-80: rgba(0, 0, 0, 0.78);
+
+  /* ============================================
+     PRIMARY BRAND - Indigo (lighter so it glows on dark)
+     ============================================ */
+  --color-primary: #818CF8;
+  --color-primary-rgb: 129, 140, 248;
+
+  --color-primary-light: #A5B4FC;
+  --color-primary-lighter: #1A1F33;   /* "lighter" = subtle indigo-tinted fill on dark */
+  --color-primary-dark: #6366F1;
+  --color-primary-darker: #4F46E5;
+
+  --color-primary-alpha-05: rgba(129, 140, 248, 0.05);
+  --color-primary-alpha-08: rgba(129, 140, 248, 0.08);
+  --color-primary-alpha-10: rgba(129, 140, 248, 0.10);
+  --color-primary-alpha-15: rgba(129, 140, 248, 0.15);
+  --color-primary-alpha-20: rgba(129, 140, 248, 0.20);
+  --color-primary-alpha-30: rgba(129, 140, 248, 0.30);
+  --color-primary-alpha-40: rgba(129, 140, 248, 0.40);
+  --color-primary-alpha-70: rgba(129, 140, 248, 0.70);
+  --color-primary-alpha-90: rgba(129, 140, 248, 0.90);
+
+  /* ============================================
+     ACCENT - Netdata Green (brighter glow)
+     ============================================ */
+  --color-accent: #00C49A;
+  --color-accent-rgb: 0, 196, 154;
+
+  --color-accent-light: #2DE0B5;
+  --color-accent-lighter: #07221C;
+  --color-accent-dark: #00AB94;
+  --color-accent-darker: #009682;
+
+  --color-accent-alpha-05: rgba(0, 196, 154, 0.05);
+  --color-accent-alpha-08: rgba(0, 196, 154, 0.08);
+  --color-accent-alpha-10: rgba(0, 196, 154, 0.10);
+  --color-accent-alpha-15: rgba(0, 196, 154, 0.15);
+  --color-accent-alpha-20: rgba(0, 196, 154, 0.20);
+  --color-accent-alpha-30: rgba(0, 196, 154, 0.30);
+  --color-accent-alpha-40: rgba(0, 196, 154, 0.40);
+  --color-accent-alpha-70: rgba(0, 196, 154, 0.70);
+  --color-accent-alpha-90: rgba(0, 196, 154, 0.90);
+
+  /* ============================================
+     SECONDARY - Slate (lifted for dark legibility)
+     ============================================ */
+  --color-secondary: #94A3B8;
+  --color-secondary-rgb: 148, 163, 184;
+
+  --color-secondary-light: #CBD5E1;
+  --color-secondary-lighter: #1A2230;
+  --color-secondary-dark: #64748B;
+  --color-secondary-darker: #475569;
+
+  --color-secondary-alpha-05: rgba(148, 163, 184, 0.05);
+  --color-secondary-alpha-08: rgba(148, 163, 184, 0.08);
+  --color-secondary-alpha-10: rgba(148, 163, 184, 0.10);
+  --color-secondary-alpha-15: rgba(148, 163, 184, 0.15);
+  --color-secondary-alpha-20: rgba(148, 163, 184, 0.20);
+  --color-secondary-alpha-30: rgba(148, 163, 184, 0.30);
+  --color-secondary-alpha-40: rgba(148, 163, 184, 0.40);
+  --color-secondary-alpha-70: rgba(148, 163, 184, 0.70);
+  --color-secondary-alpha-90: rgba(148, 163, 184, 0.90);
+
+  /* ============================================
+     GRADIENTS
+     ============================================ */
+  --gradient-primary: linear-gradient(135deg, #818CF8 0%, #6366F1 100%);
+  --gradient-primary-hover: linear-gradient(135deg, #A5B4FC 0%, #818CF8 100%);
+  --gradient-primary-subtle: linear-gradient(135deg, rgba(129, 140, 248, 0.18) 0%, rgba(99, 102, 241, 0.18) 100%);
+
+  --gradient-accent: linear-gradient(135deg, #00C49A 0%, #00AB94 100%);
+  --gradient-accent-hover: linear-gradient(135deg, #2DE0B5 0%, #00C49A 100%);
+  --gradient-accent-subtle: linear-gradient(135deg, rgba(0, 196, 154, 0.16) 0%, rgba(0, 171, 148, 0.16) 100%);
+
+  --gradient-mixed: linear-gradient(135deg, #818CF8 0%, #00C49A 100%);
+  --gradient-mixed-subtle: linear-gradient(135deg, rgba(129, 140, 248, 0.12) 0%, rgba(0, 196, 154, 0.12) 100%);
+
+  --gradient-bg-primary: linear-gradient(180deg, #0A0E14 0%, #0B1018 50%, #0A1014 100%);
+  --gradient-bg-panel: linear-gradient(180deg, rgba(129, 140, 248, 0.05) 0%, transparent 100%);
+  --gradient-bg-glow: radial-gradient(ellipse at top, rgba(129, 140, 248, 0.14) 0%, transparent 70%);
+
+  --gradient-shimmer: linear-gradient(
+    90deg,
+    rgba(129, 140, 248, 0) 0%,
+    rgba(129, 140, 248, 0.10) 50%,
+    rgba(129, 140, 248, 0) 100%
+  );
+
+  --gradient-mesh:
+    radial-gradient(at 40% 20%, rgba(129, 140, 248, 0.18) 0px, transparent 50%),
+    radial-gradient(at 80% 0%, rgba(0, 196, 154, 0.12) 0px, transparent 50%),
+    radial-gradient(at 0% 50%, rgba(99, 102, 241, 0.14) 0px, transparent 50%);
+
+  /* ============================================
+     GLASS MORPHISM
+     ============================================ */
+  --glass-bg: rgba(14, 20, 28, 0.72);
+  --glass-bg-strong: rgba(14, 20, 28, 0.88);
+  --glass-bg-subtle: rgba(14, 20, 28, 0.45);
+
+  --glass-bg-tinted: rgba(20, 24, 40, 0.85);
+  --glass-bg-tinted-strong: rgba(20, 24, 40, 0.95);
+
+  --glass-border: rgba(230, 237, 243, 0.10);
+  --glass-border-tinted: rgba(129, 140, 248, 0.18);
+
+  /* ============================================
+     TEXT COLORS - Off-white base, low glare
+     ============================================ */
+  --color-text-primary: rgba(230, 237, 243, 0.92);
+  --color-text-secondary: rgba(230, 237, 243, 0.66);
+  --color-text-tertiary: rgba(230, 237, 243, 0.46);
+  --color-text-disabled: rgba(230, 237, 243, 0.30);
+  --color-text-placeholder: rgba(230, 237, 243, 0.38);
+
+  /* On colored backgrounds: the accents are light/saturated, so near-black
+     text reads best (and looks intentional/modern). */
+  --color-text-on-primary: #0A0E14;
+  --color-text-on-accent: #04130F;
+  --color-text-on-secondary: #0A0E14;
+  --color-text-on-dark: #E6EDF3;
+  --color-text-on-warning: #1A1206;
+  --color-text-on-critical: #150404;
+
+  /* ============================================
+     BORDERS - hairline, light-on-dark
+     ============================================ */
+  --color-border-light: rgba(230, 237, 243, 0.08);
+  --color-border-medium: rgba(230, 237, 243, 0.14);
+  --color-border-strong: rgba(230, 237, 243, 0.22);
+  --color-border-hover: rgba(129, 140, 248, 0.45);
+  --color-border-focus: rgba(129, 140, 248, 0.60);
+  --color-border-active: rgba(129, 140, 248, 0.70);
+
+  /* ============================================
+     SEMANTIC: HEALTHY (Netdata Green)
+     ============================================ */
+  --color-healthy: #00C49A;
+  --color-healthy-rgb: 0, 196, 154;
+  --color-healthy-light: #2DE0B5;
+  --color-healthy-lighter: #07221C;
+  --color-healthy-dark: #00AB94;
+  --color-healthy-darker: #009682;
+
+  --color-healthy-bg: rgba(0, 196, 154, 0.12);
+  --color-healthy-bg-solid: #07221C;
+  --color-healthy-border: rgba(0, 196, 154, 0.32);
+
+  --color-success: var(--color-healthy);
+  --color-success-rgb: var(--color-healthy-rgb);
+  --color-success-light: var(--color-healthy-light);
+  --color-success-lighter: var(--color-healthy-lighter);
+  --color-success-dark: var(--color-healthy-dark);
+  --color-success-darker: var(--color-healthy-darker);
+  --color-success-alpha-06: rgba(0, 196, 154, 0.08);
+  --color-success-alpha-10: rgba(0, 196, 154, 0.12);
+  --color-success-alpha-20: rgba(0, 196, 154, 0.22);
+
+  /* ============================================
+     SEMANTIC: WARNING (Amber)
+     ============================================ */
+  --color-warning: #E3B341;
+  --color-warning-rgb: 227, 179, 65;
+  --color-warning-light: #F0C75E;
+  --color-warning-lighter: #221B08;
+  --color-warning-dark: #C9992B;
+  --color-warning-darker: #A87E1F;
+
+  --color-warning-bg: rgba(227, 179, 65, 0.14);
+  --color-warning-bg-solid: #221B08;
+  --color-warning-border: rgba(227, 179, 65, 0.38);
+
+  --color-warning-alpha-06: rgba(227, 179, 65, 0.08);
+  --color-warning-alpha-10: rgba(227, 179, 65, 0.12);
+  --color-warning-alpha-20: rgba(227, 179, 65, 0.22);
+
+  /* ============================================
+     SEMANTIC: CRITICAL (Red)
+     ============================================ */
+  --color-critical: #F85149;
+  --color-critical-rgb: 248, 81, 73;
+  --color-critical-light: #FF7B72;
+  --color-critical-lighter: #2A0E0C;
+  --color-critical-dark: #E5484D;
+  --color-critical-darker: #C93C40;
+
+  --color-critical-bg: rgba(248, 81, 73, 0.14);
+  --color-critical-bg-solid: #2A0E0C;
+  --color-critical-border: rgba(248, 81, 73, 0.36);
+
+  --color-error: var(--color-critical);
+  --color-error-rgb: var(--color-critical-rgb);
+  --color-error-light: var(--color-critical-light);
+  --color-error-lighter: var(--color-critical-lighter);
+  --color-error-dark: var(--color-critical-dark);
+  --color-error-darker: var(--color-critical-darker);
+  --color-error-alpha-06: rgba(248, 81, 73, 0.08);
+  --color-error-alpha-10: rgba(248, 81, 73, 0.12);
+  --color-error-alpha-20: rgba(248, 81, 73, 0.22);
+
+  /* ============================================
+     SEMANTIC: INFO (Indigo)
+     ============================================ */
+  --color-info: #818CF8;
+  --color-info-rgb: 129, 140, 248;
+  --color-info-light: #A5B4FC;
+  --color-info-lighter: #1A1F33;
+  --color-info-dark: #6366F1;
+  --color-info-darker: #4F46E5;
+
+  --color-info-bg: rgba(129, 140, 248, 0.10);
+  --color-info-bg-solid: #1A1F33;
+  --color-info-border: rgba(129, 140, 248, 0.30);
+
+  --color-info-alpha-06: rgba(129, 140, 248, 0.08);
+  --color-info-alpha-10: rgba(129, 140, 248, 0.12);
+  --color-info-alpha-20: rgba(129, 140, 248, 0.22);
+
+  /* ============================================
+     CHART COLORS - brightened for dark legibility
+     ============================================ */
+  --chart-color-1: #818CF8;
+  --chart-color-2: #00C49A;
+  --chart-color-3: #A78BFA;
+  --chart-color-4: #22D3EE;
+  --chart-color-5: #FB923C;
+  --chart-color-6: #F85149;
+  --chart-color-7: #58A6FF;
+  --chart-color-8: #94A3B8;
+  --chart-color-9: #2DD4BF;
+  --chart-color-10: #C084FC;
+  --chart-color-11: #E3B341;
+  --chart-color-12: #F472B6;
+
+  --chart-bg: var(--color-bg-elevated);
+  --chart-bg-hover: #1C2533;
+  --chart-border: var(--color-border-light);
+  --chart-border-hover: var(--color-primary-alpha-40);
+
+  --chart-grid: rgba(230, 237, 243, 0.06);
+  --chart-axis: rgba(230, 237, 243, 0.15);
+  --chart-label: var(--color-text-secondary);
+  --chart-title: var(--color-text-primary);
+
+  /* ============================================
+     SHADOWS - depth from black; signature indigo glow
+     ============================================ */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.40);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.45),
+               0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.45),
+               0 2px 4px rgba(0, 0, 0, 0.30);
+  --shadow-lg: 0 12px 24px rgba(0, 0, 0, 0.50),
+               0 4px 8px rgba(0, 0, 0, 0.35);
+  --shadow-xl: 0 20px 40px rgba(0, 0, 0, 0.55),
+               0 8px 16px rgba(0, 0, 0, 0.40);
+  --shadow-2xl: 0 32px 64px rgba(0, 0, 0, 0.60),
+                0 16px 32px rgba(0, 0, 0, 0.45);
+
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.40),
+                 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-card-hover: 0 12px 32px rgba(0, 0, 0, 0.55),
+                       0 0 0 1px rgba(129, 140, 248, 0.12);
+
+  --shadow-button: 0 1px 3px rgba(0, 0, 0, 0.40);
+  --shadow-button-hover: 0 4px 12px rgba(0, 0, 0, 0.50);
+  --shadow-input-focus: 0 0 0 3px rgba(129, 140, 248, 0.30);
+
+  --shadow-primary: 0 4px 14px rgba(129, 140, 248, 0.35);
+  --shadow-primary-lg: 0 8px 28px rgba(129, 140, 248, 0.40);
+  --shadow-primary-glow: 0 0 22px rgba(129, 140, 248, 0.35),
+                         0 4px 14px rgba(129, 140, 248, 0.30);
+
+  --shadow-accent: 0 4px 14px rgba(0, 196, 154, 0.32);
+  --shadow-accent-lg: 0 8px 28px rgba(0, 196, 154, 0.38);
+  --shadow-accent-glow: 0 0 22px rgba(0, 196, 154, 0.30),
+                        0 4px 14px rgba(0, 196, 154, 0.28);
+
+  --shadow-healthy: var(--shadow-accent);
+  --shadow-warning: 0 4px 14px rgba(227, 179, 65, 0.28);
+  --shadow-critical: 0 4px 14px rgba(248, 81, 73, 0.30);
+
+  --shadow-ring-primary: 0 0 0 2px rgba(129, 140, 248, 0.55);
+  --shadow-ring-accent: 0 0 0 2px rgba(0, 196, 154, 0.55);
+
+  --shadow-inset-sm: inset 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-inset-md: inset 0 2px 4px rgba(0, 0, 0, 0.35);
+
+  /* ============================================
+     SPECIAL COLORS
+     ============================================ */
+  --color-code-bg: rgba(129, 140, 248, 0.08);
+  --color-code-border: rgba(129, 140, 248, 0.14);
+  --color-code-text: rgba(230, 237, 243, 0.88);
+
+  --color-selection-bg: rgba(129, 140, 248, 0.32);
+  --color-selection-text: var(--color-text-primary);
+
+  --color-divider: rgba(230, 237, 243, 0.08);
+  --color-divider-strong: rgba(230, 237, 243, 0.15);
+}

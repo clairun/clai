@@ -8,8 +8,11 @@
  * Date: 2025-11-14
  */
 
-/* Import theme variables */
+/* Import theme variables. Light defines the token defaults under :root;
+   dark overrides them under :root[data-theme="dark"] (higher specificity),
+   so the theme module just toggles data-theme on <html>. */
 @import './theme-light.css';
+@import './theme-dark.css';
 
 /* ============================================
    GLOBAL RESETS
