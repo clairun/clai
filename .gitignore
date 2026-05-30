@@ -31,3 +31,8 @@ avante.md
 TODO.txt
 /bindings/
 coverage/
+
+# Local Flatpak build artifacts (flatpak/build-local.sh)
+/clai.flatpak
+/repo/
+/flatpak-build/
