@@ -1,6 +1,7 @@
 use glob::{MatchOptions, Pattern};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Deserialize;
 use tokio::time::Duration;
@@ -219,7 +220,10 @@ fn execute_fs_glob(
     context: &ToolExecutionContext,
     params: FsGlobParams,
 ) -> Result<serde_json::Value, String> {
-    let grants = filesystem_grants(context)?;
+    // Only search grant roots the in-process tools can actually reach: in
+    // Flatpak, non-home roots are invisible or a divergent private view, so
+    // walking them yields misleading results. No-op outside Flatpak.
+    let grants = retain_flatpak_reachable_grants(filesystem_grants(context)?);
     let limit = params
         .limit
         .unwrap_or(DEFAULT_FS_GLOB_LIMIT)
@@ -282,6 +286,7 @@ fn execute_fs_write(
             context.add_notice(RunNoticeKind::PathDenied, e.clone());
         }
     })?;
+    ensure_fs_reachable(&path)?;
 
     if params.create_parents {
         if let Some(parent) = path.parent() {
@@ -675,10 +680,74 @@ fn resolve_allowed_existing_path(
     require_write: bool,
 ) -> Result<PathBuf, String> {
     let candidate = resolve_allowed_path(path, grants, require_write)?;
+    // In Flatpak, surface the host-only reachability BEFORE the existence
+    // probe — otherwise a granted-but-unreachable path (e.g. /tmp, a private
+    // tmpfs in Flatpak) fails the in-sandbox exists() check and returns a
+    // misleading "Path does not exist" instead of steering to bash_exec.
+    ensure_fs_reachable(&candidate)?;
     if !candidate.exists() {
         return Err(format!("Path does not exist: {}", candidate.display()));
     }
     Ok(candidate)
+}
+
+/// The user's real home directory, resolved once. Inside Flatpak this is the
+/// host home (resolved via a host-spawn), cached so the fs_* path doesn't
+/// spawn a process per call.
+fn real_host_home() -> Option<PathBuf> {
+    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
+    HOME.get_or_init(|| crate::providers::get_home_dir().map(PathBuf::from))
+        .clone()
+}
+
+/// True when `resolved` lies outside the home subtree. `home` is `None` when
+/// the real home can't be determined, in which case we don't block (fail open).
+fn path_outside_home(resolved: &Path, home: Option<&Path>) -> bool {
+    match home {
+        Some(home) => !resolved.starts_with(home),
+        None => false,
+    }
+}
+
+/// In a Flatpak build the in-process fs_* tools see only what the sandbox's
+/// `--filesystem` permission exposes — in practice the user's home directory.
+/// `/tmp` is a *private* tmpfs in Flatpak and other roots (`/opt`, `/mnt`, …)
+/// aren't mapped at all, so a granted path outside home is either invisible or
+/// a different view from what `bash_exec` (which runs host-side) sees. Probing
+/// existence can't distinguish "not visible" from "absent" — a private `/tmp`
+/// both exists and is empty — so we gate structurally on the home subtree.
+fn fs_unreachable_in_flatpak(resolved: &Path, home: Option<&Path>) -> bool {
+    crate::providers::is_flatpak() && path_outside_home(resolved, home)
+}
+
+/// Fail a single-path fs_* op whose resolved path is granted but unreachable by
+/// the in-process tools in Flatpak, steering the agent to `bash_exec` instead
+/// of silently lying ("Path does not exist") or writing a phantom file into the
+/// sandbox-private view that neither bash_exec nor the host can see.
+fn ensure_fs_reachable(resolved: &Path) -> Result<(), String> {
+    if fs_unreachable_in_flatpak(resolved, real_host_home().as_deref()) {
+        return Err(format!(
+            "`{}` is granted but unreachable by fs_* tools in the Flatpak build, which can \
+             only see your home directory. Use bash_exec for this path — it runs on the host \
+             and can reach every granted path.",
+            resolved.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Drop grant roots the in-process tools can't reach in Flatpak so a glob only
+/// searches what it can actually see, rather than walking a divergent
+/// sandbox-private view. No-op outside Flatpak.
+fn retain_flatpak_reachable_grants(grants: Vec<ResolvedGrant>) -> Vec<ResolvedGrant> {
+    if !crate::providers::is_flatpak() {
+        return grants;
+    }
+    let home = real_host_home();
+    grants
+        .into_iter()
+        .filter(|grant| !path_outside_home(&grant.root, home.as_deref()))
+        .collect()
 }
 
 fn resolve_allowed_path(
@@ -1272,6 +1341,7 @@ async fn execute_fs_request_grant(
                 "path": path,
                 "access": access_to_str(access),
                 "scope": "once",
+                "note": "Valid for the current turn only — NOT retained for later turns. If you need this path again in a future turn, request it again, or ask the user to grant it always.",
             }))
         }
         crate::commands::path_grants::PathGrantDecision::AllowAlways {
@@ -1941,6 +2011,31 @@ mod tests {
             err.contains("outside the agent's allowed filesystem grants"),
             "unexpected error: {err}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // path_outside_home — Flatpak fs_* reachability predicate
+    // ------------------------------------------------------------------
+
+    // The structural gate behind `fs_unreachable_in_flatpak`: paths under the
+    // real host home are reachable by the in-process tools; everything else
+    // (e.g. /tmp — a private tmpfs in Flatpak — or /opt) is not. An unknown
+    // home fails open so non-Flatpak/edge contexts are never blocked.
+    #[test]
+    fn path_outside_home_gates_non_home_paths() {
+        let home = PathBuf::from("/home/me");
+        assert!(!path_outside_home(
+            Path::new("/home/me/.clai/workspaces/ws/file.txt"),
+            Some(&home)
+        ));
+        assert!(!path_outside_home(Path::new("/home/me"), Some(&home)));
+        assert!(path_outside_home(
+            Path::new("/tmp/test_file.txt"),
+            Some(&home)
+        ));
+        assert!(path_outside_home(Path::new("/opt/thing"), Some(&home)));
+        // Unknown real home → never block.
+        assert!(!path_outside_home(Path::new("/tmp/x"), None));
     }
 
     // ------------------------------------------------------------------
