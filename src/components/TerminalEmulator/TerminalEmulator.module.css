@@ -16,9 +16,24 @@
   .terminal {
     position: fixed;
     bottom: 12px;
-    left: 50%;
+    /* Center over the detail pane, not the viewport. The Fleet rail occupies
+       the left edge (--fleet-rail-width, published by FleetLayout), so shift
+       right by half its width and size to the remaining space. Falls back to
+       viewport-centered 80vw when no rail is present (variable unset → 0px),
+       which is why a narrow window no longer pushes the card left of the chat
+       column or overflows the detail pane. */
+    left: calc(50% + var(--fleet-rail-width, 0px) / 2);
     transform: translateX(-50%);
-    width: 80vw;
+    /* Take the larger of 80% of the detail pane and the chat card's own width
+       (min(860px, detail − 48px page padding), which it's centered on too). On
+       wide screens the 80% term wins and the card stays a wide floating bar; on
+       small screens the chat-width term wins so the terminal matches the
+       conversation rather than sitting narrower than it. */
+    width: max(
+      calc((100vw - var(--fleet-rail-width, 0px)) * 0.8),
+      min(860px, calc(100vw - var(--fleet-rail-width, 0px) - 48px))
+    );
+    transition: left var(--transition-fast), width var(--transition-fast);
     z-index: 100;
     background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
     border: 1px solid var(--color-border-light);

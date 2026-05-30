@@ -103,6 +103,19 @@ const FleetLayout = () => {
     return () => window.clearInterval(interval);
   }, [loadWorkspaces]);
 
+  // Publish the rail's current width so the globally-fixed terminal card (in
+  // MainLayout, a sibling of our Outlet) can center over the detail pane rather
+  // than the whole viewport. Values mirror `.rail` / `.railCollapsed` in
+  // WorkspaceRail.module.css. Cleared on unmount so non-Fleet routes fall back
+  // to viewport-centered.
+  useEffect(() => {
+    const railWidth = collapsed ? '52px' : '248px';
+    document.documentElement.style.setProperty('--fleet-rail-width', railWidth);
+    return () => {
+      document.documentElement.style.removeProperty('--fleet-rail-width');
+    };
+  }, [collapsed]);
+
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
       const next = !prev;

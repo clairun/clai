@@ -1519,7 +1519,13 @@ const Workspace = () => {
 
       <div className={styles.workspaceBody}>
         <div
-          className={`${styles.workspaceMain} ${isSidePanelOpen ? styles.workspaceMainWithPreview : ''}`}
+          className={`${styles.workspaceMain} ${
+            isSidePanelOpen
+              ? styles.workspaceMainWithPreview
+              : activePanel
+                ? styles.workspaceMainWithDrawer
+                : ''
+          }`}
         >
           <ChatFirstLayout
             sessionId={sessionId}

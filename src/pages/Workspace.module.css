@@ -634,6 +634,16 @@
   );
 }
 
+/* Drawer-only case (no preview/task panel beside it): the same two-regime
+   logic with no extra panel width — just clear the 360px drawer + gap. On wide
+   viewports A goes ≤0 so the chat stays centered (the drawer floats over empty
+   space); on narrow viewports it shifts left to keep a ~24px gap instead of
+   disappearing behind the drawer. This is the `--preview-panel-width: 0` form
+   of `.workspaceMainWithPreview` above. */
+.workspaceMainWithDrawer {
+  padding-right: max(0px, min(calc(1644px - 100%), 392px));
+}
+
 .workspaceDrawer {
   position: absolute;
   top: 0;
