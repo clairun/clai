@@ -100,6 +100,7 @@ fn looks_like_bwrap_setup_failure(output: &SandboxCommandOutput) -> bool {
 
 pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, String> {
     validate_profile_paths(command)?;
+    let in_flatpak = crate::providers::is_flatpak();
 
     let mut args = vec![
         os("--unshare-user"),
@@ -166,8 +167,7 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
         os("/sys"),
     ]);
 
-    append_runtime_file_binds(&mut args);
-    append_session_bus_bind(&mut args, command);
+    append_runtime_file_binds(&mut args, in_flatpak);
     append_workspace_and_grants(&mut args, command);
 
     for (key, value) in command.profile.env.iter() {
@@ -175,6 +175,12 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
         args.push(os(key));
         args.push(os(value));
     }
+
+    // Emitted AFTER the profile env loop: inside Flatpak this overrides the
+    // passed-through DBUS_SESSION_BUS_ADDRESS (which names the proxy socket we
+    // intentionally don't bind) with the host bus path we do bind. --setenv is
+    // last-writer-wins, so ordering matters.
+    append_session_bus_bind(&mut args, command, in_flatpak);
 
     args.push(os("--chdir"));
     args.push(command.cwd.as_os_str().to_os_string());
@@ -204,8 +210,7 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
     Ok(())
 }
 
-fn append_runtime_file_binds(args: &mut Vec<OsString>) {
-    let in_flatpak = crate::providers::is_flatpak();
+fn append_runtime_file_binds(args: &mut Vec<OsString>, in_flatpak: bool) {
     for bind in runtime_file_binds(in_flatpak) {
         for dir in private_parent_dirs_for(&bind.destination) {
             args.push(os("--dir"));
@@ -245,11 +250,11 @@ fn append_runtime_file_binds(args: &mut Vec<OsString>) {
 /// `workspace_requestUserInput`. This makes the toggle meaningful only
 /// where a session bus actually exists — desktop Linux — and a graceful
 /// no-op everywhere else (headless servers, containers, WSL).
-fn append_session_bus_bind(args: &mut Vec<OsString>, command: &SandboxCommand) {
+fn append_session_bus_bind(args: &mut Vec<OsString>, command: &SandboxCommand, in_flatpak: bool) {
     if !matches!(command.profile.session_bus, SandboxSessionBusMode::Allow) {
         return;
     }
-    let bus_path = resolve_session_bus_socket();
+    let bus_path = resolve_session_bus_socket(in_flatpak);
     let Some(bus_path) = bus_path else {
         tracing::warn!(
             "Sandbox session_bus is Allow but no path-based D-Bus session bus socket \
@@ -263,15 +268,61 @@ fn append_session_bus_bind(args: &mut Vec<OsString>, command: &SandboxCommand) {
         args.push(os("--dir"));
         args.push(dir.into_os_string());
     }
-    args.push(os("--ro-bind"));
+    // Inside Flatpak the bus path is the host's well-known socket, derived
+    // from $XDG_RUNTIME_DIR without probing the (invisible) host filesystem —
+    // so bind leniently with --ro-bind-try and let a host that genuinely has
+    // no session bus degrade gracefully instead of aborting the sandbox. On a
+    // normal host the path was resolved via an existence check, so a hard
+    // --ro-bind is appropriate.
+    args.push(os(if in_flatpak {
+        "--ro-bind-try"
+    } else {
+        "--ro-bind"
+    }));
     args.push(bus_path.clone().into_os_string());
-    args.push(bus_path.into_os_string());
+    args.push(bus_path.clone().into_os_string());
+
+    // Inside Flatpak the app's DBUS_SESSION_BUS_ADDRESS names the xdg-dbus-proxy
+    // socket (e.g. unix:path=/run/flatpak/bus) that we deliberately did NOT
+    // bind — it exists only inside the Flatpak mount namespace, not on the host
+    // where bwrap actually runs. Point the sandboxed shell at the host bus we
+    // just bound so libsecret connects to a socket that exists in the sandbox.
+    if in_flatpak {
+        let mut addr = OsString::from("unix:path=");
+        addr.push(bus_path.as_os_str());
+        args.push(os("--setenv"));
+        args.push(os("DBUS_SESSION_BUS_ADDRESS"));
+        args.push(addr);
+    }
 }
 
 /// Locate the host's D-Bus session bus socket on the filesystem. Returns
 /// None if the bus is abstract-socket-only (no file to bind) or simply
 /// absent on this host.
-fn resolve_session_bus_socket() -> Option<PathBuf> {
+fn resolve_session_bus_socket(in_flatpak: bool) -> Option<PathBuf> {
+    if in_flatpak {
+        // Inside Flatpak, DBUS_SESSION_BUS_ADDRESS points at the
+        // xdg-dbus-proxy socket (`unix:path=/run/flatpak/bus`) and
+        // `$XDG_RUNTIME_DIR/bus` is itself a symlink to that same proxy —
+        // both resolve to paths that exist ONLY inside the Flatpak mount
+        // namespace. But bwrap runs on the HOST via `flatpak-spawn --host
+        // bwrap …`, where the proxy path is absent; binding it aborts setup
+        // with `bwrap: Can't find source path /run/flatpak/bus`.
+        //
+        // The host's real session bus lives at the conventional
+        // `$XDG_RUNTIME_DIR/bus`. XDG_RUNTIME_DIR is identical inside and
+        // outside the sandbox (e.g. `/run/user/<uid>`), so we build that
+        // literal path WITHOUT following symlinks (which would chase back to
+        // the proxy) and WITHOUT probing existence (the host fs isn't visible
+        // from in here — caller binds it with --ro-bind-try). This derivation
+        // is host-agnostic: it never hardcodes a UID or path.
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")?;
+        let runtime_dir = PathBuf::from(runtime_dir);
+        if !runtime_dir.is_absolute() {
+            return None;
+        }
+        return Some(runtime_dir.join("bus"));
+    }
     if let Some(addr) = std::env::var_os("DBUS_SESSION_BUS_ADDRESS") {
         let addr = addr.to_string_lossy();
         // Address format: `transport:key=value,key=value;transport:...`.
@@ -635,7 +686,7 @@ mod tests {
                 custom_socket.display()
             )),
             Some(other_runtime.path()),
-            resolve_session_bus_socket,
+            || resolve_session_bus_socket(false),
         );
         assert_eq!(resolved.as_deref(), Some(custom_socket.as_path()));
     }
@@ -646,7 +697,9 @@ mod tests {
         let bus_path = runtime.path().join("bus");
         std::fs::write(&bus_path, "").unwrap();
 
-        let resolved = with_dbus_env(None, Some(runtime.path()), resolve_session_bus_socket);
+        let resolved = with_dbus_env(None, Some(runtime.path()), || {
+            resolve_session_bus_socket(false)
+        });
         assert_eq!(resolved.as_deref(), Some(bus_path.as_path()));
     }
 
@@ -659,7 +712,7 @@ mod tests {
         let resolved = with_dbus_env(
             Some("unix:abstract=/tmp/dbus-XYZ123,guid=abc"),
             None,
-            resolve_session_bus_socket,
+            || resolve_session_bus_socket(false),
         );
         assert!(resolved.is_none());
     }
@@ -668,7 +721,7 @@ mod tests {
     fn session_bus_returns_none_when_nothing_is_set() {
         // Headless / containerized / pre-session contexts: no bus exists.
         // The toggle becomes a no-op, no panic.
-        let resolved = with_dbus_env(None, None, resolve_session_bus_socket);
+        let resolved = with_dbus_env(None, None, || resolve_session_bus_socket(false));
         assert!(resolved.is_none());
     }
 
@@ -687,9 +740,84 @@ mod tests {
                 real_socket.display()
             )),
             None,
-            resolve_session_bus_socket,
+            || resolve_session_bus_socket(false),
         );
         assert_eq!(resolved.as_deref(), Some(real_socket.as_path()));
+    }
+
+    // Regression: inside Flatpak, DBUS_SESSION_BUS_ADDRESS names the
+    // xdg-dbus-proxy socket (`unix:path=/run/flatpak/bus`) and
+    // `$XDG_RUNTIME_DIR/bus` is a symlink to it — both exist only inside the
+    // Flatpak namespace. bwrap runs on the host (`flatpak-spawn --host bwrap`)
+    // where that path is absent, so binding it aborts the sandbox with
+    // `bwrap: Can't find source path /run/flatpak/bus`. Inside Flatpak we must
+    // instead derive the host's well-known bus path from $XDG_RUNTIME_DIR,
+    // ignoring the proxy address entirely and without probing the (invisible)
+    // host filesystem.
+    #[test]
+    fn session_bus_uses_host_runtime_dir_path_inside_flatpak() {
+        // The proxy address must NOT win, and the runtime dir's bus need not
+        // exist (host fs isn't visible from in here) — so use a path that
+        // does not exist on the test machine.
+        let resolved = with_dbus_env(
+            Some("unix:path=/run/flatpak/bus"),
+            Some(Path::new("/run/user/4242")),
+            || resolve_session_bus_socket(true),
+        );
+        assert_eq!(resolved.as_deref(), Some(Path::new("/run/user/4242/bus")));
+    }
+
+    #[test]
+    fn session_bus_none_inside_flatpak_when_runtime_dir_unset() {
+        let resolved = with_dbus_env(Some("unix:path=/run/flatpak/bus"), None, || {
+            resolve_session_bus_socket(true)
+        });
+        assert!(resolved.is_none());
+    }
+
+    // Inside Flatpak the bus bind must be lenient (--ro-bind-try, since we
+    // can't verify the host socket exists) and the sandboxed shell's
+    // DBUS_SESSION_BUS_ADDRESS must be rewritten to the bound host path so
+    // libsecret connects to a socket that actually exists in the sandbox.
+    #[test]
+    fn session_bus_allow_inside_flatpak_binds_host_path_and_overrides_address() {
+        let mut command = sample_command();
+        command.profile.session_bus = SandboxSessionBusMode::Allow;
+
+        let args = with_dbus_env(
+            Some("unix:path=/run/flatpak/bus"),
+            Some(Path::new("/run/user/4242")),
+            || {
+                let mut args: Vec<OsString> = Vec::new();
+                append_session_bus_bind(&mut args, &command, true);
+                args
+            },
+        );
+
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        // Lenient bind of the host bus path (never the proxy path).
+        let host_bus = "/run/user/4242/bus".to_string();
+        assert!(
+            rendered
+                .windows(3)
+                .any(|w| w == ["--ro-bind-try", &host_bus, &host_bus]),
+            "expected lenient --ro-bind-try of the host bus path; rendered: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|arg| arg.contains("/run/flatpak/bus")),
+            "must never reference the in-namespace proxy path; rendered: {rendered:?}"
+        );
+
+        // Address override points the inner shell at the bound host socket.
+        let addr_idx = rendered
+            .windows(3)
+            .position(|w| w[0] == "--setenv" && w[1] == "DBUS_SESSION_BUS_ADDRESS")
+            .expect("DBUS_SESSION_BUS_ADDRESS should be overridden inside Flatpak");
+        assert_eq!(rendered[addr_idx + 2], "unix:path=/run/user/4242/bus");
     }
 
     #[test]
