@@ -21,6 +21,16 @@ BIN="$TARGET_DIR/release/clai"
 RUNTIME_GLIBC_MAJOR=2
 RUNTIME_GLIBC_MINOR=42                          # GNOME 49 == freedesktop 25.08
 
+# Stage the Flatpak build tree + OSTree repo OUTSIDE the working tree.
+# `flatpak build-init` lays down an app filesystem skeleton that includes
+# `var/run -> /run` — an absolute symlink to the host runtime dir. Kept in
+# the repo, symlink-following tools (Vite's watcher and dep-scanner, etc.)
+# crawl through it into the host's live /run and crash. A cache dir keeps the
+# repo clean; both are throwaway and rebuilt from scratch each run.
+BUILD_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/clai-flatpak"
+BUILD_TREE="$BUILD_CACHE/build"
+OSTREE_REPO="$BUILD_CACHE/repo"
+
 cd "$ROOT"
 
 # Build the frontend AND the production binary inside the SDK via the Tauri
@@ -53,25 +63,26 @@ fi
 echo "    OK — highest required symbol is $max_glibc"
 
 echo "==> [3/4] Assembling the Flatpak build tree (mirrors CI)"
-rm -rf flatpak-build repo
-flatpak build-init flatpak-build "$APP_ID" "$SDK" "$PLATFORM"
+mkdir -p "$BUILD_CACHE"
+rm -rf "$BUILD_TREE" "$OSTREE_REPO"
+flatpak build-init "$BUILD_TREE" "$APP_ID" "$SDK" "$PLATFORM"
 mkdir -p \
-  flatpak-build/files/bin \
-  flatpak-build/files/share/applications \
-  flatpak-build/files/share/icons/hicolor/128x128/apps \
-  flatpak-build/files/share/icons/hicolor/scalable/apps \
-  flatpak-build/files/share/metainfo \
-  "flatpak-build/files/share/licenses/$APP_ID"
-cp "$BIN"                                          flatpak-build/files/bin/clai
-cp "flatpak/$APP_ID.desktop"                       flatpak-build/files/share/applications/
-cp src-tauri/icons/128x128.png                     "flatpak-build/files/share/icons/hicolor/128x128/apps/$APP_ID.png"
-cp public/icon.svg                                 "flatpak-build/files/share/icons/hicolor/scalable/apps/$APP_ID.svg"
-cp "flatpak/$APP_ID.metainfo.xml"                  flatpak-build/files/share/metainfo/
-cp LICENSE                                         "flatpak-build/files/share/licenses/$APP_ID/"
+  "$BUILD_TREE/files/bin" \
+  "$BUILD_TREE/files/share/applications" \
+  "$BUILD_TREE/files/share/icons/hicolor/128x128/apps" \
+  "$BUILD_TREE/files/share/icons/hicolor/scalable/apps" \
+  "$BUILD_TREE/files/share/metainfo" \
+  "$BUILD_TREE/files/share/licenses/$APP_ID"
+cp "$BIN"                                          "$BUILD_TREE/files/bin/clai"
+cp "flatpak/$APP_ID.desktop"                       "$BUILD_TREE/files/share/applications/"
+cp src-tauri/icons/128x128.png                     "$BUILD_TREE/files/share/icons/hicolor/128x128/apps/$APP_ID.png"
+cp public/icon.svg                                 "$BUILD_TREE/files/share/icons/hicolor/scalable/apps/$APP_ID.svg"
+cp "flatpak/$APP_ID.metainfo.xml"                  "$BUILD_TREE/files/share/metainfo/"
+cp LICENSE                                         "$BUILD_TREE/files/share/licenses/$APP_ID/"
 
 # --talk-name=org.freedesktop.Flatpak is REQUIRED: provider CLIs and the
 # bash_exec sandbox run on the HOST via flatpak-spawn --host.
-flatpak build-finish flatpak-build \
+flatpak build-finish "$BUILD_TREE" \
   --command=clai \
   --share=ipc \
   --share=network \
@@ -83,8 +94,8 @@ flatpak build-finish flatpak-build \
   --talk-name=org.freedesktop.Flatpak
 
 echo "==> [4/4] Exporting + bundling -> clai.flatpak"
-flatpak build-export repo flatpak-build
-flatpak build-bundle repo clai.flatpak "$APP_ID"
+flatpak build-export "$OSTREE_REPO" "$BUILD_TREE"
+flatpak build-bundle "$OSTREE_REPO" clai.flatpak "$APP_ID"
 echo "    Wrote $ROOT/clai.flatpak"
 
 if [[ "${1:-}" == "--install" ]]; then
