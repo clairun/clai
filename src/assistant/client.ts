@@ -45,7 +45,7 @@ export async function sendMessage(
   sessionId: string,
   message: string,
   connectionId: string,
-): Promise<{ message: AssistantMessage; run?: AssistantRun }> {
+): Promise<{ session: AssistantSession; message: AssistantMessage; run?: AssistantRun | null; queued: boolean }> {
   return invoke('assistant_send_message', { sessionId, message, connectionId });
 }
 

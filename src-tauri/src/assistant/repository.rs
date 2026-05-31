@@ -43,6 +43,12 @@ pub struct CreateToolCallParams {
     pub status: ToolCallStatus,
 }
 
+#[derive(Debug, Clone)]
+pub struct QueuedUserMessage {
+    pub message: AssistantMessage,
+    pub connection_id: String,
+}
+
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
@@ -90,6 +96,13 @@ fn map_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantMessage, St
             row.get("provider_metadata_json"),
             "provider metadata",
         )?,
+    })
+}
+
+fn map_queued_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<QueuedUserMessage, String> {
+    Ok(QueuedUserMessage {
+        message: map_message_row(row)?,
+        connection_id: row.get("connection_id"),
     })
 }
 
@@ -273,6 +286,75 @@ pub async fn create_message(
     Ok(message)
 }
 
+pub async fn create_user_message(
+    pool: &DbPool,
+    session_id: String,
+    text: String,
+    queue_connection_id: Option<&str>,
+) -> Result<AssistantMessage, String> {
+    let now = now_ms();
+    let message = AssistantMessage {
+        id: Uuid::new_v4().to_string(),
+        session_id,
+        role: MessageRole::User,
+        content: vec![ContentPart::Text { text }],
+        created_at: now,
+        provider_metadata: None,
+    };
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start assistant message transaction: {}", e))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO assistant_messages
+            (id, session_id, role, content_json, provider_metadata_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&message.id)
+    .bind(&message.session_id)
+    .bind(to_json_string(&message.role)?)
+    .bind(to_json_string(&message.content)?)
+    .bind(Option::<String>::None)
+    .bind(message.created_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to create assistant message: {}", e))?;
+
+    if let Some(connection_id) = queue_connection_id {
+        sqlx::query(
+            r#"
+            INSERT INTO assistant_message_queue
+                (message_id, session_id, connection_id, status, queued_at, delivered_run_id, delivered_at)
+            VALUES (?, ?, ?, 'pending', ?, NULL, NULL)
+            "#,
+        )
+        .bind(&message.id)
+        .bind(&message.session_id)
+        .bind(connection_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to queue assistant message: {}", e))?;
+    }
+
+    sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(&message.session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to update assistant session timestamp: {}", e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit assistant message transaction: {}", e))?;
+
+    Ok(message)
+}
+
 pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<AssistantRun, String> {
     let run = AssistantRun {
         id: Uuid::new_v4().to_string(),
@@ -335,10 +417,8 @@ pub async fn list_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantR
 }
 
 /// Whether the session currently has a non-terminal run (queued, running,
-/// or waiting for a tool). Used by `assistant_send_message` to reject new
-/// user input while the agent is still working on the previous turn —
-/// `Run`-level locking, not `Session`-level, because a session has at
-/// most one in-flight run at any given moment by construction.
+/// or waiting for a tool). Used by message queueing and follow-up scheduling
+/// to preserve one active run per session.
 pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<bool, String> {
     let (count,): (i64,) = sqlx::query_as(
         r#"
@@ -354,6 +434,140 @@ pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<b
     .map_err(|e| format!("Failed to check for active runs: {}", e))?;
 
     Ok(count > 0)
+}
+
+pub async fn get_active_run(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<Option<AssistantRun>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, session_id, status, trigger, connection_id, provider_id, model_id, usage_json, error, notices_json, started_at, completed_at
+        FROM assistant_runs
+        WHERE session_id = ?
+          AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
+        ORDER BY started_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load active run: {}", e))?;
+
+    row.as_ref().map(map_run_row).transpose()
+}
+
+pub async fn list_pending_queued_messages(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<Vec<QueuedUserMessage>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT m.id, m.session_id, m.role, m.content_json, m.provider_metadata_json, m.created_at,
+               q.connection_id
+        FROM assistant_message_queue q
+        JOIN assistant_messages m ON m.id = q.message_id
+        WHERE q.session_id = ? AND q.status = 'pending'
+        ORDER BY q.queued_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to list pending queued messages: {}", e))?;
+
+    rows.iter().map(map_queued_message_row).collect()
+}
+
+pub async fn list_delivered_queued_messages_for_run(
+    pool: &DbPool,
+    session_id: &str,
+    run_id: &str,
+) -> Result<Vec<QueuedUserMessage>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT m.id, m.session_id, m.role, m.content_json, m.provider_metadata_json, m.created_at,
+               q.connection_id
+        FROM assistant_message_queue q
+        JOIN assistant_messages m ON m.id = q.message_id
+        WHERE q.session_id = ?
+          AND q.status = 'delivered'
+          AND q.delivered_run_id = ?
+        ORDER BY q.queued_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to list delivered queued messages: {}", e))?;
+
+    rows.iter().map(map_queued_message_row).collect()
+}
+
+pub async fn list_pending_queued_message_ids(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<Vec<String>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT message_id
+        FROM assistant_message_queue
+        WHERE session_id = ? AND status = 'pending'
+        ORDER BY queued_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to list pending queued message ids: {}", e))?;
+
+    Ok(rows.iter().map(|row| row.get("message_id")).collect())
+}
+
+pub async fn mark_queued_messages_delivered(
+    pool: &DbPool,
+    session_id: &str,
+    run_id: &str,
+    message_ids: &[String],
+) -> Result<(), String> {
+    if message_ids.is_empty() {
+        return Ok(());
+    }
+
+    let delivered_at = now_ms();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start queue delivery transaction: {}", e))?;
+
+    for message_id in message_ids {
+        sqlx::query(
+            r#"
+            UPDATE assistant_message_queue
+            SET status = 'delivered',
+                delivered_run_id = ?,
+                delivered_at = ?
+            WHERE session_id = ?
+              AND message_id = ?
+              AND status = 'pending'
+            "#,
+        )
+        .bind(run_id)
+        .bind(delivered_at)
+        .bind(session_id)
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to mark queued message delivered: {}", e))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit queue delivery transaction: {}", e))?;
+
+    Ok(())
 }
 
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {

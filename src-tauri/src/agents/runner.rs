@@ -684,7 +684,22 @@ async fn run_scheduled_agent_with_fallback(
         runtime::unregister_run(&run.id);
 
         match result {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                if let Err(error) = crate::commands::assistant::start_queued_followup_if_idle(
+                    pool.clone(),
+                    app_handle.clone(),
+                    session.id.clone(),
+                )
+                .await
+                {
+                    tracing::error!(
+                        session_id = %session.id,
+                        error = %error,
+                        "Failed to start queued assistant follow-up after scheduled run"
+                    );
+                }
+                return Ok(());
+            }
             Err(error) => {
                 let error_text = error.to_string();
                 last_error = Some(error_text.clone());
@@ -703,6 +718,20 @@ async fn run_scheduled_agent_with_fallback(
                 }
             }
         }
+    }
+
+    if let Err(error) = crate::commands::assistant::start_queued_followup_if_idle(
+        pool.clone(),
+        app_handle.clone(),
+        session.id.clone(),
+    )
+    .await
+    {
+        tracing::error!(
+            session_id = %session.id,
+            error = %error,
+            "Failed to start queued assistant follow-up after failed scheduled run"
+        );
     }
 
     Err(RunnerError::AssistantSession(

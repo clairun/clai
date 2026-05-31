@@ -32,16 +32,6 @@ const getEnabledMcpServerIds = (tab: TabLike): string[] => {
   return attached.filter((id) => !disabled.has(id));
 };
 
-// Error prefix returned by the backend's `assistant_send_message` when a
-// run is already in flight for the session. Keep in sync with
-// `ASSISTANT_RUN_IN_FLIGHT_ERROR` in `commands/assistant.rs`.
-const RUN_IN_FLIGHT_ERROR_PREFIX = 'RUN_IN_FLIGHT: ';
-
-const isRunInFlightError = (err: unknown): boolean => {
-  const msg = typeof err === 'string' ? err : err instanceof Error ? err.message : '';
-  return msg.startsWith(RUN_IN_FLIGHT_ERROR_PREFIX);
-};
-
 const errorMessage = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
@@ -56,11 +46,9 @@ const TerminalEmulatorWrapper = () => {
     ? decodeURIComponent(workspaceRouteMatch[1])
     : 'default';
 
-  // Track whether the active route's session has a non-terminal run. We
-  // use this to disable the chat input — the backend additionally rejects
-  // a send while a run is in flight (belt-and-braces), but the visual
-  // cue belongs here so the user can see immediately that the agent is
-  // busy. Per route:
+  // Track whether the active route's session has a non-terminal run so
+  // the input can show queued-message wording while still accepting text.
+  // Per route:
   //  - workspace: the workspace's canonical manager session, looked up by
   //    `workspace:<id>` tab-key (Workspace.tsx populates this on load).
   //  - default tab: the tab's own session via `useAssistantSession`.
@@ -151,9 +139,7 @@ const TerminalEmulatorWrapper = () => {
         } catch (err) {
           console.error('[TerminalEmulatorWrapper] Workspace assistant error:', err);
           return {
-            error: isRunInFlightError(err)
-              ? 'The agent is still working on the previous turn — wait for it to finish.'
-              : errorMessage(err, 'Assistant request failed.'),
+            error: errorMessage(err, 'Assistant request failed.'),
           };
         }
       }
@@ -202,7 +188,7 @@ const TerminalEmulatorWrapper = () => {
     return (
       <TerminalEmulator
         onSendToChat={handleSendToAgent}
-        disabled={inputDisabled}
+        agentWorking={inputDisabled}
       />
     );
   }
@@ -216,7 +202,7 @@ const TerminalEmulatorWrapper = () => {
     >
       <TerminalEmulator
         onSendToChat={handleSendToAgent}
-        disabled={inputDisabled}
+        agentWorking={inputDisabled}
       />
     </TabContextProvider>
   );

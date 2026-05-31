@@ -462,6 +462,16 @@ async fn prepare_prompt(
         return Ok(provider_message_text(&trigger_content));
     }
 
+    let queued_messages =
+        repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id).await?;
+    if !queued_messages.is_empty() {
+        let messages: Vec<AssistantMessage> = queued_messages
+            .into_iter()
+            .map(|queued| queued.message)
+            .collect();
+        return Ok(queued_messages_prompt(&messages));
+    }
+
     let messages = repository::list_messages(&deps.pool, &session.id).await?;
     messages
         .iter()
@@ -470,6 +480,24 @@ async fn prepare_prompt(
         .map(message_text)
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| LocalAgentRunError::failed("No user message found for Claude Code run"))
+}
+
+fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
+    if messages.len() == 1 {
+        return message_text(&messages[0]);
+    }
+
+    let mut prompt =
+        "The user sent these additional messages while you were working. Respond to them in order:"
+            .to_string();
+    for (index, message) in messages.iter().enumerate() {
+        let text = message_text(message);
+        if text.trim().is_empty() {
+            continue;
+        }
+        prompt.push_str(&format!("\n\nMessage {}:\n{}", index + 1, text));
+    }
+    prompt
 }
 
 async fn system_prompt_text(

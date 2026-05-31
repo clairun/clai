@@ -26,10 +26,10 @@ interface SendToChatResult {
 
 interface TerminalEmulatorProps {
   onSendToChat?: (text: string) => Promise<SendToChatResult | void>;
-  disabled?: boolean;
+  agentWorking?: boolean;
 }
 
-const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorProps) => {
+const TerminalEmulator = ({ onSendToChat, agentWorking = false }: TerminalEmulatorProps) => {
   const { executeCommand, commandHistory } = useCommand();
   const { handleLayoutCommand, getActiveTab } = useTabManager();
   const { setActiveContext, openChat, isCurrentChatOpen } = useChatManager();
@@ -163,18 +163,6 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
   const handleCommandExecution = async (input: string) => {
     const trimmed = input.trim();
     if (!trimmed) return;
-
-    // Chat is disabled while the active session has a run in flight. Slash
-    // commands stay live (they're local UI actions, not LLM turns) — so
-    // we only gate the free-text chat path. The server has a matching
-    // guard in `assistant_send_message`; this is the visual half.
-    if (disabled && !trimmed.startsWith('/')) {
-      addOutputMessage(
-        'The agent is still working on the previous turn — wait for it to finish.',
-        'warning',
-      );
-      return;
-    }
 
     // Clear input immediately and reset textarea height
     setInputValue('');
@@ -377,9 +365,9 @@ const TerminalEmulator = ({ onSendToChat, disabled = false }: TerminalEmulatorPr
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
             onClick={(e) => e.stopPropagation()}
-            aria-disabled={disabled || undefined}
-            placeholder={disabled
-              ? 'Agent is working — input will re-enable when the run completes…'
+            aria-busy={agentWorking || undefined}
+            placeholder={agentWorking
+              ? 'Agent is working — Enter queues a follow-up message...'
               : isFleetRoute
                 ? 'Message the selected agent...'
                 : isWorkspaceRoute

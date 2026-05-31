@@ -1,15 +1,15 @@
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository;
-use crate::assistant::repository::{CreateMessageParams, CreateRunParams, CreateSessionParams};
+use crate::assistant::repository::{CreateRunParams, CreateSessionParams};
 use crate::assistant::runtime;
 use crate::assistant::tools::ask_user::{self, AskUserAnswer};
 use crate::assistant::types::{
-    AssistantMessage, AssistantRun, AssistantSession, ContentPart, MessageRole, RunStatus,
-    RunTrigger, SessionContext, SessionKind, ToolInvocation,
+    AssistantMessage, AssistantRun, AssistantSession, RunStatus, RunTrigger, SessionContext,
+    SessionKind, ToolInvocation,
 };
 use crate::config::workspace_config;
 use crate::db::DbPool;
@@ -31,7 +31,9 @@ pub struct CreateAssistantSessionRequest {
 pub struct AssistantSendMessageResult {
     pub session: AssistantSession,
     pub message: AssistantMessage,
-    pub run: AssistantRun,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<AssistantRun>,
+    pub queued: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,13 +227,6 @@ pub async fn assistant_list_tool_calls(
     repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref()).await
 }
 
-/// Error string returned by [`assistant_send_message`] when the session
-/// already has a non-terminal run. The frontend matches on this exact
-/// prefix to distinguish "wait, the agent is still working" from generic
-/// failures so it can keep the input disabled instead of surfacing a
-/// red error toast.
-pub const ASSISTANT_RUN_IN_FLIGHT_ERROR: &str = "RUN_IN_FLIGHT: ";
-
 #[tauri::command]
 pub async fn assistant_send_message(
     session_id: String,
@@ -241,41 +236,72 @@ pub async fn assistant_send_message(
     state: State<'_, AppState>,
 ) -> Result<AssistantSendMessageResult, String> {
     let (target_pool, mut session) = session_pool(state.inner(), &session_id).await?;
+    let connection = provider_connection(state.inner(), &connection_id)?;
+    let active_run = repository::get_active_run(&target_pool, &session.id).await?;
+    let has_pending_queue = !repository::list_pending_queued_messages(&target_pool, &session.id)
+        .await?
+        .is_empty();
 
-    // Server-side belt-and-braces guard. The FE disables the input while
-    // a run is in flight, but multi-tab usage, race conditions on
-    // network-slow turns, and future programmatic callers all need the
-    // backend to reject too. When we add user-message queueing later
-    // this is the natural spot to enqueue instead of refusing.
-    if repository::session_has_active_run(&target_pool, &session.id).await? {
-        return Err(format!(
-            "{}A run is already in flight for this session — wait for it to finish or cancel it.",
-            ASSISTANT_RUN_IN_FLIGHT_ERROR
-        ));
+    if active_run.is_none() {
+        // If tied to a workspace agent (manager), sync execution config with the
+        // latest workspace_agents row so config changes take effect immediately.
+        // Phase 1.4: the row's inline `execution` column is the source of truth.
+        let needs_execution_update = fresh_execution_for_session(state.inner(), &session)?;
+        if let Some(fresh_execution) = needs_execution_update {
+            session.context.execution = fresh_execution;
+            session.updated_at = chrono::Utc::now().timestamp_millis();
+            session = repository::update_session(&target_pool, &session).await?;
+        }
     }
 
-    // If tied to a workspace agent (manager), sync execution config with the
-    // latest workspace_agents row so config changes take effect immediately.
-    // Phase 1.4: the row's inline `execution` column is the source of truth.
-    let needs_execution_update = fresh_execution_for_session(state.inner(), &session)?;
-    if let Some(fresh_execution) = needs_execution_update {
-        session.context.execution = fresh_execution;
-        session.updated_at = chrono::Utc::now().timestamp_millis();
-        session = repository::update_session(&target_pool, &session).await?;
-    }
-
-    let assistant_message = repository::create_message(
+    let queue_message = active_run.is_some() || has_pending_queue;
+    let assistant_message = repository::create_user_message(
         &target_pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::User,
-            content: vec![ContentPart::Text { text: message }],
-            provider_metadata: None,
-        },
+        session.id.clone(),
+        message,
+        queue_message.then_some(connection_id.as_str()),
     )
     .await?;
 
-    let connection = provider_connection(state.inner(), &connection_id)?;
+    if let Some(run) = active_run {
+        emit_event(
+            &app,
+            &session,
+            Some(&run.id),
+            AssistantUiEvent::MessageCreated {
+                message: assistant_message.clone(),
+            },
+        )?;
+
+        return Ok(AssistantSendMessageResult {
+            session,
+            message: assistant_message,
+            run: Some(run),
+            queued: true,
+        });
+    }
+
+    if has_pending_queue {
+        emit_event(
+            &app,
+            &session,
+            None,
+            AssistantUiEvent::MessageCreated {
+                message: assistant_message.clone(),
+            },
+        )?;
+
+        let run =
+            start_queued_followup_if_idle(target_pool.clone(), app.clone(), session.id.clone())
+                .await?;
+
+        return Ok(AssistantSendMessageResult {
+            session,
+            message: assistant_message,
+            run,
+            queued: false,
+        });
+    }
 
     let run = repository::create_run(
         &target_pool,
@@ -319,7 +345,8 @@ pub async fn assistant_send_message(
     Ok(AssistantSendMessageResult {
         session,
         message: assistant_message,
-        run,
+        run: Some(run),
+        queued: false,
     })
 }
 
@@ -452,9 +479,12 @@ pub(crate) fn spawn_run_task(
 ) {
     let cancel_token = runtime::register_run(&run_id);
     tauri::async_runtime::spawn(async move {
-        let deps = AssistantDeps { pool, app };
+        let deps = AssistantDeps {
+            pool: pool.clone(),
+            app: app.clone(),
+        };
         let input = RunTurnInput {
-            session_id,
+            session_id: session_id.clone(),
             run_id: Some(run_id.clone()),
             trigger,
             connection_id,
@@ -465,5 +495,87 @@ pub(crate) fn spawn_run_task(
             tracing::error!("Assistant engine error for run {}: {}", run_id, e);
         }
         runtime::unregister_run(&run_id);
+        if let Err(e) =
+            start_queued_followup_if_idle(pool.clone(), app.clone(), session_id.clone()).await
+        {
+            tracing::error!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to start queued assistant follow-up"
+            );
+        }
     });
+}
+
+pub(crate) async fn start_queued_followup_if_idle(
+    pool: DbPool,
+    app: AppHandle,
+    session_id: String,
+) -> Result<Option<AssistantRun>, String> {
+    if repository::session_has_active_run(&pool, &session_id).await? {
+        return Ok(None);
+    }
+
+    let pending = repository::list_pending_queued_messages(&pool, &session_id).await?;
+    if pending.is_empty() {
+        return Ok(None);
+    }
+
+    let mut session = repository::get_session(&pool, &session_id)
+        .await?
+        .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
+
+    let app_state = app.state::<AppState>();
+    if let Some(fresh_execution) = fresh_execution_for_session(app_state.inner(), &session)? {
+        session.context.execution = fresh_execution;
+        session.updated_at = chrono::Utc::now().timestamp_millis();
+        session = repository::update_session(&pool, &session).await?;
+    }
+
+    let connection_id = pending[0].connection_id.clone();
+    let connection = provider_connection(app_state.inner(), &connection_id)?;
+    let run = repository::create_run(
+        &pool,
+        CreateRunParams {
+            session_id: session.id.clone(),
+            status: RunStatus::Queued,
+            trigger: RunTrigger::UserMessage,
+            connection_id: connection_id.clone(),
+            provider_id: connection.provider_id.clone(),
+            model_id: connection.model_id.clone(),
+            usage: None,
+            error: None,
+        },
+    )
+    .await?;
+
+    let message_ids: Vec<String> = pending
+        .iter()
+        .map(|queued| queued.message.id.clone())
+        .collect();
+    if let Err(error) =
+        repository::mark_queued_messages_delivered(&pool, &session.id, &run.id, &message_ids).await
+    {
+        let _ =
+            repository::update_run_status(&pool, &run.id, RunStatus::Failed, Some(&error)).await;
+        return Err(error);
+    }
+
+    emit_event(
+        &app,
+        &session,
+        Some(&run.id),
+        AssistantUiEvent::RunQueued { run: run.clone() },
+    )?;
+
+    spawn_run_task(
+        pool,
+        app,
+        session.id,
+        run.id.clone(),
+        RunTrigger::UserMessage,
+        connection_id,
+    );
+
+    Ok(Some(run))
 }

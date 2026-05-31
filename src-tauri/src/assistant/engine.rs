@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use std::collections::HashSet;
 use tauri::AppHandle;
 use tauri::Manager;
 use thiserror::Error;
@@ -220,6 +221,14 @@ pub async fn run_session_turn(
         // the source of truth; this only shapes what the provider sees so a
         // mid-stream hangup or stacked user typing can't poison subsequent runs.
         let messages = repository::list_messages(&deps.pool, &session.id).await?;
+        let message_ids_in_snapshot: HashSet<&str> =
+            messages.iter().map(|message| message.id.as_str()).collect();
+        let queued_message_ids_in_request: Vec<String> =
+            repository::list_pending_queued_message_ids(&deps.pool, &session.id)
+                .await?
+                .into_iter()
+                .filter(|id| message_ids_in_snapshot.contains(id.as_str()))
+                .collect();
         let normalized = normalize_history_for_provider(&messages);
 
         let mut provider_messages = vec![system_message.clone()];
@@ -245,6 +254,18 @@ pub async fn run_session_turn(
                 return Err(e.into());
             }
         };
+
+        if let Err(e) = repository::mark_queued_messages_delivered(
+            &deps.pool,
+            &session.id,
+            &run_id,
+            &queued_message_ids_in_request,
+        )
+        .await
+        {
+            fail_run(deps, &session, &run_id, usage.as_ref(), &e).await?;
+            return Err(AssistantEngineError::Persistence(e));
+        }
 
         // Create assistant message placeholder
         let assistant_message = repository::create_message(

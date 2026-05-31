@@ -76,6 +76,23 @@ async fn setup_test_pool() -> DbPool {
 
     sqlx::query(
         r#"
+        CREATE TABLE assistant_message_queue (
+            message_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            connection_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('pending', 'delivered')),
+            queued_at INTEGER NOT NULL,
+            delivered_run_id TEXT,
+            delivered_at INTEGER
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
         CREATE TABLE assistant_tool_calls (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -358,6 +375,131 @@ async fn test_update_message_content() {
         }
         _ => panic!("expected tool use"),
     }
+}
+
+#[tokio::test]
+async fn test_user_message_queue_lifecycle() {
+    let pool = setup_test_pool().await;
+
+    let session = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let unqueued = create_user_message(&pool, session.id.clone(), "first".into(), None)
+        .await
+        .unwrap();
+    let queued = create_user_message(
+        &pool,
+        session.id.clone(),
+        "while you work".into(),
+        Some("conn-1"),
+    )
+    .await
+    .unwrap();
+
+    let pending = list_pending_queued_messages(&pool, &session.id)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message.id, queued.id);
+    assert_eq!(pending[0].connection_id, "conn-1");
+    assert_ne!(pending[0].message.id, unqueued.id);
+
+    let run = create_run(
+        &pool,
+        CreateRunParams {
+            session_id: session.id.clone(),
+            status: RunStatus::Queued,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn-1".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+            usage: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    mark_queued_messages_delivered(&pool, &session.id, &run.id, &[queued.id.clone()])
+        .await
+        .unwrap();
+
+    assert!(list_pending_queued_messages(&pool, &session.id)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let delivered = list_delivered_queued_messages_for_run(&pool, &session.id, &run.id)
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].message.id, queued.id);
+}
+
+#[tokio::test]
+async fn test_get_active_run_ignores_terminal_runs() {
+    let pool = setup_test_pool().await;
+
+    let session = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+
+    create_run(
+        &pool,
+        CreateRunParams {
+            session_id: session.id.clone(),
+            status: RunStatus::Completed,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn-1".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+            usage: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(get_active_run(&pool, &session.id).await.unwrap().is_none());
+
+    let running = create_run(
+        &pool,
+        CreateRunParams {
+            session_id: session.id.clone(),
+            status: RunStatus::Running,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn-1".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+            usage: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        get_active_run(&pool, &session.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        running.id
+    );
 }
 
 // ---------------------------------------------------------------------------
