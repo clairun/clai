@@ -367,6 +367,12 @@ interface ChatMessageListProps {
   isStreaming?: boolean;
   toolCalls?: ToolInvocation[];
   userLabel?: string;
+  // Error message of the most recent run if it failed, shown inline at the
+  // end of the conversation (directly under the failed turn). Null when the
+  // last run didn't fail. `runErrorIsLimit` selects a calmer style for
+  // usage/rate limits, which resolve on their own at a stated reset time.
+  runError?: string | null;
+  runErrorIsLimit?: boolean;
 }
 
 const ChatMessageList = ({
@@ -379,6 +385,8 @@ const ChatMessageList = ({
   // transcript — those `user` messages are the parent's task instructions,
   // not anything the human typed.
   userLabel = 'You',
+  runError = null,
+  runErrorIsLimit = false,
 }: ChatMessageListProps) => {
   const [isNearBottom, setIsNearBottom] = useState(true);
 
@@ -437,13 +445,25 @@ const ChatMessageList = ({
     )
   ), [continuationFlags, streamingText, toolCallsById, userLabel]);
 
-  const runningFooter = isStreaming ? (
+  // Footer rendered inside the scroll area, right after the last message.
+  // While a run is in flight we show the activity indicator; once it ends we
+  // show the failure (if any) attached to the turn it belongs to. These are
+  // mutually exclusive — a failed run is no longer streaming.
+  const footer = isStreaming ? (
     <div className={styles.runningIndicator}>
       <img
         src="/icon.svg"
         alt="Clai"
         className={styles.runningIcon}
       />
+    </div>
+  ) : runError ? (
+    <div
+      className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner}
+      role="alert"
+    >
+      <span className={styles.runErrorIcon}>{runErrorIsLimit ? '⏳' : '⚠'}</span>
+      <span>{runError}</span>
     </div>
   ) : null;
 
@@ -460,7 +480,7 @@ const ChatMessageList = ({
       estimateSize={180}
       overscan={1400}
       gap={12}
-      footer={runningFooter}
+      footer={footer}
       footerEstimateSize={56}
       initialScrollToBottom
       scrollToBottomSignal={messages.length}

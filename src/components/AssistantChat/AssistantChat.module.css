@@ -81,6 +81,39 @@
   }
 }
 
+/* Run-failure notice rendered as the list footer, in-flow under the failed
+   turn (not pinned to the viewport). */
+.runErrorBanner,
+.runLimitBanner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 4px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.runErrorBanner {
+  border: 1px solid var(--color-critical-border);
+  background: var(--color-critical-bg);
+  color: var(--color-critical);
+}
+
+/* Usage/rate limit — calmer than a hard error: it resolves on its own at the
+   stated reset time. */
+.runLimitBanner {
+  border: 1px solid var(--color-warning-border);
+  background: color-mix(in srgb, var(--color-warning-bg) 60%, var(--color-bg-elevated));
+  color: var(--color-text-primary);
+}
+
+.runErrorIcon {
+  flex-shrink: 0;
+  line-height: 1.45;
+}
+
 /* Activity List */
 .activityList {
   flex: 1;

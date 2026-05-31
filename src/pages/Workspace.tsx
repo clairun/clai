@@ -156,6 +156,22 @@ const getLastRunInfo = (runs: AssistantRun[] | null | undefined): AssistantRun |
   return last ?? null;
 };
 
+// Mirrors the backend `is_usage_limit_error` classifier (local_agent.rs).
+// Used purely for presentation: a usage/rate limit is non-retryable until a
+// reset time the message already states, so we show it with a calmer style
+// (clock) rather than a hard error.
+const isUsageLimitError = (message: string): boolean => {
+  const m = message.toLowerCase();
+  return (
+    m.includes('usage limit') ||
+    m.includes('session limit') ||
+    m.includes('rate limit') ||
+    m.includes('rate_limit') ||
+    m.includes('quota') ||
+    (m.includes("you've hit your") && m.includes('limit'))
+  );
+};
+
 const RUN_STATUS_LABEL: Partial<Record<AssistantRun['status'], string>> = {
   completed: 'Completed',
   completed_with_warnings: 'Warnings',
@@ -1106,6 +1122,8 @@ interface ChatFirstLayoutProps {
   toolCalls: ToolInvocation[];
   streamingText: Record<string, string>;
   isStreaming: boolean;
+  runError: string | null;
+  runErrorIsLimit: boolean;
 }
 
 const ChatFirstLayout = ({
@@ -1115,6 +1133,8 @@ const ChatFirstLayout = ({
   toolCalls,
   streamingText,
   isStreaming,
+  runError,
+  runErrorIsLimit,
 }: ChatFirstLayoutProps) => (
   <div className={styles.chatFirstContent}>
     {messages.length > 0 ? (
@@ -1124,6 +1144,8 @@ const ChatFirstLayout = ({
           toolCalls={toolCalls}
           streamingText={streamingText}
           isStreaming={isStreaming}
+          runError={runError}
+          runErrorIsLimit={runErrorIsLimit}
         />
         <AskUserPanel sessionId={sessionId} />
         <InlineApprovalCard workspaceId={workspaceId} />
@@ -1504,6 +1526,13 @@ const Workspace = () => {
   const activeRun =
     (snapshot?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
+  // Surface the most recent run's failure in the chat. Derived from the
+  // newest run, so it clears automatically when the next run starts. Without
+  // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
+  const lastRun = getLastRunInfo(sessionState?.runs || snapshot?.runs);
+  const runError =
+    lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
+  const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
   // Clear the "stopping…" lock once the cancelled run leaves the active
   // set. The cancel propagation is async (engine checkpoints), so we
   // can't clear on the cancel call returning.
@@ -1559,6 +1588,8 @@ const Workspace = () => {
             toolCalls={toolCalls}
             streamingText={streamingText}
             isStreaming={isStreaming}
+            runError={runError}
+            runErrorIsLimit={runErrorIsLimit}
           />
         </div>
 
