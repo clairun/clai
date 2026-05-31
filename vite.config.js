@@ -35,8 +35,12 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching `src-tauri` and the local Flatpak
+      //    build tree. The latter contains `var/run -> /run`, an absolute
+      //    symlink into the host runtime dir; following it leads the watcher
+      //    into udev's circular `watch/` symlinks and crashes Vite with
+      //    ELOOP. Vite doesn't honor .gitignore, so it must be excluded here.
+      ignored: ["**/src-tauri/**", "**/flatpak-build/**"],
     },
   },
 }));
