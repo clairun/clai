@@ -495,6 +495,7 @@ async fn ensure_workspace_manager_session(
         execution: agent_config.execution.clone(),
         netdata_conversation_id: None,
         cli_session_id: None,
+        cli_session_provider: None,
         automation_id: Some(agent_config.id.clone()),
         // Despite the misleading name, `agent_workspace_id` is the *workspace*
         // id the tools use to derive the on-disk working directory. Setting it
@@ -515,6 +516,7 @@ async fn ensure_workspace_manager_session(
         // reconcile" — see the doc comment above.
         let mut merged = desired_context.clone();
         merged.cli_session_id = session.context.cli_session_id.clone();
+        merged.cli_session_provider = session.context.cli_session_provider.clone();
         merged.inter_agent_call = session.context.inter_agent_call.clone();
 
         let session = if session.title.as_deref() != Some(agent_config.name.as_str())

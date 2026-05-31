@@ -1311,6 +1311,8 @@ fn desired_workspace_context(
         netdata_conversation_id: existing_session
             .and_then(|session| session.context.netdata_conversation_id.clone()),
         cli_session_id: existing_session.and_then(|session| session.context.cli_session_id.clone()),
+        cli_session_provider: existing_session
+            .and_then(|session| session.context.cli_session_provider.clone()),
         automation_id,
         agent_workspace_id,
         automation_name,

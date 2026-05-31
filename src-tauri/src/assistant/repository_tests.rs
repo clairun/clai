@@ -124,6 +124,7 @@ fn sample_context() -> SessionContext {
         execution: ExecutionCapabilityConfig::default(),
         netdata_conversation_id: None,
         cli_session_id: None,
+        cli_session_provider: None,
         automation_id: None,
         agent_workspace_id: None,
         automation_name: None,

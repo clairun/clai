@@ -480,6 +480,7 @@ fn task_session_context(
         execution: target_config.execution.clone(),
         netdata_conversation_id: None,
         cli_session_id: None,
+        cli_session_provider: None,
         automation_id: Some(target_config.id.clone()),
         agent_workspace_id: Some(workspace_id.to_string()),
         automation_name: Some(target_config.name.clone()),

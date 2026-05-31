@@ -133,6 +133,23 @@ pub async fn run_session_turn(
                 ));
             }
         };
+    // A CLI session id is provider-specific (Claude generates its own UUID;
+    // Codex returns a server-side thread id), so an id created by one CLI is
+    // meaningless to another — resuming it fails (e.g. Codex: "no rollout
+    // found for thread id"). If the session was last driven by a *known,
+    // different* provider, drop the stale id so this run starts fresh. We only
+    // act when the owning provider is known: legacy sessions (provider `None`,
+    // created before this was tracked) are left alone and recover via the
+    // session-lost path instead, so we don't needlessly reset live sessions.
+    if session
+        .context
+        .cli_session_provider
+        .as_deref()
+        .is_some_and(|owner| owner != connection.provider_id)
+        && session.context.cli_session_id.is_some()
+    {
+        clear_cli_session_id(deps, &mut session).await?;
+    }
     let had_existing_cli_session = session.context.cli_session_id.is_some();
 
     let mcp_runtime = local_mcp::ensure_started(&deps.app).await?;
@@ -158,7 +175,7 @@ pub async fn run_session_turn(
     let run_result = match provider_runtime {
         CliProviderRuntime::ClaudeCode => {
             let (cli_session_id, is_new_session) =
-                ensure_cli_session_id(deps, &mut session).await?;
+                ensure_cli_session_id(deps, &mut session, &connection.provider_id).await?;
             let mcp_config_path = match write_mcp_config(mcp_runtime.url(), binding_guard.token()) {
                 Ok(path) => path,
                 Err(error) => {
@@ -274,6 +291,10 @@ fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) ->
             message.contains("Session not found")
                 || message.contains("No session found")
                 || message.contains("failed to read thread")
+                // `codex exec resume <id>` for an id Codex doesn't know (e.g. a
+                // stale id left by another provider, or a pruned rollout).
+                || message.contains("no rollout found")
+                || message.contains("thread/resume failed")
         }
     }
 }
@@ -302,6 +323,7 @@ async fn clear_cli_session_id(
     session: &mut AssistantSession,
 ) -> Result<(), AssistantEngineError> {
     session.context.cli_session_id = None;
+    session.context.cli_session_provider = None;
     session.updated_at = chrono::Utc::now().timestamp_millis();
     *session = repository::update_session(&deps.pool, session).await?;
     Ok(())
@@ -311,11 +333,15 @@ async fn set_cli_session_id(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
     cli_session_id: String,
+    provider_id: &str,
 ) -> Result<(), LocalAgentRunError> {
-    if session.context.cli_session_id.as_deref() == Some(cli_session_id.as_str()) {
+    if session.context.cli_session_id.as_deref() == Some(cli_session_id.as_str())
+        && session.context.cli_session_provider.as_deref() == Some(provider_id)
+    {
         return Ok(());
     }
     session.context.cli_session_id = Some(cli_session_id);
+    session.context.cli_session_provider = Some(provider_id.to_string());
     session.updated_at = chrono::Utc::now().timestamp_millis();
     *session = repository::update_session(&deps.pool, session)
         .await
@@ -362,13 +388,22 @@ async fn resolve_run_id(
 async fn ensure_cli_session_id(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
+    provider_id: &str,
 ) -> Result<(String, bool), AssistantEngineError> {
-    if let Some(id) = &session.context.cli_session_id {
-        return Ok((id.clone(), false));
+    if let Some(id) = session.context.cli_session_id.clone() {
+        // Backfill the owning provider for sessions created before it was
+        // tracked, so a future provider switch is detected proactively.
+        if session.context.cli_session_provider.as_deref() != Some(provider_id) {
+            session.context.cli_session_provider = Some(provider_id.to_string());
+            session.updated_at = chrono::Utc::now().timestamp_millis();
+            *session = repository::update_session(&deps.pool, session).await?;
+        }
+        return Ok((id, false));
     }
 
     let id = Uuid::new_v4().to_string();
     session.context.cli_session_id = Some(id.clone());
+    session.context.cli_session_provider = Some(provider_id.to_string());
     session.updated_at = chrono::Utc::now().timestamp_millis();
     *session = repository::update_session(&deps.pool, session).await?;
     Ok((id, true))
@@ -1055,7 +1090,7 @@ async fn handle_codex_event(
     match value.get("type").and_then(Value::as_str) {
         Some("thread.started") => {
             if let Some(thread_id) = value.get("thread_id").and_then(Value::as_str) {
-                set_cli_session_id(deps, session, thread_id.to_string()).await?;
+                set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
             }
         }
         Some("turn.completed") => {
@@ -2403,6 +2438,34 @@ mod tests {
             "No conversation found with session ID"
         ));
         assert!(!is_usage_limit_error(""));
+    }
+
+    #[test]
+    fn codex_resume_failures_are_session_lost() {
+        // Real message seen when resuming a thread id Codex doesn't own (e.g.
+        // a stale id from a different provider after switching Claude→Codex).
+        assert!(is_session_lost_error(
+            CliProviderRuntime::Codex,
+            "Codex exited with status exit status: 1 --- stderr --- Error: thread/resume: thread/resume failed: no rollout found for thread id 729ca14e-b692-4679-aee5-375bac0fb91e (code -32600)"
+        ));
+        assert!(is_session_lost_error(
+            CliProviderRuntime::Codex,
+            "Session not found"
+        ));
+        // A usage limit is NOT a session-loss — must not trigger the reset path.
+        assert!(!is_session_lost_error(
+            CliProviderRuntime::Codex,
+            "You've hit your usage limit. Try again at 9:47 PM."
+        ));
+        // Claude's resume failure stays matched on the Claude side only.
+        assert!(is_session_lost_error(
+            CliProviderRuntime::ClaudeCode,
+            "No conversation found with session ID abc"
+        ));
+        assert!(!is_session_lost_error(
+            CliProviderRuntime::ClaudeCode,
+            "no rollout found for thread id abc"
+        ));
     }
 
     #[test]

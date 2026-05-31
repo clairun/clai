@@ -24,6 +24,7 @@ const SESSION: AssistantSession = {
     execution: {},
     netdataConversationId: null,
     cliSessionId: null,
+    cliSessionProvider: null,
     automationId: null,
     agentWorkspaceId: null,
     automationName: null,

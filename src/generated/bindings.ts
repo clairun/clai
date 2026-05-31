@@ -131,7 +131,14 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { spaceId: string | null, roomId: string | null, workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, netdataConversationId: string | null, cliSessionId: string | null, automationId: string | null, agentWorkspaceId: string | null, automationName: string | null, interAgentCall: InterAgentCallContext | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
+export type SessionContext = { spaceId: string | null, roomId: string | null, workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, netdataConversationId: string | null, cliSessionId: string | null, 
+/**
+ * The CLI provider that owns `cli_session_id`. A session id is
+ * provider-specific (Claude generates its own UUID; Codex returns a
+ * server-side thread id), so switching providers must NOT reuse it.
+ * `None` for sessions created before this was tracked.
+ */
+cliSessionProvider: string | null, automationId: string | null, agentWorkspaceId: string | null, automationName: string | null, interAgentCall: InterAgentCallContext | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
 
 export type SessionKind = "interactive" | "background_job";
 
