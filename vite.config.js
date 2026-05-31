@@ -18,6 +18,15 @@ export default defineConfig(async () => ({
     target: ["es2021", "safari15"],
   },
 
+  // Pin dependency pre-bundling to the real app entry. By default Vite globs
+  // `**/*.html` across the whole project to discover entries, which crawls
+  // into `flatpak-build/` (var/run -> host /run, full of unrelated downloaded
+  // HTML) and `src-tauri/target` codegen assets, then crashes the esbuild scan
+  // with EPIPE. This is a single-page app, so one entry is all we need.
+  optimizeDeps: {
+    entries: ["index.html"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
