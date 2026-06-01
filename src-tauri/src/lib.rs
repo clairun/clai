@@ -372,6 +372,8 @@ pub fn run() {
             commands::workspace::workspace_get_or_create_session,
             commands::workspace::workspace_read_file,
             commands::workspace::workspace_read_file_base64,
+            commands::workspace::workspace_list_dir,
+            commands::workspace::workspace_search_artifacts,
             commands::workspace::workspace_write_file,
             commands::workspace::workspace_download_file,
             commands::workspace::workspace_update_session_mcp,

@@ -7,8 +7,10 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   WorkspaceAgentResponse,
+  WorkspaceDirEntry,
   WorkspaceFileBytes,
   WorkspaceFileContent,
+  WorkspaceFileEntry,
   WorkspaceListEntry,
   WorkspaceSessionBinding,
   WorkspaceSnapshot,
@@ -30,6 +32,37 @@ export async function getOrCreateWorkspaceSession(
   workspaceId: string = 'default'
 ): Promise<WorkspaceSessionBinding> {
   return invoke('workspace_get_or_create_session', { workspaceId });
+}
+
+/**
+ * List a single directory level of the artifact tree. Called lazily by the
+ * artifacts panel — once for the root, then per folder as the user expands it —
+ * so a workspace with tens of thousands of artifacts never has to be walked or
+ * held in memory all at once. `path` is relative to the workspace root; omit it
+ * (or pass '') for the root level.
+ */
+export async function listWorkspaceDir(
+  workspaceId: string,
+  path?: string
+): Promise<WorkspaceDirEntry[]> {
+  return invoke('workspace_list_dir', {
+    request: { workspaceId, path: path || null },
+  });
+}
+
+/**
+ * Search the entire artifact tree server-side for files whose relative path
+ * matches the query (case-insensitive). Needed because the panel only lazy-
+ * loads the directory levels the user has expanded, so client-side filtering
+ * could never span unopened folders.
+ */
+export async function searchWorkspaceArtifacts(
+  workspaceId: string,
+  query: string
+): Promise<WorkspaceFileEntry[]> {
+  return invoke('workspace_search_artifacts', {
+    request: { workspaceId, query },
+  });
 }
 
 export async function readWorkspaceFile(

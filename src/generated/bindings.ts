@@ -190,6 +190,22 @@ execution: unknown, createdAt: bigint, updatedAt: bigint, };
 export type WorkspaceAgentSummary = { id: string, agentDefinitionId: string, displayName: string, role: string, isDefault: boolean, description?: string | null, };
 
 /**
+ * One entry in a single directory level of the artifact tree, returned by
+ * `workspace_list_dir`. Unlike `WorkspaceFileEntry` (always a file), this can
+ * be either a file or a directory; directories carry a recursive
+ * `child_count` so the UI can show "N files" without descending.
+ */
+export type WorkspaceDirEntry = { path: string, name: string, 
+/**
+ * "file" or "directory".
+ */
+kind: string, viewer: string | null, size: bigint | null, updatedAt: bigint | null, 
+/**
+ * Recursive file count for directories; `None` for files.
+ */
+childCount: bigint | null, };
+
+/**
  * A workspace file returned as base64-encoded bytes plus a best-effort
  * MIME type. Used by the HTML-artifact preview bundler to inline local
  * resources (stylesheets, scripts, images, fonts) so a multi-file report
@@ -201,7 +217,7 @@ export type WorkspaceFileContent = { path: string, viewer: string, content: stri
 
 export type WorkspaceFileEntry = { path: string, relativePath: string, name: string, viewer: string, size: bigint | null, updatedAt: bigint | null, preview: string | null, };
 
-export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, artifactCount: bigint, memoryCount: bigint, assignedAgentCount: number, defaultManagerName: string | null, runningTaskCount: bigint, blockedTaskCount: bigint, failedTaskCount: bigint, attentionTaskCount: bigint, latestAttentionTaskId: string | null, latestAttentionTaskTitle: string | null, latestAttentionTaskStatus: string | null, latestAttentionTaskSummary: string | null, latestAttentionTaskUpdatedAt: bigint | null, scheduleEnabled: boolean, schedulePaused: boolean, 
+export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, assignedAgentCount: number, defaultManagerName: string | null, runningTaskCount: bigint, blockedTaskCount: bigint, failedTaskCount: bigint, attentionTaskCount: bigint, latestAttentionTaskId: string | null, latestAttentionTaskTitle: string | null, latestAttentionTaskStatus: string | null, latestAttentionTaskSummary: string | null, latestAttentionTaskUpdatedAt: bigint | null, scheduleEnabled: boolean, schedulePaused: boolean, 
 /**
  * Schedule mode (interval vs cron). Empty when the workspace is
  * not scheduled. The Fleet card reads this to render the cadence
@@ -211,7 +227,14 @@ scheduleKind: ScheduleKind | null, nextRunInSeconds: bigint | null, createdAt: b
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 
-export type WorkspaceSnapshot = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, selectedMcpServerNames: Array<string>, session: AssistantSession | null, messages: Array<AssistantMessage>, runs: Array<AssistantRun>, toolCalls: Array<ToolInvocation>, memories: Array<WorkspaceFileEntry>, artifacts: Array<WorkspaceFileEntry>, enabled: boolean | null, scheduleEnabled: boolean, schedulePaused: boolean, 
+export type WorkspaceSnapshot = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, selectedMcpServerNames: Array<string>, session: AssistantSession | null, messages: Array<AssistantMessage>, runs: Array<AssistantRun>, toolCalls: Array<ToolInvocation>, memories: Array<WorkspaceFileEntry>, artifacts: Array<WorkspaceFileEntry>, 
+/**
+ * True recursive artifact count for the workspace root, independent of
+ * any list cap. The artifacts panel lazy-loads its tree one directory
+ * level at a time via `workspace_list_dir`, so the header counter reads
+ * this instead of `artifacts.len()`.
+ */
+artifactCount: bigint, enabled: boolean | null, scheduleEnabled: boolean, schedulePaused: boolean, 
 /**
  * The workspace's schedule mode (interval vs cron). Empty when the
  * workspace isn't scheduled. The frontend reads this to render the

@@ -17,7 +17,9 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
   acknowledgeWorkspaceTask,
   getWorkspaceSnapshot,
+  listWorkspaceDir,
   runWorkspaceNow,
+  searchWorkspaceArtifacts,
   setWorkspaceSchedulePaused,
   setWorkspaceTitle,
 } from '../workspace/client';
@@ -25,6 +27,7 @@ import type {
   AssistantMessage,
   AssistantRun,
   ToolInvocation,
+  WorkspaceDirEntry,
   WorkspaceFileEntry,
   WorkspaceSnapshot,
   WorkspaceTaskResponse,
@@ -35,10 +38,11 @@ const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
 // Periodic poll skips the session payload (messages/runs/toolCalls are
 // kept in sync via the assistant event stream) but still re-walks the
-// workspace filesystem so memories/artifacts created by a running agent
-// surface without the user having to re-enter the workspace. The
-// backend caps the walk at MAX_ENTRY_COUNT (500) entries with a
-// skip-list, so the per-tick cost stays bounded.
+// workspace filesystem so memories created by a running agent surface
+// without the user having to re-enter the workspace, and so the artifact
+// count stays current. Artifacts themselves are no longer returned here —
+// the panel lazy-loads each directory level via workspace_list_dir — so the
+// per-tick cost is a memory walk plus a recursive artifact count.
 const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
   includeSessionPayload: false,
 };
@@ -437,161 +441,55 @@ const WorkspaceFileEntryList = ({
 };
 
 // ── Artifact file-tree browser ────────────────────────────────────────────
-// Artifacts arrive as a flat list of { name, path, updatedAt }. For large
-// workspaces (hundreds of files) a flat list is hard to navigate, so we
-// reconstruct the folder hierarchy from each entry's `path` and render it
-// as a collapsible tree with one folder/file per row.
+// Artifacts can number in the tens of thousands, so the panel never loads the
+// whole tree. It lazy-loads one directory level at a time via
+// `workspace_list_dir`: the root on open, then each folder's children when the
+// user expands it. Search bypasses the tree entirely and asks the backend
+// (`workspace_search_artifacts`) so it can span folders that were never opened.
 
-type ArtifactFileNode = {
-  kind: 'file';
-  name: string;
-  path: string;
-  depth: number;
-  entry: WorkspaceFileEntry;
-};
+// A flattened, depth-tagged row for the virtualized tree view. `entry` is the
+// directory listing entry (file or directory); `loading` rows are transient
+// placeholders shown while a just-expanded folder's children are in flight.
+type ArtifactRow =
+  | { kind: 'entry'; key: string; depth: number; entry: WorkspaceDirEntry }
+  | { kind: 'loading'; key: string; depth: number };
 
-type ArtifactFolderDraft = {
-  kind: 'folder';
-  name: string;
-  path: string;
-  depth: number;
-  children: Map<string, ArtifactDraftNode>;
-};
+// Convert a directory-listing file entry into the WorkspaceFileEntry shape the
+// preview/onSelect plumbing expects.
+const dirEntryToFileEntry = (entry: WorkspaceDirEntry): WorkspaceFileEntry => ({
+  path: entry.path,
+  relativePath: entry.path,
+  name: entry.name,
+  viewer: entry.viewer ?? '',
+  size: entry.size,
+  updatedAt: entry.updatedAt,
+  preview: null,
+});
 
-type ArtifactDraftNode = ArtifactFolderDraft | ArtifactFileNode;
-
-type ArtifactFolderNode = {
-  kind: 'folder';
-  name: string;
-  path: string;
-  depth: number;
-  children: ArtifactTreeNode[];
-  fileCount: number;
-};
-
-type ArtifactTreeNode = ArtifactFolderNode | ArtifactFileNode;
-
-const buildArtifactTree = (artifacts: WorkspaceFileEntry[]): ArtifactFolderNode => {
-  const root: ArtifactFolderDraft = {
-    kind: 'folder',
-    name: '',
-    path: '',
-    depth: -1,
-    children: new Map(),
-  };
-  for (const entry of artifacts) {
-    const parts = (entry.path || entry.name || '').split('/').filter(Boolean);
-    if (parts.length === 0) continue;
-    let node = root;
-    for (let i = 0; i < parts.length; i += 1) {
-      const part = parts[i]!; // bounded by the loop condition
-      const isLeaf = i === parts.length - 1;
-      const childPath = node.path ? `${node.path}/${part}` : part;
-      let child = node.children.get(part);
-      if (!child) {
-        child = isLeaf
-          ? { kind: 'file', name: part, path: childPath, depth: i, entry }
-          : { kind: 'folder', name: part, path: childPath, depth: i, children: new Map() };
-        node.children.set(part, child);
-      } else if (!isLeaf && child.kind === 'file') {
-        // Rare: a segment was registered as a file, but a deeper path now
-        // uses it as a folder. Promote to folder so traversal continues.
-        child = { kind: 'folder', name: part, path: childPath, depth: i, children: new Map() };
-        node.children.set(part, child);
-      }
-      if (child.kind === 'folder') {
-        node = child;
-      }
-    }
-  }
-
-  const finalize = (node: ArtifactDraftNode): ArtifactTreeNode => {
-    if (node.kind === 'file') return node;
-    const arr = [...node.children.values()];
-    arr.sort((a, b) => {
-      if (a.kind !== b.kind) return a.kind === 'folder' ? -1 : 1;
-      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
-    });
-    const children = arr.map(finalize);
-    const fileCount = children.reduce(
-      (count, child) => count + (child.kind === 'file' ? 1 : child.fileCount),
-      0
-    );
-    return {
-      kind: 'folder',
-      name: node.name,
-      path: node.path,
-      depth: node.depth,
-      children,
-      fileCount,
-    };
-  };
-  return finalize(root) as ArtifactFolderNode;
-};
-
-// When the search box has content, walk the tree once and collect every
-// matching file path plus every ancestor folder path. The flatten pass then
-// uses this set both as a visibility filter and (since it contains all
-// ancestor folders) as the effective "expanded" set — so matches always
-// reveal themselves without disturbing the user's manual expansion state.
-const computeArtifactMatches = (root: ArtifactFolderNode, query: string): Set<string> | null => {
-  if (!query) return null;
-  const q = query.toLowerCase();
-  const matched = new Set<string>();
-  const walk = (node: ArtifactTreeNode): boolean => {
-    if (node.kind === 'file') {
-      if (node.name.toLowerCase().includes(q) || node.path.toLowerCase().includes(q)) {
-        matched.add(node.path);
-        const parts = node.path.split('/');
-        parts.pop();
-        while (parts.length > 0) {
-          matched.add(parts.join('/'));
-          parts.pop();
+// Walk the loaded directory levels into a flat, depth-tagged row list,
+// descending only into folders the user has expanded. A folder that's expanded
+// but not yet loaded emits a single loading placeholder row.
+const flattenLoadedTree = (
+  childrenByPath: Map<string, WorkspaceDirEntry[]>,
+  expanded: Set<string>
+): ArtifactRow[] => {
+  const out: ArtifactRow[] = [];
+  const walk = (parentPath: string, depth: number) => {
+    const children = childrenByPath.get(parentPath);
+    if (!children) return;
+    for (const entry of children) {
+      out.push({ kind: 'entry', key: entry.path, depth, entry });
+      if (entry.kind === 'directory' && expanded.has(entry.path)) {
+        if (childrenByPath.has(entry.path)) {
+          walk(entry.path, depth + 1);
+        } else {
+          out.push({ kind: 'loading', key: `${entry.path}::loading`, depth: depth + 1 });
         }
-        return true;
-      }
-      return false;
-    }
-    let any = false;
-    for (const child of node.children) {
-      if (walk(child)) any = true;
-    }
-    return any;
-  };
-  for (const child of root.children) walk(child);
-  return matched;
-};
-
-const flattenArtifactTree = (
-  root: ArtifactFolderNode,
-  expanded: Set<string>,
-  matches: Set<string> | null
-): ArtifactTreeNode[] => {
-  const out: ArtifactTreeNode[] = [];
-  const walk = (node: ArtifactFolderNode) => {
-    for (const child of node.children) {
-      if (matches && !matches.has(child.path)) continue;
-      out.push(child);
-      if (child.kind === 'folder' && expanded.has(child.path)) {
-        walk(child);
       }
     }
   };
-  walk(root);
+  walk('', 0);
   return out;
-};
-
-const HighlightedText = ({ text, query }: { text: string; query: string }): React.ReactNode => {
-  if (!query) return text;
-  const idx = text.toLowerCase().indexOf(query.toLowerCase());
-  if (idx === -1) return text;
-  return (
-    <>
-      {text.slice(0, idx)}
-      <mark className={styles.fileTreeMark}>{text.slice(idx, idx + query.length)}</mark>
-      {text.slice(idx + query.length)}
-    </>
-  );
 };
 
 const ChevronIcon = ({ open }: { open: boolean }) => (
@@ -645,40 +543,50 @@ const FileGlyph = () => (
 );
 
 interface ArtifactTreeRowProps {
-  node: ArtifactTreeNode;
+  row: ArtifactRow;
   isExpanded: boolean;
-  query: string;
   onToggle: (path: string) => void;
   onSelect?: (entry: WorkspaceFileEntry) => void;
 }
 
-const ArtifactTreeRow = ({ node, isExpanded, query, onToggle, onSelect }: ArtifactTreeRowProps) => {
-  const isFolder = node.kind === 'folder';
+const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect }: ArtifactTreeRowProps) => {
+  if (row.kind === 'loading') {
+    return (
+      <div
+        className={`${styles.fileTreeRow} ${styles.fileTreeRowFile}`}
+        style={{ paddingInlineStart: 8 + row.depth * 14 }}
+      >
+        <span className={styles.fileTreeChevronSlot} />
+        <span className={styles.fileTreeName}>Loading…</span>
+      </div>
+    );
+  }
+
+  const { entry, depth } = row;
+  const isFolder = entry.kind === 'directory';
   const handleClick = () => {
-    if (isFolder) onToggle(node.path);
-    else onSelect?.(node.entry);
+    if (isFolder) onToggle(entry.path);
+    else onSelect?.(dirEntryToFileEntry(entry));
   };
   return (
     <button
       type="button"
       className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}`}
-      style={{ paddingInlineStart: 8 + node.depth * 14 }}
+      style={{ paddingInlineStart: 8 + depth * 14 }}
       onClick={handleClick}
-      title={node.path}
+      title={entry.path}
       aria-expanded={isFolder ? isExpanded : undefined}
     >
       <span className={styles.fileTreeChevronSlot}>
         {isFolder && <ChevronIcon open={isExpanded} />}
       </span>
       <span className={styles.fileTreeIcon}>{isFolder ? <FolderGlyph /> : <FileGlyph />}</span>
-      <span className={styles.fileTreeName}>
-        <HighlightedText text={node.name} query={query} />
-      </span>
+      <span className={styles.fileTreeName}>{entry.name}</span>
       <span className={styles.fileTreeMeta}>
         {isFolder
-          ? node.fileCount
-          : node.entry?.updatedAt
-            ? formatTimestamp(node.entry.updatedAt)
+          ? Number(entry.childCount ?? 0)
+          : entry.updatedAt
+            ? formatTimestamp(entry.updatedAt)
             : ''}
       </span>
     </button>
@@ -686,80 +594,177 @@ const ArtifactTreeRow = ({ node, isExpanded, query, onToggle, onSelect }: Artifa
 };
 
 interface ArtifactsListProps {
-  artifacts: WorkspaceFileEntry[];
+  workspaceId: string;
+  totalCount: number;
   onSelect?: (entry: WorkspaceFileEntry) => void;
 }
 
-const ArtifactsList = ({ artifacts, onSelect }: ArtifactsListProps) => {
+const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
+
+// Lazy directory-tree browser. Loads the root level on open and each folder's
+// children on first expand, caching them by path. The 5s snapshot poll surfaces
+// new artifacts by bumping `totalCount`, which we use to silently refresh the
+// already-loaded levels so a running agent's output appears without reopening.
+const ArtifactsList = ({ workspaceId, totalCount, onSelect }: ArtifactsListProps) => {
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const initializedRef = useRef(false);
+  const [childrenByPath, setChildrenByPath] = useState<Map<string, WorkspaceDirEntry[]>>(
+    () => new Map()
+  );
+  const loadingRef = useRef<Set<string>>(new Set());
+  const autoExpandedRef = useRef(false);
 
-  const tree = useMemo(() => buildArtifactTree(artifacts || []), [artifacts]);
-  const total = (artifacts || []).length;
-
-  // On first non-empty load, auto-expand the sole top-level folder so the
-  // user doesn't have to click once to see anything — common case for
-  // repo-rooted artifacts like `work/<repo>/...`.
-  useEffect(() => {
-    if (initializedRef.current) return;
-    if (tree.children.length === 0) return;
-    initializedRef.current = true;
-    if (tree.children.length === 1 && tree.children[0]!.kind === 'folder') {
-      setExpanded(new Set([tree.children[0]!.path]));
-    }
-  }, [tree]);
-
+  const [searchResults, setSearchResults] = useState<WorkspaceFileEntry[] | null>(null);
+  const [searching, setSearching] = useState(false);
   const trimmedQuery = query.trim();
-  const matches = useMemo(() => computeArtifactMatches(tree, trimmedQuery), [tree, trimmedQuery]);
 
-  const visibleNodes = useMemo(
-    () => flattenArtifactTree(tree, matches || expanded, matches),
-    [tree, expanded, matches]
+  // Load (or reload) a single directory level. `force` bypasses the cache so the
+  // poll-driven refresh can pick up newly created files.
+  const loadDir = useCallback(
+    async (path: string, force = false) => {
+      if (loadingRef.current.has(path)) return;
+      if (!force && childrenByPath.has(path)) return;
+      loadingRef.current.add(path);
+      try {
+        const entries = await listWorkspaceDir(workspaceId, path);
+        setChildrenByPath((prev) => {
+          const next = new Map(prev);
+          next.set(path, entries);
+          return next;
+        });
+      } catch (error) {
+        console.error(`Failed to list workspace dir "${path}":`, error);
+      } finally {
+        loadingRef.current.delete(path);
+      }
+    },
+    [workspaceId, childrenByPath]
   );
 
-  const handleToggle = useCallback((path: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
-  }, []);
+  // Reset and load the root when the workspace changes.
+  useEffect(() => {
+    autoExpandedRef.current = false;
+    loadingRef.current = new Set();
+    setExpanded(new Set());
+    setChildrenByPath(new Map());
+    void loadDir('', true);
+  }, [workspaceId]);
 
-  const itemKey = useCallback((node: ArtifactTreeNode) => node.path, []);
+  // When the artifact count changes (agent created/removed files), refresh every
+  // directory level we've already loaded so the open tree stays live. Bounded by
+  // how many folders the user has expanded, not by total artifact count.
+  useEffect(() => {
+    if (childrenByPath.size === 0) return;
+    for (const path of childrenByPath.keys()) {
+      void loadDir(path, true);
+    }
+  }, [totalCount]);
+
+  // Auto-expand a sole top-level folder once, so repo-rooted artifacts like
+  // `work/<repo>/...` reveal their first level without an extra click.
+  useEffect(() => {
+    if (autoExpandedRef.current) return;
+    const root = childrenByPath.get('');
+    if (!root) return;
+    autoExpandedRef.current = true;
+    if (root.length === 1 && root[0]!.kind === 'directory') {
+      const only = root[0]!.path;
+      setExpanded(new Set([only]));
+      void loadDir(only);
+    }
+  }, [childrenByPath, loadDir]);
+
+  // Debounced server-side search. Empty query → tree view.
+  useEffect(() => {
+    if (!trimmedQuery) {
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const handle = window.setTimeout(() => {
+      searchWorkspaceArtifacts(workspaceId, trimmedQuery)
+        .then((results) => {
+          if (!cancelled) setSearchResults(results);
+        })
+        .catch((error) => {
+          console.error('Failed to search workspace artifacts:', error);
+          if (!cancelled) setSearchResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSearching(false);
+        });
+    }, ARTIFACT_SEARCH_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [workspaceId, trimmedQuery]);
+
+  const handleToggle = useCallback(
+    (path: string) => {
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(path)) {
+          next.delete(path);
+        } else {
+          next.add(path);
+          void loadDir(path);
+        }
+        return next;
+      });
+    },
+    [loadDir]
+  );
+
+  const visibleRows = useMemo(
+    () => flattenLoadedTree(childrenByPath, expanded),
+    [childrenByPath, expanded]
+  );
+
+  const itemKey = useCallback((row: ArtifactRow) => row.key, []);
   const renderItem = useCallback(
-    (node: ArtifactTreeNode) => (
+    (row: ArtifactRow) => (
       <ArtifactTreeRow
-        node={node}
-        isExpanded={matches ? true : expanded.has(node.path)}
-        query={trimmedQuery}
+        row={row}
+        isExpanded={row.kind === 'entry' && expanded.has(row.entry.path)}
         onToggle={handleToggle}
         onSelect={onSelect}
       />
     ),
-    [expanded, matches, trimmedQuery, handleToggle, onSelect]
+    [expanded, handleToggle, onSelect]
   );
 
   return (
     <div className={styles.searchableList}>
-      {total > 0 && (
+      {totalCount > 0 && (
         <input
           type="text"
           className={styles.searchInput}
           value={query}
           onChange={(event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
-          placeholder={`Search artifacts (${total})`}
+          placeholder={`Search artifacts (${totalCount})`}
           aria-label="Search artifacts"
         />
       )}
-      {total === 0 ? (
+      {trimmedQuery ? (
+        searching && searchResults === null ? (
+          <div className={styles.drawerEmpty}>Searching…</div>
+        ) : (
+          <WorkspaceFileEntryList
+            entries={searchResults || []}
+            emptyMessage={`No artifacts match "${query}".`}
+            onSelect={onSelect}
+          />
+        )
+      ) : totalCount === 0 ? (
         <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
-      ) : visibleNodes.length === 0 ? (
-        <div className={styles.drawerEmpty}>No artifacts match &quot;{query}&quot;.</div>
+      ) : visibleRows.length === 0 ? (
+        <div className={styles.drawerEmpty}>Loading…</div>
       ) : (
         <WorkspaceVirtualizedList
-          items={visibleNodes}
+          items={visibleRows}
           itemKey={itemKey}
           renderItem={renderItem}
           className={styles.drawerVirtualList}
@@ -808,7 +813,7 @@ const WorkspaceHeader = ({
   isGenericWorkspace,
   messages,
   memories,
-  artifacts,
+  artifactCount,
   activePanel,
   setActivePanel,
   onRunNow,
@@ -826,7 +831,7 @@ const WorkspaceHeader = ({
   isGenericWorkspace: boolean;
   messages: AssistantMessage[];
   memories: WorkspaceFileEntry[];
-  artifacts: WorkspaceFileEntry[];
+  artifactCount: number;
   activePanel: ActivePanel;
   setActivePanel: React.Dispatch<React.SetStateAction<ActivePanel>>;
   onTitleSaved: (title: string) => void;
@@ -1106,7 +1111,7 @@ const WorkspaceHeader = ({
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter('memories', memories.length, 'memories')}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter('artifacts', artifacts.length, 'artifacts')}
+        {renderCounter('artifacts', artifactCount, 'artifacts')}
       </div>
     </div>
   );
@@ -1300,9 +1305,10 @@ const Workspace = () => {
 
           // Lightweight refresh: the backend skipped the session payload
           // (messages/runs/toolCalls live in the assistant event store),
-          // so preserve those from the prior snapshot. Memories and
-          // artifacts ARE re-fetched so writes made by a running agent
-          // appear without the user having to re-enter the workspace.
+          // so preserve those from the prior snapshot. Memories and the
+          // artifact count ARE re-fetched so a running agent's writes appear
+          // without the user having to re-enter the workspace (the artifacts
+          // panel itself lazy-loads directory levels on its own).
           return {
             ...nextSnapshot,
             messages: current.messages || [],
@@ -1488,7 +1494,11 @@ const Workspace = () => {
   }, [loadSnapshot]);
 
   const memories = snapshot?.memories || [];
+  // `artifacts` is now intentionally empty in the snapshot — the panel lazy-
+  // loads each directory level on demand. It's kept only so navigatePreviewFile
+  // can still resolve a clicked sibling against any entries it has seen.
   const artifacts = snapshot?.artifacts || [];
+  const artifactCount = Number(snapshot?.artifactCount ?? 0);
 
   // Open another workspace file in the preview — used when a link inside a
   // previewed file points at a sibling (an index page linking to a report, a
@@ -1553,7 +1563,7 @@ const Workspace = () => {
         isGenericWorkspace={isGenericWorkspace}
         messages={messages}
         memories={memories}
-        artifacts={artifacts}
+        artifactCount={artifactCount}
         activePanel={activePanel}
         setActivePanel={setActivePanel}
         onTitleSaved={handleTitleSaved}
@@ -1669,7 +1679,8 @@ const Workspace = () => {
 
               {activePanel === 'artifacts' && (
                 <ArtifactsList
-                  artifacts={artifacts}
+                  workspaceId={workspaceId}
+                  totalCount={artifactCount}
                   onSelect={(entry) => openPreviewEntry({ kind: 'artifact', entry })}
                 />
               )}

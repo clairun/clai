@@ -126,6 +126,29 @@ pub struct WorkspaceFileEntry {
     pub preview: Option<String>,
 }
 
+/// One entry in a single directory level of the artifact tree, returned by
+/// `workspace_list_dir`. Unlike `WorkspaceFileEntry` (always a file), this can
+/// be either a file or a directory; directories carry a recursive
+/// `child_count` so the UI can show "N files" without descending.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct WorkspaceDirEntry {
+    pub path: String,
+    pub name: String,
+    /// "file" or "directory".
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+    /// Recursive file count for directories; `None` for files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_count: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -163,6 +186,12 @@ pub struct WorkspaceSnapshot {
     pub memories: Vec<WorkspaceFileEntry>,
     #[serde(default)]
     pub artifacts: Vec<WorkspaceFileEntry>,
+    /// True recursive artifact count for the workspace root, independent of
+    /// any list cap. The artifacts panel lazy-loads its tree one directory
+    /// level at a time via `workspace_list_dir`, so the header counter reads
+    /// this instead of `artifacts.len()`.
+    #[serde(default)]
+    pub artifact_count: i64,
     // Agent schedule info (only for agent workspaces)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -719,6 +748,28 @@ fn collect_files(
     }
 
     Ok(())
+}
+
+/// Recursive file count for the artifact tree, applying the same skip-list as
+/// `workspace_list_dir` / the artifact `collect_files` walk so the header
+/// counter matches what the panel can actually surface (excludes `.clai`,
+/// `node_modules`, `target`, `.git`, …).
+fn count_artifact_files(dir: &Path) -> i64 {
+    let mut count: i64 = 0;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if should_skip_artifact_dir(&path) {
+                    continue;
+                }
+                count += count_artifact_files(&path);
+            } else if path.is_file() {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 fn ensure_agent_workspace_root(root: &Path) -> Result<(), String> {
@@ -1387,26 +1438,6 @@ fn workspace_virtual_artifacts(
     Ok(artifacts)
 }
 
-fn merge_workspace_artifacts(
-    mut file_artifacts: Vec<WorkspaceFileEntry>,
-    virtual_artifacts: Vec<VirtualWorkspaceArtifact>,
-) -> Vec<WorkspaceFileEntry> {
-    let existing_paths: std::collections::HashSet<String> = file_artifacts
-        .iter()
-        .map(|entry| entry.path.clone())
-        .collect();
-
-    file_artifacts.extend(
-        virtual_artifacts
-            .into_iter()
-            .filter(|artifact| !existing_paths.contains(&artifact.entry.path))
-            .map(|artifact| artifact.entry),
-    );
-
-    sort_workspace_entries(&mut file_artifacts);
-    file_artifacts
-}
-
 /// Vestigial: the legacy tabs/tiles UI no longer exists. Frontend still
 /// invokes `load_workspace_state` / `save_workspace_state` from
 /// `workspaceStore.js`; we satisfy those callers with empty state until
@@ -1461,30 +1492,30 @@ pub async fn workspace_get_snapshot(
         (Vec::new(), Vec::new(), Vec::new())
     };
 
-    let (memories, artifacts) = if options.include_files() {
+    // Memories are still returned in full (their panel renders the flat list);
+    // artifacts are no longer walked here — the panel lazy-loads each directory
+    // level via `workspace_list_dir`, so we only need the true recursive count
+    // for the header counter. This also keeps the periodic 5s poll bounded:
+    // counting is cheaper than building + serializing every entry, and there is
+    // no longer a 500-entry cap silently truncating large workspaces.
+    let (memories, artifact_count) = if options.include_files() {
         if let Some(root_path) = &descriptor.root_path {
             let memory_root = root_path.join(".clai").join("memory");
             let mut memories = Vec::new();
             if memory_root.exists() {
                 collect_files(&memory_root, root_path, &mut memories, false)?;
             }
-
-            let mut artifacts = Vec::new();
-            collect_files(root_path, root_path, &mut artifacts, true)?;
             sort_workspace_entries(&mut memories);
-            sort_workspace_entries(&mut artifacts);
 
-            let workspace_state = load_workspace_state_from_pool().await?;
-            let virtual_artifacts = workspace_virtual_artifacts(&descriptor, &workspace_state)?;
-            let artifacts = merge_workspace_artifacts(artifacts, virtual_artifacts);
-
-            (memories, artifacts)
+            let artifact_count = count_artifact_files(root_path);
+            (memories, artifact_count)
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), 0)
         }
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), 0)
     };
+    let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
 
     let (assigned_agents, default_workspace_agent_id) =
         list_workspace_agent_responses(state.inner(), &descriptor.workspace_id).await?;
@@ -1538,12 +1569,203 @@ pub async fn workspace_get_snapshot(
         tool_calls,
         memories,
         artifacts,
+        artifact_count,
         enabled,
         schedule_enabled,
         schedule_paused,
         schedule_kind,
         next_run_in_seconds,
     })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceListDirRequest {
+    pub workspace_id: String,
+    /// Directory to list, relative to the workspace root. `None`/empty = root.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// List a single directory level of the artifact tree. The artifacts panel
+/// calls this lazily — once for the root, then again per folder as the user
+/// expands it — so the whole tree never has to be walked or held in memory at
+/// once. Applies the same skip-list as the rest of the artifact surface.
+#[tauri::command]
+pub async fn workspace_list_dir(
+    request: WorkspaceListDirRequest,
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkspaceDirEntry>, String> {
+    let descriptor =
+        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
+    let root_path = descriptor
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(root_path)?;
+
+    let rel = request.path.unwrap_or_default();
+    let target = normalize_path(root_path.join(&rel));
+    if !target.starts_with(root_path) {
+        return Err(format!(
+            "Path {} is outside the workspace root",
+            target.display()
+        ));
+    }
+    if !target.is_dir() {
+        return Err(format!("Not a directory: {}", rel));
+    }
+
+    let read_dir = fs::read_dir(&target)
+        .map_err(|error| format!("Failed to read {}: {}", target.display(), error))?;
+    let mut entries: Vec<WorkspaceDirEntry> = Vec::new();
+    for entry in read_dir {
+        let entry =
+            entry.map_err(|error| format!("Failed to inspect directory entry: {}", error))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Failed to inspect {}: {}", path.display(), error))?;
+        let relative_path = match path.strip_prefix(root_path) {
+            Ok(value) => value.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string();
+
+        if file_type.is_dir() {
+            if should_skip_artifact_dir(&path) {
+                continue;
+            }
+            entries.push(WorkspaceDirEntry {
+                path: relative_path,
+                name,
+                kind: "directory".to_string(),
+                viewer: None,
+                size: None,
+                updated_at: None,
+                child_count: Some(count_artifact_files(&path)),
+            });
+        } else if file_type.is_file() {
+            let metadata = fs::metadata(&path).ok();
+            entries.push(WorkspaceDirEntry {
+                path: relative_path,
+                name,
+                kind: "file".to_string(),
+                viewer: Some(viewer_for_path(&path)),
+                size: metadata.as_ref().map(|value| value.len()),
+                updated_at: metadata.as_ref().and_then(file_updated_at),
+                child_count: None,
+            });
+        }
+    }
+
+    // Folders first, then files; each group sorted by name (case-insensitive).
+    entries.sort_by(|a, b| {
+        let a_dir = a.kind == "directory";
+        let b_dir = b.kind == "directory";
+        if a_dir != b_dir {
+            return if a_dir {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+        }
+        a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    });
+
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSearchArtifactsRequest {
+    pub workspace_id: String,
+    pub query: String,
+}
+
+/// Upper bound on results returned by `workspace_search_artifacts`. The walk
+/// stops early once this many matches are collected; the command logs a
+/// warning so a silently-truncated result set is visible in the logs.
+const ARTIFACT_SEARCH_CAP: usize = 1000;
+
+fn search_artifact_files(
+    current: &Path,
+    root: &Path,
+    needle: &str,
+    matches: &mut Vec<WorkspaceFileEntry>,
+) {
+    if matches.len() >= ARTIFACT_SEARCH_CAP {
+        return;
+    }
+    let Ok(read_dir) = fs::read_dir(current) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        if matches.len() >= ARTIFACT_SEARCH_CAP {
+            break;
+        }
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if should_skip_artifact_dir(&path) {
+                continue;
+            }
+            search_artifact_files(&path, root, needle, matches);
+        } else if file_type.is_file() {
+            let matches_name = path
+                .strip_prefix(root)
+                .ok()
+                .map(|relative| relative.to_string_lossy().to_lowercase().contains(needle))
+                .unwrap_or(false);
+            if matches_name {
+                if let Some(file) = build_file_entry(root, &path) {
+                    matches.push(file);
+                }
+            }
+        }
+    }
+}
+
+/// Walk the whole artifact tree server-side and return file entries whose
+/// relative path matches `query` (case-insensitive substring). Backs the
+/// artifacts panel search box: since the panel only lazy-loads the directory
+/// levels the user has opened, client-side filtering could only ever see those
+/// — this command searches everything regardless of what's expanded.
+#[tauri::command]
+pub async fn workspace_search_artifacts(
+    request: WorkspaceSearchArtifactsRequest,
+    state: State<'_, AppState>,
+) -> Result<Vec<WorkspaceFileEntry>, String> {
+    let descriptor =
+        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
+    let root_path = descriptor
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(root_path)?;
+
+    let needle = request.query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut matches = Vec::new();
+    search_artifact_files(root_path, root_path, &needle, &mut matches);
+    if matches.len() >= ARTIFACT_SEARCH_CAP {
+        tracing::warn!(
+            query = %request.query,
+            cap = ARTIFACT_SEARCH_CAP,
+            "workspace_search_artifacts results truncated"
+        );
+    }
+    sort_workspace_entries(&mut matches);
+    Ok(matches)
 }
 
 #[tauri::command]
@@ -1946,8 +2168,6 @@ pub struct WorkspaceListEntry {
     pub agent_id: Option<String>,
     pub enabled: bool,
     pub message_count: i64,
-    pub artifact_count: i64,
-    pub memory_count: i64,
     pub assigned_agent_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_manager_name: Option<String>,
@@ -2189,7 +2409,6 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
 
     for locator in locators {
         let id = locator.id.clone();
-        let (artifact_count, memory_count) = count_workspace_files(&locator.root_path);
         let workspace_pool = state.workspace_db(&id).await?;
         let message_count = count_session_messages(&workspace_pool, state.inner(), &id).await;
         let task_attention = workspace_task_attention_summary(&workspace_pool, &id).await?;
@@ -2220,8 +2439,6 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             agent_id: None,
             enabled: true,
             message_count,
-            artifact_count,
-            memory_count,
             assigned_agent_count,
             default_manager_name,
             running_task_count: task_attention.running_task_count,
@@ -2499,29 +2716,6 @@ pub async fn workspace_set_title(
     Ok(())
 }
 
-/// Count artifacts and memories in a workspace's filesystem.
-fn count_workspace_files(root: &Path) -> (i64, i64) {
-    let memory_root = root.join(".clai").join("memory");
-    let memory_count = count_files_recursive(&memory_root);
-
-    let mut artifact_count: i64 = 0;
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.file_name().and_then(|n| n.to_str()) == Some(".clai") {
-                continue;
-            }
-            if path.is_dir() {
-                artifact_count += count_files_recursive(&path);
-            } else if path.is_file() {
-                artifact_count += 1;
-            }
-        }
-    }
-
-    (artifact_count, memory_count)
-}
-
 async fn workspace_task_attention_summary(
     pool: &DbPool,
     _workspace_id: &str,
@@ -2578,21 +2772,6 @@ async fn workspace_task_attention_summary(
     }
 
     Ok(summary)
-}
-
-fn count_files_recursive(dir: &Path) -> i64 {
-    let mut count: i64 = 0;
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                count += count_files_recursive(&path);
-            } else if path.is_file() {
-                count += 1;
-            }
-        }
-    }
-    count
 }
 
 /// Count messages on the canonical workspace session — the same row the
