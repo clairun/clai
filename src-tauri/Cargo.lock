@@ -625,6 +625,7 @@ dependencies = [
  "keyring",
  "reqwest 0.12.28",
  "rmcp",
+ "rustls",
  "schemars 1.2.1",
  "scraper",
  "serde",

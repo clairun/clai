@@ -43,6 +43,14 @@ tokio = { version = "1", features = ["full"] }
 # - windows-native: Uses Windows Credential Manager
 keyring = { version = "3", features = ["linux-native-sync-persistent", "apple-native", "windows-native"] }
 
+# rustls is pulled in transitively by rmcp's reqwest 0.13 (HTTP MCP transport).
+# rustls 0.23 requires a process-wide default CryptoProvider to be installed
+# before any TLS handshake, otherwise reqwest panics with "No provider set".
+# We install the `ring` provider (already in the tree) once at startup; declaring
+# rustls directly here gives us access to that API. default-features off avoids
+# pulling the heavier aws-lc-rs backend.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
 # Ergonomic error handling with derive macro
 thiserror = "2"
 

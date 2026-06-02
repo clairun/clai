@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::time::Duration;
 
 use rmcp::{
     model::{
@@ -21,6 +22,13 @@ use crate::assistant::auth::McpSecretStorage;
 use crate::assistant::types::ToolDefinition;
 use crate::config::{ClaiConfig, McpServerAuth, McpServerConfig};
 
+/// External MCP connect + tool discovery must not hang the `clai` bridge's
+/// `list_tools` — Claude Code waits on that call to expose *any* tool, so a
+/// single slow/unreachable server would otherwise wedge the whole session.
+/// Bound the network handshake and the tools/list so a misbehaving server
+/// degrades to "no tools from that server" instead.
+const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// MCP tool discovered from an external server.
 ///
 /// Discovery and execution will be implemented in a follow-up slice; this
@@ -35,10 +43,29 @@ pub struct ExternalMcpToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
+/// A short, stable discriminator for a server id used in qualified tool names.
+///
+/// Server ids are UUIDs (36 chars). Embedding the full id plus a long remote
+/// tool name can blow past providers' 64-char function-name limit, so we use
+/// the first 8 hex chars — unique enough across a user's handful of MCP
+/// servers — and resolve it back by prefix match at call time.
+fn short_server_id(server_id: &str) -> &str {
+    server_id.get(..8).unwrap_or(server_id)
+}
+
 impl ExternalMcpToolDefinition {
     /// Stable assistant-visible tool name.
+    ///
+    /// Uses `mcp__<short-server>__<tool>`: only letters/digits/underscores/
+    /// dashes and starts with a letter, satisfying OpenAI/litellm's function-
+    /// name regex (a `.`-separated name is rejected with HTTP 400). Mirrors the
+    /// `mcp__server__tool` convention Claude Code uses.
     pub fn qualified_name(&self) -> String {
-        format!("mcp.{}.{}", self.server_id, self.tool_name)
+        format!(
+            "mcp__{}__{}",
+            short_server_id(&self.server_id),
+            self.tool_name
+        )
     }
 
     pub fn to_tool_definition(&self) -> ToolDefinition {
@@ -295,7 +322,21 @@ impl McpClientManager {
             return Ok(false);
         }
 
-        let connection = Self::connect_server(&config, bearer_token).await?;
+        let connection = match tokio::time::timeout(
+            MCP_DISCOVERY_TIMEOUT,
+            Self::connect_server(&config, bearer_token),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(format!(
+                    "Timed out after {}s connecting to MCP server `{}`",
+                    MCP_DISCOVERY_TIMEOUT.as_secs(),
+                    config.name
+                ))
+            }
+        };
         let server = self
             .servers
             .get_mut(server_id)
@@ -318,7 +359,16 @@ impl McpClientManager {
                 .as_ref()
                 .ok_or_else(|| format!("MCP server not connected: {}", server.config.name))?;
 
-            connection.list_all_tools().await?
+            match tokio::time::timeout(MCP_DISCOVERY_TIMEOUT, connection.list_all_tools()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(format!(
+                        "Timed out after {}s listing tools for MCP server `{}`",
+                        MCP_DISCOVERY_TIMEOUT.as_secs(),
+                        server.config.name
+                    ))
+                }
+            }
         };
 
         let discovered_tools = tools
@@ -338,13 +388,19 @@ impl McpClientManager {
         server_ids: &[String],
         tool_name: &str,
     ) -> Result<(String, String, String), String> {
-        if let Some((server_id, remote_tool_name)) = parse_qualified_tool_name(tool_name) {
-            if !server_ids.iter().any(|candidate| candidate == &server_id) {
+        if let Some((short_id, remote_tool_name)) = parse_qualified_tool_name(tool_name) {
+            // The name carries the short (8-char) server id; map it back to the
+            // full id among this session's selected servers.
+            let Some(server_id) = server_ids
+                .iter()
+                .find(|candidate| short_server_id(candidate) == short_id)
+                .cloned()
+            else {
                 return Err(format!(
                     "MCP tool `{}` is not allowed for this session",
                     tool_name
                 ));
-            }
+            };
 
             let discovered_tools = self.ensure_server_tools_discovered(&server_id).await?;
             if !discovered_tools
@@ -375,11 +431,8 @@ impl McpClientManager {
             0 => Err(format!("Unknown external MCP tool: {}", tool_name)),
             1 => {
                 let server_id = matches.remove(0);
-                Ok((
-                    server_id.clone(),
-                    tool_name.to_string(),
-                    format!("mcp.{}.{}", server_id, tool_name),
-                ))
+                let visible = format!("mcp__{}__{}", short_server_id(&server_id), tool_name);
+                Ok((server_id, tool_name.to_string(), visible))
             }
             _ => Err(format!(
                 "Ambiguous MCP tool `{}`: available on multiple selected servers ({})",
@@ -458,10 +511,13 @@ impl McpClientManager {
     }
 }
 
+/// Parse `mcp__<short-server>__<tool>` into (short server id, remote tool name).
+/// The short id is hex (no `__`), so the first `__` after the prefix is the
+/// boundary; the remote tool name keeps any later underscores intact.
 fn parse_qualified_tool_name(tool_name: &str) -> Option<(String, String)> {
-    let raw = tool_name.strip_prefix("mcp.")?;
-    let (server_id, remote_tool_name) = raw.split_once('.')?;
-    Some((server_id.to_string(), remote_tool_name.to_string()))
+    let raw = tool_name.strip_prefix("mcp__")?;
+    let (short_id, remote_tool_name) = raw.split_once("__")?;
+    Some((short_id.to_string(), remote_tool_name.to_string()))
 }
 
 fn normalize_call_tool_result(
@@ -526,4 +582,66 @@ fn spawn_stderr_logger(server_id: String, stderr: ChildStderr) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool(server_id: &str, tool_name: &str) -> ExternalMcpToolDefinition {
+        ExternalMcpToolDefinition {
+            server_id: server_id.to_string(),
+            tool_name: tool_name.to_string(),
+            display_name: tool_name.to_string(),
+            description: String::new(),
+            input_schema: serde_json::json!({}),
+        }
+    }
+
+    // The function name must satisfy OpenAI/litellm's rule: start with a letter,
+    // then only letters/digits/underscores/dashes, max 64 chars. A `.`-separated
+    // name (the previous scheme) is rejected with HTTP 400.
+    fn is_valid_openai_function_name(name: &str) -> bool {
+        name.len() <= 64
+            && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    #[test]
+    fn qualified_name_is_a_valid_function_name_even_for_long_tools() {
+        // Full UUID + longest Netdata tool name used to be 65 chars with dots.
+        let t = tool(
+            "1c47ed2d-295e-458f-99dc-d9ba07f5b43c",
+            "get_anomalous_contexts",
+        );
+        let name = t.qualified_name();
+        assert_eq!(name, "mcp__1c47ed2d__get_anomalous_contexts");
+        assert!(is_valid_openai_function_name(&name), "invalid: {name}");
+    }
+
+    #[test]
+    fn qualified_name_round_trips_through_the_parser() {
+        let server_id = "1c47ed2d-295e-458f-99dc-d9ba07f5b43c";
+        let t = tool(server_id, "get_metric_data");
+        let (short_id, remote) = parse_qualified_tool_name(&t.qualified_name()).unwrap();
+        assert_eq!(remote, "get_metric_data");
+        // The short id resolves back to the full server id by prefix.
+        assert_eq!(short_server_id(server_id), short_id);
+        assert!(server_id.starts_with(&short_id));
+    }
+
+    #[test]
+    fn parser_preserves_underscores_in_the_remote_tool_name() {
+        let (short_id, remote) = parse_qualified_tool_name("mcp__1c47ed2d__a_b_c").unwrap();
+        assert_eq!(short_id, "1c47ed2d");
+        assert_eq!(remote, "a_b_c");
+    }
+
+    #[test]
+    fn parser_rejects_non_mcp_names() {
+        assert!(parse_qualified_tool_name("fs_read").is_none());
+        assert!(parse_qualified_tool_name("mcp__onlyserver").is_none());
+    }
 }

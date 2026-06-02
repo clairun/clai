@@ -187,6 +187,15 @@ pub fn run() {
 
     tracing::info!("CLAI starting up...");
 
+    // Install the process-wide rustls CryptoProvider before any TLS handshake.
+    // rmcp's HTTP MCP transport builds a reqwest 0.13 (rustls 0.23) client, and
+    // rustls 0.23 panics with "No provider set" if no default provider is
+    // installed — which crashed the worker the first time an HTTPS MCP server
+    // (e.g. Netdata Cloud) was contacted, hanging tool discovery. `ring` is the
+    // backend already in our dependency tree. Idempotent: ignore the Err that
+    // signals a provider was already installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Clear temp directory from previous runs (MCP configs, etc)
     agents::clear_tmp_dir();
 
