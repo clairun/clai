@@ -153,16 +153,6 @@ pub enum McpServerAuth {
     },
 }
 
-/// Optional integration classification for a configured MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "bindings.ts")]
-pub enum McpServerIntegrationType {
-    #[default]
-    Generic,
-    NetdataCloud,
-}
-
 /// User-configured MCP server definition persisted in app config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerConfig {
@@ -173,8 +163,6 @@ pub struct McpServerConfig {
     pub transport: McpServerTransport,
     #[serde(default)]
     pub auth: McpServerAuth,
-    #[serde(default)]
-    pub integration_type: McpServerIntegrationType,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -340,7 +328,6 @@ impl McpServerConfig {
             enabled: true,
             transport,
             auth: McpServerAuth::None,
-            integration_type: McpServerIntegrationType::Generic,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -512,7 +499,7 @@ impl AgentConfig {
 
     /// Returns the static list of required built-in tool namespaces.
     pub fn required_tools(&self) -> Vec<&'static str> {
-        let mut tools = vec!["netdata", "dashboard", "tabs"];
+        let mut tools = vec!["dashboard", "tabs"];
         tools.push("fs");
         if !matches!(self.execution.shell.mode, ShellAccessMode::Off) {
             tools.push("bash");
@@ -697,11 +684,10 @@ mod tests {
         let agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
         let tools = agent.required_tools();
 
-        assert!(tools.contains(&"netdata"));
         assert!(tools.contains(&"dashboard"));
         assert!(tools.contains(&"tabs"));
         assert!(tools.contains(&"fs"));
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 3);
     }
 
     #[test]

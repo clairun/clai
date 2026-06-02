@@ -6,8 +6,8 @@ import styles from './McpServerFormModal.module.css';
 interface McpServerFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  // Receives the assembled form payload (name/enabled/integrationType/
-  // transport/auth). Loosely typed to match McpServersSettings' handler.
+  // Receives the assembled form payload (name/enabled/transport/auth).
+  // Loosely typed to match McpServersSettings' handler.
   onSubmit: (data: Record<string, unknown>) => Promise<void>;
   server?: McpServerResponse | null;
 }
@@ -24,7 +24,6 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }: McpServerForm
   const [name, setName] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [transportType, setTransportType] = useState<'stdio' | 'http'>('stdio');
-  const [integrationType, setIntegrationType] = useState('generic');
   const [authType, setAuthType] = useState('none');
   const [bearerToken, setBearerToken] = useState('');
   const [hasStoredSecret, setHasStoredSecret] = useState(false);
@@ -42,7 +41,6 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }: McpServerForm
     if (server) {
       setName(server.name || '');
       setEnabled(server.enabled !== false);
-      setIntegrationType(server.integrationType || 'generic');
       if (server.transport?.type === 'http') {
         setTransportType('http');
         setUrl(server.transport.url || '');
@@ -66,7 +64,6 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }: McpServerForm
       setName('');
       setEnabled(true);
       setTransportType('stdio');
-      setIntegrationType('generic');
       setAuthType('none');
       setHasStoredSecret(false);
       setBearerToken('');
@@ -152,7 +149,6 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }: McpServerForm
       await onSubmit({
         name: trimmedName,
         enabled,
-        integrationType,
         transport,
         auth,
       });
@@ -188,20 +184,6 @@ const McpServerFormModal = ({ isOpen, onClose, onSubmit, server }: McpServerForm
               disabled={saving}
               autoFocus
             />
-          </div>
-
-          <div className={styles.field}>
-            <label className={styles.label} htmlFor="mcp-integration-type">Integration</label>
-            <select
-              id="mcp-integration-type"
-              className={styles.select}
-              value={integrationType}
-              onChange={(event) => setIntegrationType(event.target.value)}
-              disabled={saving}
-            >
-              <option value="generic">Generic MCP</option>
-              <option value="netdata_cloud">Netdata Cloud</option>
-            </select>
           </div>
 
           <div className={styles.field}>

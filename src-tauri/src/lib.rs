@@ -2,8 +2,7 @@
 //!
 //! This is the Rust backend for the Tauri-based desktop application.
 //! It handles:
-//! - Secure token storage via OS keychain
-//! - HTTP communication with backend APIs and provider services
+//! - HTTP communication with provider services
 //! - Exposing functionality to the JavaScript frontend
 //! - Scheduled automations with MCP tool integration
 //!
@@ -22,15 +21,13 @@
 //! available under `crate::module_name`.
 //!
 //! ```ignore
-//! mod api;  // Declares src/api/mod.rs as a module
-//!           // Contents accessible as crate::api::*
+//! mod commands;  // Declares src/commands/mod.rs as a module
+//!                // Contents accessible as crate::commands::*
 //! ```
 
 // Declare our modules
 mod agents;
-mod api;
 mod assistant;
-mod auth;
 mod commands;
 mod config;
 mod db;
@@ -43,7 +40,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
 use agents::SharedScheduler;
-use auth::TokenStorage;
 use tauri::Manager;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -68,10 +64,6 @@ pub mod runtime {
 /// It's registered with Tauri via `.manage()` and injected into commands
 /// via `State<'_, AppState>`.
 pub struct AppState {
-    /// Secure token storage backed by OS keychain
-    pub token_storage: TokenStorage,
-    /// Current API base URL (protected by mutex for thread safety)
-    pub base_url: Mutex<String>,
     /// Configuration manager for providers, automations, and MCP servers.
     pub config_manager: Mutex<ConfigManager>,
     /// External MCP client registry.
@@ -99,9 +91,6 @@ impl AppState {
         mcp_client_manager.sync_from_config(&initial_config);
 
         Ok(Self {
-            token_storage: TokenStorage::new()
-                .map_err(|error| format!("Failed to initialize token storage: {}", error))?,
-            base_url: Mutex::new(DEFAULT_BASE_URL.to_string()),
             config_manager: Mutex::new(config_manager),
             mcp_client_manager: AsyncMutex::new(mcp_client_manager),
             scheduler: agents::create_shared_scheduler(),
@@ -163,9 +152,6 @@ impl AppState {
     }
 }
 
-/// Default base URL for Netdata Cloud API.
-const DEFAULT_BASE_URL: &str = "https://app.netdata.cloud";
-
 /// Entry point for the Tauri application.
 ///
 /// # Rust Learning: Conditional Compilation
@@ -198,13 +184,6 @@ pub fn run() {
 
     // Clear temp directory from previous runs (MCP configs, etc)
     agents::clear_tmp_dir();
-
-    // Initialize token storage (uses OS keychain)
-    // If this fails, the app cannot function, so we panic.
-    let token_storage = TokenStorage::new().expect(
-        "Failed to initialize secure token storage. \
-         On Linux, ensure libsecret is installed.",
-    );
 
     // Initialize config manager (loads config from disk or creates default)
     let config_manager = ConfigManager::new().expect(
@@ -259,7 +238,7 @@ pub fn run() {
     let scheduler = agents::create_shared_scheduler();
 
     // Register default automation definitions and restore enabled instances
-    agents::init::initialize_scheduler(&scheduler, &config_manager, &token_storage);
+    agents::init::initialize_scheduler(&scheduler, &config_manager);
 
     // Clone scheduler before moving into state (needed for runner and for
     // post-DB population from workspace_agents).
@@ -268,8 +247,6 @@ pub fn run() {
 
     // Create the shared application state
     let state = AppState {
-        token_storage,
-        base_url: Mutex::new(DEFAULT_BASE_URL.to_string()),
         config_manager: Mutex::new(config_manager),
         mcp_client_manager: AsyncMutex::new({
             let mut manager = mcp::client::McpClientManager::new();
@@ -329,15 +306,6 @@ pub fn run() {
         // Register our custom commands
         // These become available to JS via invoke()
         .invoke_handler(tauri::generate_handler![
-            // Authentication commands
-            commands::auth::set_token,
-            commands::auth::has_token,
-            commands::auth::clear_token,
-            commands::auth::set_base_url,
-            commands::auth::get_base_url,
-            // Legacy chart/anomalies API commands
-            commands::api::api_get_data,
-            commands::api::api_get_contexts,
             // Assistant runtime commands
             commands::assistant::assistant_create_session,
             commands::assistant::assistant_get_session,

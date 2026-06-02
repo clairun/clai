@@ -478,7 +478,6 @@ fn task_session_context(
             .collect(),
         mcp_server_ids,
         execution: target_config.execution.clone(),
-        netdata_conversation_id: None,
         cli_session_id: None,
         cli_session_provider: None,
         automation_id: Some(target_config.id.clone()),

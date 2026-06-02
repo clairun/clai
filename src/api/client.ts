@@ -21,67 +21,6 @@ import type {
  */
 
 // ============================================================================
-// Authentication Functions
-// ============================================================================
-
-/**
- * Store the API token securely in the OS keychain.
- * @throws If token storage fails
- */
-export const setToken = async (token: string): Promise<void> => {
-  try {
-    await invoke('set_token', { token });
-  } catch (error) {
-    throw new Error(`Failed to store token: ${error}`);
-  }
-};
-
-/**
- * Check if a token is stored (user is authenticated).
- */
-export const hasToken = async (): Promise<boolean> => {
-  try {
-    return await invoke('has_token');
-  } catch (error) {
-    console.error('Failed to check token:', error);
-    return false;
-  }
-};
-
-/**
- * Clear the stored token (logout).
- */
-export const clearToken = async (): Promise<void> => {
-  try {
-    await invoke('clear_token');
-  } catch (error) {
-    console.error('Failed to clear token:', error);
-  }
-};
-
-/**
- * Set the API base URL (e.g., "https://app.netdata.cloud").
- */
-export const setBaseUrl = async (url: string): Promise<void> => {
-  try {
-    await invoke('set_base_url', { url });
-  } catch (error) {
-    throw new Error(`Failed to set base URL: ${error}`);
-  }
-};
-
-/**
- * Get the current API base URL.
- */
-export const getBaseUrl = async (): Promise<string> => {
-  try {
-    return await invoke('get_base_url');
-  } catch {
-    return 'https://app.netdata.cloud';
-  }
-};
-
-// ============================================================================
 // Error Handling
 // ============================================================================
 

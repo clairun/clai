@@ -122,7 +122,6 @@ fn sample_context() -> SessionContext {
         tool_scopes: vec![],
         mcp_server_ids: vec![],
         execution: ExecutionCapabilityConfig::default(),
-        netdata_conversation_id: None,
         cli_session_id: None,
         cli_session_provider: None,
         automation_id: None,

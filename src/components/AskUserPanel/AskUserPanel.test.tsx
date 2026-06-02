@@ -22,7 +22,6 @@ const SESSION: AssistantSession = {
     toolScopes: [],
     mcpServerIds: [],
     execution: {},
-    netdataConversationId: null,
     cliSessionId: null,
     cliSessionProvider: null,
     automationId: null,

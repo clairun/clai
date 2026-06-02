@@ -157,8 +157,6 @@ pub struct SessionContext {
     #[ts(type = "unknown")]
     pub execution: ExecutionCapabilityConfig,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub netdata_conversation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<String>,
     /// The CLI provider that owns `cli_session_id`. A session id is
     /// provider-specific (Claude generates its own UUID; Codex returns a

@@ -5,7 +5,6 @@
 //! which runs after the DB pool is ready.
 
 use crate::agents::{AgentDefinition, SharedScheduler};
-use crate::auth::TokenStorage;
 use crate::config::{
     workspace_config, AgentConfig, ConfigManager, ExecutionCapabilityConfig, ShellAccessMode,
 };
@@ -21,11 +20,7 @@ fn agent_config_to_definition(config: &AgentConfig) -> AgentDefinition {
 /// No-op kept so the synchronous lib.rs setup path stays untouched. The real
 /// scheduler population now happens in `populate_scheduler_from_workspace_agents`
 /// once the DB pool is initialized.
-pub fn initialize_scheduler(
-    _scheduler: &SharedScheduler,
-    _config_manager: &ConfigManager,
-    _token_storage: &TokenStorage,
-) {
+pub fn initialize_scheduler(_scheduler: &SharedScheduler, _config_manager: &ConfigManager) {
     // intentionally empty
 }
 
@@ -86,7 +81,7 @@ pub fn apply_workspace_schedule(
     }
 
     let execution: ExecutionCapabilityConfig = agent.execution.clone();
-    let mut tools: Vec<&'static str> = vec!["netdata", "dashboard", "tabs", "fs"];
+    let mut tools: Vec<&'static str> = vec!["dashboard", "tabs", "fs"];
     if !matches!(execution.shell.mode, ShellAccessMode::Off) {
         tools.push("bash");
     }
@@ -116,6 +111,7 @@ pub fn apply_workspace_schedule(
 }
 
 /// Clears all agent instances.
+#[allow(dead_code)]
 pub async fn clear_all_instances(scheduler: &SharedScheduler) {
     let mut scheduler = scheduler.lock().await;
 
@@ -158,10 +154,7 @@ mod tests {
 
         assert_eq!(definition.id, agent.id);
         assert_eq!(definition.name, "Test Agent");
-        assert_eq!(
-            definition.required_tools,
-            vec!["netdata", "dashboard", "tabs", "fs"]
-        );
+        assert_eq!(definition.required_tools, vec!["dashboard", "tabs", "fs"]);
     }
 
     #[tokio::test]

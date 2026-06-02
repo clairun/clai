@@ -493,7 +493,6 @@ async fn ensure_workspace_manager_session(
             .collect(),
         mcp_server_ids: agent_config.selected_mcp_server_ids.clone(),
         execution: agent_config.execution.clone(),
-        netdata_conversation_id: None,
         cli_session_id: None,
         cli_session_provider: None,
         automation_id: Some(agent_config.id.clone()),

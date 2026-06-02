@@ -8,7 +8,6 @@ import {
 import McpServerFormModal from './McpServerFormModal';
 import type {
   McpServerAuthResponse,
-  McpServerIntegrationType,
   McpServerResponse,
   McpServerTransport,
 } from '../../generated/bindings';
@@ -41,13 +40,6 @@ const authSummary = (auth: McpServerAuthResponse | null | undefined): string => 
     return auth.has_secret ? 'Bearer token configured' : 'Bearer token missing';
   }
   return 'No auth';
-};
-
-const integrationSummary = (integrationType: McpServerIntegrationType | undefined): string => {
-  if (integrationType === 'netdata_cloud') {
-    return 'Netdata Cloud';
-  }
-  return 'Generic MCP';
 };
 
 const McpServersSettings = () => {
@@ -157,7 +149,7 @@ const McpServersSettings = () => {
                   </span>
                 </div>
                 <div className={styles.serverMeta}>
-                  {integrationSummary(server.integrationType)} · {server.transport?.type === 'http' ? 'HTTP' : 'Stdio'} · {authSummary(server.auth)}
+                  {server.transport?.type === 'http' ? 'HTTP' : 'Stdio'} · {authSummary(server.auth)}
                 </div>
                 <div className={styles.serverTransport}>{transportSummary(server.transport)}</div>
               </div>

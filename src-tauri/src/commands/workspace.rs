@@ -1359,8 +1359,6 @@ fn desired_workspace_context(
         tool_scopes: descriptor.tool_scopes.clone(),
         mcp_server_ids,
         execution,
-        netdata_conversation_id: existing_session
-            .and_then(|session| session.context.netdata_conversation_id.clone()),
         cli_session_id: existing_session.and_then(|session| session.context.cli_session_id.clone()),
         cli_session_provider: existing_session
             .and_then(|session| session.context.cli_session_provider.clone()),

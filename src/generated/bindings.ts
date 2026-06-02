@@ -27,7 +27,7 @@ export type AuthMode = "subscription_login" | "subscription_api_key" | "develope
 
 export type ContentPart = { "type": "text", text: string, } | { "type": "thinking", text: string, signature?: string | null, } | { "type": "tool_use", tool_call_id: string, tool_name: string, arguments: JsonValue, } | { "type": "tool_result", tool_call_id: string, payload: JsonValue, started_at?: bigint | null, completed_at?: bigint | null, };
 
-export type CreateMcpServerRequest = { name: string, enabled: boolean, transport: McpServerTransport, integrationType: McpServerIntegrationType, auth: McpServerAuthRequest, };
+export type CreateMcpServerRequest = { name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
 export type CreateProviderConnectionRequest = { name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
@@ -39,12 +39,7 @@ export type McpServerAuthRequest = { "type": "none" } | { "type": "bearer_token"
 
 export type McpServerAuthResponse = { "type": "none" } | { "type": "bearer_token", has_secret: boolean, };
 
-/**
- * Optional integration classification for a configured MCP server.
- */
-export type McpServerIntegrationType = "generic" | "netdata_cloud";
-
-export type McpServerResponse = { id: string, name: string, enabled: boolean, transport: McpServerTransport, integrationType: McpServerIntegrationType, auth: McpServerAuthResponse, createdAt: string, updatedAt: string, };
+export type McpServerResponse = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthResponse, createdAt: string, updatedAt: string, };
 
 /**
  * User-configured MCP server transport.
@@ -131,7 +126,7 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { spaceId: string | null, roomId: string | null, workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, netdataConversationId: string | null, cliSessionId: string | null, 
+export type SessionContext = { spaceId: string | null, roomId: string | null, workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
 /**
  * The CLI provider that owns `cli_session_id`. A session id is
  * provider-specific (Claude generates its own UUID; Codex returns a
@@ -168,7 +163,7 @@ export type ToolCallStatus = "pending" | "running" | "completed" | "failed";
 
 export type ToolInvocation = { id: string, runId: string, sessionId: string, toolName: string, params: JsonValue, status: ToolCallStatus, result: JsonValue | null, error: string | null, startedAt: bigint, completedAt: bigint | null, };
 
-export type UpdateMcpServerRequest = { id: string, name: string, enabled: boolean, transport: McpServerTransport, integrationType: McpServerIntegrationType, auth: McpServerAuthRequest, };
+export type UpdateMcpServerRequest = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
 export type UpdateProviderConnectionRequest = { id: string, name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 

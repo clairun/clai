@@ -23,7 +23,7 @@ use std::time::Instant;
 /// - `id`: Unique identifier (UUID from config)
 /// - `name`: Human-readable name for UI
 /// - `description`: Description of what this agent does
-/// - `required_tools`: Tool namespaces this agent needs (e.g., ["netdata", "canvas"])
+/// - `required_tools`: Tool namespaces this agent needs (e.g., ["dashboard", "canvas"])
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDefinition {
     /// Unique identifier for this agent type.
@@ -36,10 +36,10 @@ pub struct AgentDefinition {
     #[serde(default)]
     pub description: String,
 
-    /// List of tool namespaces this agent needs (e.g., ["netdata", "canvas", "tabs"]).
+    /// List of tool namespaces this agent needs (e.g., ["dashboard", "canvas", "tabs"]).
     ///
     /// The executor will only expose tools from these namespaces to the AI.
-    /// Available namespaces: "netdata", "canvas", "tabs"
+    /// Available namespaces: "dashboard", "canvas", "tabs"
     #[serde(default)]
     pub required_tools: Vec<String>,
 }
