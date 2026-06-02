@@ -329,110 +329,290 @@
   color: var(--color-primary);
 }
 
-/* Tool Call Group — collapsible container for multiple tool calls in one turn */
-.toolGroup {
-  margin-top: 12px;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
+/* ============================================
+   TOOL CALLS — compact one-line rows
+   ============================================ */
+
+/* A turn's tool calls, stacked as slim rows. */
+.toolList {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
-.toolGroupHeader {
+.toolRowBlock {
+  border-radius: var(--radius-sm);
+  /* Opacity/transform only — no height animation — so a newly-appearing row
+     eases in without forcing the virtualizer to re-measure (transform/opacity
+     don't change layout box height). */
+  animation: toolFadeIn 140ms ease-out;
+}
+
+@keyframes toolFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* The clickable summary line: icon · verb · arg ............ summary · chevron */
+.toolRow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  background: var(--color-overlay-04);
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--color-text-secondary);
   transition: background var(--transition-fast);
 }
 
-.toolGroupHeader:hover {
-  background: var(--color-overlay-08);
+.toolRow:hover {
+  background: var(--color-overlay-04);
 }
 
-.toolGroupSummary {
-  font-size: 11px;
+.toolRowIcon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--color-success);
+}
+
+.toolRowIconError {
+  color: var(--color-critical);
+}
+
+.toolRowIconRunning {
+  color: var(--color-primary);
+}
+
+.toolRowVerb {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.toolRowArg {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
   color: var(--color-text-tertiary);
-  margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.toolGroupBody {
-  padding: 6px 10px 10px;
+.toolRowRight {
+  flex-shrink: 0;
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolRowSummary {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-tertiary);
+}
+
+.toolRowSummaryError {
+  color: var(--color-critical);
+}
+
+.toolRowRunning {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-primary);
+}
+
+.toolRowRunning .spinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
+}
+
+.toolRowChevron {
+  font-size: 9px;
+  opacity: 0.6;
+  color: var(--color-text-tertiary);
+  transition: transform var(--transition-fast);
+}
+
+/* Row chevron is ▾ (down): flip to point up when expanded. */
+.toolRowChevron.expanded {
+  transform: rotate(180deg);
+}
+
+/* "Show N earlier calls" toggle above a capped group. */
+.toolShowEarlier {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 3px 8px;
+  margin-bottom: 2px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.toolShowEarlier:hover {
+  color: var(--color-text-secondary);
+  background: var(--color-overlay-04);
+}
+
+/* This chevron is ▸ (right): rotate to point down when expanded. */
+.toolShowEarlier .toolRowChevron.expanded {
+  transform: rotate(90deg);
+}
+
+/* Expanded view, indented under the row's verb. */
+.toolContent {
+  margin: 2px 0 8px 22px;
+  padding-top: 8px;
+  border-top: 1px solid var(--glass-border);
+  max-height: 520px;
+  overflow: auto;
+}
+
+/* Terminal-style output (bash + raw text) — never markdown-mangled. */
+.toolTerminalWrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.toolCommand {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-primary);
+  background: var(--color-bg-primary);
+  padding: 8px 10px;
+  border: 1px solid var(--glass-border);
+  border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.toolTerminal {
+  margin: 0;
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-primary);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.toolTerminalWrap .toolTerminal {
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+.toolTerminalError {
+  color: var(--color-critical);
+}
+
+/* ask_user — render the question, choices, and answer instead of raw JSON. */
+.askUser {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.askUserQuestion {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.45;
+}
+
+.askUserOptions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.toolGroupBody .toolBlock {
-  margin-top: 0;
-}
-
-/* Tool Block */
-.toolBlock {
-  margin-top: 12px;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.toolHeader {
+.askUserOption {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  background: var(--color-overlay-04);
-  cursor: pointer;
-  transition: background var(--transition-fast);
-}
-
-.toolHeader:hover {
-  background: var(--color-overlay-08);
-}
-
-.toolHeaderLeft {
-  display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
-}
-
-.toolHeaderRight {
-  display: flex;
-  align-items: center;
-}
-
-.toolIcon {
-  font-size: 14px;
-  opacity: 0.7;
-}
-
-.toolIconEmoji {
-  font-size: 14px;
-  opacity: 0.7;
-}
-
-.toolName {
-  font-size: 13px;
-  font-weight: 500;
+  padding: 6px 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
   color: var(--color-text-secondary);
-  font-family: var(--font-mono);
 }
 
-.expandIcon {
-  font-size: 10px;
+.askUserOptionSelected {
+  border-color: var(--color-accent);
+  background: var(--color-accent-alpha-08);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+.askUserBullet {
+  flex-shrink: 0;
+  font-size: 11px;
   color: var(--color-text-tertiary);
-  transition: transform var(--transition-fast);
 }
 
-.expandIcon.expanded {
-  transform: rotate(180deg);
+.askUserOptionSelected .askUserBullet {
+  color: var(--color-accent);
 }
 
-.toolContent {
-  padding: 10px 14px;
-  border-top: 1px solid var(--glass-border);
+.askUserOptionDesc {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--color-text-tertiary);
+}
+
+.askUserAnswer {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-accent-alpha-08);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.askUserAnswerLabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-accent);
 }
 
 .toolTabs {

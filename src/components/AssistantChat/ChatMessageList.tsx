@@ -15,7 +15,20 @@ import type {
   RunNotice,
   ToolInvocation,
 } from '../../generated/bindings';
+import {
+  cleanToolName,
+  extractMcpText,
+  guessLang,
+  summarizeToolCall,
+  summarizeToolResult,
+  toPreviewText,
+} from './toolDisplay';
 import styles from './AssistantChat.module.css';
+
+// Tools beyond this count collapse behind a "show N earlier" toggle so a turn
+// that fires dozens of tools stays scannable; the most-recent MAX_VISIBLE rows
+// stay on screen.
+const MAX_VISIBLE_TOOLS = 4;
 
 // Narrowed ContentPart variants — `Extract` pulls the specific shape out
 // of the generated discriminated union so `.text` / `.tool_name` etc.
@@ -102,16 +115,6 @@ const ThinkingBlock = memo(({ content }: { content: string }) => {
   );
 });
 ThinkingBlock.displayName = 'ThinkingBlock';
-
-/**
- * Clean MCP-style tool names: "mcp.<uuid>.get_metric_data" → "get_metric_data"
- */
-const cleanToolName = (name: string): string => {
-  if (!name) return name;
-  // Match mcp.<uuid-or-id>.<actual_tool_name>
-  const match = name.match(/^mcp\.[^.]+\.(.+)$/);
-  return match ? match[1]! : name;
-};
 
 /**
  * Walk an assistant message's `content` array (already ordered) and
@@ -268,48 +271,6 @@ const groupMessages = (messages: AssistantMessage[]): RenderItem[] => {
  * - Strings: render as markdown (may contain tables, lists, etc.)
  * - Objects/arrays: pretty-print as JSON
  */
-/**
- * Extract displayable text from an MCP-style result.
- * MCP results can be:
- * - An envelope object: { content: [{ type: "text", text: "..." }], text: "...", ... }
- * - A content array directly: [{ type: "text", text: "..." }]
- * - A plain string
- * - A generic JSON object
- */
-interface McpTextPart {
-  type?: string;
-  text?: string;
-}
-
-const extractMcpText = (result: unknown): string | null => {
-  if (!result || typeof result !== 'object') return null;
-
-  const envelope = result as { content?: unknown; text?: unknown };
-
-  // Envelope object with content array
-  if (Array.isArray(envelope.content)) {
-    const textParts = (envelope.content as McpTextPart[])
-      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-      .map((p) => p.text as string);
-    if (textParts.length > 0) return textParts.join('\n\n');
-  }
-
-  // Envelope object with top-level text field
-  if (typeof envelope.text === 'string' && envelope.text.trim()) {
-    return envelope.text;
-  }
-
-  // Direct content array
-  if (Array.isArray(result)) {
-    const textParts = (result as McpTextPart[])
-      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-      .map((p) => p.text as string);
-    if (textParts.length > 0) return textParts.join('\n\n');
-  }
-
-  return null;
-};
-
 const renderToolResult = (result: unknown): React.ReactNode => {
   if (result == null) return null;
 
@@ -477,7 +438,14 @@ const ChatMessageList = ({
       itemKey={itemKey}
       renderItem={renderItem}
       className={styles.activityList}
-      estimateSize={180}
+      // Most turns are now one-line tool rows (~30px). A large estimate
+      // over-allocates each not-yet-measured row, so during an active run the
+      // footer/last row sits well below the real content and stick-to-bottom
+      // scrolls into that empty slot — the "jumps off the bottom on every new
+      // tool" gap. Estimating near the common row height keeps the transient
+      // gap negligible; taller text blocks correct on measure (overscan keeps
+      // them rendered/measured).
+      estimateSize={48}
       overscan={1400}
       gap={12}
       footer={footer}
@@ -622,87 +590,180 @@ const MergedToolGroup = memo(({ item, toolCallsById, isContinuation = false }: M
   );
 });
 
+/** Coerce a value into a plain object (parsing JSON strings) or null. */
+const toObj = (value: unknown): Record<string, unknown> | null => {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* not JSON */
+    }
+  }
+  return null;
+};
+
 /**
- * ToolCallGroup — collapses multiple tool calls into a compact summary.
- * Single tool call: shown inline (always visible header).
- * Multiple tool calls: collapsed behind a summary row.
+ * Render a tool's expanded output, formatted per tool:
+ * - bash_exec → the command as a `$ …` line + a terminal-style block (raw,
+ *   monospace, whitespace-preserving — markdown would mangle shell output).
+ * - fs_read / fs_write → file content in a fenced block with a language
+ *   guessed from the path, so it's syntax-highlighted.
+ * - anything else (MCP text, JSON, …) → the existing smart `renderToolResult`.
  */
-const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
-  const [isGroupExpanded, setIsGroupExpanded] = useState(false);
+const renderToolOutput = (
+  toolName: string,
+  params: unknown,
+  result: unknown,
+  error: string | null | undefined,
+  isRunning: boolean,
+): React.ReactNode => {
+  const name = cleanToolName(toolName || '');
 
-  if (toolUses.length === 0) return null;
-
-  // Single tool call — render inline, no grouping needed
-  if (toolUses.length === 1) {
-    const tu = toolUses[0]!;
+  if (isRunning && result == null && !error) {
     return (
-      <ToolCallBlock
-        key={tu.toolCallId}
-        toolName={tu.toolName}
-        params={tu.params || tu.arguments}
-        status={tu.status}
-        result={tu.result}
-        error={tu.error}
-      />
+      <div className={styles.loadingState}>
+        <span className={styles.spinner} />
+        <span>Executing…</span>
+      </div>
     );
   }
 
-  // Multiple tool calls — group with summary
-  const completedCount = toolUses.filter((t) => t.status === 'completed').length;
-  const failedCount = toolUses.filter((t) => t.status === 'failed').length;
-  const runningCount = toolUses.length - completedCount - failedCount;
+  if (name === 'bash_exec') {
+    const command = toObj(params)?.command;
+    const body = toPreviewText('bash_exec', result, error);
+    return (
+      <div className={styles.toolTerminalWrap}>
+        {typeof command === 'string' && command && (
+          <div className={styles.toolCommand}>{`$ ${command}`}</div>
+        )}
+        <pre className={`${styles.toolTerminal} ${error ? styles.toolTerminalError : ''}`}>{body}</pre>
+      </div>
+    );
+  }
 
-  const summaryParts = [];
-  if (completedCount > 0) summaryParts.push(`${completedCount} complete`);
-  if (failedCount > 0) summaryParts.push(`${failedCount} failed`);
-  if (runningCount > 0) summaryParts.push(`${runningCount} running`);
+  if (name === 'ask_user') {
+    const p = toObj(params);
+    const r = toObj(result);
+    const question = typeof p?.question === 'string' ? p.question : '';
+    const context = typeof p?.context === 'string' ? p.context : '';
+    const options = Array.isArray(p?.options) ? (p!.options as Array<{ label?: string; description?: string | null }>) : [];
+    const answer = typeof r?.answer === 'string' ? r.answer : '';
+    const selectedIdx = typeof r?.selectedOptionIndex === 'number' ? r.selectedOptionIndex : -1;
+    return (
+      <div className={styles.askUser}>
+        {question && <div className={styles.askUserQuestion}>{question}</div>}
+        {context && <MarkdownMessage content={context} isStreaming={false} />}
+        {options.length > 0 && (
+          <ul className={styles.askUserOptions}>
+            {options.map((opt, i) => {
+              const label = typeof opt?.label === 'string' ? opt.label : '';
+              const selected = i === selectedIdx;
+              return (
+                <li
+                  key={i}
+                  className={`${styles.askUserOption} ${selected ? styles.askUserOptionSelected : ''}`}
+                >
+                  <span className={styles.askUserBullet}>{selected ? '●' : '○'}</span>
+                  <span>
+                    {label}
+                    {opt?.description ? <span className={styles.askUserOptionDesc}>{opt.description}</span> : null}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {answer && (
+          <div className={styles.askUserAnswer}>
+            <span className={styles.askUserAnswerLabel}>Answer</span>
+            <MarkdownMessage content={answer} isStreaming={false} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (error) {
+    return <pre className={`${styles.toolTerminal} ${styles.toolTerminalError}`}>{error}</pre>;
+  }
+
+  if (name === 'fs_read' || name === 'fs_write') {
+    const fromResult = toObj(result);
+    const fromParams = toObj(params);
+    const path =
+      (typeof fromResult?.path === 'string' && fromResult.path) ||
+      (typeof fromParams?.path === 'string' && fromParams.path) ||
+      '';
+    const content =
+      (typeof fromResult?.content === 'string' && fromResult.content) ||
+      (typeof fromParams?.content === 'string' && fromParams.content) ||
+      '';
+    if (content) {
+      return (
+        <MarkdownMessage
+          content={'```' + guessLang(path) + '\n' + content + '\n```'}
+          isStreaming={false}
+        />
+      );
+    }
+  }
+
+  return renderToolResult(result);
+};
+
+/**
+ * ToolCallGroup — renders a turn's tool calls as compact one-line rows.
+ * Beyond MAX_VISIBLE_TOOLS, older calls collapse behind a "show N earlier"
+ * toggle so a 35-tool turn stays scannable.
+ */
+const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
+  const [showEarlier, setShowEarlier] = useState(false);
+
+  if (toolUses.length === 0) return null;
+
+  const overflow = toolUses.length - MAX_VISIBLE_TOOLS;
+  const hasOverflow = overflow > 0;
+  const visible = hasOverflow && !showEarlier ? toolUses.slice(-MAX_VISIBLE_TOOLS) : toolUses;
 
   return (
-    <div className={styles.toolGroup}>
-      <div
-        className={styles.toolGroupHeader}
-        onClick={() => setIsGroupExpanded((prev) => !prev)}
-      >
-        <div className={styles.toolHeaderLeft}>
-          <span className={styles.toolIconEmoji}>
-            {failedCount > 0 ? '✗' : runningCount > 0 ? '⚙' : '✓'}
-          </span>
-          <span className={styles.toolName}>
-            {toolUses.length} tool calls
-          </span>
-          <span className={styles.toolGroupSummary}>
-            {summaryParts.join(' · ')}
-          </span>
-        </div>
-        <div className={styles.toolHeaderRight}>
-          <span className={`${styles.expandIcon} ${isGroupExpanded ? styles.expanded : ''}`}>
-            ▼
-          </span>
-        </div>
-      </div>
-
-      {isGroupExpanded && (
-        <div className={styles.toolGroupBody}>
-          {toolUses.map((tu) => (
-            <ToolCallBlock
-              key={tu.toolCallId}
-              toolName={tu.toolName}
-              params={tu.params || tu.arguments}
-              status={tu.status}
-              result={tu.result}
-              error={tu.error}
-            />
-          ))}
-        </div>
+    <div className={styles.toolList}>
+      {hasOverflow && (
+        <button
+          type="button"
+          className={styles.toolShowEarlier}
+          onClick={() => setShowEarlier((prev) => !prev)}
+          aria-expanded={showEarlier}
+        >
+          <span className={`${styles.toolRowChevron} ${showEarlier ? styles.expanded : ''}`}>▸</span>
+          {showEarlier ? 'Hide earlier calls' : `Show ${overflow} earlier ${overflow === 1 ? 'call' : 'calls'}`}
+        </button>
       )}
+      {visible.map((tu) => (
+        <ToolRow
+          key={tu.toolCallId}
+          toolName={tu.toolName}
+          params={tu.params ?? tu.arguments}
+          status={tu.status}
+          result={tu.result}
+          error={tu.error}
+        />
+      ))}
     </div>
   );
 });
 
 /**
- * ToolCallBlock — renders a single tool call with status, params, and result
+ * ToolRow — a single tool call as one scannable line:
+ *   <status> <verb> <primary arg> ............... <result summary> <chevron>
+ * Click to expand the full, well-formatted Output/Input view.
  */
-interface ToolCallBlockProps {
+interface ToolRowProps {
   toolName: string;
   params?: unknown;
   status: string;
@@ -710,35 +771,50 @@ interface ToolCallBlockProps {
   error?: string | null;
 }
 
-const ToolCallBlock = memo(({ toolName, params, status, result, error }: ToolCallBlockProps) => {
+const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'output' | 'input'>('output');
 
-  const handleToggle = useCallback(() => {
-    setIsExpanded((prev) => !prev);
-  }, []);
+  const handleToggle = useCallback(() => setIsExpanded((prev) => !prev), []);
 
-  const statusDisplay = status === 'completed' ? 'complete' : status === 'failed' ? 'error' : 'pending';
+  const { verb, arg } = useMemo(() => summarizeToolCall(toolName, params), [toolName, params]);
+  const resultSummary = useMemo(
+    () => summarizeToolResult(toolName, result, error, status),
+    [toolName, result, error, status],
+  );
+
+  const isRunning = status === 'running';
+  const isFailed = status === 'failed' || !!error;
+  const icon = isFailed ? '✗' : isRunning ? '⚙' : '✓';
+
   const formattedParams = formatParams(params);
   const hasInput = !!formattedParams;
-  const hasOutput = result != null || !!error || status === 'running';
+  const hasOutput = result != null || !!error || isRunning;
 
   return (
-    <div className={styles.toolBlock}>
-      <div className={styles.toolHeader} onClick={handleToggle}>
-        <div className={styles.toolHeaderLeft}>
-          <span className={styles.toolIconEmoji}>
-            {status === 'completed' ? '✓' : status === 'failed' ? '✗' : '⚙'}
-          </span>
-          <span className={styles.toolName}>{toolName}</span>
-          <StatusIndicator status={statusDisplay} />
-        </div>
-        <div className={styles.toolHeaderRight}>
-          <span className={`${styles.expandIcon} ${isExpanded ? styles.expanded : ''}`}>
-            ▼
-          </span>
-        </div>
-      </div>
+    <div className={styles.toolRowBlock}>
+      <button type="button" className={styles.toolRow} onClick={handleToggle} aria-expanded={isExpanded}>
+        <span className={`${styles.toolRowIcon} ${isFailed ? styles.toolRowIconError : ''} ${isRunning ? styles.toolRowIconRunning : ''}`}>
+          {icon}
+        </span>
+        <span className={styles.toolRowVerb}>{verb}</span>
+        {arg && <span className={styles.toolRowArg}>{arg}</span>}
+        <span className={styles.toolRowRight}>
+          {isRunning ? (
+            <span className={styles.toolRowRunning}>
+              <span className={styles.spinner} />
+              running…
+            </span>
+          ) : resultSummary ? (
+            <span
+              className={`${styles.toolRowSummary} ${resultSummary.tone === 'error' ? styles.toolRowSummaryError : ''}`}
+            >
+              {resultSummary.text}
+            </span>
+          ) : null}
+          <span className={`${styles.toolRowChevron} ${isExpanded ? styles.expanded : ''}`}>▾</span>
+        </span>
+      </button>
 
       {isExpanded && (
         <div className={styles.toolContent}>
@@ -767,70 +843,19 @@ const ToolCallBlock = memo(({ toolName, params, status, result, error }: ToolCal
 
           {activeTab === 'input' && hasInput && (
             <div className={styles.toolResult}>
-              <MarkdownMessage
-                content={'```json\n' + formattedParams + '\n```'}
-                isStreaming={false}
-              />
+              <MarkdownMessage content={'```json\n' + formattedParams + '\n```'} isStreaming={false} />
             </div>
           )}
 
           {activeTab === 'output' && (
-            <>
-              {result != null && (
-                <div className={styles.toolResult}>
-                  {renderToolResult(result)}
-                </div>
-              )}
-              {error && (
-                <div className={styles.toolResult}>
-                  <span style={{ color: 'var(--color-critical)' }}>{error}</span>
-                </div>
-              )}
-              {!result && !error && status === 'running' && (
-                <div className={styles.loadingState}>
-                  <span className={styles.spinner}></span>
-                  <span>Executing...</span>
-                </div>
-              )}
-            </>
+            <div className={styles.toolResult}>
+              {renderToolOutput(toolName, params, result, error, isRunning)}
+            </div>
           )}
         </div>
       )}
     </div>
   );
-});
-
-const StatusIndicator = memo(({ status }: { status: string }) => {
-  switch (status) {
-    case 'pending':
-      return (
-        <span className={styles.statusPending}>
-          <span className={styles.spinner}></span>
-          Running...
-        </span>
-      );
-    case 'complete':
-      // The leading ✓ icon next to the tool name already conveys success — a
-      // separate green pill on every successful call adds noise. Surface a
-      // badge only for non-default states (pending, warning, error).
-      return null;
-    case 'warning':
-      return (
-        <span className={styles.statusWarning}>
-          <span className={styles.warningIcon}>⚠</span>
-          Warnings
-        </span>
-      );
-    case 'error':
-      return (
-        <span className={styles.statusError}>
-          <span className={styles.errorIcon}>✗</span>
-          Failed
-        </span>
-      );
-    default:
-      return null;
-  }
 });
 
 /**

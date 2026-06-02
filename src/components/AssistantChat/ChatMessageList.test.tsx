@@ -122,8 +122,8 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('visible reply')).toBeInTheDocument();
   });
 
-  it('collapses many consecutive tool calls into a summary group', () => {
-    const content: AssistantMessage['content'] = Array.from({ length: 3 }, (_, i) => ({
+  const toolGroup = (count: number): { messages: AssistantMessage[]; toolCalls: ToolInvocation[] } => {
+    const content: AssistantMessage['content'] = Array.from({ length: count }, (_, i) => ({
       type: 'tool_use' as const,
       tool_call_id: `tc-${i}`,
       tool_name: `tool_${i}`,
@@ -142,8 +142,55 @@ describe('ChatMessageList', () => {
       startedAt: 0n,
       completedAt: 1n,
     }));
+    return { messages, toolCalls };
+  };
+
+  it('renders each tool as its own one-line row when under the cap', () => {
+    const { messages, toolCalls } = toolGroup(3);
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
-    // The multi-tool group shows a "N tool calls" summary row.
-    expect(screen.getByText('3 tool calls')).toBeInTheDocument();
+    expect(screen.getByText('tool_0')).toBeInTheDocument();
+    expect(screen.getByText('tool_2')).toBeInTheDocument();
+    expect(screen.queryByText(/earlier/)).toBeNull();
+  });
+
+  it('caps a large tool group at 4 rows behind a "show earlier" toggle', () => {
+    const { messages, toolCalls } = toolGroup(6);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    // 6 - 4 = 2 hidden behind the toggle; only the last 4 render.
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+    expect(screen.queryByText('tool_0')).toBeNull();
+    expect(screen.queryByText('tool_1')).toBeNull();
+    expect(screen.getByText('tool_2')).toBeInTheDocument();
+    expect(screen.getByText('tool_5')).toBeInTheDocument();
+  });
+
+  it('shows a bash row summary (verb, command, exit code) without expanding', () => {
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'bash_exec', arguments: {} },
+        ],
+      }),
+    ];
+    const toolCalls: ToolInvocation[] = [
+      {
+        id: 'tc-1',
+        runId: 'r-1',
+        sessionId: 'sess-1',
+        toolName: 'bash_exec',
+        params: { command: 'npm run build' },
+        status: 'completed',
+        result: { exitCode: 0, stdout: 'Build complete', stderr: '' },
+        error: null,
+        startedAt: 0n,
+        completedAt: 1n,
+      },
+    ];
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+    expect(screen.getByText('npm run build')).toBeInTheDocument();
+    expect(screen.getByText('exit 0')).toBeInTheDocument();
   });
 });
