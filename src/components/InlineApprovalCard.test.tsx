@@ -91,6 +91,21 @@ describe('InlineApprovalCard', () => {
     });
   });
 
+  it('drops a previous workspace\'s card when switching workspaces', async () => {
+    // Regression: the Workspace page reuses this component instance across
+    // workspace→workspace navigation (no remount), so a pending card from
+    // workspace A must not linger in workspace B's view. Changing the
+    // workspaceId prop has to clear the stale request.
+    const { rerender } = render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    fireRequest(SINGLE_SEGMENT_REQUEST);
+    expect(await screen.findByText('rg --files')).toBeInTheDocument();
+
+    rerender(<InlineApprovalCard workspaceId="ws-2" />);
+
+    await waitFor(() => expect(screen.queryByText('rg --files')).toBeNull());
+  });
+
   it('drops the card when permissions://resolved fires for it (abandoned tool call)', async () => {
     // Regression: when the agent's bash_exec call is abandoned mid-wait
     // (the CLI drops the MCP transport, "response for tool bash_exec was

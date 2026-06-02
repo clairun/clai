@@ -72,6 +72,19 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
   // the seed and an in-flight event for the same request don't
   // double-add.
   useEffect(() => {
+    // Switching workspaces reuses this component instance — the Workspace
+    // page does NOT remount on workspace→workspace navigation — so any
+    // requests still held from the previous workspace must be dropped
+    // before we seed/subscribe for the new one. Without this, workspace
+    // A's pending approval card leaks into workspace B's view (it lingers
+    // until A's request happens to resolve). Clearing here keys the card's
+    // per-workspace state to workspaceId.
+    setRequests([]);
+    setPerCardState({});
+    setError(null);
+    setSubmittingId(null);
+    previousCountRef.current = 0;
+
     if (!workspaceId) return undefined;
 
     let cancelled = false;

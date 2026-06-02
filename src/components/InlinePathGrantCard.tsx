@@ -103,6 +103,18 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
   const previousCountRef = useRef(0);
 
   useEffect(() => {
+    // Switching workspaces reuses this component instance — the Workspace
+    // page does NOT remount on workspace→workspace navigation — so drop any
+    // requests still held from the previous workspace before seeding/
+    // subscribing for the new one. Without this, workspace A's pending
+    // path-grant card leaks into workspace B's view until A's request
+    // happens to resolve.
+    setRequests([]);
+    setPerCardState({});
+    setError(null);
+    setSubmittingId(null);
+    previousCountRef.current = 0;
+
     if (!workspaceId) return undefined;
 
     let cancelled = false;

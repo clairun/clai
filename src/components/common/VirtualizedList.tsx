@@ -144,6 +144,12 @@ const VirtualizedListInner = <T,>({
   const rafRef = useRef<number | null>(null);
   const didInitialScrollRef = useRef(false);
   const prevLayoutRef = useRef<LayoutResult | null>(null);
+  // Synchronous mirror of "is the user at/near the bottom", updated on every
+  // scroll. The scrollToBottomSignal effect reads this to decide whether to
+  // follow new content — a new message appended below doesn't fire a scroll
+  // or resize event, so this ref still reflects where the user was *before*
+  // the update, which is exactly the signal we want.
+  const nearBottomRef = useRef(true);
   const [measurementVersion, setMeasurementVersion] = useState(0);
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 });
   const [footerHeight, setFooterHeight] = useState(footer ? footerEstimateSize : 0);
@@ -176,7 +182,9 @@ const VirtualizedListInner = <T,>({
     ));
 
     const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
-    onNearBottomChange?.(distanceFromBottom < NEAR_BOTTOM_THRESHOLD);
+    const isNearBottom = distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
+    nearBottomRef.current = isNearBottom;
+    onNearBottomChange?.(isNearBottom);
   }, [onNearBottomChange]);
 
   const handleScroll = useCallback(() => {
@@ -282,6 +290,10 @@ const VirtualizedListInner = <T,>({
   useEffect(() => {
     if (scrollToBottomSignal === null || scrollToBottomSignal === undefined) return;
     if (!didInitialScrollRef.current && initialScrollToBottom) return;
+    // Only follow new content if the user was already at/near the bottom.
+    // If they've scrolled up to read earlier messages, leave them there
+    // instead of yanking the view back down on every update.
+    if (!nearBottomRef.current) return;
     scrollToBottom(scrollToBottomBehavior);
   }, [initialScrollToBottom, scrollToBottom, scrollToBottomBehavior, scrollToBottomSignal]);
 
