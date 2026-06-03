@@ -36,6 +36,7 @@ fn launch_argv(bwrap_args: Vec<OsString>, in_flatpak: bool) -> (&'static str, Ve
 }
 
 pub async fn run(command: SandboxCommand) -> Result<SandboxCommandOutput, String> {
+    validate_grants_exist(&command).await?;
     let args = bwrap_args(&command)?;
     let in_flatpak = crate::providers::is_flatpak();
     let (program, launch_args) = launch_argv(args, in_flatpak);
@@ -198,16 +199,64 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
         ));
     }
 
+    Ok(())
+}
+
+/// Verify every path grant still exists before launching, so a stale grant
+/// surfaces as a clear message rather than a silently-skipped bind (grants use
+/// `*-bind-try`, so a vanished one would otherwise just be absent inside the
+/// sandbox).
+///
+/// Existence MUST be probed in the same mount namespace the bind resolves in.
+/// In a Flatpak build the inner `bwrap` runs on the host via
+/// `flatpak-spawn --host bwrap …`, so its grant binds resolve against the
+/// *host* filesystem — but this process runs in the Flatpak namespace, where
+/// `/tmp` is a private tmpfs and `/opt`, `/mnt`, … aren't mapped at all. A
+/// plain in-process `Path::exists()` would then report a perfectly valid host
+/// path (e.g. `/tmp/foo`) as missing and wrongly abort the command. So inside
+/// Flatpak we probe on the host with `flatpak-spawn --host test -e`.
+async fn validate_grants_exist(command: &SandboxCommand) -> Result<(), String> {
+    let in_flatpak = crate::providers::is_flatpak();
     for grant in &command.profile.path_grants {
-        if !grant.host_path.exists() {
+        let exists = if in_flatpak {
+            host_path_exists(&grant.host_path).await
+        } else {
+            grant.host_path.exists()
+        };
+        if !exists {
             return Err(format!(
                 "Sandbox path grant does not exist: {}",
                 grant.host_path.display()
             ));
         }
     }
-
     Ok(())
+}
+
+/// Probe path existence on the *host* via `flatpak-spawn --host test -e`.
+///
+/// Fails open (returns `true`) when the probe itself can't be spawned — e.g.
+/// `flatpak-spawn` is missing because the `org.freedesktop.Flatpak` talk
+/// permission isn't granted. In that case the real sandbox launch fails with
+/// the dedicated "flatpak-spawn not found" message, which is clearer than a
+/// misattributed "grant does not exist".
+async fn host_path_exists(path: &Path) -> bool {
+    let status = Command::new(FLATPAK_SPAWN_BIN)
+        .arg("--host")
+        .arg("test")
+        .arg("-e")
+        .arg(path.as_os_str())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    match status {
+        Ok(status) => status.success(),
+        // Path grants are always absolute, so `test -e <path>` can't be
+        // confused by a leading-dash argument; only a spawn failure lands here.
+        Err(_) => true,
+    }
 }
 
 fn append_runtime_file_binds(args: &mut Vec<OsString>, in_flatpak: bool) {
@@ -368,31 +417,49 @@ fn append_workspace_and_grants(args: &mut Vec<OsString>, command: &SandboxComman
     // overlap and emit order is irrelevant. We push the workspace first so an
     // exact-duplicate grant gets dropped by the dedup below and the workspace's
     // RW access wins.
-    let mut binds: Vec<(PathBuf, SandboxPathAccess)> =
+    // The bool is `lenient`: false for the workspace root (a missing workspace
+    // is fatal), true for grants (a missing/invisible grant is skipped via
+    // *-bind-try rather than aborting the whole sandbox).
+    let mut binds: Vec<(PathBuf, SandboxPathAccess, bool)> =
         Vec::with_capacity(command.profile.path_grants.len() + 1);
     binds.push((
         command.profile.workspace_root.clone(),
         SandboxPathAccess::ReadWrite,
+        false,
     ));
     for grant in &command.profile.path_grants {
         if grant.host_path == command.profile.workspace_root {
             continue;
         }
-        binds.push((grant.host_path.clone(), grant.access));
+        binds.push((grant.host_path.clone(), grant.access, true));
     }
 
-    binds.sort_by_key(|(path, _)| path_depth(path));
+    binds.sort_by_key(|(path, _, _)| path_depth(path));
 
-    for (path, access) in binds {
-        append_bind(args, access, &path, &path);
+    for (path, access, lenient) in binds {
+        append_bind(args, access, &path, &path, lenient);
     }
 }
 
-fn append_bind(args: &mut Vec<OsString>, access: SandboxPathAccess, source: &Path, dest: &Path) {
-    match access {
-        SandboxPathAccess::ReadOnly => args.push(os("--ro-bind")),
-        SandboxPathAccess::ReadWrite => args.push(os("--bind")),
-    }
+/// Emit a single bind. `lenient` selects bwrap's `*-bind-try` variant, which
+/// skips the bind (instead of aborting the entire sandbox) when the source
+/// path is absent at launch time. Used for path grants so one stale or
+/// namespace-invisible grant can't disable every `bash_exec`; the workspace
+/// root binds non-leniently because its absence is a genuine, fatal error.
+fn append_bind(
+    args: &mut Vec<OsString>,
+    access: SandboxPathAccess,
+    source: &Path,
+    dest: &Path,
+    lenient: bool,
+) {
+    let flag = match (access, lenient) {
+        (SandboxPathAccess::ReadOnly, false) => "--ro-bind",
+        (SandboxPathAccess::ReadOnly, true) => "--ro-bind-try",
+        (SandboxPathAccess::ReadWrite, false) => "--bind",
+        (SandboxPathAccess::ReadWrite, true) => "--bind-try",
+    };
+    args.push(os(flag));
     args.push(source.as_os_str().to_os_string());
     args.push(dest.as_os_str().to_os_string());
 }
@@ -1027,7 +1094,10 @@ mod tests {
             let flag = &rendered[chunk_start];
             let dest = &rendered[chunk_start + 2];
             if dest == &ancestor_str {
-                assert_eq!(flag, "--ro-bind", "ancestor grant should be ro-bind");
+                assert_eq!(
+                    flag, "--ro-bind-try",
+                    "ancestor grant should be a lenient ro-bind"
+                );
                 ancestor_flag_idx = Some(chunk_start);
             } else if dest == &workspace_str {
                 assert_eq!(flag, "--bind", "workspace should be a writable bind");
@@ -1041,6 +1111,127 @@ mod tests {
             ancestor_flag_idx < workspace_flag_idx,
             "workspace bind ({workspace_flag_idx}) must come after ancestor grant ({ancestor_flag_idx}) so RW overlays RO; rendered: {rendered:?}"
         );
+    }
+
+    // A grant whose host path is gone must bind via `--ro-bind-try` (skipped by
+    // bwrap) rather than `--ro-bind` (which aborts the whole sandbox). This is
+    // what stops one stale grant from disabling every `bash_exec` for a session.
+    #[test]
+    fn missing_grant_binds_leniently_so_sandbox_still_launches() {
+        let workspace = tempfile::tempdir().unwrap();
+        let command = SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 1_000,
+            max_output_chars: 1_000,
+            profile: SandboxProfile {
+                workspace_root: workspace.path().to_path_buf(),
+                path_grants: vec![SandboxPathGrant {
+                    host_path: PathBuf::from("/tmp/clai-this-path-does-not-exist-xyz.md"),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                network: SandboxNetworkMode::Host,
+                session_bus: SandboxSessionBusMode::Deny,
+                env: SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+            },
+        };
+
+        let mut args: Vec<OsString> = Vec::new();
+        append_workspace_and_grants(&mut args, &command);
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        let grant_str = "/tmp/clai-this-path-does-not-exist-xyz.md".to_string();
+        let mut found = false;
+        for chunk_start in (0..rendered.len().saturating_sub(2)).step_by(3) {
+            if rendered[chunk_start + 2] == grant_str {
+                assert_eq!(
+                    rendered[chunk_start], "--ro-bind-try",
+                    "a grant must bind leniently; rendered: {rendered:?}"
+                );
+                found = true;
+            }
+        }
+        assert!(found, "grant bind not emitted; rendered: {rendered:?}");
+    }
+
+    // Outside Flatpak, grant existence is probed in-process (the same namespace
+    // bwrap runs in), so a genuinely-missing grant is rejected up front with a
+    // clear message instead of a cryptic bind failure.
+    #[tokio::test]
+    async fn validate_grants_exist_rejects_missing_grant_off_flatpak() {
+        if crate::providers::is_flatpak() {
+            return; // off-Flatpak assertion only
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let command = SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 1_000,
+            max_output_chars: 1_000,
+            profile: SandboxProfile {
+                workspace_root: workspace.path().to_path_buf(),
+                path_grants: vec![SandboxPathGrant {
+                    host_path: PathBuf::from("/tmp/clai-this-path-does-not-exist-xyz.md"),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                network: SandboxNetworkMode::Host,
+                session_bus: SandboxSessionBusMode::Deny,
+                env: SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+            },
+        };
+
+        let err = validate_grants_exist(&command)
+            .await
+            .expect_err("missing grant should be rejected");
+        assert!(
+            err.contains("Sandbox path grant does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // An existing grant passes validation (and bwrap_args no longer blocks on
+    // grant existence at all — that responsibility moved to validate_grants_exist).
+    #[tokio::test]
+    async fn validate_grants_exist_accepts_present_grant() {
+        let workspace = tempfile::tempdir().unwrap();
+        let granted = tempfile::tempdir().unwrap();
+        let command = SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 1_000,
+            max_output_chars: 1_000,
+            profile: SandboxProfile {
+                workspace_root: workspace.path().to_path_buf(),
+                path_grants: vec![SandboxPathGrant {
+                    host_path: granted.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                network: SandboxNetworkMode::Host,
+                session_bus: SandboxSessionBusMode::Deny,
+                env: SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+            },
+        };
+
+        // In Flatpak this probes the host (tempdir exists there too); off
+        // Flatpak it probes in-process. Either way a present path passes.
+        validate_grants_exist(&command)
+            .await
+            .expect("present grant should pass validation");
     }
 
     // End-to-end variant of the regression test: build a real workspace under
