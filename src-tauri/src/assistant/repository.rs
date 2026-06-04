@@ -245,6 +245,55 @@ pub async fn list_messages(
     rows.iter().map(map_message_row).collect()
 }
 
+pub async fn get_message(
+    pool: &DbPool,
+    message_id: &str,
+) -> Result<Option<AssistantMessage>, String> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+        FROM assistant_messages
+        WHERE id = ?
+        "#,
+    )
+    .bind(message_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load assistant message: {}", e))?;
+
+    row.as_ref().map(map_message_row).transpose()
+}
+
+/// Permanently remove a message row and its `assistant_message_queue` row
+/// (deleted explicitly — the schema's ON DELETE CASCADE only fires on
+/// connections where `PRAGMA foreign_keys` happens to be on, which the
+/// pool doesn't guarantee). Used to discard run input that never got an
+/// answer — a user message (and the empty assistant placeholder) of a run
+/// that failed before the provider produced anything.
+pub async fn delete_message(pool: &DbPool, message_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start message delete transaction: {}", e))?;
+
+    sqlx::query("DELETE FROM assistant_message_queue WHERE message_id = ?")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to delete queued assistant message: {}", e))?;
+
+    sqlx::query("DELETE FROM assistant_messages WHERE id = ?")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to delete assistant message: {}", e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit message delete transaction: {}", e))?;
+    Ok(())
+}
+
 pub async fn create_message(
     pool: &DbPool,
     params: CreateMessageParams,
@@ -894,4 +943,69 @@ pub async fn recover_stale_runs(pool: &DbPool) -> Result<u64, String> {
         );
     }
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Per-test workspace pool in a tempdir, with the production
+    /// workspace migrations applied.
+    async fn create_test_pool() -> (tempfile::TempDir, DbPool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = crate::db::init_workspace_db(tmp.path()).await.unwrap();
+        (tmp, pool)
+    }
+
+    async fn insert_session(pool: &DbPool, id: &str) {
+        sqlx::query(
+            r#"
+            INSERT INTO assistant_sessions
+                (id, kind, title, context_json, created_at, updated_at)
+            VALUES (?, '"chat"', 'Test', '{}', 1, 1)
+            "#,
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn queue_rows_for(pool: &DbPool, message_id: &str) -> i64 {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM assistant_message_queue WHERE message_id = ?",
+        )
+        .bind(message_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn delete_message_removes_row_and_queue_entry() {
+        let (_tmp, pool) = create_test_pool().await;
+        insert_session(&pool, "s1").await;
+
+        // Queued variant: the queue side-table row must go with the message.
+        let queued =
+            create_user_message(&pool, "s1".to_string(), "hello".to_string(), Some("conn-1"))
+                .await
+                .unwrap();
+        assert_eq!(queue_rows_for(&pool, &queued.id).await, 1);
+        assert!(get_message(&pool, &queued.id).await.unwrap().is_some());
+
+        delete_message(&pool, &queued.id).await.unwrap();
+        assert!(get_message(&pool, &queued.id).await.unwrap().is_none());
+        assert_eq!(queue_rows_for(&pool, &queued.id).await, 0);
+
+        // Non-queued variant deletes cleanly too.
+        let direct = create_user_message(&pool, "s1".to_string(), "again".to_string(), None)
+            .await
+            .unwrap();
+        delete_message(&pool, &direct.id).await.unwrap();
+        assert!(get_message(&pool, &direct.id).await.unwrap().is_none());
+
+        // Deleting an unknown id is a no-op, not an error.
+        delete_message(&pool, "missing").await.unwrap();
+    }
 }

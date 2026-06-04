@@ -143,6 +143,7 @@ pub async fn run_session_turn(
                     connection.provider_id
                 );
                 fail_run(deps, &session, &run_id, None, &message).await?;
+                discard_if_unanswered(deps, &session, &run_id, &input, &None).await;
                 return Err(AssistantEngineError::Provider(
                     crate::assistant::providers::types::ProviderError::RequestFailed(message),
                 ));
@@ -205,6 +206,8 @@ pub async fn run_session_turn(
                         Err(error) => {
                             let message = error.message();
                             fail_run(deps, &session, &run_id, None, &message).await?;
+                            discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot)
+                                .await;
                             return Err(AssistantEngineError::Provider(
                                 crate::assistant::providers::types::ProviderError::RequestFailed(
                                     message,
@@ -319,11 +322,49 @@ pub async fn run_session_turn(
                 );
             }
             fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
+            discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot).await;
             Err(AssistantEngineError::Provider(
                 crate::assistant::providers::types::ProviderError::RequestFailed(message),
             ))
         }
     }
+}
+
+/// After a failed CLI run, drop the unanswered input — but only when the
+/// turn produced nothing the user could see. The check runs against the
+/// slot's *persisted* row (tool_use parts are flushed mid-run and partial
+/// output is finalized before the error returns, so the DB is the source
+/// of truth). Conservative on load errors: real output must never be
+/// deleted, so "can't tell" counts as "has content".
+async fn discard_if_unanswered(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    input: &crate::assistant::engine::RunTurnInput,
+    assistant_slot: &Option<AssistantMessage>,
+) {
+    let placeholder_id = match assistant_slot.as_ref() {
+        None => None,
+        Some(slot) => match repository::get_message(&deps.pool, &slot.id).await {
+            Ok(Some(current))
+                if crate::assistant::engine::run_produced_no_content(&current.content) =>
+            {
+                Some(slot.id.as_str())
+            }
+            Ok(None) => None,
+            // Non-empty content or load error: the user saw (or may have
+            // seen) output — keep everything.
+            _ => return,
+        },
+    };
+    crate::assistant::engine::discard_unanswered_run_input(
+        deps,
+        session,
+        run_id,
+        input.trigger_message_id.as_deref(),
+        placeholder_id,
+    )
+    .await;
 }
 
 fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) -> bool {

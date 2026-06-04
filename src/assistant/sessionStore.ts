@@ -51,6 +51,7 @@ export interface AssistantStoreState {
 
   initSession: (session: AssistantSession & { tabId?: string | null }) => void;
   addMessage: (sessionId: string, message: AssistantMessage) => void;
+  removeMessage: (sessionId: string, messageId: string) => void;
   appendDelta: (sessionId: string, messageId: string, text: string) => void;
   completeMessage: (sessionId: string, message: AssistantMessage) => void;
   updateMessageContent: (sessionId: string, message: AssistantMessage) => void;
@@ -115,6 +116,18 @@ const useAssistantStore = create<AssistantStoreState>()(
               s.messages.push(message);
             }
           }
+        }),
+
+      // Backend retracted a message — e.g. a user message whose run failed
+      // before the provider produced anything (no point showing a message
+      // that never got an answer). Also drops any streaming-text remnant
+      // keyed by the message.
+      removeMessage: (sessionId, messageId) =>
+        set((state) => {
+          const s = state.sessions[sessionId];
+          if (!s) return;
+          s.messages = s.messages.filter((m) => m.id !== messageId);
+          delete s.streamingTextByMessageId[messageId];
         }),
 
       appendDelta: (sessionId, messageId, text) =>

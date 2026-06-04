@@ -384,6 +384,7 @@ fn spawn_task_run(
             connection_id,
             cancel_token: cancel_token.clone(),
             inter_agent_call_depth: None,
+            trigger_message_id: None,
         };
 
         let result = engine::run_session_turn(&deps, input).await;

@@ -340,6 +340,7 @@ pub async fn assistant_send_message(
         run.id.clone(),
         RunTrigger::UserMessage,
         connection_id,
+        Some(assistant_message.id.clone()),
     );
 
     Ok(AssistantSendMessageResult {
@@ -426,6 +427,7 @@ pub async fn assistant_retry_run(
         run.id.clone(),
         RunTrigger::Retry,
         connection_id,
+        None,
     );
 
     Ok(run)
@@ -476,6 +478,11 @@ pub(crate) fn spawn_run_task(
     run_id: String,
     trigger: RunTrigger,
     connection_id: String,
+    // Id of the user message that triggered this run (direct send path
+    // only) — lets the engine discard it if the run fails before the
+    // provider produces anything. Queued-followup runs pass None; their
+    // messages are linked via assistant_message_queue.delivered_run_id.
+    trigger_message_id: Option<String>,
 ) {
     let cancel_token = runtime::register_run(&run_id);
     tauri::async_runtime::spawn(async move {
@@ -490,6 +497,7 @@ pub(crate) fn spawn_run_task(
             connection_id,
             cancel_token,
             inter_agent_call_depth: None,
+            trigger_message_id,
         };
         if let Err(e) = engine::run_session_turn(&deps, input).await {
             tracing::error!("Assistant engine error for run {}: {}", run_id, e);
@@ -575,6 +583,9 @@ pub(crate) async fn start_queued_followup_if_idle(
         run.id.clone(),
         RunTrigger::UserMessage,
         connection_id,
+        // Followup runs find their input via the queue table
+        // (delivered_run_id), not a direct trigger message.
+        None,
     );
 
     Ok(Some(run))

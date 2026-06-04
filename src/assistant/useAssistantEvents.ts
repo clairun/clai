@@ -34,6 +34,13 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
       store.addMessage(sessionId, event.payload.message);
       break;
 
+    case 'message_deleted':
+      // A user message whose run failed before the provider produced
+      // anything (or its empty assistant placeholder) was retracted by
+      // the backend — drop it so it doesn't linger unanswered.
+      store.removeMessage(sessionId, event.payload.message_id);
+      break;
+
     case 'run_queued':
     case 'run_started':
     case 'run_completed':

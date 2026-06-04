@@ -34,6 +34,11 @@ pub struct RunTurnInput {
     pub connection_id: String,
     pub cancel_token: CancellationToken,
     pub inter_agent_call_depth: Option<u32>,
+    /// Id of the user message that triggered this run (Some only for the
+    /// direct send path). If the run fails before the provider produces
+    /// anything, this message is discarded — see
+    /// `discard_unanswered_run_input`.
+    pub trigger_message_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -251,6 +256,19 @@ pub async fn run_session_turn(
             Ok(s) => s,
             Err(e) => {
                 fail_run(deps, &session, &run_id, usage.as_ref(), &e.to_string()).await?;
+                // First iteration: the provider rejected the request outright
+                // (connection/auth/limit), so the user's message never reached
+                // the LLM — drop it. Later iterations already produced content.
+                if iteration == 0 {
+                    discard_unanswered_run_input(
+                        deps,
+                        &session,
+                        &run_id,
+                        input.trigger_message_id.as_deref(),
+                        None,
+                    )
+                    .await;
+                }
                 return Err(e.into());
             }
         };
@@ -370,12 +388,36 @@ pub async fn run_session_turn(
                     }
                     ProviderEvent::ProviderError { message } => {
                         fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
+                        // Mid-stream failure before anything came back (some
+                        // providers report limits this way): the user got no
+                        // answer at all, so drop their message and the empty
+                        // assistant placeholder created above.
+                        if iteration == 0 && run_produced_no_content(&content_parts) {
+                            discard_unanswered_run_input(
+                                deps,
+                                &session,
+                                &run_id,
+                                input.trigger_message_id.as_deref(),
+                                Some(&assistant_message.id),
+                            )
+                            .await;
+                        }
                         return Ok(());
                     }
                 },
                 Some(Err(e)) => {
                     let error_msg = e.to_string();
                     fail_run(deps, &session, &run_id, usage.as_ref(), &error_msg).await?;
+                    if iteration == 0 && run_produced_no_content(&content_parts) {
+                        discard_unanswered_run_input(
+                            deps,
+                            &session,
+                            &run_id,
+                            input.trigger_message_id.as_deref(),
+                            Some(&assistant_message.id),
+                        )
+                        .await;
+                    }
                     return Err(AssistantEngineError::Provider(
                         ProviderError::RequestFailed(error_msg),
                     ));
@@ -2309,6 +2351,69 @@ pub(crate) fn build_trigger_message(
 }
 
 /// Helper to mark a run as failed and emit the event.
+/// True when a run's accumulated content amounts to nothing the user could
+/// see: no text, no thinking, no tool calls. (The empty-Text placeholder a
+/// message row is seeded with doesn't count.)
+pub(crate) fn run_produced_no_content(parts: &[ContentPart]) -> bool {
+    parts
+        .iter()
+        .all(|part| matches!(part, ContentPart::Text { text } if text.is_empty()))
+}
+
+/// Best-effort cleanup after a run that failed before the provider produced
+/// anything (connection error, usage limit, CLI spawn failure): delete the
+/// user message(s) that triggered it — the direct trigger plus any queued
+/// messages delivered to this run — and the empty assistant placeholder, then
+/// emit `MessageDeleted` for each so the UI drops them too. A message that
+/// never got an answer has no business lingering in the conversation; the
+/// failed run row keeps its error, so the failure banner still explains what
+/// happened, and the typed text stays recoverable via the input history.
+/// Errors are logged, not propagated — cleanup must never mask the original
+/// failure.
+pub(crate) async fn discard_unanswered_run_input(
+    deps: &AssistantDeps,
+    session: &crate::assistant::types::AssistantSession,
+    run_id: &str,
+    trigger_message_id: Option<&str>,
+    assistant_placeholder_id: Option<&str>,
+) {
+    let mut message_ids: Vec<String> = Vec::new();
+    match repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id).await
+    {
+        Ok(queued) => message_ids.extend(queued.into_iter().map(|q| q.message.id)),
+        Err(error) => tracing::warn!(
+            run_id,
+            error,
+            "Failed to list queued messages while discarding unanswered run input"
+        ),
+    }
+    if let Some(id) = trigger_message_id {
+        if !message_ids.iter().any(|existing| existing == id) {
+            message_ids.push(id.to_string());
+        }
+    }
+    message_ids.extend(assistant_placeholder_id.map(str::to_string));
+
+    for message_id in message_ids {
+        match repository::delete_message(&deps.pool, &message_id).await {
+            Ok(()) => {
+                let _ = emit_event(
+                    &deps.app,
+                    session,
+                    Some(run_id),
+                    AssistantUiEvent::MessageDeleted { message_id },
+                );
+            }
+            Err(error) => tracing::warn!(
+                run_id,
+                message_id,
+                error,
+                "Failed to delete unanswered run input message"
+            ),
+        }
+    }
+}
+
 async fn fail_run(
     deps: &AssistantDeps,
     session: &crate::assistant::types::AssistantSession,

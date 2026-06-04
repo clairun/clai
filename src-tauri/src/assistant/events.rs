@@ -20,6 +20,15 @@ pub enum AssistantUiEvent {
     MessageCreated {
         message: AssistantMessage,
     },
+    /// A message was removed from the conversation: a user message whose
+    /// run failed before the provider produced anything (connection error,
+    /// usage limit, CLI spawn failure), or the empty assistant placeholder
+    /// created for that run. The FE drops it from session state — there's
+    /// no point showing a message that never got an answer; the typed text
+    /// stays recoverable via the input's history (↑).
+    MessageDeleted {
+        message_id: MessageId,
+    },
     RunQueued {
         run: AssistantRun,
     },
