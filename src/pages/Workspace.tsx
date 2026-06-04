@@ -597,6 +597,9 @@ const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect }: ArtifactTreeRo
 interface ArtifactsListProps {
   workspaceId: string;
   totalCount: number;
+  /** Latest mtime (unix ms) across the artifact tree — changes on
+   *  content-only edits and renames, which leave `totalCount` unchanged. */
+  latestModifiedAt: number;
   onSelect?: (entry: WorkspaceFileEntry) => void;
 }
 
@@ -606,7 +609,7 @@ const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
 // children on first expand, caching them by path. The 5s snapshot poll surfaces
 // new artifacts by bumping `totalCount`, which we use to silently refresh the
 // already-loaded levels so a running agent's output appears without reopening.
-const ArtifactsList = ({ workspaceId, totalCount, onSelect }: ArtifactsListProps) => {
+const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: ArtifactsListProps) => {
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [childrenByPath, setChildrenByPath] = useState<Map<string, WorkspaceDirEntry[]>>(
@@ -651,15 +654,18 @@ const ArtifactsList = ({ workspaceId, totalCount, onSelect }: ArtifactsListProps
     void loadDir('', true);
   }, [workspaceId]);
 
-  // When the artifact count changes (agent created/removed files), refresh every
-  // directory level we've already loaded so the open tree stays live. Bounded by
-  // how many folders the user has expanded, not by total artifact count.
+  // When the artifact tree changes, refresh every directory level we've
+  // already loaded so the open tree stays live. Keyed on the count (files
+  // created/removed) AND the tree's latest mtime — a content-only edit or a
+  // rename leaves the count unchanged but must still refresh the listed
+  // timestamps. Bounded by how many folders the user has expanded, not by
+  // total artifact count.
   useEffect(() => {
     if (childrenByPath.size === 0) return;
     for (const path of childrenByPath.keys()) {
       void loadDir(path, true);
     }
-  }, [totalCount]);
+  }, [totalCount, latestModifiedAt]);
 
   // Auto-expand a sole top-level folder once, so repo-rooted artifacts like
   // `work/<repo>/...` reveal their first level without an extra click.
@@ -1704,6 +1710,7 @@ const Workspace = () => {
                 <ArtifactsList
                   workspaceId={workspaceId}
                   totalCount={artifactCount}
+                  latestModifiedAt={Number(snapshot?.artifactLatestModifiedAt ?? 0)}
                   onSelect={(entry) => openPreviewEntry({ kind: 'artifact', entry })}
                 />
               )}

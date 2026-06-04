@@ -192,6 +192,12 @@ pub struct WorkspaceSnapshot {
     /// this instead of `artifacts.len()`.
     #[serde(default)]
     pub artifact_count: i64,
+    /// Latest mtime (unix ms) across the artifact tree — files and
+    /// non-skipped directories. Changes on any mutation, including
+    /// content-only edits and renames that leave the count unchanged;
+    /// the artifacts panel keys its tree refresh on this. 0 when empty.
+    #[serde(default)]
+    pub artifact_latest_modified_at: i64,
     // Agent schedule info (only for agent workspaces)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
@@ -750,26 +756,58 @@ fn collect_files(
     Ok(())
 }
 
-/// Recursive file count for the artifact tree, applying the same skip-list as
+/// Recursive stats for the artifact tree, applying the same skip-list as
 /// `workspace_list_dir` / the artifact `collect_files` walk so the header
 /// counter matches what the panel can actually surface (excludes `.clai`,
 /// `node_modules`, `target`, `.git`, …).
+///
+/// Returns `(file_count, latest_modified_at_ms)`. The mtime max includes
+/// directories, not just files: an in-place edit bumps the file's mtime,
+/// while a rename/move bumps the parent directory's — together they make
+/// the value change on any mutation, which is what the artifacts panel
+/// keys its refresh on (the count alone misses content-only changes).
+/// Recursive file count only — used for per-folder `childCount` in
+/// `workspace_list_dir`, where the mtime half of the stats isn't needed.
 fn count_artifact_files(dir: &Path) -> i64 {
+    artifact_tree_stats(dir).0
+}
+
+fn artifact_tree_stats(dir: &Path) -> (i64, i64) {
     let mut count: i64 = 0;
+    let mut latest_modified_at: i64 = 0;
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
-                if should_skip_artifact_dir(&path) {
-                    continue;
-                }
-                count += count_artifact_files(&path);
+            let is_dir = path.is_dir();
+            // Skipped trees contribute nothing — not even the dir's own
+            // mtime, or internal churn in e.g. `.git` would read as an
+            // artifact change.
+            if is_dir && should_skip_artifact_dir(&path) {
+                continue;
+            }
+            if let Some(mtime) = entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .and_then(|modified| {
+                    modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|duration| duration.as_millis() as i64)
+                })
+            {
+                latest_modified_at = latest_modified_at.max(mtime);
+            }
+            if is_dir {
+                let (child_count, child_latest) = artifact_tree_stats(&path);
+                count += child_count;
+                latest_modified_at = latest_modified_at.max(child_latest);
             } else if path.is_file() {
                 count += 1;
             }
         }
     }
-    count
+    (count, latest_modified_at)
 }
 
 fn ensure_agent_workspace_root(root: &Path) -> Result<(), String> {
@@ -1496,7 +1534,7 @@ pub async fn workspace_get_snapshot(
     // for the header counter. This also keeps the periodic 5s poll bounded:
     // counting is cheaper than building + serializing every entry, and there is
     // no longer a 500-entry cap silently truncating large workspaces.
-    let (memories, artifact_count) = if options.include_files() {
+    let (memories, artifact_count, artifact_latest_modified_at) = if options.include_files() {
         if let Some(root_path) = &descriptor.root_path {
             let memory_root = root_path.join(".clai").join("memory");
             let mut memories = Vec::new();
@@ -1505,13 +1543,13 @@ pub async fn workspace_get_snapshot(
             }
             sort_workspace_entries(&mut memories);
 
-            let artifact_count = count_artifact_files(root_path);
-            (memories, artifact_count)
+            let (artifact_count, artifact_latest_modified_at) = artifact_tree_stats(root_path);
+            (memories, artifact_count, artifact_latest_modified_at)
         } else {
-            (Vec::new(), 0)
+            (Vec::new(), 0, 0)
         }
     } else {
-        (Vec::new(), 0)
+        (Vec::new(), 0, 0)
     };
     let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
 
@@ -1568,6 +1606,7 @@ pub async fn workspace_get_snapshot(
         memories,
         artifacts,
         artifact_count,
+        artifact_latest_modified_at,
         enabled,
         schedule_enabled,
         schedule_paused,

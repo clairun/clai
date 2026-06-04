@@ -235,7 +235,14 @@ export type WorkspaceSnapshot = { workspaceId: string, kind: string, title: stri
  * level at a time via `workspace_list_dir`, so the header counter reads
  * this instead of `artifacts.len()`.
  */
-artifactCount: bigint, enabled: boolean | null, scheduleEnabled: boolean, schedulePaused: boolean, 
+artifactCount: bigint, 
+/**
+ * Latest mtime (unix ms) across the artifact tree — files and
+ * non-skipped directories. Changes on any mutation, including
+ * content-only edits and renames that leave the count unchanged;
+ * the artifacts panel keys its tree refresh on this. 0 when empty.
+ */
+artifactLatestModifiedAt: bigint, enabled: boolean | null, scheduleEnabled: boolean, schedulePaused: boolean, 
 /**
  * The workspace's schedule mode (interval vs cron). Empty when the
  * workspace isn't scheduled. The frontend reads this to render the
