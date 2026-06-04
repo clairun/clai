@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -390,6 +390,28 @@ export default function WorkspaceFilePreviewPanel({
   // resets the affordance.
   const [justCopied, setJustCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  // Which header field was just copied via click-to-copy ('name' = the title,
+  // 'path' = the workspace-relative path row). Drives a transient "Copied"
+  // tag next to the clicked element; cleared after ~1.2s or on file change.
+  const [copiedField, setCopiedField] = useState<'name' | 'path' | null>(null);
+  const copiedFieldTimerRef = useRef<number | null>(null);
+
+  const copyField = useCallback(async (field: 'name' | 'path', text: string) => {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedField(field);
+      if (copiedFieldTimerRef.current) window.clearTimeout(copiedFieldTimerRef.current);
+      copiedFieldTimerRef.current = window.setTimeout(() => setCopiedField(null), 1200);
+    } catch {
+      // Clipboard unavailable — nothing actionable; the text stays visible
+      // and selectable on screen.
+    }
+  }, []);
+
+  useEffect(() => () => {
+    if (copiedFieldTimerRef.current) window.clearTimeout(copiedFieldTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!entry?.path) {
@@ -429,6 +451,7 @@ export default function WorkspaceFilePreviewPanel({
   useEffect(() => {
     setHtmlMode('preview');
     setJustCopied(false);
+    setCopiedField(null);
   }, [entry?.path]);
 
   // Build the self-contained preview bundle once a loaded file turns out to
@@ -560,9 +583,17 @@ export default function WorkspaceFilePreviewPanel({
     <aside className={styles.panel} role="region" aria-label={`${kindLabel}: ${entry.name}`}>
       <div className={styles.header}>
         <div className={styles.headerLeft}>
-          <span className={styles.title} title={entry.name}>
+          <button
+            type="button"
+            className={styles.titleButton}
+            onClick={() => copyField('name', entry.name)}
+            title={copiedField === 'name' ? 'Copied!' : `${entry.name} — click to copy file name`}
+          >
             {entry.name}
-          </span>
+          </button>
+          {copiedField === 'name' && (
+            <span className={styles.copiedTag} role="status">Copied</span>
+          )}
           <span className={styles.kindPill}>{kindLabel}</span>
         </div>
         <div className={styles.headerActions}>
@@ -615,9 +646,19 @@ export default function WorkspaceFilePreviewPanel({
         {(entry.path || entry.updatedAt) && (
           <div className={styles.bodyMeta}>
             {entry.path && (
-              <span className={styles.path} title={entry.path}>
-                {entry.path}
-              </span>
+              <>
+                <button
+                  type="button"
+                  className={styles.pathButton}
+                  onClick={() => copyField('path', entry.path)}
+                  title={copiedField === 'path' ? 'Copied!' : `${entry.path} — click to copy path`}
+                >
+                  {entry.path}
+                </button>
+                {copiedField === 'path' && (
+                  <span className={styles.copiedTag} role="status">Copied</span>
+                )}
+              </>
             )}
             {entry.updatedAt && (
               <>

@@ -55,7 +55,17 @@
   flex: 1;
 }
 
-.title {
+/* The title is a click-to-copy button (copies the file name) styled as
+   plain header text; dotted underline on hover hints at the affordance. */
+.titleButton {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+  font: inherit;
   font-size: 13px;
   font-weight: 600;
   color: var(--color-text-primary);
@@ -63,6 +73,21 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   letter-spacing: 0.02em;
+}
+
+.titleButton:hover {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+/* Transient confirmation shown next to a just-copied field. */
+.copiedTag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--color-primary);
 }
 
 .kindPill {
@@ -190,7 +215,16 @@
   color: var(--color-text-tertiary);
 }
 
-.path {
+/* The path row is a click-to-copy button (copies the workspace-relative
+   path) styled as the plain mono metadata text it replaces. */
+.pathButton {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 11px;
   color: var(--color-text-tertiary);
@@ -198,6 +232,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
+}
+
+.pathButton:hover {
+  color: var(--color-text-secondary);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
 }
 
 .empty {
