@@ -23,36 +23,42 @@ fn sweep_workspace_agent_mcp_renames(
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .locators_sorted();
     for locator in locators {
-        let mut config =
-            crate::config::workspace_config::load(&locator.root_path).map_err(|e| e.to_string())?;
-        let mut changed = false;
-        let now = chrono::Utc::now().timestamp_millis();
-        for agent in &mut config.agents {
-            // Resolve each existing ref to an id (lookup by name with
-            // fallback to name-as-id), then convert back to a ref using
-            // the current config. Any McpRef whose name was renamed
-            // gets refreshed; entries that resolved through the
-            // name-as-id fallback are dropped (they were already
-            // pointing at nothing).
-            let ids = crate::config::workspace_config::refs_to_mcp_ids(
-                app_config,
-                &agent.selected_mcp_servers,
-            );
-            let resolved: Vec<String> = ids
-                .into_iter()
-                .filter(|id| app_config.mcp_servers.iter().any(|s| s.id == *id))
-                .collect();
-            let new_refs = crate::config::workspace_config::mcp_ids_to_refs(app_config, &resolved);
-            if new_refs != agent.selected_mcp_servers {
-                agent.selected_mcp_servers = new_refs;
-                agent.updated_at = now;
-                changed = true;
-            }
-        }
+        // Atomic RMW (see workspace_config::update); unchanged configs are
+        // rewritten with identical content, which the atomic save makes
+        // harmless — sweeps only run on rare rename/delete actions.
+        let (changed, config) =
+            crate::config::workspace_config::update(&locator.root_path, |config| {
+                let mut changed = false;
+                let now = chrono::Utc::now().timestamp_millis();
+                for agent in &mut config.agents {
+                    // Resolve each existing ref to an id (lookup by name with
+                    // fallback to name-as-id), then convert back to a ref using
+                    // the current config. Any McpRef whose name was renamed
+                    // gets refreshed; entries that resolved through the
+                    // name-as-id fallback are dropped (they were already
+                    // pointing at nothing).
+                    let ids = crate::config::workspace_config::refs_to_mcp_ids(
+                        app_config,
+                        &agent.selected_mcp_servers,
+                    );
+                    let resolved: Vec<String> = ids
+                        .into_iter()
+                        .filter(|id| app_config.mcp_servers.iter().any(|s| s.id == *id))
+                        .collect();
+                    let new_refs =
+                        crate::config::workspace_config::mcp_ids_to_refs(app_config, &resolved);
+                    if new_refs != agent.selected_mcp_servers {
+                        agent.selected_mcp_servers = new_refs;
+                        agent.updated_at = now;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    config.updated_at = now;
+                }
+                Ok(changed)
+            })?;
         if changed {
-            config.updated_at = now;
-            crate::config::workspace_config::save(&locator.root_path, &config)
-                .map_err(|e| e.to_string())?;
             state
                 .workspace_index
                 .write()
@@ -77,27 +83,36 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .locators_sorted();
     for locator in locators {
-        let mut config =
-            crate::config::workspace_config::load(&locator.root_path).map_err(|e| e.to_string())?;
-        let mut changed = false;
-        let now = chrono::Utc::now().timestamp_millis();
-        for agent in &mut config.agents {
-            let ids = crate::config::workspace_config::refs_to_mcp_ids(
-                &app_config,
-                &agent.selected_mcp_servers,
-            );
-            if ids.iter().any(|id| id == server_id) {
-                let filtered: Vec<String> = ids.into_iter().filter(|id| id != server_id).collect();
-                agent.selected_mcp_servers =
-                    crate::config::workspace_config::mcp_ids_to_refs(&app_config, &filtered);
-                agent.updated_at = now;
-                changed = true;
-            }
-        }
+        // Atomic RMW (see workspace_config::update); unchanged configs are
+        // rewritten with identical content, which the atomic save makes
+        // harmless — sweeps only run on rare rename/delete actions.
+        let (changed, config) =
+            crate::config::workspace_config::update(&locator.root_path, |config| {
+                let mut changed = false;
+                let now = chrono::Utc::now().timestamp_millis();
+                for agent in &mut config.agents {
+                    let ids = crate::config::workspace_config::refs_to_mcp_ids(
+                        &app_config,
+                        &agent.selected_mcp_servers,
+                    );
+                    if ids.iter().any(|id| id == server_id) {
+                        let filtered: Vec<String> =
+                            ids.into_iter().filter(|id| id != server_id).collect();
+                        agent.selected_mcp_servers =
+                            crate::config::workspace_config::mcp_ids_to_refs(
+                                &app_config,
+                                &filtered,
+                            );
+                        agent.updated_at = now;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    config.updated_at = now;
+                }
+                Ok(changed)
+            })?;
         if changed {
-            config.updated_at = now;
-            crate::config::workspace_config::save(&locator.root_path, &config)
-                .map_err(|e| e.to_string())?;
             state
                 .workspace_index
                 .write()

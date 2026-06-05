@@ -465,18 +465,27 @@ fn load_workspace_config_for_id(
     Ok((root, config))
 }
 
-fn save_workspace_config_for_root(
+/// Atomic read-modify-write of a workspace config + index refresh.
+///
+/// Use this (not `load_workspace_config_for_id` + `save_workspace_config_
+/// for_root`) whenever the write depends on the loaded state — bare
+/// load→save pairs race the agent runner's run-completion persist (and
+/// each other) as lost updates. See `workspace_config::update`.
+fn update_workspace_config_for_id<R>(
     state: &AppState,
-    root: &Path,
-    config: &WorkspaceConfig,
-) -> Result<(), String> {
-    workspace_config::save(root, config).map_err(|e| e.to_string())?;
+    workspace_id: &str,
+    mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
+) -> Result<(R, WorkspaceConfig), String> {
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let (value, config) = workspace_config::update(&root, mutate)?;
     state
         .workspace_index
         .write()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .insert_config(root.to_path_buf(), config);
-    Ok(())
+        .insert_config(root, &config);
+    Ok((value, config))
 }
 
 fn normalize_path(path: PathBuf) -> PathBuf {
@@ -981,20 +990,22 @@ fn set_workspace_default_agent_id(
     workspace_id: &str,
     workspace_agent_id: &str,
 ) -> Result<(), String> {
-    let (root, mut config) = load_workspace_config_for_id(state, workspace_id)?;
-    if !config
-        .agents
-        .iter()
-        .any(|agent| agent.id == workspace_agent_id)
-    {
-        return Err(format!(
-            "Workspace agent assignment not found: {}",
-            workspace_agent_id
-        ));
-    }
-    config.default_agent_id = workspace_agent_id.to_string();
-    config.updated_at = now_millis();
-    save_workspace_config_for_root(state, &root, &config)
+    update_workspace_config_for_id(state, workspace_id, |config| {
+        if !config
+            .agents
+            .iter()
+            .any(|agent| agent.id == workspace_agent_id)
+        {
+            return Err(format!(
+                "Workspace agent assignment not found: {}",
+                workspace_agent_id
+            ));
+        }
+        config.default_agent_id = workspace_agent_id.to_string();
+        config.updated_at = now_millis();
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 fn load_workspace_agent_rows(
@@ -2105,19 +2116,19 @@ pub async fn workspace_update_session_mcp(
             // Persist the MCP selection onto the workspace's manager row so
             // it survives across sessions and shows in Workspace Settings.
             let app_config = app_config(state.inner())?;
-            let (root, mut config) =
-                load_workspace_config_for_id(state.inner(), &descriptor.workspace_id)?;
-            if let Some(agent) = config
-                .agents
-                .iter_mut()
-                .find(|agent| agent.id == manager.id)
-            {
-                agent.selected_mcp_servers =
-                    workspace_config::mcp_ids_to_refs(&app_config, &request.mcp_server_ids);
-                agent.updated_at = chrono::Utc::now().timestamp_millis();
-                config.updated_at = agent.updated_at;
-                save_workspace_config_for_root(state.inner(), &root, &config)?;
-            }
+            update_workspace_config_for_id(state.inner(), &descriptor.workspace_id, |config| {
+                if let Some(agent) = config
+                    .agents
+                    .iter_mut()
+                    .find(|agent| agent.id == manager.id)
+                {
+                    agent.selected_mcp_servers =
+                        workspace_config::mcp_ids_to_refs(&app_config, &request.mcp_server_ids);
+                    agent.updated_at = chrono::Utc::now().timestamp_millis();
+                    config.updated_at = agent.updated_at;
+                }
+                Ok(())
+            })?;
         }
     }
     updated.updated_at = chrono::Utc::now().timestamp_millis();
@@ -2134,18 +2145,20 @@ pub async fn workspace_set_provider(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
-    let (root, mut config) = load_workspace_config_for_id(state.inner(), &workspace_id)?;
-    config.preferred_provider_connection_id = Some(provider_connection_id.clone());
-    if let Some(manager) = config
-        .agents
-        .iter_mut()
-        .find(|agent| agent.id == config.default_agent_id)
-    {
-        manager.provider_connection_ids = vec![provider_connection_id];
-        manager.updated_at = now;
-    }
-    config.updated_at = now;
-    save_workspace_config_for_root(state.inner(), &root, &config)?;
+    update_workspace_config_for_id(state.inner(), &workspace_id, |config| {
+        config.preferred_provider_connection_id = Some(provider_connection_id.clone());
+        let default_agent_id = config.default_agent_id.clone();
+        if let Some(manager) = config
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == default_agent_id)
+        {
+            manager.provider_connection_ids = vec![provider_connection_id];
+            manager.updated_at = now;
+        }
+        config.updated_at = now;
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -2585,27 +2598,28 @@ pub async fn workspace_set_schedule(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let (root, mut config) = load_workspace_config_for_id(state.inner(), &workspace_id)?;
-    match kind {
-        None => {
-            // Disabling clears the pause + next-run anchor so a future
-            // re-enable starts from a fresh schedule.
-            config.schedule.enabled = false;
-            config.schedule.paused = false;
-            config.schedule.next_run_at_unix_ms = None;
+    let ((), config) = update_workspace_config_for_id(state.inner(), &workspace_id, |config| {
+        match kind {
+            None => {
+                // Disabling clears the pause + next-run anchor so a future
+                // re-enable starts from a fresh schedule.
+                config.schedule.enabled = false;
+                config.schedule.paused = false;
+                config.schedule.next_run_at_unix_ms = None;
+            }
+            Some(new_kind) => {
+                // Validate before saving — surfaces "invalid cron" /
+                // "unknown timezone" / "interval=0" as a clean error to the UI.
+                let now = now_millis();
+                let next = crate::agents::schedule::compute_next_run_at(&new_kind, now)?;
+                config.schedule.enabled = true;
+                config.schedule.kind = new_kind;
+                config.schedule.next_run_at_unix_ms = Some(next);
+            }
         }
-        Some(new_kind) => {
-            // Validate before saving — surfaces "invalid cron" /
-            // "unknown timezone" / "interval=0" as a clean error to the UI.
-            let now = now_millis();
-            let next = crate::agents::schedule::compute_next_run_at(&new_kind, now)?;
-            config.schedule.enabled = true;
-            config.schedule.kind = new_kind;
-            config.schedule.next_run_at_unix_ms = Some(next);
-        }
-    }
-    config.updated_at = now_millis();
-    save_workspace_config_for_root(state.inner(), &root, &config)?;
+        config.updated_at = now_millis();
+        Ok(())
+    })?;
 
     let mut scheduler = state.scheduler.lock().await;
     crate::agents::init::apply_workspace_schedule(&mut scheduler, &config);
@@ -2662,13 +2676,14 @@ pub async fn workspace_set_schedule_paused(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let (root, mut config) = load_workspace_config_for_id(state.inner(), &workspace_id)?;
-    if !config.schedule.enabled {
-        return Err("Workspace is not periodic.".to_string());
-    }
-    config.schedule.paused = paused;
-    config.updated_at = now_millis();
-    save_workspace_config_for_root(state.inner(), &root, &config)?;
+    let ((), config) = update_workspace_config_for_id(state.inner(), &workspace_id, |config| {
+        if !config.schedule.enabled {
+            return Err("Workspace is not periodic.".to_string());
+        }
+        config.schedule.paused = paused;
+        config.updated_at = now_millis();
+        Ok(())
+    })?;
 
     let mut scheduler = state.scheduler.lock().await;
     crate::agents::init::apply_workspace_schedule(&mut scheduler, &config);
@@ -2769,10 +2784,11 @@ pub async fn workspace_set_title(
     }
 
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let (root, mut config) = load_workspace_config_for_id(state.inner(), &workspace_id)?;
-    config.title = trimmed.to_string();
-    config.updated_at = now_millis();
-    save_workspace_config_for_root(state.inner(), &root, &config)?;
+    update_workspace_config_for_id(state.inner(), &workspace_id, |config| {
+        config.title = trimmed.to_string();
+        config.updated_at = now_millis();
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -2787,9 +2803,14 @@ pub async fn workspace_mark_opened(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let (root, mut config) = load_workspace_config_for_id(state.inner(), &workspace_id)?;
-    config.last_opened_at = now_millis();
-    save_workspace_config_for_root(state.inner(), &root, &config)?;
+    // Atomic RMW: this command fires on run-ends-while-viewing, i.e. at
+    // the same instant the runner persists the schedule's next-run
+    // anchor — a bare load→save here clobbered that anchor and made the
+    // schedule re-fire on every app restart.
+    update_workspace_config_for_id(state.inner(), &workspace_id, |config| {
+        config.last_opened_at = now_millis();
+        Ok(())
+    })?;
 
     Ok(())
 }

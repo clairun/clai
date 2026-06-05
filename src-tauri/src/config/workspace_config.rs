@@ -327,6 +327,40 @@ pub fn save(root: &Path, config: &WorkspaceConfig) -> Result<(), WorkspaceConfig
     Ok(())
 }
 
+/// Process-wide lock serializing read-modify-write cycles on workspace
+/// config files. One lock for all workspaces: writes are rare and tiny,
+/// so contention is negligible and a per-root map isn't worth the
+/// bookkeeping.
+static UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Atomically read-modify-write a workspace's `config.json`.
+///
+/// Every writer that loads the config, mutates it, and saves it back
+/// MUST go through this function. Bare `load` → mutate → `save`
+/// sequences race with each other as lost updates: the agent runner's
+/// run-completion persist (the `schedule.next_run_at_unix_ms` anchor)
+/// was clobbered by `workspace_mark_opened`, which the FE invokes the
+/// moment a run ends while the user is viewing that workspace — the
+/// two cycles deterministically overlapped and whichever saved last
+/// won. The reverted (past) anchor then re-fired the schedule on every
+/// app restart.
+///
+/// The closure may return `Err` to abort; nothing is written then. On
+/// success the freshly-saved config is returned so callers can update
+/// the in-memory workspace index to match disk.
+pub fn update<R>(
+    root: &Path,
+    mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
+) -> Result<(R, WorkspaceConfig), String> {
+    let _guard = UPDATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut config = load(root).map_err(|e| e.to_string())?;
+    let value = mutate(&mut config)?;
+    save(root, &config).map_err(|e| e.to_string())?;
+    Ok((value, config))
+}
+
 pub fn skill_ids_to_refs(config: &AppConfig, ids: &[String]) -> Vec<SkillRef> {
     ids.iter()
         .map(|id| {
@@ -480,5 +514,79 @@ mod attach_provider_tests {
         let manager = WorkspaceAgent::new_manager("mgr".to_string(), 1);
         assert_eq!(manager.execution.shell.mode, ShellAccessMode::Restricted);
         assert!(manager.execution.web.enabled);
+    }
+
+    // -------------------------------------------------------------------
+    // update(): atomic read-modify-write
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn update_persists_mutation_and_returns_saved_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+
+        let (value, config) = update(tmp.path(), |config| {
+            config.schedule.next_run_at_unix_ms = Some(123);
+            Ok("done")
+        })
+        .unwrap();
+
+        assert_eq!(value, "done");
+        assert_eq!(config.schedule.next_run_at_unix_ms, Some(123));
+        let on_disk = load(tmp.path()).unwrap();
+        assert_eq!(on_disk.schedule.next_run_at_unix_ms, Some(123));
+    }
+
+    #[test]
+    fn update_err_closure_aborts_without_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+
+        let result = update(tmp.path(), |config| {
+            config.title = "clobbered".to_string();
+            Err::<(), _>("validation failed".to_string())
+        });
+
+        assert_eq!(result.unwrap_err(), "validation failed");
+        assert_eq!(load(tmp.path()).unwrap().title, "Title");
+    }
+
+    /// Regression test for the lost-update race: the runner's
+    /// run-completion persist (writes `next_run_at_unix_ms`) overlapped
+    /// with `workspace_mark_opened` (writes `last_opened_at`); whichever
+    /// bare load→save finished last erased the other's field. With
+    /// `update()` both mutations must survive regardless of interleaving.
+    #[test]
+    fn update_concurrent_writers_lose_no_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let runner = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                update(&root, |config| {
+                    config.schedule.next_run_at_unix_ms = Some(999);
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        let opener = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                update(&root, |config| {
+                    config.last_opened_at = 555;
+                    Ok(())
+                })
+                .unwrap();
+            })
+        };
+        runner.join().unwrap();
+        opener.join().unwrap();
+
+        let on_disk = load(&root).unwrap();
+        assert_eq!(on_disk.schedule.next_run_at_unix_ms, Some(999));
+        assert_eq!(on_disk.last_opened_at, 555);
     }
 }

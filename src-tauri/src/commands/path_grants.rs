@@ -345,46 +345,51 @@ fn persist_grant_to_agent(
     let root = state
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let mut config = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
-        return Err(format!(
-            "Cannot persist path grant: workspace agent not found for id `{}`",
-            agent_id
-        ));
-    };
+    // Atomic RMW (see workspace_config::update): grant approvals can land
+    // while the runner persists a run completion to the same file.
+    let ((), config) = workspace_config::update(&root, |config| {
+        let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
+            return Err(format!(
+                "Cannot persist path grant: workspace agent not found for id `{}`",
+                agent_id
+            ));
+        };
 
-    let execution = &mut agent.execution;
+        let execution = &mut agent.execution;
 
-    if let Some(existing) = execution
-        .filesystem
-        .extra_paths
-        .iter_mut()
-        .find(|g| g.path == path)
-    {
-        let upgrades = matches!(existing.access, FilesystemPathAccess::ReadOnly)
-            && matches!(access, FilesystemPathAccess::ReadWrite);
-        if !upgrades && existing.access == access {
-            return Ok(());
-        }
-        existing.access = access;
-        existing.origin = Some(GrantOrigin::Approval {
-            reason: reason.to_string(),
-            granted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-        });
-    } else {
-        execution.filesystem.extra_paths.push(FilesystemPathGrant {
-            path: path.to_string(),
-            access,
-            origin: Some(GrantOrigin::Approval {
+        if let Some(existing) = execution
+            .filesystem
+            .extra_paths
+            .iter_mut()
+            .find(|g| g.path == path)
+        {
+            let upgrades = matches!(existing.access, FilesystemPathAccess::ReadOnly)
+                && matches!(access, FilesystemPathAccess::ReadWrite);
+            if !upgrades && existing.access == access {
+                // Idempotent re-approval — rewriting the same content is
+                // harmless, so no special no-op path.
+                return Ok(());
+            }
+            existing.access = access;
+            existing.origin = Some(GrantOrigin::Approval {
                 reason: reason.to_string(),
                 granted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-            }),
-        });
-    }
+            });
+        } else {
+            execution.filesystem.extra_paths.push(FilesystemPathGrant {
+                path: path.to_string(),
+                access,
+                origin: Some(GrantOrigin::Approval {
+                    reason: reason.to_string(),
+                    granted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+                }),
+            });
+        }
 
-    agent.updated_at = chrono::Utc::now().timestamp_millis();
-    config.updated_at = agent.updated_at;
-    workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
+        agent.updated_at = chrono::Utc::now().timestamp_millis();
+        config.updated_at = agent.updated_at;
+        Ok(())
+    })?;
     state
         .workspace_index
         .write()

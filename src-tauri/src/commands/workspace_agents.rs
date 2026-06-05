@@ -113,13 +113,9 @@ pub async fn workspace_create_agent(
     state: State<'_, AppState>,
 ) -> Result<WorkspaceAgentDetail, String> {
     let app_config = app_config(state.inner())?;
-    let (root, mut config) = load_workspace_config(state.inner(), &request.workspace_id)?;
     let id = request
         .id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    if config.agents.iter().any(|agent| agent.id == id) {
-        return Err(format!("Workspace agent already exists: {}", id));
-    }
 
     // The host `$HOME` RO default is pre-populated by the UI via
     // `workspace_agent_default_execution` so the user can see and remove it
@@ -146,9 +142,14 @@ pub async fn workspace_create_agent(
         created_at: now,
         updated_at: now,
     };
-    config.updated_at = now;
-    config.agents.push(agent);
-    save_workspace_config(state.inner(), &root, &config)?;
+    let ((), config) = update_workspace_config(state.inner(), &request.workspace_id, |config| {
+        if config.agents.iter().any(|agent| agent.id == id) {
+            return Err(format!("Workspace agent already exists: {}", id));
+        }
+        config.updated_at = now;
+        config.agents.push(agent);
+        Ok(())
+    })?;
 
     let saved = config
         .agents
@@ -164,39 +165,37 @@ pub async fn workspace_update_agent(
     state: State<'_, AppState>,
 ) -> Result<WorkspaceAgentDetail, String> {
     let app_config = app_config(state.inner())?;
-    let (root, mut config) = load_workspace_config(state.inner(), &request.workspace_id)?;
     let now = now_millis();
-    let Some(agent) = config
-        .agents
-        .iter_mut()
-        .find(|agent| agent.id == request.agent_id)
-    else {
-        return Err(format!("Workspace agent not found: {}", request.agent_id));
-    };
+    let agent_id = request.agent_id.clone();
+    let workspace_id = request.workspace_id.clone();
+    let ((), config) = update_workspace_config(state.inner(), &workspace_id, |config| {
+        let Some(agent) = config
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == request.agent_id)
+        else {
+            return Err(format!("Workspace agent not found: {}", request.agent_id));
+        };
 
-    agent.name = request.name;
-    agent.description = request.description;
-    agent.selected_skills =
-        workspace_config::skill_ids_to_refs(&app_config, &request.selected_skill_ids);
-    agent.selected_mcp_servers =
-        workspace_config::mcp_ids_to_refs(&app_config, &request.selected_mcp_server_ids);
-    agent.provider_connection_ids = request.provider_connection_ids;
-    agent.execution = request.execution;
-    agent.enabled = request.enabled;
-    agent.updated_at = now;
-    config.updated_at = now;
-    save_workspace_config(state.inner(), &root, &config)?;
+        agent.name = request.name;
+        agent.description = request.description;
+        agent.selected_skills =
+            workspace_config::skill_ids_to_refs(&app_config, &request.selected_skill_ids);
+        agent.selected_mcp_servers =
+            workspace_config::mcp_ids_to_refs(&app_config, &request.selected_mcp_server_ids);
+        agent.provider_connection_ids = request.provider_connection_ids;
+        agent.execution = request.execution;
+        agent.enabled = request.enabled;
+        agent.updated_at = now;
+        config.updated_at = now;
+        Ok(())
+    })?;
 
     let saved = config
         .agents
         .iter()
-        .find(|agent| agent.id == request.agent_id)
-        .ok_or_else(|| {
-            format!(
-                "Workspace agent not found after update: {}",
-                request.agent_id
-            )
-        })?;
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| format!("Workspace agent not found after update: {}", agent_id))?;
     Ok(detail_from_agent(&app_config, &config, saved))
 }
 
@@ -206,22 +205,23 @@ pub async fn workspace_delete_agent(
     agent_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let (root, mut config) = load_workspace_config(state.inner(), &workspace_id)?;
-    if config.default_agent_id == agent_id {
-        return Err(
-            "Cannot delete the workspace's manager agent. Designate a different manager first."
-                .to_string(),
-        );
-    }
+    update_workspace_config(state.inner(), &workspace_id, |config| {
+        if config.default_agent_id == agent_id {
+            return Err(
+                "Cannot delete the workspace's manager agent. Designate a different manager first."
+                    .to_string(),
+            );
+        }
 
-    let before = config.agents.len();
-    config.agents.retain(|agent| agent.id != agent_id);
-    if config.agents.len() == before {
-        return Err(format!("Workspace agent not found: {}", agent_id));
-    }
+        let before = config.agents.len();
+        config.agents.retain(|agent| agent.id != agent_id);
+        if config.agents.len() == before {
+            return Err(format!("Workspace agent not found: {}", agent_id));
+        }
 
-    config.updated_at = now_millis();
-    save_workspace_config(state.inner(), &root, &config)?;
+        config.updated_at = now_millis();
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -231,19 +231,20 @@ pub async fn workspace_set_agent_enabled(
     state: State<'_, AppState>,
 ) -> Result<WorkspaceAgentDetail, String> {
     let app_config = app_config(state.inner())?;
-    let (root, mut config) = load_workspace_config(state.inner(), &request.workspace_id)?;
     let now = now_millis();
-    let Some(agent) = config
-        .agents
-        .iter_mut()
-        .find(|agent| agent.id == request.agent_id)
-    else {
-        return Err(format!("Workspace agent not found: {}", request.agent_id));
-    };
-    agent.enabled = request.enabled;
-    agent.updated_at = now;
-    config.updated_at = now;
-    save_workspace_config(state.inner(), &root, &config)?;
+    let ((), config) = update_workspace_config(state.inner(), &request.workspace_id, |config| {
+        let Some(agent) = config
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == request.agent_id)
+        else {
+            return Err(format!("Workspace agent not found: {}", request.agent_id));
+        };
+        agent.enabled = request.enabled;
+        agent.updated_at = now;
+        config.updated_at = now;
+        Ok(())
+    })?;
 
     let saved = config
         .agents
@@ -269,18 +270,24 @@ fn load_workspace_config(
     Ok((root, config))
 }
 
-fn save_workspace_config(
+/// Atomic read-modify-write + index refresh — all config writers must use
+/// this instead of a bare load→save pair, which races the runner's
+/// run-completion persist (see `workspace_config::update`).
+fn update_workspace_config<R>(
     state: &AppState,
-    root: &std::path::Path,
-    config: &WorkspaceConfig,
-) -> Result<(), String> {
-    workspace_config::save(root, config).map_err(|e| e.to_string())?;
+    workspace_id: &str,
+    mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
+) -> Result<(R, WorkspaceConfig), String> {
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let (value, config) = workspace_config::update(&root, mutate)?;
     state
         .workspace_index
         .write()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .insert_config(root.to_path_buf(), config);
-    Ok(())
+        .insert_config(root, &config);
+    Ok((value, config))
 }
 
 fn app_config(state: &AppState) -> Result<AppConfig, String> {

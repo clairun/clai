@@ -370,12 +370,18 @@ pub(crate) fn persist_workspace_run_completion(
     let root = state
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let mut config = workspace_config::load(&root).map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp_millis();
-    config.schedule.next_run_at_unix_ms = next_run_at_unix_ms;
-    config.last_run_completed_at = now;
-    config.updated_at = now;
-    workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
+    // Atomic RMW: `workspace_mark_opened` fires from the FE the moment a
+    // run ends while the user is viewing the workspace, so a bare
+    // load→save here raced it and the anchor written below could be
+    // clobbered by the other writer's stale copy (the schedule then
+    // re-fired on every app restart).
+    let ((), config) = workspace_config::update(&root, |config| {
+        config.schedule.next_run_at_unix_ms = next_run_at_unix_ms;
+        config.last_run_completed_at = now;
+        config.updated_at = now;
+        Ok(())
+    })?;
     state
         .workspace_index
         .write()

@@ -33,30 +33,37 @@ fn sweep_workspace_agent_skill_ids(state: &AppState, source_id: &str) -> Result<
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .locators_sorted();
     for locator in locators {
-        let mut config =
-            crate::config::workspace_config::load(&locator.root_path).map_err(|e| e.to_string())?;
-        let mut changed = false;
-        let now = chrono::Utc::now().timestamp_millis();
-        for agent in &mut config.agents {
-            let ids = crate::config::workspace_config::refs_to_skill_ids(
-                &app_config,
-                &agent.selected_skills,
-            );
-            if ids.iter().any(|skill_id| skill_id.starts_with(&prefix)) {
-                let filtered: Vec<String> = ids
-                    .into_iter()
-                    .filter(|skill_id| !skill_id.starts_with(&prefix))
-                    .collect();
-                agent.selected_skills =
-                    crate::config::workspace_config::skill_ids_to_refs(&app_config, &filtered);
-                agent.updated_at = now;
-                changed = true;
-            }
-        }
+        // Atomic RMW (see workspace_config::update); unchanged configs are
+        // rewritten with identical content, which the atomic save makes
+        // harmless — sweeps only run on rare rename/delete actions.
+        let (changed, config) =
+            crate::config::workspace_config::update(&locator.root_path, |config| {
+                let mut changed = false;
+                let now = chrono::Utc::now().timestamp_millis();
+                for agent in &mut config.agents {
+                    let ids = crate::config::workspace_config::refs_to_skill_ids(
+                        &app_config,
+                        &agent.selected_skills,
+                    );
+                    if ids.iter().any(|skill_id| skill_id.starts_with(&prefix)) {
+                        let filtered: Vec<String> = ids
+                            .into_iter()
+                            .filter(|skill_id| !skill_id.starts_with(&prefix))
+                            .collect();
+                        agent.selected_skills = crate::config::workspace_config::skill_ids_to_refs(
+                            &app_config,
+                            &filtered,
+                        );
+                        agent.updated_at = now;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    config.updated_at = now;
+                }
+                Ok(changed)
+            })?;
         if changed {
-            config.updated_at = now;
-            crate::config::workspace_config::save(&locator.root_path, &config)
-                .map_err(|e| e.to_string())?;
             state
                 .workspace_index
                 .write()
