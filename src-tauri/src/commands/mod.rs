@@ -5,7 +5,6 @@
 
 pub mod agent_templates;
 pub mod assistant;
-pub mod fleet;
 pub mod mcp_servers;
 pub mod path_grants;
 pub mod permissions;

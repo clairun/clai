@@ -2465,10 +2465,10 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
     Ok(entries)
 }
 
-/// Trigger an immediate run of the workspace's manager agent. Mirrors
-/// `fleet_run_now`, but takes a workspace id instead of an agent id so the
-/// Fleet UI's workspace cards (which don't carry the manager agent id in
-/// the list payload) can wire a "run now" action without an extra lookup.
+/// Trigger an immediate run of the workspace's manager agent. Takes a
+/// workspace id (rather than the manager agent's id) so the Fleet UI's
+/// workspace cards — which don't carry the manager agent id in the list
+/// payload — can wire a "run now" action without an extra lookup.
 #[tauri::command]
 pub async fn workspace_run_now(
     workspace_id: String,

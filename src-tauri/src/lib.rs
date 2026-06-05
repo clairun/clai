@@ -351,8 +351,6 @@ pub fn run() {
             commands::skills::skill_source_refresh,
             commands::skills::skill_source_set_enabled,
             commands::skills::skill_source_delete,
-            commands::fleet::fleet_get_snapshot,
-            commands::fleet::fleet_run_now,
             // Workspace state persistence commands
             commands::workspace::load_workspace_state,
             commands::workspace::save_workspace_state,
