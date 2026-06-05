@@ -17,14 +17,14 @@ use tauri::{Emitter, Manager};
 pub const WORKSPACE_TASK_ATTENTION_EVENT_NAME: &str = "workspace://task-attention";
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListWorkspaceAgentsParams {
     #[serde(default)]
     pub include_disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignWorkspaceTaskParams {
     pub workspace_agent_id: String,
     pub title: String,
@@ -32,7 +32,7 @@ pub struct AssignWorkspaceTaskParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GetWorkspaceTaskResultParams {
     pub task_id: String,
 }

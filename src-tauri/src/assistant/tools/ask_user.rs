@@ -42,8 +42,12 @@ use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository;
 use crate::assistant::tools::ToolExecutionContext;
 
+// `deny_unknown_fields` keeps serde behavior aligned with the advertised
+// schema's `additionalProperties: false` (schemars derives the latter from
+// the former, and the router validates calls against that schema before
+// dispatch — all three layers agree).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AskUserParams {
     /// The question to surface to the user. Rendered as the prompt of
     /// the inline answer block in the chat.
@@ -60,7 +64,7 @@ pub struct AskUserParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export, export_to = "bindings.ts")]
 pub struct AskUserOption {
     pub label: String,

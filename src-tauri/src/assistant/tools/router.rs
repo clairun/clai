@@ -1,7 +1,7 @@
 use tauri::Manager;
 
 use crate::assistant::engine::AssistantDeps;
-use crate::assistant::tools::{ask_user, local, workspace_tasks};
+use crate::assistant::tools::{ask_user, local, registry, workspace_tasks};
 use crate::AppState;
 
 use super::ToolExecutionContext;
@@ -15,6 +15,12 @@ use super::ToolExecutionContext;
 /// still carry the old dotted form (`fs.list`); we canonicalize on
 /// dispatch so those continue to work, and a one-shot DB migration
 /// rewrites them at-rest on the next launch.
+///
+/// Built-in tool params are validated against the tool's declared
+/// `input_schema` BEFORE dispatch — a malformed call fails immediately
+/// with the violations and the expected schema, instead of surfacing a
+/// tool-specific parse error (or, historically, nothing at all: a
+/// malformed `ask_user` once registered no UI and timed out the run).
 pub async fn execute_tool(
     deps: &AssistantDeps,
     context: &ToolExecutionContext,
@@ -28,6 +34,7 @@ pub async fn execute_tool(
     let unqualified = super::strip_local_mcp_qualifier(tool_name);
     let canonical = canonicalize_tool_name(tool_name);
     let name_for_dispatch = canonical.as_str();
+    validate_builtin_params(name_for_dispatch, &params)?;
     match name_for_dispatch {
         name if name.starts_with("fs_")
             || name.starts_with("bash_")
@@ -69,6 +76,40 @@ fn canonicalize_tool_name(name: &str) -> String {
     }
 }
 
+/// Validate params against a built-in tool's declared `input_schema`.
+///
+/// External MCP tool names have no entry in the registry map and pass
+/// through untouched — the remote server owns and enforces its schema.
+/// On violation the error lists every failing path and embeds the full
+/// expected schema, so the model can self-correct in its next iteration
+/// instead of retrying blind.
+fn validate_builtin_params(tool_name: &str, params: &serde_json::Value) -> Result<(), String> {
+    let Some(compiled) = registry::builtin_param_validator(tool_name) else {
+        return Ok(());
+    };
+    let violations: Vec<String> = compiled
+        .validator
+        .iter_errors(params)
+        .map(|error| {
+            let path = if error.instance_path.to_string().is_empty() {
+                "(root)".to_string()
+            } else {
+                error.instance_path.to_string()
+            };
+            format!("- at `{}`: {}", path, error)
+        })
+        .collect();
+    if violations.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Invalid parameters for tool `{}`:\n{}\nThe expected input schema is:\n{}",
+        tool_name,
+        violations.join("\n"),
+        serde_json::to_string_pretty(&compiled.schema).unwrap_or_default(),
+    ))
+}
+
 async fn execute_external_mcp_tool(
     deps: &AssistantDeps,
     context: &ToolExecutionContext,
@@ -85,7 +126,71 @@ async fn execute_external_mcp_tool(
 
 #[cfg(test)]
 mod tests {
-    use super::canonicalize_tool_name;
+    use super::{canonicalize_tool_name, validate_builtin_params};
+
+    /// The production payload (June 2026, MiniMax): `options` wrapped in
+    /// `{"item": [...]}` instead of being the declared array. Must be
+    /// rejected immediately, naming the failing path and embedding the
+    /// expected schema for self-correction.
+    #[test]
+    fn rejects_item_wrapped_ask_user_options_with_path_and_schema() {
+        let params = serde_json::json!({
+            "question": "¿Cómo quieres que reoriente la lista?",
+            "context": "Con 48 años todo el perfil cambia.",
+            "options": {"item": [
+                {"label": "Te paso los 4 datos", "description": "Me das los 4 datos"},
+            ]},
+        });
+        let error = validate_builtin_params("ask_user", &params).unwrap_err();
+        assert!(
+            error.contains("Invalid parameters for tool `ask_user`"),
+            "{error}"
+        );
+        assert!(error.contains("/options"), "missing failing path: {error}");
+        assert!(
+            error.contains("The expected input schema is:"),
+            "missing schema: {error}"
+        );
+        assert!(
+            error.contains("\"question\""),
+            "schema not embedded: {error}"
+        );
+    }
+
+    #[test]
+    fn accepts_valid_ask_user_params() {
+        let params = serde_json::json!({
+            "question": "Pick one",
+            "options": [{"label": "A"}, {"label": "B", "description": "second"}],
+        });
+        assert!(validate_builtin_params("ask_user", &params).is_ok());
+        // options/context are optional
+        assert!(validate_builtin_params("ask_user", &serde_json::json!({"question": "q"})).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_extra_keys_strictly() {
+        let params = serde_json::json!({"question": "q", "ooptions": []});
+        let error = validate_builtin_params("ask_user", &params).unwrap_err();
+        assert!(error.contains("ooptions"), "{error}");
+    }
+
+    #[test]
+    fn enforces_handwritten_schema_bounds() {
+        // bash_exec advertises timeoutMs <= 600000 — the gate enforces it.
+        let params = serde_json::json!({"command": "ls", "timeoutMs": 900000});
+        let error = validate_builtin_params("bash_exec", &params).unwrap_err();
+        assert!(error.contains("timeoutMs"), "{error}");
+        // missing required `command`
+        let error = validate_builtin_params("bash_exec", &serde_json::json!({})).unwrap_err();
+        assert!(error.contains("command"), "{error}");
+    }
+
+    #[test]
+    fn external_mcp_tools_pass_through_unvalidated() {
+        let junk = serde_json::json!({"whatever": {"deeply": ["weird"]}});
+        assert!(validate_builtin_params("mcp__1c47ed2d__search", &junk).is_ok());
+    }
 
     #[test]
     fn canonicalizes_legacy_dotted_names() {
