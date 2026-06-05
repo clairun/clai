@@ -8,7 +8,7 @@ import prettier from 'eslint-config-prettier';
 /**
  * ESLint flat config for CLAI frontend.
  *
- * React 19 hooks rules are intentionally disabled for now because the
+ * React 19 strict hooks rules are disabled for now because the
  * existing codebase was written before these strict rules existed.
  * Re-enable them incrementally in follow-up PRs:
  *   - react-hooks/set-state-in-effect
@@ -17,7 +17,10 @@ import prettier from 'eslint-config-prettier';
  *   - react-hooks/refs
  *   - react-hooks/immutability
  *   - react-hooks/use-memo
- *   - react-hooks/purity
+ *
+ * `react-hooks/purity` was enabled as a warning on 2026-06-05 (clai#5).
+ * The current codebase is clean for this rule (0 violations), so the
+ * next step is to promote it from `warn` to `error` in a follow-up PR.
  */
 export default [
   js.configs.recommended,
@@ -51,7 +54,7 @@ export default [
       'react-hooks/refs': 'off',
       'react-hooks/immutability': 'off',
       'react-hooks/use-memo': 'off',
-      'react-hooks/purity': 'off',
+      'react-hooks/purity': 'warn',
     },
     settings: {
       react: { version: 'detect' },
@@ -90,7 +93,7 @@ export default [
       'react-hooks/refs': 'off',
       'react-hooks/immutability': 'off',
       'react-hooks/use-memo': 'off',
-      'react-hooks/purity': 'off',
+      'react-hooks/purity': 'warn',
     },
     settings: {
       react: {
