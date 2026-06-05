@@ -21,6 +21,7 @@ use crate::assistant::providers::cli::{CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_I
 use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
+use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, ContentPart, MessageRole, ProviderConnection,
     ProviderInputMessage, RunNotice, RunStatus, RunUsage, ToolCallStatus,
@@ -1523,7 +1524,7 @@ fn codex_tool_name(item: &Value) -> String {
         .get("tool")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    if server == "clai" {
+    if server == LOCAL_MCP_SERVER_NAME {
         tool.to_string()
     } else {
         format!("{}/{}", server, tool)
@@ -2032,6 +2033,13 @@ async fn persist_tool_use(
     tool_name: &str,
     params: Value,
 ) -> Result<(), LocalAgentRunError> {
+    // Claude Code reaches our built-ins through the local MCP server, so
+    // its stream reports them qualified (`mcp__clai__web_fetch`). Persist
+    // the canonical name instead — the codex path does the same in
+    // `codex_tool_name`. Replayed history otherwise teaches the next
+    // provider (after a provider switch) to mimic the qualified names,
+    // which used to fail dispatch with "not allowed for this session".
+    let tool_name = strip_local_mcp_qualifier(tool_name);
     let invocation = repository::create_tool_call(
         &deps.pool,
         CreateToolCallParams {

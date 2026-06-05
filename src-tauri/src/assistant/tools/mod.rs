@@ -17,6 +17,26 @@ use crate::assistant::types::{
 };
 use crate::config::{ExecutionCapabilityConfig, FilesystemPathGrant};
 
+/// The name under which clai's local MCP server is registered with CLI
+/// providers (`write_mcp_config` for Claude Code, `add_codex_common_args`
+/// for Codex — both in `assistant::local_agent`).
+pub const LOCAL_MCP_SERVER_NAME: &str = "clai";
+
+/// The `mcp__<server>__` qualifier Claude Code prepends to tools it
+/// discovered on our local MCP server (`mcp__clai__web_fetch`).
+pub const LOCAL_MCP_TOOL_PREFIX: &str = "mcp__clai__";
+
+/// Strips the CLI-side qualifier from a tool name that was recorded under
+/// (or mimicked from) a Claude Code run: `mcp__clai__web_fetch` →
+/// `web_fetch`. External MCP tools proxied through the local server lose
+/// only the outer qualifier (`mcp__clai__mcp__1c47ed2d__x` →
+/// `mcp__1c47ed2d__x`, which is their canonical internal name). Names
+/// without the qualifier pass through unchanged — external server short
+/// ids are 8 hex chars, so `mcp__clai__` can never denote one of them.
+pub fn strip_local_mcp_qualifier(name: &str) -> &str {
+    name.strip_prefix(LOCAL_MCP_TOOL_PREFIX).unwrap_or(name)
+}
+
 /// Context for tool execution within an assistant run.
 #[allow(dead_code)]
 pub struct ToolExecutionContext {
@@ -151,5 +171,49 @@ impl ToolExecutionContext {
             .lock()
             .map(|p| p.clone())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_constant_matches_server_name() {
+        assert_eq!(
+            LOCAL_MCP_TOOL_PREFIX,
+            format!("mcp__{}__", LOCAL_MCP_SERVER_NAME)
+        );
+    }
+
+    #[test]
+    fn strips_local_mcp_qualifier_from_builtins() {
+        assert_eq!(
+            strip_local_mcp_qualifier("mcp__clai__web_fetch"),
+            "web_fetch"
+        );
+        assert_eq!(
+            strip_local_mcp_qualifier("mcp__clai__bash_exec"),
+            "bash_exec"
+        );
+        assert_eq!(strip_local_mcp_qualifier("mcp__clai__ask_user"), "ask_user");
+    }
+
+    #[test]
+    fn strips_only_the_outer_qualifier_for_proxied_external_tools() {
+        assert_eq!(
+            strip_local_mcp_qualifier("mcp__clai__mcp__1c47ed2d__search"),
+            "mcp__1c47ed2d__search"
+        );
+    }
+
+    #[test]
+    fn leaves_unqualified_and_external_names_unchanged() {
+        assert_eq!(strip_local_mcp_qualifier("web_fetch"), "web_fetch");
+        assert_eq!(
+            strip_local_mcp_qualifier("mcp__1c47ed2d__search"),
+            "mcp__1c47ed2d__search"
+        );
+        assert_eq!(strip_local_mcp_qualifier("mcp__clai"), "mcp__clai");
     }
 }

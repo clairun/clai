@@ -1478,6 +1478,54 @@ mod tests {
     }
 
     #[test]
+    fn normalize_strips_local_mcp_qualifier_from_claude_recorded_history() {
+        // Rows persisted by pre-normalization Claude Code runs carry the
+        // CLI-side qualified names. Replay must hand the provider the
+        // canonical names or the model mimics the qualified ones after a
+        // provider switch (the "not allowed for this session" bug).
+        let messages = vec![
+            user_message("fetch something"),
+            assistant_message_with_content(vec![
+                ContentPart::ToolUse {
+                    tool_call_id: "call_a".into(),
+                    tool_name: "mcp__clai__web_fetch".into(),
+                    arguments: serde_json::json!({"url": "https://example.com"}),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "call_b".into(),
+                    tool_name: "mcp__clai__mcp__1c47ed2d__search".into(),
+                    arguments: serde_json::json!({}),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "call_c".into(),
+                    tool_name: "bash_exec".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ]),
+            // Every tool_use needs a result or the orphan-stripping pass
+            // removes it before we can assert on its name.
+            tool_message("call_a"),
+            tool_message("call_b"),
+            tool_message("call_c"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        let names: Vec<&str> = normalized[1]
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::ToolUse { tool_name, .. } => Some(tool_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["web_fetch", "mcp__1c47ed2d__search", "bash_exec"]
+        );
+    }
+
+    #[test]
     fn normalize_preserves_happy_path_alternation() {
         let messages = vec![
             user_message("hi"),
@@ -2074,6 +2122,34 @@ mod tests {
 /// isn't present in the preceding assistant's `ToolUse` parts, and merge
 /// consecutive same-role messages (text concatenated with a blank-line
 /// separator).
+/// Rewrites `mcp__clai__*` tool names recorded by pre-normalization Claude
+/// Code runs back to their canonical form. Without this, history replayed
+/// after a provider switch teaches the model to mimic the qualified names
+/// (which only existed inside the CLI's view of our local MCP server).
+/// `persist_tool_use` strips the qualifier for new rows; this covers rows
+/// that were persisted before that fix.
+fn normalized_assistant_parts(parts: &[ContentPart]) -> Vec<ContentPart> {
+    parts
+        .iter()
+        .cloned()
+        .map(|part| match part {
+            ContentPart::ToolUse {
+                tool_call_id,
+                tool_name,
+                arguments,
+            } => {
+                let canonical = tools::strip_local_mcp_qualifier(&tool_name).to_string();
+                ContentPart::ToolUse {
+                    tool_call_id,
+                    tool_name: canonical,
+                    arguments,
+                }
+            }
+            other => other,
+        })
+        .collect()
+}
+
 fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<ProviderInputMessage> {
     let mut out: Vec<ProviderInputMessage> = Vec::new();
 
@@ -2089,13 +2165,14 @@ fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<Provider
                 }
                 if let Some(last) = out.last_mut() {
                     if last.role == MessageRole::Assistant {
-                        last.content.extend(msg.content.iter().cloned());
+                        last.content
+                            .extend(normalized_assistant_parts(&msg.content));
                         continue;
                     }
                 }
                 out.push(ProviderInputMessage {
                     role: MessageRole::Assistant,
-                    content: msg.content.clone(),
+                    content: normalized_assistant_parts(&msg.content),
                 });
             }
             MessageRole::Tool => {
