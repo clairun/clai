@@ -1,9 +1,30 @@
+/* Single row, always: the input card keeps a fixed vertical footprint no
+   matter how many MCP servers are attached or how narrow the bar gets
+   (the bar can be at its 420px floor next to open side panels). The
+   provider picker shrinks first (its label clips); badges keep their
+   size and the row scrolls horizontally for the rest. */
 .contextBar {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  min-width: 0;
   padding: 0 4px;
+  scrollbar-width: thin;
+}
+
+.contextBar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.contextBar::-webkit-scrollbar-thumb {
+  background: var(--color-border-medium);
+  border-radius: 2px;
+}
+
+.contextBar > * {
+  flex-shrink: 0;
 }
 
 .providerPicker {
@@ -16,6 +37,11 @@
   background: var(--color-overlay-02);
   cursor: pointer;
   transition: border-color var(--transition-fast), background var(--transition-fast);
+  /* Shrinkable (overrides the children's flex-shrink: 0): give ground to
+     the MCP badges before the row starts scrolling, down to a still-
+     recognizable minimum. */
+  flex-shrink: 1;
+  min-width: 130px;
 }
 
 .providerPicker:hover {
@@ -38,6 +64,10 @@
   cursor: pointer;
   outline: none;
   padding: 0;
+  /* Let the picker shrink: the selected label clips rather than forcing
+     the row to wrap or scroll. */
+  flex: 1;
+  min-width: 0;
 }
 
 .providerChevron {

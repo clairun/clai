@@ -15,6 +15,11 @@
   line-height: 1.4;
   font-weight: 500;
   white-space: nowrap;
+  /* A single long server name must not blow up the single-row context
+     bar — cap and ellipsize (full name stays in the title tooltip). */
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: all var(--transition-fast);
   user-select: none;
   background: var(--color-overlay-04);
@@ -54,6 +59,11 @@
 /* Text */
 .text {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  /* The badge caps its width (see .badge) — the label is the part that
+     gives way, with an ellipsis; the icon keeps its size. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 /* Badge Types */
