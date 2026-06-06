@@ -10,20 +10,17 @@
   flex-wrap: nowrap;
   overflow-x: auto;
   min-width: 0;
-  /* Bottom padding reserves a lane for the horizontal scrollbar so it
-     never draws over the picker/badges (constant, so the card height
-     doesn't change when the bar overflows). */
-  padding: 0 4px 6px;
-  scrollbar-width: thin;
+  padding: 0 4px;
+  /* No visible scrollbar: WebKitGTK draws its overlay bar on top of the
+     content (a reserved padding lane didn't keep it off the badges), so
+     hide it entirely — the row still scrolls via touchpad swipe or
+     Shift+wheel, and overflow is rare (only many MCP servers at the
+     narrow input floor). */
+  scrollbar-width: none;
 }
 
 .contextBar::-webkit-scrollbar {
-  height: 4px;
-}
-
-.contextBar::-webkit-scrollbar-thumb {
-  background: var(--color-border-medium);
-  border-radius: 2px;
+  display: none;
 }
 
 .contextBar > * {
