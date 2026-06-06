@@ -3,7 +3,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { save } from '@tauri-apps/plugin-dialog';
 import MarkdownMessage from './Chat/MarkdownMessage';
-import { downloadWorkspaceFile, readWorkspaceFile } from '../workspace/client';
+import { downloadWorkspaceFile, openWorkspacePath, readWorkspaceFile } from '../workspace/client';
 import {
   bundleHtmlForPreview,
   isWorkspaceRelativeHref,
@@ -502,6 +502,21 @@ export default function WorkspaceFilePreviewPanel({
     return slash === -1 ? entry.path : entry.path.slice(slash + 1);
   })();
 
+  const handleOpenInEditor = async () => {
+    if (!entry?.path) return;
+    try {
+      await openWorkspacePath(workspaceId, entry.path, 'editor');
+    } catch (err) {
+      setError(
+        typeof err === 'string'
+          ? err
+          : err instanceof Error
+            ? err.message
+            : 'Failed to open in editor.'
+      );
+    }
+  };
+
   const handleDownload = async () => {
     if (!canAct || downloading || !entry?.path) return;
     setDownloading(true);
@@ -597,6 +612,19 @@ export default function WorkspaceFilePreviewPanel({
           <span className={styles.kindPill}>{kindLabel}</span>
         </div>
         <div className={styles.headerActions}>
+          <button
+            type="button"
+            className={styles.iconButton}
+            onClick={handleOpenInEditor}
+            disabled={!entry?.path}
+            title="Open in editor"
+            aria-label="Open in editor"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M12 20h9" />
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+            </svg>
+          </button>
           <button
             type="button"
             className={styles.iconButton}

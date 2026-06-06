@@ -17,13 +17,16 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
   acknowledgeWorkspaceTask,
   getWorkspaceSnapshot,
+  importWorkspaceFiles,
   listWorkspaceDir,
   markWorkspaceOpened,
+  openWorkspacePath,
   runWorkspaceNow,
   searchWorkspaceArtifacts,
   setWorkspaceSchedulePaused,
   setWorkspaceTitle,
 } from '../workspace/client';
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import type {
   AssistantMessage,
   AssistantRun,
@@ -1703,6 +1706,35 @@ const Workspace = () => {
   }, [snapshot, cancellingRunId]);
   const stopBusy = cancellingRunId !== null;
 
+  // Drawer header actions for the artifacts panel: hand the workspace
+  // folder to the user's editor/terminal (Settings → Applications), and
+  // import files picked in the native dialog (under Flatpak the
+  // FileChooser portal grants access to the picked files).
+  const handleOpenWorkspaceIn = useCallback(
+    async (target: 'editor' | 'terminal') => {
+      try {
+        await openWorkspacePath(workspaceId, null, target);
+      } catch (err) {
+        setError(errorMessage(err, `Failed to open the workspace in the ${target}.`));
+      }
+    },
+    [workspaceId]
+  );
+
+  const handleAddFiles = useCallback(async () => {
+    try {
+      const picked = await openFileDialog({ multiple: true, title: 'Add files to workspace' });
+      const paths = (Array.isArray(picked) ? picked : picked ? [picked] : []).filter(
+        (p): p is string => typeof p === 'string'
+      );
+      if (paths.length === 0) return;
+      await importWorkspaceFiles(workspaceId, paths);
+      await loadSnapshot(false);
+    } catch (err) {
+      setError(errorMessage(err, 'Failed to add files.'));
+    }
+  }, [workspaceId, loadSnapshot]);
+
   return (
     <div className={styles.workspacePage}>
       <WorkspaceHeader
@@ -1778,6 +1810,34 @@ const Workspace = () => {
                 {activePanel.charAt(0).toUpperCase() + activePanel.slice(1)}
               </span>
               <div className={styles.workspaceDrawerActions}>
+                {activePanel === 'artifacts' && (
+                  <>
+                    <button
+                      type="button"
+                      className={styles.workspaceDrawerAction}
+                      onClick={handleAddFiles}
+                      title="Copy files from your computer into the workspace"
+                    >
+                      + Add files
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.workspaceDrawerAction}
+                      onClick={() => handleOpenWorkspaceIn('editor')}
+                      title="Open the workspace folder in your editor"
+                    >
+                      Editor
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.workspaceDrawerAction}
+                      onClick={() => handleOpenWorkspaceIn('terminal')}
+                      title="Open a terminal at the workspace folder"
+                    >
+                      Terminal
+                    </button>
+                  </>
+                )}
                 {activePanel === 'agents' &&
                   snapshot?.kind !== 'agent' &&
                   workspaceId !== DEFAULT_WORKSPACE_ID && (

@@ -86,7 +86,7 @@ pub fn is_snap() -> bool {
 /// Gets a command that can run on the host system.
 ///
 /// In Flatpak, this wraps the command with `flatpak-spawn --host`.
-fn get_host_command(cmd: &str) -> Command {
+pub(crate) fn get_host_command(cmd: &str) -> Command {
     if is_flatpak() {
         let mut command = Command::new("flatpak-spawn");
         command.arg("--host").arg(cmd);
@@ -150,7 +150,7 @@ fn command_exists_at_path(path: &str) -> bool {
 
 /// Checks if a command exists on the system.
 /// First checks PATH, then falls back to common user binary locations.
-fn command_exists(cmd: &str) -> bool {
+pub(crate) fn command_exists(cmd: &str) -> bool {
     #[cfg(target_os = "windows")]
     let check_cmd = "where";
 

@@ -12,6 +12,7 @@ import AssistantProviderSettings from './AssistantProviderSettings';
 import McpServersSettings from './McpServersSettings';
 import SkillsSettings from './SkillsSettings';
 import AppearanceSettings from './AppearanceSettings';
+import ApplicationsSettings from './ApplicationsSettings';
 import styles from './SettingsModal.module.css';
 
 /**
@@ -45,6 +46,15 @@ const SkillsIcon = () => (
   </svg>
 );
 
+const AppsIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="7" height="7" rx="1" />
+    <rect x="14" y="3" width="7" height="7" rx="1" />
+    <rect x="3" y="14" width="7" height="7" rx="1" />
+    <rect x="14" y="14" width="7" height="7" rx="1" />
+  </svg>
+);
+
 const AppearanceIcon = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <circle cx="12" cy="12" r="9" />
@@ -68,6 +78,7 @@ const TABS = {
   PROVIDER: 'provider',
   SKILLS: 'skills',
   MCP_SERVERS: 'mcp_servers',
+  APPLICATIONS: 'applications',
   APPEARANCE: 'appearance',
 } as const;
 
@@ -131,6 +142,8 @@ const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }: Settings
         return <SkillsSettings />;
       case TABS.MCP_SERVERS:
         return <McpServersSettings />;
+      case TABS.APPLICATIONS:
+        return <ApplicationsSettings />;
       case TABS.APPEARANCE:
         return <AppearanceSettings />;
       default:
@@ -172,6 +185,13 @@ const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }: Settings
             >
               <PlugIcon />
               <span>MCP Servers</span>
+            </button>
+            <button
+              className={`${styles.navItem} ${activeTab === TABS.APPLICATIONS ? styles.active : ''}`}
+              onClick={() => setActiveTab(TABS.APPLICATIONS)}
+            >
+              <AppsIcon />
+              <span>Applications</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.APPEARANCE ? styles.active : ''}`}

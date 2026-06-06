@@ -374,12 +374,12 @@ pub struct WorkspaceTaskActionRequest {
 }
 
 #[derive(Debug, Clone)]
-struct WorkspaceDescriptor {
+pub(crate) struct WorkspaceDescriptor {
     workspace_id: String,
     kind: String,
     title: String,
     agent_id: Option<String>,
-    root_path: Option<PathBuf>,
+    pub(crate) root_path: Option<PathBuf>,
     provider_connection_ids: Vec<String>,
     selected_mcp_server_ids: Vec<String>,
     selected_mcp_server_names: Vec<String>,
@@ -836,7 +836,7 @@ fn ensure_agent_workspace_root(root: &Path) -> Result<(), String> {
     })
 }
 
-fn resolve_workspace_descriptor(
+pub(crate) fn resolve_workspace_descriptor(
     state: &AppState,
     workspace_id: Option<String>,
 ) -> Result<WorkspaceDescriptor, String> {

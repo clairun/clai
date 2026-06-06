@@ -180,6 +180,46 @@ export type SkillSourceKind = { "kind": "local", path: string, } | { "kind": "gi
 
 export type SkillSourceResponse = { managedKind: string | null, readOnly: boolean, id: string, name: string, enabled: boolean, source: SkillSourceKind, createdAt: string, updatedAt: string, };
 
+/**
+ * A probe-table entry the UI can offer in a dropdown.
+ */
+export type SystemAppEntry = { id: string, name: string, };
+
+/**
+ * User selection persisted in `~/.clai/config.json`. `editor`/`terminal`
+ * hold a probe-table id, the sentinel `"custom"`, or None for the
+ * default behavior (xdg-open / the terminal resolution chain).
+ */
+export type SystemAppsConfig = { editor: string | null, 
+/**
+ * Custom editor template; `{path}` is replaced with the file or
+ * directory being opened.
+ */
+editorCustomCommand: string | null, terminal: string | null, 
+/**
+ * Custom terminal template; `{dir}` is replaced with the working
+ * directory.
+ */
+terminalCustomCommand: string | null, };
+
+/**
+ * Detection result for the Settings "Applications" section.
+ */
+export type SystemAppsStatus = { 
+/**
+ * Editors from the probe table found on the host.
+ */
+editors: Array<SystemAppEntry>, 
+/**
+ * Terminals from the probe table found on the host.
+ */
+terminals: Array<SystemAppEntry>, 
+/**
+ * Pretty name of the xdg default handler for text/plain, when
+ * resolvable — shown as "System default (gedit)" in the dropdown.
+ */
+systemEditorName: string | null, };
+
 export type TestResult = { success: boolean, error: string | null, };
 
 export type ToolCallStatus = "pending" | "running" | "completed" | "failed";

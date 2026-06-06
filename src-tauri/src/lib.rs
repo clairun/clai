@@ -34,6 +34,7 @@ mod db;
 mod mcp;
 mod paths;
 mod providers;
+mod system_apps;
 mod workspace_index;
 
 use std::path::{Path, PathBuf};
@@ -357,6 +358,11 @@ pub fn run() {
             // Workspace state persistence commands
             commands::workspace::load_workspace_state,
             commands::workspace::save_workspace_state,
+            commands::system_apps::system_apps_detect,
+            commands::system_apps::get_system_apps_settings,
+            commands::system_apps::set_system_apps_settings,
+            commands::system_apps::open_workspace_path,
+            commands::system_apps::workspace_import_files,
             commands::workspace::workspace_get_snapshot,
             commands::workspace::workspace_get_or_create_session,
             commands::workspace::workspace_read_file,

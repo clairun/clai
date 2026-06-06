@@ -1,0 +1,83 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.heading {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.subtle {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+/* GNOME-style row: label/description on the left, picker on the right. */
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  max-width: 560px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+}
+
+.row + .row {
+  margin-top: 8px;
+}
+
+.rowLabel {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rowTitle {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.rowDesc {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.select {
+  flex-shrink: 0;
+  max-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.customInput {
+  margin-top: 6px;
+  max-width: 560px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-family: var(--font-mono, monospace);
+}
+
+.customInput:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: var(--shadow-input-focus);
+}

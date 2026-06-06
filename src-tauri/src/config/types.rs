@@ -581,6 +581,11 @@ pub struct AppConfig {
     /// User-configured provider connections for the app-owned assistant runtime.
     #[serde(default)]
     pub provider_connections: Vec<ProviderConnection>,
+
+    /// Editor/terminal selections for "open in app" actions
+    /// (Settings → Applications).
+    #[serde(default)]
+    pub system_apps: crate::system_apps::SystemAppsConfig,
 }
 
 impl Default for AppConfig {
@@ -592,6 +597,7 @@ impl Default for AppConfig {
             mcp_servers: Vec::new(),
             skill_sources: Vec::new(),
             provider_connections: Vec::new(),
+            system_apps: crate::system_apps::SystemAppsConfig::default(),
         }
     }
 }

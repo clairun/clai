@@ -109,6 +109,25 @@ export async function downloadWorkspaceFile(
   });
 }
 
+/** Open a workspace file/folder in the configured editor, system app, or
+ *  terminal. `relPath` omitted/empty targets the workspace root. */
+export async function openWorkspacePath(
+  workspaceId: string,
+  relPath: string | null,
+  target: 'editor' | 'system' | 'terminal'
+): Promise<void> {
+  return invoke('open_workspace_path', { workspaceId, relPath, target });
+}
+
+/** Copy user-picked files (absolute host paths from the native dialog)
+ *  into the workspace root. Returns the created file names. */
+export async function importWorkspaceFiles(
+  workspaceId: string,
+  sourcePaths: string[]
+): Promise<string[]> {
+  return invoke('workspace_import_files', { workspaceId, sourcePaths, destRelPath: null });
+}
+
 export async function updateWorkspaceSessionMcp(
   workspaceId: string,
   mcpServerIds: string[]
