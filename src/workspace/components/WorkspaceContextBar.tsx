@@ -1,4 +1,4 @@
-import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { getMcpServers } from '../../api/client';
 import { assistantClient } from '../../assistant';
@@ -183,11 +183,52 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
   const hasProviders = !isAgent && enabledProviders.length > 0;
   const hasBadges = displayMcpServers.length > 0 || (!isAgent && hasConfiguredServers) || hasProviders;
 
+  // The bar scrolls horizontally with a hidden scrollbar (WebKitGTK draws
+  // its overlay bar over the badges), so provide the affordances here:
+  // a vertical wheel scrolls the row (native non-passive listener —
+  // React's delegated wheel handlers are passive, so preventDefault would
+  // be ignored and the page would scroll instead), and edge fades appear
+  // on whichever side has clipped badges.
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const [fadeLeft, setFadeLeft] = useState(false);
+  const [fadeRight, setFadeRight] = useState(false);
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el) return undefined;
+
+    const update = () => {
+      setFadeLeft(el.scrollLeft > 1);
+      setFadeRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaX !== 0) return; // native horizontal gesture works as-is
+      if (el.scrollWidth <= el.clientWidth) return;
+      el.scrollLeft += event.deltaY;
+      event.preventDefault();
+    };
+
+    update();
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('scroll', update, { passive: true });
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+    observer?.observe(el);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('scroll', update);
+      observer?.disconnect();
+    };
+    // Re-evaluate the fades when the badge set changes — content growth
+    // doesn't resize the bar itself, so the ResizeObserver misses it.
+  }, [hasBadges, displayMcpServers.length, enabledProviders.length]);
+
   if (!hasBadges) return null;
 
   return (
     <>
-      <div className={styles.contextBar}>
+      <div
+        ref={barRef}
+        className={`${styles.contextBar} ${fadeLeft ? styles.fadeLeft : ''} ${fadeRight ? styles.fadeRight : ''}`}
+      >
         {hasProviders && (
           <label className={styles.providerPicker}>
             <svg className={styles.providerIcon} width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

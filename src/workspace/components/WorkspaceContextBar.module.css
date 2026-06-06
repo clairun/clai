@@ -23,6 +23,36 @@
   display: none;
 }
 
+/* Edge fades — the scroll affordance now that the scrollbar is hidden.
+   Applied per side only when content is actually clipped there, so a
+   half-visible badge fades out instead of looking abruptly cut. */
+.fadeRight {
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to right, black calc(100% - 28px), transparent);
+}
+
+.fadeLeft {
+  -webkit-mask-image: linear-gradient(to right, transparent, black 28px);
+  mask-image: linear-gradient(to right, transparent, black 28px);
+}
+
+.fadeLeft.fadeRight {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    black 28px,
+    black calc(100% - 28px),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    black 28px,
+    black calc(100% - 28px),
+    transparent
+  );
+}
+
 .contextBar > * {
   flex-shrink: 0;
 }
