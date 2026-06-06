@@ -79,9 +79,18 @@
   border-color: var(--color-border-medium, var(--color-border-light));
 }
 
-.option input[type="radio"] {
+.option input[type="radio"],
+.option input[type="checkbox"] {
   margin-top: 2px;
   flex-shrink: 0;
+}
+
+/* Multi-select questions: small instruction above the checkboxes. */
+.multiHint {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
 }
 
 .optionBody {

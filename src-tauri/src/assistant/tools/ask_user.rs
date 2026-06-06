@@ -57,6 +57,12 @@ pub struct AskUserParams {
     /// a plain textarea.
     #[serde(default)]
     pub options: Option<Vec<AskUserOption>>,
+    /// When true (and `options` is present), the user may select MULTIPLE
+    /// options instead of exactly one. The result then carries every
+    /// selected label joined in `answer` plus `selectedOptionIndexes`.
+    /// Ignored for questions without options. Defaults to false.
+    #[serde(default)]
+    pub multi_select: Option<bool>,
     /// Optional extra context to display alongside the question (e.g.
     /// what the agent has tried, what tradeoffs to weigh).
     #[serde(default)]
@@ -77,7 +83,11 @@ pub struct AskUserOption {
 #[derive(Debug, Clone)]
 pub struct AskUserAnswer {
     pub text: String,
+    /// Single-select questions: the picked option's index.
     pub selected_option_index: Option<usize>,
+    /// Multi-select questions: every picked option's index, in option
+    /// order. `None` for single-select / free-text answers.
+    pub selected_option_indexes: Option<Vec<usize>>,
 }
 
 type PendingMap = HashMap<String, oneshot::Sender<AskUserAnswer>>;
@@ -154,6 +164,7 @@ pub async fn execute(
             pending_id: pending_id.clone(),
             question: question.clone(),
             options: sanitize_options(params.options.clone()),
+            multi_select: params.multi_select.unwrap_or(false),
             extra_context: params.context.clone(),
         },
     );
@@ -177,6 +188,17 @@ pub async fn execute(
         result.insert(
             "selectedOptionIndex".to_string(),
             serde_json::Value::Number(idx.into()),
+        );
+    }
+    if let Some(indexes) = answer.selected_option_indexes {
+        result.insert(
+            "selectedOptionIndexes".to_string(),
+            serde_json::Value::Array(
+                indexes
+                    .into_iter()
+                    .map(|idx| serde_json::Value::Number(idx.into()))
+                    .collect(),
+            ),
         );
     }
     Ok(serde_json::Value::Object(result))

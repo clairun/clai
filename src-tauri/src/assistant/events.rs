@@ -87,13 +87,17 @@ pub enum AssistantUiEvent {
         run: AssistantRun,
     },
     /// The `ask_user` tool is awaiting a human answer. The FE renders an
-    /// inline answer block (radio for options, textarea for free text)
-    /// keyed by `pending_id` and submits via `assistant_submit_user_input`.
+    /// inline answer block (radios — or checkboxes when `multi_select` —
+    /// for options, textarea for free text) keyed by `pending_id` and
+    /// submits via `assistant_submit_user_input`.
     AskUserRequested {
         pending_id: String,
         question: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         options: Option<Vec<AskUserOption>>,
+        /// When true the user may pick any number of options.
+        #[serde(default)]
+        multi_select: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         extra_context: Option<String>,
     },

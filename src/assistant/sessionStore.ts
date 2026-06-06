@@ -24,6 +24,8 @@ export interface PendingAskUser {
   pendingId: string;
   question: string;
   options: { label: string; description?: string | null }[] | null;
+  /** When true the user may pick any number of options (checkboxes). */
+  multiSelect?: boolean;
   extraContext: string | null;
 }
 

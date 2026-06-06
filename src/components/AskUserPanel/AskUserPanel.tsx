@@ -29,6 +29,10 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
   );
 
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  // Multi-select questions: the set of checked option indexes, plus
+  // whether the "Other" free-text checkbox is on.
+  const [selectedIndexes, setSelectedIndexes] = useState<Set<number>>(new Set());
+  const [otherChecked, setOtherChecked] = useState(false);
   const [otherText, setOtherText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -42,6 +46,8 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
     if (pending?.pendingId === previousPendingIdRef.current) return;
     previousPendingIdRef.current = pending?.pendingId || null;
     setSelectedIndex(null);
+    setSelectedIndexes(new Set());
+    setOtherChecked(false);
     setOtherText('');
     setError('');
     setSubmitting(false);
@@ -57,14 +63,21 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
 
   const options = useMemo(() => pending?.options || [], [pending?.options]);
   const hasOptions = options.length > 0;
+  // multiSelect only applies to option-bearing questions; a free-text
+  // question is single-answer by nature.
+  const isMultiSelect = hasOptions && !!pending?.multiSelect;
 
   const canSubmit = useMemo(() => {
     if (!pending || submitting) return false;
     if (!hasOptions) return otherText.trim().length > 0;
+    if (isMultiSelect) {
+      if (selectedIndexes.size > 0) return true;
+      return otherChecked && otherText.trim().length > 0;
+    }
     if (selectedIndex === null) return false;
     if (selectedIndex === OTHER_INDEX) return otherText.trim().length > 0;
     return true;
-  }, [pending, submitting, hasOptions, selectedIndex, otherText]);
+  }, [pending, submitting, hasOptions, isMultiSelect, selectedIndexes, otherChecked, selectedIndex, otherText]);
 
   if (!pending) return null;
 
@@ -75,7 +88,16 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
     try {
       let answer: string;
       let selectedOptionIndex: number | null = null;
-      if (!hasOptions || selectedIndex === OTHER_INDEX || selectedIndex === null) {
+      let selectedOptionIndexes: number[] | null = null;
+      if (isMultiSelect) {
+        const indexes = [...selectedIndexes].sort((a, b) => a - b);
+        const parts = indexes.map((idx) => options[idx]!.label);
+        if (otherChecked && otherText.trim()) {
+          parts.push(otherText.trim());
+        }
+        answer = parts.join(', ');
+        selectedOptionIndexes = indexes;
+      } else if (!hasOptions || selectedIndex === OTHER_INDEX || selectedIndex === null) {
         answer = otherText.trim();
       } else {
         answer = options[selectedIndex]!.label;
@@ -86,6 +108,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
           pendingId: pending.pendingId,
           answer,
           selectedOptionIndex,
+          selectedOptionIndexes,
         },
       });
       // The backend will emit `ask_user_resolved` which clears the
@@ -156,14 +179,28 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
 
       {hasOptions ? (
         <div className={styles.options}>
+          {isMultiSelect && (
+            <span className={styles.multiHint}>Select all that apply.</span>
+          )}
           {options.map((option, index) => (
             <label key={`opt-${index}`} className={styles.option}>
               <input
-                type="radio"
+                type={isMultiSelect ? 'checkbox' : 'radio'}
                 name={`ask-user-${pending.pendingId}`}
                 value={index}
-                checked={selectedIndex === index}
-                onChange={() => setSelectedIndex(index)}
+                checked={isMultiSelect ? selectedIndexes.has(index) : selectedIndex === index}
+                onChange={() => {
+                  if (isMultiSelect) {
+                    setSelectedIndexes((current) => {
+                      const next = new Set(current);
+                      if (next.has(index)) next.delete(index);
+                      else next.add(index);
+                      return next;
+                    });
+                  } else {
+                    setSelectedIndex(index);
+                  }
+                }}
                 disabled={submitting}
               />
               <span className={styles.optionBody}>
@@ -176,19 +213,27 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
           ))}
           <label className={styles.option}>
             <input
-              type="radio"
+              type={isMultiSelect ? 'checkbox' : 'radio'}
               name={`ask-user-${pending.pendingId}`}
               value={OTHER_INDEX}
-              checked={selectedIndex === OTHER_INDEX}
-              onChange={() => setSelectedIndex(OTHER_INDEX)}
+              checked={isMultiSelect ? otherChecked : selectedIndex === OTHER_INDEX}
+              onChange={() => {
+                if (isMultiSelect) {
+                  setOtherChecked((current) => !current);
+                } else {
+                  setSelectedIndex(OTHER_INDEX);
+                }
+              }}
               disabled={submitting}
             />
             <span className={styles.optionBody}>
               <span className={styles.optionLabel}>Other</span>
-              <span className={styles.optionDescription}>Type a free-text answer.</span>
+              <span className={styles.optionDescription}>
+                {isMultiSelect ? 'Add a free-text answer.' : 'Type a free-text answer.'}
+              </span>
             </span>
           </label>
-          {selectedIndex === OTHER_INDEX && (
+          {(isMultiSelect ? otherChecked : selectedIndex === OTHER_INDEX) && (
             <textarea
               className={styles.textarea}
               value={otherText}

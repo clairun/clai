@@ -121,6 +121,7 @@ describe('AskUserPanel — submission', () => {
         pendingId: 'pending-abc',
         answer: 'Option B',
         selectedOptionIndex: 1,
+        selectedOptionIndexes: null,
       },
     });
   });
@@ -141,6 +142,7 @@ describe('AskUserPanel — submission', () => {
         pendingId: 'pending-abc',
         answer: 'my custom answer',
         selectedOptionIndex: null,
+        selectedOptionIndexes: null,
       },
     });
   });
@@ -161,6 +163,87 @@ describe('AskUserPanel — submission', () => {
   });
 });
 
+describe('AskUserPanel — multi-select', () => {
+  it('renders checkboxes and submits all selected labels + indexes', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest({ multiSelect: true }));
+
+    expect(screen.getByText('Select all that apply.')).toBeInTheDocument();
+    const optionA = screen.getByLabelText(/Option A/);
+    const optionB = screen.getByLabelText(/Option B/);
+    expect(optionA).toHaveAttribute('type', 'checkbox');
+
+    await user.click(optionB);
+    await user.click(optionA);
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await user.click(screen.getByRole('button', { name: /send answer/i }));
+
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: {
+        pendingId: 'pending-abc',
+        answer: 'Option A, Option B',
+        selectedOptionIndex: null,
+        selectedOptionIndexes: [0, 1],
+      },
+    });
+  });
+
+  it('unchecking removes the option from the submission', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest({ multiSelect: true }));
+
+    const optionA = screen.getByLabelText(/Option A/);
+    await user.click(optionA);
+    await user.click(screen.getByLabelText(/Option B/));
+    await user.click(optionA); // toggle off
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await user.click(screen.getByRole('button', { name: /send answer/i }));
+
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: {
+        pendingId: 'pending-abc',
+        answer: 'Option B',
+        selectedOptionIndex: null,
+        selectedOptionIndexes: [1],
+      },
+    });
+  });
+
+  it('appends Other free text to the selected labels', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest({ multiSelect: true }));
+
+    await user.click(screen.getByLabelText(/Option A/));
+    await user.click(screen.getByLabelText(/Other/));
+    await user.type(screen.getByPlaceholderText(/Type your answer…/), 'something else');
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await user.click(screen.getByRole('button', { name: /send answer/i }));
+
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: {
+        pendingId: 'pending-abc',
+        answer: 'Option A, something else',
+        selectedOptionIndex: null,
+        selectedOptionIndexes: [0],
+      },
+    });
+  });
+
+  it('cannot submit with nothing selected', async () => {
+    mountWithPending(askUserRequest({ multiSelect: true }));
+    expect(screen.getByRole('button', { name: /send answer/i })).toBeDisabled();
+  });
+
+  it('single-select questions still render radios', () => {
+    mountWithPending(askUserRequest());
+    expect(screen.getByLabelText(/Option A/)).toHaveAttribute('type', 'radio');
+    expect(screen.queryByText('Select all that apply.')).toBeNull();
+  });
+});
+
 describe('AskUserPanel — keyboard', () => {
   it('Enter in the textarea submits the answer', async () => {
     const user = userEvent.setup();
@@ -174,6 +257,7 @@ describe('AskUserPanel — keyboard', () => {
         pendingId: 'pending-abc',
         answer: 'quick answer',
         selectedOptionIndex: null,
+        selectedOptionIndexes: null,
       },
     });
   });
@@ -212,6 +296,7 @@ describe('AskUserPanel — keyboard', () => {
         pendingId: 'pending-abc',
         answer: 'Option B',
         selectedOptionIndex: 1,
+        selectedOptionIndexes: null,
       },
     });
   });

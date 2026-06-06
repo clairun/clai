@@ -620,6 +620,10 @@ pub struct AssistantSubmitUserInputRequest {
     /// "Other"). Omitted for plain-text questions.
     #[serde(default)]
     pub selected_option_index: Option<usize>,
+    /// Multi-select questions: every picked option's 0-based index, in
+    /// option order. Omitted for single-select / free-text questions.
+    #[serde(default)]
+    pub selected_option_indexes: Option<Vec<usize>>,
 }
 
 /// Deliver an answer from the FE back to the blocking `ask_user` tool
@@ -634,6 +638,7 @@ pub async fn assistant_submit_user_input(
         AskUserAnswer {
             text: request.answer,
             selected_option_index: request.selected_option_index,
+            selected_option_indexes: request.selected_option_indexes,
         },
     )
 }

@@ -104,6 +104,7 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
         pendingId: event.payload.pending_id,
         question: event.payload.question,
         options: event.payload.options,
+        multiSelect: event.payload.multi_select,
         extraContext: event.payload.extra_context ?? null,
       });
       break;
