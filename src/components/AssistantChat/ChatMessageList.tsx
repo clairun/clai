@@ -782,7 +782,16 @@ const renderToolOutput = (
     const context = typeof p?.context === 'string' ? p.context : '';
     const options = Array.isArray(p?.options) ? (p!.options as Array<{ label?: string; description?: string | null }>) : [];
     const answer = typeof r?.answer === 'string' ? r.answer : '';
-    const selectedIdx = typeof r?.selectedOptionIndex === 'number' ? r.selectedOptionIndex : -1;
+    // Highlight what the user picked: single-select answers carry
+    // selectedOptionIndex, multi-select answers selectedOptionIndexes.
+    const selectedSet = new Set<number>(
+      Array.isArray(r?.selectedOptionIndexes)
+        ? (r!.selectedOptionIndexes as unknown[]).filter((v): v is number => typeof v === 'number')
+        : typeof r?.selectedOptionIndex === 'number'
+          ? [r.selectedOptionIndex]
+          : []
+    );
+    const isMultiSelect = p?.multiSelect === true;
     return (
       <div className={styles.askUser}>
         {question && <div className={styles.askUserQuestion}>{question}</div>}
@@ -791,13 +800,15 @@ const renderToolOutput = (
           <ul className={styles.askUserOptions}>
             {options.map((opt, i) => {
               const label = typeof opt?.label === 'string' ? opt.label : '';
-              const selected = i === selectedIdx;
+              const selected = selectedSet.has(i);
               return (
                 <li
                   key={i}
                   className={`${styles.askUserOption} ${selected ? styles.askUserOptionSelected : ''}`}
                 >
-                  <span className={styles.askUserBullet}>{selected ? '●' : '○'}</span>
+                  <span className={styles.askUserBullet}>
+                    {isMultiSelect ? (selected ? '☑' : '☐') : selected ? '●' : '○'}
+                  </span>
                   <span>
                     {label}
                     {opt?.description ? <span className={styles.askUserOptionDesc}>{opt.description}</span> : null}
