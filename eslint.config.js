@@ -14,7 +14,6 @@ import prettier from 'eslint-config-prettier';
  *   - react-hooks/set-state-in-effect
  *   - react-hooks/exhaustive-deps
  *   - react-hooks/preserve-manual-memoization
- *   - react-hooks/immutability
  *
  * `react-hooks/purity` was enabled as a warning on 2026-06-05 (clai#5).
  * The current codebase is clean for this rule (0 violations), so the
@@ -45,6 +44,24 @@ import prettier from 'eslint-config-prettier';
  * follow-up PRs; this PR is the gate-establishment flip only.
  * Once all 16 are resolved, this rule will be promoted from
  * `warn` to `error` in a separate PR.
+ *
+ * `react-hooks/immutability` was enabled as a warning on 2026-06-06
+ * (clai#5). Like `refs`, the current codebase is NOT clean — the
+ * rule surfaces 2 violations, both of which follow the same
+ * "useEffect captures a function declared later in the same
+ * component body" pattern (the function is declared with `const`
+ * below the effect, but the effect calls it on mount). Affected sites:
+ *   - src/components/Settings/McpServersSettings.tsx:53 — `useEffect`
+ *     calls `loadServers()` declared at line 61.
+ *   - src/components/Settings/SkillsSettings.tsx:88 — `useEffect`
+ *     calls `loadCatalog()` declared at line 92.
+ * The rule reports these as "Cannot access variable before it is
+ * declared" because the closure created by `useEffect` references a
+ * `const` binding that is in the temporal dead zone at the point of
+ * effect creation. The fix is to declare the function above the
+ * effect (or move the function body inline into the effect); both
+ * are mechanical, no behavior change. Cleanup will land in a focused
+ * follow-up PR; this PR is the gate-establishment flip only.
  */
 export default [
   js.configs.recommended,
@@ -76,7 +93,7 @@ export default [
       'react-hooks/exhaustive-deps': 'off',
       'react-hooks/preserve-manual-memoization': 'off',
       'react-hooks/refs': 'warn',
-      'react-hooks/immutability': 'off',
+      'react-hooks/immutability': 'warn',
       'react-hooks/use-memo': 'warn',
       'react-hooks/purity': 'warn',
     },
@@ -115,7 +132,7 @@ export default [
       'react-hooks/exhaustive-deps': 'off',
       'react-hooks/preserve-manual-memoization': 'off',
       'react-hooks/refs': 'warn',
-      'react-hooks/immutability': 'off',
+      'react-hooks/immutability': 'warn',
       'react-hooks/use-memo': 'warn',
       'react-hooks/purity': 'warn',
     },
