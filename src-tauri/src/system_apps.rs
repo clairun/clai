@@ -8,6 +8,12 @@
 //! owns the MIME → app table; we never rebuild it), and a `Custom…`
 //! template as the escape hatch for anything not in the table.
 //!
+//! Terminal editors (nvim, vim, helix) can't be spawned detached — with
+//! no TTY they die silently — so their table entries are flagged
+//! `in_terminal` and route through the terminal resolution, each
+//! terminal entry carrying the syntax that introduces a command to run
+//! inside it (`gnome-terminal -- cmd`, `konsole -e cmd`, `kitty cmd`…).
+//!
 //! Terminal resolution has no xdg-mime equivalent (a known freedesktop
 //! gap), so it's a chain: explicit user choice → `xdg-terminal-exec`
 //! (the emerging standard; runs a command in the preferred terminal and
@@ -64,72 +70,153 @@ pub struct SystemAppsConfig {
     pub terminal_custom_command: Option<String>,
 }
 
-/// (id, display name, binary, open-file args, open-dir args).
-/// `{path}` is replaced with the target file/directory.
-type EditorSpec = (
-    &'static str,
-    &'static str,
-    &'static str,
-    &'static [&'static str],
-    &'static [&'static str],
-);
+/// Probe-table editor. `{path}` in the arg lists is replaced with the
+/// file/directory being opened. `in_terminal` editors run inside the
+/// resolved terminal instead of being spawned detached.
+struct EditorSpec {
+    id: &'static str,
+    name: &'static str,
+    bin: &'static str,
+    file_args: &'static [&'static str],
+    dir_args: &'static [&'static str],
+    in_terminal: bool,
+}
 
 const EDITORS: &[EditorSpec] = &[
-    (
-        "vscode",
-        "Visual Studio Code",
-        "code",
-        &["--goto", "{path}"],
-        &["{path}"],
-    ),
-    (
-        "cursor",
-        "Cursor",
-        "cursor",
-        &["--goto", "{path}"],
-        &["{path}"],
-    ),
-    ("zed", "Zed", "zed", &["{path}"], &["{path}"]),
-    ("sublime", "Sublime Text", "subl", &["{path}"], &["{path}"]),
-    (
-        "vscodium",
-        "VSCodium",
-        "codium",
-        &["--goto", "{path}"],
-        &["{path}"],
-    ),
+    EditorSpec {
+        id: "vscode",
+        name: "Visual Studio Code",
+        bin: "code",
+        file_args: &["--goto", "{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "cursor",
+        name: "Cursor",
+        bin: "cursor",
+        file_args: &["--goto", "{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "zed",
+        name: "Zed",
+        bin: "zed",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "sublime",
+        name: "Sublime Text",
+        bin: "subl",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "vscodium",
+        name: "VSCodium",
+        bin: "codium",
+        file_args: &["--goto", "{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "nvim",
+        name: "Neovim",
+        bin: "nvim",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: true,
+    },
+    EditorSpec {
+        id: "vim",
+        name: "Vim",
+        bin: "vim",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: true,
+    },
+    EditorSpec {
+        id: "helix",
+        name: "Helix",
+        bin: "hx",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: true,
+    },
 ];
 
-/// (id, display name, binary, args opening at a working directory).
-/// `{dir}` is replaced with the directory.
-const TERMINALS: &[(&str, &str, &str, &[&str])] = &[
-    (
-        "ptyxis",
-        "Ptyxis",
-        "ptyxis",
-        &["--working-directory", "{dir}"],
-    ),
-    (
-        "gnome-terminal",
-        "GNOME Terminal",
-        "gnome-terminal",
-        &["--working-directory={dir}"],
-    ),
-    ("konsole", "Konsole", "konsole", &["--workdir", "{dir}"]),
-    ("kitty", "kitty", "kitty", &["--directory", "{dir}"]),
-    (
-        "alacritty",
-        "Alacritty",
-        "alacritty",
-        &["--working-directory", "{dir}"],
-    ),
-    ("foot", "foot", "foot", &["-D", "{dir}"]),
-    (
-        "wezterm",
-        "WezTerm",
-        "wezterm",
-        &["start", "--cwd", "{dir}"],
-    ),
+/// Probe-table terminal. `dir_args` open at a working directory
+/// (`{dir}` substituted); `exec_args` introduce a command to run inside
+/// the terminal (appended before the command itself).
+struct TerminalSpec {
+    id: &'static str,
+    name: &'static str,
+    bin: &'static str,
+    dir_args: &'static [&'static str],
+    exec_args: &'static [&'static str],
+}
+
+const TERMINALS: &[TerminalSpec] = &[
+    TerminalSpec {
+        id: "ptyxis",
+        name: "Ptyxis",
+        bin: "ptyxis",
+        dir_args: &["--working-directory", "{dir}"],
+        exec_args: &["--"],
+    },
+    TerminalSpec {
+        id: "gnome-terminal",
+        name: "GNOME Terminal",
+        bin: "gnome-terminal",
+        dir_args: &["--working-directory={dir}"],
+        exec_args: &["--"],
+    },
+    TerminalSpec {
+        id: "konsole",
+        name: "Konsole",
+        bin: "konsole",
+        dir_args: &["--workdir", "{dir}"],
+        exec_args: &["-e"],
+    },
+    TerminalSpec {
+        id: "ghostty",
+        name: "Ghostty",
+        bin: "ghostty",
+        dir_args: &["--working-directory={dir}"],
+        exec_args: &["-e"],
+    },
+    TerminalSpec {
+        id: "kitty",
+        name: "kitty",
+        bin: "kitty",
+        dir_args: &["--directory", "{dir}"],
+        exec_args: &[],
+    },
+    TerminalSpec {
+        id: "alacritty",
+        name: "Alacritty",
+        bin: "alacritty",
+        dir_args: &["--working-directory", "{dir}"],
+        exec_args: &["-e"],
+    },
+    TerminalSpec {
+        id: "foot",
+        name: "foot",
+        bin: "foot",
+        dir_args: &["-D", "{dir}"],
+        exec_args: &[],
+    },
+    TerminalSpec {
+        id: "wezterm",
+        name: "WezTerm",
+        bin: "wezterm",
+        dir_args: &["start", "--cwd", "{dir}"],
+        exec_args: &["--"],
+    },
 ];
 
 /// Probe the host for known editors/terminals + the xdg default editor
@@ -138,18 +225,18 @@ const TERMINALS: &[(&str, &str, &str, &[&str])] = &[
 pub fn detect_system_apps() -> SystemAppsStatus {
     let editors = EDITORS
         .iter()
-        .filter(|(_, _, bin, _, _)| command_exists(bin))
-        .map(|(id, name, _, _, _)| SystemAppEntry {
-            id: (*id).to_string(),
-            name: (*name).to_string(),
+        .filter(|spec| command_exists(spec.bin))
+        .map(|spec| SystemAppEntry {
+            id: spec.id.to_string(),
+            name: spec.name.to_string(),
         })
         .collect();
     let terminals = TERMINALS
         .iter()
-        .filter(|(_, _, bin, _)| command_exists(bin))
-        .map(|(id, name, _, _)| SystemAppEntry {
-            id: (*id).to_string(),
-            name: (*name).to_string(),
+        .filter(|spec| command_exists(spec.bin))
+        .map(|spec| SystemAppEntry {
+            id: spec.id.to_string(),
+            name: spec.name.to_string(),
         })
         .collect();
     SystemAppsStatus {
@@ -228,6 +315,8 @@ fn parse_custom_template(
 
 /// Open `path` (file or directory) in the configured editor. Falls back
 /// to the system default (`xdg-open`) when nothing is configured.
+/// Terminal editors run inside the resolved terminal at the path's
+/// directory.
 pub fn open_in_editor(config: &SystemAppsConfig, path: &Path, is_dir: bool) -> Result<(), String> {
     let path_str = path.display().to_string();
     match config.editor.as_deref() {
@@ -242,17 +331,31 @@ pub fn open_in_editor(config: &SystemAppsConfig, path: &Path, is_dir: bool) -> R
             spawn_host_detached(&bin, &args, None)
         }
         Some(id) => {
-            let entry = EDITORS
+            let spec = EDITORS
                 .iter()
-                .find(|(eid, _, _, _, _)| *eid == id)
+                .find(|spec| spec.id == id)
                 .ok_or_else(|| format!("Unknown editor `{}` — re-select it in Settings.", id))?;
-            let (_, _, bin, file_args, dir_args) = entry;
             let args = substitute(
-                if is_dir { dir_args } else { file_args },
+                if is_dir {
+                    spec.dir_args
+                } else {
+                    spec.file_args
+                },
                 "{path}",
                 &path_str,
             );
-            spawn_host_detached(bin, &args, None)
+            if spec.in_terminal {
+                let dir = if is_dir {
+                    path
+                } else {
+                    path.parent().unwrap_or(path)
+                };
+                let mut command = vec![spec.bin.to_string()];
+                command.extend(args);
+                run_in_terminal(config, dir, &command)
+            } else {
+                spawn_host_detached(spec.bin, &args, None)
+            }
         }
     }
 }
@@ -262,9 +365,19 @@ pub fn open_with_system(path: &Path) -> Result<(), String> {
     spawn_host_detached("xdg-open", &[path.display().to_string()], None)
 }
 
-/// Open a terminal at `dir`. Resolution chain: explicit choice →
-/// `xdg-terminal-exec` → `$TERMINAL` → first available probe entry.
+/// Open a terminal at `dir`.
 pub fn open_terminal(config: &SystemAppsConfig, dir: &Path) -> Result<(), String> {
+    run_in_terminal(config, dir, &[])
+}
+
+/// Open the resolved terminal at `dir`, optionally running `command`
+/// inside it (terminal editors). Resolution chain: explicit choice →
+/// `xdg-terminal-exec` → `$TERMINAL` → first available probe entry.
+fn run_in_terminal(
+    config: &SystemAppsConfig,
+    dir: &Path,
+    command: &[String],
+) -> Result<(), String> {
     let dir_str = dir.display().to_string();
     match config.terminal.as_deref() {
         Some("custom") => {
@@ -273,37 +386,64 @@ pub fn open_terminal(config: &SystemAppsConfig, dir: &Path) -> Result<(), String
                 .as_deref()
                 .filter(|t| !t.trim().is_empty())
                 .ok_or_else(|| "Custom terminal command is not configured.".to_string())?;
-            let (bin, args) = parse_custom_template(template, "{dir}", &dir_str)?;
+            let (bin, mut args) = parse_custom_template(template, "{dir}", &dir_str)?;
+            args.extend_from_slice(command);
             return spawn_host_detached(&bin, &args, Some(dir));
         }
         Some(id) if id != "auto" => {
-            let entry = TERMINALS
+            let spec = TERMINALS
                 .iter()
-                .find(|(tid, _, _, _)| *tid == id)
+                .find(|spec| spec.id == id)
                 .ok_or_else(|| format!("Unknown terminal `{}` — re-select it in Settings.", id))?;
-            let (_, _, bin, dir_args) = entry;
-            return spawn_host_detached(bin, &substitute(dir_args, "{dir}", &dir_str), None);
+            return spawn_terminal_spec(spec, &dir_str, command);
         }
         _ => {}
     }
 
-    // Auto chain. xdg-terminal-exec opens the user's preferred terminal
-    // and inherits the working directory.
+    // Auto chain. xdg-terminal-exec opens the user's preferred terminal,
+    // inherits the working directory, and takes the command verbatim.
     if command_exists("xdg-terminal-exec") {
-        return spawn_host_detached("xdg-terminal-exec", &[], Some(dir));
+        return spawn_host_detached("xdg-terminal-exec", command, Some(dir));
     }
     if let Ok(term) = std::env::var("TERMINAL") {
         let term = term.trim().to_string();
         if !term.is_empty() && command_exists(&term) {
-            return spawn_host_detached(&term, &[], Some(dir));
+            // Use the probe entry's syntax when $TERMINAL is a known
+            // terminal (matched by binary name); otherwise fall back to
+            // the de-facto `-e` convention (xterm, urxvt, st, …).
+            let basename = term.rsplit('/').next().unwrap_or(&term);
+            if let Some(spec) = TERMINALS.iter().find(|spec| spec.bin == basename) {
+                return spawn_terminal_spec(spec, &dir_str, command);
+            }
+            let mut args: Vec<String> = Vec::new();
+            if !command.is_empty() {
+                args.push("-e".to_string());
+                args.extend_from_slice(command);
+            }
+            return spawn_host_detached(&term, &args, Some(dir));
         }
     }
-    for (_, _, bin, dir_args) in TERMINALS {
-        if command_exists(bin) {
-            return spawn_host_detached(bin, &substitute(dir_args, "{dir}", &dir_str), None);
+    for spec in TERMINALS {
+        if command_exists(spec.bin) {
+            return spawn_terminal_spec(spec, &dir_str, command);
         }
     }
     Err("No terminal emulator found. Pick one in Settings → Applications.".to_string())
+}
+
+/// Build a probe-table terminal invocation: working-directory args, then
+/// the exec introducer + command when one should run inside.
+fn spawn_terminal_spec(
+    spec: &TerminalSpec,
+    dir_str: &str,
+    command: &[String],
+) -> Result<(), String> {
+    let mut args = substitute(spec.dir_args, "{dir}", dir_str);
+    if !command.is_empty() {
+        args.extend(spec.exec_args.iter().map(|a| a.to_string()));
+        args.extend_from_slice(command);
+    }
+    spawn_host_detached(spec.bin, &args, None)
 }
 
 /// Resolve `rel_path` inside `root`, refusing anything that escapes it
@@ -378,5 +518,35 @@ mod tests {
         };
         let err = open_in_editor(&config, Path::new("/tmp"), true).unwrap_err();
         assert!(err.contains("Unknown editor"), "{err}");
+    }
+
+    #[test]
+    fn terminal_editors_are_flagged() {
+        for id in ["nvim", "vim", "helix"] {
+            let spec = EDITORS.iter().find(|spec| spec.id == id).unwrap();
+            assert!(spec.in_terminal, "{id} must run inside a terminal");
+        }
+        let code = EDITORS.iter().find(|spec| spec.id == "vscode").unwrap();
+        assert!(!code.in_terminal);
+    }
+
+    #[test]
+    fn terminal_spec_invocation_includes_exec_introducer() {
+        // gnome-terminal: dir flag, `--`, then the command.
+        let spec = TERMINALS
+            .iter()
+            .find(|spec| spec.id == "gnome-terminal")
+            .unwrap();
+        let mut args = substitute(spec.dir_args, "{dir}", "/w");
+        args.extend(spec.exec_args.iter().map(|a| a.to_string()));
+        args.extend_from_slice(&["nvim".to_string(), "/w/f.md".to_string()]);
+        assert_eq!(
+            args,
+            vec!["--working-directory=/w", "--", "nvim", "/w/f.md"]
+        );
+
+        // kitty: command appended directly, no introducer.
+        let spec = TERMINALS.iter().find(|spec| spec.id == "kitty").unwrap();
+        assert!(spec.exec_args.is_empty());
     }
 }
