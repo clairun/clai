@@ -104,6 +104,37 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
     }
   };
 
+  // Enter answers; Ctrl/Cmd+Enter (and Shift+Enter) insert a newline.
+  // The browser doesn't insert a newline while a modifier is held, so
+  // Ctrl+Enter splices one in manually at the caret.
+  const handleTextareaKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== 'Enter') return;
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      const node = event.currentTarget;
+      // setRangeText moves the DOM value + caret synchronously; syncing
+      // state from node.value afterwards means the controlled re-render
+      // is a no-op and the caret stays put (a deferred restore would
+      // race with further keystrokes).
+      node.setRangeText('\n', node.selectionStart, node.selectionEnd, 'end');
+      setOtherText(node.value);
+      return;
+    }
+    if (event.shiftKey) return; // native newline
+    event.preventDefault();
+    void submit();
+  };
+
+  // Enter anywhere else in the panel (e.g. on a radio option) also
+  // answers. The textarea handles its own Enter above; preventDefault
+  // keeps a focused Send button from double-submitting via native click.
+  const handlePanelKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Enter' || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.target instanceof HTMLTextAreaElement) return;
+    event.preventDefault();
+    void submit();
+  };
+
   return (
     <section
       ref={containerRef}
@@ -111,6 +142,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
       role="dialog"
       aria-label="Agent question"
       tabIndex={-1}
+      onKeyDown={handlePanelKeyDown}
     >
       <header className={styles.header}>
         <span className={styles.chip}>AGENT IS ASKING</span>
@@ -161,7 +193,8 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
               className={styles.textarea}
               value={otherText}
               onChange={(event) => setOtherText(event.target.value)}
-              placeholder="Type your answer…"
+              onKeyDown={handleTextareaKeyDown}
+              placeholder="Type your answer… (Enter sends, Ctrl+Enter for a new line)"
               rows={3}
               disabled={submitting}
             />
@@ -172,7 +205,8 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
           className={styles.textarea}
           value={otherText}
           onChange={(event) => setOtherText(event.target.value)}
-          placeholder="Type your answer…"
+          onKeyDown={handleTextareaKeyDown}
+          placeholder="Type your answer… (Enter sends, Ctrl+Enter for a new line)"
           rows={4}
           disabled={submitting}
         />

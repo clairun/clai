@@ -97,7 +97,7 @@ describe('AskUserPanel — rendering', () => {
   it('falls back to a plain textarea when no options are provided', () => {
     mountWithPending(askUserRequest({ options: null }));
     expect(screen.queryByText('Option A')).toBeNull();
-    expect(screen.getByPlaceholderText('Type your answer…')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Type your answer…/)).toBeInTheDocument();
   });
 });
 
@@ -130,7 +130,7 @@ describe('AskUserPanel — submission', () => {
     mountWithPending(askUserRequest());
 
     await user.click(screen.getByLabelText(/Other/));
-    const textarea = screen.getByPlaceholderText('Type your answer…');
+    const textarea = screen.getByPlaceholderText(/Type your answer…/);
     await user.type(textarea, 'my custom answer');
 
     mockInvoke.mockResolvedValueOnce(undefined);
@@ -151,13 +151,69 @@ describe('AskUserPanel — submission', () => {
     const user = userEvent.setup();
     mountWithPending(askUserRequest({ options: null }));
 
-    await user.type(screen.getByPlaceholderText('Type your answer…'), 'hi');
+    await user.type(screen.getByPlaceholderText(/Type your answer…/), 'hi');
     mockInvoke.mockRejectedValueOnce(new Error('run already ended'));
     await user.click(screen.getByRole('button', { name: /send answer/i }));
 
     // Question still visible after the rejected submit; error surfaces.
     expect(screen.getByText('Which option do you want?')).toBeInTheDocument();
     expect(screen.getByText(/run already ended/)).toBeInTheDocument();
+  });
+});
+
+describe('AskUserPanel — keyboard', () => {
+  it('Enter in the textarea submits the answer', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest({ options: null }));
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    await user.type(screen.getByPlaceholderText(/Type your answer…/), 'quick answer{Enter}');
+
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: {
+        pendingId: 'pending-abc',
+        answer: 'quick answer',
+        selectedOptionIndex: null,
+      },
+    });
+  });
+
+  it('Ctrl+Enter inserts a newline instead of submitting', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest({ options: null }));
+
+    const textarea = screen.getByPlaceholderText(/Type your answer…/);
+    await user.type(textarea, 'line one{Control>}{Enter}{/Control}line two');
+
+    expect(textarea).toHaveValue('line one\nline two');
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it('Enter with empty text does not submit', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest({ options: null }));
+
+    await user.type(screen.getByPlaceholderText(/Type your answer…/), '{Enter}');
+    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it('Enter on a selected option submits it', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest());
+
+    mockInvoke.mockResolvedValueOnce(undefined);
+    const optionB = screen.getByLabelText(/Option B/);
+    await user.click(optionB);
+    optionB.focus();
+    await user.keyboard('{Enter}');
+
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: {
+        pendingId: 'pending-abc',
+        answer: 'Option B',
+        selectedOptionIndex: 1,
+      },
+    });
   });
 });
 
