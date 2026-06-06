@@ -725,6 +725,30 @@
   opacity: 0.55;
 }
 
+/* Quiet icon-only header action (artifacts drawer: add files / editor /
+   terminal). Same visual register as the close button — the drawer header
+   is chrome, not a call to action. */
+.workspaceDrawerIconAction {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.workspaceDrawerIconAction:hover {
+  background: var(--color-overlay-06, var(--color-overlay-04));
+  color: var(--color-text-primary);
+}
+
 .workspaceDrawerClose {
   appearance: none;
   background: transparent;
