@@ -16,11 +16,17 @@ import prettier from 'eslint-config-prettier';
  *   - react-hooks/preserve-manual-memoization
  *   - react-hooks/refs
  *   - react-hooks/immutability
- *   - react-hooks/use-memo
  *
  * `react-hooks/purity` was enabled as a warning on 2026-06-05 (clai#5).
  * The current codebase is clean for this rule (0 violations), so the
  * next step is to promote it from `warn` to `error` in a follow-up PR.
+ *
+ * `react-hooks/use-memo` was enabled as a warning on 2026-06-06 (clai#5).
+ * The current codebase is clean for this rule (0 violations) — every
+ * `useMemo`/`useCallback` call site already uses an inline arrow
+ * function and a simple array-literal dep array. The next step for
+ * this rule is also to promote it from `warn` to `error` in a
+ * follow-up PR, after the `purity` promotion lands.
  */
 export default [
   js.configs.recommended,
@@ -53,7 +59,7 @@ export default [
       'react-hooks/preserve-manual-memoization': 'off',
       'react-hooks/refs': 'off',
       'react-hooks/immutability': 'off',
-      'react-hooks/use-memo': 'off',
+      'react-hooks/use-memo': 'warn',
       'react-hooks/purity': 'warn',
     },
     settings: {
@@ -92,7 +98,7 @@ export default [
       'react-hooks/preserve-manual-memoization': 'off',
       'react-hooks/refs': 'off',
       'react-hooks/immutability': 'off',
-      'react-hooks/use-memo': 'off',
+      'react-hooks/use-memo': 'warn',
       'react-hooks/purity': 'warn',
     },
     settings: {
