@@ -513,6 +513,18 @@ fn parse_sse_frame(
                         if let Some(name) = cb.get("name").and_then(|n| n.as_str()) {
                             tool_calls[index].name = name.to_string();
                         }
+                        // Anthropic itself opens tool_use blocks with
+                        // `"input": {}` and streams the real input via
+                        // input_json_delta. Some Anthropic-compatible
+                        // providers ship the complete input object here
+                        // instead, with no deltas — capture it, or the
+                        // call dispatches with empty params.
+                        if let Some(input) = cb
+                            .get("input")
+                            .filter(|i| i.as_object().is_some_and(|o| !o.is_empty()))
+                        {
+                            tool_calls[index].arguments = input.to_string();
+                        }
                     }
                     // A thinking block opens empty; its text/signature arrive as
                     // content_block_delta. Nothing to capture at start.
@@ -578,8 +590,7 @@ fn parse_sse_frame(
             let index = json.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
             if index < tool_calls.len() && !tool_calls[index].id.is_empty() {
                 let tc = &tool_calls[index];
-                let params =
-                    serde_json::from_str::<serde_json::Value>(&tc.arguments).unwrap_or(json!({}));
+                let params = super::parse_tool_arguments(&tc.name, &tc.arguments);
                 events.push(Ok(ProviderEvent::ToolCallReady {
                     tool_call: ToolInvocationDraft {
                         tool_call_id: tc.id.clone(),
@@ -791,6 +802,63 @@ mod tests {
         assert!(events.iter().any(|e| matches!(
             e,
             Ok(ProviderEvent::ThinkingSignature { signature }) if signature == "abc123"
+        )));
+    }
+
+    /// Anthropic-compatible providers may ship the complete tool input in
+    /// `content_block_start` (real Anthropic sends `"input": {}` there and
+    /// streams the input via input_json_delta). It must not be dropped.
+    #[test]
+    fn captures_full_tool_input_from_content_block_start() {
+        let mut emitted_start = true;
+        let mut tool_calls = Vec::new();
+        let start = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash_exec\",\"input\":{\"command\":\"ls\"}}}";
+        parse_sse_frame(start, &mut emitted_start, &mut tool_calls);
+        let stop = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}";
+        let events = parse_sse_frame(stop, &mut emitted_start, &mut tool_calls);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Ok(ProviderEvent::ToolCallReady { tool_call })
+                if tool_call.params == json!({"command": "ls"})
+        )));
+    }
+
+    /// Real Anthropic opens tool_use blocks with `"input": {}` — that empty
+    /// object must not clobber the input streamed via input_json_delta.
+    #[test]
+    fn streamed_input_deltas_still_accumulate_after_empty_start_input() {
+        let mut emitted_start = true;
+        let mut tool_calls = Vec::new();
+        let start = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash_exec\",\"input\":{}}}";
+        parse_sse_frame(start, &mut emitted_start, &mut tool_calls);
+        let delta = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"ls\\\"}\"}}";
+        parse_sse_frame(delta, &mut emitted_start, &mut tool_calls);
+        let stop = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}";
+        let events = parse_sse_frame(stop, &mut emitted_start, &mut tool_calls);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Ok(ProviderEvent::ToolCallReady { tool_call })
+                if tool_call.params == json!({"command": "ls"})
+        )));
+    }
+
+    /// Malformed streamed input must surface as-is (wrapped under
+    /// `invalid_json`), not silently degrade to `{}` — the user needs to
+    /// see what the model actually sent.
+    #[test]
+    fn malformed_tool_input_is_preserved_in_params() {
+        let mut emitted_start = true;
+        let mut tool_calls = Vec::new();
+        let start = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash_exec\",\"input\":{}}}";
+        parse_sse_frame(start, &mut emitted_start, &mut tool_calls);
+        let delta = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\": oops\"}}";
+        parse_sse_frame(delta, &mut emitted_start, &mut tool_calls);
+        let stop = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}";
+        let events = parse_sse_frame(stop, &mut emitted_start, &mut tool_calls);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Ok(ProviderEvent::ToolCallReady { tool_call })
+                if tool_call.params == json!({"invalid_json": "{\"command\": oops"})
         )));
     }
 

@@ -599,8 +599,7 @@ fn flush_tool_calls(
         if tc.id.is_empty() {
             continue;
         }
-        let params = serde_json::from_str::<serde_json::Value>(&tc.arguments)
-            .unwrap_or(serde_json::json!({}));
+        let params = super::parse_tool_arguments(&tc.name, &tc.arguments);
 
         events.push(Ok(ProviderEvent::ToolCallReady {
             tool_call: ToolInvocationDraft {
