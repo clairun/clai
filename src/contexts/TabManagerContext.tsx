@@ -14,9 +14,6 @@
  */
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { handleTabCommand } from '../utils/tabCommandHandler';
-import type { ParsedCommand } from '../utils/commandParser';
-import type { CommandResult } from '../utils/contextCommandHandler';
 import { useWorkspaceStore } from '../stores/workspaceStore';
 import type { LeafTileNode, TabContext, WorkspaceTab } from '../stores/workspaceStore';
 import { useShallow } from 'zustand/react/shallow';
@@ -25,25 +22,9 @@ interface TabManagerContextValue {
   tabs: WorkspaceTab[];
   activeTabId: string | null;
 
-  createTab: (title?: string | null) => WorkspaceTab;
-  closeTab: (tabId: string) => void;
-  switchToTab: (tabId: string) => void;
-  switchToTabByIndex: (index: number) => void;
-  switchToNextTab: () => string | null;
-  switchToPrevTab: () => string | null;
-  renameTab: (tabId: string, newTitle: string) => void;
-  moveTab: (fromIndex: number, toIndex: number) => void;
-  duplicateTab: (tabId: string) => WorkspaceTab | null;
-  clearAllTabs: () => void;
-
   getActiveTab: () => WorkspaceTab | null;
-  getTab: (tabId: string) => WorkspaceTab | null;
 
   updateTabContext: (tabId: string, context: Record<string, unknown>) => void;
-  getTabContext: (tabId: string) => TabContext | null;
-  getActiveTabContext: () => TabContext | null;
-
-  handleLayoutCommand: (command: ParsedCommand) => CommandResult;
 }
 
 const TabManagerContext = createContext<TabManagerContextValue | null>(null);
@@ -60,7 +41,6 @@ export const useTabManager = (): TabManagerContextValue => {
   return context;
 };
 
-const generateTabId = () => `tab_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 const generateTileId = () => `tile_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
 const DEFAULT_TAB_CONTEXT: TabContext = {
@@ -117,32 +97,6 @@ const createTile = (commandId: string | null = null): LeafTileNode => ({
   id: generateTileId(),
   type: 'leaf',
   commandId: commandId ?? undefined,
-});
-
-const extractTabNumber = (title: string): number | null => {
-  const match = title.match(/^Tab (\d+)$/);
-  return match ? parseInt(match[1]!, 10) : null;
-};
-
-const getNextTabNumber = (tabs: WorkspaceTab[]): number => {
-  if (tabs.length === 0) return 1;
-  const tabNumbers = tabs
-    .map((tab) => extractTabNumber(tab.title))
-    .filter((num): num is number => num !== null);
-  if (tabNumbers.length === 0) return 1;
-  return Math.max(...tabNumbers) + 1;
-};
-
-const createTab = (
-  title: string | null = null,
-  commandId: string | null = null,
-  initialContext: RawTabContext | null = null
-): WorkspaceTab => ({
-  id: generateTabId(),
-  title: title || `Tab ${Date.now()}`,
-  createdAt: Date.now(),
-  rootTile: createTile(commandId),
-  context: normalizeTabContext(initialContext),
 });
 
 /**
@@ -235,9 +189,9 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
         localStorage.removeItem('netdata_selected_room');
       }
     }
-    // If no tabs were loaded, start with none — tabs are created on demand via
-    // the /tab command. (The legacy "open /help on first run" behavior went
-    // away with the command-visualization grid.)
+    // If no tabs were loaded, start with none. Fresh installs run with zero
+    // tabs: the /tab command that once created them is gone (legacy tabs/
+    // tiles UI), so tabs only exist in stores persisted by old versions.
   }, [workspaceState]);
 
   /**
@@ -304,105 +258,9 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
     useWorkspaceStore.getState().triggerSave();
   }, [tabs, activeTabId]);
 
-  const createNewTab = useCallback((title: string | null = null): WorkspaceTab => {
-    const tabTitle = title || `Tab ${getNextTabNumber(tabs)}`;
-
-    const tabContext: RawTabContext | null = activeTabId
-      ? (() => {
-          const activeTab = tabs.find((t) => t.id === activeTabId);
-          if (!activeTab?.context) return null;
-          return {
-            mcpServers: {
-              attachedServerIds: [],
-              disabledServerIds: [],
-            },
-            customContext: { ...activeTab.context.customContext },
-          };
-        })()
-      : null;
-
-    const newTab = createTab(tabTitle, null, tabContext);
-
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
-
-    return newTab;
-  }, [tabs, activeTabId]);
-
-  const closeTab = useCallback((tabId: string) => {
-    setTabs((prev) => {
-      const filtered = prev.filter((t) => t.id !== tabId);
-      if (tabId === activeTabId) {
-        if (filtered.length > 0) {
-          setActiveTabId(filtered[filtered.length - 1]!.id);
-        } else {
-          setActiveTabId(null);
-        }
-      }
-      return filtered;
-    });
-  }, [activeTabId]);
-
-  const switchToTab = useCallback((tabId: string) => {
-    const tab = tabs.find((t) => t.id === tabId);
-    if (tab) {
-      setActiveTabId(tabId);
-    }
-  }, [tabs]);
-
-  const switchToTabByIndex = useCallback((index: number) => {
-    if (index > 0 && index <= tabs.length) {
-      const tab = tabs[index - 1]!;
-      switchToTab(tab.id);
-    }
-  }, [tabs, switchToTab]);
-
-  const switchToNextTab = useCallback((): string | null => {
-    if (tabs.length === 0) return null;
-    const currentIndex = tabs.findIndex((t) => t.id === activeTabId);
-    const nextIndex = (currentIndex + 1) % tabs.length;
-    const nextTabId = tabs[nextIndex]!.id;
-    switchToTab(nextTabId);
-    return nextTabId;
-  }, [tabs, activeTabId, switchToTab]);
-
-  const switchToPrevTab = useCallback((): string | null => {
-    if (tabs.length === 0) return null;
-    const currentIndex = tabs.findIndex((t) => t.id === activeTabId);
-    const prevIndex = currentIndex === 0 ? tabs.length - 1 : currentIndex - 1;
-    const prevTabId = tabs[prevIndex]!.id;
-    switchToTab(prevTabId);
-    return prevTabId;
-  }, [tabs, activeTabId, switchToTab]);
-
-  const renameTab = useCallback((tabId: string, newTitle: string) => {
-    setTabs((prev) =>
-      prev.map((tab) => (tab.id === tabId ? { ...tab, title: newTitle } : tab))
-    );
-  }, []);
-
-  const moveTab = useCallback((fromIndex: number, toIndex: number) => {
-    setTabs((prev) => {
-      const newTabs = [...prev];
-      const [movedTab] = newTabs.splice(fromIndex, 1);
-      if (movedTab) newTabs.splice(toIndex, 0, movedTab);
-      return newTabs;
-    });
-    useWorkspaceStore.getState().reorderTabs(fromIndex, toIndex);
-  }, []);
-
   const getActiveTab = useCallback((): WorkspaceTab | null => {
     return tabs.find((t) => t.id === activeTabId) || null;
   }, [tabs, activeTabId]);
-
-  const getTab = useCallback((tabId: string): WorkspaceTab | null => {
-    return tabs.find((t) => t.id === tabId) || null;
-  }, [tabs]);
-
-  const clearAllTabs = useCallback(() => {
-    setTabs([]);
-    setActiveTabId(null);
-  }, []);
 
   const updateTabContext = useCallback((tabId: string, context: Record<string, unknown>) => {
     setTabs((prev) =>
@@ -420,126 +278,16 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
     );
   }, []);
 
-  const getTabContext = useCallback((tabId: string): TabContext | null => {
-    const tab = tabs.find((t) => t.id === tabId);
-    return tab?.context || null;
-  }, [tabs]);
-
-  const getActiveTabContext = useCallback((): TabContext | null => {
-    if (!activeTabId) return null;
-    return getTabContext(activeTabId);
-  }, [activeTabId, getTabContext]);
-
-  const duplicateTab = useCallback((tabId: string): WorkspaceTab | null => {
-    const tab = tabs.find((t) => t.id === tabId);
-    if (!tab) return null;
-
-    const newTab: WorkspaceTab = {
-      ...tab,
-      id: generateTabId(),
-      title: `${tab.title} (Copy)`,
-      createdAt: Date.now(),
-      rootTile: {
-        ...tab.rootTile,
-        id: generateTileId(),
-      },
-      context: {
-        mcpServers: {
-          attachedServerIds: [...(tab.context?.mcpServers?.attachedServerIds || [])],
-          disabledServerIds: [...(tab.context?.mcpServers?.disabledServerIds || [])],
-        },
-        customContext: { ...(tab.context?.customContext || {}) },
-      },
-    };
-
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
-
-    return newTab;
-  }, [tabs]);
-
-  const handleLayoutCommand = useCallback((command: ParsedCommand): CommandResult => {
-    const { type } = command;
-
-    try {
-      switch (type) {
-        case 'tab': {
-          return handleTabCommand(command, {
-            tabs,
-            activeTabId,
-            createTab: createNewTab,
-            closeTab,
-            switchToTab,
-            switchToNextTab,
-            switchToPrevTab,
-            renameTab,
-            duplicateTab,
-            resetTab: () => ({ success: true, message: 'Tab reset' }),
-          });
-        }
-
-        case 'reset-all': {
-          clearAllTabs();
-          return { success: true, message: 'All tabs cleared' };
-        }
-
-        // The `/tile` command was removed alongside the tile-grid UI; it
-        // falls through to the default branch.
-
-        default:
-          return { success: false, message: `Unknown layout command: ${type}` };
-      }
-    } catch (error) {
-      console.error('Error handling layout command:', error);
-      return {
-        success: false,
-        message: `Error: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-  }, [tabs, activeTabId, createNewTab, switchToTab, switchToNextTab, switchToPrevTab, closeTab, renameTab, duplicateTab, clearAllTabs]);
-
   const value = useMemo<TabManagerContextValue>(() => ({
     tabs,
     activeTabId,
-
-    createTab: createNewTab,
-    closeTab,
-    switchToTab,
-    switchToTabByIndex,
-    switchToNextTab,
-    switchToPrevTab,
-    renameTab,
-    moveTab,
-    duplicateTab,
-    clearAllTabs,
-
     getActiveTab,
-    getTab,
-
     updateTabContext,
-    getTabContext,
-    getActiveTabContext,
-
-    handleLayoutCommand,
   }), [
     tabs,
     activeTabId,
-    createNewTab,
-    closeTab,
-    switchToTab,
-    switchToTabByIndex,
-    switchToNextTab,
-    switchToPrevTab,
-    renameTab,
-    moveTab,
-    duplicateTab,
-    clearAllTabs,
     getActiveTab,
-    getTab,
     updateTabContext,
-    getTabContext,
-    getActiveTabContext,
-    handleLayoutCommand,
   ]);
 
   return (

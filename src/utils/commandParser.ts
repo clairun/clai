@@ -129,38 +129,3 @@ export const parseCommand = (commandString: string): ParsedCommand => {
   };
 };
 
-/**
- * Format a command object back to a string
- */
-export const formatCommand = (
-  command: Pick<ParsedCommand, 'name' | 'args'> | null | undefined
-): string => {
-  if (!command) return '';
-
-  let formatted = command.name;
-
-  // Add positional arguments
-  if (command.args?.positional?.length > 0) {
-    formatted += ' ' + command.args.positional.join(' ');
-  }
-
-  // Add options
-  if (command.args?.options) {
-    for (const [key, value] of Object.entries(command.args.options)) {
-      if (value === true) {
-        formatted += ` --${key}`;
-      } else {
-        formatted += ` --${key}=${value}`;
-      }
-    }
-  }
-
-  return formatted;
-};
-
-/**
- * Check if a command is a layout command
- */
-export const isLayoutCommand = (command: { type: string }): boolean => {
-  return ['tab', 'tile', 'reset-all'].includes(command.type);
-};

@@ -1,12 +1,8 @@
-import React, { useState, useRef, useEffect, useContext, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useCommand } from '../../contexts/CommandContext';
 import { useTabManager } from '../../contexts/TabManagerContext';
 import { useChatManager } from '../../contexts/ChatManagerContext';
-import TabContext from '../../contexts/TabContext';
-import { parseCommand, isLayoutCommand } from '../../utils/commandParser';
-import { handleContextCommand, isContextCommand } from '../../utils/contextCommandHandler';
-import { isCommandSupported } from '../../utils/commandRegistry';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import ContextPanel from '../ContextPanel/ContextPanel';
 import styles from './TerminalEmulator.module.css';
@@ -32,12 +28,10 @@ interface TerminalEmulatorProps {
 }
 
 const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }: TerminalEmulatorProps) => {
-  const { executeCommand, commandHistory } = useCommand();
-  const { handleLayoutCommand, getActiveTab } = useTabManager();
+  const { commandHistory } = useCommand();
+  const { getActiveTab } = useTabManager();
   const { setActiveContext, openChat, isCurrentChatOpen } = useChatManager();
   const location = useLocation();
-  // Try to get tab context, but don't throw error if not available
-  const tabContext = useContext(TabContext);
   const [inputValue, setInputValue] = useState('');
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [outputMessages, setOutputMessages] = useState<OutputMessage[]>([]);
@@ -209,50 +203,12 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
       return;
     }
 
-    // Parse the command
-    const command = parseCommand(commandInput);
-
-    // Check if it's a context command (ctx)
-    if (isContextCommand(command)) {
-      // Check if TabContext is available
-      if (!tabContext) {
-        addOutputMessage('Context commands are not available yet. Please wait for the tab to load.', 'error');
-        return;
-      }
-
-      try {
-        const result = await handleContextCommand(command, tabContext);
-        if (result.success) {
-          addOutputMessage(result.message, 'success');
-        } else {
-          addOutputMessage(result.message, 'error');
-        }
-      } catch (error) {
-        addOutputMessage(
-          `Context command error: ${error instanceof Error ? error.message : String(error)}`,
-          'error',
-        );
-      }
-    }
-    // Check if it's a layout command (tab/tile management)
-    else if (isLayoutCommand(command)) {
-      const result = handleLayoutCommand(command);
-      if (result && !result.success) {
-        addOutputMessage(result.message || 'Layout command failed', 'error');
-      } else if (result && result.message) {
-        addOutputMessage(result.message, 'success');
-      }
-    }
-    // Execute visualization/action command with CommandContext
-    else {
-      // Validate command type using registry - no hardcoded list needed!
-      if (!isCommandSupported(command.type)) {
-        addOutputMessage(`Unknown command: /${command.type}. Available: /compact, /clear, /tab, /ctx, /reset-all.`, 'error');
-        return;
-      }
-
-      executeCommand(command);
-    }
+    // Anything else is unknown. The legacy /tab, /ctx, /tile and /reset-all
+    // commands (and the command-visualization registry they fed) were
+    // removed with the old tabs/tiles UI — the tab data model survives only
+    // as the key for the terminal's default session and its MCP context.
+    const unknownName = commandInput.split(/\s+/, 1)[0] || commandInput;
+    addOutputMessage(`Unknown command: /${unknownName}. Available: /compact, /clear.`, 'error');
   };
 
   // Handle keyboard events
@@ -389,7 +345,7 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
                 ? 'Message the selected agent...'
                 : isWorkspaceRoute
                   ? 'Message this workspace...'
-                  : 'Type to chat, or run a /command (/tab, /ctx)...'}
+                  : 'Type to chat, or run a /command (/compact, /clear)...'}
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
