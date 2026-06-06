@@ -10,7 +10,10 @@
   flex-wrap: nowrap;
   overflow-x: auto;
   min-width: 0;
-  padding: 0 4px;
+  /* Bottom padding reserves a lane for the horizontal scrollbar so it
+     never draws over the picker/badges (constant, so the card height
+     doesn't change when the bar overflows). */
+  padding: 0 4px 6px;
   scrollbar-width: thin;
 }
 
