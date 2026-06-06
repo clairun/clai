@@ -3,12 +3,14 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import MermaidDiagram from './MermaidDiagram';
 import styles from './MarkdownMessage.module.css';
 
 interface MarkdownMessageProps {
   content: string;
-  // Accepted for API parity with StreamingMarkdown; this component
-  // renders the same regardless of streaming state.
+  // Used by mermaid blocks to defer/debounce diagram rendering while
+  // content is still arriving; all other elements render the same
+  // regardless of streaming state.
   isStreaming?: boolean;
 }
 
@@ -48,7 +50,7 @@ const remarkPlugins = [remarkGfm];
  * The components object is also memoized to prevent ReactMarkdown from
  * re-processing on every render.
  */
-const MarkdownMessage = memo(({ content }: MarkdownMessageProps) => {
+const MarkdownMessage = memo(({ content, isStreaming = false }: MarkdownMessageProps) => {
   // Memoize the components object to prevent ReactMarkdown from re-rendering
   // when the parent re-renders but content hasn't changed
   const components = useMemo<Components>(() => ({
@@ -67,6 +69,17 @@ const MarkdownMessage = memo(({ content }: MarkdownMessageProps) => {
           <code className={styles.inlineCode} {...props}>
             {children}
           </code>
+        );
+      }
+
+      // Mermaid blocks render as diagrams (with raw-source fallback
+      // while streaming or on parse errors).
+      if (language === 'mermaid') {
+        return (
+          <MermaidDiagram
+            code={String(children).replace(/\n$/, '')}
+            isStreaming={isStreaming}
+          />
         );
       }
 
@@ -113,7 +126,7 @@ const MarkdownMessage = memo(({ content }: MarkdownMessageProps) => {
     em: ({ children }) => <em className={styles.italic}>{children}</em>,
     del: ({ children }) => <del className={styles.strikethrough}>{children}</del>,
     hr: () => <hr className={styles.horizontalRule} />,
-  }), []); // Empty deps - styles object is stable
+  }), [isStreaming]); // styles object is stable; isStreaming feeds mermaid blocks
 
   return (
     <div className={styles.markdownContainer}>
