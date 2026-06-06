@@ -5,6 +5,8 @@ import { useTabManager } from '../../contexts/TabManagerContext';
 import { useChatManager } from '../../contexts/ChatManagerContext';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import ContextPanel from '../ContextPanel/ContextPanel';
+import CommandHelpModal from './CommandHelpModal';
+import { dispatchWorkspaceUiCommand } from '../../utils/workspaceUiEvents';
 import styles from './TerminalEmulator.module.css';
 
 type OutputType = 'info' | 'success' | 'error' | 'warning';
@@ -37,6 +39,7 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
   const [outputMessages, setOutputMessages] = useState<OutputMessage[]>([]);
   const [isOutputVisible, setIsOutputVisible] = useState(true);
   const [isHoveringOutput, setIsHoveringOutput] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -188,8 +191,14 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
     // Strip the leading "/" and parse as command
     const commandInput = trimmed.slice(1);
 
-    const agentCommandName = commandInput.split(/\s+/, 1)[0];
-    if (agentCommandName === 'compact' || agentCommandName === 'clear') {
+    const commandName = commandInput.split(/\s+/, 1)[0];
+
+    if (commandName === 'help') {
+      setShowHelp(true);
+      return;
+    }
+
+    if (commandName === 'compact' || commandName === 'clear') {
       if (!onAgentCommand) {
         addOutputMessage('Assistant commands are not available here.', 'error');
         return;
@@ -203,12 +212,32 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
       return;
     }
 
+    // Workspace UI commands — delivered to FleetLayout (which owns the
+    // settings modal and the clone flow) via a window event, since the
+    // terminal lives in a different React subtree.
+    if (commandName === 'settings' || commandName === 'clone') {
+      if (!isWorkspaceRoute) {
+        addOutputMessage(`Open a workspace to use /${commandName}.`, 'error');
+        return;
+      }
+      dispatchWorkspaceUiCommand({
+        action: commandName,
+        workspaceId: currentWorkspaceId || 'default',
+      });
+      if (commandName === 'clone') {
+        addOutputMessage('Cloning workspace…', 'info');
+      }
+      return;
+    }
+
     // Anything else is unknown. The legacy /tab, /ctx, /tile and /reset-all
     // commands (and the command-visualization registry they fed) were
     // removed with the old tabs/tiles UI — the tab data model survives only
     // as the key for the terminal's default session and its MCP context.
-    const unknownName = commandInput.split(/\s+/, 1)[0] || commandInput;
-    addOutputMessage(`Unknown command: /${unknownName}. Available: /compact, /clear.`, 'error');
+    addOutputMessage(
+      `Unknown command: /${commandName || commandInput}. Type /help for available commands.`,
+      'error',
+    );
   };
 
   // Handle keyboard events
@@ -345,7 +374,7 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
                 ? 'Message the selected agent...'
                 : isWorkspaceRoute
                   ? 'Message this workspace...'
-                  : 'Type to chat, or run a /command (/compact, /clear)...'}
+                  : 'Type to chat, or run a /command (/help)...'}
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
@@ -370,6 +399,8 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
           ))}
         </div>
       )}
+
+      {showHelp && <CommandHelpModal onClose={() => setShowHelp(false)} />}
 
     </div>
   );

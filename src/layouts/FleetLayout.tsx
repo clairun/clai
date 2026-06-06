@@ -17,6 +17,7 @@ import { useFleetActivity } from '../hooks/useFleetActivity';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { errText, num } from '../fleet/workspaceStatus';
+import { onWorkspaceUiCommand } from '../utils/workspaceUiEvents';
 import type { WorkspaceListEntry, WorkspaceSnapshot } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
 
@@ -203,6 +204,17 @@ const FleetLayout = () => {
     },
     [cloneBusyId, loadWorkspaces, navigate],
   );
+
+  // Slash commands from the floating terminal (/settings, /clone) arrive as
+  // window events — the terminal lives in MainLayout, outside this subtree,
+  // so it can't call these handlers directly.
+  useEffect(() => onWorkspaceUiCommand(({ action, workspaceId }) => {
+    if (action === 'settings') {
+      handleOpenSettings(workspaceId);
+    } else if (action === 'clone') {
+      handleClone(workspaceId);
+    }
+  }), [handleOpenSettings, handleClone]);
 
   const handleRequestDelete = useCallback((id: string, title?: string) => {
     if (!id) return;
