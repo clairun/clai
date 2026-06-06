@@ -217,7 +217,7 @@ const VirtualizedListInner = <T,>({
     programmaticScrollRef.current = false;
 
     let isNearBottom: boolean;
-    if (scrolledUp && !wasProgrammatic) {
+    if (scrolledUp && !wasProgrammatic && distanceFromBottom > 1) {
       isNearBottom = false;
       // User is actively heading for older content and is close to the top —
       // ask for more. Gated on user intent (not raw position) so the
@@ -225,6 +225,14 @@ const VirtualizedListInner = <T,>({
       if (scrollTop < NEAR_TOP_THRESHOLD) {
         onApproachTopRef.current?.();
       }
+    } else if (scrolledUp && !wasProgrammatic) {
+      // scrollTop dropped but we're still glued to the bottom: that's the
+      // browser clamping scrollTop after the content got shorter (an item
+      // re-measuring smaller, or a re-keyed group falling back to the size
+      // estimate until it re-measures) — not the user scrolling up. The clamp
+      // isn't one of our writes, so the programmatic flag can't cover it.
+      // Treating it as user intent silently broke following mid-stream.
+      isNearBottom = true;
     } else if (scrolledDown || wasProgrammatic) {
       isNearBottom = distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
     } else {
