@@ -574,23 +574,19 @@
   min-height: 0;
   display: flex;
   align-items: stretch;
+  /* The conversation column never compresses below this. When the pane
+     can't fit chat + preview + drawer side by side, the floating panels
+     overlap the chat's right edge instead of crushing it to a sliver. */
+  --chat-min-width: 420px;
   /* Side-panel width — file preview & task transcript share this.
-     clamp(min, preferred, max) keeps it readable on small screens while
-     letting it grow on wide monitors. Panels' own `max-width` ensures they
-     never spill past the available room. */
-  --preview-panel-width: clamp(440px, 42vw, 720px);
-}
-
-@media (max-width: 1100px) {
-  .workspaceBody {
-    --preview-panel-width: 380px;
-  }
-}
-
-@media (max-width: 900px) {
-  .workspaceBody {
-    --preview-panel-width: 320px;
-  }
+     Sized against the PANE (100% = workspaceBody; both consumers resolve
+     percentages against it), not the viewport: 42vw used to overshoot
+     badly next to the workspace rail on non-maximized windows. Preferred
+     size is whatever fits beside the drawer (368px incl. gap) while
+     leaving the chat floor + 24px gap intact; floored at 360px so the
+     panel itself stays usable, capped at 720px on wide monitors. Panels'
+     own `max-width` ensures they never spill past the available room. */
+  --preview-panel-width: clamp(360px, calc(100% - 812px), 720px);
 }
 
 .workspaceMain {
@@ -617,19 +613,24 @@
        → padding = 1644 + 2*panel_width − W.   (1644 = 860 + 2*368 + 2*24)
     B. Chat collapses to content area (W − padding < 860): solve directly
        → padding = 368 + panel_width + 24 = 392 + panel_width.
-   The actual padding is `max(0, min(A, B))`:
+   The actual padding is `max(0, min(A, B, C))` where C caps the squeeze
+   at the chat floor:
      - very wide viewports → A goes negative → padding = 0, chat stays
        fully centered (no shift)
      - mid viewports → A < B → A applies, chat centered with 24px gap
      - narrow viewports → B < A → B applies, chat fills the available
-       content area with 24px gap and never disappears behind the panel.
+       content area with 24px gap and never disappears behind the panel
+     - too narrow for everything → C = 100% − chat floor wins, the chat
+       holds --chat-min-width and the floating panels overlap its right
+       edge instead of crushing it to a one-character column.
    368 = drawer width (360) + 8px gap to drawer. */
 .workspaceMainWithPreview {
   padding-right: max(
     0px,
     min(
       calc(1644px + 2 * var(--preview-panel-width, 600px) - 100%),
-      calc(392px + var(--preview-panel-width, 600px))
+      calc(392px + var(--preview-panel-width, 600px)),
+      calc(100% - var(--chat-min-width, 420px))
     )
   );
 }
@@ -641,7 +642,10 @@
    disappearing behind the drawer. This is the `--preview-panel-width: 0` form
    of `.workspaceMainWithPreview` above. */
 .workspaceMainWithDrawer {
-  padding-right: max(0px, min(calc(1644px - 100%), 392px));
+  padding-right: max(
+    0px,
+    min(calc(1644px - 100%), 392px, calc(100% - var(--chat-min-width, 420px)))
+  );
 }
 
 .workspaceDrawer {

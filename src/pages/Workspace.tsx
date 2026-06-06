@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useOutletContext, useParams } from 'react-router-dom';
 import type { FleetOutletContext } from '../layouts/FleetLayout';
 import { workspaceDeleteAgent } from '../api/client';
@@ -1162,8 +1162,50 @@ const ChatFirstLayout = ({
   hasOlderMessages,
   isLoadingOlderMessages,
   onLoadOlderMessages,
-}: ChatFirstLayoutProps) => (
-  <div className={styles.chatFirstContent}>
+}: ChatFirstLayoutProps) => {
+  const cardRef = useRef<HTMLDivElement | null>(null);
+
+  // Publish the conversation card's viewport geometry as document-level
+  // CSS vars so the fixed input bar (TerminalEmulator) can align itself
+  // with the conversation column instead of spanning the whole detail
+  // pane (same pattern as --terminal-height / --fleet-rail-width). The
+  // card's own ResizeObserver misses pure position shifts (margin:auto
+  // recentering while width stays at max), so the parent — whose content
+  // box changes whenever the side-panel padding animates or the window
+  // resizes — is observed too. Cleared on unmount so other routes fall
+  // back to the pane-centered default.
+  useLayoutEffect(() => {
+    const node = cardRef.current;
+    if (!node || typeof ResizeObserver === 'undefined') return undefined;
+
+    let raf: number | null = null;
+    const publish = () => {
+      raf = null;
+      const rect = node.getBoundingClientRect();
+      const rootStyle = document.documentElement.style;
+      rootStyle.setProperty('--chat-card-center', `${rect.left + rect.width / 2}px`);
+      rootStyle.setProperty('--chat-card-width', `${rect.width}px`);
+    };
+    const schedule = () => {
+      if (raf == null) raf = window.requestAnimationFrame(publish);
+    };
+
+    publish();
+    const observer = new ResizeObserver(schedule);
+    observer.observe(node);
+    if (node.parentElement) observer.observe(node.parentElement);
+
+    return () => {
+      observer.disconnect();
+      if (raf != null) window.cancelAnimationFrame(raf);
+      const rootStyle = document.documentElement.style;
+      rootStyle.removeProperty('--chat-card-center');
+      rootStyle.removeProperty('--chat-card-width');
+    };
+  }, []);
+
+  return (
+    <div className={styles.chatFirstContent} ref={cardRef}>
     {messages.length > 0 ? (
       <>
         {/* Keyed by workspace: this component instance is reused across
@@ -1212,8 +1254,9 @@ const ChatFirstLayout = ({
         </p>
       </div>
     )}
-  </div>
-);
+    </div>
+  );
+};
 
 const Workspace = () => {
   const params = useParams();

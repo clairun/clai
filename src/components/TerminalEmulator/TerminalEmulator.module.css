@@ -16,22 +16,29 @@
   .terminal {
     position: fixed;
     bottom: 12px;
-    /* Center over the detail pane, not the viewport. The Fleet rail occupies
-       the left edge (--fleet-rail-width, published by FleetLayout), so shift
-       right by half its width and size to the remaining space. Falls back to
-       viewport-centered 80vw when no rail is present (variable unset → 0px),
-       which is why a narrow window no longer pushes the card left of the chat
-       column or overflows the detail pane. */
-    left: calc(50% + var(--fleet-rail-width, 0px) / 2);
+    /* Align with the conversation column when a workspace publishes its
+       geometry (--chat-card-center / --chat-card-width, set by the
+       Workspace page): the input sits exactly under the conversation and
+       follows it when side panels shift it left, with a 420px floor so
+       it stays usable at the conversation's own minimum width.
+
+       Fallback (fleet & other routes): center over the detail pane — the
+       Fleet rail occupies the left edge (--fleet-rail-width, published
+       by FleetLayout), so shift right by half its width. Width takes the
+       larger of 80% of the detail pane and the chat card's own width
+       (min(860px, detail − 48px page padding)), so the bar matches the
+       conversation on small screens instead of sitting narrower. */
+    left: var(--chat-card-center, calc(50% + var(--fleet-rail-width, 0px) / 2));
     transform: translateX(-50%);
-    /* Take the larger of 80% of the detail pane and the chat card's own width
-       (min(860px, detail − 48px page padding), which it's centered on too). On
-       wide screens the 80% term wins and the card stays a wide floating bar; on
-       small screens the chat-width term wins so the terminal matches the
-       conversation rather than sitting narrower than it. */
     width: max(
-      calc((100vw - var(--fleet-rail-width, 0px)) * 0.8),
-      min(860px, calc(100vw - var(--fleet-rail-width, 0px) - 48px))
+      420px,
+      var(
+        --chat-card-width,
+        max(
+          calc((100vw - var(--fleet-rail-width, 0px)) * 0.8),
+          min(860px, calc(100vw - var(--fleet-rail-width, 0px) - 48px))
+        )
+      )
     );
     transition: left var(--transition-fast), width var(--transition-fast);
     z-index: 100;
