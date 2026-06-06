@@ -1182,9 +1182,17 @@ const ChatFirstLayout = ({
     const publish = () => {
       raf = null;
       const rect = node.getBoundingClientRect();
+      // When the pane is too narrow the card slides left out of it (its
+      // left edge clips under the workspace rail — see .chatFirstContent),
+      // but the input bar must stay inside the pane. Publish the VISIBLE
+      // strip instead of the raw card rect, floored at the same minimum
+      // as the CSS --chat-min-width so the bar never shrinks below it.
+      const paneLeft = node.parentElement?.getBoundingClientRect().left ?? rect.left;
+      const visibleLeft = Math.max(rect.left, paneLeft);
+      const width = Math.max(rect.right - visibleLeft, 420);
       const rootStyle = document.documentElement.style;
-      rootStyle.setProperty('--chat-card-center', `${rect.left + rect.width / 2}px`);
-      rootStyle.setProperty('--chat-card-width', `${rect.width}px`);
+      rootStyle.setProperty('--chat-card-center', `${visibleLeft + width / 2}px`);
+      rootStyle.setProperty('--chat-card-width', `${width}px`);
     };
     const schedule = () => {
       if (raf == null) raf = window.requestAnimationFrame(publish);

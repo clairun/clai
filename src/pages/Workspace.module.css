@@ -575,8 +575,11 @@
   display: flex;
   align-items: stretch;
   /* The conversation column never compresses below this. When the pane
-     can't fit chat + preview + drawer side by side, the floating panels
-     overlap the chat's right edge instead of crushing it to a sliver. */
+     can't fit chat + preview + drawer side by side, the chat card keeps
+     this width and slides LEFT, its left edge clipping out of the pane
+     (visually: under the workspace rail) instead of crushing to a
+     sliver. Kept in sync with the JS floor in ChatFirstLayout's
+     geometry publisher (Workspace.tsx). */
   --chat-min-width: 420px;
   /* Side-panel width — file preview & task transcript share this.
      Sized against the PANE (100% = workspaceBody; both consumers resolve
@@ -613,24 +616,23 @@
        → padding = 1644 + 2*panel_width − W.   (1644 = 860 + 2*368 + 2*24)
     B. Chat collapses to content area (W − padding < 860): solve directly
        → padding = 368 + panel_width + 24 = 392 + panel_width.
-   The actual padding is `max(0, min(A, B, C))` where C caps the squeeze
-   at the chat floor:
+   The actual padding is `max(0, min(A, B))`:
      - very wide viewports → A goes negative → padding = 0, chat stays
        fully centered (no shift)
      - mid viewports → A < B → A applies, chat centered with 24px gap
      - narrow viewports → B < A → B applies, chat fills the available
        content area with 24px gap and never disappears behind the panel
-     - too narrow for everything → C = 100% − chat floor wins, the chat
-       holds --chat-min-width and the floating panels overlap its right
-       edge instead of crushing it to a one-character column.
+     - too narrow for everything → the chat card holds --chat-min-width
+       and slides LEFT out of the pane (see .chatFirstContent), its left
+       edge clipping under the workspace rail, so the panels stay fully
+       visible and the chat's right portion stays readable.
    368 = drawer width (360) + 8px gap to drawer. */
 .workspaceMainWithPreview {
   padding-right: max(
     0px,
     min(
       calc(1644px + 2 * var(--preview-panel-width, 600px) - 100%),
-      calc(392px + var(--preview-panel-width, 600px)),
-      calc(100% - var(--chat-min-width, 420px))
+      calc(392px + var(--preview-panel-width, 600px))
     )
   );
 }
@@ -642,10 +644,7 @@
    disappearing behind the drawer. This is the `--preview-panel-width: 0` form
    of `.workspaceMainWithPreview` above. */
 .workspaceMainWithDrawer {
-  padding-right: max(
-    0px,
-    min(calc(1644px - 100%), 392px, calc(100% - var(--chat-min-width, 420px)))
-  );
+  padding-right: max(0px, min(calc(1644px - 100%), 392px));
 }
 
 .workspaceDrawer {
@@ -951,9 +950,24 @@
   background: var(--color-bg-elevated);
   box-shadow: var(--shadow-md);
   overflow: auto;
-  max-width: 860px;
-  width: 100%;
-  margin: 0 auto;
+  /* Width: fill the available column, between the readable floor and the
+     860px cap. Margin-left replaces `margin: 0 auto` with an explicit
+     three-regime formula (100% = the column width after any side-panel
+     padding):
+       - column ≥ 860 → (100% − 860)/2 wins → centered, as before
+       - floor ≤ column < 860 → both terms ≤ 0, outer min(0)... left term
+         is 0 → pinned left, fills the column, as before
+       - column < floor → 100% − floor (negative) wins → the card keeps
+         the floor width and slides left out of the pane; ancestors clip
+         it at the pane edge so it reads as sliding under the workspace
+         rail, while its right edge still clears the floating panels. */
+  width: clamp(var(--chat-min-width, 420px), 100%, 860px);
+  margin: 0;
+  margin-left: max(
+    min(0px, calc(100% - var(--chat-min-width, 420px))),
+    calc((100% - 860px) / 2)
+  );
+  transition: margin-left 220ms ease-out;
 }
 
 /* Soft gradient accent line along the top — mirrors the Fleet detail pane
