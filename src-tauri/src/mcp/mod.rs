@@ -5,4 +5,5 @@
 //! agent-facing tool surface itself lives in `crate::assistant::tools`.
 
 pub mod client;
+pub mod oauth;
 pub mod tools;

@@ -9,7 +9,8 @@ use rmcp::{
     },
     service::{RoleClient, RunningService, ServiceExt},
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+        auth::AuthClient, streamable_http_client::StreamableHttpClientTransportConfig,
+        StreamableHttpClientTransport,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,7 @@ use tokio::{
 use crate::assistant::auth::McpSecretStorage;
 use crate::assistant::types::ToolDefinition;
 use crate::config::{ClaiConfig, McpServerAuth, McpServerConfig};
+use crate::mcp::oauth;
 
 /// External MCP connect + tool discovery must not hang the `clai` bridge's
 /// `list_tools` — Claude Code waits on that call to expose *any* tool, so a
@@ -222,6 +224,7 @@ impl McpClientManager {
             McpServerAuth::None => Ok(None),
             McpServerAuth::BearerToken { secret_ref } => McpSecretStorage::get_secret(secret_ref)
                 .map_err(|e| format!("Failed to read MCP server credential: {}", e)),
+            McpServerAuth::OAuth { .. } => Ok(None),
         }
     }
 
@@ -291,7 +294,7 @@ impl McpClientManager {
     }
 
     async fn ensure_connected(&mut self, server_id: &str) -> Result<bool, String> {
-        let (needs_connect, config, bearer_token) = {
+        let (needs_connect, config) = {
             let server = self
                 .servers
                 .get(server_id)
@@ -307,15 +310,7 @@ impl McpClientManager {
                 .map(ConnectedMcpServer::is_transport_closed)
                 .unwrap_or(true);
 
-            let bearer_token = match &server.config.auth {
-                McpServerAuth::None => None,
-                McpServerAuth::BearerToken { secret_ref } => {
-                    McpSecretStorage::get_secret(secret_ref)
-                        .map_err(|e| format!("Failed to read MCP server credential: {}", e))?
-                }
-            };
-
-            (needs_connect, server.config.clone(), bearer_token)
+            (needs_connect, server.config.clone())
         };
 
         if !needs_connect {
@@ -324,7 +319,7 @@ impl McpClientManager {
 
         let connection = match tokio::time::timeout(
             MCP_DISCOVERY_TIMEOUT,
-            Self::connect_server(&config, bearer_token),
+            Self::connect_server(&config),
         )
         .await
         {
@@ -442,10 +437,7 @@ impl McpClientManager {
         }
     }
 
-    async fn connect_server(
-        config: &McpServerConfig,
-        bearer_token: Option<String>,
-    ) -> Result<ConnectedMcpServer, String> {
+    async fn connect_server(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
         match &config.transport {
             crate::config::McpServerTransport::Http { url } => {
                 // Build on rmcp's own bundled reqwest client via `from_config`
@@ -453,19 +445,55 @@ impl McpClientManager {
                 // rmcp (rmcp 1.7 uses reqwest 0.13; CLAI stays on 0.12).
                 let mut transport_config =
                     StreamableHttpClientTransportConfig::with_uri(url.clone());
-                if let Some(token) = bearer_token {
-                    transport_config = transport_config.auth_header(token);
-                }
-
-                let service =
-                    ().serve(StreamableHttpClientTransport::from_config(transport_config))
+                let service = match &config.auth {
+                    McpServerAuth::None => {
+                        ().serve(StreamableHttpClientTransport::from_config(transport_config))
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "Failed to connect to HTTP MCP server `{}`: {}",
+                                    config.name, error
+                                )
+                            })?
+                    }
+                    McpServerAuth::BearerToken { secret_ref } => {
+                        let token = McpSecretStorage::get_secret(secret_ref)
+                            .map_err(|e| format!("Failed to read MCP server credential: {}", e))?
+                            .ok_or_else(|| {
+                                format!("Bearer token missing for MCP server `{}`", config.name)
+                            })?;
+                        transport_config = transport_config.auth_header(token);
+                        ().serve(StreamableHttpClientTransport::from_config(transport_config))
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "Failed to connect to HTTP MCP server `{}`: {}",
+                                    config.name, error
+                                )
+                            })?
+                    }
+                    McpServerAuth::OAuth { .. } => {
+                        let auth_manager = oauth::runtime_auth_manager_for_server(config).await?;
+                        let http_client = rmcp_reqwest::Client::builder()
+                            .pool_max_idle_per_host(0)
+                            .build()
+                            .map_err(|error| {
+                                format!("Failed to build OAuth HTTP client: {}", error)
+                            })?;
+                        let auth_client = AuthClient::new(http_client, auth_manager);
+                        ().serve(StreamableHttpClientTransport::with_client(
+                            auth_client,
+                            transport_config,
+                        ))
                         .await
                         .map_err(|error| {
                             format!(
-                                "Failed to connect to HTTP MCP server `{}`: {}",
+                                "Failed to connect to OAuth MCP server `{}`: {}",
                                 config.name, error
                             )
-                        })?;
+                        })?
+                    }
+                };
 
                 Ok(ConnectedMcpServer::Http(service))
             }

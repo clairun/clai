@@ -125,6 +125,16 @@
   background: var(--color-bg-secondary, #F6F4F2);
 }
 
+.pendingPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--color-primary-alpha-20);
+  border-radius: 8px;
+  background: var(--color-primary-alpha-05);
+}
+
 .templateHeader {
   display: flex;
   justify-content: space-between;
@@ -240,6 +250,34 @@
   font-size: 12px;
   color: var(--color-text-tertiary);
   line-height: 1.4;
+}
+
+.authStatus {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.authConnected {
+  background: var(--color-success-bg);
+  color: var(--color-success-dark);
+}
+
+.authDisconnected {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-dark, #92400E);
+}
+
+.oauthActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .checkboxGroup {
