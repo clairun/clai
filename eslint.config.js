@@ -8,10 +8,10 @@ import prettier from 'eslint-config-prettier';
 /**
  * ESLint flat config for CLAI frontend.
  *
- * React 19 strict hooks rules are disabled for now because the
- * existing codebase was written before these strict rules existed.
- * Re-enable them incrementally in follow-up PRs:
- *   - react-hooks/exhaustive-deps
+ * React 19 strict hooks rules are all enabled as warnings as of
+ * 2026-06-07 (clai#5, all 7 sub-rules). The next step is to
+ * promote them from `warn` to `error` in a focused follow-up PR,
+ * after the violation cleanup PRs land.
  *
  * `react-hooks/purity` was enabled as a warning on 2026-06-05 (clai#5).
  * The current codebase is clean for this rule (0 violations), so the
@@ -156,6 +156,82 @@ import prettier from 'eslint-config-prettier';
  * file or one PR per pattern class); this PR is the
  * gate-establishment flip only. Once all 29 are resolved, this
  * rule will be promoted from `warn` to `error` in a separate PR.
+ *
+ * `react-hooks/exhaustive-deps` was enabled as a warning on
+ * 2026-06-07 (clai#5). The rule validates that every React hook
+ * whose deps array is checked (useEffect, useMemo, useCallback,
+ * useImperativeHandle, useLayoutEffect) has a deps array that
+ * exactly matches the set of values read inside the hook body.
+ * The rationale is that an effect with a missing or extra dep
+ * will either run too often (extra dep invalidates the memo on
+ * every render) or too rarely (missing dep captures a stale
+ * value across renders). Both bugs are time-dependent and hard
+ * to reproduce. The current codebase is mostly clean — the rule
+ * surfaces only 10 violations across 6 files (the lowest count
+ * of any sub-rule so far; the issue estimated ~29). Four
+ * distinct violation shapes appear, in order of frequency:
+ *   1. "Missing dep" — 4 instances. A `useEffect` reads a
+ *      value that is not in its deps array, so the effect will
+ *      never re-run when that value changes. Examples:
+ *      src/components/AskUserPanel/AskUserPanel.tsx:62 (missing
+ *      `pending`), src/components/Settings/WorkspaceSettingsModal.tsx:894
+ *      (missing `snapshot`), src/pages/Workspace.tsx:659 (missing
+ *      `loadDir`), src/pages/Workspace.tsx:672 (missing
+ *      `childrenByPath` and `loadDir`). The fix is usually to
+ *      add the dep, or — if the dep changes on every render
+ *      (e.g. an inline function) — to use `useCallback` to
+ *      stabilize it first. The `react-hooks/exhaustive-deps`
+ *      autofix will propose a fix, but the fix often has to be
+ *      hand-edited because the autofix would re-introduce the
+ *      "changes every render" problem.
+ *   2. "Stale-ref in cleanup" — 2 instances. A `useEffect`
+ *      cleanup function reads `someRef.current`, but the cleanup
+ *      is invoked when the component unmounts or the effect
+ *      re-runs, by which time `someRef.current` may have
+ *      changed. Examples:
+ *      src/components/PermissionAttentionNotifications.tsx:138
+ *      and src/components/WorkspaceTaskNotifications.tsx:82
+ *      (both use `timersRef.current` in cleanup). The fix is
+ *      to copy `someRef.current` to a local variable inside
+ *      the effect body and read the local in cleanup. This is
+ *      a well-known React pattern; see
+ *      https://react.dev/reference/react/useEffect#caveats.
+ *   3. "Inline expression in deps" — 3 instances. A `useMemo`
+ *      or `useCallback` deps array contains a logical or
+ *      arithmetic expression that is recomputed on every render
+ *      (e.g. `a || b`, `a ?? defaultValue`), so the memo
+ *      never actually memoizes. Examples:
+ *      src/components/Settings/WorkspaceSettingsModal.tsx:472
+ *      (deps array contains `agents` which is a logical
+ *      expression recomputed on every render),
+ *      src/pages/Workspace.tsx:1580 (deps array contains
+ *      `memories` which is a logical expression),
+ *      src/pages/Workspace.tsx:1584 (deps array contains
+ *      `artifacts` which is a logical expression). The fix is
+ *      either to wrap the expression in its own `useMemo`, or
+ *      to move the expression inside the hook callback so the
+ *      dep is the underlying stable value instead of the derived
+ *      one.
+ *   4. "Unnecessary dep" — 1 instance. A `useMemo` lists a dep
+ *      that is itself derived from the value being memoized,
+ *      creating a circular dependency that the React Compiler
+ *      cannot resolve. Example:
+ *      src/components/common/VirtualizedList.tsx:372 (deps
+ *      array contains `measurementVersion`, which is a
+ *      counter bumped inside the effect that consumes the
+ *      memoized value). The fix is to remove the dep.
+ * Affected files (counts in parens):
+ *   - src/pages/Workspace.tsx (4)
+ *   - src/components/Settings/WorkspaceSettingsModal.tsx (2)
+ *   - src/components/AskUserPanel/AskUserPanel.tsx (1)
+ *   - src/components/PermissionAttentionNotifications.tsx (1)
+ *   - src/components/WorkspaceTaskNotifications.tsx (1)
+ *   - src/components/common/VirtualizedList.tsx (1)
+ * This is the LAST sub-rule of issue #5 — all 7 React 19 strict
+ * hooks rules are now enabled as warnings. The next step is to
+ * start filing cleanup PRs (likely one per file or per pattern
+ * class), then promote the rules from `warn` to `error` in
+ * a separate PR once the codebase is clean.
  */
 export default [
   js.configs.recommended,
@@ -184,7 +260,7 @@ export default [
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       'react-hooks/set-state-in-effect': 'warn',
-      'react-hooks/exhaustive-deps': 'off',
+      'react-hooks/exhaustive-deps': 'warn',
       'react-hooks/preserve-manual-memoization': 'warn',
       'react-hooks/refs': 'warn',
       'react-hooks/immutability': 'warn',
@@ -221,9 +297,8 @@ export default [
       'react/display-name': 'off',
       'react/no-unescaped-entities': 'off',
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
-      // Disabled React 19 strict hooks rules (see top comment)
       'react-hooks/set-state-in-effect': 'warn',
-      'react-hooks/exhaustive-deps': 'off',
+      'react-hooks/exhaustive-deps': 'warn',
       'react-hooks/preserve-manual-memoization': 'warn',
       'react-hooks/refs': 'warn',
       'react-hooks/immutability': 'warn',
