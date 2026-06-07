@@ -12,7 +12,7 @@ import styles from './McpServerFormModal.module.css';
 interface McpServerFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (data: Record<string, unknown>) => Promise<McpServerResponse>;
+  onSubmit: (data: McpServerFormPayload) => Promise<McpServerResponse>;
   onServerSaved: (server: McpServerResponse) => void;
   server?: McpServerResponse | null;
   catalogEntry?: McpCatalogEntry | null;
@@ -27,7 +27,7 @@ interface OAuthLoginState {
   expiresAt: string;
 }
 
-interface FormPayload {
+export interface McpServerFormPayload {
   name: string;
   enabled: boolean;
   transport: Record<string, unknown>;
@@ -196,7 +196,7 @@ const McpServerFormModal = ({
     return null;
   }
 
-  const buildPayload = (): FormPayload | null => {
+  const buildPayload = (): McpServerFormPayload | null => {
     const trimmedName = name.trim();
     if (!trimmedName) {
       setError('Server name is required');

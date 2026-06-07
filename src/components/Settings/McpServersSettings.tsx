@@ -8,6 +8,7 @@ import {
   updateMcpServer,
 } from '../../api/client';
 import McpServerFormModal from './McpServerFormModal';
+import type { McpServerFormPayload } from './McpServerFormModal';
 import type {
   McpCatalogEntry,
   McpServerAuthResponse,
@@ -170,7 +171,7 @@ const McpServersSettings = () => {
     window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
   };
 
-  const handleSubmit = async (formData: Record<string, unknown>): Promise<McpServerResponse> => {
+  const handleSubmit = async (formData: McpServerFormPayload): Promise<McpServerResponse> => {
     setError(null);
     try {
       let saved: McpServerResponse;
