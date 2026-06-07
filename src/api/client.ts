@@ -1,9 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  McpCatalogEntry,
+  McpOAuthStartResponse,
   McpServerResponse,
   SkillCatalogResponse,
   SkillDefinition,
   SkillSourceResponse,
+  StartMcpOAuthLoginRequest,
   WorkspaceAgentResponse,
 } from '../generated/bindings';
 
@@ -270,6 +273,14 @@ export const getMcpServer = async (id: string): Promise<McpServerResponse> => {
   }
 };
 
+export const getMcpServerCatalog = async (): Promise<McpCatalogEntry[]> => {
+  try {
+    return await invoke('get_mcp_server_catalog');
+  } catch (error) {
+    return handleApiError(error, 'Failed to get MCP server catalog');
+  }
+};
+
 export const createMcpServer = async (request: unknown): Promise<McpServerResponse> => {
   try {
     return await invoke('create_mcp_server', { request });
@@ -291,5 +302,39 @@ export const deleteMcpServer = async (id: string): Promise<void> => {
     return await invoke('delete_mcp_server', { id });
   } catch (error) {
     return handleApiError(error, 'Failed to delete MCP server');
+  }
+};
+
+export const startMcpOAuthLogin = async (
+  request: StartMcpOAuthLoginRequest
+): Promise<McpOAuthStartResponse> => {
+  try {
+    return await invoke('start_mcp_oauth_login', { request });
+  } catch (error) {
+    return handleApiError(error, 'Failed to start MCP OAuth login');
+  }
+};
+
+export const finishMcpOAuthLogin = async (loginId: string): Promise<McpServerResponse> => {
+  try {
+    return await invoke('finish_mcp_oauth_login', { loginId });
+  } catch (error) {
+    return handleApiError(error, 'Failed to finish MCP OAuth login');
+  }
+};
+
+export const cancelMcpOAuthLogin = async (loginId: string): Promise<void> => {
+  try {
+    return await invoke('cancel_mcp_oauth_login', { loginId });
+  } catch (error) {
+    return handleApiError(error, 'Failed to cancel MCP OAuth login');
+  }
+};
+
+export const disconnectMcpOAuth = async (id: string): Promise<McpServerResponse> => {
+  try {
+    return await invoke('disconnect_mcp_oauth', { id });
+  } catch (error) {
+    return handleApiError(error, 'Failed to disconnect MCP OAuth');
   }
 };

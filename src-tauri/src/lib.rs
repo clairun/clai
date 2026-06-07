@@ -69,6 +69,8 @@ pub struct AppState {
     pub config_manager: Mutex<ConfigManager>,
     /// External MCP client registry.
     pub mcp_client_manager: AsyncMutex<mcp::client::McpClientManager>,
+    /// In-memory MCP OAuth login sessions awaiting browser callback/finish.
+    pub pending_mcp_oauth: AsyncMutex<mcp::oauth::McpOAuthSessionRegistry>,
     /// Agent scheduler (manages agent instances)
     pub scheduler: SharedScheduler,
     /// In-flight shell-permission approval requests awaiting user decision.
@@ -94,6 +96,7 @@ impl AppState {
         Ok(Self {
             config_manager: Mutex::new(config_manager),
             mcp_client_manager: AsyncMutex::new(mcp_client_manager),
+            pending_mcp_oauth: AsyncMutex::new(mcp::oauth::McpOAuthSessionRegistry::new()),
             scheduler: agents::create_shared_scheduler(),
             pending_approvals: commands::permissions::PendingApprovals::new(),
             pending_path_grants: commands::path_grants::PendingPathGrants::new(),
@@ -254,6 +257,7 @@ pub fn run() {
             manager.sync_from_config(&initial_config);
             manager
         }),
+        pending_mcp_oauth: AsyncMutex::new(mcp::oauth::McpOAuthSessionRegistry::new()),
         scheduler,
         pending_approvals: commands::permissions::PendingApprovals::new(),
         pending_path_grants: commands::path_grants::PendingPathGrants::new(),
@@ -327,9 +331,14 @@ pub fn run() {
             // MCP server commands
             commands::mcp_servers::get_mcp_servers,
             commands::mcp_servers::get_mcp_server,
+            commands::mcp_servers::get_mcp_server_catalog,
             commands::mcp_servers::create_mcp_server,
             commands::mcp_servers::update_mcp_server,
             commands::mcp_servers::delete_mcp_server,
+            commands::mcp_servers::start_mcp_oauth_login,
+            commands::mcp_servers::finish_mcp_oauth_login,
+            commands::mcp_servers::cancel_mcp_oauth_login,
+            commands::mcp_servers::disconnect_mcp_oauth,
             // Provider commands
             commands::provider::get_ai_provider,
             commands::provider::set_ai_provider,

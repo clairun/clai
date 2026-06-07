@@ -58,9 +58,13 @@ export type FilesystemPathAccess = "read_only" | "read_write";
 
 export type InterAgentCallContext = { callId: string, callerAgentId: string | null, callerSessionId: string, callerRunId: string, callerToolCallId: string | null, calleeAgentId: string, exposedToolName: string, };
 
-export type McpServerAuthRequest = { "type": "none" } | { "type": "bearer_token", token: string | null, };
+export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
-export type McpServerAuthResponse = { "type": "none" } | { "type": "bearer_token", has_secret: boolean, };
+export type McpOAuthStartResponse = { loginId: string, serverId: string, authorizationUrl: string, expiresAt: string, };
+
+export type McpServerAuthRequest = { "type": "none" } | { "type": "bearer_token", token: string | null, } | { "type": "oauth", scopes: Array<string>, client_id: string | null, client_secret: string | null, client_metadata_url: string | null, };
+
+export type McpServerAuthResponse = { "type": "none" } | { "type": "bearer_token", has_secret: boolean, } | { "type": "oauth", connected: boolean, needs_login: boolean, authorization_server_issuer: string | null, scopes: Array<string>, client_id_configured: boolean, client_secret_configured: boolean, client_metadata_url: string | null, last_error: string | null, };
 
 export type McpServerResponse = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthResponse, createdAt: string, updatedAt: string, };
 
@@ -179,6 +183,8 @@ export type SkillSourceDiagnostic = { sourceId: string, sourceName: string, ok: 
 export type SkillSourceKind = { "kind": "local", path: string, } | { "kind": "git", uri: string, reference?: string | null, local_path?: string | null, };
 
 export type SkillSourceResponse = { managedKind: string | null, readOnly: boolean, id: string, name: string, enabled: boolean, source: SkillSourceKind, createdAt: string, updatedAt: string, };
+
+export type StartMcpOAuthLoginRequest = { serverId: string | null, name: string, enabled: boolean, url: string, scopes: Array<string>, clientId: string | null, clientSecret: string | null, clientMetadataUrl: string | null, };
 
 /**
  * A probe-table entry the UI can offer in a dropdown.

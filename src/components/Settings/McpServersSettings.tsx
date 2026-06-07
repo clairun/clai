@@ -2,11 +2,15 @@ import React, { useEffect, useState } from 'react';
 import {
   createMcpServer,
   deleteMcpServer,
+  disconnectMcpOAuth,
+  getMcpServerCatalog,
   getMcpServers,
   updateMcpServer,
 } from '../../api/client';
 import McpServerFormModal from './McpServerFormModal';
+import type { McpServerFormPayload } from './McpServerFormModal';
 import type {
+  McpCatalogEntry,
   McpServerAuthResponse,
   McpServerResponse,
   McpServerTransport,
@@ -15,10 +19,19 @@ import styles from './McpServersSettings.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
 
+type McpSection = 'catalog' | 'configured';
+
 const PlusIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="12" y1="5" x2="12" y2="19" />
     <line x1="5" y1="12" x2="19" y2="12" />
+  </svg>
+);
+
+const LinkIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11.5 4.43" />
+    <path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 0 0 7.07 7.07l1.33-1.33" />
   </svg>
 );
 
@@ -39,15 +52,43 @@ const authSummary = (auth: McpServerAuthResponse | null | undefined): string => 
     // `auth.hasSecret` and always rendered "missing".
     return auth.has_secret ? 'Bearer token configured' : 'Bearer token missing';
   }
-  return 'No auth';
+  if (auth.type === 'oauth') {
+    return auth.connected ? 'OAuth connected' : 'OAuth reconnect required';
+  }
+  return 'Unknown auth';
 };
+
+const normalizeUrl = (value: string): string => value.replace(/\/+$/, '').toLowerCase();
+
+const configuredCatalogServer = (
+  entry: McpCatalogEntry,
+  servers: McpServerResponse[]
+): McpServerResponse | undefined => servers.find((server) => (
+  server.transport?.type === 'http'
+    && normalizeUrl(server.transport.url) === normalizeUrl(entry.endpointUrl)
+));
+
+const initials = (name: string): string => name
+  .split(/\s+/)
+  .filter(Boolean)
+  .slice(0, 2)
+  .map((part) => part[0]?.toUpperCase())
+  .join('') || 'M';
+
+const errText = (err: unknown, fallback: string): string =>
+  typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
 const McpServersSettings = () => {
   const [servers, setServers] = useState<McpServerResponse[]>([]);
+  const [catalog, setCatalog] = useState<McpCatalogEntry[]>([]);
+  const [failedLogos, setFailedLogos] = useState<Set<string>>(() => new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingServer, setEditingServer] = useState<McpServerResponse | null>(null);
+  const [selectedCatalogEntry, setSelectedCatalogEntry] = useState<McpCatalogEntry | null>(null);
+  const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<McpSection>('catalog');
 
   useEffect(() => {
     loadServers();
@@ -58,11 +99,15 @@ const McpServersSettings = () => {
     setError(null);
 
     try {
-      const result = await getMcpServers();
-      setServers(result || []);
+      const [serverResult, catalogResult] = await Promise.all([
+        getMcpServers(),
+        getMcpServerCatalog(),
+      ]);
+      setServers(serverResult || []);
+      setCatalog(catalogResult || []);
     } catch (loadError) {
       console.error('[McpServersSettings] Failed to load servers:', loadError);
-      setError('Failed to load MCP servers. Please try again.');
+      setError(errText(loadError, 'Failed to load MCP servers. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -70,11 +115,20 @@ const McpServersSettings = () => {
 
   const handleCreate = () => {
     setEditingServer(null);
+    setSelectedCatalogEntry(null);
+    setIsFormOpen(true);
+  };
+
+  const handleConnectCatalogEntry = (entry: McpCatalogEntry) => {
+    const configured = configuredCatalogServer(entry, servers);
+    setEditingServer(configured || null);
+    setSelectedCatalogEntry(entry);
     setIsFormOpen(true);
   };
 
   const handleEdit = (server: McpServerResponse) => {
     setEditingServer(server);
+    setSelectedCatalogEntry(null);
     setIsFormOpen(true);
   };
 
@@ -90,50 +144,137 @@ const McpServersSettings = () => {
     }
   };
 
-  const handleSubmit = async (formData: Record<string, unknown>) => {
+  const handleDisconnectOAuth = async (server: McpServerResponse) => {
+    if (disconnectingId) {
+      return;
+    }
+    setDisconnectingId(server.id);
     setError(null);
     try {
+      const updated = await disconnectMcpOAuth(server.id);
+      setServers((current) => current.map((item) => (
+        item.id === updated.id ? updated : item
+      )));
+      window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
+    } catch (disconnectError) {
+      console.error('[McpServersSettings] Failed to disconnect OAuth:', disconnectError);
+      setError(errText(disconnectError, 'Failed to disconnect MCP OAuth.'));
+    } finally {
+      setDisconnectingId(null);
+    }
+  };
+
+  const upsertServer = (saved: McpServerResponse) => {
+    setServers((current) => {
+      if (current.some((server) => server.id === saved.id)) {
+        return current.map((server) => (server.id === saved.id ? saved : server));
+      }
+      return [...current, saved];
+    });
+    window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
+  };
+
+  const handleSubmit = async (formData: McpServerFormPayload): Promise<McpServerResponse> => {
+    setError(null);
+    try {
+      let saved: McpServerResponse;
       if (editingServer) {
-        const updated = await updateMcpServer({
+        saved = await updateMcpServer({
           id: editingServer.id,
           ...formData,
         });
-        setServers((current) => current.map((server) => (
-          server.id === updated.id ? updated : server
-        )));
       } else {
-        const created = await createMcpServer(formData);
-        setServers((current) => [...current, created]);
+        saved = await createMcpServer(formData);
       }
-      window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
-      setIsFormOpen(false);
-      setEditingServer(null);
+      upsertServer(saved);
+      return saved;
     } catch (submitError) {
       console.error('[McpServersSettings] Failed to save server:', submitError);
       throw submitError;
     }
   };
 
-  return (
-    <div className={styles.container}>
-      <div className={styles.header}>
-        <div className={styles.headerText}>
-          <h3 className={styles.title}>MCP Servers</h3>
-          <p className={styles.description}>
-            Register local or remote MCP servers once, then assign them explicitly to the agents that should be allowed to use them.
-          </p>
+  const handleFormClose = () => {
+    setIsFormOpen(false);
+    setEditingServer(null);
+    setSelectedCatalogEntry(null);
+  };
+
+  // When the catalog is empty there is only one thing to show, so force the
+  // configured view regardless of the last-selected tab.
+  const hasCatalog = catalog.length > 0;
+  const effectiveSection: McpSection = hasCatalog ? activeSection : 'configured';
+
+  const renderCatalogSection = () => (
+    <section className={styles.section}>
+      <div className={styles.sectionHeader}>
+        <div>
+          <h4 className={styles.sectionTitle}>Hosted OAuth Servers</h4>
+          <p className={styles.sectionDescription}>Connect commonly used hosted MCP servers with the browser OAuth flow.</p>
         </div>
-        <button className={styles.addButton} onClick={handleCreate}>
-          <PlusIcon />
-          <span>Add Server</span>
-        </button>
       </div>
+      <div className={styles.catalogGrid}>
+        {catalog.map((entry) => {
+          const configured = configuredCatalogServer(entry, servers);
+          const logoSrc = entry.logoAsset ? `/${entry.logoAsset}` : '';
+          const showLogo = Boolean(logoSrc) && !failedLogos.has(entry.id);
+          return (
+            <div key={entry.id} className={styles.catalogCard}>
+              <div className={styles.catalogLogo} aria-hidden="true">
+                {showLogo ? (
+                  <img
+                    className={styles.catalogLogoImage}
+                    src={logoSrc}
+                    alt=""
+                    onError={() => {
+                      setFailedLogos((current) => {
+                        const next = new Set(current);
+                        next.add(entry.id);
+                        return next;
+                      });
+                    }}
+                  />
+                ) : (
+                  initials(entry.displayName)
+                )}
+              </div>
+              <div className={styles.catalogMain}>
+                <div className={styles.catalogNameRow}>
+                  <span className={styles.catalogName}>{entry.displayName}</span>
+                  {configured && (
+                    <span className={`${styles.statusBadge} ${configured.enabled ? styles.enabled : styles.disabled}`}>
+                      {configured.auth?.type === 'oauth' && configured.auth.connected ? 'Connected' : 'Configured'}
+                    </span>
+                  )}
+                </div>
+                <div className={styles.catalogCategory}>{entry.category}</div>
+                <p className={styles.catalogDescription}>{entry.description}</p>
+              </div>
+              <button
+                type="button"
+                className={styles.catalogButton}
+                onClick={() => handleConnectCatalogEntry(entry)}
+              >
+                <LinkIcon />
+                <span>{configured ? 'Edit' : 'Connect'}</span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 
-      {error && <div className={styles.errorBanner}>{error}</div>}
-
-      {loading ? (
-        <div className={styles.loadingState}>Loading MCP servers...</div>
-      ) : servers.length === 0 ? (
+  const renderConfiguredSection = () => (
+    <section className={styles.section}>
+      <div className={styles.sectionHeader}>
+        <div>
+          <h4 className={styles.sectionTitle}>Configured Servers</h4>
+          <p className={styles.sectionDescription}>Servers listed here can be selected in workspace and agent context.</p>
+        </div>
+        <span className={styles.count}>{servers.length}</span>
+      </div>
+      {servers.length === 0 ? (
         <div className={styles.emptyState}>
           No MCP servers configured yet.
         </div>
@@ -147,6 +288,11 @@ const McpServersSettings = () => {
                   <span className={`${styles.statusBadge} ${server.enabled ? styles.enabled : styles.disabled}`}>
                     {server.enabled ? 'Enabled' : 'Disabled'}
                   </span>
+                  {server.auth?.type === 'oauth' && (
+                    <span className={`${styles.statusBadge} ${server.auth.connected ? styles.connected : styles.needsLogin}`}>
+                      {server.auth.connected ? 'OAuth' : 'Reconnect'}
+                    </span>
+                  )}
                 </div>
                 <div className={styles.serverMeta}>
                   {server.transport?.type === 'http' ? 'HTTP' : 'Stdio'} · {authSummary(server.auth)}
@@ -157,6 +303,15 @@ const McpServersSettings = () => {
                 <button className={styles.actionButton} onClick={() => handleEdit(server)}>
                   Edit
                 </button>
+                {server.auth?.type === 'oauth' && (
+                  <button
+                    className={styles.actionButton}
+                    onClick={() => handleDisconnectOAuth(server)}
+                    disabled={disconnectingId === server.id}
+                  >
+                    {disconnectingId === server.id ? 'Disconnecting...' : 'Disconnect'}
+                  </button>
+                )}
                 <button
                   className={`${styles.actionButton} ${styles.deleteButton}`}
                   onClick={() => handleDelete(server.id)}
@@ -168,21 +323,72 @@ const McpServersSettings = () => {
           ))}
         </div>
       )}
+    </section>
+  );
+
+  return (
+    <div className={styles.container}>
+      <div className={styles.header}>
+        <div className={styles.headerText}>
+          <h3 className={styles.title}>MCP Servers</h3>
+          <p className={styles.description}>
+            Register local or remote MCP servers once, then assign them explicitly to the agents that should be allowed to use them.
+          </p>
+        </div>
+        <button className={styles.addButton} onClick={handleCreate}>
+          <PlusIcon />
+          <span>Add Custom</span>
+        </button>
+      </div>
+
+      {error && <div className={styles.errorBanner}>{error}</div>}
+
+      {loading ? (
+        <div className={styles.loadingState}>Loading MCP servers...</div>
+      ) : (
+        <>
+          {hasCatalog && (
+            <div className={styles.subNav} role="tablist" aria-label="MCP server sections">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={effectiveSection === 'catalog'}
+                className={`${styles.subNavItem} ${effectiveSection === 'catalog' ? styles.subNavItemActive : ''}`}
+                onClick={() => setActiveSection('catalog')}
+              >
+                <span>Catalog</span>
+                <span className={styles.subNavCount}>{catalog.length}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={effectiveSection === 'configured'}
+                className={`${styles.subNavItem} ${effectiveSection === 'configured' ? styles.subNavItemActive : ''}`}
+                onClick={() => setActiveSection('configured')}
+              >
+                <span>Configured</span>
+                <span className={styles.subNavCount}>{servers.length}</span>
+              </button>
+            </div>
+          )}
+
+          {effectiveSection === 'catalog' ? renderCatalogSection() : renderConfiguredSection()}
+        </>
+      )}
 
       <div className={styles.hint}>
         <p>
-          This slice stores MCP server definitions and agent assignments. External tool discovery and execution are wired into the backend foundation, but transport-level calls are still a follow-up step.
+          OAuth credentials and bearer tokens are stored in the OS keyring. Config files keep only server definitions and secret references.
         </p>
       </div>
 
       <McpServerFormModal
         isOpen={isFormOpen}
-        onClose={() => {
-          setIsFormOpen(false);
-          setEditingServer(null);
-        }}
+        onClose={handleFormClose}
         onSubmit={handleSubmit}
+        onServerSaved={upsertServer}
         server={editingServer}
+        catalogEntry={selectedCatalogEntry}
       />
     </div>
   );

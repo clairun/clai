@@ -151,6 +151,18 @@ pub enum McpServerAuth {
     BearerToken {
         secret_ref: String,
     },
+    #[serde(rename = "oauth")]
+    OAuth {
+        credential_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        authorization_server_issuer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_metadata_url: Option<String>,
+        #[serde(default)]
+        scopes: Vec<String>,
+    },
 }
 
 /// User-configured MCP server definition persisted in app config.
