@@ -19,6 +19,8 @@ import styles from './McpServersSettings.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
 
+type McpSection = 'catalog' | 'configured';
+
 const PlusIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <line x1="12" y1="5" x2="12" y2="19" />
@@ -86,6 +88,7 @@ const McpServersSettings = () => {
   const [editingServer, setEditingServer] = useState<McpServerResponse | null>(null);
   const [selectedCatalogEntry, setSelectedCatalogEntry] = useState<McpCatalogEntry | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<McpSection>('catalog');
 
   useEffect(() => {
     loadServers();
@@ -197,6 +200,132 @@ const McpServersSettings = () => {
     setSelectedCatalogEntry(null);
   };
 
+  // When the catalog is empty there is only one thing to show, so force the
+  // configured view regardless of the last-selected tab.
+  const hasCatalog = catalog.length > 0;
+  const effectiveSection: McpSection = hasCatalog ? activeSection : 'configured';
+
+  const renderCatalogSection = () => (
+    <section className={styles.section}>
+      <div className={styles.sectionHeader}>
+        <div>
+          <h4 className={styles.sectionTitle}>Hosted OAuth Servers</h4>
+          <p className={styles.sectionDescription}>Connect commonly used hosted MCP servers with the browser OAuth flow.</p>
+        </div>
+      </div>
+      <div className={styles.catalogGrid}>
+        {catalog.map((entry) => {
+          const configured = configuredCatalogServer(entry, servers);
+          const logoSrc = entry.logoAsset ? `/${entry.logoAsset}` : '';
+          const showLogo = Boolean(logoSrc) && !failedLogos.has(entry.id);
+          return (
+            <div key={entry.id} className={styles.catalogCard}>
+              <div className={styles.catalogLogo} aria-hidden="true">
+                {showLogo ? (
+                  <img
+                    className={styles.catalogLogoImage}
+                    src={logoSrc}
+                    alt=""
+                    onError={() => {
+                      setFailedLogos((current) => {
+                        const next = new Set(current);
+                        next.add(entry.id);
+                        return next;
+                      });
+                    }}
+                  />
+                ) : (
+                  initials(entry.displayName)
+                )}
+              </div>
+              <div className={styles.catalogMain}>
+                <div className={styles.catalogNameRow}>
+                  <span className={styles.catalogName}>{entry.displayName}</span>
+                  {configured && (
+                    <span className={`${styles.statusBadge} ${configured.enabled ? styles.enabled : styles.disabled}`}>
+                      {configured.auth?.type === 'oauth' && configured.auth.connected ? 'Connected' : 'Configured'}
+                    </span>
+                  )}
+                </div>
+                <div className={styles.catalogCategory}>{entry.category}</div>
+                <p className={styles.catalogDescription}>{entry.description}</p>
+              </div>
+              <button
+                type="button"
+                className={styles.catalogButton}
+                onClick={() => handleConnectCatalogEntry(entry)}
+              >
+                <LinkIcon />
+                <span>{configured ? 'Edit' : 'Connect'}</span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+
+  const renderConfiguredSection = () => (
+    <section className={styles.section}>
+      <div className={styles.sectionHeader}>
+        <div>
+          <h4 className={styles.sectionTitle}>Configured Servers</h4>
+          <p className={styles.sectionDescription}>Servers listed here can be selected in workspace and agent context.</p>
+        </div>
+        <span className={styles.count}>{servers.length}</span>
+      </div>
+      {servers.length === 0 ? (
+        <div className={styles.emptyState}>
+          No MCP servers configured yet.
+        </div>
+      ) : (
+        <div className={styles.serverList}>
+          {servers.map((server) => (
+            <div key={server.id} className={styles.serverCard}>
+              <div className={styles.serverMain}>
+                <div className={styles.serverNameRow}>
+                  <span className={styles.serverName}>{server.name}</span>
+                  <span className={`${styles.statusBadge} ${server.enabled ? styles.enabled : styles.disabled}`}>
+                    {server.enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                  {server.auth?.type === 'oauth' && (
+                    <span className={`${styles.statusBadge} ${server.auth.connected ? styles.connected : styles.needsLogin}`}>
+                      {server.auth.connected ? 'OAuth' : 'Reconnect'}
+                    </span>
+                  )}
+                </div>
+                <div className={styles.serverMeta}>
+                  {server.transport?.type === 'http' ? 'HTTP' : 'Stdio'} · {authSummary(server.auth)}
+                </div>
+                <div className={styles.serverTransport}>{transportSummary(server.transport)}</div>
+              </div>
+              <div className={styles.serverActions}>
+                <button className={styles.actionButton} onClick={() => handleEdit(server)}>
+                  Edit
+                </button>
+                {server.auth?.type === 'oauth' && (
+                  <button
+                    className={styles.actionButton}
+                    onClick={() => handleDisconnectOAuth(server)}
+                    disabled={disconnectingId === server.id}
+                  >
+                    {disconnectingId === server.id ? 'Disconnecting...' : 'Disconnect'}
+                  </button>
+                )}
+                <button
+                  className={`${styles.actionButton} ${styles.deleteButton}`}
+                  onClick={() => handleDelete(server.id)}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -218,125 +347,32 @@ const McpServersSettings = () => {
         <div className={styles.loadingState}>Loading MCP servers...</div>
       ) : (
         <>
-          {catalog.length > 0 && (
-            <section className={styles.section}>
-              <div className={styles.sectionHeader}>
-                <div>
-                  <h4 className={styles.sectionTitle}>Hosted OAuth Servers</h4>
-                  <p className={styles.sectionDescription}>Connect commonly used hosted MCP servers with the browser OAuth flow.</p>
-                </div>
-                <span className={styles.count}>{catalog.length}</span>
-              </div>
-              <div className={styles.catalogGrid}>
-                {catalog.map((entry) => {
-                  const configured = configuredCatalogServer(entry, servers);
-                  const logoSrc = entry.logoAsset ? `/${entry.logoAsset}` : '';
-                  const showLogo = Boolean(logoSrc) && !failedLogos.has(entry.id);
-                  return (
-                    <div key={entry.id} className={styles.catalogCard}>
-                      <div className={styles.catalogLogo} aria-hidden="true">
-                        {showLogo ? (
-                          <img
-                            className={styles.catalogLogoImage}
-                            src={logoSrc}
-                            alt=""
-                            onError={() => {
-                              setFailedLogos((current) => {
-                                const next = new Set(current);
-                                next.add(entry.id);
-                                return next;
-                              });
-                            }}
-                          />
-                        ) : (
-                          initials(entry.displayName)
-                        )}
-                      </div>
-                      <div className={styles.catalogMain}>
-                        <div className={styles.catalogNameRow}>
-                          <span className={styles.catalogName}>{entry.displayName}</span>
-                          {configured && (
-                            <span className={`${styles.statusBadge} ${configured.enabled ? styles.enabled : styles.disabled}`}>
-                              {configured.auth?.type === 'oauth' && configured.auth.connected ? 'Connected' : 'Configured'}
-                            </span>
-                          )}
-                        </div>
-                        <div className={styles.catalogCategory}>{entry.category}</div>
-                        <p className={styles.catalogDescription}>{entry.description}</p>
-                      </div>
-                      <button
-                        type="button"
-                        className={styles.catalogButton}
-                        onClick={() => handleConnectCatalogEntry(entry)}
-                      >
-                        <LinkIcon />
-                        <span>{configured ? 'Edit' : 'Connect'}</span>
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
+          {hasCatalog && (
+            <div className={styles.subNav} role="tablist" aria-label="MCP server sections">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={effectiveSection === 'catalog'}
+                className={`${styles.subNavItem} ${effectiveSection === 'catalog' ? styles.subNavItemActive : ''}`}
+                onClick={() => setActiveSection('catalog')}
+              >
+                <span>Catalog</span>
+                <span className={styles.subNavCount}>{catalog.length}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={effectiveSection === 'configured'}
+                className={`${styles.subNavItem} ${effectiveSection === 'configured' ? styles.subNavItemActive : ''}`}
+                onClick={() => setActiveSection('configured')}
+              >
+                <span>Configured</span>
+                <span className={styles.subNavCount}>{servers.length}</span>
+              </button>
+            </div>
           )}
 
-          <section className={styles.section}>
-            <div className={styles.sectionHeader}>
-              <div>
-                <h4 className={styles.sectionTitle}>Configured Servers</h4>
-                <p className={styles.sectionDescription}>Servers listed here can be selected in workspace and agent context.</p>
-              </div>
-              <span className={styles.count}>{servers.length}</span>
-            </div>
-            {servers.length === 0 ? (
-              <div className={styles.emptyState}>
-                No MCP servers configured yet.
-              </div>
-            ) : (
-              <div className={styles.serverList}>
-                {servers.map((server) => (
-                  <div key={server.id} className={styles.serverCard}>
-                    <div className={styles.serverMain}>
-                      <div className={styles.serverNameRow}>
-                        <span className={styles.serverName}>{server.name}</span>
-                        <span className={`${styles.statusBadge} ${server.enabled ? styles.enabled : styles.disabled}`}>
-                          {server.enabled ? 'Enabled' : 'Disabled'}
-                        </span>
-                        {server.auth?.type === 'oauth' && (
-                          <span className={`${styles.statusBadge} ${server.auth.connected ? styles.connected : styles.needsLogin}`}>
-                            {server.auth.connected ? 'OAuth' : 'Reconnect'}
-                          </span>
-                        )}
-                      </div>
-                      <div className={styles.serverMeta}>
-                        {server.transport?.type === 'http' ? 'HTTP' : 'Stdio'} · {authSummary(server.auth)}
-                      </div>
-                      <div className={styles.serverTransport}>{transportSummary(server.transport)}</div>
-                    </div>
-                    <div className={styles.serverActions}>
-                      <button className={styles.actionButton} onClick={() => handleEdit(server)}>
-                        Edit
-                      </button>
-                      {server.auth?.type === 'oauth' && (
-                        <button
-                          className={styles.actionButton}
-                          onClick={() => handleDisconnectOAuth(server)}
-                          disabled={disconnectingId === server.id}
-                        >
-                          {disconnectingId === server.id ? 'Disconnecting...' : 'Disconnect'}
-                        </button>
-                      )}
-                      <button
-                        className={`${styles.actionButton} ${styles.deleteButton}`}
-                        onClick={() => handleDelete(server.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+          {effectiveSection === 'catalog' ? renderCatalogSection() : renderConfiguredSection()}
         </>
       )}
 

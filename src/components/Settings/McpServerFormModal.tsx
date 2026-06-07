@@ -73,10 +73,19 @@ const McpServerFormModal = ({
   const [clientMetadataUrl, setClientMetadataUrl] = useState('');
   const [oauthLogin, setOauthLogin] = useState<OAuthLoginState | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const existingConnectedOAuth = server?.auth?.type === 'oauth' && server.auth.connected;
   const formDisabled = saving || !!oauthLogin;
+
+  // Catalog entries are pre-seeded with everything OAuth needs (name, URL,
+  // suggested scopes, dynamic client registration). For a fresh connect we
+  // collapse the full form to a single "Connect with OAuth" action and tuck
+  // the editable fields behind an "Advanced settings" disclosure.
+  const isCatalogQuickConnect =
+    !!catalogEntry && !isEditing && transportType === 'http' && authType === 'oauth';
+  const showFormFields = !isCatalogQuickConnect || showAdvanced;
 
   useEffect(() => {
     if (!isOpen) {
@@ -85,6 +94,7 @@ const McpServerFormModal = ({
 
     setOauthLogin(null);
     setClientSecret('');
+    setShowAdvanced(false);
 
     if (server) {
       setName(server.name || '');
@@ -408,209 +418,231 @@ const McpServerFormModal = ({
             </div>
           )}
 
-          <div className={styles.field}>
-            <label className={styles.label} htmlFor="mcp-server-name">Name</label>
-            <input
-              id="mcp-server-name"
-              className={styles.input}
-              type="text"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="e.g., Filesystem Tools"
-              disabled={formDisabled}
-              autoFocus
-            />
-          </div>
+          {isCatalogQuickConnect && !oauthLogin && (
+            <div className={styles.quickConnect}>
+              <p className={styles.sectionDescription}>
+                CLAI will open your browser to authorize access using OAuth. No extra setup is
+                required — adjust the connection details only if this provider needs custom scopes
+                or a pre-registered client.
+              </p>
+              <button
+                type="button"
+                className={styles.advancedToggle}
+                onClick={() => setShowAdvanced((value) => !value)}
+                disabled={saving}
+              >
+                {showAdvanced ? 'Hide advanced settings' : 'Advanced settings'}
+              </button>
+            </div>
+          )}
 
-          <div className={styles.field}>
-            <label className={styles.label} htmlFor="mcp-transport-type">Transport</label>
-            <select
-              id="mcp-transport-type"
-              className={styles.select}
-              value={transportType}
-              onChange={(event) => {
-                const next = event.target.value as TransportType;
-                setTransportType(next);
-                if (next === 'stdio') {
-                  setAuthType('none');
-                }
-              }}
-              disabled={formDisabled}
-            >
-              <option value="stdio">Stdio</option>
-              <option value="http">HTTP</option>
-            </select>
-          </div>
-
-          {transportType === 'stdio' ? (
+          {showFormFields && (
             <>
               <div className={styles.field}>
-                <label className={styles.label} htmlFor="mcp-command">Command</label>
+                <label className={styles.label} htmlFor="mcp-server-name">Name</label>
                 <input
-                  id="mcp-command"
+                  id="mcp-server-name"
                   className={styles.input}
                   type="text"
-                  value={command}
-                  onChange={(event) => setCommand(event.target.value)}
-                  placeholder="npx"
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
+                  placeholder="e.g., Filesystem Tools"
                   disabled={formDisabled}
+                  autoFocus
                 />
               </div>
 
               <div className={styles.field}>
-                <label className={styles.label} htmlFor="mcp-args">Arguments</label>
-                <textarea
-                  id="mcp-args"
-                  className={styles.textarea}
-                  value={argsText}
-                  onChange={(event) => setArgsText(event.target.value)}
-                  placeholder="@modelcontextprotocol/server-filesystem&#10;/path/to/root"
-                  rows={4}
-                  disabled={formDisabled}
-                />
-                <span className={styles.hint}>One argument per line.</span>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className={styles.field}>
-                <label className={styles.label} htmlFor="mcp-url">URL</label>
-                <input
-                  id="mcp-url"
-                  className={styles.input}
-                  type="url"
-                  value={url}
-                  onChange={(event) => setUrl(event.target.value)}
-                  placeholder="https://example.com/mcp"
-                  disabled={formDisabled}
-                />
-              </div>
-
-              <div className={styles.field}>
-                <label className={styles.label} htmlFor="mcp-auth-type">Authentication</label>
+                <label className={styles.label} htmlFor="mcp-transport-type">Transport</label>
                 <select
-                  id="mcp-auth-type"
+                  id="mcp-transport-type"
                   className={styles.select}
-                  value={authType}
-                  onChange={(event) => setAuthType(event.target.value as AuthType)}
+                  value={transportType}
+                  onChange={(event) => {
+                    const next = event.target.value as TransportType;
+                    setTransportType(next);
+                    if (next === 'stdio') {
+                      setAuthType('none');
+                    }
+                  }}
                   disabled={formDisabled}
                 >
-                  <option value="none">None</option>
-                  <option value="bearer_token">Bearer Token</option>
-                  <option value="oauth">OAuth</option>
+                  <option value="stdio">Stdio</option>
+                  <option value="http">HTTP</option>
                 </select>
               </div>
 
-              {authType === 'bearer_token' && (
-                <div className={styles.field}>
-                  <label className={styles.label} htmlFor="mcp-bearer-token">Bearer Token</label>
-                  <input
-                    id="mcp-bearer-token"
-                    className={styles.input}
-                    type="password"
-                    value={bearerToken}
-                    onChange={(event) => setBearerToken(event.target.value)}
-                    placeholder={isEditing ? 'Leave blank to keep current token' : 'Paste bearer token'}
-                    disabled={formDisabled}
-                  />
-                  <span className={styles.hint}>
-                    {hasStoredSecret
-                      ? 'A token is already stored securely. Enter a new value only to rotate it.'
-                      : 'The token is stored securely in your OS keyring and is never written to config.json.'}
-                  </span>
-                </div>
-              )}
-
-              {authType === 'oauth' && (
-                <div className={styles.section}>
-                  <div className={styles.sectionTitle}>OAuth</div>
-                  {server?.auth?.type === 'oauth' && (
-                    <div className={`${styles.authStatus} ${server.auth.connected ? styles.authConnected : styles.authDisconnected}`}>
-                      {server.auth.connected ? 'Connected' : 'Reconnect required'}
-                    </div>
-                  )}
+              {transportType === 'stdio' ? (
+                <>
                   <div className={styles.field}>
-                    <label className={styles.label} htmlFor="mcp-oauth-scopes">Scopes</label>
-                    <textarea
-                      id="mcp-oauth-scopes"
-                      className={styles.textarea}
-                      value={scopesText}
-                      onChange={(event) => setScopesText(event.target.value)}
-                      placeholder="Leave blank to use server defaults"
-                      rows={3}
+                    <label className={styles.label} htmlFor="mcp-command">Command</label>
+                    <input
+                      id="mcp-command"
+                      className={styles.input}
+                      type="text"
+                      value={command}
+                      onChange={(event) => setCommand(event.target.value)}
+                      placeholder="npx"
                       disabled={formDisabled}
                     />
-                    <span className={styles.hint}>Separate scopes with spaces, commas, or new lines.</span>
                   </div>
-                  <div className={styles.gridTwo}>
-                    <div className={styles.field}>
-                      <label className={styles.label} htmlFor="mcp-oauth-client-id">Client ID</label>
-                      <input
-                        id="mcp-oauth-client-id"
-                        className={styles.input}
-                        type="text"
-                        value={clientId}
-                        onChange={(event) => setClientId(event.target.value)}
-                        placeholder={server?.auth?.type === 'oauth' && server.auth.client_id_configured ? 'Configured' : 'Dynamic registration'}
-                        disabled={formDisabled}
-                      />
-                    </div>
-                    <div className={styles.field}>
-                      <label className={styles.label} htmlFor="mcp-oauth-client-secret">Client Secret</label>
-                      <input
-                        id="mcp-oauth-client-secret"
-                        className={styles.input}
-                        type="password"
-                        value={clientSecret}
-                        onChange={(event) => setClientSecret(event.target.value)}
-                        placeholder={server?.auth?.type === 'oauth' && server.auth.client_secret_configured ? 'Stored' : 'Optional'}
-                        disabled={formDisabled}
-                      />
-                    </div>
-                  </div>
+
                   <div className={styles.field}>
-                    <label className={styles.label} htmlFor="mcp-oauth-client-metadata-url">Client Metadata URL</label>
+                    <label className={styles.label} htmlFor="mcp-args">Arguments</label>
+                    <textarea
+                      id="mcp-args"
+                      className={styles.textarea}
+                      value={argsText}
+                      onChange={(event) => setArgsText(event.target.value)}
+                      placeholder="@modelcontextprotocol/server-filesystem&#10;/path/to/root"
+                      rows={4}
+                      disabled={formDisabled}
+                    />
+                    <span className={styles.hint}>One argument per line.</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className={styles.field}>
+                    <label className={styles.label} htmlFor="mcp-url">URL</label>
                     <input
-                      id="mcp-oauth-client-metadata-url"
+                      id="mcp-url"
                       className={styles.input}
                       type="url"
-                      value={clientMetadataUrl}
-                      onChange={(event) => setClientMetadataUrl(event.target.value)}
-                      placeholder="Use CLAI default metadata"
-                      disabled={formDisabled || !!clientId.trim()}
+                      value={url}
+                      onChange={(event) => setUrl(event.target.value)}
+                      placeholder="https://example.com/mcp"
+                      disabled={formDisabled}
                     />
                   </div>
-                  {existingConnectedOAuth && !oauthLogin && (
-                    <div className={styles.oauthActions}>
-                      <button
-                        type="button"
-                        className={styles.cancelButton}
-                        onClick={startOAuth}
-                        disabled={saving}
-                      >
-                        Reconnect OAuth
-                      </button>
+
+                  <div className={styles.field}>
+                    <label className={styles.label} htmlFor="mcp-auth-type">Authentication</label>
+                    <select
+                      id="mcp-auth-type"
+                      className={styles.select}
+                      value={authType}
+                      onChange={(event) => setAuthType(event.target.value as AuthType)}
+                      disabled={formDisabled}
+                    >
+                      <option value="none">None</option>
+                      <option value="bearer_token">Bearer Token</option>
+                      <option value="oauth">OAuth</option>
+                    </select>
+                  </div>
+
+                  {authType === 'bearer_token' && (
+                    <div className={styles.field}>
+                      <label className={styles.label} htmlFor="mcp-bearer-token">Bearer Token</label>
+                      <input
+                        id="mcp-bearer-token"
+                        className={styles.input}
+                        type="password"
+                        value={bearerToken}
+                        onChange={(event) => setBearerToken(event.target.value)}
+                        placeholder={isEditing ? 'Leave blank to keep current token' : 'Paste bearer token'}
+                        disabled={formDisabled}
+                      />
+                      <span className={styles.hint}>
+                        {hasStoredSecret
+                          ? 'A token is already stored securely. Enter a new value only to rotate it.'
+                          : 'The token is stored securely in your OS keyring and is never written to config.json.'}
+                      </span>
                     </div>
                   )}
-                </div>
+
+                  {authType === 'oauth' && (
+                    <div className={styles.section}>
+                      <div className={styles.sectionTitle}>OAuth</div>
+                      {server?.auth?.type === 'oauth' && (
+                        <div className={`${styles.authStatus} ${server.auth.connected ? styles.authConnected : styles.authDisconnected}`}>
+                          {server.auth.connected ? 'Connected' : 'Reconnect required'}
+                        </div>
+                      )}
+                      <div className={styles.field}>
+                        <label className={styles.label} htmlFor="mcp-oauth-scopes">Scopes</label>
+                        <textarea
+                          id="mcp-oauth-scopes"
+                          className={styles.textarea}
+                          value={scopesText}
+                          onChange={(event) => setScopesText(event.target.value)}
+                          placeholder="Leave blank to use server defaults"
+                          rows={3}
+                          disabled={formDisabled}
+                        />
+                        <span className={styles.hint}>Separate scopes with spaces, commas, or new lines.</span>
+                      </div>
+                      <div className={styles.gridTwo}>
+                        <div className={styles.field}>
+                          <label className={styles.label} htmlFor="mcp-oauth-client-id">Client ID</label>
+                          <input
+                            id="mcp-oauth-client-id"
+                            className={styles.input}
+                            type="text"
+                            value={clientId}
+                            onChange={(event) => setClientId(event.target.value)}
+                            placeholder={server?.auth?.type === 'oauth' && server.auth.client_id_configured ? 'Configured' : 'Dynamic registration'}
+                            disabled={formDisabled}
+                          />
+                        </div>
+                        <div className={styles.field}>
+                          <label className={styles.label} htmlFor="mcp-oauth-client-secret">Client Secret</label>
+                          <input
+                            id="mcp-oauth-client-secret"
+                            className={styles.input}
+                            type="password"
+                            value={clientSecret}
+                            onChange={(event) => setClientSecret(event.target.value)}
+                            placeholder={server?.auth?.type === 'oauth' && server.auth.client_secret_configured ? 'Stored' : 'Optional'}
+                            disabled={formDisabled}
+                          />
+                        </div>
+                      </div>
+                      <div className={styles.field}>
+                        <label className={styles.label} htmlFor="mcp-oauth-client-metadata-url">Client Metadata URL</label>
+                        <input
+                          id="mcp-oauth-client-metadata-url"
+                          className={styles.input}
+                          type="url"
+                          value={clientMetadataUrl}
+                          onChange={(event) => setClientMetadataUrl(event.target.value)}
+                          placeholder="Use CLAI default metadata"
+                          disabled={formDisabled || !!clientId.trim()}
+                        />
+                      </div>
+                      {existingConnectedOAuth && !oauthLogin && (
+                        <div className={styles.oauthActions}>
+                          <button
+                            type="button"
+                            className={styles.cancelButton}
+                            onClick={startOAuth}
+                            disabled={saving}
+                          >
+                            Reconnect OAuth
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
+
+              <div className={styles.field}>
+                <label className={styles.checkboxOption}>
+                  <input
+                    type="checkbox"
+                    checked={enabled}
+                    onChange={(event) => setEnabled(event.target.checked)}
+                    disabled={formDisabled}
+                  />
+                  <span>Enabled</span>
+                </label>
+                <span className={styles.hint}>
+                  Disabled servers stay in config but are hidden from agent selection and future tool discovery.
+                </span>
+              </div>
             </>
           )}
-
-          <div className={styles.field}>
-            <label className={styles.checkboxOption}>
-              <input
-                type="checkbox"
-                checked={enabled}
-                onChange={(event) => setEnabled(event.target.checked)}
-                disabled={formDisabled}
-              />
-              <span>Enabled</span>
-            </label>
-            <span className={styles.hint}>
-              Disabled servers stay in config but are hidden from agent selection and future tool discovery.
-            </span>
-          </div>
 
           <div className={styles.actions}>
             <button type="button" className={styles.cancelButton} onClick={requestClose} disabled={saving}>
