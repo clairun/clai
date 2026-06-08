@@ -49,6 +49,10 @@ const WorkspaceTaskNotifications = () => {
   }, []);
 
   useEffect(() => {
+    // Capture the timers map at effect setup so the cleanup clears exactly
+    // the timers this effect set up, even if the ref is later swapped out
+    // (e.g. by switching to useState/useReducer).
+    const timers = timersRef.current;
     const unlistenPromise = listen<TaskAttentionPayload>(WORKSPACE_TASK_ATTENTION_EVENT, (event) => {
       const payload = event.payload;
       if (!payload?.taskId || !payload?.workspaceId) {
@@ -79,10 +83,10 @@ const WorkspaceTaskNotifications = () => {
 
     return () => {
       unlistenPromise.then((unlisten) => unlisten());
-      for (const timer of timersRef.current.values()) {
+      for (const timer of timers.values()) {
         window.clearTimeout(timer);
       }
-      timersRef.current.clear();
+      timers.clear();
     };
   }, [dismiss]);
 
