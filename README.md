@@ -71,11 +71,12 @@ flagged, and selecting a card slides in a live chat preview.
 Download the latest build for your platform from the
 [Releases page](https://github.com/juacker/clai/releases):
 
-| Platform | Download |
-|----------|----------|
-| Windows  | `.msi` / `.exe` |
-| macOS    | `.dmg` |
-| Linux    | `.deb`, `.rpm`, or `.flatpak` |
+| Platform    | Download |
+|-------------|----------|
+| Windows     | `.msi` / `.exe` |
+| macOS       | `.dmg` |
+| Linux       | `.deb`, `.rpm`, or `.flatpak` |
+| Arch Linux  | AUR: [`clai-desktop-bin`](https://aur.archlinux.org/packages/clai-desktop-bin) |
 
 ## Getting started
 
