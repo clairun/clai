@@ -341,6 +341,11 @@ const VirtualizedListInner = <T,>({
     setFooterHeight((current) => (Math.abs(current - height) < 1 ? current : height));
   }, []);
 
+  // `measurementVersion` is a deliberate trigger dep: heightsRef is a ref
+  // (not state), so React's hook dep tracking can't observe its mutations.
+  // Bumping `measurementVersion` after writing to the ref forces this memo
+  // to recompute and pick up the new cached heights.
+  /* eslint-disable react-hooks/exhaustive-deps */
   const layout = useMemo<LayoutResult>(() => {
     const positions: Position[] = [];
     const positionsByKey = new Map<string, Position>();
@@ -377,10 +382,16 @@ const VirtualizedListInner = <T,>({
     viewport.scrollTop,
     viewport.height,
     overscan,
+    // `measurementVersion` is a deliberate trigger dep: heightsRef is a ref
+    // (not state), so React's hook dep tracking can't observe its mutations.
+    // Bumping `measurementVersion` after writing to the ref forces this memo
+    // to recompute and pick up the new cached heights. The eslint-disable
+    // is on the useMemo call line above.
     measurementVersion,
     footer,
     footerHeight,
   ]);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   useLayoutEffect(() => {
     if (!initialScrollToBottom || didInitialScrollRef.current || items.length === 0) return;
