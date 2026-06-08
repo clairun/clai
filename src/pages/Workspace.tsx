@@ -1152,6 +1152,10 @@ interface ChatFirstLayoutProps {
   sessionId: string | null;
   workspaceId: string;
   messages: AssistantMessage[];
+  // Initial-entry load is in flight with no messages yet — render a loading
+  // placeholder rather than the empty state (which would wrongly claim the
+  // conversation is empty before its history finishes loading).
+  isHydrating: boolean;
   toolCalls: ToolInvocation[];
   streamingText: Record<string, string>;
   isStreaming: boolean;
@@ -1169,6 +1173,7 @@ const ChatFirstLayout = ({
   sessionId,
   workspaceId,
   messages,
+  isHydrating,
   toolCalls,
   streamingText,
   isStreaming,
@@ -1257,6 +1262,11 @@ const ChatFirstLayout = ({
         <InlineApprovalCard workspaceId={workspaceId} />
         <InlinePathGrantCard workspaceId={workspaceId} />
       </>
+    ) : isHydrating ? (
+      <div className={styles.chatFirstLoading} aria-live="polite" aria-busy="true">
+        <span className={styles.chatFirstLoadingDot} />
+        <span className={styles.chatFirstLoadingText}>Loading conversation…</span>
+      </div>
     ) : (
       <div className={styles.chatFirstEmpty}>
         <div className={styles.chatFirstEmptyIcon}>
@@ -1295,7 +1305,13 @@ const Workspace = () => {
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
-  const [, setIsLoading] = useState(true);
+  // True only during the initial-entry load (loadSnapshot(true)); the periodic
+  // poll refreshes without flipping it. Read by the chat panel so the first
+  // hydration window renders a loading placeholder instead of the misleading
+  // "Start a conversation" empty state (the session payload arrives in a
+  // second round-trip after the lightweight snapshot, so messages are briefly
+  // empty even on a conversation that has history).
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   // The drawer chip that's open plus its contextual slide-out panel. The
   // Workspace component instance is REUSED across workspace→workspace
@@ -1630,6 +1646,11 @@ const Workspace = () => {
     [artifacts, memories, patchWorkspaceUi]
   );
   const messages = sessionState?.messages || snapshot?.messages || [];
+  // While the initial entry load is in flight and no messages have arrived
+  // yet, the conversation is unknown — not provably empty. Suppress the
+  // "Start a conversation" empty state until loading settles so an existing
+  // conversation doesn't flash the empty placeholder before its history lands.
+  const isHydrating = isLoading && messages.length === 0;
   // Conversation total from the backend page responses (kept live by the
   // store as messages stream in); before the first page load reports it,
   // the loaded window is the best available answer.
@@ -1796,6 +1817,7 @@ const Workspace = () => {
             sessionId={sessionId}
             workspaceId={workspaceId}
             messages={messages}
+            isHydrating={isHydrating}
             toolCalls={toolCalls}
             streamingText={streamingText}
             isStreaming={isStreaming}
