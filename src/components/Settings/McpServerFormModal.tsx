@@ -428,6 +428,8 @@ const McpServerFormModal = ({
               <button
                 type="button"
                 className={styles.advancedToggle}
+                aria-expanded={showAdvanced}
+                aria-controls="mcp-advanced-fields"
                 onClick={() => setShowAdvanced((value) => !value)}
                 disabled={saving}
               >
@@ -437,7 +439,7 @@ const McpServerFormModal = ({
           )}
 
           {showFormFields && (
-            <>
+            <div id="mcp-advanced-fields" className={styles.advancedFields}>
               <div className={styles.field}>
                 <label className={styles.label} htmlFor="mcp-server-name">Name</label>
                 <input
@@ -641,7 +643,7 @@ const McpServerFormModal = ({
                   Disabled servers stay in config but are hidden from agent selection and future tool discovery.
                 </span>
               </div>
-            </>
+            </div>
           )}
 
           <div className={styles.actions}>

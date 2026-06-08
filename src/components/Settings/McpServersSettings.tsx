@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   createMcpServer,
   deleteMcpServer,
@@ -204,9 +204,38 @@ const McpServersSettings = () => {
   // configured view regardless of the last-selected tab.
   const hasCatalog = catalog.length > 0;
   const effectiveSection: McpSection = hasCatalog ? activeSection : 'configured';
+  const catalogTabRef = useRef<HTMLButtonElement>(null);
+  const configuredTabRef = useRef<HTMLButtonElement>(null);
+  // The configured section doubles as a tabpanel only when the sub-nav is
+  // shown (i.e. the catalog is non-empty); otherwise it stands alone.
+  const configuredPanelProps = hasCatalog
+    ? {
+        role: 'tabpanel' as const,
+        id: 'mcp-panel-configured',
+        'aria-labelledby': 'mcp-tab-configured',
+        tabIndex: 0,
+      }
+    : {};
+
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    const next: McpSection =
+      event.key === 'Home'
+        ? 'catalog'
+        : event.key === 'End'
+          ? 'configured'
+          : effectiveSection === 'catalog'
+            ? 'configured'
+            : 'catalog';
+    setActiveSection(next);
+    (next === 'catalog' ? catalogTabRef : configuredTabRef).current?.focus();
+  };
 
   const renderCatalogSection = () => (
-    <section className={styles.section}>
+    <section className={styles.section} role="tabpanel" id="mcp-panel-catalog" aria-labelledby="mcp-tab-catalog" tabIndex={0}>
       <div className={styles.sectionHeader}>
         <div>
           <h4 className={styles.sectionTitle}>Hosted OAuth Servers</h4>
@@ -266,7 +295,7 @@ const McpServersSettings = () => {
   );
 
   const renderConfiguredSection = () => (
-    <section className={styles.section}>
+    <section className={styles.section} {...configuredPanelProps}>
       <div className={styles.sectionHeader}>
         <div>
           <h4 className={styles.sectionTitle}>Configured Servers</h4>
@@ -352,6 +381,11 @@ const McpServersSettings = () => {
               <button
                 type="button"
                 role="tab"
+                id="mcp-tab-catalog"
+                aria-controls="mcp-panel-catalog"
+                tabIndex={effectiveSection === 'catalog' ? 0 : -1}
+                ref={catalogTabRef}
+                onKeyDown={handleTabKeyDown}
                 aria-selected={effectiveSection === 'catalog'}
                 className={`${styles.subNavItem} ${effectiveSection === 'catalog' ? styles.subNavItemActive : ''}`}
                 onClick={() => setActiveSection('catalog')}
@@ -362,6 +396,11 @@ const McpServersSettings = () => {
               <button
                 type="button"
                 role="tab"
+                id="mcp-tab-configured"
+                aria-controls="mcp-panel-configured"
+                tabIndex={effectiveSection === 'configured' ? 0 : -1}
+                ref={configuredTabRef}
+                onKeyDown={handleTabKeyDown}
                 aria-selected={effectiveSection === 'configured'}
                 className={`${styles.subNavItem} ${effectiveSection === 'configured' ? styles.subNavItemActive : ''}`}
                 onClick={() => setActiveSection('configured')}

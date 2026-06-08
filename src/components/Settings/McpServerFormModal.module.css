@@ -748,3 +748,11 @@
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* Advanced settings field group: preserves the form's column rhythm when the
+ * fields are wrapped for the disclosure's aria-controls target. */
+.advancedFields {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
