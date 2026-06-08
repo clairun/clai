@@ -551,10 +551,6 @@ const ChatMessageList = ({
       initialScrollToBottom
       scrollToBottomSignal={messages.length}
       scrollToBottomBehavior="auto"
-      // Near-bottom gating now lives inside VirtualizedList on a synchronous
-      // ref — round-tripping it through state here lagged a render behind and
-      // let fast streaming re-pin the view over the user's upward scroll.
-      stickToBottom={isStreaming}
       forceScrollToBottomKey={lastUserMessageId}
       onApproachTop={handleApproachTop}
     />

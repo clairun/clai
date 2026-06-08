@@ -123,7 +123,6 @@ interface VirtualizedListProps<T> {
   initialScrollToBottom?: boolean;
   scrollToBottomSignal?: number | null;
   scrollToBottomBehavior?: ScrollBehavior;
-  stickToBottom?: boolean;
   // When this key changes to a new non-null value (e.g. the id of the user
   // message that was just sent), scroll to the bottom unconditionally — even
   // if the user had scrolled up — and resume following new content.
@@ -152,7 +151,6 @@ const VirtualizedListInner = <T,>({
   initialScrollToBottom = false,
   scrollToBottomSignal = null,
   scrollToBottomBehavior = 'auto',
-  stickToBottom = false,
   forceScrollToBottomKey = null,
   onNearBottomChange,
   onApproachTop,
@@ -415,11 +413,14 @@ const VirtualizedListInner = <T,>({
     prevLayoutRef.current = layout;
 
     if (!node) return;
-    // Skip only while actively pinned to the bottom (the pin effect below owns
-    // the position there). stickToBottom alone isn't enough: it now stays true
-    // for the whole stream, and a reader who scrolled up mid-stream still
-    // needs their position anchored while items above re-measure.
-    if (stickToBottom && nearBottomRef.current) return;
+    // Skip while at the bottom — the pin effect below owns the position there,
+    // following new/re-measured content down. Gated on the live near-bottom
+    // ref (not on whether a run is streaming): the initial-load and
+    // post-completion settle windows aren't streaming, but a reader sitting at
+    // the bottom still wants to stay there as rows grow from their size
+    // estimate. A reader who scrolled up flips the ref false and lands here, so
+    // their position stays anchored while items re-measure.
+    if (nearBottomRef.current) return;
     if (!prev || prev.positions.length === 0 || layout.positions.length === 0) return;
 
     const currentScrollTop = node.scrollTop;
@@ -447,22 +448,25 @@ const VirtualizedListInner = <T,>({
       programmaticScrollRef.current = true;
       node.scrollTop = currentScrollTop + delta;
     }
-  }, [layout, stickToBottom]);
+  }, [layout]);
 
-  // Pin to the bottom while content grows (streaming). Gated on the
-  // synchronous follow ref — not a prop round-tripped through parent state,
-  // which lags a render behind and used to re-pin over the user's upward
-  // scroll. Applied synchronously (not via scrollToBottom's rAF) so a stale
-  // queued frame can never undo a scroll-up that happened in between.
+  // Pin to the bottom whenever content grows and the reader is at the bottom.
+  // Gated solely on the synchronous follow ref — not on whether a run is
+  // streaming — so the initial load and the moment after a completion (rows
+  // settling from their size estimate to real height) keep the view glued to
+  // the latest content instead of drifting up. The ref is the user-intent
+  // guard: a scroll/wheel-up flips it false before this runs, so it can't
+  // fight the user. Applied synchronously (not via scrollToBottom's rAF) so a
+  // stale queued frame can never undo a scroll-up that happened in between.
   useLayoutEffect(() => {
-    if (!stickToBottom || !nearBottomRef.current) return;
+    if (!nearBottomRef.current) return;
     const node = scrollRef.current;
     if (!node) return;
     const top = Math.max(0, node.scrollHeight - node.clientHeight);
     if (node.scrollTop >= top - 1) return;
     programmaticScrollRef.current = true;
     node.scrollTop = top;
-  }, [layout.totalHeight, stickToBottom]);
+  }, [layout.totalHeight]);
 
   // Unconditional jump to the bottom — the user just sent a message (or an
   // equivalent "take me to the latest" event keyed by forceScrollToBottomKey).
