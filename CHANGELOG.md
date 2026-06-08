@@ -37,14 +37,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial beta release
 - Desktop app for building, running, and supervising small teams of AI agents
-- Multi-tab workspace with tiling window support
-- Canvas view for visual node graphs
+- Workspace-local agent teams — add helper agents, each with their own
+  prompts, skills, MCP servers, providers, and execution policy; the main
+  agent delegates to them as tools
+- Fleet view for supervising every workspace, including scheduled runs and
+  tasks that need attention, with live chat previews
+- MCP-native tools, configured once and attachable per workspace or per
+  agent (HTTP and stdio transports)
+- Multiple providers — OpenAI-compatible and Anthropic-compatible API
+  connections, plus local CLI agents (Claude Code, OpenAI Codex, OpenCode)
+- Local execution sandbox — per-agent filesystem grants and three shell
+  modes (Off, Restricted, Full)
+- Inspectable tasks — delegated work streams a live transcript of the helper
+  agent's conversation, tool calls, and verdict
+- Memory & artifacts persisted to the workspace directory, with read-only
+  previews in the drawer
+- Scheduled (periodic) workspaces that run the main agent on an interval
+- Default skills and agent templates (`code-reviewer`, `sow-tracker`)
+- Run notices that surface policy denials instead of failing silently
 - Chat interface with markdown rendering
 - Conversation history and context management
 - Light and dark themes
 - Cross-platform support (Windows, macOS, Linux)
-- Configurable API connection settings
-- Room-based session management
 - Permission-based capabilities system
 
 ### Technical
