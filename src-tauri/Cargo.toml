@@ -1,7 +1,7 @@
 [package]
 name = "clai"
 version = "26.6.7"
-description = "Command Line AI App"
+description = "Desktop multi-agent orchestration app with MCP-native tools"
 authors = ["juacker"]
 edition = "2021"
 

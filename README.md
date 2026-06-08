@@ -14,6 +14,11 @@
   A desktop app for building, running, and supervising small teams of AI agents.
 </p>
 
+<p align="center">
+  <em>Local-first and provider-agnostic — your agents run on your machine, use your
+  tools and files under per-agent permissions, and report to you from one Fleet cockpit.</em>
+</p>
+
 <img width="100%" alt="CLAI" src="docs/hello_clai.png">
 
 ## What it is

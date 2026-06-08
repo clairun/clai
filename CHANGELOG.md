@@ -36,12 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial beta release
-- AI-powered command line interface for Netdata
+- Desktop app for building, running, and supervising small teams of AI agents
 - Multi-tab workspace with tiling window support
 - Canvas view for visual node graphs
 - Chat interface with markdown rendering
 - Conversation history and context management
-- Light theme with Netdata brand colors
+- Light and dark themes
 - Cross-platform support (Windows, macOS, Linux)
 - Configurable API connection settings
 - Room-based session management

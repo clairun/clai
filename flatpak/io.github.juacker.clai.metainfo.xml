@@ -12,16 +12,20 @@
 
   <description>
     <p>
-      CLAI is a desktop application for orchestrating and monitoring AI agents
-      with MCP-native tool integration. It provides a unified interface for
-      managing multiple AI providers, scheduled automations, local execution
-      with shell access controls, and workspace orchestration with canvas
-      and dashboards.
+      CLAI is a desktop application for building, running, and supervising
+      small teams of AI agents. Work is organized into workspaces, each an
+      ongoing conversation with a main agent that can chat with you, use tools
+      through attached MCP servers and a local filesystem and shell sandbox,
+      delegate to helper agents, persist context as memories and artifacts,
+      and run on a schedule.
     </p>
     <p>
-      Features include tabbed capability scopes, per-agent filesystem and shell
-      policies, run notices for policy denials, and support for any
-      OpenAI-compatible provider.
+      A Fleet view supervises everything, surfacing scheduled workspaces,
+      tasks that need attention, and live chat previews. CLAI supports
+      multiple providers — OpenAI-compatible and Anthropic-compatible APIs as
+      well as local CLI agents such as Claude Code, OpenAI Codex, and OpenCode
+      — with per-agent filesystem and shell execution policies, run notices
+      for policy denials, and fully inspectable task transcripts.
     </p>
   </description>
 
