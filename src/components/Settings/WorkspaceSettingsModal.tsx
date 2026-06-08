@@ -469,7 +469,10 @@ const WorkspaceSettingsModal = ({
     if (e.target === e.currentTarget) handleClose();
   }, [handleClose]);
 
-  const agents = snapshot?.assignedAgents || [];
+  const agents = useMemo(
+    () => snapshot?.assignedAgents || [],
+    [snapshot?.assignedAgents]
+  );
   const sortedAgents = useMemo(() => (
     [...agents].sort((a, b) => (a.isDefault === b.isDefault ? 0 : a.isDefault ? -1 : 1))
   ), [agents]);

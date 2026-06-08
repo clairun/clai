@@ -1592,11 +1592,17 @@ const Workspace = () => {
     return () => window.clearInterval(interval);
   }, [loadSnapshot]);
 
-  const memories = snapshot?.memories || [];
+  const memories = useMemo(
+    () => snapshot?.memories || [],
+    [snapshot?.memories]
+  );
   // `artifacts` is now intentionally empty in the snapshot — the panel lazy-
   // loads each directory level on demand. It's kept only so navigatePreviewFile
   // can still resolve a clicked sibling against any entries it has seen.
-  const artifacts = snapshot?.artifacts || [];
+  const artifacts = useMemo(
+    () => snapshot?.artifacts || [],
+    [snapshot?.artifacts]
+  );
   const artifactCount = Number(snapshot?.artifactCount ?? 0);
 
   // Open another workspace file in the preview — used when a link inside a
