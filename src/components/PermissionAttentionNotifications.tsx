@@ -122,6 +122,10 @@ const PermissionAttentionNotifications = () => {
   );
 
   useEffect(() => {
+    // Capture the timers map at effect setup so the cleanup clears exactly
+    // the timers this effect set up, even if the ref is later swapped out
+    // (e.g. by switching to useState/useReducer).
+    const timers = timersRef.current;
     const unlistenPromises = [
       listen<PermissionRequest>(PERMISSION_REQUEST_EVENT, (event) => {
         enqueue(buildPermissionNotification(event.payload));
@@ -135,10 +139,10 @@ const PermissionAttentionNotifications = () => {
       for (const promise of unlistenPromises) {
         promise.then((unlisten) => unlisten()).catch(() => {});
       }
-      for (const timer of timersRef.current.values()) {
+      for (const timer of timers.values()) {
         window.clearTimeout(timer);
       }
-      timersRef.current.clear();
+      timers.clear();
     };
   }, [enqueue]);
 
