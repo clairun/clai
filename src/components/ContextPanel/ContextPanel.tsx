@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import ReactDOM from 'react-dom';
 import { useTabManager } from '../../contexts/TabManagerContext';
 import { getMcpServers } from '../../api/client';
@@ -101,13 +101,19 @@ const ContextPanel = () => {
     [availableMcpServers]
   );
 
-  const attachedMcpServers = useMemo(
-    () =>
-      attachedMcpServerIds
-        .map((id) => availableMcpServers.find((server) => server.id === id))
-        .filter((server): server is McpServerResponse => Boolean(server)),
-    [attachedMcpServerIds, availableMcpServers]
-  );
+  // `attachedMcpServers` is intentionally derived inline rather than
+  // wrapped in `useMemo`. The work is O(n*m) over the user's attached
+  // MCP server IDs (typically 0-5) and the catalog of available
+  // servers (typically 0-30) — a few hundred operations per render at
+  // most — and there are no memoized downstream consumers, so the
+  // memoization would only add bookkeeping without a runtime win.
+  // Wrapping it in `useMemo` also triggers
+  // `react-hooks/preserve-manual-memoization` because the compiler
+  // treats `attachedMcpServerIds` (the return of a helper call) as a
+  // "may be mutated later" value it cannot statically reason about.
+  const attachedMcpServers = attachedMcpServerIds
+    .map((id) => availableMcpServers.find((server) => server.id === id))
+    .filter((server): server is McpServerResponse => Boolean(server));
 
   const hasCustomContext = Object.keys(customContext).length > 0;
   const hasMcpContext = attachedMcpServerIds.length > 0 || configuredMcpServers.length > 0;
@@ -125,7 +131,16 @@ const ContextPanel = () => {
     }
   }, [activeTab, enabledProviderConnections, isAgentManagedTab, tabContext?.assistantConnectionId, updateTabContext]);
 
-  const handleAddMcpServer = useCallback((serverId: string) => {
+  // `handleAddMcpServer` / `handleRemoveMcpServer` / `handleToggleMcpServer`
+  // are intentionally plain (non-memoized) functions. The React Compiler
+  // treats manual `useCallback` deps that capture values from a function
+  // call (e.g. `getActiveTab()`, the helper-returned `attachedMcpServerIds`)
+  // as "may be mutated later" and refuses to compile the surrounding
+  // `useMemo`/`useCallback`. The callbacks have no memoized consumers
+  // (McpServerSelector is not wrapped in React.memo), so dropping the
+  // manual memoization is both safe at runtime and the canonical fix
+  // recommended by the React Compiler docs.
+  const handleAddMcpServer = (serverId: string) => {
     if (!activeTab || isAgentManagedTab) return;
 
     const nextAttachedIds = attachedMcpServerIds.includes(serverId)
@@ -138,9 +153,9 @@ const ContextPanel = () => {
         disabledServerIds: disabledMcpServerIds.filter((id) => id !== serverId),
       },
     });
-  }, [activeTab, attachedMcpServerIds, disabledMcpServerIds, isAgentManagedTab, updateTabContext]);
+  };
 
-  const handleRemoveMcpServer = useCallback((serverId: string) => {
+  const handleRemoveMcpServer = (serverId: string) => {
     if (!activeTab || isAgentManagedTab) return;
 
     updateTabContext(activeTab.id, {
@@ -149,9 +164,9 @@ const ContextPanel = () => {
         disabledServerIds: disabledMcpServerIds.filter((id) => id !== serverId),
       },
     });
-  }, [activeTab, attachedMcpServerIds, disabledMcpServerIds, isAgentManagedTab, updateTabContext]);
+  };
 
-  const handleToggleMcpServer = useCallback((serverId: string) => {
+  const handleToggleMcpServer = (serverId: string) => {
     if (!activeTab || isAgentManagedTab || !attachedMcpServerIds.includes(serverId)) return;
 
     const isDisabled = disabledMcpServerIds.includes(serverId);
@@ -165,7 +180,7 @@ const ContextPanel = () => {
         disabledServerIds: nextDisabledIds,
       },
     });
-  }, [activeTab, attachedMcpServerIds, disabledMcpServerIds, isAgentManagedTab, updateTabContext]);
+  };
 
   if (!hasCustomContext && !hasMcpContext && !hasAssistantContext) {
     return null;
