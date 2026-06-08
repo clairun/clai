@@ -19,7 +19,11 @@
   tools and files under per-agent permissions, and report to you from one Fleet cockpit.</em>
 </p>
 
-<img width="100%" alt="CLAI" src="docs/hello_clai.png">
+<p align="center">
+  <a href="https://juacker.github.io/clai/"><img width="100%" alt="CLAI — watch the demo" src="docs/hello_clai.png"></a>
+  <br>
+  <a href="https://juacker.github.io/clai/"><strong>▶ Watch the demo</strong></a>
+</p>
 
 ## What it is
 
