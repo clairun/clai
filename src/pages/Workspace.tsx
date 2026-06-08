@@ -626,12 +626,22 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
   const [searching, setSearching] = useState(false);
   const trimmedQuery = query.trim();
 
+  // Mirror of `childrenByPath` so callbacks/effects can read the latest
+  // value without subscribing to it (avoids re-firing the workspace-change
+  // effect and the artifact-tree refresh effect on every map update).
+  const childrenByPathRef = useRef(childrenByPath);
+  useEffect(() => {
+    childrenByPathRef.current = childrenByPath;
+  });
+
   // Load (or reload) a single directory level. `force` bypasses the cache so the
-  // poll-driven refresh can pick up newly created files.
+  // poll-driven refresh can pick up newly created files. The cache check
+  // reads the latest `childrenByPath` via the ref so this callback no longer
+  // needs the map in its dep array.
   const loadDir = useCallback(
     async (path: string, force = false) => {
       if (loadingRef.current.has(path)) return;
-      if (!force && childrenByPath.has(path)) return;
+      if (!force && childrenByPathRef.current.has(path)) return;
       loadingRef.current.add(path);
       try {
         const entries = await listWorkspaceDir(workspaceId, path);
@@ -646,30 +656,35 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
         loadingRef.current.delete(path);
       }
     },
-    [workspaceId, childrenByPath]
+    [workspaceId]
   );
 
-  // Reset and load the root when the workspace changes.
+  // Reset and load the root when the workspace changes. `loadDir` is keyed
+  // on `workspaceId` and a ref-mirrored `childrenByPath`, so its identity
+  // is stable across load-driven map updates and adding it to deps doesn't
+  // loop.
   useEffect(() => {
     autoExpandedRef.current = false;
     loadingRef.current = new Set();
     setExpanded(new Set());
     setChildrenByPath(new Map());
     void loadDir('', true);
-  }, [workspaceId]);
+  }, [workspaceId, loadDir]);
 
   // When the artifact tree changes, refresh every directory level we've
   // already loaded so the open tree stays live. Keyed on the count (files
   // created/removed) AND the tree's latest mtime — a content-only edit or a
   // rename leaves the count unchanged but must still refresh the listed
   // timestamps. Bounded by how many folders the user has expanded, not by
-  // total artifact count.
+  // total artifact count. `childrenByPath` is read via the ref so this
+  // effect doesn't re-fire on every load-driven map update; `loadDir` is
+  // stable now that its only real dep is `workspaceId`.
   useEffect(() => {
-    if (childrenByPath.size === 0) return;
-    for (const path of childrenByPath.keys()) {
+    if (childrenByPathRef.current.size === 0) return;
+    for (const path of childrenByPathRef.current.keys()) {
       void loadDir(path, true);
     }
-  }, [totalCount, latestModifiedAt]);
+  }, [totalCount, latestModifiedAt, loadDir]);
 
   // Auto-expand a sole top-level folder once, so repo-rooted artifacts like
   // `work/<repo>/...` reveal their first level without an extra click.

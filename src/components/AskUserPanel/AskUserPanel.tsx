@@ -59,7 +59,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
     if (pending && containerRef.current) {
       containerRef.current.focus({ preventScroll: false });
     }
-  }, [pending?.pendingId]);
+  }, [pending]);
 
   const options = useMemo(() => pending?.options || [], [pending?.options]);
   const hasOptions = options.length > 0;

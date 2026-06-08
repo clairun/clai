@@ -23,7 +23,7 @@ import {
 import { assistantClient } from '../../assistant';
 import { setWorkspaceTitle } from '../../workspace/client';
 import IntervalSelect from './IntervalSelect';
-import type { ProviderConnection, WorkspaceSnapshot } from '../../generated/bindings';
+import type { ProviderConnection, ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
 import styles from './WorkspaceSettingsModal.module.css';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -795,8 +795,9 @@ const CRON_PRESETS = [
   { label: 'Monthly', value: '0 0 1 * *' },
 ];
 
-const initialScheduleKindFromSnapshot = (snapshot: WorkspaceSnapshot | null | undefined): ScheduleKindDraft => {
-  const kind = snapshot?.scheduleKind;
+// Narrows to ScheduleKind (not the whole snapshot) so callers can pass
+// `snapshot?.scheduleKind` and the effect's closure matches its deps.
+const initialScheduleKindFromSnapshot = (kind: ScheduleKind | null | undefined): ScheduleKindDraft => {
   if (kind?.type === 'cron') {
     return { type: 'cron', expression: kind.expression || '', timezone: kind.timezone || '' };
   }
@@ -855,7 +856,7 @@ const ScheduleSection = ({
 }) => {
   const [enabled, setEnabled] = useState(!!snapshot?.scheduleEnabled);
   const [scheduleKind, setScheduleKind] = useState(() =>
-    initialScheduleKindFromSnapshot(snapshot)
+    initialScheduleKindFromSnapshot(snapshot?.scheduleKind)
   );
   // Local busy flag for the imperative-only actions (Pause/Resume, Run
   // now). Save goes through the modal's global flow, so we don't track
@@ -890,7 +891,7 @@ const ScheduleSection = ({
 
   useEffect(() => {
     setEnabled(!!snapshot?.scheduleEnabled);
-    setScheduleKind(initialScheduleKindFromSnapshot(snapshot));
+    setScheduleKind(initialScheduleKindFromSnapshot(snapshot?.scheduleKind));
   }, [snapshot?.scheduleEnabled, snapshot?.scheduleKind]);
 
   const paused = !!snapshot?.schedulePaused;
@@ -995,7 +996,7 @@ const ScheduleSection = ({
 
   const isDirty =
     enabled !== !!snapshot?.scheduleEnabled
-    || JSON.stringify(scheduleKind) !== JSON.stringify(initialScheduleKindFromSnapshot(snapshot));
+    || JSON.stringify(scheduleKind) !== JSON.stringify(initialScheduleKindFromSnapshot(snapshot?.scheduleKind));
 
   const onDirtyChangeRef = useRef(onDirtyChange);
   useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
