@@ -961,11 +961,11 @@ pub(crate) fn build_system_prompt(
         );
     }
 
-    if context.agent_workspace_id.is_some() {
+    if let Some(workspace_id) = context.agent_workspace_id.as_deref() {
         prompt.push_str("\n## Local Execution Capabilities\n");
-        prompt.push_str(
-            "- Workspace filesystem root: available (read_write, default shell cwd). Shared with other agents in the same workspace.\n",
-        );
+        prompt.push_str(&format!(
+            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
+        ));
 
         if context.execution.filesystem.extra_paths.is_empty() {
             prompt.push_str("- Additional path grants: none\n");
@@ -1050,7 +1050,9 @@ pub(crate) fn build_system_prompt(
              - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
              - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
              - If `fs_request_grant` is denied, do not retry the same path. Either request a narrower path, ask the user via `workspace_requestUserInput`, or stop and explain what was blocked.\n\
-             - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n",
+             - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n\
+             - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n\
+             - Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
         );
 
         // Git/SSH etiquette guard. The agent shouldn't rewrite commit authorship
@@ -1070,7 +1072,7 @@ pub(crate) fn build_system_prompt(
 
         prompt.push_str(
             "\n## Agent Memory\n\
-             The `.clai/memory/` directory inside your workspace is pre-created and ready to use as durable memory across runs.\n\
+             The `.clai/memory/` directory inside your workspace is pre-created and ready to use as durable memory across runs. These memory files are surfaced to the user in the CLAI app's **Memory** view, so write them to be human-readable, not just machine notes.\n\
              Memory has three layers, each with a distinct purpose:\n\n\
              ### 1. State — short-horizon working memory (`state.md`)\n\
              Current focus, pending actions, open questions, and outcome of the last run.\n\
@@ -1240,6 +1242,33 @@ mod tests {
         };
 
         assert!(!text.contains("## Agent Memory"));
+    }
+
+    #[test]
+    fn build_system_prompt_makes_agent_self_aware_of_clai_workspace_model() {
+        let context = SessionContext {
+            agent_workspace_id: Some("ws-abc".to_string()),
+            execution: ExecutionCapabilityConfig::default(),
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        // Workspace = the write-home, named by id, files visible as artifacts.
+        assert!(text.contains("id `ws-abc`"));
+        assert!(text.contains("read_write home"));
+        assert!(text.contains("shown to the user as **artifacts**"));
+        // Default writes to the workspace (read-only-grant awareness).
+        assert!(text.contains("Default your writes to the workspace"));
+        // Cross-workspace isolation + how to reach another via its id.
+        assert!(text.contains("Other CLAI workspaces exist"));
+        assert!(text.contains("ask them for its workspace id"));
+        // Memory is surfaced to the user in the app.
+        assert!(text.contains("**Memory** view"));
     }
 
     #[test]
