@@ -1457,7 +1457,16 @@ const AgentSection = ({
 
   // True when the form has changed from the loaded (or freshly created)
   // baseline. Drives the Save button's enabled state.
+  // `baselinePayloadRef` is a load/save snapshot, not a measurement
+  // cache: it is written once on agent load and once after a successful
+  // save (see the load effect above and the save handler below). It
+  // intentionally lives in a ref so that a re-render triggered by an
+  // edit does not produce a fresh baseline. Reading it here is the only
+  // way to derive isDirty in render without a state mirror and the
+  // accompanying render-stale flash.
+  // eslint-disable-next-line react-hooks/refs -- see justification above
   const isDirty = baselinePayloadRef.current !== null
+    // eslint-disable-next-line react-hooks/refs -- see justification above
     && baselinePayloadRef.current !== currentPayload;
 
   const handleApplyTemplate = useCallback(() => {
