@@ -4,6 +4,7 @@
 //! Each submodule contains related commands grouped by functionality.
 
 pub mod agent_templates;
+pub mod app_info;
 pub mod assistant;
 pub mod mcp_servers;
 pub mod path_grants;

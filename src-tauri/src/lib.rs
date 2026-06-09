@@ -311,6 +311,8 @@ pub fn run() {
         // Register our custom commands
         // These become available to JS via invoke()
         .invoke_handler(tauri::generate_handler![
+            // App metadata
+            commands::app_info::app_version_detail,
             // Assistant runtime commands
             commands::assistant::assistant_create_session,
             commands::assistant::assistant_get_session,
