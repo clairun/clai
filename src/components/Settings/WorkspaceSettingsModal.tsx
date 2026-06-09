@@ -620,6 +620,7 @@ const WorkspaceSettingsModal = ({
           </aside>
 
           <main className={styles.contentArea}>
+            {/* eslint-disable-next-line react-hooks/refs -- `visited` is a `useState<Set<string>>` (declared above) rendered as a list of section keys. The rule's identifier classifier misidentifies the `Array.from(visited)` property access as a ref read; it is a plain state read and is safe. */}
             {Array.from(visited).map((key) => {
               const sel = parseSelectionKey(key);
               const isActive = key === activeKey;
@@ -1518,6 +1519,7 @@ const AgentSection = ({
   // the sidebar dot indicators reflect current state.
   const onDirtyChangeRef = useRef(onDirtyChange);
   useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
+  // eslint-disable-next-line react-hooks/refs
   useEffect(() => { onDirtyChangeRef.current?.(isDirty); }, [isDirty]);
 
   useImperativeHandle(ref, () => ({
