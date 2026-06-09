@@ -181,6 +181,107 @@ pub(crate) fn command_exists(cmd: &str) -> bool {
     false
 }
 
+/// Resolves a CLI command to an absolute path, searching PATH (the host PATH
+/// under Flatpak, via `flatpak-spawn --host which`) and then the common user
+/// bin dirs under the *real* home. Mirrors [`command_exists`] but returns the
+/// resolved path.
+///
+/// Why this matters on the execution path: a GUI-launched app inherits the
+/// desktop session's minimal PATH (not your login shell's), and a Flatpak's
+/// PATH points at the runtime, not your host tools — so a bare `codex` often
+/// won't resolve at spawn time even though it's installed. Resolving to an
+/// absolute host path up front sidesteps both.
+///
+/// A value that already contains a path separator is returned unchanged (the
+/// user gave an explicit path). Returns `None` if the command can't be found
+/// anywhere, so callers fall back to the bare name and the usual "not found"
+/// spawn error.
+pub(crate) fn resolve_command_path(cmd: &str) -> Option<String> {
+    if cmd.contains('/') {
+        return Some(cmd.to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let which = "where";
+    #[cfg(not(target_os = "windows"))]
+    let which = "which";
+
+    let mut command = get_host_command(which);
+    command.arg(cmd);
+    if let Ok(output) = command.output() {
+        if output.status.success() {
+            if let Some(path) = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+            {
+                return Some(path.to_string());
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if let Some(home) = get_home_dir() {
+        for dir in USER_BIN_PATHS {
+            let path = format!("{}/{}/{}", home, dir, cmd);
+            if command_exists_at_path(&path) {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Builds a [`tokio::process::Command`] for running a host CLI binary.
+///
+/// Under Flatpak the binary lives on the **host** (the sandbox can't see host
+/// system paths like `/usr/bin`), so we run it via `flatpak-spawn --host`.
+/// Environment variables are injected with `--env=` because the host command
+/// runs in the host's environment, not the sandbox's, so sandbox-side `.env()`
+/// values wouldn't survive the hop. The working directory is set on the
+/// wrapper process — `flatpak-spawn` forwards its cwd to the host command, and
+/// the path is valid host-side because `--filesystem=home` maps the real home
+/// at the same path inside the sandbox.
+///
+/// Outside Flatpak it's a plain `Command` with env/cwd applied directly.
+/// Callers append the CLI's own arguments with `.arg(...)` afterwards — in
+/// both modes those land as arguments to the target binary.
+pub(crate) fn build_host_cli_command(
+    binary: &str,
+    envs: &[(&str, &str)],
+    working_dir: Option<&std::path::Path>,
+) -> tokio::process::Command {
+    build_host_cli_command_impl(is_flatpak(), binary, envs, working_dir)
+}
+
+fn build_host_cli_command_impl(
+    in_flatpak: bool,
+    binary: &str,
+    envs: &[(&str, &str)],
+    working_dir: Option<&std::path::Path>,
+) -> tokio::process::Command {
+    let mut command = if in_flatpak {
+        let mut command = tokio::process::Command::new("flatpak-spawn");
+        command.arg("--host");
+        for (key, value) in envs {
+            command.arg(format!("--env={}={}", key, value));
+        }
+        command.arg(binary);
+        command
+    } else {
+        let mut command = tokio::process::Command::new(binary);
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command
+    };
+    if let Some(dir) = working_dir {
+        command.current_dir(dir);
+    }
+    command
+}
+
 /// Gets the version of a command by running `<cmd> --version`.
 /// Currently unused for performance reasons, but kept for future use.
 #[allow(dead_code)]
@@ -417,6 +518,101 @@ mod tests {
         // This test just verifies the function runs
         // In a real Flatpak environment, it would return true
         let _ = is_flatpak();
+    }
+
+    fn argv(command: &tokio::process::Command) -> Vec<String> {
+        let std = command.as_std();
+        let mut out = vec![std.get_program().to_string_lossy().into_owned()];
+        out.extend(std.get_args().map(|a| a.to_string_lossy().into_owned()));
+        out
+    }
+
+    #[test]
+    fn host_cli_command_outside_flatpak_runs_binary_directly() {
+        let command = build_host_cli_command_impl(
+            false,
+            "/usr/bin/codex",
+            &[("MCP_TIMEOUT", "3600000")],
+            Some(std::path::Path::new("/home/u/ws")),
+        );
+        // Program is the binary itself; env is set on the process (not argv).
+        assert_eq!(argv(&command), vec!["/usr/bin/codex".to_string()]);
+        let std = command.as_std();
+        let env: Vec<_> = std
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        assert!(env.contains(&("MCP_TIMEOUT".to_string(), Some("3600000".to_string()))));
+        assert_eq!(
+            std.get_current_dir(),
+            Some(std::path::Path::new("/home/u/ws"))
+        );
+    }
+
+    #[test]
+    fn host_cli_command_in_flatpak_wraps_with_flatpak_spawn() {
+        let command = build_host_cli_command_impl(
+            true,
+            "/usr/bin/codex",
+            &[("CLAI_MCP_TOKEN", "tok"), ("MCP_TIMEOUT", "3600000")],
+            Some(std::path::Path::new("/home/u/ws")),
+        );
+        // flatpak-spawn --host --env=... --env=... <binary>; env is injected as
+        // argv flags (the host command runs in the host's env, so .env() on the
+        // wrapper wouldn't reach it), and the binary is the last arg here so
+        // caller-appended CLI args land after it.
+        assert_eq!(
+            argv(&command),
+            vec![
+                "flatpak-spawn".to_string(),
+                "--host".to_string(),
+                "--env=CLAI_MCP_TOKEN=tok".to_string(),
+                "--env=MCP_TIMEOUT=3600000".to_string(),
+                "/usr/bin/codex".to_string(),
+            ]
+        );
+        // cwd is set on the wrapper; flatpak-spawn forwards it to the host cmd.
+        assert_eq!(
+            command.as_std().get_current_dir(),
+            Some(std::path::Path::new("/home/u/ws"))
+        );
+    }
+
+    #[test]
+    fn host_cli_command_appends_caller_args_after_binary() {
+        // Caller appends the CLI's own args; under Flatpak they must land after
+        // the binary so they're args to the binary, not to flatpak-spawn.
+        let mut command = build_host_cli_command_impl(true, "codex", &[], None);
+        command.arg("exec").arg("-");
+        assert_eq!(
+            argv(&command),
+            vec![
+                "flatpak-spawn".to_string(),
+                "--host".to_string(),
+                "codex".to_string(),
+                "exec".to_string(),
+                "-".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_command_path_passes_through_explicit_paths() {
+        // A value with a separator is the user's explicit path — returned
+        // unchanged, no PATH lookup.
+        assert_eq!(
+            resolve_command_path("/usr/bin/codex"),
+            Some("/usr/bin/codex".to_string())
+        );
+        assert_eq!(
+            resolve_command_path("./local/codex"),
+            Some("./local/codex".to_string())
+        );
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use tokio::process::Command;
 use ts_rs::TS;
 
 use crate::assistant::auth::ProviderSecretStorage;
@@ -450,23 +449,21 @@ async fn test_cli_provider_connection(
         .or_else(|| cli::command_for_provider(&connection.provider_id).map(str::to_string))
         .ok_or_else(|| format!("Unsupported CLI provider: {}", connection.provider_id))?;
 
-    let output = match connection.provider_id.as_str() {
-        cli::CLAUDE_CODE_PROVIDER_ID => Command::new(&command)
-            .args(["auth", "status"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run `{}`: {}", command, e))?,
-        cli::CODEX_PROVIDER_ID => Command::new(&command)
-            .args(["login", "status"])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run `{}`: {}", command, e))?,
-        _ => Command::new(&command)
-            .arg("--version")
-            .output()
-            .await
-            .map_err(|e| format!("Failed to run `{}`: {}", command, e))?,
+    // Resolve to an absolute host path and run host-aware (via
+    // `flatpak-spawn --host` under Flatpak) — the same path the actual run
+    // uses, so a passing test reflects a launchable CLI.
+    let resolved =
+        crate::providers::resolve_command_path(&command).unwrap_or_else(|| command.clone());
+    let args: &[&str] = match connection.provider_id.as_str() {
+        cli::CLAUDE_CODE_PROVIDER_ID => &["auth", "status"],
+        cli::CODEX_PROVIDER_ID => &["login", "status"],
+        _ => &["--version"],
     };
+    let output = crate::providers::build_host_cli_command(&resolved, &[], None)
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run `{}`: {}", command, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

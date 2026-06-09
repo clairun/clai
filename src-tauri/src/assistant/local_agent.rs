@@ -630,31 +630,43 @@ async fn run_claude_turn(
     )
     .await?;
 
-    let binary = connection
+    let configured_binary = connection
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("claude");
-    let mut command = Command::new(binary);
-    // Default MCP_TIMEOUT in Claude Code is ~30s, which is shorter than a
-    // human typically takes to answer an `ask_user` prompt. When the user
-    // takes longer the MCP HTTP request times out client-side and Claude
-    // reports `MCP server "clai" transport dropped mid-call; response for
-    // tool "ask_user" was lost`. Bump to 1h — runs are already bounded by
-    // `cancel_token`, so an actually-stuck tool doesn't sit indefinitely.
-    command.env("MCP_TIMEOUT", "3600000");
-    // Force Claude Code's "tool search" off. CC 2.1.x can *optimistically*
-    // enable tool search (a server-driven experiment, seen as
-    // `[ToolSearch:optimistic] mode=tst, result=true` in its debug log), which
-    // withholds tool definitions from the model for on-demand lookup via a
-    // `ToolSearchTool`. But CLAI disallows that search tool (`--tools ""` +
-    // `--disallowedTools`), so when the experiment fires the model ends up with
-    // neither the MCP tools nor a way to find them -> `tools:[]`, intermittently
-    // (it's an experiment bucket, hence the coin-flip). Pinning it off makes CC
-    // inject our tool defs directly every run. Harmless: we only expose ~12
-    // tools, well under any threshold where search would matter. See #63120.
-    command.env("ENABLE_TOOL_SEARCH", "false");
+    // Resolve to an absolute host path: a GUI-launched app or a Flatpak has a
+    // minimal/runtime PATH that often can't find a bare `claude`. Falls back to
+    // the bare name (and the usual "not found" error) if unresolvable.
+    let binary = crate::providers::resolve_command_path(configured_binary)
+        .unwrap_or_else(|| configured_binary.to_string());
+    // Pin the subprocess cwd to the agent's workspace root. Without it, Claude
+    // Code inherits CLAI's launch cwd (the repo on a dev box) and its
+    // auto-memory loader pulls in unrelated projects' memory. Skipped when the
+    // session has no workspace_id or the workspace isn't in the index.
+    let working_dir = session
+        .context
+        .workspace_id
+        .as_deref()
+        .and_then(|workspace_id| {
+            deps.app
+                .state::<crate::AppState>()
+                .workspace_root(workspace_id)
+        });
+    // MCP_TIMEOUT: Claude Code's ~30s default is shorter than a human takes to
+    // answer an `ask_user` prompt, so the MCP request times out client-side
+    // ("transport dropped mid-call"); 1h is safe since runs are bounded by
+    // `cancel_token`. ENABLE_TOOL_SEARCH=false: CC 2.1.x can optimistically
+    // enable tool search and withhold tool defs, but CLAI disallows the search
+    // tool (`--tools ""`), leaving the model with no tools — pin it off
+    // (#63120). Both are injected via the host-command helper so they survive
+    // the `flatpak-spawn` hop (the host CLI runs in the host's environment).
+    let mut command = crate::providers::build_host_cli_command(
+        &binary,
+        &[("MCP_TIMEOUT", "3600000"), ("ENABLE_TOOL_SEARCH", "false")],
+        working_dir.as_deref(),
+    );
     command
         .arg("-p")
         .arg("--output-format")
@@ -700,24 +712,6 @@ async fn run_claude_turn(
             "Claude Code debug logging enabled (--debug-file)"
         );
         command.arg("--debug-file").arg(&debug_path);
-    }
-
-    // Pin the subprocess cwd to the agent's workspace root. Without
-    // this, Claude Code inherits CLAI's launch cwd — which on a dev
-    // machine is the CLAI repo itself, causing Claude Code's
-    // auto-memory loader (`~/.claude/projects/<hash-of-cwd>/memory/`)
-    // to pull in memory from unrelated projects. Pinning cwd keys
-    // memory to the workspace, giving each agent a clean per-workspace
-    // context. Skipped when the session has no workspace_id (transient
-    // sessions) or the workspace is no longer in the index.
-    if let Some(workspace_id) = session.context.workspace_id.as_deref() {
-        if let Some(root) = deps
-            .app
-            .state::<crate::AppState>()
-            .workspace_root(workspace_id)
-        {
-            command.current_dir(&root);
-        }
     }
 
     let mut child = command.spawn().map_err(|e| {
@@ -846,14 +840,23 @@ async fn run_codex_turn(
     )
     .await?;
 
-    let binary = connection
+    let configured_binary = connection
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("codex");
+    let binary = crate::providers::resolve_command_path(configured_binary)
+        .unwrap_or_else(|| configured_binary.to_string());
     let workspace_root = workspace_root_for_session(deps, session);
-    let mut command = Command::new(binary);
+    // Env (MCP token + timeout) goes through the helper so it survives the
+    // `flatpak-spawn --host` hop — under Flatpak the host CLI runs in the
+    // host's environment, not the sandbox's.
+    let mut command = crate::providers::build_host_cli_command(
+        &binary,
+        &[(CODEX_MCP_TOKEN_ENV, mcp_token), ("MCP_TIMEOUT", "3600000")],
+        workspace_root.as_deref(),
+    );
     command.arg("exec");
     match existing_thread_id.as_deref() {
         Some(thread_id) => {
@@ -873,14 +876,9 @@ async fn run_codex_turn(
     }
     command
         .arg("-")
-        .env(CODEX_MCP_TOKEN_ENV, mcp_token)
-        .env("MCP_TIMEOUT", "3600000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(root) = workspace_root.as_ref() {
-        command.current_dir(root);
-    }
 
     let mut child = command.spawn().map_err(|e| {
         LocalAgentRunError::failed(format!(
@@ -1022,30 +1020,40 @@ async fn run_opencode_turn(
     )
     .await?;
 
-    let binary = connection
+    let configured_binary = connection
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("opencode");
+    let binary = crate::providers::resolve_command_path(configured_binary)
+        .unwrap_or_else(|| configured_binary.to_string());
     let workspace_root = workspace_root_for_session(deps, session);
     let config_content = opencode_config_content(mcp_url, mcp_token)?;
 
-    let mut command = Command::new(binary);
+    // Env (incl. the MCP config blob) goes through the helper so it survives
+    // the `flatpak-spawn --host` hop — under Flatpak the host CLI runs in the
+    // host's environment, not the sandbox's.
+    let mut command = crate::providers::build_host_cli_command(
+        &binary,
+        &[
+            ("OPENCODE_CONFIG_CONTENT", config_content.as_str()),
+            ("OPENCODE_DISABLE_AUTOUPDATE", "true"),
+            ("OPENCODE_DISABLE_PRUNE", "true"),
+            ("OPENCODE_DISABLE_CLAUDE_CODE", "true"),
+            ("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT", "true"),
+            ("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", "true"),
+            ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true"),
+            ("OPENCODE_DISABLE_LSP_DOWNLOAD", "true"),
+            ("MCP_TIMEOUT", "3600000"),
+        ],
+        workspace_root.as_deref(),
+    );
     command
         .arg("--pure")
         .arg("run")
         .arg("--format")
         .arg("json")
-        .env("OPENCODE_CONFIG_CONTENT", config_content)
-        .env("OPENCODE_DISABLE_AUTOUPDATE", "true")
-        .env("OPENCODE_DISABLE_PRUNE", "true")
-        .env("OPENCODE_DISABLE_CLAUDE_CODE", "true")
-        .env("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT", "true")
-        .env("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", "true")
-        .env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true")
-        .env("OPENCODE_DISABLE_LSP_DOWNLOAD", "true")
-        .env("MCP_TIMEOUT", "3600000")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1058,7 +1066,6 @@ async fn run_opencode_turn(
     }
     if let Some(root) = workspace_root.as_ref() {
         command.arg("--dir").arg(root);
-        command.current_dir(root);
     }
 
     let mut child = command.spawn().map_err(|e| {
