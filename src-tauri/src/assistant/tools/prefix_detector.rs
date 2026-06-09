@@ -231,6 +231,20 @@ pub fn suggest_prefix(segment: &str) -> String {
         return binary.to_string();
     }
 
+    // A head that isn't a plausible command name has no meaningful
+    // allowlist prefix: the `:` no-op builtin, or punctuation left over
+    // from a malformed / over-collapsed segment (e.g. an unterminated
+    // quote that swallowed the rest of the line). Returning an empty
+    // string tells the modal to omit the "Save as prefix" / "Always allow"
+    // affordances — the frontend gates them on a non-empty suggestedPrefix
+    // — so the user only gets allow-once and isn't offered a bogus,
+    // never-matching grant like `:`. Real command names start with a
+    // letter, digit (`7z`), or underscore.
+    let first = binary.chars().next().unwrap_or('\0');
+    if !first.is_ascii_alphanumeric() && first != '_' {
+        return String::new();
+    }
+
     let style = lookup_style(binary);
 
     if matches!(style, Style::None) {
@@ -648,6 +662,37 @@ mod tests {
     #[test]
     fn env_prefix_then_path() {
         check("FOO=1 ./scripts/deploy.sh", "./scripts/deploy.sh");
+    }
+
+    // -----------------------------------------------------------------
+    // Junk heads → no prefix (Fix #3)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn colon_noop_has_no_prefix() {
+        // The `:` builtin is a no-op; allowlisting it is meaningless and
+        // never matches a re-run. Return empty so the modal hides persist.
+        check(":", "");
+    }
+
+    #[test]
+    fn colon_with_redirect_has_no_prefix() {
+        // `: > file` — the over-collapsed shape from the real bug report.
+        check(": > /tmp/out.jsonl", "");
+    }
+
+    #[test]
+    fn punctuation_head_has_no_prefix() {
+        // Leftover punctuation from a scrambled segment isn't a command.
+        check("> file", "");
+        check("&& echo hi", "");
+    }
+
+    #[test]
+    fn digit_leading_binary_still_gets_prefix() {
+        // `7z` is a real binary — must NOT be rejected as junk. (Unknown
+        // style, so the subcommand-shaped `x` is included as a subword.)
+        check("7z x archive.7z", "7z x");
     }
 
     #[test]

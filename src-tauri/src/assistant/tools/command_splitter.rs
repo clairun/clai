@@ -67,10 +67,24 @@ pub fn split_command(input: &str) -> Vec<Segment> {
             None
         };
 
-        // Escape: consume one literal char and clear the flag.
+        // Escape: a backslash immediately followed by a newline is a line
+        // continuation — the shell removes BOTH characters and joins the
+        // lines into one logical command. Drop the backslash we already
+        // buffered and swallow the newline (and a paired `\r\n`). Any other
+        // escaped char is kept literally. (Single quotes never set `escape`,
+        // so `\<newline>` inside `'...'` correctly stays literal.)
         if escape {
-            buf.push(c);
             escape = false;
+            if c == '\n' || c == '\r' {
+                buf.pop(); // remove the trailing backslash
+                if c == '\r' && next == Some('\n') {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            buf.push(c);
             i += 1;
             continue;
         }
@@ -472,6 +486,22 @@ pub fn split_command(input: &str) -> Vec<Segment> {
     }
 
     push_segment(&mut segments, &buf, opaque);
+
+    // If parsing ended inside an unterminated quote, backtick, or bracket
+    // group, separator detection was unreliable for everything after the
+    // opening delimiter — a single stray quote silently swallows later
+    // `;` / `&&` / `|`, collapsing unrelated commands into one mis-identified
+    // segment. Rather than emit a misleading partial segmentation, surface
+    // the whole command as one Opaque segment so the user reviews it as a
+    // unit. `suggest_prefix` declines to offer a prefix for a junk head like
+    // `:`, so no bogus "always allow" is proposed for the blob.
+    if in_single || in_double || in_backtick || depth > 0 {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+        return vec![Segment::Opaque(trimmed.to_string())];
+    }
 
     // Post-process: reclassify Simple segments whose head is an executor
     // command or a control-flow keyword as Opaque. These run other programs
@@ -1352,5 +1382,83 @@ mod tests {
         assert!(!is_env_assignment("=bar"));
         assert!(!is_env_assignment("1FOO=bar")); // can't start with digit
         assert!(!is_env_assignment("foo-bar=x")); // dash not allowed
+    }
+
+    // -----------------------------------------------------------------
+    // Backslash-newline line continuation (Fix #1)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn backslash_newline_continuation_joins_lines() {
+        // The shell removes `\<newline>` entirely: this is one `git log`,
+        // not a segment carrying a literal backslash + embedded newline.
+        assert_eq!(
+            split("git log \\\n  --oneline"),
+            vec![simple("git log   --oneline")]
+        );
+    }
+
+    #[test]
+    fn backslash_newline_continuation_does_not_create_extra_segment() {
+        // Without continuation handling the bare newline would split this
+        // into two segments; the `\` must suppress that.
+        assert_eq!(split("echo a \\\necho b"), vec![simple("echo a echo b")]);
+    }
+
+    #[test]
+    fn backslash_crlf_continuation_joins_lines() {
+        assert_eq!(
+            split("git log \\\r\n  --oneline"),
+            vec![simple("git log   --oneline")]
+        );
+    }
+
+    #[test]
+    fn backslash_newline_continuation_inside_double_quotes() {
+        // Line continuation is also removed inside double quotes.
+        assert_eq!(split("echo \"a \\\nb\""), vec![simple("echo \"a b\"")]);
+    }
+
+    #[test]
+    fn backslash_before_normal_char_still_literal() {
+        // Only `\<newline>` is special; `\;` stays a literal escaped char.
+        assert_eq!(split(r"echo a\;b"), vec![simple(r"echo a\;b")]);
+    }
+
+    // -----------------------------------------------------------------
+    // Unterminated quote / group defense (Fix #3)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unterminated_double_quote_collapses_to_single_opaque() {
+        // A stray unclosed quote desyncs separator detection. Rather than
+        // emit a scrambled partial segmentation, the whole command becomes
+        // one Opaque segment for review.
+        let segs = split("echo \"unterminated ; rm -rf / && cd /a");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+        assert_eq!(segs[0].text(), "echo \"unterminated ; rm -rf / && cd /a");
+    }
+
+    #[test]
+    fn unterminated_single_quote_collapses_to_single_opaque() {
+        let segs = split("echo 'oops ; ls");
+        assert_eq!(segs, vec![opaque("echo 'oops ; ls")]);
+    }
+
+    #[test]
+    fn unbalanced_paren_group_collapses_to_single_opaque() {
+        let segs = split("( cd /a && echo hi");
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].is_opaque());
+    }
+
+    #[test]
+    fn balanced_quotes_after_fix_still_split_normally() {
+        // Guard: the defense must not trip on well-formed input.
+        assert_eq!(
+            split(r#"echo "a ; b" && ls"#),
+            vec![simple(r#"echo "a ; b""#), simple("ls")]
+        );
     }
 }

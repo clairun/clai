@@ -1058,8 +1058,43 @@ pub(crate) fn evaluate_command_policy(
     if approvals.is_empty() {
         PolicyResult::Allow
     } else {
-        PolicyResult::NeedsApproval(approvals)
+        PolicyResult::NeedsApproval(dedup_approvals_by_prefix(approvals))
     }
+}
+
+/// Collapses approval rows that share the same non-empty suggested prefix
+/// into one. Without this, a command like `cd /a && cd /b && cd /c` asks the
+/// user to grant `cd` three times in a single modal. Rows with an empty
+/// suggested prefix (no stable allowlist head — e.g. the `:` no-op or an
+/// over-collapsed opaque blob) are never merged: each is a distinct
+/// allow-once decision and has no prefix to key on. When duplicates disagree
+/// on kind, the kept row is marked `Opaque` so the "review carefully"
+/// affordance is preserved rather than silently downgraded to `Simple`.
+fn dedup_approvals_by_prefix(
+    approvals: Vec<crate::commands::permissions::SegmentApproval>,
+) -> Vec<crate::commands::permissions::SegmentApproval> {
+    use crate::commands::permissions::SegmentKind;
+    use std::collections::HashMap;
+
+    let mut result: Vec<crate::commands::permissions::SegmentApproval> =
+        Vec::with_capacity(approvals.len());
+    let mut index_by_prefix: HashMap<String, usize> = HashMap::new();
+
+    for approval in approvals {
+        if approval.suggested_prefix.is_empty() {
+            result.push(approval);
+            continue;
+        }
+        if let Some(&idx) = index_by_prefix.get(&approval.suggested_prefix) {
+            if matches!(approval.kind, SegmentKind::Opaque) {
+                result[idx].kind = SegmentKind::Opaque;
+            }
+            continue;
+        }
+        index_by_prefix.insert(approval.suggested_prefix.clone(), result.len());
+        result.push(approval);
+    }
+    result
 }
 
 /// True for shell segments that have no execution surface of their own and
@@ -2580,6 +2615,48 @@ mod tests {
         assert_eq!(approvals.len(), 1);
         assert!(approvals[0].kind == crate::commands::permissions::SegmentKind::Opaque);
         assert_eq!(approvals[0].suggested_prefix, "find");
+    }
+
+    #[test]
+    fn policy_dedups_repeated_prefix_into_one_approval() {
+        // The motivating bug: `cd /a && cd /b && cd /c` derives the same
+        // `cd` prefix three times. The user should be asked to grant `cd`
+        // exactly once, not once per occurrence.
+        let exec = restricted_execution_config(&[], &[]);
+        let result = evaluate_command_policy(&exec, "cd /a && cd /b && cd /c", &[], &[]);
+        let PolicyResult::NeedsApproval(approvals) = result else {
+            panic!("expected NeedsApproval, got {:?}", policy_label(&result));
+        };
+        assert_eq!(approvals.len(), 1, "repeated `cd` prefix should collapse");
+        assert_eq!(approvals[0].suggested_prefix, "cd");
+    }
+
+    #[test]
+    fn policy_distinct_prefixes_are_not_merged() {
+        // Different derived prefixes remain separate decisions.
+        let exec = restricted_execution_config(&[], &[]);
+        let result = evaluate_command_policy(&exec, "git add -A && git commit -m x", &[], &[]);
+        let PolicyResult::NeedsApproval(approvals) = result else {
+            panic!("expected NeedsApproval, got {:?}", policy_label(&result));
+        };
+        let prefixes: Vec<&str> = approvals
+            .iter()
+            .map(|a| a.suggested_prefix.as_str())
+            .collect();
+        assert_eq!(prefixes, vec!["git add", "git commit"]);
+    }
+
+    #[test]
+    fn policy_empty_prefix_rows_are_not_merged() {
+        // Rows with no stable prefix (junk `:` head) have nothing to key on
+        // and must each stay as a distinct allow-once decision.
+        let exec = restricted_execution_config(&[], &[]);
+        let result = evaluate_command_policy(&exec, ": > a; : > b", &[], &[]);
+        let PolicyResult::NeedsApproval(approvals) = result else {
+            panic!("expected NeedsApproval, got {:?}", policy_label(&result));
+        };
+        assert_eq!(approvals.len(), 2, "empty-prefix rows must not collapse");
+        assert!(approvals.iter().all(|a| a.suggested_prefix.is_empty()));
     }
 
     #[test]
