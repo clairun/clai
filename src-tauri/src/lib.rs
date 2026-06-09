@@ -323,6 +323,7 @@ pub fn run() {
             commands::assistant::assistant_send_message,
             commands::assistant::assistant_compact_session,
             commands::assistant::assistant_delete_queued_message,
+            commands::assistant::assistant_edit_queued_message,
             commands::assistant::assistant_submit_user_input,
             commands::assistant::assistant_retry_run,
             commands::assistant::assistant_cancel_run,

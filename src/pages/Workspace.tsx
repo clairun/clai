@@ -1164,6 +1164,7 @@ interface ChatFirstLayoutProps {
   runStartedAt: number | null;
   queuedMessageIds: string[];
   onDeleteQueuedMessage: (messageId: string) => void;
+  onEditQueuedMessage: (messageId: string, text: string) => Promise<void>;
   hasOlderMessages: boolean;
   isLoadingOlderMessages: boolean;
   onLoadOlderMessages: () => void;
@@ -1182,6 +1183,7 @@ const ChatFirstLayout = ({
   runStartedAt,
   queuedMessageIds,
   onDeleteQueuedMessage,
+  onEditQueuedMessage,
   hasOlderMessages,
   isLoadingOlderMessages,
   onLoadOlderMessages,
@@ -1254,6 +1256,7 @@ const ChatFirstLayout = ({
           runStartedAt={runStartedAt}
           queuedMessageIds={queuedMessageIds}
           onDeleteQueuedMessage={onDeleteQueuedMessage}
+          onEditQueuedMessage={onEditQueuedMessage}
           hasOlderMessages={hasOlderMessages}
           isLoadingOlderMessages={isLoadingOlderMessages}
           onLoadOlderMessages={onLoadOlderMessages}
@@ -1676,6 +1679,20 @@ const Workspace = () => {
     },
     [sessionId]
   );
+  const handleEditQueuedMessage = useCallback(
+    async (messageId: string, text: string) => {
+      if (!sessionId) return;
+      // AssistantMessageUpdated from the backend swaps the text in the
+      // store. On a lost race ("already picked up") the edit errors and the
+      // original text is left untouched.
+      try {
+        await assistantClient.editQueuedMessage(sessionId, messageId, text);
+      } catch (err) {
+        console.error('[Workspace] Failed to edit queued message:', err);
+      }
+    },
+    [sessionId]
+  );
   const handleLoadOlderMessages = useCallback(() => {
     if (!sessionId) return;
     const store = useAssistantStore.getState();
@@ -1826,6 +1843,7 @@ const Workspace = () => {
             runStartedAt={runStartedAt}
             queuedMessageIds={queuedMessageIds}
             onDeleteQueuedMessage={handleDeleteQueuedMessage}
+            onEditQueuedMessage={handleEditQueuedMessage}
             hasOlderMessages={hasOlderMessages}
             isLoadingOlderMessages={isLoadingOlderMessages}
             onLoadOlderMessages={handleLoadOlderMessages}

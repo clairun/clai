@@ -90,6 +90,19 @@ export async function deleteQueuedMessage(sessionId: string, messageId: string):
   return invoke('assistant_delete_queued_message', { sessionId, messageId });
 }
 
+/**
+ * Edit the text of a queued user message in-place (still waiting, not yet
+ * picked up by a run). Errors if a run grabbed it in the meantime. The
+ * backend emits AssistantMessageUpdated, which swaps the text in the store.
+ */
+export async function editQueuedMessage(
+  sessionId: string,
+  messageId: string,
+  text: string,
+): Promise<void> {
+  return invoke('assistant_edit_queued_message', { sessionId, messageId, text });
+}
+
 export async function listRuns(sessionId: string): Promise<AssistantRun[]> {
   return invoke('assistant_list_runs', { sessionId });
 }

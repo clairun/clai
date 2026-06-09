@@ -503,6 +503,69 @@ pub async fn delete_pending_queued_message(
     Ok(true)
 }
 
+/// Update the text of a message that is still *pending* in the queue — the
+/// user wrote it while a run was active and no run has picked it up yet.
+/// Returns the updated message, or `None` (touching nothing) when the
+/// message has already been delivered or was never queued. The pending
+/// check and the content update share one transaction, so an edit can't
+/// race a concurrent delivery: a message already handed to a run is frozen.
+pub async fn update_pending_queued_message(
+    pool: &DbPool,
+    session_id: &str,
+    message_id: &str,
+    text: String,
+) -> Result<Option<AssistantMessage>, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start queued message edit transaction: {}", e))?;
+
+    // Guard: only pending queue rows are editable. Pull `created_at` in the
+    // same query so we can return a faithful message without a second read.
+    let row = sqlx::query(
+        r#"
+        SELECT q.status AS status, m.created_at AS created_at
+        FROM assistant_message_queue q
+        JOIN assistant_messages m ON m.id = q.message_id
+        WHERE q.message_id = ? AND q.session_id = ?
+        "#,
+    )
+    .bind(message_id)
+    .bind(session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to read queued assistant message: {}", e))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if row.get::<String, _>("status") != "pending" {
+        return Ok(None);
+    }
+
+    let message = AssistantMessage {
+        id: message_id.to_string(),
+        session_id: session_id.to_string(),
+        role: MessageRole::User,
+        content: vec![ContentPart::Text { text }],
+        created_at: row.get("created_at"),
+        provider_metadata: None,
+    };
+
+    sqlx::query("UPDATE assistant_messages SET content_json = ? WHERE id = ? AND session_id = ?")
+        .bind(to_json_string(&message.content)?)
+        .bind(message_id)
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to update queued assistant message: {}", e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit queued message edit transaction: {}", e))?;
+    Ok(Some(message))
+}
+
 pub async fn create_message(
     pool: &DbPool,
     params: CreateMessageParams,
@@ -1376,6 +1439,14 @@ mod tests {
         .unwrap()
     }
 
+    async fn message_text(pool: &DbPool, message_id: &str) -> Option<String> {
+        let message = get_message(pool, message_id).await.unwrap()?;
+        message.content.into_iter().find_map(|part| match part {
+            ContentPart::Text { text } => Some(text),
+            _ => None,
+        })
+    }
+
     #[tokio::test]
     async fn delete_message_removes_row_and_queue_entry() {
         let (_tmp, pool) = create_test_pool().await;
@@ -1459,5 +1530,81 @@ mod tests {
             .await
             .unwrap());
         assert!(get_message(&pool, &direct.id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn update_pending_queued_message_only_edits_pending() {
+        let (_tmp, pool) = create_test_pool().await;
+        insert_session(&pool, "s1").await;
+
+        // Pending → edited; returns the updated message with original
+        // created_at, and the queue row stays pending (edit ≠ delivery).
+        let pending =
+            create_user_message(&pool, "s1".to_string(), "old".to_string(), Some("conn-1"))
+                .await
+                .unwrap();
+        let updated =
+            update_pending_queued_message(&pool, "s1", &pending.id, "new text".to_string())
+                .await
+                .unwrap()
+                .expect("pending message should be editable");
+        assert_eq!(updated.created_at, pending.created_at);
+        assert_eq!(
+            message_text(&pool, &pending.id).await.as_deref(),
+            Some("new text")
+        );
+        assert_eq!(queue_rows_for(&pool, &pending.id).await, 1);
+
+        // Already delivered → None, text untouched.
+        let delivered =
+            create_user_message(&pool, "s1".to_string(), "taken".to_string(), Some("conn-1"))
+                .await
+                .unwrap();
+        sqlx::query("UPDATE assistant_message_queue SET status = 'delivered' WHERE message_id = ?")
+            .bind(&delivered.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            update_pending_queued_message(&pool, "s1", &delivered.id, "nope".to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            message_text(&pool, &delivered.id).await.as_deref(),
+            Some("taken")
+        );
+
+        // Wrong session → None, untouched.
+        let other =
+            create_user_message(&pool, "s1".to_string(), "mine".to_string(), Some("conn-1"))
+                .await
+                .unwrap();
+        assert!(
+            update_pending_queued_message(&pool, "other-session", &other.id, "x".to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            message_text(&pool, &other.id).await.as_deref(),
+            Some("mine")
+        );
+
+        // Never queued → None, untouched.
+        let direct = create_user_message(&pool, "s1".to_string(), "direct".to_string(), None)
+            .await
+            .unwrap();
+        assert!(
+            update_pending_queued_message(&pool, "s1", &direct.id, "x".to_string())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            message_text(&pool, &direct.id).await.as_deref(),
+            Some("direct")
+        );
     }
 }

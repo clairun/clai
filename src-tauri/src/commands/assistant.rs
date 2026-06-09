@@ -606,6 +606,42 @@ pub async fn assistant_delete_queued_message(
     Ok(())
 }
 
+/// Edit the text of a user message that is still waiting in the queue
+/// (written while a run was active, not yet picked up). Atomic against
+/// delivery: if a run grabbed it in the meantime, this errors and the
+/// message stays as-is. Emits `AssistantMessageUpdated` on success so every
+/// open view swaps in the new text.
+#[tauri::command]
+pub async fn assistant_edit_queued_message(
+    session_id: String,
+    message_id: String,
+    text: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("A queued message can't be empty — delete it instead.".to_string());
+    }
+    let (target_pool, session) = session_pool(state.inner(), &session_id).await?;
+    let updated =
+        repository::update_pending_queued_message(&target_pool, &session.id, &message_id, text)
+            .await?;
+    let Some(message) = updated else {
+        return Err(
+            "This message was already picked up by the agent and can no longer be edited."
+                .to_string(),
+        );
+    };
+    emit_event(
+        &app,
+        &session,
+        None,
+        AssistantUiEvent::AssistantMessageUpdated { message },
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantSubmitUserInputRequest {

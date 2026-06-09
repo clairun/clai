@@ -376,6 +376,9 @@ interface ChatMessageListProps {
   // Remove a still-queued message before any run picks it up. Omit to
   // hide the remove affordance (e.g. read-only transcript views).
   onDeleteQueuedMessage?: (messageId: string) => void;
+  // Edit a still-queued message's text in-place before any run picks it
+  // up. Omit to hide the edit affordance.
+  onEditQueuedMessage?: (messageId: string, text: string) => Promise<void> | void;
   hasOlderMessages?: boolean;
   isLoadingOlderMessages?: boolean;
   onLoadOlderMessages?: () => void;
@@ -396,6 +399,7 @@ const ChatMessageList = ({
   runStartedAt = null,
   queuedMessageIds,
   onDeleteQueuedMessage,
+  onEditQueuedMessage,
   hasOlderMessages = false,
   isLoadingOlderMessages = false,
   onLoadOlderMessages,
@@ -493,6 +497,7 @@ const ChatMessageList = ({
         isContinuation={continuationFlags[idx]}
         isQueued={queuedIdSet.has(item.message.id)}
         onDeleteQueued={onDeleteQueuedMessage}
+        onEditQueued={onEditQueuedMessage}
       />
     )
   ), [
@@ -502,6 +507,7 @@ const ChatMessageList = ({
     userLabel,
     queuedIdSet,
     onDeleteQueuedMessage,
+    onEditQueuedMessage,
     onLoadOlderMessages,
     isLoadingOlderMessages,
   ]);
@@ -565,6 +571,7 @@ interface MessageBlockProps {
   isContinuation?: boolean;
   isQueued?: boolean;
   onDeleteQueued?: (messageId: string) => void;
+  onEditQueued?: (messageId: string, text: string) => Promise<void> | void;
 }
 
 const MessageBlock = memo(
@@ -576,8 +583,12 @@ const MessageBlock = memo(
     isContinuation = false,
     isQueued = false,
     onDeleteQueued,
+    onEditQueued,
   }: MessageBlockProps) => {
   const { role, createdAt } = message;
+  // Local draft state for editing a queued message in-place. `null` = not
+  // editing; a string = the working draft seeded from the message text.
+  const [editDraft, setEditDraft] = useState<string | null>(null);
 
   if (role === 'user') {
     const textContent = getTextContent(message);
@@ -587,6 +598,20 @@ const MessageBlock = memo(
     if (textContent.startsWith('--- New scheduled run at') || textContent.startsWith('--- Manual run at')) {
       return null;
     }
+
+    const isEditing = editDraft !== null;
+    const trimmedDraft = (editDraft ?? '').trim();
+    const submitEdit = () => {
+      if (!trimmedDraft || trimmedDraft === textContent.trim()) {
+        setEditDraft(null);
+        return;
+      }
+      // The backend emits AssistantMessageUpdated, which swaps the text in
+      // the store; close the editor optimistically. On error the store is
+      // untouched and the original text remains.
+      void Promise.resolve(onEditQueued?.(message.id, trimmedDraft)).catch(() => {});
+      setEditDraft(null);
+    };
 
     return (
       <div className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''}`}>
@@ -598,7 +623,18 @@ const MessageBlock = memo(
               Queued
             </span>
           )}
-          {isQueued && onDeleteQueued && (
+          {isQueued && onEditQueued && !isEditing && (
+            <button
+              type="button"
+              className={styles.queuedEdit}
+              onClick={() => setEditDraft(textContent)}
+              title="Edit before it's picked up"
+              aria-label="Edit queued message"
+            >
+              ✎
+            </button>
+          )}
+          {isQueued && onDeleteQueued && !isEditing && (
             <button
               type="button"
               className={styles.queuedRemove}
@@ -610,9 +646,47 @@ const MessageBlock = memo(
             </button>
           )}
         </div>
-        <div className={styles.messageContent}>
-          <MarkdownMessage content={textContent} />
-        </div>
+        {isEditing ? (
+          <div className={styles.queuedEditor}>
+            <textarea
+              className={styles.queuedEditorInput}
+              value={editDraft ?? ''}
+              autoFocus
+              rows={Math.min(8, Math.max(2, (editDraft ?? '').split('\n').length))}
+              onChange={(e) => setEditDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  submitEdit();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  setEditDraft(null);
+                }
+              }}
+            />
+            <div className={styles.queuedEditorActions}>
+              <button
+                type="button"
+                className={styles.queuedEditorSave}
+                onClick={submitEdit}
+                disabled={!trimmedDraft}
+              >
+                Save
+              </button>
+              <button
+                type="button"
+                className={styles.queuedEditorCancel}
+                onClick={() => setEditDraft(null)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className={styles.messageContent}>
+            <MarkdownMessage content={textContent} />
+          </div>
+        )}
       </div>
     );
   }

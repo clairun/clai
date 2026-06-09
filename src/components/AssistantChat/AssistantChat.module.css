@@ -262,6 +262,88 @@
   color: var(--color-critical);
 }
 
+.queuedEdit {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.queuedEdit:hover {
+  background: var(--color-overlay-08, rgba(0, 0, 0, 0.06));
+  color: var(--color-accent);
+}
+
+.queuedEditor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.queuedEditorInput {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-medium);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.queuedEditorInput:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.queuedEditorActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.queuedEditorSave,
+.queuedEditorCancel {
+  appearance: none;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--color-border-medium);
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.queuedEditorSave {
+  border-color: transparent;
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.queuedEditorSave:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.queuedEditorCancel:hover {
+  background: var(--color-bg-hover);
+}
+
 /* Agent Query Message - when agent initiates a query with [@clai] */
 .agentQueryMessage {
   padding: 14px 16px;
