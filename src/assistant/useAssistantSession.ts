@@ -5,7 +5,7 @@
  * Handles lazy session creation, message sending, and state access.
  */
 
-import { useCallback, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import useAssistantStore from './sessionStore';
 import * as client from './client';
 import type { AssistantSession } from '../generated/bindings';
@@ -25,9 +25,15 @@ export function useAssistantSession(tabId: string) {
     sessionId ? state.sessions[sessionId] : null
   );
 
-  // Use ref to avoid stale closures in callbacks
+  // Mirror sessionId into a ref so stable callbacks (sendMessage in particular)
+  // always see the latest value. Writing `ref.current` directly during render
+  // trips the `react-hooks/refs` lint rule, so the mirror lives in an effect
+  // keyed on sessionId — every value change re-runs the effect, but the ref
+  // assignment is the only side-effect so the cost is negligible.
   const sessionIdRef = useRef(sessionId);
-  sessionIdRef.current = sessionId;
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   /**
    * Ensure an assistant session exists for this tab.

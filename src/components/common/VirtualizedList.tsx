@@ -178,8 +178,12 @@ const VirtualizedListInner = <T,>({
   // Latest onApproachTop behind a stable ref, so callers passing an inline
   // callback don't churn the scroll-handler chain (updateFollowState →
   // syncViewport → handleScroll + its ResizeObserver) on every render.
+  // Writing `ref.current` directly during render trips the `react-hooks/refs`
+  // lint rule, so the mirror lives in an effect keyed on onApproachTop.
   const onApproachTopRef = useRef(onApproachTop);
-  onApproachTopRef.current = onApproachTop;
+  useEffect(() => {
+    onApproachTopRef.current = onApproachTop;
+  }, [onApproachTop]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const node = scrollRef.current;

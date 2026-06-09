@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useRef, useMemo } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 
 /**
  * ChatManagerContext
@@ -49,9 +49,15 @@ export const ChatManagerProvider = ({ children }: { children: React.ReactNode })
   // Track the currently active chat context
   const [activeSpaceRoom, setActiveSpaceRoom] = useState<string | null>(null);
 
-  // Reference to prevent unnecessary re-renders
+  // Mirror panelStates into a ref so stable callbacks (getPanelState,
+  // setActiveContext) always read the latest snapshot without invalidating
+  // the useCallback chain. Writing `ref.current` directly during render
+  // trips the `react-hooks/refs` lint rule, so the mirror lives in an
+  // effect keyed on panelStates.
   const panelStatesRef = useRef(panelStates);
-  panelStatesRef.current = panelStates;
+  useEffect(() => {
+    panelStatesRef.current = panelStates;
+  }, [panelStates]);
 
   /**
    * Generate a unique key for a chat context

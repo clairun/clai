@@ -35,8 +35,17 @@ const useTypewriterBuffer = (accumulated: string, isStreaming: boolean): string 
   const lenRef = useRef(displayed.length);
   const streamingRef = useRef(isStreaming);
 
-  accRef.current = accumulated || '';
-  streamingRef.current = isStreaming;
+  // Mirror the changing inputs into refs so the RAF `tick` callback always
+  // reads the latest values without being in the effect dep list (and
+  // re-creating the loop on every change). Writing `ref.current` directly
+  // during render trips the `react-hooks/refs` lint rule, so the mirror
+  // lives in effects keyed on the input values.
+  useEffect(() => {
+    accRef.current = accumulated || '';
+  }, [accumulated]);
+  useEffect(() => {
+    streamingRef.current = isStreaming;
+  }, [isStreaming]);
 
   useEffect(() => {
     // If the consumer never asked for streaming, just mirror content
