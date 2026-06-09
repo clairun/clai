@@ -355,6 +355,13 @@ const VirtualizedListInner = <T,>({
 
     for (let index = 0; index < items.length; index += 1) {
       const key = itemKey(items[index]!, index);
+      // `heightsRef` is a deliberate render-time cache: the height map
+      // can be hundreds of entries for long chat histories, and pushing
+      // every measurement through setState would cascade-render the whole
+      // list. The companion `measurementVersion` state (in this memo's
+      // dep list) signals cache mutations, so the rule's "refs are not
+      // for render" concern does not apply here.
+      // eslint-disable-next-line react-hooks/refs
       const cached = heightsRef.current.get(key);
       const size = cached !== undefined ? cached : estimateSize;
       const entry = { top, size, key };
