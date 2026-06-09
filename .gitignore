@@ -32,6 +32,9 @@ TODO.txt
 /bindings/
 coverage/
 
+# Design documents — kept locally, not tracked in the repo.
+docs/*.md
+
 # Local Flatpak build artifacts (flatpak/build-local.sh).
 # The build tree + OSTree repo now stage in ~/.cache/clai-flatpak (outside
 # the repo); only the final bundle lands here. The dir entries are kept as
