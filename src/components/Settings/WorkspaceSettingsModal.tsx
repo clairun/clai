@@ -353,6 +353,7 @@ const WorkspaceSettingsModal = ({
   // meaningfully different initialSelection).
   useEffect(() => {
     if (!isOpen) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resets selection/visited/dirty/saving state when the modal re-opens or the caller's initial selection changes; the lint cannot model the 5-field derived draft keyed on props, not on rendered state.
     setSelection(initialSel);
     setVisited(new Set([selectionKey(initialSel)]));
     setDirty({});
@@ -700,6 +701,7 @@ const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }: {
   // Resync if the parent snapshot changes (e.g., a save just completed and
   // the parent refetched). Skipped when the local draft already matches
   // the snapshot so we don't fight an in-flight save's loopback.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- Resyncs local title from the parent snapshot when it changes (e.g., after a save refetch); the lint cannot model the loopback-avoidance guard the next line adds.
   useEffect(() => { setTitle(snapshot?.title || ''); }, [snapshot?.title]);
 
   const isDirty = title.trim() !== (snapshot?.title || '').trim();
@@ -894,6 +896,7 @@ const ScheduleSection = ({
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resyncs schedule state from the snapshot when the parent's enabled flag or kind changes; the lint cannot model a 2-field derived draft that survives an in-flight save's loopback.
     setEnabled(!!snapshot?.scheduleEnabled);
     setScheduleKind(initialScheduleKindFromSnapshot(snapshot?.scheduleKind));
   }, [snapshot?.scheduleEnabled, snapshot?.scheduleKind]);
@@ -905,6 +908,7 @@ const ScheduleSection = ({
   // sanity-check what they typed before hitting Save.
   useEffect(() => {
     if (!enabled || scheduleKind.type !== 'cron') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Fetches the next 3 fire times whenever the cron expression/timezone change; async invoke is outside the lint's set-state model and the cancellation guard is invisible to it.
       setPreviewTimes([]);
       setPreviewError(null);
       return undefined;
@@ -1367,6 +1371,7 @@ const AgentSection = ({
     if (!isCreate) return;
     if (agent) return;                              // already initialized
     if (deps?.defaultExecution === undefined) return; // fetch still pending
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Bootstraps the create-flow draft from the resolved defaultExecution; the lint cannot model the fetch-pending guard (deps?.defaultExecution === undefined).
     setAgent(blankAgentDraft(deps.defaultExecution || undefined));
     setLoading(false);
   }, [isCreate, agent, deps?.defaultExecution]);
@@ -1374,6 +1379,7 @@ const AgentSection = ({
   // Reset form fields whenever the source agent changes
   useEffect(() => {
     if (!agent) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resets all 15+ form fields when the source agent changes; the lint cannot model a multi-field prop→state mirror without causing cascading renders on every input.
     setName(agent.name || '');
     setDescription(agent.description || '');
     setSelectedMcpServerIds(agent.selectedMcpServerIds || []);
@@ -1425,6 +1431,7 @@ const AgentSection = ({
 
   useEffect(() => {
     if (providerConnectionDraft && availableProviderConnections.some((c) => c.id === providerConnectionDraft)) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Auto-selects the first available provider connection when the list changes; the lint cannot model a "keep current if still valid, otherwise default" derivation.
     setProviderConnectionDraft(availableProviderConnections[0]?.id || '');
   }, [availableProviderConnections, providerConnectionDraft]);
 
