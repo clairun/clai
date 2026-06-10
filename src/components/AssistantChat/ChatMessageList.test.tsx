@@ -197,6 +197,27 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('exit 0')).toBeInTheDocument();
   });
 
+  it('hides the empty assistant placeholder until content or streaming text arrives', () => {
+    // Each turn is seeded with an empty Text placeholder before anything
+    // streams. Rendering it would create a zero-height virtual item whose
+    // 0px measurement the virtualizer can't cache, leaving a phantom
+    // estimate-sized gap above the running footer.
+    const messages: AssistantMessage[] = [
+      msg({ id: 'm1', role: 'user', content: [{ type: 'text', text: 'do the thing' }] }),
+      msg({ id: 'm2', role: 'assistant', content: [{ type: 'text', text: '' }] }),
+    ];
+    const { rerender } = render(<ChatMessageList messages={messages} isStreaming />);
+    expect(screen.getByTestId('virtual-list').children).toHaveLength(2); // user item + footer
+    expect(screen.queryByText('Clai')).toBeNull();
+
+    // First streamed delta for the placeholder makes it visible.
+    rerender(
+      <ChatMessageList messages={messages} isStreaming streamingText={{ m2: 'on it' }} />,
+    );
+    expect(screen.getByText('on it')).toBeInTheDocument();
+    expect(screen.getByText('Clai')).toBeInTheDocument();
+  });
+
   it('shows an elapsed timer in the running footer', () => {
     const messages: AssistantMessage[] = [
       msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'working…' }] }),

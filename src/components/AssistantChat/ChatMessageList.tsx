@@ -192,6 +192,24 @@ const isToolOnlyMessage = (message: AssistantMessage): boolean => {
   return !text.trim() && tools.length > 0;
 };
 
+/**
+ * Whether an assistant message has anything to show: a non-empty text or
+ * thinking part, or any other part kind (tool_use etc.). A just-seeded turn
+ * message (one empty Text placeholder) has none — rendering it produces a
+ * zero-height item, and VirtualizedList can't cache a 0px measurement, so
+ * the item holds its ~48px size estimate. That phantom slot is the gap that
+ * flashes under the last tool row while the model composes its next tool
+ * call. Callers hide such messages until content (or streaming text) lands.
+ */
+const hasRenderableContent = (message: AssistantMessage): boolean => (
+  Array.isArray(message.content)
+  && message.content.some((part) => {
+    if (!part || typeof part !== 'object') return false;
+    if (part.type === 'text' || part.type === 'thinking') return !!part.text;
+    return true;
+  })
+);
+
 const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
   if (!message) return true;
   if (message.role === 'tool') return true;
@@ -414,26 +432,39 @@ const ChatMessageList = ({
     return map;
   }, [toolCalls]);
 
+  // Drop assistant messages that have nothing to render yet — the empty
+  // placeholder each turn is seeded with stays hidden until its first
+  // content part or streaming delta arrives (see hasRenderableContent).
+  const visibleMessages = useMemo(
+    () => messages.filter((msg) => (
+      msg.role !== 'assistant' || hasRenderableContent(msg) || !!streamingText[msg.id]
+    )),
+    [messages, streamingText],
+  );
+
   const grouped = useMemo(() => {
-    const items = groupMessages(messages);
+    const items = groupMessages(visibleMessages);
     if (hasOlderMessages && onLoadOlderMessages) {
       return [{ type: 'load-earlier' } as RenderItem, ...items];
     }
     return items;
-  }, [messages, hasOlderMessages, onLoadOlderMessages]);
+  }, [visibleMessages, hasOlderMessages, onLoadOlderMessages]);
 
   // Id of the last visible message iff it's a user message. Writing a message
   // is an explicit "show me the latest" — when a new user message lands at the
   // tail of the conversation, the list jumps to the bottom even if the reader
   // had scrolled up into history.
+  // Scans visibleMessages (not raw messages) so the still-empty assistant
+  // placeholder seeded right after a send can't mask the user message when
+  // both land in the same render batch.
   const lastUserMessageId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const msg = messages[i]!;
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      const msg = visibleMessages[i]!;
       if (isHiddenMessage(msg)) continue;
       return msg.role === 'user' ? msg.id : null;
     }
     return null;
-  }, [messages]);
+  }, [visibleMessages]);
 
   // An item is an "assistant continuation" when it's an assistant turn
   // (text+tools MessageBlock or a tool-only MergedToolGroup) AND the
