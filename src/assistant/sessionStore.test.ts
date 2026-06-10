@@ -141,6 +141,35 @@ describe('addMessage', () => {
   });
 });
 
+describe('queuedMessageIds — live events win over snapshot hydrations', () => {
+  it('is seeded from the snapshot on the first hydration', () => {
+    const store = useAssistantStore.getState();
+    store.loadSessionData(SESSION.id, SESSION, [msg('m-q')], [], [], ['m-q']);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual(['m-q']);
+  });
+
+  it('does not resurrect a delivered chip from a stale snapshot', () => {
+    // Regression: a snapshot fetched before the queue delivery committed
+    // could be applied *after* the queued_messages_delivered event, putting
+    // the cleared chip back. The event was one-shot, and streaming gates
+    // further hydrations, so the stale chip survived the whole follow-up
+    // run. Once an entry exists, the event-driven set is authoritative.
+    const store = useAssistantStore.getState();
+    store.loadSessionData(SESSION.id, SESSION, [msg('m-q')], [], [], ['m-q']);
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-q']);
+    store.loadSessionData(SESSION.id, SESSION, [msg('m-q')], [], [], ['m-q']);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual([]);
+  });
+
+  it('keeps a live-queued chip across a hydration that lacks queue state', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.markMessageQueued(SESSION.id, 'm-q');
+    store.loadSessionData(SESSION.id, SESSION, [msg('m-q')], [], []);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual(['m-q']);
+  });
+});
+
 describe('totalMessageCount — conversation total, not the loaded window', () => {
   it('is seeded by loadSessionData and survives a refresh that omits it', () => {
     const store = useAssistantStore.getState();

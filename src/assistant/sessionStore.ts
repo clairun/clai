@@ -347,10 +347,18 @@ const useAssistantStore = create<AssistantStoreState>()(
             messages,
             runs,
             toolCalls,
-            // Snapshot-sourced when provided; otherwise preserve the live
-            // event-driven set so a hydration that didn't fetch queue state
-            // doesn't wipe the chips.
-            queuedMessageIds: queuedMessageIds ?? existing?.queuedMessageIds ?? [],
+            // The live event-driven set wins once the session is hydrated.
+            // A snapshot reflects the queue at fetch time and can be staler
+            // than a queued_messages_delivered event that already cleared a
+            // chip (snapshot fetched pre-delivery, applied post-event) —
+            // re-applying it resurrected the chip for the whole follow-up
+            // run, with no later event to clear it. Events are strictly
+            // ordered and the listener is app-global, so an existing entry
+            // is never behind; snapshot ids only seed the first hydration
+            // (app start / evicted session).
+            queuedMessageIds: existing
+              ? existing.queuedMessageIds
+              : queuedMessageIds ?? [],
             olderMessageCursor:
               olderMessageCursor !== undefined
                 ? olderMessageCursor
