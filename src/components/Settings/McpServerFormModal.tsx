@@ -87,11 +87,20 @@ const McpServerFormModal = ({
     !!catalogEntry && !isEditing && transportType === 'http' && authType === 'oauth';
   const showFormFields = !isCatalogQuickConnect || showAdvanced;
 
+  // This effect re-initialises the 16+ form fields from the incoming
+  // `server` / `catalogEntry` props whenever the modal is (re)opened with
+  // a different editing target. The form is mounted-once-per-edit and the
+  // user can switch between "edit existing", "new from catalog", and
+  // "new empty" modes, so we cannot rely on `useState` lazy initialisers
+  // alone. The parent (`McpServersSettings.tsx`) could in principle
+  // remount the modal via `key={server?.id ?? catalogEntry?.id ?? 'new'}`
+  // to avoid this effect; tracked as a future refactor.
   useEffect(() => {
     if (!isOpen) {
       return;
     }
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setOauthLogin(null);
     setClientSecret('');
     setShowAdvanced(false);

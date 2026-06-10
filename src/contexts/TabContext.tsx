@@ -71,7 +71,21 @@ export function TabContextProvider({
     initialContext?.assistantConnectionId || null
   );
 
+  // Sync the local state slots from the incoming `initialContext` snapshot
+  // whenever the parent switches tabs (`tabId` change) or pushes a new
+  // context payload (`initialContext` identity change, e.g. when a tab's
+  // context is restored from disk while the provider is still mounted).
+  // The `key={tabId}` parent-side pattern would handle the first case but
+  // not the second, so we keep this effect. Tracked for a future refactor
+  // to extract a child component remounted via `key={tabId}` and route
+  // cross-tabId `initialContext` pushes through `useSyncExternalStore`.
   useEffect(() => {
+    // The four setters in this effect form a single "sync local state
+    // from the incoming `initialContext` snapshot" reaction. The lint
+    // rule reports only the first setState in the effect, so a single
+    // disable on this line silences all four; the suppression is
+    // justified above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSelectedMcpServerIds(
       initialContext?.mcpServers?.attachedServerIds || initialContext?.mcpServers?.selectedServerIds || []
     );
