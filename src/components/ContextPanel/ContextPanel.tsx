@@ -7,6 +7,7 @@ import type { McpServerResponse, ProviderConnection } from '../../generated/bind
 import ContextBadge from './ContextBadge';
 import McpServerAvatar from './McpServerAvatar';
 import McpServerSelector from './McpServerSelector';
+import ProviderSetupBadge from './ProviderSetupBadge';
 import styles from './ContextPanel.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
@@ -50,6 +51,9 @@ const ContextPanel = () => {
   const [showMcpSelector, setShowMcpSelector] = useState(false);
   const [availableMcpServers, setAvailableMcpServers] = useState<McpServerResponse[]>([]);
   const [providerConnections, setProviderConnections] = useState<ProviderConnection[]>([]);
+  // Distinguishes "no providers configured" from "providers not loaded yet",
+  // so the setup call-to-action doesn't flash on every startup.
+  const [connectionsLoaded, setConnectionsLoaded] = useState(false);
 
   const activeTab = getActiveTab();
   const tabContext = activeTab?.context;
@@ -76,11 +80,13 @@ const ContextPanel = () => {
         if (!cancelled) {
           setAvailableMcpServers(servers || []);
           setProviderConnections(connections || []);
+          setConnectionsLoaded(true);
         }
       } catch {
         if (!cancelled) {
           setAvailableMcpServers([]);
           setProviderConnections([]);
+          setConnectionsLoaded(true);
         }
       }
     };
@@ -118,6 +124,9 @@ const ContextPanel = () => {
   const hasCustomContext = Object.keys(customContext).length > 0;
   const hasMcpContext = attachedMcpServerIds.length > 0 || configuredMcpServers.length > 0;
   const hasAssistantContext = !isAgentManagedTab && enabledProviderConnections.length > 0;
+  // First-run state: nothing to select. Show the setup call-to-action where
+  // the picker would be, so a fresh install has an obvious next step.
+  const needsProvider = !isAgentManagedTab && connectionsLoaded && enabledProviderConnections.length === 0;
 
   useEffect(() => {
     if (!activeTab || isAgentManagedTab || enabledProviderConnections.length === 0) {
@@ -182,7 +191,7 @@ const ContextPanel = () => {
     });
   };
 
-  if (!hasCustomContext && !hasMcpContext && !hasAssistantContext) {
+  if (!hasCustomContext && !hasMcpContext && !hasAssistantContext && !needsProvider) {
     return null;
   }
 
@@ -218,6 +227,8 @@ const ContextPanel = () => {
               </svg>
             </label>
           )}
+
+          {needsProvider && <ProviderSetupBadge />}
 
           {hasMcpContext && !isAgentManagedTab && (
             <ContextBadge

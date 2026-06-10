@@ -98,9 +98,17 @@ interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialTab?: TabValue;
+  // When 'new', the provider tab opens with its "Add Connection" form
+  // already open — used by first-run deep links (no provider configured).
+  initialProviderAction?: 'new' | null;
 }
 
-const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }: SettingsModalProps) => {
+const SettingsModal = ({
+  isOpen,
+  onClose,
+  initialTab = TABS.PROVIDER,
+  initialProviderAction = null,
+}: SettingsModalProps) => {
   const [activeTab, setActiveTab] = useState<TabValue>(initialTab);
 
   // Reset to `initialTab` whenever the modal transitions to open, or the
@@ -158,7 +166,7 @@ const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }: Settings
   const renderContent = () => {
     switch (activeTab) {
       case TABS.PROVIDER:
-        return <AssistantProviderSettings />;
+        return <AssistantProviderSettings initialAction={initialProviderAction} />;
       case TABS.SKILLS:
         return <SkillsSettings />;
       case TABS.MCP_SERVERS:

@@ -6,6 +6,7 @@ import type { McpServerResponse, ProviderConnection } from '../../generated/bind
 import ContextBadge from '../../components/ContextPanel/ContextBadge';
 import McpServerAvatar from '../../components/ContextPanel/McpServerAvatar';
 import McpServerSelector from '../../components/ContextPanel/McpServerSelector';
+import ProviderSetupBadge from '../../components/ContextPanel/ProviderSetupBadge';
 import { getWorkspaceSnapshot, updateWorkspaceSessionMcp, setWorkspaceProvider } from '../client';
 import styles from './WorkspaceContextBar.module.css';
 
@@ -32,6 +33,9 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
   const [showMcpSelector, setShowMcpSelector] = useState(false);
   const [availableMcpServers, setAvailableMcpServers] = useState<McpServerResponse[]>([]);
   const [providerConnections, setProviderConnections] = useState<ProviderConnection[]>([]);
+  // Distinguishes "no providers configured" from "providers not loaded yet",
+  // so the setup call-to-action doesn't flash on every startup.
+  const [connectionsLoaded, setConnectionsLoaded] = useState(false);
   const [localMcpServerIds, setLocalMcpServerIds] = useState<string[]>([]);
   const [localDisabledIds, setLocalDisabledIds] = useState<string[]>([]);
   const [isAgent, setIsAgent] = useState(false);
@@ -83,11 +87,13 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
         if (!cancelled) {
           setAvailableMcpServers(servers || []);
           setProviderConnections(connections || []);
+          setConnectionsLoaded(true);
         }
       } catch {
         if (!cancelled) {
           setAvailableMcpServers([]);
           setProviderConnections([]);
+          setConnectionsLoaded(true);
         }
       }
     };
@@ -181,7 +187,11 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
 
   const hasConfiguredServers = configuredMcpServers.length > 0;
   const hasProviders = !isAgent && enabledProviders.length > 0;
-  const hasBadges = displayMcpServers.length > 0 || (!isAgent && hasConfiguredServers) || hasProviders;
+  // First-run state: nothing to select. Show the setup call-to-action where
+  // the picker would be, so a fresh install has an obvious next step.
+  const needsProvider = !isAgent && connectionsLoaded && enabledProviders.length === 0;
+  const hasBadges =
+    displayMcpServers.length > 0 || (!isAgent && hasConfiguredServers) || hasProviders || needsProvider;
 
   // The bar scrolls horizontally with a hidden scrollbar (WebKitGTK draws
   // its overlay bar over the badges), so provide the affordances here:
@@ -252,6 +262,8 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
             </svg>
           </label>
         )}
+
+        {needsProvider && <ProviderSetupBadge />}
 
         {displayMcpServers.map((server) => {
           const isDisabled = localDisabledIds.includes(server.id);

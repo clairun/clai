@@ -1,0 +1,31 @@
+/* Mirrors the provider picker pill (.providerPicker in ContextPanel /
+   WorkspaceContextBar) so the call-to-action sits exactly where the picker
+   will appear once a provider exists — just in the critical palette. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-critical-alpha-30, rgba(220, 38, 38, 0.35));
+  border-radius: var(--radius-full);
+  background: var(--color-critical-alpha-10, rgba(220, 38, 38, 0.1));
+  color: var(--color-critical, #dc2626);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.badge:hover {
+  border-color: var(--color-critical, #dc2626);
+  background: var(--color-critical-alpha-20, rgba(220, 38, 38, 0.16));
+}
+
+.icon {
+  flex-shrink: 0;
+}
+
+.label {
+  line-height: 1;
+}

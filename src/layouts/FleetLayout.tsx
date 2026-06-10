@@ -11,7 +11,8 @@ import {
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
-import { SettingsModal } from '../components/Settings';
+import { SettingsModal, TABS } from '../components/Settings';
+import { OPEN_GLOBAL_SETTINGS_EVENT, type OpenGlobalSettingsDetail } from '../utils/globalSettings';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
@@ -81,6 +82,12 @@ const FleetLayout = () => {
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [globalSettingsOpen, setGlobalSettingsOpen] = useState(false);
+  const [globalSettingsTab, setGlobalSettingsTab] = useState<typeof TABS[keyof typeof TABS]>(TABS.PROVIDER);
+  // Set when the modal was opened by a deep link that wants the provider
+  // tab's "Add Connection" form already open (e.g. the first-run badge in
+  // the chat context bar). Cleared on close so a later manual open of
+  // Settings doesn't replay the form.
+  const [globalSettingsProviderAction, setGlobalSettingsProviderAction] = useState<'new' | null>(null);
   const [cloneBusyId, setCloneBusyId] = useState<string | null>(null);
   const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
   const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
@@ -113,6 +120,20 @@ const FleetLayout = () => {
     const interval = window.setInterval(loadWorkspaces, REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [loadWorkspaces]);
+
+  // Deep links into the global settings modal from leaf components (e.g. the
+  // "Configure a provider first" badge in the chat context bar) arrive as a
+  // window event — this layout is the modal's only host.
+  useEffect(() => {
+    const handleOpenSettings = (event: Event) => {
+      const detail = (event as CustomEvent<OpenGlobalSettingsDetail>).detail || {};
+      setGlobalSettingsTab(detail.tab ?? TABS.PROVIDER);
+      setGlobalSettingsProviderAction(detail.providerAction ?? null);
+      setGlobalSettingsOpen(true);
+    };
+    window.addEventListener(OPEN_GLOBAL_SETTINGS_EVENT, handleOpenSettings);
+    return () => window.removeEventListener(OPEN_GLOBAL_SETTINGS_EVENT, handleOpenSettings);
+  }, []);
 
   // Publish the rail's current width so the globally-fixed terminal card (in
   // MainLayout, a sibling of our Outlet) can center over the detail pane rather
@@ -326,7 +347,11 @@ const FleetLayout = () => {
         <button
           type="button"
           className={styles.settingsButton}
-          onClick={() => setGlobalSettingsOpen(true)}
+          onClick={() => {
+            setGlobalSettingsTab(TABS.PROVIDER);
+            setGlobalSettingsProviderAction(null);
+            setGlobalSettingsOpen(true);
+          }}
           title="Settings"
           aria-label="Open settings"
         >
@@ -374,7 +399,12 @@ const FleetLayout = () => {
 
       <SettingsModal
         isOpen={globalSettingsOpen}
-        onClose={() => setGlobalSettingsOpen(false)}
+        onClose={() => {
+          setGlobalSettingsOpen(false);
+          setGlobalSettingsProviderAction(null);
+        }}
+        initialTab={globalSettingsTab}
+        initialProviderAction={globalSettingsProviderAction}
       />
 
       <ConfirmDialog
