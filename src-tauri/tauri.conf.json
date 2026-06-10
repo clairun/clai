@@ -31,7 +31,7 @@
         "depends": ["bubblewrap (>= 0.4.0)"]
       },
       "rpm": {
-        "depends": ["bubblewrap >= 0.4.0"]
+        "depends": ["bubblewrap"]
       }
     },
     "icon": [
