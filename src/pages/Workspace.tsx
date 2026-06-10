@@ -666,6 +666,7 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
   useEffect(() => {
     autoExpandedRef.current = false;
     loadingRef.current = new Set();
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets file-tree state and triggers a root reload when the workspace switches; the lint cannot model a 'reset then async-load' effect that runs once per workspaceId.
     setExpanded(new Set());
     setChildrenByPath(new Map());
     void loadDir('', true);
@@ -695,6 +696,7 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
     autoExpandedRef.current = true;
     if (root.length === 1 && root[0]!.kind === 'directory') {
       const only = root[0]!.path;
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Auto-expands the single top-level directory on first root load so the user lands inside the workspace folder; guarded by autoExpandedRef and gated on the root shape, which makes it a one-shot effect rather than a prop-resync.
       setExpanded(new Set([only]));
       void loadDir(only);
     }
@@ -703,6 +705,7 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
   // Debounced server-side search. Empty query → tree view.
   useEffect(() => {
     if (!trimmedQuery) {
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Debounced server-side search bootstrap; async invoke + cancellation token + setTimeout is outside the lint's set-state model, and the empty-query early-return branch makes a 'resync from prop' formulation incomplete.
       setSearchResults(null);
       setSearching(false);
       return;
@@ -1603,6 +1606,7 @@ const Workspace = () => {
 
   useEffect(() => {
     lastLoadedSessionUpdatedAtRef.current = null;
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Interval poll on loadSnapshot identity: full reload once, then setInterval for lightweight polls. The pattern cannot be expressed without setState in an effect (refs can't trigger renders).
     loadSnapshot(true);
     const interval = window.setInterval(
       () => loadSnapshot(false, LIGHTWEIGHT_SNAPSHOT_OPTIONS),
@@ -1761,6 +1765,7 @@ const Workspace = () => {
     const stillActive = (snapshot?.runs || []).some(
       (run) => run.id === cancellingRunId && ACTIVE_RUN_STATUSES.includes(run.status)
     );
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Clears the 'stopping…' lock once the cancelled run leaves the active set; the cancel propagation is async (engine checkpoints) so the clear has to observe snapshot.runs in an effect.
     if (!stillActive) setCancellingRunId(null);
   }, [snapshot, cancellingRunId]);
   const stopBusy = cancellingRunId !== null;

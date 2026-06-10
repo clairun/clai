@@ -415,6 +415,7 @@ export default function WorkspaceFilePreviewPanel({
 
   useEffect(() => {
     if (!entry?.path) {
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Async file-content bootstrap: fetch on workspaceId/path/viewer change with cancellation guard; setLoading/setError/setFile is outside the lint's set-state model.
       setLoading(false);
       return undefined;
     }
@@ -449,6 +450,7 @@ export default function WorkspaceFilePreviewPanel({
   }, [workspaceId, entry?.path, entry?.viewer]);
 
   useEffect(() => {
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets htmlMode/justCopied/copiedField when the entry path changes; 3-field prop→state mirror cannot be expressed as a useMemo without re-rendering on every copy click.
     setHtmlMode('preview');
     setJustCopied(false);
     setCopiedField(null);
@@ -463,6 +465,7 @@ export default function WorkspaceFilePreviewPanel({
       return undefined;
     }
     let cancelled = false;
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Async HTML bundle build (fire-and-forget invoke with cancellation); the lint cannot model the 'loaded file + html mode + looks-like-html' gating that decides whether to build at all.
     setBundling(true);
     setHtmlBundle(null);
     bundleHtmlForPreview(workspaceId, file.path, file.content)
