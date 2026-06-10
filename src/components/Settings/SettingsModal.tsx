@@ -91,13 +91,25 @@ interface SettingsModalProps {
 }
 
 const SettingsModal = ({ isOpen, onClose, initialTab = TABS.PROVIDER }: SettingsModalProps) => {
-  // The modal returns null when closed (see early return below), so every
-  // open remounts the component and re-runs `useState(initialTab)`. The
-  // "reset on open" effect this file used to carry was a redundant
-  // re-set to the same value and has been removed; if a future caller
-  // needs to switch tabs while the modal stays open, pass
-  // `key={initialTab}` from the parent so React remounts for them.
   const [activeTab, setActiveTab] = useState<TabValue>(initialTab);
+
+  // Reset to `initialTab` whenever the modal transitions to open, or the
+  // requested tab changes while it is open. The caller (FleetLayout) renders
+  // this modal unconditionally and only toggles `isOpen`, so the instance
+  // stays mounted across open/close — returning `null` while closed does not
+  // unmount it, and `useState(initialTab)` runs only on first mount. We adjust
+  // state during render (React's documented "information from a previous
+  // render" pattern) rather than in an effect: it skips the extra commit an
+  // effect would cause and stays clear of react-hooks/set-state-in-effect.
+  const [prevOpen, setPrevOpen] = useState(isOpen);
+  const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
+  if (isOpen !== prevOpen || initialTab !== prevInitialTab) {
+    setPrevOpen(isOpen);
+    setPrevInitialTab(initialTab);
+    if (isOpen) {
+      setActiveTab(initialTab);
+    }
+  }
 
   // Handle escape key
   useEffect(() => {
