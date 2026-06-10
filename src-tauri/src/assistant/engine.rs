@@ -1145,6 +1145,15 @@ pub(crate) fn build_system_prompt(
              - Do not store secrets in memory unless the operator explicitly configured a path for that purpose.\n\
              - Knowledge is not a dashboard — don't duplicate transient metrics there. State is not knowledge — don't put durable heuristics in `state.md`.\n",
         );
+
+        prompt.push_str(
+            "\n## Conversation History Database (read-only)\n\
+             The complete conversation record of this workspace lives in a SQLite database at `.clai/data.sqlite` (relative to your workspace root): every message, run, and tool call with its full output, across all agents in this workspace — including detail long since compacted out of your context window. Use it when memory files don't have what you need and you must recover verbatim past work: the exact command that was run, the full text of an old error, what the user or a sibling agent said weeks ago.\n\
+             - STRICTLY READ-ONLY. This is the CLAI app's live database, being written concurrently while you run. Open it only as `sqlite3 'file:.clai/data.sqlite?mode=ro'` (if the sqlite3 CLI is unavailable, use python3's sqlite3 module with the same `mode=ro` URI). Never INSERT/UPDATE/DELETE, never VACUUM or ALTER, never open it without `mode=ro` — a write can corrupt the app's state.\n\
+             - Discover the schema with `.tables` and `.schema` rather than assuming it — it changes between app versions. The key tables are `assistant_messages` (conversation, `content_json`), `assistant_tool_calls` (every tool invocation and its result), `assistant_runs`, and `workspace_tasks`.\n\
+             - Keep queries narrow. Single rows can hold megabytes of tool output, so always SELECT specific columns, filter (`WHERE ... LIKE`, `json_extract`, time ranges on `created_at`) and `LIMIT`; never dump whole tables or `SELECT *` unbounded.\n\
+             - Your own in-flight run is in there too. This is a tool for finding *past* work — check memory files first, and reach for the database when you need the verbatim record.\n",
+        );
     }
 
     ProviderInputMessage {
@@ -1269,6 +1278,46 @@ mod tests {
         assert!(text.contains("ask them for its workspace id"));
         // Memory is surfaced to the user in the app.
         assert!(text.contains("**Memory** view"));
+    }
+
+    #[test]
+    fn build_system_prompt_documents_readonly_conversation_history_db() {
+        let context = SessionContext {
+            agent_workspace_id: Some("ws-abc".to_string()),
+            execution: ExecutionCapabilityConfig::default(),
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        // Where the record lives, and the read-only mandate with the exact
+        // safe open incantation.
+        assert!(text.contains("## Conversation History Database (read-only)"));
+        assert!(text.contains(".clai/data.sqlite"));
+        assert!(text.contains("STRICTLY READ-ONLY"));
+        assert!(text.contains("sqlite3 'file:.clai/data.sqlite?mode=ro'"));
+        // Schema discovery over hardcoded assumptions; narrow queries.
+        assert!(text.contains(".tables"));
+        assert!(text.contains("Keep queries narrow"));
+        // Memory stays the first stop; the DB is the verbatim fallback.
+        assert!(text.contains("check memory files first"));
+    }
+
+    #[test]
+    fn build_system_prompt_omits_history_db_without_workspace() {
+        let context = SessionContext::default();
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(!text.contains("## Conversation History Database"));
     }
 
     #[test]
