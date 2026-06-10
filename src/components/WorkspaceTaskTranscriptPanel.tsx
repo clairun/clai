@@ -39,6 +39,7 @@ export default function WorkspaceTaskTranscriptPanel({
   // as new messages and tool calls stream in.
   useEffect(() => {
     if (!sessionId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- async bootstrap: clear UI state on sessionId change; the effect then either resolves synchronously (session is already in the store) or fetches the session and updates bootstrapping/error state on completion. The lint rule cannot model the async load.
       setBootstrapping(false);
       setBootstrapError('');
       return undefined;

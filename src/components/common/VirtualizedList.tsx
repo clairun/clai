@@ -314,6 +314,13 @@ const VirtualizedListInner = <T,>({
     }
   }, []);
 
+  // Prune stale entries from the `heightsRef` cache when `items` (or the key
+  // extractor) changes, and bump `measurementVersion` so React re-renders with
+  // the up-to-date heights. The ref is a non-React sidecar for the cached
+  // row heights; React has no other way to learn that the ref's contents
+  // changed, so the render signal must come from a setState. The full
+  // refactor would be `useSyncExternalStore` over the cache; tracked as a
+  // future change.
   useEffect(() => {
     const liveKeys = new Set(items.map((item, index) => itemKey(item, index)));
     let removed = false;
@@ -324,6 +331,7 @@ const VirtualizedListInner = <T,>({
       }
     }
     if (removed) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- bump measurementVersion after pruning heightsRef so React re-renders with the pruned heights.
       setMeasurementVersion((version) => version + 1);
     }
   }, [items, itemKey]);

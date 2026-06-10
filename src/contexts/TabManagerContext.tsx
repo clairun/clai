@@ -122,6 +122,15 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
   /**
    * Load tabs from the Zustand store (backed by SQLite) on mount.
    * Falls back to localStorage for one-time migration of old persisted tabs.
+   *
+   * This is a genuine one-shot hydrate: the `hasLoadedTabs` ref + the
+   * `workspaceState.initialized` gate guarantee it fires at most once,
+   * and `skipNextSync` blocks the downstream sync effect from echoing
+   * the just-loaded tabs back into the store. The setState-in-effect
+   * is the whole point of the effect (move persisted data into React
+   * state); the lint rule cannot model the one-shot guards and warns
+   * anyway. A single disable on the first setState silences the whole
+   * block (the rule reports only the first setState per effect).
    */
   useEffect(() => {
     if (!workspaceState.initialized) return;
@@ -143,6 +152,7 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
     if (tabsFromStore.length > 0) {
       // Skip the next sync to avoid immediately rewriting what we just loaded.
       skipNextSync.current = true;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot hydrate from persisted store; hasLoadedTabs ref + skipNextSync prevent the echo the rule warns about.
       setTabs(tabsFromStore);
       setActiveTabId(storedActiveTabId || tabsFromStore[0]!.id);
       tabsLoaded = true;
