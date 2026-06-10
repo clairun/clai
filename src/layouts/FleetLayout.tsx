@@ -98,7 +98,17 @@ const FleetLayout = () => {
     }
   }, []);
 
+  // Initial load + 5s poll: keeps the workspace rail in sync with the
+  // server. The interval handle and its unmount cleanup make this an
+  // effect (cannot be a `useState` lazy init), and `loadWorkspaces` is
+  // the callback that actually calls the setters -- the lint rule
+  // reports this effect because invoking `loadWorkspaces` is what
+  // causes the setState. The `loadWorkspaces` callback itself is a
+  // stable `useCallback` (empty deps), so the effect only re-runs if
+  // the callback identity ever changes; a single disable on the first
+  // statement silences the warning.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch + 5s poll; the setStates live inside the loadWorkspaces callback that this effect owns.
     loadWorkspaces();
     const interval = window.setInterval(loadWorkspaces, REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
