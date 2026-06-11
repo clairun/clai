@@ -6,7 +6,7 @@
 pkgname=clai-desktop-bin
 pkgver=@PKGVER@
 pkgrel=1
-pkgdesc="Desktop app for building, running, and supervising small teams of AI agents"
+pkgdesc="Desktop app for building, running, and supervising teams of AI agents"
 arch=('x86_64')
 url="https://github.com/juacker/clai"
 license=('MIT')
