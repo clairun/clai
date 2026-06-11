@@ -15,76 +15,12 @@ use crate::config::{
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use tauri::State;
 use ts_rs::TS;
-
-/// Tab context payload.
-///
-/// This is intentionally schema-less on the Rust side so frontend tab context can
-/// evolve without losing fields during persistence round-trips.
-pub type TabContext = serde_json::Value;
-
-/// Tile node in the layout tree
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TileNode {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub tile_type: String, // "leaf" or "split"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub direction: Option<String>, // "horizontal" or "vertical"
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sizes: Option<Vec<f64>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub children: Option<Vec<TileNode>>,
-}
-
-/// Tab data structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Tab {
-    pub id: String,
-    pub title: String,
-    pub created_at: i64,
-    pub root_tile: TileNode,
-    pub context: TabContext,
-}
-
-/// Command data structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Command {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub command_type: String,
-    pub args: serde_json::Value,
-    pub tab_id: String,
-    pub tile_id: String,
-    pub created_at: i64,
-    pub state: serde_json::Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at: Option<i64>,
-}
-
-/// Vestigial: the legacy tabs/tiles UI state shape. Still serialized over
-/// the wire because `workspaceStore.js` hasn't been ripped out yet; the
-/// load/save Tauri commands return / ignore an empty version of this.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceState {
-    pub active_tab_id: Option<String>,
-    #[serde(default)]
-    pub tab_order: Vec<String>, // Array of tab IDs in display order
-    pub tabs: HashMap<String, Tab>,
-    pub commands: HashMap<String, Command>,
-}
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
 const MAX_ENTRY_COUNT: usize = 500;
@@ -396,12 +332,6 @@ struct WorkspaceProviderSelection {
 }
 
 #[derive(Debug, Clone)]
-struct VirtualWorkspaceArtifact {
-    entry: WorkspaceFileEntry,
-    content: String,
-}
-
-#[derive(Debug, Clone)]
 struct WorkspaceAgentRow {
     id: String,
     workspace_id: String,
@@ -584,111 +514,6 @@ fn sort_workspace_entries(entries: &mut [WorkspaceFileEntry]) {
             .cmp(&left.updated_at)
             .then_with(|| left.path.cmp(&right.path))
     });
-}
-
-fn tab_agent_id(context: &TabContext) -> Option<&str> {
-    context
-        .get("agent")
-        .and_then(|value| value.get("agentId"))
-        .and_then(|value| value.as_str())
-}
-
-fn virtual_artifact_path(_tab: &Tab, command: &Command, extension: &str) -> String {
-    let kind = command.command_type.to_ascii_lowercase();
-    let stem = format!("{}-{}", kind, command.id);
-    format!("visualizations/{}.{}", stem, extension)
-}
-
-fn command_preview(command_type: &str, state: &serde_json::Value) -> Option<String> {
-    match command_type {
-        "canvas" => Some(format!(
-            "{} nodes, {} edges",
-            state
-                .get("nodes")
-                .and_then(|value| value.as_array())
-                .map(|value| value.len())
-                .unwrap_or(0),
-            state
-                .get("edges")
-                .and_then(|value| value.as_array())
-                .map(|value| value.len())
-                .unwrap_or(0)
-        )),
-        "dashboard" => Some(format!(
-            "{} charts",
-            state
-                .get("elements")
-                .and_then(|value| value.as_array())
-                .map(|value| value.len())
-                .unwrap_or(0)
-        )),
-        _ => None,
-    }
-}
-
-fn normalize_canvas_artifact_state(state: &serde_json::Value) -> serde_json::Value {
-    json!({
-        "nodes": state.get("nodes").cloned().unwrap_or_else(|| json!([])),
-        "edges": state.get("edges").cloned().unwrap_or_else(|| json!([])),
-    })
-}
-
-fn normalize_dashboard_artifact_state(state: &serde_json::Value) -> serde_json::Value {
-    let time_range = state
-        .get("timeRange")
-        .and_then(|value| value.as_str())
-        .or_else(|| {
-            state
-                .get("selectedInterval")
-                .and_then(|value| value.get("label"))
-                .and_then(|value| value.as_str())
-        })
-        .unwrap_or("1h");
-
-    json!({
-        "elements": state.get("elements").cloned().unwrap_or_else(|| json!([])),
-        "timeRange": time_range,
-    })
-}
-
-fn command_to_virtual_artifact(
-    tab: &Tab,
-    command: &Command,
-) -> Result<Option<VirtualWorkspaceArtifact>, String> {
-    let (normalized_state, extension, viewer) = match command.command_type.as_str() {
-        "canvas" => (
-            normalize_canvas_artifact_state(&command.state),
-            "canvas",
-            "canvas".to_string(),
-        ),
-        "dashboard" => (
-            normalize_dashboard_artifact_state(&command.state),
-            "dashboard.json",
-            "dashboard".to_string(),
-        ),
-        _ => return Ok(None),
-    };
-
-    let path = virtual_artifact_path(tab, command, extension);
-    let content = serde_json::to_string_pretty(&normalized_state)
-        .map_err(|error| format!("Failed to serialize {} artifact: {}", command.id, error))?;
-
-    Ok(Some(VirtualWorkspaceArtifact {
-        entry: WorkspaceFileEntry {
-            path: path.clone(),
-            relative_path: path.clone(),
-            name: Path::new(&path)
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_string(),
-            viewer,
-            size: Some(content.len() as u64),
-            updated_at: command.updated_at.or(Some(command.created_at)),
-            preview: command_preview(&command.command_type, &normalized_state),
-        },
-        content,
-    }))
 }
 
 fn file_updated_at(metadata: &fs::Metadata) -> Option<i64> {
@@ -1454,66 +1279,6 @@ fn resolve_workspace_file_target(root: &Path, relative_path: &str) -> Result<Pat
     Ok(candidate)
 }
 
-fn workspace_virtual_artifacts(
-    descriptor: &WorkspaceDescriptor,
-    workspace_state: &WorkspaceState,
-) -> Result<Vec<VirtualWorkspaceArtifact>, String> {
-    let Some(agent_id) = descriptor.agent_id.as_deref() else {
-        return Ok(Vec::new());
-    };
-
-    let mut artifacts = Vec::new();
-
-    for tab in workspace_state.tabs.values() {
-        if tab_agent_id(&tab.context) != Some(agent_id) {
-            continue;
-        }
-
-        for command in workspace_state
-            .commands
-            .values()
-            .filter(|command| command.tab_id == tab.id)
-        {
-            if let Some(artifact) = command_to_virtual_artifact(tab, command)? {
-                artifacts.push(artifact);
-            }
-        }
-    }
-
-    artifacts.sort_by(|left, right| {
-        right
-            .entry
-            .updated_at
-            .cmp(&left.entry.updated_at)
-            .then_with(|| left.entry.path.cmp(&right.entry.path))
-    });
-
-    Ok(artifacts)
-}
-
-/// Vestigial: the legacy tabs/tiles UI no longer exists. Frontend still
-/// invokes `load_workspace_state` / `save_workspace_state` from
-/// `workspaceStore.js`; we satisfy those callers with empty state until
-/// the frontend store is ripped out too.
-async fn load_workspace_state_from_pool() -> Result<WorkspaceState, String> {
-    Ok(WorkspaceState::default())
-}
-
-/// Vestigial: the legacy tabs/tiles UI no longer exists. Frontend still
-/// invokes this from `workspaceStore.js`; we return empty state.
-#[tauri::command]
-pub async fn load_workspace_state() -> Result<WorkspaceState, String> {
-    Ok(WorkspaceState::default())
-}
-
-/// Vestigial Tauri command — the tabs/tiles UI no longer exists. The
-/// frontend's `workspaceStore` still invokes this; we accept and ignore
-/// the payload until that store is removed.
-#[tauri::command]
-pub async fn save_workspace_state(_workspace_state: WorkspaceState) -> Result<(), String> {
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn workspace_get_snapshot(
     workspace_id: Option<String>,
@@ -1926,21 +1691,7 @@ pub async fn workspace_read_file(
                 content,
             })
         }
-        Err(_) => {
-            let workspace_state = load_workspace_state_from_pool().await?;
-            if let Some(artifact) = workspace_virtual_artifacts(&descriptor, &workspace_state)?
-                .into_iter()
-                .find(|artifact| artifact.entry.path == request.path)
-            {
-                return Ok(WorkspaceFileContent {
-                    path: request.path,
-                    viewer: artifact.entry.viewer,
-                    content: artifact.content,
-                });
-            }
-
-            Err(format!("File not found: {}", request.path))
-        }
+        Err(_) => Err(format!("File not found: {}", request.path)),
     }
 }
 
@@ -2009,19 +1760,7 @@ pub async fn workspace_download_file(
             fs::copy(&source, &dest).map_err(|e| format!("Failed to save file: {}", e))?;
             Ok(dest.to_string_lossy().to_string())
         }
-        Err(_) => {
-            let workspace_state = load_workspace_state_from_pool().await?;
-            if let Some(artifact) = workspace_virtual_artifacts(&descriptor, &workspace_state)?
-                .into_iter()
-                .find(|artifact| artifact.entry.path == request.path)
-            {
-                fs::write(&dest, artifact.content)
-                    .map_err(|e| format!("Failed to save file: {}", e))?;
-                return Ok(dest.to_string_lossy().to_string());
-            }
-
-            Err(format!("File not found: {}", request.path))
-        }
+        Err(_) => Err(format!("File not found: {}", request.path)),
     }
 }
 

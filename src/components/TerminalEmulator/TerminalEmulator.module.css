@@ -51,25 +51,6 @@
   }
 }
 
-/* Context Panel Wrapper - adapts ContextPanel for terminal display */
-.contextPanelWrapper {
-  position: relative;
-  width: 100%;
-  /* FIXED: Removed border-bottom to prevent double border */
-  background: transparent;
-}
-
-/* Override ContextPanel styles when inside terminal */
-.contextPanelWrapper :global(.contextPanel) {
-  position: relative;
-  top: auto;
-  background: transparent;
-  /* FIXED: Keep border-bottom only on context panel */
-  border-bottom: 1px solid var(--color-border-light);
-  padding: 12px 24px 8px;
-  z-index: auto;
-}
-
 /* Workspace context bar inside terminal */
 .workspaceContextWrapper {
   padding: 8px 14px 0;

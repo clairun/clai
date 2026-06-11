@@ -12,8 +12,6 @@ import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import VirtualizedList from '../components/common/VirtualizedList';
-import { useChatManager } from '../contexts/ChatManagerContext';
-import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import {
   acknowledgeWorkspaceTask,
   getWorkspaceSnapshot,
@@ -75,7 +73,6 @@ type SettingsSelection =
   | { kind: 'agent'; agentId: string }
   | { kind: 'new-agent' };
 type SnapshotOptions = Parameters<typeof getWorkspaceSnapshot>[1];
-type ShortcutHandlers = { onToggleChat?: () => void };
 type VirtualizedListProps<T> = {
   items: T[];
   itemKey: (item: T, index: number) => string;
@@ -89,10 +86,6 @@ type VirtualizedListProps<T> = {
 const WorkspaceVirtualizedList = VirtualizedList as <T>(
   props: VirtualizedListProps<T>
 ) => React.ReactElement | null;
-const useWorkspaceKeyboardShortcuts = useKeyboardShortcuts as unknown as (
-  handlers: ShortcutHandlers,
-  enabled?: boolean
-) => void;
 
 const toNumber = (value: NumericTimestamp): number | null => {
   if (value === null || value === undefined) return null;
@@ -1302,7 +1295,6 @@ const ChatFirstLayout = ({
 
 const Workspace = () => {
   const params = useParams();
-  const { toggleChat } = useChatManager();
   // Provided by FleetLayout's <Outlet>; lets us refresh the workspace rail
   // immediately after changes (e.g. a title rename) instead of waiting for
   // its 5s poll. Optional-chained so the page is resilient if ever rendered
@@ -1401,16 +1393,6 @@ const Workspace = () => {
     sessionId ? state.sessions[sessionId] || null : null
   );
   const lastLoadedSessionUpdatedAtRef = useRef<NumericTimestamp>(null);
-
-  // Register Ctrl/Cmd+Shift+C to toggle chat panel — only for agent workspaces.
-  // General workspaces embed chat directly in the page.
-  useWorkspaceKeyboardShortcuts({
-    onToggleChat: () => {
-      if (snapshot?.kind === 'agent') {
-        toggleChat();
-      }
-    },
-  });
 
   const loadSnapshot = useCallback(
     async (showSpinner = false, options: SnapshotOptions = null) => {

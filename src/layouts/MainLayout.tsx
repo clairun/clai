@@ -3,8 +3,6 @@ import { Outlet } from 'react-router-dom';
 import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmulatorWrapper';
 import PermissionAttentionNotifications from '../components/PermissionAttentionNotifications';
 import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
-import { TabManagerProvider } from '../contexts/TabManagerContext';
-import { ChatManagerProvider } from '../contexts/ChatManagerContext';
 import { useAssistantEvents } from '../assistant';
 import styles from './MainLayout.module.css';
 
@@ -22,20 +20,16 @@ const MainLayout = () => {
   }, []);
 
   return (
-    <TabManagerProvider>
-      <AssistantEventListener>
-        <ChatManagerProvider>
-          <div className={styles.mainLayout}>
-            <WorkspaceTaskNotifications />
-            <PermissionAttentionNotifications />
-            <TerminalEmulatorWrapper />
-            <div className={styles.contentArea}>
-              <Outlet />
-            </div>
-          </div>
-        </ChatManagerProvider>
-      </AssistantEventListener>
-    </TabManagerProvider>
+    <AssistantEventListener>
+      <div className={styles.mainLayout}>
+        <WorkspaceTaskNotifications />
+        <PermissionAttentionNotifications />
+        <TerminalEmulatorWrapper />
+        <div className={styles.contentArea}>
+          <Outlet />
+        </div>
+      </div>
+    </AssistantEventListener>
   );
 };
 

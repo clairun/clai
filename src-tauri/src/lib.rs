@@ -367,9 +367,6 @@ pub fn run() {
             commands::skills::skill_source_refresh,
             commands::skills::skill_source_set_enabled,
             commands::skills::skill_source_delete,
-            // Workspace state persistence commands
-            commands::workspace::load_workspace_state,
-            commands::workspace::save_workspace_state,
             commands::system_apps::system_apps_detect,
             commands::system_apps::get_system_apps_settings,
             commands::system_apps::set_system_apps_settings,

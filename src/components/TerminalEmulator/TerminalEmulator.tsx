@@ -1,9 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
-import { useTabManager } from '../../contexts/TabManagerContext';
-import { useChatManager } from '../../contexts/ChatManagerContext';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
-import ContextPanel from '../ContextPanel/ContextPanel';
 import CommandHelpModal from './CommandHelpModal';
 import { dispatchWorkspaceUiCommand } from '../../utils/workspaceUiEvents';
 import styles from './TerminalEmulator.module.css';
@@ -29,8 +26,6 @@ interface TerminalEmulatorProps {
 }
 
 const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }: TerminalEmulatorProps) => {
-  const { getActiveTab } = useTabManager();
-  const { setActiveTab, openChat, isCurrentChatOpen } = useChatManager();
   const location = useLocation();
   const [inputValue, setInputValue] = useState('');
   const [outputMessages, setOutputMessages] = useState<OutputMessage[]>([]);
@@ -44,14 +39,9 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
   // CHANGED: Ref for the wrapper element instead of display to handle scrolling
   const inputWrapperRef = useRef<HTMLDivElement>(null);
 
-  // Check if desktop chat panel is open
-  const isChatOpen = isCurrentChatOpen();
-  const isFleetRoute = location.pathname === '/fleet';
   const isWorkspaceRoute = location.pathname === '/workspace' || location.pathname.startsWith('/workspace/');
   const workspaceRouteMatch = location.pathname.match(/^\/workspace\/([^/]+)\/?$/);
   const currentWorkspaceId = workspaceRouteMatch ? decodeURIComponent(workspaceRouteMatch[1]!) : null;
-  // Hide ContextPanel on Fleet and workspace routes (workspace has its own context bar)
-  const hideContextPanel = isFleetRoute || isWorkspaceRoute;
 
   // Maximum number of messages to keep
   const MAX_MESSAGES = 5;
@@ -147,14 +137,6 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
     }
   }, [outputMessages]);
 
-  // Sync chat visibility with the active tab
-  useEffect(() => {
-    const activeTab = getActiveTab();
-    if (activeTab?.id) {
-      setActiveTab(activeTab.id);
-    }
-  }, [getActiveTab, setActiveTab]);
-
   // Handle command execution
   const handleCommandExecution = async (input: string) => {
     const trimmed = input.trim();
@@ -167,14 +149,9 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
     // Check if input starts with "/" - it's a command
     const isSlashCommand = trimmed.startsWith('/');
 
-    // If NOT a slash command, send to chat.
-    // Auto-open sidebar chat on non-Fleet, non-workspace routes.
-    // Workspace routes handle chat opening themselves (agent workspaces open the
-    // side panel, general workspaces embed chat in the page).
+    // If NOT a slash command, send to chat. Workspace routes render the chat
+    // in the page; other routes reject with a hint to open a workspace.
     if (!isSlashCommand) {
-      if (!isChatOpen && !isFleetRoute && !isWorkspaceRoute) {
-        openChat();
-      }
       if (onSendToChat) {
         const result = await onSendToChat(trimmed);
         if (result?.error) {
@@ -228,8 +205,7 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
 
     // Anything else is unknown. The legacy /tab, /ctx, /tile and /reset-all
     // commands (and the command-visualization registry they fed) were
-    // removed with the old tabs/tiles UI — the tab data model survives only
-    // as the key for the terminal's default session and its MCP context.
+    // removed with the old tabs/tiles UI.
     addOutputMessage(
       `Unknown command: /${commandName || commandInput}. Type /help for available commands.`,
       'error',
@@ -300,14 +276,7 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
 
 
   return (
-    <div ref={terminalRef} className={`${styles.terminal} ${isChatOpen ? styles.chatOpen : ''}`} onClick={handleTerminalClick}>
-      {/* Context Panel - shows capability badges (hidden on Fleet and workspace routes) */}
-      {!hideContextPanel && (
-        <div className={styles.contextPanelWrapper}>
-          <ContextPanel />
-        </div>
-      )}
-
+    <div ref={terminalRef} className={styles.terminal} onClick={handleTerminalClick}>
       {/* Workspace context bar — MCP badges inside the terminal on workspace routes */}
       {isWorkspaceRoute && currentWorkspaceId && (
         <div className={styles.workspaceContextWrapper}>
@@ -341,11 +310,9 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
             aria-busy={agentWorking || undefined}
             placeholder={agentWorking
               ? 'Agent is working — Enter queues a follow-up message...'
-              : isFleetRoute
-                ? 'Message the selected agent...'
-                : isWorkspaceRoute
-                  ? 'Message this workspace...'
-                  : 'Type to chat, or run a /command (/help)...'}
+              : isWorkspaceRoute
+                ? 'Message this workspace...'
+                : 'Open a workspace to chat, or run a /command (/help)...'}
             spellCheck={false}
             autoComplete="off"
             autoCorrect="off"
