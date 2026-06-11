@@ -85,6 +85,7 @@ const SkillsSettings = () => {
   );
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/immutability -- One-shot async bootstrap: loadCatalog is declared below with `const` so the linter cannot prove the closure value at effect registration; the function only reads the initial state via setSources/setSkills/setDiagnostics, so the TDZ is benign here.
     loadCatalog();
   }, []);
 

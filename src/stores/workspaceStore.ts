@@ -101,7 +101,6 @@ function normalizeTabContext(context: RawTabContext | null | undefined = {}): Ta
   const {
     mcpServers: rawMcpServers = {},
     customContext: rawCustomContext = {},
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     spaceRoom: _spaceRoom,
     ...restContext
   } = context || {};

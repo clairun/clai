@@ -91,6 +91,7 @@ const McpServersSettings = () => {
   const [activeSection, setActiveSection] = useState<McpSection>('catalog');
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/immutability -- One-shot async bootstrap: loadServers is declared below with `const` so the linter cannot prove the closure value at effect registration; the function only reads the initial state via setServers/setLoading/setError, so the TDZ is benign here.
     loadServers();
   }, []);
 
