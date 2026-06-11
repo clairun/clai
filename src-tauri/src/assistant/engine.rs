@@ -897,9 +897,9 @@ pub(crate) fn build_system_prompt(
          - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
          - Evaluate whether prior tool outputs are still fresh enough for the current decision. When information can expire or change over time (for example issues, alerts, metrics, repo state, or external system status), re-run the relevant tools if freshness matters.\n\
          - Chat is the default output channel. Use normal assistant replies for status, findings, and conclusions.\n\
-         - Prefer `workspace.*` tools for durable outputs. Use them to list, read, create, and update artifacts that should remain in the workspace after the run.\n\
-         - Before creating a new durable artifact, call `workspace.listArtifacts` and reuse or update an existing relevant artifact when possible.\n\
-         - Prefer updating existing workspace artifacts over duplicating them.\n\
+         - When looking for code, files, or prior work, ALWAYS search your workspace first — `fs_glob`/`fs_list` from the workspace root, or a `bash_exec` search scoped to it — before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n\
+         - Durable outputs belong in the workspace: write them there with `fs_write` so they persist after the run as user-visible artifacts.\n\
+         - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n\
          - Be concise and direct in your responses. Prefer concrete actions and evidence over vague summaries.\n",
     );
 
@@ -972,7 +972,7 @@ pub(crate) fn build_system_prompt(
         ));
         prompt.push_str(
             "Your assistant text is visible to the user in chat. Treat chat as the primary way to communicate progress and outcomes.\n\
-             Prefer `workspace.*` artifact tools when saving durable workspace outputs.\n\
+             Save durable outputs as files in the workspace (via `fs_write`) so they surface as artifacts.\n\
              For routine scheduled passes, a concise chat update is often sufficient.\n\
              Prefer updating existing visuals over recreating duplicate panels when the topic is unchanged.\n",
         );
@@ -1073,7 +1073,7 @@ pub(crate) fn build_system_prompt(
         }
 
         if context.execution.web.enabled {
-            prompt.push_str("- Web access: enabled (`web.search` and `web.fetch` available)\n");
+            prompt.push_str("- Web access: enabled (`web_search` and `web_fetch` available)\n");
         }
 
         prompt.push_str(
