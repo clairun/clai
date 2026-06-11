@@ -8,14 +8,16 @@
  * History: this context used to also own a tile-grid layout and a per-tab
  * command registry that fed the pre-workspace Home UI. That UI was removed
  * (see Routes.tsx / the P2-0 dead-code sweep), so the tile/command machinery
- * is gone. A minimal `rootTile` leaf is still created and persisted because
- * the workspace-state persist shape (and the vestigial, stubbed Rust
- * `save_workspace_state` command) still expects it.
+ * is gone. Tabs can no longer be created (the /tab command went with that
+ * UI) and the Rust persistence commands are stubs, so in practice this
+ * provider always runs with zero tabs; it survives only because the
+ * terminal and MCP context bar still read it. The `rootTile` field on
+ * persisted tabs is a vestige of the old persist shape.
  */
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { useWorkspaceStore } from '../stores/workspaceStore';
-import type { LeafTileNode, TabContext, WorkspaceTab } from '../stores/workspaceStore';
+import type { TabContext, WorkspaceTab } from '../stores/workspaceStore';
 import { useShallow } from 'zustand/react/shallow';
 
 interface TabManagerContextValue {
@@ -41,8 +43,6 @@ export const useTabManager = (): TabManagerContextValue => {
   return context;
 };
 
-const generateTileId = () => `tile_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
 const DEFAULT_TAB_CONTEXT: TabContext = {
   mcpServers: {
     attachedServerIds: [],
@@ -59,8 +59,6 @@ interface RawMcpServers {
 interface RawTabContext {
   mcpServers?: RawMcpServers;
   customContext?: Record<string, unknown>;
-  /** Legacy Netdata-era field intentionally dropped during normalize. */
-  spaceRoom?: unknown;
   [key: string]: unknown;
 }
 
@@ -70,7 +68,6 @@ const normalizeTabContext = (context: RawTabContext | null | undefined = {}): Ta
   const {
     mcpServers: rawMcpContext = {},
     customContext: rawCustomContext = {},
-    spaceRoom: _spaceRoom,
     ...restContext
   } = context || {};
   const legacySelectedIds = uniqueIds(rawMcpContext.selectedServerIds || []);
@@ -92,13 +89,6 @@ const normalizeTabContext = (context: RawTabContext | null | undefined = {}): Ta
     },
   };
 };
-
-/** Create the vestigial root leaf tile a tab still carries for persistence. */
-const createTile = (commandId: string | null = null): LeafTileNode => ({
-  id: generateTileId(),
-  type: 'leaf',
-  commandId: commandId ?? undefined,
-});
 
 /**
  * TabManagerProvider component
@@ -122,7 +112,6 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
 
   /**
    * Load tabs from the Zustand store (backed by SQLite) on mount.
-   * Falls back to localStorage for one-time migration of old persisted tabs.
    *
    * This is a genuine one-shot hydrate: the `hasLoadedTabs` ref + the
    * `workspaceState.initialized` gate guarantee it fires at most once,
@@ -138,7 +127,6 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
     if (hasLoadedTabs.current) return;
     hasLoadedTabs.current = true;
 
-    let tabsLoaded = false;
     const { storedTabs, storedTabOrder, storedActiveTabId } = workspaceState;
 
     let tabsFromStore: WorkspaceTab[];
@@ -156,53 +144,10 @@ export const TabManagerProvider = ({ children }: { children: React.ReactNode }) 
       // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot hydrate from persisted store; hasLoadedTabs ref + skipNextSync prevent the echo the rule warns about.
       setTabs(tabsFromStore);
       setActiveTabId(storedActiveTabId || tabsFromStore[0]!.id);
-      tabsLoaded = true;
     }
-
-    // One-time migration from the old localStorage tab store.
-    if (!tabsLoaded) {
-      try {
-        const savedTabs = localStorage.getItem('netdata_tabs');
-        const savedActiveTabId = localStorage.getItem('netdata_active_tab_id');
-
-        if (savedTabs) {
-          const parsed = JSON.parse(savedTabs);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            const migratedTabs: WorkspaceTab[] = parsed.map((tab) => {
-              const migratedTab = { ...tab } as WorkspaceTab & { rootTile?: WorkspaceTab['rootTile'] };
-              if (!migratedTab.rootTile) {
-                migratedTab.rootTile = createTile(null);
-              } else if (!migratedTab.rootTile.id || !migratedTab.rootTile.type) {
-                migratedTab.rootTile = createTile(
-                  (migratedTab.rootTile as LeafTileNode).commandId || null
-                );
-              }
-              migratedTab.context = normalizeTabContext(migratedTab.context as RawTabContext);
-              return migratedTab as WorkspaceTab;
-            });
-
-            setTabs(migratedTabs);
-            setActiveTabId(savedActiveTabId || migratedTabs[0]!.id);
-
-            localStorage.removeItem('netdata_tabs');
-            localStorage.removeItem('netdata_active_tab_id');
-            localStorage.removeItem('netdata_selected_space');
-            localStorage.removeItem('netdata_selected_room');
-
-            tabsLoaded = true;
-          }
-        }
-      } catch (err) {
-        console.error('Error loading tabs from localStorage:', err);
-        localStorage.removeItem('netdata_tabs');
-        localStorage.removeItem('netdata_active_tab_id');
-        localStorage.removeItem('netdata_selected_space');
-        localStorage.removeItem('netdata_selected_room');
-      }
-    }
-    // If no tabs were loaded, start with none. Fresh installs run with zero
-    // tabs: the /tab command that once created them is gone (legacy tabs/
-    // tiles UI), so tabs only exist in stores persisted by old versions.
+    // If the store had no tabs, start with none. Fresh installs run with
+    // zero tabs: the /tab command that once created them is gone (legacy
+    // tabs/tiles UI), so tabs only exist in stores persisted by old versions.
   }, [workspaceState]);
 
   /**

@@ -92,8 +92,6 @@ interface RawMcpServers {
 interface RawTabContext {
   mcpServers?: RawMcpServers;
   customContext?: Record<string, unknown>;
-  /** Legacy field intentionally dropped during normalize. */
-  spaceRoom?: unknown;
   [key: string]: unknown;
 }
 
@@ -101,7 +99,6 @@ function normalizeTabContext(context: RawTabContext | null | undefined = {}): Ta
   const {
     mcpServers: rawMcpServers = {},
     customContext: rawCustomContext = {},
-    spaceRoom: _spaceRoom,
     ...restContext
   } = context || {};
 
