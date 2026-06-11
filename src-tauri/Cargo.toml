@@ -116,6 +116,15 @@ htmd = "0.5.4"
 base64 = "0.22"
 ts-rs = { version = "12.0.1", features = ["serde-compat", "serde-json-impl"] }
 
+# Same crate (and version) that `keyring`'s sync secret-service backend uses
+# internally, so this adds no new transitive code. We need it directly to
+# create the Secret Service "default" collection when none exists (live
+# sessions, autologin accounts, fresh users — anywhere PAM never created the
+# login keyring). `keyring` 3.x cannot self-heal in that case: its create
+# path for the special `default` target only re-reads the alias.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service = "4.1"
+
 [dev-dependencies]
 # Temporary directories for testing
 tempfile = "3"
