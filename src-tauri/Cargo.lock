@@ -615,6 +615,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "dbus-secret-service",
  "dirs 5.0.1",
  "futures",
  "glob",
