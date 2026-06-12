@@ -903,6 +903,28 @@ pub(crate) fn build_system_prompt(
          - Be concise and direct in your responses. Prefer concrete actions and evidence over vague summaries.\n",
     );
 
+    // Transport-drop recovery for grant/response-blocking tools. The local MCP
+    // transport can drop an in-flight call (surfaced to the model as
+    // "transport dropped mid-call; response for tool <name> was lost"). For a
+    // tool that blocks on a user grant or answer, the outcome is then unknown
+    // AND a now-stale approval/question card can linger in the UI, so the model
+    // must re-ask rather than assume an answer or proceed. Scoped to sessions
+    // that actually expose such a tool; ordinary read/write tools, which can be
+    // retried without side effects, need no special handling.
+    let has_interactive_tool = tool_names
+        .iter()
+        .any(|n| matches!(*n, "ask_user" | "bash_exec" | "fs_request_grant"));
+    if has_interactive_tool {
+        prompt.push_str(
+            "\n## Interactive Tool Reliability\n\
+             A tool call can occasionally fail with a transport error such as `MCP server \"clai\" transport dropped mid-call; response for tool <name> was lost`. This means CLAI lost the in-flight call before its result reached you, so the call's outcome is UNKNOWN — it may or may not have run.\n\
+             - This matters specifically for tools that block on a user grant or response — `ask_user`, and approval-gated `bash_exec` / `fs_request_grant`. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost, and a now-stale approval/question card may still be visible in the app.\n\
+             - When it happens, re-issue the SAME interactive call once so the user gets a fresh, answerable prompt. Do NOT assume it was approved, denied, or answered, and do NOT proceed past it on the strength of the lost call.\n\
+             - Briefly tell the user you hit a transport drop and are re-requesting; they can dismiss any duplicate or stale permission card.\n\
+             - For non-interactive tools (reads, searches, writes), a transport drop needs no special handling — just retry normally if you still need the result.\n",
+        );
+    }
+
     if context.space_id.is_some() || !context.mcp_server_ids.is_empty() {
         prompt.push_str(
             "- This tab already carries session-specific context and capabilities. \
@@ -1425,6 +1447,44 @@ mod tests {
             "Evaluate whether prior tool outputs are still fresh enough for the current decision."
         ));
         assert!(text.contains("re-run the relevant tools if freshness matters."));
+    }
+
+    #[test]
+    fn build_system_prompt_adds_interactive_reliability_guidance_when_blocking_tool_present() {
+        let context = SessionContext::default();
+        let tools = [crate::assistant::types::ToolDefinition {
+            name: "ask_user".to_string(),
+            description: "desc".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+
+        let message = build_system_prompt(&context, None, &tools, &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(text.contains("## Interactive Tool Reliability"));
+        assert!(text.contains("transport dropped mid-call"));
+        assert!(text.contains("re-issue the SAME interactive call once"));
+    }
+
+    #[test]
+    fn build_system_prompt_omits_interactive_reliability_guidance_without_blocking_tool() {
+        let context = SessionContext::default();
+        let tools = [crate::assistant::types::ToolDefinition {
+            name: "fs_read".to_string(),
+            description: "desc".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+
+        let message = build_system_prompt(&context, None, &tools, &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(!text.contains("## Interactive Tool Reliability"));
     }
 
     #[test]
