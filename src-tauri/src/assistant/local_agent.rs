@@ -31,7 +31,8 @@ use crate::assistant::types::{
 };
 use crate::AppState;
 
-const CLAUDE_DISABLED_TOOLS: &str = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,NotebookRead,LSP";
+const CLAUDE_DISABLED_TOOLS: &str =
+    "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
 const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
 
 /// When `CLAI_LOG_CLI_STREAM` is set to a truthy value, every raw JSONL line
