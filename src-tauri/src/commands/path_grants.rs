@@ -120,8 +120,14 @@ struct PendingInner {
     counts: HashMap<Option<String>, u32>,
 }
 
+#[derive(Debug)]
+pub enum PendingPathGrantOutcome {
+    Decision(PathGrantDecision),
+    Superseded,
+}
+
 pub struct PendingEntry {
-    pub sender: oneshot::Sender<PathGrantDecision>,
+    pub sender: oneshot::Sender<PendingPathGrantOutcome>,
     pub workspace_id: Option<String>,
     pub agent_id: Option<String>,
     /// The run awaiting this decision. Used by
@@ -130,6 +136,12 @@ pub struct PendingEntry {
     /// stale entry instead of stacking a duplicate card.
     pub run_id: String,
     pub request: PathGrantRequest,
+}
+
+pub struct SupersededPathGrant {
+    pub request_id: String,
+    pub workspace_id: Option<String>,
+    pub remaining: u32,
 }
 
 impl PendingPathGrants {
@@ -146,7 +158,7 @@ impl PendingPathGrants {
         &self,
         request: PathGrantRequest,
         run_id: String,
-    ) -> (oneshot::Receiver<PathGrantDecision>, u32) {
+    ) -> (oneshot::Receiver<PendingPathGrantOutcome>, u32) {
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().await;
         let request_id = request.request_id.clone();
@@ -190,12 +202,18 @@ impl PendingPathGrants {
             .collect()
     }
 
-    /// See [`crate::commands::permissions::PendingApprovals::purge_workspace`].
-    /// Same semantics — drops every pending path-grant request for the
-    /// given workspace, clears its count, and returns the run ids that
-    /// were awaiting the dropped entries so the caller can cancel those
-    /// runs. Used by `workspace_delete`.
-    pub async fn purge_workspace(&self, workspace_id: &str) -> Vec<String> {
+    /// See [`crate::commands::permissions::PendingApprovals::purge_workspace_canceling_runs`].
+    /// Same semantics — cancels runs before dropping every pending
+    /// path-grant request for the given workspace, clears its count, and
+    /// returns the cancelled run ids. Used by `workspace_delete`.
+    pub async fn purge_workspace_canceling_runs<F>(
+        &self,
+        workspace_id: &str,
+        mut cancel_run: F,
+    ) -> Vec<String>
+    where
+        F: FnMut(&str),
+    {
         let mut inner = self.inner.lock().await;
         let to_remove: Vec<String> = inner
             .entries
@@ -204,10 +222,18 @@ impl PendingPathGrants {
             .map(|(id, _)| id.clone())
             .collect();
         let mut run_ids = Vec::with_capacity(to_remove.len());
-        for id in to_remove {
-            if let Some(entry) = inner.entries.remove(&id) {
-                run_ids.push(entry.run_id);
+        for id in &to_remove {
+            if let Some(entry) = inner.entries.get(id) {
+                run_ids.push(entry.run_id.clone());
             }
+        }
+        run_ids.sort();
+        run_ids.dedup();
+        for run_id in &run_ids {
+            cancel_run(run_id);
+        }
+        for id in to_remove {
+            inner.entries.remove(&id);
         }
         inner.counts.remove(&Some(workspace_id.to_string()));
         run_ids
@@ -234,13 +260,14 @@ impl PendingPathGrants {
     /// Same semantics for path grants, keyed on run + requested path +
     /// requested access: a fresh registration for the same grant replaces
     /// any stale orphaned entry (and its UI card) instead of stacking a
-    /// duplicate.
+    /// duplicate. Supersede is explicit; channel closure remains
+    /// cancellation/teardown.
     pub async fn take_superseded(
         &self,
         run_id: &str,
         requested_path: &str,
         requested_access: crate::config::FilesystemPathAccess,
-    ) -> Vec<(PendingEntry, u32)> {
+    ) -> Vec<SupersededPathGrant> {
         let mut inner = self.inner.lock().await;
         let ids: Vec<String> = inner
             .entries
@@ -257,6 +284,8 @@ impl PendingPathGrants {
             let Some(entry) = inner.entries.remove(&id) else {
                 continue;
             };
+            let request_id = entry.request.request_id.clone();
+            let workspace_id = entry.workspace_id.clone();
             let count = match inner.counts.get_mut(&entry.workspace_id) {
                 Some(n) if *n > 0 => {
                     *n -= 1;
@@ -268,7 +297,12 @@ impl PendingPathGrants {
                 }
                 _ => 0,
             };
-            taken.push((entry, count));
+            let _ = entry.sender.send(PendingPathGrantOutcome::Superseded);
+            taken.push(SupersededPathGrant {
+                request_id,
+                workspace_id,
+                remaining: count,
+            });
         }
         taken
     }
@@ -348,7 +382,9 @@ pub async fn submit_path_grant_decision(
         )?;
     }
 
-    let _ = entry.sender.send(validated);
+    let _ = entry
+        .sender
+        .send(PendingPathGrantOutcome::Decision(validated));
     emit_attention(&app, entry.workspace_id, remaining);
     Ok(())
 }
@@ -739,11 +775,16 @@ mod tests {
             .take_superseded("run-1", "/p", FilesystemPathAccess::ReadOnly)
             .await;
         assert_eq!(taken.len(), 1);
-        assert_eq!(taken[0].0.request.request_id, "id-stale");
-        assert_eq!(taken[0].1, 2, "unrelated entries must remain counted");
+        assert_eq!(taken[0].request_id, "id-stale");
+        assert_eq!(
+            taken[0].remaining, 2,
+            "unrelated entries must remain counted"
+        );
 
-        drop(taken);
-        assert!(stale_rx.await.is_err(), "supersede closes the channel");
+        assert!(matches!(
+            stale_rx.await,
+            Ok(PendingPathGrantOutcome::Superseded)
+        ));
         assert!(pending.take("id-access").await.is_some());
         assert!(pending.take("id-path").await.is_some());
 
@@ -752,5 +793,36 @@ mod tests {
             .take_superseded("run-2", "/q", FilesystemPathAccess::ReadOnly)
             .await
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn purge_workspace_cancels_run_before_dropping_sender() {
+        let pending = PendingPathGrants::new();
+        let request = PathGrantRequest {
+            request_id: "id-1".to_string(),
+            workspace_id: Some("ws-1".to_string()),
+            agent_id: None,
+            agent_name: None,
+            requested_path: "/p".to_string(),
+            requested_access: FilesystemPathAccess::ReadOnly,
+            reason: "r".to_string(),
+        };
+        let mut rx = pending.register(request, "run-1".to_string()).await.0;
+
+        let run_ids = pending
+            .purge_workspace_canceling_runs("ws-1", |run_id| {
+                assert_eq!(run_id, "run-1");
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            })
+            .await;
+
+        assert_eq!(run_ids, vec!["run-1".to_string()]);
+        assert!(
+            rx.await.is_err(),
+            "purge drops the sender after cancellation"
+        );
     }
 }

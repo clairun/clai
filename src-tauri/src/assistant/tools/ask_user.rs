@@ -97,7 +97,13 @@ pub struct AskUserAnswer {
 // Keyed by pending id; the value carries the owning session id so callers
 // (mid-run input delivery) can check whether a session is currently blocked
 // on a human answer without threading new state through the tool router.
-type PendingMap = HashMap<String, (String, oneshot::Sender<AskUserAnswer>)>;
+#[derive(Debug)]
+enum AskUserOutcome {
+    Answer(AskUserAnswer),
+    Superseded,
+}
+
+type PendingMap = HashMap<String, (String, oneshot::Sender<AskUserOutcome>)>;
 static PENDING: OnceLock<Mutex<PendingMap>> = OnceLock::new();
 
 fn pending_map() -> &'static Mutex<PendingMap> {
@@ -124,7 +130,7 @@ pub fn submit_answer(pending_id: &str, answer: AskUserAnswer) -> Result<(), Stri
     let (_, tx) = map
         .remove(pending_id)
         .ok_or_else(|| format!("No pending ask_user with id `{}`", pending_id))?;
-    tx.send(answer)
+    tx.send(AskUserOutcome::Answer(answer))
         .map_err(|_| "ask_user receiver was dropped (run already ended)".to_string())
 }
 
@@ -132,9 +138,9 @@ pub fn submit_answer(pending_id: &str, answer: AskUserAnswer) -> Result<(), Stri
 /// pending ids. Called when a new ask is registered for the session: the
 /// frontend renders a single ask panel per session, so a still-pending
 /// ask at registration time is an orphan (its CLI transport dropped
-/// mid-call and the model is re-asking). Dropping the removed senders
-/// wakes the orphaned waits with a channel-closed error, which they
-/// treat as superseded (no run cancellation).
+/// mid-call and the model is re-asking). The removed senders receive an
+/// explicit superseded outcome, so channel closure remains reserved for
+/// cancellation/teardown.
 pub fn take_for_session(session_id: &str) -> Vec<String> {
     let Ok(mut map) = pending_map().lock() else {
         return Vec::new();
@@ -145,7 +151,9 @@ pub fn take_for_session(session_id: &str) -> Vec<String> {
         .map(|(id, _)| id.clone())
         .collect();
     for id in &ids {
-        map.remove(id);
+        if let Some((_, tx)) = map.remove(id) {
+            let _ = tx.send(AskUserOutcome::Superseded);
+        }
     }
     ids
 }
@@ -169,6 +177,22 @@ struct PendingGuard {
 impl PendingGuard {
     fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    async fn expire_and_stop<T>(&mut self) -> T {
+        if let Ok(mut map) = pending_map().lock() {
+            map.remove(&self.id);
+        }
+        let _ = emit_event(
+            &self.app,
+            &self.session,
+            Some(self.run_id.as_str()),
+            AssistantUiEvent::AskUserResolved {
+                pending_id: self.id.clone(),
+            },
+        );
+        self.armed = false;
+        super::cancel_run_and_park(&self.cancel_token).await
     }
 }
 
@@ -232,7 +256,7 @@ pub async fn execute(
     }
 
     let pending_id = Uuid::new_v4().to_string();
-    let (tx, rx) = oneshot::channel::<AskUserAnswer>();
+    let (tx, rx) = oneshot::channel::<AskUserOutcome>();
     {
         let mut map = pending_map()
             .lock()
@@ -263,23 +287,23 @@ pub async fn execute(
 
     let wait_timeout = context.interactive_wait_timeout(ASK_USER_TIMEOUT);
     let answer = match tokio::time::timeout(wait_timeout, rx).await {
-        Ok(Ok(answer)) => answer,
-        Ok(Err(_)) => {
-            // Sender dropped without an answer: a newer ask for this
-            // session superseded this one (transport-drop re-ask). The
-            // superseding call already cleaned the map and the UI, and
-            // the run is alive waiting on the NEW question — disarm
-            // rather than cancel the run.
+        Ok(Ok(AskUserOutcome::Answer(answer))) => answer,
+        Ok(Ok(AskUserOutcome::Superseded)) => {
+            // A fresh question for this session replaced this orphaned
+            // wait after a transport drop. Ignore the stale future.
             guard.disarm();
             return Err(
                 "ask_user was superseded by a newer question before an answer arrived".to_string(),
             );
         }
+        Ok(Err(_)) if context.cancel_token.is_cancelled() => {
+            return super::cancel_run_and_park(&context.cancel_token).await;
+        }
+        Ok(Err(_)) => {
+            return guard.expire_and_stop().await;
+        }
         Err(_) => {
-            return Err(format!(
-                "ask_user timed out waiting for a user answer after {} seconds",
-                wait_timeout.as_secs()
-            ))
+            return guard.expire_and_stop().await;
         }
     };
     guard.disarm();
@@ -381,8 +405,8 @@ mod tests {
 
     #[test]
     fn take_for_session_removes_only_that_sessions_asks_and_closes_channels() {
-        let (tx_a, rx_a) = oneshot::channel::<AskUserAnswer>();
-        let (tx_b, mut rx_b) = oneshot::channel::<AskUserAnswer>();
+        let (tx_a, rx_a) = oneshot::channel::<AskUserOutcome>();
+        let (tx_b, mut rx_b) = oneshot::channel::<AskUserOutcome>();
         {
             let mut map = pending_map().lock().unwrap();
             map.insert(
@@ -400,9 +424,11 @@ mod tests {
         assert!(!session_has_pending_ask("tfs-session-a"));
         assert!(session_has_pending_ask("tfs-session-b"));
 
-        // The removed sender is dropped → the orphaned wait wakes with a
-        // channel-closed error (the supersede signal)...
-        assert!(rx_a.blocking_recv().is_err());
+        // The orphaned wait receives an explicit supersede signal.
+        assert!(matches!(
+            rx_a.blocking_recv(),
+            Ok(AskUserOutcome::Superseded)
+        ));
         // ...while the other session's channel stays open.
         assert!(matches!(
             rx_b.try_recv(),
@@ -415,7 +441,7 @@ mod tests {
 
     #[test]
     fn submit_answer_fails_for_superseded_pending_id() {
-        let (tx, _rx) = oneshot::channel::<AskUserAnswer>();
+        let (tx, _rx) = oneshot::channel::<AskUserOutcome>();
         pending_map()
             .lock()
             .unwrap()

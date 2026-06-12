@@ -2486,15 +2486,20 @@ pub async fn workspace_delete(
         })?;
     }
 
-    // Drain in-memory queues for this workspace, then cancel the runs
-    // that were awaiting those decisions. The awaiting side treats a
-    // dropped oneshot as "superseded by a newer request; keep the run
-    // alive", so the explicit cancel here is what actually stops runs
-    // scoped to the now-deleted workspace.
-    let purged_approvals = state.pending_approvals.purge_workspace(&workspace_id).await;
+    // Drain in-memory queues for this workspace. The purge helpers cancel
+    // runs before dropping pending senders, so workspace deletion cannot be
+    // mistaken for an interactive-request supersede.
+    let purged_approvals = state
+        .pending_approvals
+        .purge_workspace_canceling_runs(&workspace_id, |run_id| {
+            let _ = crate::assistant::runtime::cancel_run(run_id);
+        })
+        .await;
     let purged_path_grants = state
         .pending_path_grants
-        .purge_workspace(&workspace_id)
+        .purge_workspace_canceling_runs(&workspace_id, |run_id| {
+            let _ = crate::assistant::runtime::cancel_run(run_id);
+        })
         .await;
     let mut purged_run_ids: Vec<String> = purged_approvals
         .iter()
@@ -2503,9 +2508,6 @@ pub async fn workspace_delete(
         .collect();
     purged_run_ids.sort();
     purged_run_ids.dedup();
-    for run_id in &purged_run_ids {
-        crate::assistant::runtime::cancel_run(run_id);
-    }
 
     tracing::info!(
         workspace_id = %workspace_id,

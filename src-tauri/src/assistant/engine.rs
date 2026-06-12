@@ -922,6 +922,7 @@ pub(crate) fn build_system_prompt(
              A tool call can occasionally fail with a transport error such as `MCP server \"clai\" transport dropped mid-call; response for tool <name> was lost`. This means CLAI lost the in-flight call before its result reached you, so the call's outcome is UNKNOWN — it may or may not have run.\n\
              - This matters specifically for tools that block on a user grant or response — `ask_user`, and approval-gated `bash_exec` / `fs_request_grant`. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost.\n\
              - When it happens, re-issue the SAME interactive call once. CLAI replaces the lost prompt with the fresh one in the app, so the user simply answers the new prompt. Do NOT assume the lost call was approved, denied, or answered, and do NOT proceed past it.\n\
+             - Apply this only to active CLAI human waits. If a user-input, command-approval, or filesystem-grant prompt expires or is denied, do not invent convoluted workarounds to bypass it. If the permission or answer is required, stop and explain what is blocked; retry only after a transport drop where the outcome is unknown.\n\
              - For non-interactive tools (reads, searches, writes), a transport drop needs no special handling — just retry normally if you still need the result.\n",
         );
     }
@@ -1468,6 +1469,8 @@ mod tests {
         assert!(text.contains("## Interactive Tool Reliability"));
         assert!(text.contains("transport dropped mid-call"));
         assert!(text.contains("re-issue the SAME interactive call once"));
+        assert!(text.contains("Apply this only to active CLAI human waits"));
+        assert!(text.contains("do not invent convoluted workarounds"));
         // The backend supersedes the orphaned request when the model
         // re-asks, so the prompt must NOT push stale-card caveats (e.g.
         // telling the user to dismiss duplicates) onto the model.

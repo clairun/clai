@@ -20,6 +20,15 @@ use crate::assistant::types::{
 };
 use crate::config::{ExecutionCapabilityConfig, FilesystemPathGrant};
 
+/// Terminal human-wait handling: once a CLAI-owned prompt for user input or
+/// permission expires, cancel the run and never return a tool result for the
+/// model to route around. The outer run driver races tool execution against
+/// this token and will drop this parked future while cancelling the run.
+pub async fn cancel_run_and_park<T>(cancel_token: &CancellationToken) -> T {
+    cancel_token.cancel();
+    std::future::pending::<T>().await
+}
+
 /// The name under which clai's local MCP server is registered with CLI
 /// providers (`write_mcp_config` for Claude Code, `add_codex_common_args`
 /// for Codex — both in `assistant::local_agent`).
