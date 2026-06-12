@@ -42,10 +42,11 @@ use crate::AppState;
 pub const PATH_GRANT_REQUEST_EVENT: &str = "path-grants://request";
 pub const PATH_GRANT_ATTENTION_EVENT: &str = "path-grants://attention";
 /// Emitted when a pending path-grant request is cleared *without* a user
-/// decision — the tool call was abandoned (CLI transport dropped mid-call,
-/// run cancelled) or it timed out. The inline path-grant card removes the
-/// now-useless card on this. Normal submissions clear the card optimistically
-/// on the frontend, so they don't emit this.
+/// decision — the run was cancelled or ended (reaping a wait orphaned by
+/// a CLI transport drop), the wait timed out, or a re-asked grant
+/// superseded the stale request. The inline path-grant card removes the
+/// now-useless card on this. Normal submissions clear the card
+/// optimistically on the frontend, so they don't emit this.
 pub const PATH_GRANT_RESOLVED_EVENT: &str = "path-grants://resolved";
 
 /// Same bound as the command-approval flow: 24h is generous enough that
@@ -123,6 +124,11 @@ pub struct PendingEntry {
     pub sender: oneshot::Sender<PathGrantDecision>,
     pub workspace_id: Option<String>,
     pub agent_id: Option<String>,
+    /// The run awaiting this decision. Used by
+    /// [`PendingPathGrants::take_superseded`] so a re-asked grant (after a
+    /// CLI transport drop orphaned the original request) replaces the
+    /// stale entry instead of stacking a duplicate card.
+    pub run_id: String,
     pub request: PathGrantRequest,
 }
 
@@ -139,6 +145,7 @@ impl PendingPathGrants {
     pub async fn register(
         &self,
         request: PathGrantRequest,
+        run_id: String,
     ) -> (oneshot::Receiver<PathGrantDecision>, u32) {
         let (tx, rx) = oneshot::channel();
         let mut inner = self.inner.lock().await;
@@ -151,6 +158,7 @@ impl PendingPathGrants {
                 sender: tx,
                 workspace_id: workspace_id.clone(),
                 agent_id,
+                run_id,
                 request,
             },
         );
@@ -184,8 +192,10 @@ impl PendingPathGrants {
 
     /// See [`crate::commands::permissions::PendingApprovals::purge_workspace`].
     /// Same semantics — drops every pending path-grant request for the
-    /// given workspace and clears its count. Used by `workspace_delete`.
-    pub async fn purge_workspace(&self, workspace_id: &str) -> usize {
+    /// given workspace, clears its count, and returns the run ids that
+    /// were awaiting the dropped entries so the caller can cancel those
+    /// runs. Used by `workspace_delete`.
+    pub async fn purge_workspace(&self, workspace_id: &str) -> Vec<String> {
         let mut inner = self.inner.lock().await;
         let to_remove: Vec<String> = inner
             .entries
@@ -193,12 +203,14 @@ impl PendingPathGrants {
             .filter(|(_, entry)| entry.workspace_id.as_deref() == Some(workspace_id))
             .map(|(id, _)| id.clone())
             .collect();
-        let count = to_remove.len();
+        let mut run_ids = Vec::with_capacity(to_remove.len());
         for id in to_remove {
-            inner.entries.remove(&id);
+            if let Some(entry) = inner.entries.remove(&id) {
+                run_ids.push(entry.run_id);
+            }
         }
         inner.counts.remove(&Some(workspace_id.to_string()));
-        count
+        run_ids
     }
 
     pub async fn take(&self, request_id: &str) -> Option<(PendingEntry, u32)> {
@@ -216,6 +228,49 @@ impl PendingPathGrants {
             _ => 0,
         };
         Some((entry, count))
+    }
+
+    /// See [`crate::commands::permissions::PendingApprovals::take_superseded`].
+    /// Same semantics for path grants, keyed on run + requested path +
+    /// requested access: a fresh registration for the same grant replaces
+    /// any stale orphaned entry (and its UI card) instead of stacking a
+    /// duplicate.
+    pub async fn take_superseded(
+        &self,
+        run_id: &str,
+        requested_path: &str,
+        requested_access: crate::config::FilesystemPathAccess,
+    ) -> Vec<(PendingEntry, u32)> {
+        let mut inner = self.inner.lock().await;
+        let ids: Vec<String> = inner
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.run_id == run_id
+                    && entry.request.requested_path == requested_path
+                    && entry.request.requested_access == requested_access
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut taken = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(entry) = inner.entries.remove(&id) else {
+                continue;
+            };
+            let count = match inner.counts.get_mut(&entry.workspace_id) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    let v = *n;
+                    if v == 0 {
+                        inner.counts.remove(&entry.workspace_id);
+                    }
+                    v
+                }
+                _ => 0,
+            };
+            taken.push((entry, count));
+        }
+        taken
     }
 }
 
@@ -620,7 +675,7 @@ mod tests {
             requested_access: FilesystemPathAccess::ReadOnly,
             reason: "r".to_string(),
         };
-        let (_rx, count) = pending.register(request).await;
+        let (_rx, count) = pending.register(request, "run-1".to_string()).await;
         assert_eq!(count, 1);
         let taken = pending.take("id-1").await;
         assert!(taken.is_some());
@@ -647,10 +702,55 @@ mod tests {
             ..a.clone()
         };
         a.request_id = "id-a".to_string();
-        let _ = pending.register(a).await;
-        let _ = pending.register(b).await;
+        let _ = pending.register(a, "run-1".to_string()).await;
+        let _ = pending.register(b, "run-1".to_string()).await;
         let list = pending.list_for_workspace("ws-A").await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].request_id, "id-a");
+    }
+
+    #[tokio::test]
+    async fn take_superseded_matches_run_path_and_access() {
+        let pending = PendingPathGrants::new();
+        let base = PathGrantRequest {
+            request_id: "id-stale".to_string(),
+            workspace_id: Some("ws".to_string()),
+            agent_id: None,
+            agent_name: None,
+            requested_path: "/p".to_string(),
+            requested_access: FilesystemPathAccess::ReadOnly,
+            reason: "r".to_string(),
+        };
+        let other_access = PathGrantRequest {
+            request_id: "id-access".to_string(),
+            requested_access: FilesystemPathAccess::ReadWrite,
+            ..base.clone()
+        };
+        let other_path = PathGrantRequest {
+            request_id: "id-path".to_string(),
+            requested_path: "/q".to_string(),
+            ..base.clone()
+        };
+        let (stale_rx, _) = pending.register(base, "run-1".to_string()).await;
+        let _rx2 = pending.register(other_access, "run-1".to_string()).await;
+        let _rx3 = pending.register(other_path, "run-1".to_string()).await;
+
+        let taken = pending
+            .take_superseded("run-1", "/p", FilesystemPathAccess::ReadOnly)
+            .await;
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].0.request.request_id, "id-stale");
+        assert_eq!(taken[0].1, 2, "unrelated entries must remain counted");
+
+        drop(taken);
+        assert!(stale_rx.await.is_err(), "supersede closes the channel");
+        assert!(pending.take("id-access").await.is_some());
+        assert!(pending.take("id-path").await.is_some());
+
+        // A different run never supersedes.
+        assert!(pending
+            .take_superseded("run-2", "/q", FilesystemPathAccess::ReadOnly)
+            .await
+            .is_empty());
     }
 }

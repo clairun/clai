@@ -12,8 +12,9 @@ import type {
 import styles from './InlinePathGrantCard.module.css';
 
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
-// Backend cleared a pending grant without a user decision (tool call
-// abandoned — CLI transport dropped — or timed out). Drop the stale card.
+// Backend cleared a pending grant without a user decision (run cancelled
+// or ended, wait timed out, or a re-asked grant superseded it). Drop the
+// stale card.
 const PATH_GRANT_RESOLVED_EVENT = 'path-grants://resolved';
 
 type PathAccess = FilesystemPathAccess;

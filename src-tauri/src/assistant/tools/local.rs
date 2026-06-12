@@ -1194,13 +1194,17 @@ fn is_pure_assignment_token(tok: &str) -> bool {
 }
 
 /// Cleans up an abandoned permission request when the approval-wait future
-/// is dropped without a user decision — the Claude Code CLI dropping the MCP
-/// transport mid-call (its "response for tool bash_exec was lost" message),
-/// or the run being cancelled. In either case the awaiting future below is
-/// dropped, so this guard runs: it removes the still-pending registry entry,
-/// tells the frontend to drop the now-useless approval card, and cancels the
-/// run so the model cannot continue without the missing decision. Disarmed on
-/// a normal decision, where the submit command already removed the entry.
+/// is dropped without a user decision — the run being cancelled, or the
+/// run ending while this wait was orphaned by a CLI transport drop (the
+/// rmcp session worker keeps the future alive past the dropped
+/// connection; `BindingGuard` reaps it at run end, which drops this
+/// future). The guard then removes the still-pending registry entry,
+/// tells the frontend to drop the now-useless approval card, and cancels
+/// the run so the model cannot continue without the missing decision
+/// (a no-op when the run already ended). Disarmed on a normal decision,
+/// where the submit command already removed the entry, and on a
+/// channel-closed wakeup (supersede), where the superseding caller
+/// already cleaned up and the run must stay alive.
 ///
 /// Cleanup is async (registry lock) so it's spawned onto the app runtime;
 /// `Drop` can't await. `take` is a no-op if the entry was already removed
@@ -1277,7 +1281,30 @@ async fn await_user_permission(
     };
     let request_id = request.request_id.clone();
 
-    let (rx, count) = app_state.pending_approvals.register(request.clone()).await;
+    // Supersede: if a previous request for this exact run + command is
+    // still pending, it is an orphan — its CLI transport dropped mid-call
+    // and the model is now re-asking. Replace it (and its UI card) with
+    // the fresh request instead of stacking a duplicate the user can no
+    // longer meaningfully answer. Dropping the stale entry's sender wakes
+    // the orphaned wait with a channel-closed error, which it treats as
+    // superseded (no run cancellation — this run is alive and waiting on
+    // the NEW request).
+    for (stale, remaining) in app_state
+        .pending_approvals
+        .take_superseded(&context.run_id, command)
+        .await
+    {
+        crate::commands::permissions::emit_permission_resolved(
+            &deps.app,
+            &stale.request.request_id,
+        );
+        emit_attention(&deps.app, stale.workspace_id.clone(), remaining);
+    }
+
+    let (rx, count) = app_state
+        .pending_approvals
+        .register(request.clone(), context.run_id.clone())
+        .await;
 
     if let Err(e) = deps.app.emit(PERMISSION_REQUEST_EVENT, &request) {
         tracing::warn!("Failed to emit permission request event: {}", e);
@@ -1305,7 +1332,15 @@ async fn await_user_permission(
             d
         }
         Ok(Err(_)) => {
-            let msg = "Permission approval channel closed before a decision was made";
+            // The sender was dropped without a decision: this request was
+            // superseded by a fresh registration for the same run + command
+            // (the model re-asked after a transport drop), or app state is
+            // tearing down. Either way the registry entry is already gone
+            // and the run may be live, waiting on the NEW request — so
+            // disarm the guard rather than cancel the run.
+            abandon_guard.disarm();
+            let msg = "Permission request was superseded by a newer request \
+                       for the same command before a decision was made";
             context.add_notice(RunNoticeKind::CommandDenied, msg.to_string());
             return Err(msg.to_string());
         }
@@ -1528,8 +1563,8 @@ fn access_to_str(access: FilesystemPathAccess) -> &'static str {
 /// return shape (path grants aren't per-segment).
 /// Path-grant analogue of [`AbandonedApprovalGuard`]: clears a pending
 /// filesystem path-grant request, drops its card, and cancels the run when
-/// the approval-wait future is abandoned (CLI transport drop mid-call, or
-/// run cancellation).
+/// the approval-wait future is abandoned (run cancellation, or run-end
+/// reaping of a wait orphaned by a CLI transport drop).
 struct AbandonedPathGrantGuard {
     app: tauri::AppHandle,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -1578,9 +1613,28 @@ async fn await_path_grant_decision(
     let workspace_id = context.workspace_id.clone();
     let request_id = request.request_id.clone();
 
+    // Supersede a stale orphaned request for the same run + path + access
+    // (the model re-asked after a CLI transport drop). See the analogous
+    // block in `await_user_permission` for the full rationale.
+    for (stale, remaining) in app_state
+        .pending_path_grants
+        .take_superseded(
+            &context.run_id,
+            &request.requested_path,
+            request.requested_access,
+        )
+        .await
+    {
+        crate::commands::path_grants::emit_path_grant_resolved(
+            &deps.app,
+            &stale.request.request_id,
+        );
+        emit_attention(&deps.app, stale.workspace_id.clone(), remaining);
+    }
+
     let (rx, count) = app_state
         .pending_path_grants
-        .register(request.clone())
+        .register(request.clone(), context.run_id.clone())
         .await;
 
     if let Err(e) = deps.app.emit(PATH_GRANT_REQUEST_EVENT, &request) {
@@ -1606,7 +1660,14 @@ async fn await_path_grant_decision(
             Ok(decision)
         }
         Ok(Err(_)) => {
-            let msg = "Path-grant approval channel closed before a decision was made".to_string();
+            // Sender dropped without a decision: superseded by a fresh
+            // registration for the same run + path + access, or app
+            // teardown. The superseding caller already cleaned up and the
+            // run may be live on the NEW request — disarm, don't cancel.
+            abandon_guard.disarm();
+            let msg = "Path-grant request was superseded by a newer request \
+                       for the same path before a decision was made"
+                .to_string();
             context.add_notice(RunNoticeKind::PathGrantDenied, msg.clone());
             Err(msg)
         }

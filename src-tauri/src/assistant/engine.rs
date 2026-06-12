@@ -906,11 +906,13 @@ pub(crate) fn build_system_prompt(
     // Transport-drop recovery for grant/response-blocking tools. The local MCP
     // transport can drop an in-flight call (surfaced to the model as
     // "transport dropped mid-call; response for tool <name> was lost"). For a
-    // tool that blocks on a user grant or answer, the outcome is then unknown
-    // AND a now-stale approval/question card can linger in the UI, so the model
-    // must re-ask rather than assume an answer or proceed. Scoped to sessions
-    // that actually expose such a tool; ordinary read/write tools, which can be
-    // retried without side effects, need no special handling.
+    // tool that blocks on a user grant or answer, the outcome is then unknown,
+    // so the model must re-ask rather than assume an answer or proceed. The
+    // backend treats the re-asked call as superseding the orphaned one (the
+    // stale approval/question card is replaced in place), so no UI caveats are
+    // needed here. Scoped to sessions that actually expose such a tool;
+    // ordinary read/write tools, which can be retried without side effects,
+    // need no special handling.
     let has_interactive_tool = tool_names
         .iter()
         .any(|n| matches!(*n, "ask_user" | "bash_exec" | "fs_request_grant"));
@@ -918,9 +920,8 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "\n## Interactive Tool Reliability\n\
              A tool call can occasionally fail with a transport error such as `MCP server \"clai\" transport dropped mid-call; response for tool <name> was lost`. This means CLAI lost the in-flight call before its result reached you, so the call's outcome is UNKNOWN — it may or may not have run.\n\
-             - This matters specifically for tools that block on a user grant or response — `ask_user`, and approval-gated `bash_exec` / `fs_request_grant`. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost, and a now-stale approval/question card may still be visible in the app.\n\
-             - When it happens, re-issue the SAME interactive call once so the user gets a fresh, answerable prompt. Do NOT assume it was approved, denied, or answered, and do NOT proceed past it on the strength of the lost call.\n\
-             - Briefly tell the user you hit a transport drop and are re-requesting; they can dismiss any duplicate or stale permission card.\n\
+             - This matters specifically for tools that block on a user grant or response — `ask_user`, and approval-gated `bash_exec` / `fs_request_grant`. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost.\n\
+             - When it happens, re-issue the SAME interactive call once. CLAI replaces the lost prompt with the fresh one in the app, so the user simply answers the new prompt. Do NOT assume the lost call was approved, denied, or answered, and do NOT proceed past it.\n\
              - For non-interactive tools (reads, searches, writes), a transport drop needs no special handling — just retry normally if you still need the result.\n",
         );
     }
@@ -1467,6 +1468,11 @@ mod tests {
         assert!(text.contains("## Interactive Tool Reliability"));
         assert!(text.contains("transport dropped mid-call"));
         assert!(text.contains("re-issue the SAME interactive call once"));
+        // The backend supersedes the orphaned request when the model
+        // re-asks, so the prompt must NOT push stale-card caveats (e.g.
+        // telling the user to dismiss duplicates) onto the model.
+        assert!(text.contains("replaces the lost prompt with the fresh one"));
+        assert!(!text.contains("dismiss"));
     }
 
     #[test]

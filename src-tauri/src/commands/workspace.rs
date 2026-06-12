@@ -2486,21 +2486,33 @@ pub async fn workspace_delete(
         })?;
     }
 
-    // Drain in-memory queues for this workspace. Pending bash-tool /
-    // path-grant approvals get their oneshot channels dropped, which
-    // surfaces as a closed-channel error on the awaiting side — correct,
-    // since the workspace they were scoped to no longer exists.
+    // Drain in-memory queues for this workspace, then cancel the runs
+    // that were awaiting those decisions. The awaiting side treats a
+    // dropped oneshot as "superseded by a newer request; keep the run
+    // alive", so the explicit cancel here is what actually stops runs
+    // scoped to the now-deleted workspace.
     let purged_approvals = state.pending_approvals.purge_workspace(&workspace_id).await;
     let purged_path_grants = state
         .pending_path_grants
         .purge_workspace(&workspace_id)
         .await;
+    let mut purged_run_ids: Vec<String> = purged_approvals
+        .iter()
+        .chain(purged_path_grants.iter())
+        .cloned()
+        .collect();
+    purged_run_ids.sort();
+    purged_run_ids.dedup();
+    for run_id in &purged_run_ids {
+        crate::assistant::runtime::cancel_run(run_id);
+    }
 
     tracing::info!(
         workspace_id = %workspace_id,
         agents_cleared = agent_ids.len(),
-        approvals_purged = purged_approvals,
-        path_grants_purged = purged_path_grants,
+        approvals_purged = purged_approvals.len(),
+        path_grants_purged = purged_path_grants.len(),
+        runs_cancelled = purged_run_ids.len(),
         "Deleted general workspace"
     );
 
