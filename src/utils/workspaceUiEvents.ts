@@ -3,18 +3,20 @@
  *
  * The floating terminal (MainLayout) and the workspace chrome
  * (FleetLayout) live in separate React subtrees, so slash commands that
- * trigger workspace UI (settings modal, clone) are delivered as window
+ * trigger workspace UI (settings modal, fork) are delivered as window
  * CustomEvents — the same decoupling the MCP/provider "changed" events
  * already use.
  */
 
 export const WORKSPACE_UI_COMMAND_EVENT = 'clai-workspace-ui-command';
+const PENDING_FORK_PROMPTS_KEY = 'clai.pendingForkPrompts';
 
-export type WorkspaceUiAction = 'settings' | 'clone';
+export type WorkspaceUiAction = 'settings' | 'fork';
 
 export interface WorkspaceUiCommandDetail {
   action: WorkspaceUiAction;
   workspaceId: string;
+  prompt?: string | null;
 }
 
 export const dispatchWorkspaceUiCommand = (detail: WorkspaceUiCommandDetail): void => {
@@ -31,4 +33,45 @@ export const onWorkspaceUiCommand = (
   };
   window.addEventListener(WORKSPACE_UI_COMMAND_EVENT, listener);
   return () => window.removeEventListener(WORKSPACE_UI_COMMAND_EVENT, listener);
+};
+
+const readPendingForkPrompts = (): Record<string, string> => {
+  try {
+    const raw = sessionStorage.getItem(PENDING_FORK_PROMPTS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => typeof value === 'string'),
+    ) as Record<string, string>;
+  } catch {
+    return {};
+  }
+};
+
+const writePendingForkPrompts = (prompts: Record<string, string>): void => {
+  try {
+    sessionStorage.setItem(PENDING_FORK_PROMPTS_KEY, JSON.stringify(prompts));
+  } catch {
+    /* ignore storage failure */
+  }
+};
+
+export const setPendingForkPrompt = (workspaceId: string, prompt: string): void => {
+  const trimmed = prompt.trim();
+  if (!workspaceId || !trimmed) return;
+  const prompts = readPendingForkPrompts();
+  prompts[workspaceId] = trimmed;
+  writePendingForkPrompts(prompts);
+};
+
+export const takePendingForkPrompt = (workspaceId: string): string | null => {
+  if (!workspaceId) return null;
+  const prompts = readPendingForkPrompts();
+  const prompt = prompts[workspaceId] || null;
+  if (prompt !== null) {
+    delete prompts[workspaceId];
+    writePendingForkPrompts(prompts);
+  }
+  return prompt;
 };

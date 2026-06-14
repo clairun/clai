@@ -1,0 +1,68 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay-60);
+  backdrop-filter: blur(4px);
+  z-index: 10010;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.15s ease;
+}
+
+.modal {
+  background: var(--color-bg-primary, #FDFCFB);
+  border-radius: 12px;
+  box-shadow: var(--shadow-xl);
+  min-width: 280px;
+  max-width: 92vw;
+  padding: 22px 26px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  animation: slideUp 0.18s ease;
+}
+
+.spinner {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2.5px solid var(--color-border-medium);
+  border-top-color: var(--color-primary);
+  animation: spin 0.7s linear infinite;
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-text-primary, #1a1a1a);
+  margin: 0;
+}
+
+.body {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

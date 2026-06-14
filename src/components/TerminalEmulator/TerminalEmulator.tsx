@@ -46,7 +46,7 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
   // Maximum number of messages to keep
   const MAX_MESSAGES = 5;
   // Auto-collapse delay in milliseconds
-  const AUTO_COLLAPSE_DELAY = 5000; // 10 seconds
+  const AUTO_COLLAPSE_DELAY = 10000;
 
   // Auto-resize textarea to fit content
   const adjustTextareaHeight = useCallback(() => {
@@ -102,9 +102,9 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
       // Keep only the last MAX_MESSAGES messages
       return updated.slice(-MAX_MESSAGES);
     });
-    // Only show output area and reset auto-collapse timer for error/warning messages
-    // Success messages are added to the list but don't expand the panel
-    if (type === 'error' || type === 'warning') {
+    // Show progress/error/warning messages immediately. Success messages are
+    // added to history but don't expand the panel.
+    if (type === 'info' || type === 'error' || type === 'warning') {
       setIsOutputVisible(true);
       resetAutoCollapseTimer();
     }
@@ -164,7 +164,8 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
     // Strip the leading "/" and parse as command
     const commandInput = trimmed.slice(1);
 
-    const commandName = commandInput.split(/\s+/, 1)[0];
+    const commandName = commandInput.split(/\s+/, 1)[0] || '';
+    const commandArgs = commandInput.slice(commandName.length).trim();
 
     if (commandName === 'help') {
       setShowHelp(true);
@@ -186,20 +187,21 @@ const TerminalEmulator = ({ onSendToChat, onAgentCommand, agentWorking = false }
     }
 
     // Workspace UI commands — delivered to FleetLayout (which owns the
-    // settings modal and the clone flow) via a window event, since the
+    // settings modal and the fork flow) via a window event, since the
     // terminal lives in a different React subtree.
-    if (commandName === 'settings' || commandName === 'clone') {
+    if (commandName === 'settings' || commandName === 'fork') {
       if (!isWorkspaceRoute) {
         addOutputMessage(`Open a workspace to use /${commandName}.`, 'error');
         return;
       }
+      // Fork progress is shown as a blocking modal by FleetLayout (driven by
+      // its forkBusyId state) — no terminal output, which would otherwise
+      // linger as a stale line after the fork completes.
       dispatchWorkspaceUiCommand({
         action: commandName,
         workspaceId: currentWorkspaceId || 'default',
+        prompt: commandName === 'fork' ? commandArgs : null,
       });
-      if (commandName === 'clone') {
-        addOutputMessage('Cloning workspace…', 'info');
-      }
       return;
     }
 

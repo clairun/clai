@@ -3,7 +3,7 @@ import { Outlet, useMatch, useNavigate } from 'react-router-dom';
 import {
   listWorkspaces,
   deleteWorkspace,
-  cloneWorkspaceConfig,
+  forkWorkspace,
   getWorkspaceSnapshot,
   runWorkspaceNow,
   setWorkspaceSchedulePaused,
@@ -14,11 +14,12 @@ import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModa
 import { SettingsModal, TABS } from '../components/Settings';
 import { OPEN_GLOBAL_SETTINGS_EVENT, type OpenGlobalSettingsDetail } from '../utils/globalSettings';
 import ConfirmDialog from '../components/ConfirmDialog';
+import ProgressDialog from '../components/ProgressDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { errText, num } from '../fleet/workspaceStatus';
-import { onWorkspaceUiCommand } from '../utils/workspaceUiEvents';
+import { onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
 import type { WorkspaceListEntry, WorkspaceSnapshot } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
 
@@ -88,7 +89,7 @@ const FleetLayout = () => {
   // the chat context bar). Cleared on close so a later manual open of
   // Settings doesn't replay the form.
   const [globalSettingsProviderAction, setGlobalSettingsProviderAction] = useState<'new' | null>(null);
-  const [cloneBusyId, setCloneBusyId] = useState<string | null>(null);
+  const [forkBusyId, setForkBusyId] = useState<string | null>(null);
   const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
   const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
 
@@ -218,34 +219,38 @@ const FleetLayout = () => {
     loadWorkspaces();
   }, [settingsState.workspaceId, loadWorkspaces]);
 
-  const handleClone = useCallback(
-    async (id: string) => {
-      if (!id || cloneBusyId) return;
-      setCloneBusyId(id);
+  const handleFork = useCallback(
+    async (id: string, prompt?: string | null) => {
+      if (!id || forkBusyId) return;
+      setForkBusyId(id);
       try {
-        const newId = await cloneWorkspaceConfig(id);
+        const cleanPrompt = prompt?.trim() || '';
+        const newId = await forkWorkspace(id, cleanPrompt || null);
+        if (cleanPrompt) {
+          setPendingForkPrompt(newId, cleanPrompt);
+        }
         setError('');
         await loadWorkspaces();
         navigate(`/workspace/${newId}`);
       } catch (err) {
-        setError(errText(err, 'Failed to clone workspace.'));
+        setError(errText(err, 'Failed to fork workspace.'));
       } finally {
-        setCloneBusyId(null);
+        setForkBusyId(null);
       }
     },
-    [cloneBusyId, loadWorkspaces, navigate],
+    [forkBusyId, loadWorkspaces, navigate],
   );
 
-  // Slash commands from the floating terminal (/settings, /clone) arrive as
+  // Slash commands from the floating terminal (/settings, /fork) arrive as
   // window events — the terminal lives in MainLayout, outside this subtree,
   // so it can't call these handlers directly.
-  useEffect(() => onWorkspaceUiCommand(({ action, workspaceId }) => {
+  useEffect(() => onWorkspaceUiCommand(({ action, workspaceId, prompt }) => {
     if (action === 'settings') {
       handleOpenSettings(workspaceId);
-    } else if (action === 'clone') {
-      handleClone(workspaceId);
+    } else if (action === 'fork') {
+      handleFork(workspaceId, prompt);
     }
-  }), [handleOpenSettings, handleClone]);
+  }), [handleOpenSettings, handleFork]);
 
   const handleRequestDelete = useCallback((id: string, title?: string) => {
     if (!id) return;
@@ -377,10 +382,10 @@ const FleetLayout = () => {
           onRunNow={handleRunNow}
           onTogglePause={handleTogglePause}
           onSettings={handleOpenSettings}
-          onClone={handleClone}
+          onFork={handleFork}
           onDelete={handleRequestDelete}
           runNowBusyId={runNowBusyId}
-          cloneBusyId={cloneBusyId}
+          forkBusyId={forkBusyId}
           pauseBusyId={pauseBusyId}
         />
         <div className={styles.detail}>
@@ -405,6 +410,12 @@ const FleetLayout = () => {
         }}
         initialTab={globalSettingsTab}
         initialProviderAction={globalSettingsProviderAction}
+      />
+
+      <ProgressDialog
+        isOpen={!!forkBusyId}
+        title="Forking workspace…"
+        body="Copying agents, settings, and artifacts into the new workspace."
       />
 
       <ConfirmDialog

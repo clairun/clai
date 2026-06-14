@@ -14,6 +14,7 @@ import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import VirtualizedList from '../components/common/VirtualizedList';
 import {
   acknowledgeWorkspaceTask,
+  getOrCreateWorkspaceSession,
   getWorkspaceSnapshot,
   importWorkspaceFiles,
   listWorkspaceDir,
@@ -34,6 +35,7 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
+import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
 import styles from './Workspace.module.css';
 
 const DEFAULT_WORKSPACE_ID = 'default';
@@ -1712,6 +1714,52 @@ const Workspace = () => {
         useAssistantStore.getState().setOlderMessagesLoading(sessionId, false);
       });
   }, [sessionId]);
+
+  const forkPromptStartedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!snapshot || forkPromptStartedRef.current.has(workspaceId)) return;
+
+    const prompt = takePendingForkPrompt(workspaceId);
+    if (!prompt) return;
+
+    forkPromptStartedRef.current.add(workspaceId);
+    let cancelled = false;
+
+    const startForkPrompt = async () => {
+      try {
+        const binding = await getOrCreateWorkspaceSession(workspaceId);
+        const connectionId = binding.providerConnectionId;
+        if (!connectionId) {
+          throw new Error(
+            'Add an enabled assistant provider connection before sending the fork prompt.',
+          );
+        }
+
+        const store = useAssistantStore.getState();
+        store.initSession(binding.session);
+        store.setActiveSessionForTab(`workspace:${workspaceId}`, binding.session.id);
+
+        const result = await assistantClient.sendMessage(binding.session.id, prompt, connectionId);
+        if (cancelled) return;
+
+        store.addMessage(binding.session.id, result.message);
+        if (result.queued) {
+          store.markMessageQueued(binding.session.id, result.message.id);
+        }
+        await loadSnapshot(false);
+      } catch (err) {
+        if (!cancelled) {
+          setError(errorMessage(err, 'Failed to start the fork prompt.'));
+        }
+      }
+    };
+
+    void startForkPrompt();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSnapshot, snapshot, workspaceId]);
+
   const tasks = snapshot?.tasks || [];
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.

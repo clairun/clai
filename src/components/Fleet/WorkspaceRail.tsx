@@ -22,10 +22,10 @@ interface WorkspaceRailProps {
   onRunNow: (id: string) => void;
   onTogglePause: (id: string, currentlyPaused: boolean) => void;
   onSettings: (id: string) => void;
-  onClone: (id: string) => void;
+  onFork: (id: string) => void;
   onDelete: (id: string, title: string) => void;
   runNowBusyId: string | null;
-  cloneBusyId: string | null;
+  forkBusyId: string | null;
   pauseBusyId: string | null;
 }
 
@@ -79,10 +79,10 @@ const WorkspaceRail = ({
   onRunNow,
   onTogglePause,
   onSettings,
-  onClone,
+  onFork,
   onDelete,
   runNowBusyId,
-  cloneBusyId,
+  forkBusyId,
   pauseBusyId,
 }: WorkspaceRailProps) => {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -315,14 +315,14 @@ const WorkspaceRail = ({
                           type="button"
                           className={styles.menuItem}
                           role="menuitem"
-                          disabled={cloneBusyId === ws.id}
+                          disabled={forkBusyId === ws.id}
                           onClick={(e) => {
                             e.stopPropagation();
                             setOpenMenuId(null);
-                            onClone(ws.id);
+                            onFork(ws.id);
                           }}
                         >
-                          {cloneBusyId === ws.id ? 'Cloning…' : 'Clone config'}
+                          {forkBusyId === ws.id ? 'Forking…' : 'Fork workspace'}
                         </button>
                         <button
                           type="button"

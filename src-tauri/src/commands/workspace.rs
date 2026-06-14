@@ -309,6 +309,16 @@ pub struct WorkspaceTaskActionRequest {
     pub task_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceForkRequest {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceDescriptor {
     workspace_id: String,
@@ -659,6 +669,113 @@ fn ensure_agent_workspace_root(root: &Path) -> Result<(), String> {
             error
         )
     })
+}
+
+fn should_skip_fork_copy_path(relative_path: &Path) -> bool {
+    let mut components = relative_path.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return false;
+    };
+    if first != ".clai" {
+        return false;
+    }
+
+    let Some(Component::Normal(second)) = components.next() else {
+        return false;
+    };
+    if components.next().is_some() {
+        return false;
+    }
+
+    let name = second.to_string_lossy();
+    name == "config.json" || name == "config.json.tmp" || name.starts_with("data.sqlite")
+}
+
+fn copy_workspace_durable_files(source_root: &Path, target_root: &Path) -> Result<(), String> {
+    fn copy_dir(source_root: &Path, current: &Path, target_root: &Path) -> Result<(), String> {
+        let entries = fs::read_dir(current)
+            .map_err(|error| format!("Failed to read {}: {}", current.display(), error))?;
+
+        for entry in entries {
+            let entry =
+                entry.map_err(|error| format!("Failed to inspect directory entry: {}", error))?;
+            let source_path = entry.path();
+            let relative_path = source_path
+                .strip_prefix(source_root)
+                .map_err(|error| format!("Failed to resolve fork path: {}", error))?;
+
+            if should_skip_fork_copy_path(relative_path) {
+                continue;
+            }
+
+            let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
+                format!("Failed to inspect {}: {}", source_path.display(), error)
+            })?;
+            if metadata.file_type().is_symlink() {
+                tracing::debug!(
+                    path = %source_path.display(),
+                    "Skipping symlink while forking workspace"
+                );
+                continue;
+            }
+
+            let target_path = target_root.join(relative_path);
+            if metadata.is_dir() {
+                fs::create_dir_all(&target_path).map_err(|error| {
+                    format!("Failed to create {}: {}", target_path.display(), error)
+                })?;
+                copy_dir(source_root, &source_path, target_root)?;
+            } else if metadata.is_file() {
+                if let Some(parent) = target_path.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        format!("Failed to create {}: {}", parent.display(), error)
+                    })?;
+                }
+                fs::copy(&source_path, &target_path).map_err(|error| {
+                    format!(
+                        "Failed to copy {} to {}: {}",
+                        source_path.display(),
+                        target_path.display(),
+                        error
+                    )
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    copy_dir(source_root, source_root, target_root)
+}
+
+fn write_fork_marker(
+    target_root: &Path,
+    source_id: &str,
+    source_title: &str,
+    new_id: &str,
+    prompt: Option<&str>,
+) -> Result<(), String> {
+    let memory_dir = target_root.join(".clai").join("memory");
+    fs::create_dir_all(&memory_dir)
+        .map_err(|error| format!("Failed to create fork memory directory: {}", error))?;
+    let mut content = format!(
+        "# Fork Context\n\n\
+         This workspace was forked from `{}` (`{}`) at {}.\n\n\
+         The new workspace id is `{}`. Copied memories and artifacts are historical context; \
+         if they mention the source workspace id or path, translate them to this workspace only when still applicable.\n",
+        source_title,
+        source_id,
+        chrono::Utc::now().to_rfc3339(),
+        new_id
+    );
+    if let Some(prompt) = prompt.map(str::trim).filter(|value| !value.is_empty()) {
+        content.push_str("\n## Fork Prompt\n\n");
+        content.push_str(prompt);
+        content.push('\n');
+    }
+
+    fs::write(memory_dir.join("fork.md"), content)
+        .map_err(|error| format!("Failed to write fork marker: {}", error))
 }
 
 pub(crate) fn resolve_workspace_descriptor(
@@ -2092,28 +2209,20 @@ pub async fn workspace_create(
     Ok(id)
 }
 
-/// Clone a workspace's *configuration* into a brand-new, empty workspace.
+/// Fork a workspace into a brand-new workspace.
 ///
-/// Copies the agents (each with a fresh id), the default-agent selection,
-/// preferred provider, and every per-agent setting — skills, MCP servers,
-/// provider connections, and sandbox/execution policy — but NOT any data:
-/// the clone gets a fresh empty `data.sqlite` (no sessions, messages, runs,
-/// tasks) and empty memory/artifacts. Use it to spin up a clean workspace
-/// for a similar task without reconfiguring from scratch.
-///
-/// Agent ids are workspace-local, so they're regenerated and the
-/// `default_agent_id` pointer is remapped; skill/MCP/provider references are
-/// global and carry over unchanged. The schedule cadence (`kind`) is
-/// preserved but left **disabled** so a fresh clone never auto-runs on
-/// creation — re-enabling it in settings is a single toggle. Returns the new
-/// workspace id.
+/// Copies the durable setup and files: agents (with fresh ids), skills, MCP
+/// servers, provider selection, execution policy / permissions, memories, and
+/// artifacts. Runtime state is deliberately reset: the fork gets a fresh empty
+/// SQLite DB, no runs, no queued messages, no tasks, and its schedule starts
+/// disabled so it never auto-runs immediately after creation.
 #[tauri::command]
-pub async fn workspace_clone_config(
-    workspace_id: String,
+pub async fn workspace_fork(
+    request: WorkspaceForkRequest,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let source_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let (_source_root, source_config) = load_workspace_config_for_id(state.inner(), &source_id)?;
+    let source_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
+    let (source_root, source_config) = load_workspace_config_for_id(state.inner(), &source_id)?;
 
     let now = now_millis();
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -2141,20 +2250,29 @@ pub async fn workspace_clone_config(
         .get(&source_config.default_agent_id)
         .cloned()
         .or_else(|| agents.first().map(|a| a.id.clone()))
-        .ok_or_else(|| "Source workspace has no agents to clone".to_string())?;
+        .ok_or_else(|| "Source workspace has no agents to fork".to_string())?;
 
-    // Preserve the cadence but never auto-run a fresh clone.
+    // Preserve the cadence but never auto-run a fresh fork.
     let mut schedule = source_config.schedule.clone();
     schedule.enabled = false;
     schedule.paused = false;
     schedule.next_run_at_unix_ms = None;
 
-    let cloned = WorkspaceConfig {
+    let requested_title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let fork_title = requested_title
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} (Fork)", source_config.title));
+
+    let forked = WorkspaceConfig {
         id: new_id.clone(),
-        title: format!("{} (Copy)", source_config.title),
+        title: fork_title.clone(),
         created_at: now,
         updated_at: now,
-        // A fresh clone has no runs — don't inherit the source's
+        // A fresh fork has no runs — don't inherit the source's
         // unread/seen state.
         last_run_completed_at: 0,
         last_opened_at: 0,
@@ -2172,13 +2290,23 @@ pub async fn workspace_clone_config(
     fs::create_dir_all(&memory_dir)
         .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
 
-    workspace_config::save(&root, &cloned).map_err(|e| e.to_string())?;
+    workspace_config::save(&root, &forked).map_err(|e| e.to_string())?;
     let workspace_pool = crate::db::init_workspace_db(&root).await?;
+    copy_workspace_durable_files(&source_root, &root)?;
+    workspace_config::save(&root, &forked).map_err(|e| e.to_string())?;
+    write_fork_marker(
+        &root,
+        &source_id,
+        &source_config.title,
+        &new_id,
+        request.prompt.as_deref(),
+    )?;
+
     state
         .workspace_index
         .write()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .insert_config(root.clone(), &cloned);
+        .insert_config(root.clone(), &forked);
     state
         .workspace_index
         .write()
@@ -2188,8 +2316,9 @@ pub async fn workspace_clone_config(
     tracing::info!(
         source_workspace_id = %source_id,
         workspace_id = %new_id,
-        agents = cloned.agents.len(),
-        "Cloned workspace config into a new empty workspace"
+        agents = forked.agents.len(),
+        title = %fork_title,
+        "Forked workspace into a new workspace"
     );
 
     Ok(new_id)

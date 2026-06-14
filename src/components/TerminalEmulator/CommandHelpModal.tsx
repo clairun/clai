@@ -29,8 +29,8 @@ const COMMANDS: CommandEntry[] = [
     scope: 'workspace',
   },
   {
-    command: '/clone',
-    description: 'Clone the current workspace and switch to the copy.',
+    command: '/fork <prompt>',
+    description: 'Fork the current workspace, switch to it, and optionally start with the prompt.',
     scope: 'workspace',
   },
 ];

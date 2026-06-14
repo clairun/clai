@@ -386,7 +386,7 @@ pub fn run() {
             commands::workspace::workspace_set_default_agent,
             commands::workspace::workspace_acknowledge_task,
             commands::workspace::workspace_create,
-            commands::workspace::workspace_clone_config,
+            commands::workspace::workspace_fork,
             commands::workspace::workspace_list,
             commands::workspace::workspace_run_now,
             commands::workspace::workspace_set_schedule,

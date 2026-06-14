@@ -170,12 +170,21 @@ export async function createWorkspace(title?: string | null): Promise<string> {
 }
 
 /**
- * Clone a workspace's configuration (agents, skills, MCP, providers, sandbox,
- * schedule cadence) into a new empty workspace — no sessions/messages/tasks/
- * memory/artifacts. Returns the new workspace id.
+ * Fork a workspace's durable setup and files into a new workspace. Runtime
+ * state (runs/tasks/queued approvals) starts fresh. Returns the new workspace id.
  */
-export async function cloneWorkspaceConfig(workspaceId: string): Promise<string> {
-  return invoke('workspace_clone_config', { workspaceId });
+export async function forkWorkspace(
+  workspaceId: string,
+  prompt?: string | null,
+  title?: string | null,
+): Promise<string> {
+  return invoke('workspace_fork', {
+    request: {
+      workspaceId,
+      prompt: prompt || null,
+      title: title || null,
+    },
+  });
 }
 
 export async function listWorkspaces(): Promise<WorkspaceListEntry[]> {
