@@ -24,8 +24,8 @@ const DEFAULT_FS_LIST_LIMIT: usize = 200;
 const MAX_FS_LIST_LIMIT: usize = 2_000;
 const DEFAULT_FS_GLOB_LIMIT: usize = 200;
 const MAX_FS_GLOB_LIMIT: usize = 2_000;
-const DEFAULT_BASH_TIMEOUT_MS: u64 = 120_000;
-const MAX_BASH_TIMEOUT_MS: u64 = 600_000;
+const DEFAULT_BASH_TIMEOUT_MS: u64 = 300_000;
+const MAX_BASH_TIMEOUT_MS: u64 = 1_800_000;
 const DEFAULT_BASH_OUTPUT_LIMIT: usize = 20_000;
 const MAX_BASH_OUTPUT_LIMIT: usize = 200_000;
 const DEFAULT_WEB_FETCH_CONTENT_LIMIT: usize = 20_000;
@@ -349,6 +349,9 @@ async fn execute_bash_exec(
         }
     }
 
+    // Whether the model set timeoutMs itself — drives the recovery hint on a
+    // timeout ("the requested timeout" vs "the default timeout").
+    let explicit_timeout = params.timeout_ms.is_some();
     let timeout_ms = params
         .timeout_ms
         .unwrap_or(DEFAULT_BASH_TIMEOUT_MS)
@@ -376,7 +379,8 @@ async fn execute_bash_exec(
         if error.starts_with("Sandboxed shell is unavailable") {
             context.add_notice(RunNoticeKind::SandboxUnavailable, error.clone());
         }
-    })?;
+    })
+    .map_err(|error| augment_timeout_error(error, timeout_ms, explicit_timeout))?;
 
     Ok(serde_json::json!({
         "cwd": output.cwd.display().to_string(),
@@ -385,6 +389,37 @@ async fn execute_bash_exec(
         "stdout": output.stdout,
         "stderr": output.stderr
     }))
+}
+
+/// Turn a bare sandbox timeout into an actionable error the model can recover
+/// from. A plain "timed out after N ms" is a dead end — the caller can't tell
+/// that a larger `timeoutMs` exists or what its ceiling is. When the run timed
+/// out below the cap, point at `timeoutMs` (distinguishing the default from an
+/// explicitly requested value); when it was already at the cap, tell the model
+/// to narrow the command instead of waiting longer. Non-timeout errors pass
+/// through unchanged.
+fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool) -> String {
+    if !error.contains("timed out after") {
+        return error;
+    }
+    if timeout_ms < MAX_BASH_TIMEOUT_MS {
+        let which = if explicit_timeout {
+            "requested"
+        } else {
+            "default"
+        };
+        format!(
+            "{error}. That was the {which} timeout; for long-running work \
+             (builds, large test suites) re-run with a higher `timeoutMs` \
+             (up to {MAX_BASH_TIMEOUT_MS} ms)."
+        )
+    } else {
+        format!(
+            "{error}. That is the maximum `timeoutMs` ({MAX_BASH_TIMEOUT_MS} ms); \
+             narrow the command (e.g. a single package or a test subset) so it \
+             finishes within the limit."
+        )
+    }
 }
 
 fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant>, String> {
@@ -3017,5 +3052,39 @@ mod tests {
             evaluate_command_policy(&exec, "rm file.txt", &[], &run_blocked),
             PolicyResult::Allow,
         ));
+    }
+
+    #[test]
+    fn augment_timeout_error_passes_through_non_timeout() {
+        let err = "Shell command failed: boom".to_string();
+        assert_eq!(
+            augment_timeout_error(err.clone(), DEFAULT_BASH_TIMEOUT_MS, false),
+            err
+        );
+    }
+
+    #[test]
+    fn augment_timeout_error_points_at_timeoutms_below_cap() {
+        let err = "Sandboxed shell command timed out after 300000 ms".to_string();
+        let out = augment_timeout_error(err, DEFAULT_BASH_TIMEOUT_MS, false);
+        assert!(out.contains("timed out after 300000 ms"));
+        assert!(out.contains("default timeout"));
+        assert!(out.contains("`timeoutMs`"));
+        assert!(out.contains(&MAX_BASH_TIMEOUT_MS.to_string()));
+    }
+
+    #[test]
+    fn augment_timeout_error_labels_requested_timeout() {
+        let err = "Sandboxed shell command timed out after 600000 ms".to_string();
+        let out = augment_timeout_error(err, 600_000, true);
+        assert!(out.contains("requested timeout"));
+    }
+
+    #[test]
+    fn augment_timeout_error_at_cap_advises_narrowing() {
+        let err = "Sandboxed shell command timed out after 1800000 ms".to_string();
+        let out = augment_timeout_error(err, MAX_BASH_TIMEOUT_MS, true);
+        assert!(out.contains("maximum `timeoutMs`"));
+        assert!(out.contains("narrow the command"));
     }
 }

@@ -231,13 +231,13 @@ fn fs_request_grant_def() -> ToolDefinition {
 fn bash_exec_def() -> ToolDefinition {
     ToolDefinition {
         name: "bash_exec".to_string(),
-        description: "Run a shell command through CLAI's guarded executor inside this automation's allowed working directory. On Linux this runs inside the local execution sandbox; if the sandbox is unavailable, the command fails closed. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 600000 (10 min); the default is 120000 (2 min).".to_string(),
+        description: "Run a shell command through CLAI's guarded executor inside this automation's allowed working directory. On Linux this runs inside the local execution sandbox; if the sandbox is unavailable, the command fails closed. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 1800000 (30 min); the default is 300000 (5 min).".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string" },
-                "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000, "description": "Command timeout in milliseconds (default 120000, max 600000)" },
+                "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 1800000, "description": "Command timeout in milliseconds (default 300000, max 1800000)" },
                 "maxOutputChars": { "type": "integer", "minimum": 1 }
             },
             "required": ["command"],
