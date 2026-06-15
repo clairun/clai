@@ -290,10 +290,19 @@ fn spawn_host_detached(bin: &str, args: &[String], dir: Option<&Path>) -> Result
         }
     }
     command.args(args);
-    command
+    let child = command
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("Failed to launch `{}`: {}", bin, e))
+        .map_err(|e| format!("Failed to launch `{}`: {}", bin, e))?;
+    // Fire-and-forget, but still reap: dropping the `Child` neither waits nor
+    // kills on Unix, so a closed editor/terminal (or its `flatpak-spawn` host
+    // proxy) would linger as a `<defunct>` zombie parented to us. A detached
+    // thread blocks in `wait()` (no CPU) until the process exits, reaps it,
+    // then exits itself.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 /// Split a custom template into (binary, args) with the placeholder
