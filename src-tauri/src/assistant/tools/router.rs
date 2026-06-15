@@ -177,8 +177,8 @@ mod tests {
 
     #[test]
     fn enforces_handwritten_schema_bounds() {
-        // bash_exec advertises timeoutMs <= 600000 — the gate enforces it.
-        let params = serde_json::json!({"command": "ls", "timeoutMs": 900000});
+        // bash_exec advertises timeoutMs <= 1800000 — the gate enforces it.
+        let params = serde_json::json!({"command": "ls", "timeoutMs": 2_000_000});
         let error = validate_builtin_params("bash_exec", &params).unwrap_err();
         assert!(error.contains("timeoutMs"), "{error}");
         // missing required `command`
