@@ -318,10 +318,8 @@ fn has_multiple_statements(sql: &str) -> bool {
                 }
                 in_double = !in_double;
             }
-            ';' if !in_single && !in_double => {
-                if !sql[i + 1..].trim().is_empty() {
-                    return true;
-                }
+            ';' if !in_single && !in_double && !sql[i + 1..].trim().is_empty() => {
+                return true;
             }
             _ => {}
         }
