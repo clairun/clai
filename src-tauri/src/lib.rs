@@ -418,8 +418,17 @@ pub fn run() {
             commands::path_grants::list_pending_path_grant_requests,
             commands::path_grants::list_pending_path_grant_counts,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Kill any live terminal sessions before the process exits, so PTY
+            // child shells (and their reader/flusher threads) don't get
+            // reparented to init and leak. The frontend's per-component
+            // `terminal_close` only covers a graceful React unmount.
+            if let tauri::RunEvent::Exit = event {
+                app_handle.state::<AppState>().terminals.close_all();
+            }
+        });
 }
 
 async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Result<(), String> {

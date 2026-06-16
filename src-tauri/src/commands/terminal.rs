@@ -109,6 +109,24 @@ impl TerminalRegistry {
             .expect("terminal registry poisoned")
             .remove(id)
     }
+
+    /// Kill every live session. Called on app teardown (see `lib.rs`'s
+    /// `RunEvent::Exit` hook) so PTY children and their reader/flusher threads
+    /// don't outlive the app — the frontend's per-component `terminal_close`
+    /// only fires on a graceful React unmount, not on window close or quit.
+    pub fn close_all(&self) {
+        // Drain under the lock, then kill without holding it (kill can block).
+        let handles: Vec<Arc<TerminalHandle>> = {
+            let mut map = self.inner.lock().expect("terminal registry poisoned");
+            map.drain().map(|(_, handle)| handle).collect()
+        };
+        for handle in handles {
+            handle.closed.store(true, Ordering::SeqCst);
+            if let Ok(mut killer) = handle.killer.lock() {
+                let _ = killer.kill();
+            }
+        }
+    }
 }
 
 /// Resolve the shell to launch. Native: `$SHELL` (fallback `/bin/bash`), or
@@ -119,7 +137,21 @@ fn native_shell() -> String {
     if cfg!(windows) {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
     } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+        // Trust $SHELL only if it actually exists. A stale value (e.g. left
+        // over after switching shells, or inherited from another machine)
+        // would spawn a process that exits immediately, giving a
+        // flash-and-gone terminal. Fall back to bash, then sh.
+        if let Ok(shell) = std::env::var("SHELL") {
+            if !shell.is_empty() && Path::new(&shell).exists() {
+                return shell;
+            }
+        }
+        for candidate in ["/bin/bash", "/bin/sh"] {
+            if Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+        "/bin/sh".to_string()
     }
 }
 
@@ -234,6 +266,12 @@ fn spawn_io_threads(
                     }
                 }
 
+                // Explicit teardown (terminal_close / app-exit close_all): the
+                // frontend initiated it and is gone, so stop promptly without
+                // emitting an Exit event.
+                if closed.load(Ordering::SeqCst) {
+                    break;
+                }
                 if eof.load(Ordering::SeqCst) {
                     let tail = {
                         let mut guard = pending.lock().expect("terminal pending buffer poisoned");
@@ -246,7 +284,6 @@ fn spawn_io_threads(
                     }
                     let code = *exit_code.lock().expect("terminal exit code poisoned");
                     let _ = channel.send(TerminalEvent::Exit { code });
-                    closed.store(true, Ordering::SeqCst);
                     break;
                 }
             }
