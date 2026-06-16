@@ -494,15 +494,46 @@ fn sync_git_skill_source(source: &mut SkillSourceConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Builds the `git` command, wrapping it with `flatpak-spawn --host` when
+/// running inside a Flatpak sandbox. The sandbox image ships no `git` on its
+/// PATH, so a bare `Command::new("git")` fails with `os error 2` (No such
+/// file or directory) — the symptom users hit when adding a git skill source.
+/// On the host `git` is available, so we hop out via `flatpak-spawn --host`,
+/// mirroring how editor/terminal launches are spawned (see
+/// `system_apps::spawn_host_detached`).
+///
+/// The working directory needs care across the Flatpak hop. Outside Flatpak we
+/// set `current_dir` directly on `git`. Inside Flatpak we must pass it as
+/// `flatpak-spawn --directory=<dir>`: setting `current_dir` on the
+/// `flatpak-spawn` wrapper only moves the wrapper itself, not the host `git` it
+/// spawns, so `git fetch`/`checkout`/`pull` would otherwise run in the wrong
+/// directory and fail to find `.git/`. The skill-source cache lives under the
+/// user's real home (`~/.clai/cache/skill-sources/...`), which Flatpak maps at
+/// the same path inside the sandbox (`--filesystem=home`), so the directory
+/// resolves to the same location on both sides of the hop.
+fn build_git_command(in_flatpak: bool, current_dir: Option<&Path>) -> Command {
+    if in_flatpak {
+        let mut command = Command::new("flatpak-spawn");
+        if let Some(current_dir) = current_dir {
+            command.arg(format!("--directory={}", current_dir.display()));
+        }
+        command.arg("--host").arg("git");
+        command
+    } else {
+        let mut command = Command::new("git");
+        if let Some(current_dir) = current_dir {
+            command.current_dir(current_dir);
+        }
+        command
+    }
+}
+
 fn run_git<I, S>(current_dir: Option<&Path>, args: I) -> Result<(), String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut command = Command::new("git");
-    if let Some(current_dir) = current_dir {
-        command.current_dir(current_dir);
-    }
+    let mut command = build_git_command(crate::providers::is_flatpak(), current_dir);
     command.args(args);
 
     let output = command
@@ -540,4 +571,58 @@ fn remove_git_cache_if_owned(source: &SkillSourceConfig) -> Result<(), String> {
             .map_err(|error| format!("Failed to remove skill source cache: {}", error))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_git_command_native_invokes_git_directly() {
+        let command = build_git_command(false, None);
+        assert_eq!(command.get_program(), OsStr::new("git"));
+        assert_eq!(command.get_args().count(), 0);
+        assert_eq!(command.get_current_dir(), None);
+    }
+
+    #[test]
+    fn build_git_command_native_applies_cwd_directly() {
+        let dir = Path::new("/tmp/clai-skill-cache");
+        let command = build_git_command(false, Some(dir));
+        assert_eq!(command.get_program(), OsStr::new("git"));
+        assert_eq!(command.get_current_dir(), Some(dir));
+        // Native path must NOT add a flatpak-spawn --directory flag.
+        assert_eq!(command.get_args().count(), 0);
+    }
+
+    #[test]
+    fn build_git_command_in_flatpak_wraps_with_flatpak_spawn() {
+        let command = build_git_command(true, None);
+        assert_eq!(command.get_program(), OsStr::new("flatpak-spawn"));
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(args, vec![OsStr::new("--host"), OsStr::new("git")]);
+        // No cwd requested -> no --directory and no wrapper cwd.
+        assert_eq!(command.get_current_dir(), None);
+    }
+
+    #[test]
+    fn build_git_command_in_flatpak_forwards_cwd_via_directory_flag() {
+        let dir = Path::new("/home/user/.clai/cache/skill-sources/abc");
+        let command = build_git_command(true, Some(dir));
+        assert_eq!(command.get_program(), OsStr::new("flatpak-spawn"));
+        let args: Vec<&OsStr> = command.get_args().collect();
+        // cwd is passed with --directory=, BEFORE --host git, so the host git
+        // (not the flatpak-spawn wrapper) runs in the repo directory.
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("--directory=/home/user/.clai/cache/skill-sources/abc"),
+                OsStr::new("--host"),
+                OsStr::new("git"),
+            ]
+        );
+        // The wrapper's own cwd must NOT be set — that would only move
+        // flatpak-spawn, not the host git.
+        assert_eq!(command.get_current_dir(), None);
+    }
 }
