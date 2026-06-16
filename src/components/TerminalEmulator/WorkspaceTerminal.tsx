@@ -78,8 +78,15 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({ workspaceId, onEx
 
     fit.fit();
 
+    // React StrictMode (dev) mounts -> unmounts -> remounts; closing the
+    // throwaway first shell makes the backend emit `exit` on that first
+    // channel. Guard so the surviving component doesn't auto-leave terminal
+    // mode, and so we never write to a disposed terminal.
+    let disposed = false;
+
     const channel = new Channel<TerminalEvent>();
     channel.onmessage = (event) => {
+      if (disposed) return;
       if (event.type === 'output') {
         term.write(base64ToBytes(event.dataB64));
       } else if (event.type === 'exit') {
@@ -88,12 +95,14 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({ workspaceId, onEx
           `\r\n\x1b[33m[process exited${code != null ? ` (code ${code})` : ''}]\x1b[0m\r\n`
         );
         setStatus('exited');
-        // The shell is gone (e.g. the user typed `exit`); leave terminal mode.
-        window.setTimeout(() => onExitRef.current(), 600);
+        // The shell is gone (e.g. the user typed `exit`); leave terminal mode,
+        // unless this instance was already torn down.
+        window.setTimeout(() => {
+          if (!disposed) onExitRef.current();
+        }, 600);
       }
     };
 
-    let disposed = false;
     void (async () => {
       try {
         const id = await invoke<string>('terminal_open', {
