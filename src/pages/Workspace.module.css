@@ -991,7 +991,14 @@
     min(0px, calc(100% - var(--chat-min-width, 420px))),
     calc((100% - 860px) / 2)
   );
-  transition: margin-left 220ms ease-out;
+  /* Float the card above the fixed composer/terminal. As a flex:1 item this
+     shrinks the card's rendered height (keeping its rounded bottom visible
+     above the composer) and is scoped to the conversation column only, so the
+     workspace rail and artifacts panels keep full height. */
+  margin-bottom: var(--terminal-height, 80px);
+  transition:
+    margin-left 220ms ease-out,
+    margin-bottom 180ms ease-out;
 }
 
 /* Soft gradient accent line along the top — mirrors the Fleet detail pane
