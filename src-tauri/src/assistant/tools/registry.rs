@@ -28,6 +28,7 @@ pub fn available_tools(
         tools.push(fs_read_def());
         tools.push(fs_write_def());
         tools.push(fs_request_grant_def());
+        tools.push(history_query_def());
     }
 
     if context.agent_workspace_id.is_some()
@@ -114,6 +115,7 @@ fn all_builtin_defs() -> Vec<ToolDefinition> {
         bash_exec_def(),
         web_search_def(),
         web_fetch_def(),
+        history_query_def(),
     ]
 }
 
@@ -223,6 +225,22 @@ fn fs_request_grant_def() -> ToolDefinition {
                 "reason": { "type": "string", "description": "Brief explanation shown to the user in the approval modal. Be specific about why you need this path for the current task." }
             },
             "required": ["path", "access", "reason"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn history_query_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "history_query".to_string(),
+        description: "Run a single READ-ONLY SQL query against THIS workspace's conversation history database (`.clai/data.sqlite`) and nothing else. This is your always-available recovery path: use it to recall verbatim past work when memory files don't have it — the exact command that was run, the full text of an old error, what the user or a sibling agent said earlier, or detail compacted out of your context. It is read-only and cannot reach any other file, so it never needs approval. Discover the schema first (e.g. `SELECT name FROM sqlite_master WHERE type='table'`, `PRAGMA table_info(<table>)`); key tables are `assistant_messages` (content in `content_json`), `assistant_tool_calls`, `assistant_runs`, `workspace_tasks`. Keep queries narrow: SELECT specific columns, filter, and page with LIMIT/OFFSET — single rows can be very large. Only SELECT/WITH/EXPLAIN/PRAGMA/VALUES are accepted; writes, multiple statements, and ATTACH are rejected.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "sql": { "type": "string", "description": "A single read-only SQL statement (SELECT/WITH/EXPLAIN/PRAGMA/VALUES) against this workspace's data.sqlite." },
+                "maxRows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 100, max 1000). Page larger result sets with LIMIT/OFFSET." }
+            },
+            "required": ["sql"],
             "additionalProperties": false
         }),
     }

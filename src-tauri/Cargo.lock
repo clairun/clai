@@ -624,6 +624,7 @@ dependencies = [
  "include_dir",
  "jsonschema",
  "keyring",
+ "libsqlite3-sys",
  "reqwest 0.12.28",
  "reqwest 0.13.2",
  "rmcp",

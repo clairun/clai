@@ -1,5 +1,6 @@
 pub mod ask_user;
 pub mod command_splitter;
+pub mod history_query;
 pub mod local;
 pub mod prefix_detector;
 pub mod registry;

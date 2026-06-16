@@ -389,7 +389,8 @@ fn summary_message_text(summary: &str) -> String {
          missing context needed to continue, recover it before acting rather \
          than asking the user to repeat anything: your durable state is in \
          `.clai/memory/` and the full verbatim history (every message and tool \
-         result) is in `.clai/data.sqlite`.\n\n{}",
+         result) is in `.clai/data.sqlite` — query it with the read-only \
+         `history_query` tool (no approval needed) to recover specifics.\n\n{}",
         summary.trim()
     )
 }
@@ -423,8 +424,9 @@ fn fallback_summary(messages: &[AssistantMessage]) -> String {
          transcript digest — tool payloads are truncated, and when the history \
          is too long the opening exchanges (the original goal) and the most \
          recent exchanges are kept while the middle is dropped. Continue from \
-         it, and read `.clai/memory/` and `.clai/data.sqlite` if you need \
-         anything that was elided.\n\n{}",
+         it, and recover anything that was elided from `.clai/memory/` or by \
+         querying the full history with the read-only `history_query` tool \
+         (it reads `.clai/data.sqlite` and needs no approval).\n\n{}",
         body
     )
 }
@@ -479,8 +481,9 @@ fn select_head_and_tail(rendered: &[String], budget: usize) -> String {
     let omitted = tail_start - head_end;
     let suffix = if omitted == 1 { "" } else { "s" };
     format!(
-        "{}\n\n[... {} middle message{} omitted during compaction; the full \
-         verbatim history is in `.clai/data.sqlite` ...]\n\n{}",
+        "{}\n\n[... {} middle message{} omitted during compaction; recover the \
+         full verbatim history with the read-only `history_query` tool \
+         (`.clai/data.sqlite`) ...]\n\n{}",
         rendered[..head_end].join("\n\n"),
         omitted,
         suffix,
@@ -709,6 +712,7 @@ mod tests {
         let out = fallback_summary(&messages);
         assert!(out.contains(".clai/memory/"));
         assert!(out.contains(".clai/data.sqlite"));
+        assert!(out.contains("history_query"));
     }
 
     #[test]
@@ -717,5 +721,6 @@ mod tests {
         assert!(out.contains("the summary body"));
         assert!(out.contains(".clai/memory/"));
         assert!(out.contains(".clai/data.sqlite"));
+        assert!(out.contains("history_query"));
     }
 }

@@ -50,6 +50,12 @@ pub async fn execute_tool(
             workspace_tasks::execute(deps, context, name_for_dispatch, params).await
         }
         "ask_user" => ask_user::execute(deps, context, params).await,
+        "history_query" => {
+            let params: super::history_query::HistoryQueryParams =
+                serde_json::from_value(params)
+                    .map_err(|e| format!("Invalid history_query params: {}", e))?;
+            super::history_query::execute(context, params).await
+        }
         _ => execute_external_mcp_tool(deps, context, unqualified, params).await,
     }
 }

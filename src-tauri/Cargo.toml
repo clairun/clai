@@ -111,6 +111,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 # SQLite database for workspace state persistence
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# Raw sqlite3 handle access (shared with sqlx-sqlite, same version) so the
+# history_query tool can hard-disable ATTACH via sqlite3_limit. Pinned to the
+# version sqlx-sqlite resolves (as_raw_handle exposes that crate's `sqlite3`).
+libsqlite3-sys = "0.30"
 scraper = "0.26.0"
 htmd = "0.5.4"
 base64 = "0.22"
