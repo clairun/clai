@@ -995,10 +995,13 @@
      shrinks the card's rendered height (keeping its rounded bottom visible
      above the composer) and is scoped to the conversation column only, so the
      workspace rail and artifacts panels keep full height. */
+  /* No transition on margin-bottom: the terminal panel appears instantly
+     (conditional render, no height animation), so the conversation must
+     reflow instantly to match — and an instant reflow lets the
+     scroll-to-bottom nudge on terminal-open land correctly (an animated
+     shrink moved the bottom after the nudge fired). */
   margin-bottom: var(--terminal-height, 80px);
-  transition:
-    margin-left 220ms ease-out,
-    margin-bottom 180ms ease-out;
+  transition: margin-left 220ms ease-out;
 }
 
 /* Soft gradient accent line along the top — mirrors the Fleet detail pane
