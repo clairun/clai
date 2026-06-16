@@ -1796,6 +1796,29 @@ fn matches_prefix(prefix: &str, command: &str) -> bool {
     if p.is_empty() {
         return false;
     }
+    if matches_prefix_literal(p, command) {
+        return true;
+    }
+    // Fall back to the command's canonical form so an allowlist entry the
+    // suggester proposed still matches the raw command it came from. The
+    // suggester strips leading env assignments and global flags between the
+    // binary and its subcommand (`git --no-pager log` → `git log`); the
+    // literal match above does not, so without this an "Always allow git log"
+    // grant would never cover a `git --no-pager log` invocation. Applying it
+    // to the blocklist too only strengthens it (a blocked `rm` can't hide
+    // behind `FOO=bar rm`).
+    if let Some(canonical) =
+        crate::assistant::tools::prefix_detector::canonicalize_for_match(command)
+    {
+        return matches_prefix_literal(p, &canonical);
+    }
+    false
+}
+
+/// Literal word-boundary prefix test: `command` equals `p`, or starts with
+/// `p` followed by a space (so `git log` matches `git log --oneline` but not
+/// `git logs`).
+fn matches_prefix_literal(p: &str, command: &str) -> bool {
     command == p || (command.starts_with(p) && command.as_bytes().get(p.len()) == Some(&b' '))
 }
 
@@ -2833,6 +2856,43 @@ mod tests {
             evaluate_command_policy(&exec, "which go 2>/dev/null", &[], &[]),
             PolicyResult::Allow,
         ));
+    }
+
+    #[test]
+    fn policy_durable_allowlist_git_log_covers_no_pager_variant() {
+        // The reported friction: the agent runs `git --no-pager log …`, the
+        // suggester proposes `git log` (stripping the global flag), the user
+        // clicks "Always allow", yet every later `git --no-pager log` was
+        // re-prompted because the literal matcher never reconciled the saved
+        // `git log` with the flagged command. With matcher-side
+        // canonicalization the durable `git log` now covers it.
+        let exec = restricted_execution_config(&["git log"], &[]);
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git --no-pager log --oneline -2", &[], &[]),
+            PolicyResult::Allow,
+        ));
+    }
+
+    #[test]
+    fn policy_run_scoped_git_log_covers_no_pager_variant() {
+        // Same agreement must hold for the within-run cache populated by a
+        // fresh AllowAlways/AllowOnce, so the user isn't re-prompted for the
+        // rest of the run after granting once.
+        let exec = restricted_execution_config(&[], &[]);
+        let run_allowed = vec!["git log".to_string()];
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git --no-pager log --oneline", &run_allowed, &[]),
+            PolicyResult::Allow,
+        ));
+    }
+
+    #[test]
+    fn policy_blocklist_canonicalization_blocks_env_prefixed_command() {
+        // Canonicalization strengthens the blocklist symmetrically: a blocked
+        // `rm` can't slip through behind an env assignment.
+        let exec = restricted_execution_config(&["git log"], &["rm"]);
+        let err = enforce_command_policy(&exec, None, "FOO=bar rm -rf /tmp/x").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
     }
 
     #[test]
