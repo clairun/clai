@@ -290,6 +290,71 @@ pub fn suggest_prefix(segment: &str) -> String {
     format!("{} {}", binary, first_sub)
 }
 
+/// Normalizes a segment so the allowlist/blocklist matcher identifies a
+/// command the *same way* `suggest_prefix` does when it proposes the saved
+/// prefix. Mirrors steps 2–5 of the suggestion algorithm: it drops leading
+/// `VAR=value` env assignments and the global flags that sit between the
+/// binary and its first subcommand, while preserving every token from the
+/// first subcommand onward.
+///
+/// Without this, the two halves disagree: `suggest_prefix("git --no-pager
+/// log --oneline")` returns `git log`, but a literal prefix match of
+/// `git log` against the raw `git --no-pager log …` fails — so "Always allow
+/// git log" never matches the command it came from and the user is
+/// re-prompted forever.
+///
+/// Returns `None` when nothing would be stripped (no env prefix, no
+/// inter-binary flags), so the caller can skip the redundant second match and
+/// keep using the raw text it already has.
+pub fn canonicalize_for_match(segment: &str) -> Option<String> {
+    let tokens = tokenize(segment);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    // Step 2: skip leading env assignments.
+    let mut idx = 0;
+    while idx < tokens.len() && is_env_assignment(&tokens[idx]) {
+        idx += 1;
+    }
+    let env_skipped = idx > 0;
+
+    // Step 3: the binary.
+    let Some(binary) = tokens.get(idx).cloned() else {
+        // All-assignment segment (`FOO=bar`) — a benign construct, never
+        // routed through prefix matching. Nothing to canonicalize.
+        return None;
+    };
+    idx += 1;
+
+    // Step 5: skip global flags between the binary and its first subcommand,
+    // but only for binaries that actually have a subcommand layer. Path-shaped
+    // binaries (`~/bin/go`) and flat-argument commands (`ls`, Style::None) are
+    // returned head-only by `suggest_prefix` and skip no flags, so we mirror
+    // that and leave their flags in place.
+    let mut flags_skipped = false;
+    if !is_path_shaped(&binary) && !matches!(lookup_style(&binary), Style::None) {
+        while idx < tokens.len() && is_flag(&tokens[idx]) {
+            idx += 1;
+            flags_skipped = true;
+        }
+    }
+
+    // Nothing was removed → identical to the raw text; let the literal match
+    // handle it and avoid allocating a duplicate string.
+    if !env_skipped && !flags_skipped {
+        return None;
+    }
+
+    let mut rebuilt = String::with_capacity(segment.len());
+    rebuilt.push_str(&binary);
+    for tok in &tokens[idx..] {
+        rebuilt.push(' ');
+        rebuilt.push_str(tok);
+    }
+    Some(rebuilt)
+}
+
 fn lookup_style(binary: &str) -> Style {
     if NO_SUBCOMMAND.contains(&binary) {
         Style::None
@@ -765,5 +830,86 @@ mod tests {
         assert!(is_path_shaped("a/b"));
         assert!(!is_path_shaped("foo"));
         assert!(!is_path_shaped("foo.sh")); // no slash → not path
+    }
+
+    // -----------------------------------------------------------------
+    // canonicalize_for_match — the matcher-side normalization that must
+    // agree with the suggestion it pairs with.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn canonicalize_strips_global_flag_so_match_agrees_with_suggestion() {
+        // The motivating bug: suggest_prefix maps this to `git log`, so the
+        // canonical form must start with `git log` for the saved prefix to
+        // match the command it came from.
+        assert_eq!(
+            canonicalize_for_match("git --no-pager log --oneline -5").as_deref(),
+            Some("git log --oneline -5")
+        );
+    }
+
+    #[test]
+    fn canonicalize_strips_leading_env_assignments() {
+        assert_eq!(
+            canonicalize_for_match("FOO=bar BAZ=1 git log --oneline").as_deref(),
+            Some("git log --oneline")
+        );
+    }
+
+    #[test]
+    fn canonicalize_strips_env_and_global_flag_together() {
+        assert_eq!(
+            canonicalize_for_match("GIT_PAGER=cat git --no-pager show HEAD").as_deref(),
+            Some("git show HEAD")
+        );
+    }
+
+    #[test]
+    fn canonicalize_agrees_with_suggestion_for_separate_token_flag_arg() {
+        // `git -c <val>` carries its argument as a separate token that looks
+        // like neither a flag nor an env assignment, so flag-skipping stops
+        // there — for *both* functions. They still agree (the suggested
+        // prefix is a literal prefix of the canonical form), so no re-prompt
+        // loop; this just documents the shared, pre-existing limitation.
+        let cmd = "git -c core.pager=less show HEAD";
+        let suggested = suggest_prefix(cmd);
+        let canonical = canonicalize_for_match(cmd).unwrap();
+        assert_eq!(suggested, "git core.pager=less");
+        assert!(canonical.starts_with(&suggested));
+    }
+
+    #[test]
+    fn canonicalize_returns_none_when_nothing_to_strip() {
+        // Plain command with no env prefix and no inter-binary flags — the
+        // literal match already handles it, so we signal "no change".
+        assert_eq!(canonicalize_for_match("git log --oneline -5"), None);
+    }
+
+    #[test]
+    fn canonicalize_leaves_flat_argument_commands_untouched() {
+        // `ls` is Style::None — its leading flags are arguments, not a
+        // pre-subcommand region, so suggest_prefix keeps them off the prefix
+        // and we must not strip them here either.
+        assert_eq!(canonicalize_for_match("ls -la /tmp"), None);
+    }
+
+    #[test]
+    fn canonicalize_leaves_path_shaped_binary_flags_untouched() {
+        // Path-shaped binaries have no subcommand layer; suggest_prefix
+        // returns the binary head as-is, so no flag stripping.
+        assert_eq!(canonicalize_for_match("~/go/bin/go --foo build"), None);
+    }
+
+    #[test]
+    fn canonicalize_path_shaped_binary_still_strips_env() {
+        assert_eq!(
+            canonicalize_for_match("FOO=bar ~/go/bin/go build").as_deref(),
+            Some("~/go/bin/go build")
+        );
+    }
+
+    #[test]
+    fn canonicalize_all_assignment_segment_returns_none() {
+        assert_eq!(canonicalize_for_match("FOO=bar BAZ=1"), None);
     }
 }
