@@ -371,7 +371,7 @@ pub fn run() {
             commands::skills::skill_source_refresh,
             commands::skills::skill_source_set_enabled,
             commands::skills::skill_source_delete,
-            // Integrated terminal (Phase 1 perf spike)
+            // Integrated terminal
             commands::terminal::terminal_open,
             commands::terminal::terminal_write,
             commands::terminal::terminal_resize,

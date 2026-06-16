@@ -13,7 +13,7 @@ import styles from './WorkspaceTerminal.module.css';
  * kills it (decision #4: spawn-on-enter / kill-on-exit, no state recovery).
  *
  * The PTY backend + 16ms output coalescing live in
- * `src-tauri/src/commands/terminal.rs` (validated by the Phase 1 perf spike).
+ * `src-tauri/src/commands/terminal.rs`.
  * This component is the production surface that replaces the chat composer
  * while terminal mode is active.
  */
