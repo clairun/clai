@@ -123,12 +123,30 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
     // channel. Guard so the surviving component doesn't auto-leave terminal
     // mode, and so we never write to a disposed terminal.
     let disposed = false;
+    // Inject a queued `!cmd` only after the shell has printed its first prompt
+    // (first output). Writing it before the prompt races shell startup: the
+    // kernel tty echoes the raw input, then the shell's readline redraws it at
+    // the prompt, so the command appears twice.
+    let shellReady = false;
+    let pendingInitial: string | null = null;
+    const sendInitial = (cmd: string) => {
+      const id = sessionRef.current;
+      if (id) void invoke('terminal_write', { sessionId: id, data: `${cmd}\r` });
+    };
 
     const channel = new Channel<TerminalEvent>();
     channel.onmessage = (event) => {
       if (disposed) return;
       if (event.type === 'output') {
         term.write(base64ToBytes(event.dataB64));
+        if (!shellReady) {
+          shellReady = true;
+          if (pendingInitial) {
+            const cmd = pendingInitial;
+            pendingInitial = null;
+            sendInitial(cmd);
+          }
+        }
       } else if (event.type === 'exit') {
         const code = event.code;
         term.write(
@@ -163,12 +181,12 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
         term.onResize(({ cols, rows }) => {
           void invoke('terminal_resize', { sessionId: id, cols, rows });
         });
-        // `!cmd` fast-path: run the requested command once the shell is ready.
-        // `\r` is the Enter key over a PTY; the shell echoes + runs it, output
-        // streams back through the channel like any typed command.
+        // `!cmd` fast-path: queue the command and run it once the shell is
+        // ready (first prompt). If the prompt already arrived, send now.
         const initial = consumeInitialCommand?.();
         if (initial) {
-          void invoke('terminal_write', { sessionId: id, data: `${initial}\r` });
+          if (shellReady) sendInitial(initial);
+          else pendingInitial = initial;
         }
       } catch (err) {
         term.write(`\r\n\x1b[31m[failed to open terminal: ${String(err)}]\x1b[0m\r\n`);
