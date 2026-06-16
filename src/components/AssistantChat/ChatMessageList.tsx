@@ -24,6 +24,7 @@ import {
   toPreviewText,
 } from './toolDisplay';
 import styles from './AssistantChat.module.css';
+import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
 
 // Tools beyond this count collapse behind a "show N earlier" toggle so a turn
 // that fires dozens of tools stays scannable; the most-recent MAX_VISIBLE rows
@@ -86,7 +87,6 @@ const getToolUses = (message: AssistantMessage): ToolUsePart[] => {
   return message.content.filter((part): part is ToolUsePart => part.type === 'tool_use');
 };
 
-
 /**
  * Collapsible "thinking" block — renders the model's reasoning_content
  * with a distinct muted/italic style so it doesn't compete with the
@@ -104,12 +104,19 @@ const ThinkingBlock = memo(({ content }: { content: string }) => {
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
       >
-        <span className={styles.thinkingIcon} aria-hidden="true">{'\u{1F4AD}'}</span>
+        <span className={styles.thinkingIcon} aria-hidden="true">
+          {'\u{1F4AD}'}
+        </span>
         <span className={styles.thinkingLabel}>Thinking</span>
         {!expanded && preview && (
-          <span className={styles.thinkingPreview}>{preview}{content.length > preview.length ? '…' : ''}</span>
+          <span className={styles.thinkingPreview}>
+            {preview}
+            {content.length > preview.length ? '…' : ''}
+          </span>
         )}
-        <span className={styles.thinkingChevron} aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+        <span className={styles.thinkingChevron} aria-hidden="true">
+          {expanded ? '▾' : '▸'}
+        </span>
       </button>
       {expanded && <pre className={styles.thinkingBody}>{content}</pre>}
     </div>
@@ -133,7 +140,7 @@ ThinkingBlock.displayName = 'ThinkingBlock';
  */
 const groupAssistantContent = (
   content: ContentPart[],
-  toolCallsById: Map<string, ToolInvocation> | undefined,
+  toolCallsById: Map<string, ToolInvocation> | undefined
 ): AssistantSegment[] => {
   if (!Array.isArray(content)) return [];
   const segments: AssistantSegment[] = [];
@@ -201,14 +208,13 @@ const isToolOnlyMessage = (message: AssistantMessage): boolean => {
  * flashes under the last tool row while the model composes its next tool
  * call. Callers hide such messages until content (or streaming text) lands.
  */
-const hasRenderableContent = (message: AssistantMessage): boolean => (
-  Array.isArray(message.content)
-  && message.content.some((part) => {
+const hasRenderableContent = (message: AssistantMessage): boolean =>
+  Array.isArray(message.content) &&
+  message.content.some((part) => {
     if (!part || typeof part !== 'object') return false;
     if (part.type === 'text' || part.type === 'thinking') return !!part.text;
     return true;
-  })
-);
+  });
 
 const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
   if (!message) return true;
@@ -217,9 +223,7 @@ const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
   if (message.role !== 'user') return false;
   const text = getTextContent(message);
   return (
-    !text
-    || text.startsWith('--- New scheduled run at')
-    || text.startsWith('--- Manual run at')
+    !text || text.startsWith('--- New scheduled run at') || text.startsWith('--- Manual run at')
   );
 };
 
@@ -302,18 +306,33 @@ const renderToolResult = (result: unknown): React.ReactNode => {
   // String: render as markdown (detect JSON strings)
   if (typeof result === 'string') {
     const trimmed = result.trim();
-    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    if (
+      (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+      (trimmed.startsWith('[') && trimmed.endsWith(']'))
+    ) {
       try {
         const parsed = JSON.parse(trimmed);
-        return <MarkdownMessage content={'```json\n' + JSON.stringify(parsed, null, 2) + '\n```'} isStreaming={false} />;
-      } catch { /* not JSON, render as markdown */ }
+        return (
+          <MarkdownMessage
+            content={'```json\n' + JSON.stringify(parsed, null, 2) + '\n```'}
+            isStreaming={false}
+          />
+        );
+      } catch {
+        /* not JSON, render as markdown */
+      }
     }
     return <MarkdownMessage content={result} isStreaming={false} />;
   }
 
   // Object/array without MCP text: pretty-print as JSON
   if (typeof result === 'object') {
-    return <MarkdownMessage content={'```json\n' + JSON.stringify(result, null, 2) + '\n```'} isStreaming={false} />;
+    return (
+      <MarkdownMessage
+        content={'```json\n' + JSON.stringify(result, null, 2) + '\n```'}
+        isStreaming={false}
+      />
+    );
   }
 
   return <span>{String(result)}</span>;
@@ -432,14 +451,23 @@ const ChatMessageList = ({
     return map;
   }, [toolCalls]);
 
+  // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
+  // conversation viewport). Folded into scrollToBottomSignal below with a wide
+  // multiplier so it never collides with the messages.length component. The
+  // underlying VirtualizedList still honours "only if the reader was near the
+  // bottom", so a reader scrolled up into history is left undisturbed.
+  const [scrollNudge, setScrollNudge] = useState(0);
+  useEffect(() => onScrollChatToBottom(() => setScrollNudge((n) => n + 1)), []);
+
   // Drop assistant messages that have nothing to render yet — the empty
   // placeholder each turn is seeded with stays hidden until its first
   // content part or streaming delta arrives (see hasRenderableContent).
   const visibleMessages = useMemo(
-    () => messages.filter((msg) => (
-      msg.role !== 'assistant' || hasRenderableContent(msg) || !!streamingText[msg.id]
-    )),
-    [messages, streamingText],
+    () =>
+      messages.filter(
+        (msg) => msg.role !== 'assistant' || hasRenderableContent(msg) || !!streamingText[msg.id]
+      ),
+    [messages, streamingText]
   );
 
   const grouped = useMemo(() => {
@@ -481,67 +509,68 @@ const ChatMessageList = ({
       return it.message?.role === 'assistant';
     };
 
-    return grouped.map((_, idx) =>
-      isAssistantItem(grouped[idx]) && isAssistantItem(grouped[idx - 1])
+    return grouped.map(
+      (_, idx) => isAssistantItem(grouped[idx]) && isAssistantItem(grouped[idx - 1])
     );
   }, [grouped]);
 
-  const itemKey = useCallback((item: RenderItem) => (
-    item.type === 'load-earlier'
-      ? 'load-earlier'
-      : item.type === 'tool-group'
-      ? `tool-group:${item.id}`
-      : `message:${item.message.id}`
-  ), []);
+  const itemKey = useCallback(
+    (item: RenderItem) =>
+      item.type === 'load-earlier'
+        ? 'load-earlier'
+        : item.type === 'tool-group'
+          ? `tool-group:${item.id}`
+          : `message:${item.message.id}`,
+    []
+  );
 
   // Set lookup for the queued chip; stable reference while the id list
   // doesn't change so memoized MessageBlocks don't re-render.
-  const queuedIdSet = useMemo(
-    () => new Set(queuedMessageIds ?? []),
-    [queuedMessageIds],
-  );
+  const queuedIdSet = useMemo(() => new Set(queuedMessageIds ?? []), [queuedMessageIds]);
 
-  const renderItem = useCallback((item: RenderItem, idx: number) => (
-    item.type === 'load-earlier' ? (
-      <div className={styles.loadEarlierWrap}>
-        <button
-          type="button"
-          className={styles.loadEarlierButton}
-          onClick={onLoadOlderMessages}
-          disabled={isLoadingOlderMessages}
-        >
-          {isLoadingOlderMessages ? 'Loading…' : 'Load earlier'}
-        </button>
-      </div>
-    ) : item.type === 'tool-group' ? (
-      <MergedToolGroup
-        item={item}
-        toolCallsById={toolCallsById}
-        isContinuation={continuationFlags[idx]}
-      />
-    ) : (
-      <MessageBlock
-        message={item.message}
-        streamingText={streamingText[item.message.id]}
-        toolCallsById={toolCallsById}
-        userLabel={userLabel}
-        isContinuation={continuationFlags[idx]}
-        isQueued={queuedIdSet.has(item.message.id)}
-        onDeleteQueued={onDeleteQueuedMessage}
-        onEditQueued={onEditQueuedMessage}
-      />
-    )
-  ), [
-    continuationFlags,
-    streamingText,
-    toolCallsById,
-    userLabel,
-    queuedIdSet,
-    onDeleteQueuedMessage,
-    onEditQueuedMessage,
-    onLoadOlderMessages,
-    isLoadingOlderMessages,
-  ]);
+  const renderItem = useCallback(
+    (item: RenderItem, idx: number) =>
+      item.type === 'load-earlier' ? (
+        <div className={styles.loadEarlierWrap}>
+          <button
+            type="button"
+            className={styles.loadEarlierButton}
+            onClick={onLoadOlderMessages}
+            disabled={isLoadingOlderMessages}
+          >
+            {isLoadingOlderMessages ? 'Loading…' : 'Load earlier'}
+          </button>
+        </div>
+      ) : item.type === 'tool-group' ? (
+        <MergedToolGroup
+          item={item}
+          toolCallsById={toolCallsById}
+          isContinuation={continuationFlags[idx]}
+        />
+      ) : (
+        <MessageBlock
+          message={item.message}
+          streamingText={streamingText[item.message.id]}
+          toolCallsById={toolCallsById}
+          userLabel={userLabel}
+          isContinuation={continuationFlags[idx]}
+          isQueued={queuedIdSet.has(item.message.id)}
+          onDeleteQueued={onDeleteQueuedMessage}
+          onEditQueued={onEditQueuedMessage}
+        />
+      ),
+    [
+      continuationFlags,
+      streamingText,
+      toolCallsById,
+      userLabel,
+      queuedIdSet,
+      onDeleteQueuedMessage,
+      onEditQueuedMessage,
+      onLoadOlderMessages,
+      isLoadingOlderMessages,
+    ]
+  );
 
   // Auto-load older pages as the reader scrolls toward the top.
   // VirtualizedList only fires this on user-initiated upward scrolls (never
@@ -558,10 +587,7 @@ const ChatMessageList = ({
   const footer = isStreaming ? (
     <RunningIndicator runStartedAt={runStartedAt} />
   ) : runError ? (
-    <div
-      className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner}
-      role="alert"
-    >
+    <div className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner} role="alert">
       <span className={styles.runErrorIcon}>{runErrorIsLimit ? '⏳' : '⚠'}</span>
       <span>{runError}</span>
     </div>
@@ -586,7 +612,7 @@ const ChatMessageList = ({
       footer={footer}
       footerEstimateSize={56}
       initialScrollToBottom
-      scrollToBottomSignal={messages.length}
+      scrollToBottomSignal={messages.length + scrollNudge * 1_000_000}
       scrollToBottomBehavior="auto"
       forceScrollToBottomKey={lastUserMessageId}
       onApproachTop={handleApproachTop}
@@ -616,166 +642,170 @@ const MessageBlock = memo(
     onDeleteQueued,
     onEditQueued,
   }: MessageBlockProps) => {
-  const { role, createdAt } = message;
-  // Local draft state for editing a queued message in-place. `null` = not
-  // editing; a string = the working draft seeded from the message text.
-  const [editDraft, setEditDraft] = useState<string | null>(null);
+    const { role, createdAt } = message;
+    // Local draft state for editing a queued message in-place. `null` = not
+    // editing; a string = the working draft seeded from the message text.
+    const [editDraft, setEditDraft] = useState<string | null>(null);
 
-  if (role === 'user') {
-    const textContent = getTextContent(message);
-    if (!textContent) return null;
+    if (role === 'user') {
+      const textContent = getTextContent(message);
+      if (!textContent) return null;
 
-    // Hide run boundary markers (persisted trigger messages for the LLM, not for the user)
-    if (textContent.startsWith('--- New scheduled run at') || textContent.startsWith('--- Manual run at')) {
-      return null;
+      // Hide run boundary markers (persisted trigger messages for the LLM, not for the user)
+      if (
+        textContent.startsWith('--- New scheduled run at') ||
+        textContent.startsWith('--- Manual run at')
+      ) {
+        return null;
+      }
+
+      const isEditing = editDraft !== null;
+      const trimmedDraft = (editDraft ?? '').trim();
+      const submitEdit = () => {
+        if (!trimmedDraft || trimmedDraft === textContent.trim()) {
+          setEditDraft(null);
+          return;
+        }
+        // The backend emits AssistantMessageUpdated, which swaps the text in
+        // the store; close the editor optimistically. On error the store is
+        // untouched and the original text remains.
+        void Promise.resolve(onEditQueued?.(message.id, trimmedDraft)).catch(() => {});
+        setEditDraft(null);
+      };
+
+      return (
+        <div className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''}`}>
+          <div className={styles.messageHeader}>
+            <span className={styles.messageRoleText}>{userLabel}</span>
+            {createdAt && (
+              <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>
+            )}
+            {isQueued && (
+              <span className={styles.queuedChip} title="Waiting for the agent to pick this up">
+                Queued
+              </span>
+            )}
+            {isQueued && onEditQueued && !isEditing && (
+              <button
+                type="button"
+                className={styles.queuedEdit}
+                onClick={() => setEditDraft(textContent)}
+                title="Edit before it's picked up"
+                aria-label="Edit queued message"
+              >
+                ✎
+              </button>
+            )}
+            {isQueued && onDeleteQueued && !isEditing && (
+              <button
+                type="button"
+                className={styles.queuedRemove}
+                onClick={() => onDeleteQueued(message.id)}
+                title="Remove before it's picked up"
+                aria-label="Remove queued message"
+              >
+                ×
+              </button>
+            )}
+          </div>
+          {isEditing ? (
+            <div className={styles.queuedEditor}>
+              <textarea
+                className={styles.queuedEditorInput}
+                value={editDraft ?? ''}
+                autoFocus
+                rows={Math.min(8, Math.max(2, (editDraft ?? '').split('\n').length))}
+                onChange={(e) => setEditDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    submitEdit();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setEditDraft(null);
+                  }
+                }}
+              />
+              <div className={styles.queuedEditorActions}>
+                <button
+                  type="button"
+                  className={styles.queuedEditorSave}
+                  onClick={submitEdit}
+                  disabled={!trimmedDraft}
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className={styles.queuedEditorCancel}
+                  onClick={() => setEditDraft(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className={styles.messageContent}>
+              <MarkdownMessage content={textContent} />
+            </div>
+          )}
+        </div>
+      );
     }
 
-    const isEditing = editDraft !== null;
-    const trimmedDraft = (editDraft ?? '').trim();
-    const submitEdit = () => {
-      if (!trimmedDraft || trimmedDraft === textContent.trim()) {
-        setEditDraft(null);
-        return;
-      }
-      // The backend emits AssistantMessageUpdated, which swaps the text in
-      // the store; close the editor optimistically. On error the store is
-      // untouched and the original text remains.
-      void Promise.resolve(onEditQueued?.(message.id, trimmedDraft)).catch(() => {});
-      setEditDraft(null);
-    };
+    if (role === 'assistant') {
+      // Walk message.content in order, grouping consecutive same-type
+      // parts into segments. This preserves the interleaving (text → tool
+      // → text → tool …) the assistant actually produced, rather than
+      // collapsing all text to the top and all tools to the bottom.
+      // streamingText is appended as a trailing segment because by
+      // definition it represents the *current* in-flight text block,
+      // which sits after everything already persisted. Memoized so
+      // ToolCallGroup's prop reference is stable across re-renders when
+      // nothing actually changed — its memo only helps if its toolUses
+      // array reference doesn't churn.
+      const segments = useMemo(() => {
+        const base = groupAssistantContent(message.content, toolCallsById);
+        if (streamingText) {
+          base.push({ kind: 'text', text: streamingText, streaming: true });
+        }
+        return base;
+      }, [message.content, toolCallsById, streamingText]);
 
-    return (
-      <div className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''}`}>
-        <div className={styles.messageHeader}>
-          <span className={styles.messageRoleText}>{userLabel}</span>
-          {createdAt && <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>}
-          {isQueued && (
-            <span className={styles.queuedChip} title="Waiting for the agent to pick this up">
-              Queued
-            </span>
-          )}
-          {isQueued && onEditQueued && !isEditing && (
-            <button
-              type="button"
-              className={styles.queuedEdit}
-              onClick={() => setEditDraft(textContent)}
-              title="Edit before it's picked up"
-              aria-label="Edit queued message"
-            >
-              ✎
-            </button>
-          )}
-          {isQueued && onDeleteQueued && !isEditing && (
-            <button
-              type="button"
-              className={styles.queuedRemove}
-              onClick={() => onDeleteQueued(message.id)}
-              title="Remove before it's picked up"
-              aria-label="Remove queued message"
-            >
-              ×
-            </button>
-          )}
-        </div>
-        {isEditing ? (
-          <div className={styles.queuedEditor}>
-            <textarea
-              className={styles.queuedEditorInput}
-              value={editDraft ?? ''}
-              autoFocus
-              rows={Math.min(8, Math.max(2, (editDraft ?? '').split('\n').length))}
-              onChange={(e) => setEditDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  submitEdit();
-                } else if (e.key === 'Escape') {
-                  e.preventDefault();
-                  setEditDraft(null);
-                }
-              }}
-            />
-            <div className={styles.queuedEditorActions}>
-              <button
-                type="button"
-                className={styles.queuedEditorSave}
-                onClick={submitEdit}
-                disabled={!trimmedDraft}
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                className={styles.queuedEditorCancel}
-                onClick={() => setEditDraft(null)}
-              >
-                Cancel
-              </button>
+      return (
+        <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
+          {!isContinuation && (
+            <div className={styles.messageHeader}>
+              <span className={styles.messageRoleText}>Clai</span>
+              {createdAt && (
+                <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>
+              )}
             </div>
-          </div>
-        ) : (
+          )}
           <div className={styles.messageContent}>
-            <MarkdownMessage content={textContent} />
+            {segments.map((seg, idx) => {
+              if (seg.kind === 'thinking') {
+                return <ThinkingBlock key={idx} content={seg.text} />;
+              }
+              if (seg.kind === 'text') {
+                return (
+                  <StreamingMarkdown key={idx} content={seg.text} isStreaming={!!seg.streaming} />
+                );
+              }
+              if (seg.kind === 'tools') {
+                return <ToolCallGroup key={idx} toolUses={seg.toolUses} />;
+              }
+              return null;
+            })}
           </div>
-        )}
-      </div>
-    );
-  }
-
-  if (role === 'assistant') {
-    // Walk message.content in order, grouping consecutive same-type
-    // parts into segments. This preserves the interleaving (text → tool
-    // → text → tool …) the assistant actually produced, rather than
-    // collapsing all text to the top and all tools to the bottom.
-    // streamingText is appended as a trailing segment because by
-    // definition it represents the *current* in-flight text block,
-    // which sits after everything already persisted. Memoized so
-    // ToolCallGroup's prop reference is stable across re-renders when
-    // nothing actually changed — its memo only helps if its toolUses
-    // array reference doesn't churn.
-    const segments = useMemo(() => {
-      const base = groupAssistantContent(message.content, toolCallsById);
-      if (streamingText) {
-        base.push({ kind: 'text', text: streamingText, streaming: true });
-      }
-      return base;
-    }, [message.content, toolCallsById, streamingText]);
-
-    return (
-      <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
-        {!isContinuation && (
-          <div className={styles.messageHeader}>
-            <span className={styles.messageRoleText}>Clai</span>
-            {createdAt && <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>}
-          </div>
-        )}
-        <div className={styles.messageContent}>
-          {segments.map((seg, idx) => {
-            if (seg.kind === 'thinking') {
-              return <ThinkingBlock key={idx} content={seg.text} />;
-            }
-            if (seg.kind === 'text') {
-              return (
-                <StreamingMarkdown
-                  key={idx}
-                  content={seg.text}
-                  isStreaming={!!seg.streaming}
-                />
-              );
-            }
-            if (seg.kind === 'tools') {
-              return <ToolCallGroup key={idx} toolUses={seg.toolUses} />;
-            }
-            return null;
-          })}
         </div>
-      </div>
-    );
-  }
+      );
+    }
 
-  // Skip tool result messages — shown inline with tool calls
-  return null;
-});
+    // Skip tool result messages — shown inline with tool calls
+    return null;
+  }
+);
 
 /**
  * MergedToolGroup — renders tool calls from multiple consecutive assistant turns
@@ -787,37 +817,42 @@ interface MergedToolGroupProps {
   isContinuation?: boolean;
 }
 
-const MergedToolGroup = memo(({ item, toolCallsById, isContinuation = false }: MergedToolGroupProps) => {
-  const enrichedToolUses = useMemo<EnrichedToolUse[]>(
-    () => item.toolUses.map((tu) => {
-      const tc = toolCallsById?.get(tu.tool_call_id);
-      return {
-        toolCallId: tu.tool_call_id,
-        toolName: cleanToolName(tu.tool_name),
-        arguments: tu.arguments,
-        status: tc?.status || 'running',
-        params: tc?.params,
-        result: tc?.result,
-        error: tc?.error,
-      };
-    }),
-    [item.toolUses, toolCallsById]
-  );
+const MergedToolGroup = memo(
+  ({ item, toolCallsById, isContinuation = false }: MergedToolGroupProps) => {
+    const enrichedToolUses = useMemo<EnrichedToolUse[]>(
+      () =>
+        item.toolUses.map((tu) => {
+          const tc = toolCallsById?.get(tu.tool_call_id);
+          return {
+            toolCallId: tu.tool_call_id,
+            toolName: cleanToolName(tu.tool_name),
+            arguments: tu.arguments,
+            status: tc?.status || 'running',
+            params: tc?.params,
+            result: tc?.result,
+            error: tc?.error,
+          };
+        }),
+      [item.toolUses, toolCallsById]
+    );
 
-  return (
-    <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
-      {!isContinuation && (
-        <div className={styles.messageHeader}>
-          <span className={styles.messageRoleText}>Clai</span>
-          {item.createdAt && <span className={styles.messageTimestamp}>{formatTimestamp(item.createdAt)}</span>}
+    return (
+      <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
+        {!isContinuation && (
+          <div className={styles.messageHeader}>
+            <span className={styles.messageRoleText}>Clai</span>
+            {item.createdAt && (
+              <span className={styles.messageTimestamp}>{formatTimestamp(item.createdAt)}</span>
+            )}
+          </div>
+        )}
+        <div className={styles.messageContent}>
+          <ToolCallGroup toolUses={enrichedToolUses} />
         </div>
-      )}
-      <div className={styles.messageContent}>
-        <ToolCallGroup toolUses={enrichedToolUses} />
       </div>
-    </div>
-  );
-});
+    );
+  }
+);
 
 /** Coerce a value into a plain object (parsing JSON strings) or null. */
 const toObj = (value: unknown): Record<string, unknown> | null => {
@@ -850,7 +885,7 @@ const renderToolOutput = (
   params: unknown,
   result: unknown,
   error: string | null | undefined,
-  isRunning: boolean,
+  isRunning: boolean
 ): React.ReactNode => {
   const name = cleanToolName(toolName || '');
 
@@ -871,7 +906,9 @@ const renderToolOutput = (
         {typeof command === 'string' && command && (
           <div className={styles.toolCommand}>{`$ ${command}`}</div>
         )}
-        <pre className={`${styles.toolTerminal} ${error ? styles.toolTerminalError : ''}`}>{body}</pre>
+        <pre className={`${styles.toolTerminal} ${error ? styles.toolTerminalError : ''}`}>
+          {body}
+        </pre>
       </div>
     );
   }
@@ -881,7 +918,9 @@ const renderToolOutput = (
     const r = toObj(result);
     const question = typeof p?.question === 'string' ? p.question : '';
     const context = typeof p?.context === 'string' ? p.context : '';
-    const options = Array.isArray(p?.options) ? (p!.options as Array<{ label?: string; description?: string | null }>) : [];
+    const options = Array.isArray(p?.options)
+      ? (p!.options as Array<{ label?: string; description?: string | null }>)
+      : [];
     const answer = typeof r?.answer === 'string' ? r.answer : '';
     // Highlight what the user picked: single-select answers carry
     // selectedOptionIndex, multi-select answers selectedOptionIndexes.
@@ -912,7 +951,9 @@ const renderToolOutput = (
                   </span>
                   <span>
                     {label}
-                    {opt?.description ? <span className={styles.askUserOptionDesc}>{opt.description}</span> : null}
+                    {opt?.description ? (
+                      <span className={styles.askUserOptionDesc}>{opt.description}</span>
+                    ) : null}
                   </span>
                 </li>
               );
@@ -980,8 +1021,12 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
           onClick={() => setShowEarlier((prev) => !prev)}
           aria-expanded={showEarlier}
         >
-          <span className={`${styles.toolRowChevron} ${showEarlier ? styles.expanded : ''}`}>▸</span>
-          {showEarlier ? 'Hide earlier calls' : `Show ${overflow} earlier ${overflow === 1 ? 'call' : 'calls'}`}
+          <span className={`${styles.toolRowChevron} ${showEarlier ? styles.expanded : ''}`}>
+            ▸
+          </span>
+          {showEarlier
+            ? 'Hide earlier calls'
+            : `Show ${overflow} earlier ${overflow === 1 ? 'call' : 'calls'}`}
         </button>
       )}
       {visible.map((tu) => (
@@ -1020,7 +1065,7 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
   const { verb, arg } = useMemo(() => summarizeToolCall(toolName, params), [toolName, params]);
   const resultSummary = useMemo(
     () => summarizeToolResult(toolName, result, error, status),
-    [toolName, result, error, status],
+    [toolName, result, error, status]
   );
 
   const isRunning = status === 'running';
@@ -1031,15 +1076,22 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
   // with no args, but on a failed call "the model sent {}" is exactly what
   // the user needs to see (e.g. a schema-validation reject for a missing
   // required property), so fall back to the raw JSON there.
-  const formattedParams = formatParams(params)
-    ?? (isFailed && params != null ? JSON.stringify(params, null, 2) : null);
+  const formattedParams =
+    formatParams(params) ?? (isFailed && params != null ? JSON.stringify(params, null, 2) : null);
   const hasInput = !!formattedParams;
   const hasOutput = result != null || !!error || isRunning;
 
   return (
     <div className={styles.toolRowBlock}>
-      <button type="button" className={styles.toolRow} onClick={handleToggle} aria-expanded={isExpanded}>
-        <span className={`${styles.toolRowIcon} ${isFailed ? styles.toolRowIconError : ''} ${isRunning ? styles.toolRowIconRunning : ''}`}>
+      <button
+        type="button"
+        className={styles.toolRow}
+        onClick={handleToggle}
+        aria-expanded={isExpanded}
+      >
+        <span
+          className={`${styles.toolRowIcon} ${isFailed ? styles.toolRowIconError : ''} ${isRunning ? styles.toolRowIconRunning : ''}`}
+        >
           {icon}
         </span>
         <span className={styles.toolRowVerb}>{verb}</span>
@@ -1088,7 +1140,10 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
 
           {activeTab === 'input' && hasInput && (
             <div className={styles.toolResult}>
-              <MarkdownMessage content={'```json\n' + formattedParams + '\n```'} isStreaming={false} />
+              <MarkdownMessage
+                content={'```json\n' + formattedParams + '\n```'}
+                isStreaming={false}
+              />
             </div>
           )}
 
@@ -1127,7 +1182,9 @@ const NoticesBanner = memo(({ notices }: { notices: RunNotice[] | undefined }) =
       {expanded && (
         <div className={styles.noticesList}>
           {notices.map((notice, i) => (
-            <div key={i} className={styles.noticeItem}>{notice.message}</div>
+            <div key={i} className={styles.noticeItem}>
+              {notice.message}
+            </div>
           ))}
         </div>
       )}

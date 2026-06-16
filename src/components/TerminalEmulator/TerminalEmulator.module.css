@@ -326,3 +326,29 @@
   border-radius: 3px;
   border: 1px solid var(--color-border-light);
 }
+
+/* Terminal-mode toggle button (composer → real shell). Sits left of the
+   prompt; mirrors the Ctrl+` shortcut. */
+.modeToggle {
+  appearance: none;
+  cursor: pointer;
+  flex: none;
+  margin-top: 6px;
+  padding: 2px 7px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  background: var(--color-overlay-02);
+  color: var(--color-text-secondary);
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  transition: all 0.15s ease;
+}
+
+.modeToggle:hover {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  box-shadow: var(--shadow-ring-primary);
+}

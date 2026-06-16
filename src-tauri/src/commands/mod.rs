@@ -13,5 +13,6 @@ pub mod provider;
 pub mod provider_connections;
 pub mod skills;
 pub mod system_apps;
+pub mod terminal;
 pub mod workspace;
 pub mod workspace_agents;

@@ -118,6 +118,9 @@ libsqlite3-sys = "0.30"
 scraper = "0.26.0"
 htmd = "0.5.4"
 base64 = "0.22"
+
+# PTY backend for the integrated terminal (cross-platform; ConPTY on Windows).
+portable-pty = "0.9"
 ts-rs = { version = "12.0.1", features = ["serde-compat", "serde-json-impl"] }
 
 # Same crate (and version) that `keyring`'s sync secret-service backend uses

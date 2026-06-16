@@ -21,9 +21,13 @@
   flex: 1;
   overflow: hidden;
   min-height: 0;
-  /* Leave space at bottom for TerminalEmulator (desktop only) */
-  /* TerminalEmulator has max-height: 50vh, so we reserve space for it */
-  padding-bottom: var(--terminal-height, 80px); /* Space for floating terminal card */
+  /* The floating composer/terminal card is horizontally scoped to the
+     conversation column, so it does NOT overlap the workspace rail or the
+     artifacts/side panels — only the conversation needs to reserve vertical
+     space for it. That reservation lives on the conversation card itself
+     (.chatFirstContent margin-bottom in Workspace.module.css). Reserving it
+     here instead shrank the whole app (rail + artifacts) by the terminal
+     height, which was wrong once terminal mode grew the card to ~33vh. */
 }
 
 /* Desktop: Add left padding to avoid overlap with chat panel */

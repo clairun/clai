@@ -33,12 +33,20 @@ const COMMANDS: CommandEntry[] = [
     description: 'Fork the current workspace, switch to it, and optionally start with the prompt.',
     scope: 'workspace',
   },
+  {
+    command: '!<command>',
+    description:
+      'Run a command in the integrated terminal (switches to terminal mode). A bare ! just opens the terminal.',
+    scope: 'workspace',
+  },
 ];
 
 const SHORTCUTS: { keys: string; description: string }[] = [
   { keys: 'Enter', description: 'Send message (queued if the agent is working)' },
   { keys: 'Shift+Enter', description: 'New line' },
   { keys: 'Ctrl/Cmd+L', description: 'Focus the input' },
+  { keys: 'Ctrl/Cmd+\\', description: 'Toggle terminal mode' },
+  { keys: 'Ctrl+Shift+C / V', description: 'Copy / paste in the terminal (Cmd+C/V on macOS)' },
 ];
 
 interface CommandHelpModalProps {

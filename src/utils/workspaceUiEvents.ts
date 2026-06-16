@@ -42,7 +42,7 @@ const readPendingForkPrompts = (): Record<string, string> => {
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return {};
     return Object.fromEntries(
-      Object.entries(parsed).filter(([, value]) => typeof value === 'string'),
+      Object.entries(parsed).filter(([, value]) => typeof value === 'string')
     ) as Record<string, string>;
   } catch {
     return {};
@@ -74,4 +74,22 @@ export const takePendingForkPrompt = (workspaceId: string): string | null => {
     writePendingForkPrompts(prompts);
   }
   return prompt;
+};
+
+/**
+ * Fire-and-forget signal asking the active chat conversation to scroll to the
+ * bottom (if the reader was already near the bottom). Used when entering
+ * terminal mode shrinks the conversation viewport, so the latest messages stay
+ * in view instead of being scrolled off the top.
+ */
+export const SCROLL_CHAT_TO_BOTTOM_EVENT = 'clai-scroll-chat-bottom';
+
+export const dispatchScrollChatToBottom = (): void => {
+  window.dispatchEvent(new Event(SCROLL_CHAT_TO_BOTTOM_EVENT));
+};
+
+export const onScrollChatToBottom = (handler: () => void): (() => void) => {
+  const listener = () => handler();
+  window.addEventListener(SCROLL_CHAT_TO_BOTTOM_EVENT, listener);
+  return () => window.removeEventListener(SCROLL_CHAT_TO_BOTTOM_EVENT, listener);
 };
