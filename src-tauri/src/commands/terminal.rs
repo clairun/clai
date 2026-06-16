@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -132,11 +132,10 @@ impl TerminalRegistry {
     }
 }
 
-/// Resolve the shell to launch (native path only). Native: `$SHELL` (fallback
-/// `/bin/bash`), or `%COMSPEC%`/`cmd.exe` on Windows. Under Flatpak we instead
-/// run `script -qec bash` on the host (see `build_shell_command`), relying on
-/// the host's PATH, since the sandbox's `$SHELL` may point at a path that
-/// doesn't exist on the host.
+/// Resolve the shell to launch on the NATIVE path: `$SHELL` (fallback
+/// `/bin/bash`, then `/bin/sh`), or `%COMSPEC%`/`cmd.exe` on Windows. Under
+/// Flatpak the shell is resolved instead by `flatpak_host_shell()` (the host's
+/// login shell) and run via `script` host-side — see `build_shell_command`.
 fn native_shell() -> String {
     if cfg!(windows) {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
@@ -159,12 +158,56 @@ fn native_shell() -> String {
     }
 }
 
+/// The host login shell to launch under Flatpak, resolved once and cached.
+///
+/// The sandbox's `$SHELL` is the sandbox's, not the host's, and the
+/// `flatpak-spawn` portal environment may not carry `$SHELL` at all — so read
+/// the authoritative login shell from the host's `/etc/passwd` via
+/// `getent passwd <uid>` (field 7), exactly what a host login would use. We
+/// can't `Path::exists()`-check a host path from inside the sandbox, so we
+/// trust getent's output and only fall back (to `bash`, then `sh` via the
+/// `script` invocation) when the probe itself fails or returns nothing.
+fn flatpak_host_shell() -> String {
+    static HOST_SHELL: OnceLock<String> = OnceLock::new();
+    HOST_SHELL
+        .get_or_init(|| probe_flatpak_host_shell().unwrap_or_else(|| "bash".to_string()))
+        .clone()
+}
+
+/// Run `getent passwd <uid>` on the host and parse out the login shell.
+fn probe_flatpak_host_shell() -> Option<String> {
+    let output = std::process::Command::new("flatpak-spawn")
+        .args(["--host", "sh", "-c", "getent passwd \"$(id -u)\""])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_login_shell(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Extract field 7 (login shell) from a `getent passwd` line. The shell is the
+/// last colon-separated field, so `rsplit` is robust regardless of the other
+/// fields. Returns `None` for empty/garbage input.
+fn parse_login_shell(passwd_line: &str) -> Option<String> {
+    let line = passwd_line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let shell = line.rsplit(':').next()?.trim();
+    if shell.is_empty() || !shell.contains('/') {
+        // A bare/missing shell field (no path) is not a usable shell.
+        return None;
+    }
+    Some(shell.to_string())
+}
+
 /// Build the `CommandBuilder` for the shell, host-hopping under Flatpak.
 ///
 /// Separated from `spawn_pty` and parameterized on `in_flatpak` so the argv
 /// construction is unit-testable without a real sandbox (mirrors the approach
 /// taken for the git host-hop in PR #60).
-fn build_shell_command(in_flatpak: bool, dir: &Path) -> CommandBuilder {
+fn build_shell_command(in_flatpak: bool, dir: &Path, shell: &str) -> CommandBuilder {
     if in_flatpak {
         // Working dir MUST go through `--directory=`; `CommandBuilder::cwd`
         // would only move the flatpak-spawn wrapper, not the host shell.
@@ -185,11 +228,11 @@ fn build_shell_command(in_flatpak: bool, dir: &Path) -> CommandBuilder {
         // resize stay single-layered. (Same trick as `ssh -t` / `docker -t`.)
         cmd.arg("script");
         cmd.arg("-qec");
-        cmd.arg("bash");
+        cmd.arg(shell);
         cmd.arg("/dev/null");
         cmd
     } else {
-        let mut cmd = CommandBuilder::new(native_shell());
+        let mut cmd = CommandBuilder::new(shell);
         cmd.cwd(dir);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -321,6 +364,11 @@ pub async fn terminal_open(
 ) -> Result<String, String> {
     let dir = resolve_cwd(&state, workspace_id.as_deref(), cwd.as_deref());
     let in_flatpak = crate::providers::is_flatpak();
+    let shell = if in_flatpak {
+        flatpak_host_shell()
+    } else {
+        native_shell()
+    };
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -332,7 +380,7 @@ pub async fn terminal_open(
         })
         .map_err(|e| format!("Failed to open pty: {e}"))?;
 
-    let cmd = build_shell_command(in_flatpak, &dir);
+    let cmd = build_shell_command(in_flatpak, &dir, &shell);
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -441,7 +489,7 @@ mod tests {
     #[test]
     fn flatpak_command_host_hops_with_directory_flag() {
         let dir = Path::new("/home/u/.clai/workspaces/abc");
-        let cmd = build_shell_command(true, dir);
+        let cmd = build_shell_command(true, dir, "bash");
         let argv = argv(&cmd);
         // Program + args; cwd goes via --directory=, not CommandBuilder::cwd.
         assert_eq!(argv[0], "flatpak-spawn");
@@ -466,10 +514,30 @@ mod tests {
 
     #[test]
     fn native_command_uses_a_real_shell_not_flatpak_spawn() {
-        let cmd = build_shell_command(false, Path::new("/tmp"));
+        let cmd = build_shell_command(false, Path::new("/tmp"), "/bin/zsh");
         let argv = argv(&cmd);
+        assert_eq!(argv[0], "/bin/zsh");
         assert_ne!(argv[0], "flatpak-spawn");
         assert!(!argv.iter().any(|a| a.starts_with("--directory=")));
+    }
+
+    #[test]
+    fn parse_login_shell_extracts_field_7() {
+        // Standard getent line, with trailing newline.
+        assert_eq!(
+            parse_login_shell("juacker:x:1000:1000:Juan:/home/juacker:/usr/bin/zsh\n"),
+            Some("/usr/bin/zsh".to_string())
+        );
+        // gecos containing spaces/other content still resolves the last field.
+        assert_eq!(
+            parse_login_shell("root:x:0:0:root:/root:/bin/bash"),
+            Some("/bin/bash".to_string())
+        );
+        // Empty / garbage / no-path shell field -> None (caller falls back).
+        assert_eq!(parse_login_shell(""), None);
+        assert_eq!(parse_login_shell("   "), None);
+        assert_eq!(parse_login_shell("nopasswdline"), None);
+        assert_eq!(parse_login_shell("u:x:1:1::/home/u:"), None);
     }
 
     #[test]
