@@ -76,6 +76,38 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({ workspaceId, onEx
 
     fit.fit();
 
+    // Copy/paste. Ctrl+C must stay SIGINT, so copy uses the conventional
+    // terminal chord Ctrl+Shift+C (and Cmd+C on macOS); paste is Ctrl+Shift+V
+    // / Cmd+V. `e.code` is physical-key based, so it is keyboard-layout
+    // independent. Returning false tells xterm we handled the key and stops it
+    // reaching the shell.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true;
+      const copyCombo =
+        (e.ctrlKey && e.shiftKey && e.code === 'KeyC') || (e.metaKey && e.code === 'KeyC');
+      if (copyCombo) {
+        const selection = term.getSelection();
+        if (selection) {
+          void navigator.clipboard.writeText(selection);
+          return false;
+        }
+        // No selection: let it through (e.g. Cmd+C / Ctrl+Shift+C no-op, or
+        // shell handles it).
+        return true;
+      }
+      const pasteCombo =
+        (e.ctrlKey && e.shiftKey && e.code === 'KeyV') || (e.metaKey && e.code === 'KeyV');
+      if (pasteCombo) {
+        void navigator.clipboard.readText().then((text) => {
+          // term.paste routes through onData -> terminal_write and honours
+          // bracketed-paste mode when the shell enables it.
+          if (text) term.paste(text);
+        });
+        return false;
+      }
+      return true;
+    });
+
     // React StrictMode (dev) mounts -> unmounts -> remounts; closing the
     // throwaway first shell makes the backend emit `exit` on that first
     // channel. Guard so the surviving component doesn't auto-leave terminal
