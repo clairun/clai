@@ -21,8 +21,11 @@
 //!   via `flatpak-spawn --host` and pass the working directory as
 //!   `--directory=<dir>` (NOT `CommandBuilder::cwd`, which would only move the
 //!   flatpak-spawn wrapper, not the host shell — the exact lesson from PR #60).
-//!   Whether a PTY's tty semantics survive the flatpak-spawn portal hop still
-//!   needs validation on a real Flatpak build.
+//!   The host shell is wrapped in `script` so the PTY is allocated host-side:
+//!   a merely-forwarded PTY is a real tty (vim/htop/colours work) but its
+//!   controlling-terminal session stays sandbox-side, so the host shell loses
+//!   job control ("cannot set terminal process group"). `script` makes the
+//!   host shell its own session leader, restoring job control.
 //! - **Lifecycle.** The child is reaped by the reader thread on EOF; an
 //!   explicit `terminal_close` kills the child (which unblocks the reader).
 
@@ -129,10 +132,11 @@ impl TerminalRegistry {
     }
 }
 
-/// Resolve the shell to launch. Native: `$SHELL` (fallback `/bin/bash`), or
-/// `%COMSPEC%`/`cmd.exe` on Windows. Under Flatpak we rely on the host's PATH
-/// via `flatpak-spawn --host bash`, since the sandbox's `$SHELL` may point at a
-/// path that doesn't exist on the host.
+/// Resolve the shell to launch (native path only). Native: `$SHELL` (fallback
+/// `/bin/bash`), or `%COMSPEC%`/`cmd.exe` on Windows. Under Flatpak we instead
+/// run `script -qec bash` on the host (see `build_shell_command`), relying on
+/// the host's PATH, since the sandbox's `$SHELL` may point at a path that
+/// doesn't exist on the host.
 fn native_shell() -> String {
     if cfg!(windows) {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
@@ -169,7 +173,20 @@ fn build_shell_command(in_flatpak: bool, dir: &Path) -> CommandBuilder {
         cmd.arg(format!("--directory={}", dir.display()));
         cmd.arg("--env=TERM=xterm-256color");
         cmd.arg("--env=COLORTERM=truecolor");
+        // Allocate the PTY on the HOST side via `script`, rather than letting
+        // the sandbox-side PTY be merely forwarded. The forwarded PTY is a real
+        // tty (isatty() holds, so vim/htop/colours work), but its controlling-
+        // terminal session lives with the sandbox-side `flatpak-spawn`, not the
+        // host shell — so the host bash's tcsetpgrp() fails ("cannot set
+        // terminal process group / no job control"). `script` creates a fresh
+        // PTY on the host and makes the host shell its session leader, which
+        // restores job control and silences that startup banner. It sets its
+        // own stdin (the forwarded PTY) raw and forwards SIGWINCH, so echo and
+        // resize stay single-layered. (Same trick as `ssh -t` / `docker -t`.)
+        cmd.arg("script");
+        cmd.arg("-qec");
         cmd.arg("bash");
+        cmd.arg("/dev/null");
         cmd
     } else {
         let mut cmd = CommandBuilder::new(native_shell());
@@ -430,16 +447,21 @@ mod tests {
         assert_eq!(argv[0], "flatpak-spawn");
         assert!(argv.contains(&"--host".to_string()));
         assert!(argv.contains(&"--directory=/home/u/.clai/workspaces/abc".to_string()));
-        assert_eq!(argv.last().unwrap(), "bash");
-        // The --directory flag must precede `--host bash` (flatpak-spawn opts
+        // Host shell is wrapped in `script` so the PTY is allocated host-side
+        // (restores job control across the flatpak-spawn portal hop).
+        assert!(argv.contains(&"script".to_string()));
+        assert!(argv.contains(&"-qec".to_string()));
+        assert!(argv.contains(&"bash".to_string()));
+        assert_eq!(argv.last().unwrap(), "/dev/null");
+        // The --directory flag must precede `--host` + the host command
         // before the host command).
         let dir_idx = argv
             .iter()
             .position(|a| a.starts_with("--directory="))
             .unwrap();
         let host_idx = argv.iter().position(|a| a == "--host").unwrap();
-        let bash_idx = argv.iter().position(|a| a == "bash").unwrap();
-        assert!(dir_idx < bash_idx && host_idx < bash_idx);
+        let script_idx = argv.iter().position(|a| a == "script").unwrap();
+        assert!(dir_idx < script_idx && host_idx < script_idx);
     }
 
     #[test]
