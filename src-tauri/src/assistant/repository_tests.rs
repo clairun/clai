@@ -219,6 +219,47 @@ async fn test_list_sessions_ordered_by_updated_at_desc() {
 }
 
 #[tokio::test]
+async fn test_list_sessions_by_kind_excludes_other_kinds() {
+    let pool = setup_test_pool().await;
+
+    let interactive = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: Some("Conversation".to_string()),
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // Two BackgroundJob (task) sessions that must NOT come back.
+    for title in ["Task A", "Task B"] {
+        create_session(
+            &pool,
+            CreateSessionParams {
+                kind: SessionKind::BackgroundJob,
+                title: Some(title.to_string()),
+                context: sample_context(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let interactive_only = list_sessions_by_kind(&pool, &SessionKind::Interactive)
+        .await
+        .unwrap();
+    assert_eq!(interactive_only.len(), 1);
+    assert_eq!(interactive_only[0].id, interactive.id);
+
+    let background = list_sessions_by_kind(&pool, &SessionKind::BackgroundJob)
+        .await
+        .unwrap();
+    assert_eq!(background.len(), 2);
+}
+
+#[tokio::test]
 async fn test_delete_session() {
     let pool = setup_test_pool().await;
 

@@ -1262,15 +1262,14 @@ async fn resolve_workspace_manager_agent(
 /// Find the canonical session for a workspace's manager agent.
 ///
 /// There is exactly one such session per (workspace, manager) — both
-/// user-typed chats and scheduled ticks read/write the same row. Sub-agent
-/// task delegations live in separate `BackgroundJob` sessions identified
-/// by their assignee's `automation_id` and are intentionally excluded
-/// here, since they own their own UI.
+/// user-typed chats and scheduled ticks read/write the same row. It is
+/// always `Interactive`-kind (the user can type into it).
 ///
-/// The session is Interactive-kind (the user can type into it). The
-/// `automation_id` filter is the key: it pins the session to the
-/// workspace's manager and excludes both sub-agent task sessions and any
-/// other workspace-scoped session that may exist for unrelated automations.
+/// The actual selection lives in [`select_workspace_session`] so it can be
+/// unit-tested without a database; see the regression tests there for why
+/// the `Interactive` filter is load-bearing (a self-assigned task's
+/// `BackgroundJob` session carries the manager's own `automation_id` and
+/// would otherwise hijack the conversation view).
 async fn find_workspace_session(
     pool: &DbPool,
     state: &AppState,
@@ -1282,28 +1281,58 @@ async fn find_workspace_session(
         return Ok(None);
     };
 
+    // Load only Interactive sessions: the canonical conversation is always
+    // Interactive, while delegated tasks each create a BackgroundJob row
+    // (unbounded as the workspace ages). Filtering in SQL keeps resolution
+    // independent of task volume — those rows are never fetched or parsed.
+    Ok(select_workspace_session(
+        repository::list_sessions_by_kind(pool, &SessionKind::Interactive).await?,
+        &manager_id,
+        &descriptor.workspace_id,
+        descriptor.agent_id.as_deref(),
+    ))
+}
+
+/// Pure selection logic behind [`find_workspace_session`], split out so it
+/// is unit-testable without a database or `AppState`.
+///
+/// Picks the single canonical conversation for `(workspace, manager)`. Two
+/// filters guard it:
+///
+/// - `kind == Interactive`: sub-agent task delegations run in separate
+///   `BackgroundJob` sessions. Those are normally owned by the *assignee*
+///   (a different `automation_id`), but when the manager assigns a task to
+///   *itself* the task session carries the manager's own `automation_id`,
+///   so the `automation_id` filter alone does NOT exclude it. Without the
+///   kind filter a freshly-active self-task session out-ranks the real
+///   conversation under `max_by_key(updated_at)` and hijacks the view — the
+///   user ends up seeing, and typing into, the task session.
+/// - `automation_id == manager`: pins the session to this workspace's
+///   manager and excludes sessions owned by unrelated automations.
+///
+/// If (defensively) more than one matches, the most recently updated wins.
+fn select_workspace_session(
+    sessions: Vec<AssistantSession>,
+    manager_id: &str,
+    workspace_id: &str,
+    agent_id: Option<&str>,
+) -> Option<AssistantSession> {
     let belongs_to_workspace = |session: &AssistantSession| -> bool {
-        session.context.workspace_id.as_deref() == Some(descriptor.workspace_id.as_str())
-            || descriptor
-                .agent_id
-                .as_deref()
-                .map(|agent_id| {
-                    session.context.agent_workspace_id.as_deref() == Some(agent_id)
-                        || session.context.automation_id.as_deref() == Some(agent_id)
+        session.context.workspace_id.as_deref() == Some(workspace_id)
+            || agent_id
+                .map(|aid| {
+                    session.context.agent_workspace_id.as_deref() == Some(aid)
+                        || session.context.automation_id.as_deref() == Some(aid)
                 })
                 .unwrap_or(false)
     };
 
-    // `.iter() + .filter()` yields `&&AssistantSession`; the wrap performs the
-    // auto-deref to match the `&AssistantSession` predicate. Clippy's
-    // `redundant_closure` doesn't model the double-borrow — silence it.
-    #[allow(clippy::redundant_closure)]
-    Ok(repository::list_sessions(pool)
-        .await?
+    sessions
         .into_iter()
-        .filter(|session| session.context.automation_id.as_deref() == Some(manager_id.as_str()))
-        .filter(|session| belongs_to_workspace(session))
-        .max_by_key(|session| session.updated_at))
+        .filter(|session| session.kind == SessionKind::Interactive)
+        .filter(|session| session.context.automation_id.as_deref() == Some(manager_id))
+        .filter(belongs_to_workspace)
+        .max_by_key(|session| session.updated_at)
 }
 
 fn desired_workspace_context(
@@ -1939,11 +1968,13 @@ pub async fn workspace_update_session_mcp(
         repository::create_session(
             &workspace_pool,
             repository::CreateSessionParams {
-                kind: if descriptor.agent_id.is_some() {
-                    SessionKind::BackgroundJob
-                } else {
-                    SessionKind::Interactive
-                },
+                // Always Interactive: this row IS the canonical workspace
+                // conversation that find_workspace_session resolves, and that
+                // resolver only returns Interactive sessions. Creating a
+                // BackgroundJob here would make the very next resolve miss it
+                // (silently reintroducing the self-task hijack for agent
+                // workspaces).
+                kind: SessionKind::Interactive,
                 title: Some(descriptor.title.clone()),
                 context: desired_workspace_context(
                     &descriptor,
@@ -2755,33 +2786,101 @@ async fn workspace_task_attention_summary(
     Ok(summary)
 }
 
-/// Count messages on the canonical workspace session — the same row the
-/// card-click path loads via [`find_workspace_session`]. The two used to
-/// disagree (one prefers Interactive, the other returned whichever row was
-/// most-recently updated), so the card number and the conversation length
-/// could differ wildly. With the unified session, they're the same row by
-/// construction; this helper still narrows on `automation_id == manager_id`
-/// to make that explicit and to exclude sub-agent task sessions.
+/// Count messages on the canonical workspace session — the *exact* same row
+/// the card-click path loads via [`find_workspace_session`]. Both now route
+/// through [`select_workspace_session`], so the card number and the
+/// conversation length reference the same session by construction and can
+/// never drift. (Previously this duplicated the selection inline and omitted
+/// the `kind == Interactive` filter, so a self-task `BackgroundJob` session
+/// could inflate the card count while the chat view showed the real
+/// Interactive conversation.)
 async fn count_session_messages(pool: &DbPool, state: &AppState, workspace_id: &str) -> i64 {
-    let Some(manager_id) = workspace_default_agent_id(state, workspace_id).unwrap_or(None) else {
+    let Ok(descriptor) = resolve_workspace_descriptor(state, Some(workspace_id.to_string())) else {
         return 0;
     };
-
-    let sessions = repository::list_sessions(pool).await.unwrap_or_default();
-    let Some(session) = sessions
-        .into_iter()
-        .filter(|s| s.context.automation_id.as_deref() == Some(manager_id.as_str()))
-        .filter(|s| {
-            s.context.workspace_id.as_deref() == Some(workspace_id)
-                || s.context.agent_workspace_id.as_deref() == Some(workspace_id)
-        })
-        .max_by_key(|s| s.updated_at)
+    let Some(manager_id) =
+        workspace_default_agent_id(state, &descriptor.workspace_id).unwrap_or(None)
     else {
         return 0;
     };
 
-    repository::list_messages(pool, &session.id)
+    let sessions = repository::list_sessions_by_kind(pool, &SessionKind::Interactive)
         .await
-        .map(|msgs| msgs.len() as i64)
+        .unwrap_or_default();
+    let Some(session) = select_workspace_session(
+        sessions,
+        &manager_id,
+        &descriptor.workspace_id,
+        descriptor.agent_id.as_deref(),
+    ) else {
+        return 0;
+    };
+
+    // COUNT(*) instead of loading every row just to take .len(). Counts the
+    // head session only (unchanged behavior); ancestors are excluded.
+    repository::count_session_chain_messages(pool, &session.id, false)
+        .await
+        .map(|n| n as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WS: &str = "ws-1";
+    const MGR: &str = "mgr-1";
+
+    fn session(
+        id: &str,
+        kind: SessionKind,
+        automation_id: &str,
+        workspace_id: &str,
+        updated_at: i64,
+    ) -> AssistantSession {
+        AssistantSession {
+            id: id.to_string(),
+            kind,
+            title: None,
+            context: SessionContext {
+                workspace_id: Some(workspace_id.to_string()),
+                automation_id: Some(automation_id.to_string()),
+                ..Default::default()
+            },
+            created_at: 0,
+            updated_at,
+        }
+    }
+
+    // Regression: a self-assigned task runs in a BackgroundJob session that
+    // carries the manager's own automation_id and is updated *after* the real
+    // conversation. The canonical session must stay the Interactive one, not
+    // the newer task session (which previously hijacked the workspace view and
+    // received user messages meant for the main conversation).
+    #[test]
+    fn self_task_background_session_does_not_hijack_interactive() {
+        let interactive = session("main", SessionKind::Interactive, MGR, WS, 100);
+        let self_task = session("task", SessionKind::BackgroundJob, MGR, WS, 999);
+        let chosen = select_workspace_session(vec![self_task, interactive], MGR, WS, None);
+        assert_eq!(chosen.map(|s| s.id), Some("main".to_string()));
+    }
+
+    #[test]
+    fn ignores_sessions_owned_by_other_automations() {
+        let other = session("other", SessionKind::Interactive, "someone-else", WS, 100);
+        assert!(select_workspace_session(vec![other], MGR, WS, None).is_none());
+    }
+
+    #[test]
+    fn picks_most_recent_interactive_when_several_match() {
+        let older = session("old", SessionKind::Interactive, MGR, WS, 10);
+        let newer = session("new", SessionKind::Interactive, MGR, WS, 20);
+        let chosen = select_workspace_session(vec![older, newer], MGR, WS, None);
+        assert_eq!(chosen.map(|s| s.id), Some("new".to_string()));
+    }
+
+    #[test]
+    fn returns_none_when_nothing_matches() {
+        assert!(select_workspace_session(vec![], MGR, WS, None).is_none());
+    }
 }

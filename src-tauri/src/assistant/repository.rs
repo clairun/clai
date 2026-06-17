@@ -235,6 +235,36 @@ pub async fn list_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, Strin
     rows.iter().map(map_session_row).collect()
 }
 
+/// List sessions of a single `kind`, newest-first.
+///
+/// Workspace conversation resolution needs only the `Interactive` session, so
+/// this lets callers skip loading the `BackgroundJob` rows — of which there is
+/// one per delegated task, an unbounded set as a workspace ages. Pushing the
+/// `kind` filter into SQL means those rows are never fetched or JSON-parsed.
+/// The `kind` column stores the JSON-serialized enum (e.g. `"interactive"`),
+/// so the predicate is derived from the enum via `to_json_string` rather than
+/// a hardcoded literal that could drift from the serialization.
+pub async fn list_sessions_by_kind(
+    pool: &DbPool,
+    kind: &SessionKind,
+) -> Result<Vec<AssistantSession>, String> {
+    let kind_json = to_json_string(kind)?;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, kind, title, context_json, created_at, updated_at
+        FROM assistant_sessions
+        WHERE kind = ?
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .bind(kind_json)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to list assistant sessions by kind: {}", e))?;
+
+    rows.iter().map(map_session_row).collect()
+}
+
 pub async fn delete_session(pool: &DbPool, session_id: &str) -> Result<bool, String> {
     let result = sqlx::query("DELETE FROM assistant_sessions WHERE id = ?")
         .bind(session_id)
