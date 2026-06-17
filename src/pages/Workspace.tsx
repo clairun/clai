@@ -1390,7 +1390,15 @@ const Workspace = () => {
   });
   const [agentBusy, setAgentBusy] = useState('');
   const [agentError, setAgentError] = useState('');
-  const sessionId = snapshot?.session?.id || null;
+  // The Workspace instance is REUSED across workspace→workspace navigation, so
+  // after the URL changes `snapshot` briefly still holds the PREVIOUS workspace's
+  // data until the new snapshot round-trip resolves. Gate all conversation-derived
+  // state on a snapshot that actually belongs to the current workspace, so the
+  // panel shows the loading placeholder instead of the previous workspace's
+  // conversation during the switch.
+  const snapshotReady = snapshot?.workspaceId === workspaceId;
+  const activeSnapshot = snapshotReady ? snapshot : null;
+  const sessionId = activeSnapshot?.session?.id || null;
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] || null : null
   );
@@ -1636,23 +1644,23 @@ const Workspace = () => {
     },
     [artifacts, memories, patchWorkspaceUi]
   );
-  const messages = sessionState?.messages || snapshot?.messages || [];
+  const messages = sessionState?.messages || activeSnapshot?.messages || [];
   // While the initial entry load is in flight and no messages have arrived
   // yet, the conversation is unknown — not provably empty. Suppress the
   // "Start a conversation" empty state until loading settles so an existing
   // conversation doesn't flash the empty placeholder before its history lands.
-  const isHydrating = isLoading && messages.length === 0;
+  const isHydrating = messages.length === 0 && (isLoading || !snapshotReady);
   // Conversation total from the backend page responses (kept live by the
   // store as messages stream in); before the first page load reports it,
   // the loaded window is the best available answer.
   const totalMessageCount = sessionState?.totalMessageCount ?? messages.length;
-  const toolCalls = sessionState?.toolCalls || snapshot?.toolCalls || [];
+  const toolCalls = sessionState?.toolCalls || activeSnapshot?.toolCalls || [];
   const streamingText = sessionState?.streamingTextByMessageId || {};
   const isStreaming = sessionState?.isStreaming || false;
   const runStartedAt = sessionState?.runStartedAt ?? null;
   // Store is the live source once the session is hydrated; the snapshot
   // covers the first render before hydration.
-  const queuedMessageIds = sessionState?.queuedMessageIds ?? snapshot?.queuedMessageIds ?? [];
+  const queuedMessageIds = sessionState?.queuedMessageIds ?? activeSnapshot?.queuedMessageIds ?? [];
   const hasOlderMessages = !!sessionState?.hasOlderMessages;
   const isLoadingOlderMessages = !!sessionState?.isLoadingOlderMessages;
   const handleDeleteQueuedMessage = useCallback(
@@ -1771,7 +1779,7 @@ const Workspace = () => {
   // Surface the most recent run's failure in the chat. Derived from the
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
-  const lastRun = getLastRunInfo(sessionState?.runs || snapshot?.runs);
+  const lastRun = getLastRunInfo(sessionState?.runs || activeSnapshot?.runs);
   const runError =
     lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
   const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
