@@ -1281,8 +1281,12 @@ async fn find_workspace_session(
         return Ok(None);
     };
 
+    // Load only Interactive sessions: the canonical conversation is always
+    // Interactive, while delegated tasks each create a BackgroundJob row
+    // (unbounded as the workspace ages). Filtering in SQL keeps resolution
+    // independent of task volume — those rows are never fetched or parsed.
     Ok(select_workspace_session(
-        repository::list_sessions(pool).await?,
+        repository::list_sessions_by_kind(pool, &SessionKind::Interactive).await?,
         &manager_id,
         &descriptor.workspace_id,
         descriptor.agent_id.as_deref(),
@@ -2800,7 +2804,9 @@ async fn count_session_messages(pool: &DbPool, state: &AppState, workspace_id: &
         return 0;
     };
 
-    let sessions = repository::list_sessions(pool).await.unwrap_or_default();
+    let sessions = repository::list_sessions_by_kind(pool, &SessionKind::Interactive)
+        .await
+        .unwrap_or_default();
     let Some(session) = select_workspace_session(
         sessions,
         &manager_id,
@@ -2810,9 +2816,11 @@ async fn count_session_messages(pool: &DbPool, state: &AppState, workspace_id: &
         return 0;
     };
 
-    repository::list_messages(pool, &session.id)
+    // COUNT(*) instead of loading every row just to take .len(). Counts the
+    // head session only (unchanged behavior); ancestors are excluded.
+    repository::count_session_chain_messages(pool, &session.id, false)
         .await
-        .map(|msgs| msgs.len() as i64)
+        .map(|n| n as i64)
         .unwrap_or(0)
 }
 
