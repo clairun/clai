@@ -34,6 +34,10 @@ use crate::AppState;
 const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
 const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
+const CLI_FRESH_CONTEXT_MAX_MESSAGES: usize = 16;
+const CLI_FRESH_CONTEXT_MAX_CHARS: usize = 32_000;
+const CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS: usize = 6_000;
+const CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS: usize = 1_200;
 
 /// When `CLAI_LOG_CLI_STREAM` is set to a truthy value, every raw JSONL line
 /// received from a CLI provider (Claude Code / Codex / OpenCode) is logged verbatim at
@@ -1667,7 +1671,7 @@ async fn prepare_prompt(
     trigger: &crate::assistant::types::RunTrigger,
     metadata_source: &str,
     provider_display_name: &str,
-    include_compaction_summary: bool,
+    include_fresh_session_context: bool,
 ) -> Result<String, LocalAgentRunError> {
     let prompt = if let Some(trigger_content) = build_trigger_message(session, trigger) {
         let boundary_msg = repository::create_message(
@@ -1718,29 +1722,182 @@ async fn prepare_prompt(
         }
     };
 
-    if include_compaction_summary {
-        with_compaction_summary_prompt(&deps.pool, session, prompt).await
+    if include_fresh_session_context {
+        with_fresh_cli_session_context_prompt(&deps.pool, session, prompt).await
     } else {
         Ok(prompt)
     }
 }
 
-async fn with_compaction_summary_prompt(
+async fn with_fresh_cli_session_context_prompt(
     pool: &crate::db::DbPool,
     session: &AssistantSession,
     prompt: String,
 ) -> Result<String, LocalAgentRunError> {
-    let Some(summary) = compaction::latest_compaction_summary_text(pool, &session.id).await? else {
-        return Ok(prompt);
-    };
-    if summary.trim().is_empty() {
+    let messages = repository::list_messages(pool, &session.id).await?;
+    let provider_messages = compaction::provider_history_messages(pool, &session.id, &messages)
+        .await
+        .map_err(LocalAgentRunError::failed)?;
+    let summary = compaction::latest_compaction_summary_text(pool, &session.id).await?;
+    let recent_messages: Vec<AssistantMessage> = provider_messages
+        .into_iter()
+        .filter(|message| !compaction::is_compaction_summary_message(message))
+        .collect();
+
+    let has_summary = summary
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let context_message_count = recent_messages
+        .iter()
+        .filter(|message| has_cli_context_message_content(message))
+        .count();
+    if !has_summary && context_message_count <= 1 {
         return Ok(prompt);
     }
-    Ok(format!(
-        "Conversation summary from before this new CLI session:\n{}\n\nCurrent prompt:\n{}",
-        summary.trim(),
-        prompt
+
+    Ok(fresh_cli_session_context_prompt(
+        summary.as_deref(),
+        &recent_messages,
+        &prompt,
     ))
+}
+
+fn fresh_cli_session_context_prompt(
+    summary: Option<&str>,
+    recent_messages: &[AssistantMessage],
+    prompt: &str,
+) -> String {
+    let summary = summary.map(str::trim).filter(|value| !value.is_empty());
+    let recent_context = render_cli_fresh_context(recent_messages);
+    let mut out = String::from(
+        "This is a new CLI session. CLAI has carried forward the conversation context below. Continue from it; do not treat the current prompt in isolation.",
+    );
+
+    if let Some(summary) = summary {
+        out.push_str("\n\nEarlier compacted summary:\n");
+        out.push_str(summary);
+    }
+
+    if !recent_context.is_empty() {
+        if summary.is_some() {
+            out.push_str("\n\nRecent conversation after that summary (oldest to newest):\n");
+        } else {
+            out.push_str("\n\nRecent conversation in this CLAI session (oldest to newest):\n");
+        }
+        out.push_str(&recent_context);
+    }
+
+    out.push_str("\n\nCurrent user/task prompt to answer:\n");
+    out.push_str(prompt.trim());
+    out.push_str(
+        "\n\nIf the current prompt is a short reference such as `1`, `yes`, `that`, or `continue`, resolve it from the recent conversation above. If the needed detail is not present, use the read-only `history_query` tool before asking the user to repeat context.",
+    );
+    out
+}
+
+fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
+    let mut selected = Vec::new();
+    let mut total = 0usize;
+
+    for message in messages.iter().rev() {
+        if selected.len() >= CLI_FRESH_CONTEXT_MAX_MESSAGES {
+            break;
+        }
+        let Some(mut rendered) = render_cli_context_message(message) else {
+            continue;
+        };
+        rendered = truncate_cli_context_text(&rendered, CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS);
+        let next_len = rendered.len() + 2;
+        if total + next_len > CLI_FRESH_CONTEXT_MAX_CHARS && !selected.is_empty() {
+            break;
+        }
+        if total + next_len > CLI_FRESH_CONTEXT_MAX_CHARS {
+            let remaining = CLI_FRESH_CONTEXT_MAX_CHARS.saturating_sub(total);
+            rendered = truncate_cli_context_text(&rendered, remaining);
+        }
+        total += rendered.len() + 2;
+        selected.push(rendered);
+    }
+
+    selected.reverse();
+    selected.join("\n\n")
+}
+
+fn render_cli_context_message(message: &AssistantMessage) -> Option<String> {
+    let text = message
+        .content
+        .iter()
+        .filter_map(cli_context_part_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let role = match message.role {
+        MessageRole::System => "system",
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+        MessageRole::Tool => "tool",
+    };
+    Some(format!(
+        "{} message:\n{}",
+        role,
+        truncate_cli_context_text(text.trim(), CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS)
+    ))
+}
+
+fn has_cli_context_message_content(message: &AssistantMessage) -> bool {
+    message
+        .content
+        .iter()
+        .filter_map(cli_context_part_text)
+        .any(|text| !text.trim().is_empty())
+}
+
+fn cli_context_part_text(part: &ContentPart) -> Option<String> {
+    match part {
+        ContentPart::Text { text } => Some(text.clone()),
+        ContentPart::Thinking { .. } => None,
+        ContentPart::ToolUse {
+            tool_name,
+            arguments,
+            ..
+        } => Some(format!(
+            "[tool call: {} {}]",
+            tool_name,
+            truncate_cli_context_json(arguments)
+        )),
+        ContentPart::ToolResult { payload, .. } => Some(format!(
+            "[tool result: {}]",
+            truncate_cli_context_json(payload)
+        )),
+    }
+}
+
+fn truncate_cli_context_json(value: &Value) -> String {
+    let rendered = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+    truncate_cli_context_text(&rendered, CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS)
+}
+
+fn truncate_cli_context_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    const SUFFIX: &str = "...[truncated]";
+    if max_bytes <= SUFFIX.len() {
+        return "[truncated]".to_string();
+    }
+
+    let prefix_len = max_bytes - SUFFIX.len();
+    let mut end = prefix_len;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &value[..end], SUFFIX)
 }
 
 fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
@@ -3680,6 +3837,23 @@ impl From<String> for LocalAgentRunError {
 mod tests {
     use super::*;
 
+    fn test_message(id: &str, role: MessageRole, content: Vec<ContentPart>) -> AssistantMessage {
+        AssistantMessage {
+            id: id.to_string(),
+            session_id: "session-1".to_string(),
+            role,
+            content,
+            created_at: 0,
+            provider_metadata: None,
+        }
+    }
+
+    fn text_part(text: &str) -> ContentPart {
+        ContentPart::Text {
+            text: text.to_string(),
+        }
+    }
+
     // -----------------------------------------------------------------
     // Mid-run input wire format (verified against Claude Code 2.1.170)
     // -----------------------------------------------------------------
@@ -3733,6 +3907,59 @@ mod tests {
         // Non-result events never match.
         let other = serde_json::json!({ "type": "assistant" });
         assert!(!is_interrupted_turn_result(&other));
+    }
+
+    #[test]
+    fn fresh_cli_session_context_preserves_recent_options_for_short_reply() {
+        let recent = vec![
+            test_message(
+                "assistant-options",
+                MessageRole::Assistant,
+                vec![text_part(
+                    "PR #64 is ready to land. How do you want it to go?\n\n1. Mark ready + squash-merge now\n2. Mark ready for review, you merge manually\n3. Keep as draft",
+                )],
+            ),
+            test_message("user-choice", MessageRole::User, vec![text_part("1")]),
+        ];
+
+        let prompt = fresh_cli_session_context_prompt(
+            Some("Earlier summary: review-clean, CI green, mergeable."),
+            &recent,
+            "1",
+        );
+
+        assert!(prompt.contains("Earlier compacted summary"));
+        assert!(prompt.contains("PR #64 is ready to land"));
+        assert!(prompt.contains("1. Mark ready + squash-merge now"));
+        assert!(prompt.contains("user message:\n1"));
+        assert!(prompt.contains("Current user/task prompt to answer:\n1"));
+        assert!(prompt.contains("do not treat the current prompt in isolation"));
+        assert!(prompt.contains("resolve it from the recent conversation above"));
+    }
+
+    #[test]
+    fn fresh_cli_session_context_truncates_large_recent_tool_payloads() {
+        let huge = "X".repeat(CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS * 4);
+        let recent = vec![test_message(
+            "tool-result",
+            MessageRole::Tool,
+            vec![ContentPart::ToolResult {
+                tool_call_id: "tool-1".to_string(),
+                payload: serde_json::json!({ "stdout": huge }),
+                started_at: None,
+                completed_at: None,
+            }],
+        )];
+
+        let rendered = render_cli_fresh_context(&recent);
+
+        assert!(rendered.contains("tool message:"));
+        assert!(rendered.contains("[truncated]"));
+        assert!(
+            rendered.len() < CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS + 100,
+            "rendered recent context too large: {}",
+            rendered.len()
+        );
     }
 
     #[test]
