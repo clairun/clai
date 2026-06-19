@@ -688,7 +688,10 @@ fn should_skip_fork_copy_path(relative_path: &Path) -> bool {
     }
 
     let name = second.to_string_lossy();
-    name == "config.json" || name == "config.json.tmp" || name.starts_with("data.sqlite")
+    name == "config.json"
+        || name == "config.json.tmp"
+        || name.starts_with("data.sqlite")
+        || name == "images"
 }
 
 fn copy_workspace_durable_files(source_root: &Path, target_root: &Path) -> Result<(), String> {
@@ -3027,5 +3030,37 @@ mod tests {
     #[test]
     fn returns_none_when_nothing_matches() {
         assert!(select_workspace_session(vec![], MGR, WS, None).is_none());
+    }
+
+    // Pin the skip list for `copy_workspace_durable_files`. Image
+    // attachments live under `.clai/images/` and are big binaries
+    // already correctly owned by the *source* workspace's store —
+    // copying them into a forked workspace's store just doubles
+    // disk usage and risks one store losing track of a file the
+    // other still references.
+    #[test]
+    fn fork_copy_skips_workspace_local_image_store() {
+        use std::path::Path;
+
+        // The image store is a top-level child of `.clai/`, so the
+        // skip is matched at that depth. The caller only ever hands
+        // us paths of the shape `.clai/<name>`, never `.clai/.../...`.
+        assert!(should_skip_fork_copy_path(Path::new(".clai/images")));
+        // Pre-existing skips must still hold.
+        assert!(should_skip_fork_copy_path(Path::new(".clai/config.json")));
+        assert!(should_skip_fork_copy_path(Path::new(
+            ".clai/config.json.tmp"
+        )));
+        assert!(should_skip_fork_copy_path(Path::new(".clai/data.sqlite")));
+        assert!(should_skip_fork_copy_path(Path::new(
+            ".clai/data.sqlite-wal"
+        )));
+        // Unrelated top-level children of `.clai/` are still copied
+        // (e.g. user-installed skills, terminals, agent templates).
+        assert!(!should_skip_fork_copy_path(Path::new(".clai/skills")));
+        assert!(!should_skip_fork_copy_path(Path::new(".clai/agents")));
+        // Paths outside `.clai/` are not its concern.
+        assert!(!should_skip_fork_copy_path(Path::new("images")));
+        assert!(!should_skip_fork_copy_path(Path::new("src/main.rs")));
     }
 }
