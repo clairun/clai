@@ -273,6 +273,18 @@ pub async fn run_session_turn(
         let provider_history =
             compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
         let normalized = normalize_history_for_provider(&provider_history);
+        // Drop image parts from history when the active connection can't accept
+        // them (e.g. user switched to a non-vision provider mid-conversation).
+        // The gate stops *new* image attachments; this keeps replayed history
+        // valid for the current provider. CLI providers already render images as
+        // a text placeholder upstream, so this only bites the HTTP path.
+        let normalized =
+            if providers::connection_supports_images(&connection.provider_id, &connection.model_id)
+            {
+                normalized
+            } else {
+                strip_unsupported_images(normalized)
+            };
 
         let mut provider_messages = vec![system_message.clone()];
         provider_messages.extend(normalized);
@@ -1236,6 +1248,35 @@ mod tests {
     use crate::assistant::types::SessionKind;
     use crate::assistant::types::WorkspaceAgentSummary;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
+
+    #[test]
+    fn strip_unsupported_images_replaces_image_parts_with_placeholder() {
+        let messages = vec![ProviderInputMessage {
+            role: MessageRole::User,
+            content: vec![
+                ContentPart::Text {
+                    text: "look at this".to_string(),
+                },
+                ContentPart::Image {
+                    id: "img1".to_string(),
+                    path: ".clai/images/img1.png".to_string(),
+                    media_type: "image/png".to_string(),
+                    filename: None,
+                    width: None,
+                    height: None,
+                },
+            ],
+        }];
+
+        let out = strip_unsupported_images(messages);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content.len(), 2);
+        assert!(matches!(&out[0].content[0], ContentPart::Text { text } if text == "look at this"));
+        assert!(
+            matches!(&out[0].content[1], ContentPart::Text { text } if text == "[image omitted]"),
+            "image part should become a text placeholder"
+        );
+    }
 
     #[test]
     fn build_system_prompt_includes_agent_memory_guidance_for_automations() {
@@ -2536,6 +2577,25 @@ fn normalized_assistant_parts(parts: &[ContentPart]) -> Vec<ContentPart> {
                 }
             }
             other => other,
+        })
+        .collect()
+}
+
+/// Replace `ContentPart::Image` parts with a short text placeholder so a
+/// non-vision provider still receives coherent (if lossy) history. Used only
+/// when `connection_supports_images` is false for the active connection.
+fn strip_unsupported_images(messages: Vec<ProviderInputMessage>) -> Vec<ProviderInputMessage> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            for part in message.content.iter_mut() {
+                if matches!(part, ContentPart::Image { .. }) {
+                    *part = ContentPart::Text {
+                        text: "[image omitted]".to_string(),
+                    };
+                }
+            }
+            message
         })
         .collect()
 }
