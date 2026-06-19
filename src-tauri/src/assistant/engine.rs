@@ -2648,6 +2648,13 @@ async fn resolve_request_images(
                 if out.contains_key(id) {
                     continue;
                 }
+                // Defense-in-depth: never read a non-store path (see
+                // image_store::is_store_relative_path). The send boundary
+                // already rejects these, but the file read is the real sink.
+                if !crate::assistant::image_store::is_store_relative_path(path) {
+                    tracing::warn!(image_id = %id, %path, "Rejecting non-store image path; skipping");
+                    continue;
+                }
                 let full = root.join(path);
                 match tokio::fs::read(&full).await {
                     Ok(bytes) => {

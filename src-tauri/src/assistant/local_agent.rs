@@ -1616,6 +1616,12 @@ async fn resolve_cli_user_images(
     };
     let mut resolved = Vec::with_capacity(parts.len());
     for (rel_path, media_type) in parts {
+        // Defense-in-depth: never read a non-store path (see
+        // image_store::is_store_relative_path).
+        if !crate::assistant::image_store::is_store_relative_path(&rel_path) {
+            tracing::warn!(path = %rel_path, "CLI image: non-store path rejected; skipping");
+            continue;
+        }
         let abs = root.join(&rel_path);
         match tokio::fs::read(&abs).await {
             Ok(bytes) => {

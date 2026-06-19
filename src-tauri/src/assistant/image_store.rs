@@ -89,9 +89,97 @@ pub fn store_image(
     })
 }
 
+/// Validate that `path` is a safe, store-owned image reference: exactly
+/// `.clai/images/<uuid>.<ext>` with an allowed extension. Rejects absolute
+/// paths, `..`/`.` traversal, nested subdirectories, non-UUID names, and
+/// disallowed extensions.
+///
+/// This is the trust boundary for client-supplied [`crate::assistant::types::ContentPart::Image`]
+/// parts on a user send: the send path later does `root.join(path)` and base64s
+/// the bytes for the model, so an unchecked absolute or `..` path would let a
+/// crafted message read arbitrary local files and exfiltrate them to the
+/// provider. Every path that legitimately reaches a message is produced by
+/// [`store_image`], which always emits exactly this shape.
+pub fn is_store_relative_path(path: &str) -> bool {
+    use std::path::{Component, Path};
+
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return false;
+    }
+    // Every component must be a plain name — no `..`, `.`, root, or prefix.
+    if !p.components().all(|c| matches!(c, Component::Normal(_))) {
+        return false;
+    }
+    // Must live directly under the image store: `.clai/images/<file>`.
+    let Some(file) = path.strip_prefix(&format!("{}/", IMAGE_STORE_SUBDIR)) else {
+        return false;
+    };
+    if file.is_empty() || file.contains('/') {
+        return false;
+    }
+    // `<uuid>.<ext>` with an allowed extension and a real UUID stem.
+    let Some((stem, ext)) = file.rsplit_once('.') else {
+        return false;
+    };
+    if !matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp") {
+        return false;
+    }
+    Uuid::parse_str(stem).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_store_relative_path_accepts_only_store_owned_refs() {
+        let uuid = Uuid::new_v4().to_string();
+        // Shapes store_image actually produces.
+        assert!(is_store_relative_path(&format!(
+            ".clai/images/{}.png",
+            uuid
+        )));
+        assert!(is_store_relative_path(&format!(
+            ".clai/images/{}.jpg",
+            uuid
+        )));
+        assert!(is_store_relative_path(&format!(
+            ".clai/images/{}.gif",
+            uuid
+        )));
+        assert!(is_store_relative_path(&format!(
+            ".clai/images/{}.webp",
+            uuid
+        )));
+
+        // The exfiltration vectors the gate must reject.
+        assert!(!is_store_relative_path("/etc/passwd"));
+        assert!(!is_store_relative_path("/home/user/.ssh/id_rsa"));
+        assert!(!is_store_relative_path("../../../etc/passwd"));
+        assert!(!is_store_relative_path(".clai/images/../../secret.png"));
+
+        // Wrong location / nesting / shape.
+        assert!(!is_store_relative_path(&format!("images/{}.png", uuid)));
+        assert!(!is_store_relative_path(&format!(
+            ".clai/other/{}.png",
+            uuid
+        )));
+        assert!(!is_store_relative_path(&format!(
+            ".clai/images/sub/{}.png",
+            uuid
+        )));
+        assert!(!is_store_relative_path(".clai/images/passwd.png"));
+        assert!(!is_store_relative_path(&format!(
+            ".clai/images/{}.svg",
+            uuid
+        )));
+        assert!(!is_store_relative_path(&format!(
+            ".clai/images/{}.exe",
+            uuid
+        )));
+        assert!(!is_store_relative_path(""));
+    }
 
     #[test]
     fn normalize_maps_supported_types_and_rejects_others() {

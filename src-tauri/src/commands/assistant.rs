@@ -406,14 +406,29 @@ pub async fn assistant_list_tool_calls(
 /// Validate the attachments on a user send: only `ContentPart::Image` parts may
 /// ride a user message, so the frontend can't smuggle tool/assistant content in.
 fn validate_send_images(images: &[ContentPart]) -> Result<(), String> {
-    if let Some(bad) = images
-        .iter()
-        .find(|part| !matches!(part, ContentPart::Image { .. }))
-    {
-        return Err(format!(
-            "assistant_send_message only accepts image attachments, got: {:?}",
-            bad
-        ));
+    for part in images {
+        match part {
+            // The path must be a store-owned reference (`.clai/images/<uuid>.<ext>`).
+            // Without this check a crafted send could carry an absolute or `..`
+            // path, which the send path would `root.join` + base64 + ship to the
+            // model — an arbitrary-local-file read/exfiltration hole.
+            ContentPart::Image { path, .. } => {
+                if !crate::assistant::image_store::is_store_relative_path(path) {
+                    return Err(format!(
+                        "assistant_send_message: image attachment path is not a workspace                          image-store reference (expected .clai/images/<uuid>.<ext>): {:?}",
+                        path
+                    ));
+                }
+            }
+            // Only image parts may ride a user send, so the frontend can't
+            // smuggle tool/assistant content into a user message.
+            bad => {
+                return Err(format!(
+                    "assistant_send_message only accepts image attachments, got: {:?}",
+                    bad
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -944,7 +959,18 @@ mod tests {
     fn image() -> ContentPart {
         ContentPart::Image {
             id: "img-1".into(),
-            path: ".clai/images/img-1.png".into(),
+            path: ".clai/images/00000000-0000-4000-8000-000000000000.png".into(),
+            media_type: "image/png".into(),
+            filename: None,
+            width: None,
+            height: None,
+        }
+    }
+
+    fn image_with_path(path: &str) -> ContentPart {
+        ContentPart::Image {
+            id: "img-x".into(),
+            path: path.into(),
             media_type: "image/png".into(),
             filename: None,
             width: None,
@@ -956,6 +982,17 @@ mod tests {
     fn validate_send_images_accepts_only_images() {
         assert!(validate_send_images(&[]).is_ok());
         assert!(validate_send_images(&[image(), image()]).is_ok());
+    }
+
+    #[test]
+    fn validate_send_images_rejects_non_store_paths() {
+        // Absolute path → the arbitrary-file-read/exfiltration vector.
+        let err = validate_send_images(&[image_with_path("/etc/passwd")]).unwrap_err();
+        assert!(err.contains("image-store reference"), "got: {err}");
+        // Parent-dir traversal → rejected.
+        assert!(validate_send_images(&[image_with_path("../../secret.png")]).is_err());
+        // Non-UUID stem under the store → rejected.
+        assert!(validate_send_images(&[image_with_path(".clai/images/passwd.png")]).is_err());
     }
 
     #[test]
