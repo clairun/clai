@@ -36,11 +36,21 @@ vi.mock('../Chat/StreamingMarkdown', () => ({
   default: ({ content }: { content: string }) => <div data-testid="streaming">{content}</div>,
 }));
 
+// ImageAttachment loads bytes from the workspace image store; stub the fetch
+// so the transcript renders a data-URL thumbnail without a real backend.
+vi.mock('../../workspace/client', () => ({
+  readWorkspaceFileBase64: vi.fn(async () => ({
+    path: '.clai/images/abc.png',
+    mime: 'image/png',
+    base64: 'QUJD',
+  })),
+}));
+
 import ChatMessageList from './ChatMessageList';
 import type { AssistantMessage, ToolInvocation } from '../../generated/bindings';
 
 const msg = (
-  over: Partial<AssistantMessage> & Pick<AssistantMessage, 'id' | 'role' | 'content'>,
+  over: Partial<AssistantMessage> & Pick<AssistantMessage, 'id' | 'role' | 'content'>
 ): AssistantMessage => ({
   sessionId: 'sess-1',
   createdAt: 0n,
@@ -125,7 +135,9 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('visible reply')).toBeInTheDocument();
   });
 
-  const toolGroup = (count: number): { messages: AssistantMessage[]; toolCalls: ToolInvocation[] } => {
+  const toolGroup = (
+    count: number
+  ): { messages: AssistantMessage[]; toolCalls: ToolInvocation[] } => {
     const content: AssistantMessage['content'] = Array.from({ length: count }, (_, i) => ({
       type: 'tool_use' as const,
       tool_call_id: `tc-${i}`,
@@ -211,11 +223,52 @@ describe('ChatMessageList', () => {
     expect(screen.queryByText('Clai')).toBeNull();
 
     // First streamed delta for the placeholder makes it visible.
-    rerender(
-      <ChatMessageList messages={messages} isStreaming streamingText={{ m2: 'on it' }} />,
-    );
+    rerender(<ChatMessageList messages={messages} isStreaming streamingText={{ m2: 'on it' }} />);
     expect(screen.getByText('on it')).toBeInTheDocument();
     expect(screen.getByText('Clai')).toBeInTheDocument();
+  });
+
+  it('renders an image-only user message as a thumbnail from the store', async () => {
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            id: 'img-1',
+            path: '.clai/images/abc.png',
+            media_type: 'image/png',
+            filename: 'shot.png',
+          },
+        ],
+      }),
+    ];
+    render(<ChatMessageList messages={messages} workspaceId="ws-1" userLabel="You" />);
+    // Image-only message is not hidden, and the thumbnail loads from the store.
+    const img = await screen.findByAltText('shot.png');
+    expect(img).toHaveAttribute('src', 'data:image/png;base64,QUJD');
+  });
+
+  it('hides image parts when no workspaceId is provided', () => {
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            id: 'img-1',
+            path: '.clai/images/abc.png',
+            media_type: 'image/png',
+            filename: 'shot.png',
+          },
+        ],
+      }),
+    ];
+    // No workspaceId → cannot resolve the store, so the image is not rendered.
+    render(<ChatMessageList messages={messages} userLabel="You" />);
+    expect(screen.queryByAltText('shot.png')).toBeNull();
   });
 
   it('shows an elapsed timer in the running footer', () => {

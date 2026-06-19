@@ -1078,3 +1078,49 @@
   word-break: break-word;
   border-top: 1px solid var(--color-border-light);
 }
+
+/* ── Transcript image attachments (rendered in user message blocks) ────── */
+.imageAttachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.imageAttachment {
+  max-width: 240px;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  object-fit: contain;
+  background: var(--color-overlay-02);
+}
+
+.imageAttachmentLoading {
+  width: 120px;
+  height: 120px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  background: var(--color-overlay-02);
+  animation: imageAttachmentPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes imageAttachmentPulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.imageAttachmentError {
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--color-border-light);
+  color: var(--color-text-secondary);
+  font-size: 0.85em;
+}

@@ -25,6 +25,7 @@ import {
 } from './toolDisplay';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
+import { readWorkspaceFileBase64 } from '../../workspace/client';
 
 // Tools beyond this count collapse behind a "show N earlier" toggle so a turn
 // that fires dozens of tools stays scannable; the most-recent MAX_VISIBLE rows
@@ -36,6 +37,7 @@ const MAX_VISIBLE_TOOLS = 4;
 // are accessible after a `type ===` guard.
 type TextPart = Extract<ContentPart, { type: 'text' }>;
 type ToolUsePart = Extract<ContentPart, { type: 'tool_use' }>;
+type ImagePart = Extract<ContentPart, { type: 'image' }>;
 
 // A tool_use enriched with the matching ToolInvocation record (status,
 // params, result, error) for rendering.
@@ -86,6 +88,47 @@ const getToolUses = (message: AssistantMessage): ToolUsePart[] => {
   if (!message.content || !Array.isArray(message.content)) return [];
   return message.content.filter((part): part is ToolUsePart => part.type === 'tool_use');
 };
+
+const getImageContent = (message: AssistantMessage): ImagePart[] => {
+  if (!message.content || !Array.isArray(message.content)) return [];
+  return message.content.filter((part): part is ImagePart => part.type === 'image');
+};
+
+/**
+ * Lazily loads an image part's bytes from the workspace image store and
+ * renders a thumbnail. The fetch fires only when this component mounts —
+ * i.e. when its message scrolls into the virtualized view — so a long
+ * history with many images never loads them all at once.
+ */
+const ImageAttachment = memo(({ workspaceId, part }: { workspaceId: string; part: ImagePart }) => {
+  const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    readWorkspaceFileBase64(workspaceId, part.path)
+      .then((bytes) => {
+        if (!cancelled) setSrc(`data:${bytes.mime};base64,${bytes.base64}`);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, part.path]);
+
+  if (failed) {
+    return <div className={styles.imageAttachmentError}>Image unavailable</div>;
+  }
+  if (!src) {
+    return <div className={styles.imageAttachmentLoading} />;
+  }
+  return (
+    <img className={styles.imageAttachment} src={src} alt={part.filename ?? 'attached image'} />
+  );
+});
+ImageAttachment.displayName = 'ImageAttachment';
 
 /**
  * Collapsible "thinking" block — renders the model's reasoning_content
@@ -222,9 +265,12 @@ const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
 
   if (message.role !== 'user') return false;
   const text = getTextContent(message);
-  return (
-    !text || text.startsWith('--- New scheduled run at') || text.startsWith('--- Manual run at')
-  );
+  if (text.startsWith('--- New scheduled run at') || text.startsWith('--- Manual run at')) {
+    return true;
+  }
+  // Hide only when there's nothing to show — neither text nor image parts. An
+  // image-only user message (no caption) must still render its thumbnail.
+  return !text && getImageContent(message).length === 0;
 };
 
 /**
@@ -394,6 +440,9 @@ RunningIndicator.displayName = 'RunningIndicator';
  */
 interface ChatMessageListProps {
   messages: AssistantMessage[];
+  // Workspace whose image store backs any `image` content parts; enables
+  // lazy thumbnail loading in the transcript. Omit in read-only/no-store views.
+  workspaceId?: string;
   streamingText?: Record<string, string>;
   isStreaming?: boolean;
   toolCalls?: ToolInvocation[];
@@ -423,6 +472,7 @@ interface ChatMessageListProps {
 
 const ChatMessageList = ({
   messages,
+  workspaceId,
   streamingText = EMPTY_STREAMING,
   isStreaming = false,
   toolCalls = EMPTY_TOOL_CALLS,
@@ -553,6 +603,7 @@ const ChatMessageList = ({
           streamingText={streamingText[item.message.id]}
           toolCallsById={toolCallsById}
           userLabel={userLabel}
+          workspaceId={workspaceId}
           isContinuation={continuationFlags[idx]}
           isQueued={queuedIdSet.has(item.message.id)}
           onDeleteQueued={onDeleteQueuedMessage}
@@ -564,6 +615,7 @@ const ChatMessageList = ({
       streamingText,
       toolCallsById,
       userLabel,
+      workspaceId,
       queuedIdSet,
       onDeleteQueuedMessage,
       onEditQueuedMessage,
@@ -625,6 +677,7 @@ interface MessageBlockProps {
   streamingText?: string;
   toolCallsById: Map<string, ToolInvocation>;
   userLabel?: string;
+  workspaceId?: string;
   isContinuation?: boolean;
   isQueued?: boolean;
   onDeleteQueued?: (messageId: string) => void;
@@ -637,6 +690,7 @@ const MessageBlock = memo(
     streamingText,
     toolCallsById,
     userLabel = 'You',
+    workspaceId,
     isContinuation = false,
     isQueued = false,
     onDeleteQueued,
@@ -649,7 +703,8 @@ const MessageBlock = memo(
 
     if (role === 'user') {
       const textContent = getTextContent(message);
-      if (!textContent) return null;
+      const imageParts = getImageContent(message);
+      if (!textContent && imageParts.length === 0) return null;
 
       // Hide run boundary markers (persisted trigger messages for the LLM, not for the user)
       if (
@@ -746,7 +801,14 @@ const MessageBlock = memo(
             </div>
           ) : (
             <div className={styles.messageContent}>
-              <MarkdownMessage content={textContent} />
+              {textContent && <MarkdownMessage content={textContent} />}
+              {imageParts.length > 0 && workspaceId && (
+                <div className={styles.imageAttachments}>
+                  {imageParts.map((part) => (
+                    <ImageAttachment key={part.id} workspaceId={workspaceId} part={part} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
