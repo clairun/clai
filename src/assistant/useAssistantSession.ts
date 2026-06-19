@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import useAssistantStore from './sessionStore';
 import * as client from './client';
-import type { AssistantSession } from '../generated/bindings';
+import type { AssistantSession, ContentPart } from '../generated/bindings';
 
 interface EnsureSessionContext {
   mcpServerIds?: string[];
@@ -110,11 +110,14 @@ export function useAssistantSession(tabId: string) {
    * Send a message in the current session.
    * The engine handles everything — events update the store.
    */
-  const sendMessage = useCallback(async (text: string, connectionId: string) => {
-    const sid = sessionIdRef.current;
-    if (!sid) throw new Error('No active assistant session for this tab');
-    return client.sendMessage(sid, text, connectionId);
-  }, []);
+  const sendMessage = useCallback(
+    async (text: string, connectionId: string, images: ContentPart[] = []) => {
+      const sid = sessionIdRef.current;
+      if (!sid) throw new Error('No active assistant session for this tab');
+      return client.sendMessage(sid, text, connectionId, images);
+    },
+    [],
+  );
 
   /**
    * Clear all assistant sessions attached to this tab.

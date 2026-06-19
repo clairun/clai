@@ -403,14 +403,50 @@ pub async fn assistant_list_tool_calls(
     repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref()).await
 }
 
+/// Validate the attachments on a user send: only `ContentPart::Image` parts may
+/// ride a user message, so the frontend can't smuggle tool/assistant content in.
+fn validate_send_images(images: &[ContentPart]) -> Result<(), String> {
+    if let Some(bad) = images
+        .iter()
+        .find(|part| !matches!(part, ContentPart::Image { .. }))
+    {
+        return Err(format!(
+            "assistant_send_message only accepts image attachments, got: {:?}",
+            bad
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the given connection's active model accepts image input. Drives the
+/// composer's paste/attach affordance — a single source of truth so the UI gate
+/// can't drift from the backend send-filter. See
+/// [`crate::assistant::providers::connection_supports_images`].
+#[tauri::command]
+pub async fn assistant_connection_supports_images(
+    connection_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let connection = provider_connection(state.inner(), &connection_id)?;
+    Ok(crate::assistant::providers::connection_supports_images(
+        &connection.provider_id,
+        &connection.model_id,
+    ))
+}
+
 #[tauri::command]
 pub async fn assistant_send_message(
     session_id: String,
     message: String,
     connection_id: String,
+    images: Option<Vec<ContentPart>>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AssistantSendMessageResult, String> {
+    // Only image parts may ride a user send; reject anything else so the
+    // frontend can't smuggle tool/assistant content into a user message.
+    let images = images.unwrap_or_default();
+    validate_send_images(&images)?;
     let (target_pool, mut session) = session_pool(state.inner(), &session_id).await?;
     let connection = provider_connection(state.inner(), &connection_id)?;
     let active_run = repository::get_active_run(&target_pool, &session.id).await?;
@@ -431,10 +467,12 @@ pub async fn assistant_send_message(
     }
 
     let queue_message = active_run.is_some() || has_pending_queue;
-    let assistant_message = repository::create_user_message(
+    let mut content = vec![ContentPart::Text { text: message }];
+    content.extend(images);
+    let assistant_message = repository::create_user_message_with_content(
         &target_pool,
         session.id.clone(),
-        message,
+        content,
         queue_message.then_some(connection_id.as_str()),
     )
     .await?;
@@ -896,4 +934,47 @@ pub(crate) async fn start_queued_followup_if_idle(
     );
 
     Ok(Some(run))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn image() -> ContentPart {
+        ContentPart::Image {
+            id: "img-1".into(),
+            path: ".clai/images/img-1.png".into(),
+            media_type: "image/png".into(),
+            filename: None,
+            width: None,
+            height: None,
+        }
+    }
+
+    #[test]
+    fn validate_send_images_accepts_only_images() {
+        assert!(validate_send_images(&[]).is_ok());
+        assert!(validate_send_images(&[image(), image()]).is_ok());
+    }
+
+    #[test]
+    fn validate_send_images_rejects_non_image_parts() {
+        let err = validate_send_images(&[
+            image(),
+            ContentPart::Text {
+                text: "sneaky".into(),
+            },
+        ])
+        .unwrap_err();
+        assert!(err.contains("only accepts image attachments"));
+
+        assert!(validate_send_images(&[ContentPart::ToolResult {
+            tool_call_id: "t1".into(),
+            payload: json!({}),
+            started_at: None,
+            completed_at: None,
+        }])
+        .is_err());
+    }
 }

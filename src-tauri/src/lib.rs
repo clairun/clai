@@ -327,6 +327,7 @@ pub fn run() {
             commands::assistant::assistant_list_runs,
             commands::assistant::assistant_list_tool_calls,
             commands::assistant::assistant_send_message,
+            commands::assistant::assistant_connection_supports_images,
             commands::assistant::assistant_compact_session,
             commands::assistant::assistant_delete_queued_message,
             commands::assistant::assistant_edit_queued_message,
