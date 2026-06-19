@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 
@@ -104,5 +104,81 @@ describe('TerminalEmulator per-workspace composer state', () => {
     // Returning to A restores its terminal mode (stored per workspace).
     await user.click(screen.getByText('go-A'));
     expect(screen.getByTestId('workspace-terminal')).toBeInTheDocument();
+  });
+});
+
+
+describe('TerminalEmulator image attachments', () => {
+  beforeAll(() => {
+    // jsdom lacks object-URL helpers the composer uses for thumbnails.
+    globalThis.URL.createObjectURL = vi.fn(() => 'blob:preview');
+    globalThis.URL.revokeObjectURL = vi.fn();
+  });
+
+  const imagePart = {
+    type: 'image' as const,
+    id: 'img-1',
+    path: '.clai/images/img-1.png',
+    media_type: 'image/png',
+    filename: 'shot.png',
+    width: null,
+    height: null,
+  };
+
+  it('attaches a pasted image, shows a thumbnail, and sends it with the message', async () => {
+    const user = userEvent.setup();
+    const onAttachImage = vi.fn(async () => ({ part: imagePart }));
+    const onSendToChat = vi.fn(async () => ({}));
+
+    render(
+      <MemoryRouter initialEntries={['/workspace/A']}>
+        <TerminalEmulator onAttachImage={onAttachImage} onSendToChat={onSendToChat} />
+      </MemoryRouter>
+    );
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const file = new File(['x'], 'shot.png', { type: 'image/png' });
+    fireEvent.paste(input, {
+      clipboardData: {
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+      },
+    });
+
+    // Thumbnail appears once the attach resolves.
+    await screen.findByAltText('shot.png');
+    expect(onAttachImage).toHaveBeenCalledTimes(1);
+
+    // Type text and send — the image rides along, then the tray clears.
+    await user.type(input, 'what is this');
+    await user.keyboard('{Enter}');
+
+    expect(onSendToChat).toHaveBeenCalledWith(
+      'what is this',
+      expect.arrayContaining([expect.objectContaining({ id: 'img-1', type: 'image' })])
+    );
+    expect(screen.queryByAltText('shot.png')).toBeNull();
+  });
+
+  it('removes a pasted image from the tray before send', async () => {
+    const user = userEvent.setup();
+    const onAttachImage = vi.fn(async () => ({ part: imagePart }));
+
+    render(
+      <MemoryRouter initialEntries={['/workspace/A']}>
+        <TerminalEmulator onAttachImage={onAttachImage} onSendToChat={vi.fn()} />
+      </MemoryRouter>
+    );
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const file = new File(['x'], 'shot.png', { type: 'image/png' });
+    fireEvent.paste(input, {
+      clipboardData: {
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+      },
+    });
+
+    await screen.findByAltText('shot.png');
+    await user.click(screen.getByLabelText('Remove image'));
+    expect(screen.queryByAltText('shot.png')).toBeNull();
   });
 });

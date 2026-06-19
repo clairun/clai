@@ -6,6 +6,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  ContentPart,
   WorkspaceAgentResponse,
   WorkspaceDirEntry,
   WorkspaceFileBytes,
@@ -86,6 +87,22 @@ export async function readWorkspaceFileBase64(
 ): Promise<WorkspaceFileBytes> {
   return invoke('workspace_read_file_base64', {
     request: { workspaceId, path },
+  });
+}
+
+/**
+ * Persist a pasted/attached image under the workspace's image store and return
+ * a ready-to-attach `ContentPart` (image) referencing the stored file.
+ * `dataBase64` must be the raw base64 bytes (no `data:` URL prefix).
+ */
+export async function storeWorkspaceImage(
+  workspaceId: string,
+  dataBase64: string,
+  mediaType: string,
+  filename: string | null = null,
+): Promise<ContentPart> {
+  return invoke('workspace_store_image', {
+    request: { workspaceId, dataBase64, mediaType, filename },
   });
 }
 

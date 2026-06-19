@@ -7,6 +7,7 @@ import {
   dispatchScrollChatToBottom,
   dispatchWorkspaceUiCommand,
 } from '../../utils/workspaceUiEvents';
+import type { ContentPart } from '../../generated/bindings';
 import styles from './TerminalEmulator.module.css';
 
 type OutputType = 'info' | 'success' | 'error' | 'warning';
@@ -23,19 +24,31 @@ interface SendToChatResult {
   message?: string;
 }
 
+type AttachImageResult = { part?: ContentPart; error?: string };
+
+interface ComposerAttachment {
+  part: ContentPart;
+  /** Object URL of the source File, for the local thumbnail preview only. */
+  previewUrl: string;
+}
+
 interface TerminalEmulatorProps {
-  onSendToChat?: (text: string) => Promise<SendToChatResult | void>;
+  onSendToChat?: (text: string, images: ContentPart[]) => Promise<SendToChatResult | void>;
   onAgentCommand?: (command: string) => Promise<SendToChatResult | void>;
+  onAttachImage?: (file: File) => Promise<AttachImageResult>;
   agentWorking?: boolean;
 }
 
 const TerminalEmulator = ({
   onSendToChat,
   onAgentCommand,
+  onAttachImage,
   agentWorking = false,
 }: TerminalEmulatorProps) => {
   const location = useLocation();
   const [inputValue, setInputValue] = useState('');
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [isAttaching, setIsAttaching] = useState(false);
   const [outputMessages, setOutputMessages] = useState<OutputMessage[]>([]);
   const [isOutputVisible, setIsOutputVisible] = useState(true);
   const [isHoveringOutput, setIsHoveringOutput] = useState(false);
@@ -236,9 +249,53 @@ const TerminalEmulator = ({
   }, [showTerminal]);
 
   // Handle command execution
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => {
+      const target = prev[index];
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
+  };
+
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      prev.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+      return [];
+    });
+  }, []);
+
+  // Revoke any outstanding preview URLs on unmount.
+  useEffect(() => clearAttachments, [clearAttachments]);
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.items ?? [])
+      .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (files.length === 0) return; // ordinary text paste — let it through
+    e.preventDefault();
+    if (!onAttachImage) return;
+    setIsAttaching(true);
+    try {
+      for (const file of files) {
+        const res = await onAttachImage(file);
+        if (res.error) {
+          addOutputMessage(res.error, 'error');
+        } else if (res.part) {
+          const previewUrl = URL.createObjectURL(file);
+          setAttachments((prev) => [...prev, { part: res.part as ContentPart, previewUrl }]);
+        }
+      }
+    } finally {
+      setIsAttaching(false);
+    }
+  };
+
   const handleCommandExecution = async (input: string) => {
     const trimmed = input.trim();
-    if (!trimmed) return;
+    const pendingImages = attachments.map((a) => a.part);
+    // Allow an image-only send (no text) when attachments are present.
+    if (!trimmed && pendingImages.length === 0) return;
 
     // Clear input immediately and reset textarea height
     setInputValue('');
@@ -264,7 +321,8 @@ const TerminalEmulator = ({
     // in the page; other routes reject with a hint to open a workspace.
     if (!isSlashCommand) {
       if (onSendToChat) {
-        const result = await onSendToChat(trimmed);
+        clearAttachments();
+        const result = await onSendToChat(trimmed, pendingImages);
         if (result?.error) {
           addOutputMessage(result.error, 'error');
         }
@@ -425,6 +483,37 @@ const TerminalEmulator = ({
               </button>
             )}
 
+            {/* Attachment tray: thumbnails of pasted images pending send */}
+            {(attachments.length > 0 || isAttaching) && (
+              <div className={styles.attachmentTray} aria-label="Image attachments">
+                {attachments.map((att, index) => (
+                  <div key={att.previewUrl} className={styles.attachmentThumb}>
+                    <img
+                      src={att.previewUrl}
+                      alt={
+                        att.part.type === 'image' && att.part.filename
+                          ? att.part.filename
+                          : 'Attached image'
+                      }
+                    />
+                    <button
+                      type="button"
+                      className={styles.attachmentRemove}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeAttachment(index);
+                      }}
+                      aria-label="Remove image"
+                      title="Remove image"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                {isAttaching && <span className={styles.attachmentSpinner}>Attaching…</span>}
+              </div>
+            )}
+
             {/* Terminal Input - Auto-growing textarea */}
             <div className={styles.terminalInputWrapper} ref={inputWrapperRef}>
               <textarea
@@ -434,6 +523,7 @@ const TerminalEmulator = ({
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onClick={(e) => e.stopPropagation()}
                 aria-busy={agentWorking || undefined}
                 placeholder={

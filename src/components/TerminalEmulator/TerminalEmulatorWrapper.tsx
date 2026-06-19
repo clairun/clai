@@ -10,13 +10,27 @@
 import { useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAssistantStore, assistantClient } from '../../assistant';
-import { getOrCreateWorkspaceSession } from '../../workspace/client';
+import { getOrCreateWorkspaceSession, storeWorkspaceImage } from '../../workspace/client';
+import type { ContentPart } from '../../generated/bindings';
 import TerminalEmulator from './TerminalEmulator';
 
 const errorMessage = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
 const OPEN_WORKSPACE_ERROR = 'Open a workspace to chat with the assistant.';
+
+/** Read a File into raw base64 (no `data:` URL prefix). */
+const fileToBase64 = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file'));
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
 
 const TerminalEmulatorWrapper = () => {
   const location = useLocation();
@@ -43,7 +57,7 @@ const TerminalEmulatorWrapper = () => {
    * Handle sending a query through the assistant engine.
    */
   const handleSendToAgent = useCallback(
-    async (query: string): Promise<{ error?: string }> => {
+    async (query: string, images: ContentPart[] = []): Promise<{ error?: string }> => {
       if (!isWorkspaceRoute) {
         return { error: OPEN_WORKSPACE_ERROR };
       }
@@ -64,7 +78,12 @@ const TerminalEmulatorWrapper = () => {
         const workspaceTabKey = `workspace:${currentWorkspaceId}`;
         store.setActiveSessionForTab(workspaceTabKey, binding.session.id);
 
-        const result = await assistantClient.sendMessage(binding.session.id, query, connectionId);
+        const result = await assistantClient.sendMessage(
+          binding.session.id,
+          query,
+          connectionId,
+          images,
+        );
         store.addMessage(binding.session.id, result.message);
         if (result.queued) {
           // Sent while a run was active — show the "Queued" chip until a
@@ -77,6 +96,45 @@ const TerminalEmulatorWrapper = () => {
         return {
           error: errorMessage(err, 'Assistant request failed.'),
         };
+      }
+    },
+    [currentWorkspaceId, isWorkspaceRoute]
+  );
+
+  /**
+   * Resolve + store a pasted/attached image, gated on the active connection's
+   * image capability. Returns the stored `ContentPart` to attach, or an error
+   * string to surface in the composer. The gate is the same backend resolver
+   * the send-filter uses, so the UI never offers what the provider would drop.
+   */
+  const handleAttachImage = useCallback(
+    async (file: File): Promise<{ part?: ContentPart; error?: string }> => {
+      if (!isWorkspaceRoute) {
+        return { error: OPEN_WORKSPACE_ERROR };
+      }
+      try {
+        const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
+        const connectionId = binding.providerConnectionId;
+        if (!connectionId) {
+          return {
+            error: 'Add an enabled assistant provider connection before attaching images.',
+          };
+        }
+        const supported = await assistantClient.connectionSupportsImages(connectionId);
+        if (!supported) {
+          return { error: 'The selected model does not support image input.' };
+        }
+        const dataBase64 = await fileToBase64(file);
+        const part = await storeWorkspaceImage(
+          currentWorkspaceId,
+          dataBase64,
+          file.type,
+          file.name || null,
+        );
+        return { part };
+      } catch (err) {
+        console.error('[TerminalEmulatorWrapper] Workspace image attach error:', err);
+        return { error: errorMessage(err, 'Could not attach image.') };
       }
     },
     [currentWorkspaceId, isWorkspaceRoute]
@@ -150,6 +208,7 @@ const TerminalEmulatorWrapper = () => {
     <TerminalEmulator
       onSendToChat={handleSendToAgent}
       onAgentCommand={handleAgentCommand}
+      onAttachImage={handleAttachImage}
       agentWorking={inputDisabled}
     />
   );
