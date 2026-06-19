@@ -75,7 +75,14 @@ export type McpServerTransport = { "type": "stdio", command: string, args: Array
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
-export type ModelInfo = { id: string, displayName: string, supportsTools: boolean, };
+export type ModelInfo = { id: string, displayName: string, supportsTools: boolean, 
+/**
+ * Whether this model accepts image input (vision). Drives capability
+ * gating of the composer's image-attach affordance: the UI only offers
+ * pasting/attaching images when the active connection's selected model
+ * reports `true`. Mirrors `supports_tools`.
+ */
+supportsImages: boolean, };
 
 export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 

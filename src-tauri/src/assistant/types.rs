@@ -433,6 +433,12 @@ pub struct ModelInfo {
     pub display_name: String,
     #[serde(default)]
     pub supports_tools: bool,
+    /// Whether this model accepts image input (vision). Drives capability
+    /// gating of the composer's image-attach affordance: the UI only offers
+    /// pasting/attaching images when the active connection's selected model
+    /// reports `true`. Mirrors `supports_tools`.
+    #[serde(default)]
+    pub supports_images: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

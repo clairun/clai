@@ -96,6 +96,9 @@ impl ProviderAdapter for AnthropicAdapter {
                     id,
                     display_name,
                     supports_tools: true,
+                    // Anthropic API models in current rotation are all
+                    // multimodal (Claude 3+ accept image blocks).
+                    supports_images: true,
                 })
             })
             .collect();

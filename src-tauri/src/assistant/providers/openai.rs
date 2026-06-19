@@ -106,6 +106,10 @@ impl ProviderAdapter for OpenAiAdapter {
                     id: id.clone(),
                     display_name: id,
                     supports_tools: true,
+                    // Conservative until OpenAI image sending is wired with a
+                    // per-model vision map (some OpenAI models are not vision-
+                    // capable); over-claiming would error at send time.
+                    supports_images: false,
                 })
             })
             .collect();
