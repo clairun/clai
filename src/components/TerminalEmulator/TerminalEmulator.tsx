@@ -165,16 +165,37 @@ const TerminalEmulator = ({
     }
   }, [outputMessages]);
 
-  // Leave terminal mode automatically when the workspace context goes away
-  // (navigating off a workspace route). Done via the "adjust state during
-  // render" pattern (React docs) rather than an effect: the WorkspaceTerminal
-  // then unmounts and kills its shell.
-  const [prevTerminalAvailable, setPrevTerminalAvailable] = useState(terminalAvailable);
-  if (prevTerminalAvailable !== terminalAvailable) {
-    setPrevTerminalAvailable(terminalAvailable);
-    if (!terminalAvailable) {
-      setTerminalMode(false);
-    }
+  // Per-workspace composer state. The composer is a single global instance
+  // (mounted once in MainLayout), so without this its draft text and terminal
+  // mode would leak across workspace switches: a draft typed in workspace A
+  // would appear in B, and a terminal opened in A would show in B too. We
+  // snapshot the outgoing workspace's draft + terminal mode and restore the
+  // incoming one's (empty draft / chat mode by default). Keyed by workspace
+  // id; the empty-string key buckets non-workspace routes. Persists for the
+  // app session, not across restarts.
+  //
+  // Done with the "adjust state during render" pattern (React docs) so the swap
+  // lands before paint (no stale flash). This also subsumes the old "leave
+  // terminal mode when the workspace context goes away" logic: navigating off a
+  // workspace switches to the empty key, which defaults terminal mode off (and
+  // `showTerminal` also guards on `terminalAvailable`).
+  const composerKey = currentWorkspaceId ?? '';
+  const [savedComposerState, setSavedComposerState] = useState<{
+    activeKey: string;
+    drafts: Map<string, string>;
+    terminalModes: Map<string, boolean>;
+    // activeKey starts as the first-mounted route's key; the swap below keeps
+    // it in lockstep with the current route thereafter.
+  }>(() => ({ activeKey: composerKey, drafts: new Map(), terminalModes: new Map() }));
+  if (savedComposerState.activeKey !== composerKey) {
+    const drafts = new Map(savedComposerState.drafts).set(savedComposerState.activeKey, inputValue);
+    const terminalModes = new Map(savedComposerState.terminalModes).set(
+      savedComposerState.activeKey,
+      terminalMode
+    );
+    setInputValue(drafts.get(composerKey) ?? '');
+    setTerminalMode(terminalModes.get(composerKey) ?? false);
+    setSavedComposerState({ activeKey: composerKey, drafts, terminalModes });
   }
 
   // Ctrl+\ (or Cmd+\) toggles terminal mode. Matches the backslash key
