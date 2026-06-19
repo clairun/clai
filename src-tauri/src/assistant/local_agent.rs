@@ -994,7 +994,7 @@ async fn run_claude_turn(
             // stream-json carries image content blocks on the user turn; the
             // legacy `-p` text path can't, so images only ride the modern
             // (default-on) mid-run input mode.
-            let images = resolve_cli_user_images(deps, session).await;
+            let images = resolve_cli_user_images(deps, session, run_id).await;
             claude_stream_json_user_message(&prompt, &images)
         } else {
             prompt
@@ -1270,7 +1270,7 @@ async fn run_codex_turn(
     // fresh `exec` (via shared options) and `exec resume` (ResumeArgsRaw.images)
     // paths; codex reads the files itself. Only present on the turn the user
     // actually sent them, so no per-turn re-send.
-    for image_path in resolve_codex_image_paths(deps, session).await {
+    for image_path in resolve_codex_image_paths(deps, session, run_id).await {
         command.arg("--image").arg(image_path);
     }
     command
@@ -1590,35 +1590,68 @@ fn workspace_root_for_session(deps: &AssistantDeps, session: &AssistantSession) 
 /// images, the session has no workspace root, or a file can't be read (each
 /// failure is logged and skipped — a missing image never fails the turn, the
 /// surrounding text is still sent).
+/// Image `ContentPart`s contributing to this turn's prompt. Mirrors
+/// [`prepare_prompt`]: the FULL batch of delivered queued messages for the run
+/// when present (so a batched follow-up does not drop all but the newest
+/// image), otherwise the latest user message. Oldest-first, matching the
+/// prompt text order.
+async fn turn_image_parts(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+) -> Vec<ContentPart> {
+    let queued =
+        repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "CLI image: queued-message read failed; sending text only");
+                Vec::new()
+            });
+    let contents: Vec<Vec<ContentPart>> = if !queued.is_empty() {
+        queued.into_iter().map(|q| q.message.content).collect()
+    } else {
+        match repository::list_messages(&deps.pool, &session.id).await {
+            Ok(messages) => messages
+                .into_iter()
+                .rev()
+                .find(|m| m.role == MessageRole::User)
+                .map(|m| vec![m.content])
+                .unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%error, "CLI image: message read failed; sending text only");
+                Vec::new()
+            }
+        }
+    };
+    image_parts_from_contents(contents)
+}
+
+/// Flatten per-message content into just the image parts, preserving order
+/// (message order, then within-message order). The collection step of
+/// [`turn_image_parts`], pulled out so the batch-vs-latest fix is unit-testable
+/// without a DB.
+fn image_parts_from_contents(contents: Vec<Vec<ContentPart>>) -> Vec<ContentPart> {
+    contents
+        .into_iter()
+        .flatten()
+        .filter(|p| matches!(p, ContentPart::Image { .. }))
+        .collect()
+}
+
 async fn resolve_cli_user_images(
     deps: &AssistantDeps,
     session: &AssistantSession,
+    run_id: &str,
 ) -> Vec<(String, String)> {
-    let messages = match repository::list_messages(&deps.pool, &session.id).await {
-        Ok(messages) => messages,
-        Err(error) => {
-            tracing::warn!(%error, "CLI image: message read failed; sending text only");
-            return Vec::new();
-        }
-    };
-    let Some(latest_user) = messages
-        .iter()
-        .rev()
-        .find(|message| message.role == MessageRole::User)
-    else {
+    let parts = turn_image_parts(deps, session, run_id).await;
+    if parts.is_empty() {
         return Vec::new();
-    };
+    }
     let Some(root) = workspace_root_for_session(deps, session) else {
-        if latest_user
-            .content
-            .iter()
-            .any(|p| matches!(p, ContentPart::Image { .. }))
-        {
-            tracing::warn!("CLI image: no workspace root for session; sending text only");
-        }
+        tracing::warn!("CLI image: no workspace root for session; sending text only");
         return Vec::new();
     };
-    resolve_cli_image_parts(&root, &latest_user.content).await
+    resolve_cli_image_parts(&root, &parts).await
 }
 
 /// Read the image parts on a message's content into `(media_type, base64)`
@@ -1657,33 +1690,21 @@ async fn resolve_cli_image_parts(
     resolved
 }
 
-/// Absolute, store-validated paths of the image parts on the latest user
-/// message. Codex ingests images as files (`codex exec [resume] --image`), so
-/// it gets paths rather than base64. Non-store paths and missing files are
-/// skipped (text still sends).
+/// Absolute, store-validated paths of the image parts contributing to this
+/// turn (the delivered queued batch or the latest user message — see
+/// [`turn_image_parts`]). Codex ingests images as files
+/// (`codex exec [resume] --image`), so it gets paths rather than base64.
+/// Non-store paths and missing files are skipped (text still sends).
 async fn resolve_codex_image_paths(
     deps: &AssistantDeps,
     session: &AssistantSession,
+    run_id: &str,
 ) -> Vec<PathBuf> {
-    let messages = match repository::list_messages(&deps.pool, &session.id).await {
-        Ok(messages) => messages,
-        Err(error) => {
-            tracing::warn!(%error, "Codex image: message read failed; sending text only");
-            return Vec::new();
-        }
-    };
-    let Some(latest_user) = messages
-        .iter()
-        .rev()
-        .find(|message| message.role == MessageRole::User)
-    else {
-        return Vec::new();
-    };
-    let rels: Vec<String> = latest_user
-        .content
-        .iter()
+    let rels: Vec<String> = turn_image_parts(deps, session, run_id)
+        .await
+        .into_iter()
         .filter_map(|part| match part {
-            ContentPart::Image { path, .. } => Some(path.clone()),
+            ContentPart::Image { path, .. } => Some(path),
             _ => None,
         })
         .collect();
@@ -4058,6 +4079,44 @@ mod tests {
         // No empty text block when text is empty: just the image.
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn image_parts_from_contents_collects_all_messages_in_order() {
+        let img = |id: &str| ContentPart::Image {
+            id: id.into(),
+            path: format!(".clai/images/{id}.png"),
+            media_type: "image/png".into(),
+            filename: None,
+            width: None,
+            height: None,
+        };
+        // Two queued messages, each with text + an image. The batch must yield
+        // BOTH images (the bug dropped all but the newest), in message order.
+        let contents = vec![
+            vec![
+                ContentPart::Text {
+                    text: "first".into(),
+                },
+                img("a"),
+            ],
+            vec![
+                ContentPart::Text {
+                    text: "second".into(),
+                },
+                img("b"),
+            ],
+        ];
+        let parts = image_parts_from_contents(contents);
+        assert_eq!(parts.len(), 2);
+        let ids: Vec<&str> = parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::Image { id, .. } => id.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
     }
 
     #[tokio::test]
