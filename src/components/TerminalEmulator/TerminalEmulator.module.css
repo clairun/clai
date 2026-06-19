@@ -40,7 +40,9 @@
         )
       )
     );
-    transition: left var(--transition-fast), width var(--transition-fast);
+    transition:
+      left var(--transition-fast),
+      width var(--transition-fast);
     z-index: 100;
     background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
     border: 1px solid var(--color-border-light);
@@ -59,10 +61,18 @@
 /* Input Area - Primary terminal input with modern design */
 .terminalContent {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 10px 14px;
   background: transparent;
+}
+
+/* Action-button row beneath the input (attach, terminal-mode). */
+.composerToolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Terminal Prompt Symbol - Gradient text */
@@ -80,7 +90,7 @@
 
 /* Terminal Input Wrapper - Modern input field */
 .terminalInputWrapper {
-  flex: 1;
+  flex: 0 0 auto;
   position: relative;
   min-width: 0;
   display: flex;
@@ -151,7 +161,10 @@
   max-height: calc(50vh - 120px);
   min-height: 0;
   opacity: 1;
-  transition: opacity 0.2s ease, max-height 0.2s ease, padding 0.2s ease;
+  transition:
+    opacity 0.2s ease,
+    max-height 0.2s ease,
+    padding 0.2s ease;
   /* FIXED: Added subtle border-top to separate from input area */
   border-top: 1px solid var(--color-border-light);
 }
@@ -338,7 +351,6 @@
   appearance: none;
   cursor: pointer;
   flex: none;
-  margin-top: 6px;
   padding: 2px 7px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-light);
@@ -413,24 +425,23 @@
   opacity: 0.7;
 }
 
-
 /* ── Image attach button (native file picker) ───────────────── */
 .attachButton {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 24px;
   padding: 0;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1;
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
+  background: var(--color-overlay-02);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  opacity: 0.75;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  opacity: 0.85;
+  transition: all 0.15s ease;
 }
 
 .attachButton:hover:not(:disabled) {
