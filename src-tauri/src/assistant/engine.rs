@@ -1250,6 +1250,27 @@ mod tests {
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
 
     #[test]
+    fn message_contains_image_detects_image_parts() {
+        assert!(message_contains_image(&[
+            ContentPart::Text {
+                text: "see this".to_string()
+            },
+            ContentPart::Image {
+                id: "img-1".to_string(),
+                path: "img-1.png".to_string(),
+                media_type: "image/png".to_string(),
+                filename: None,
+                width: None,
+                height: None,
+            },
+        ]));
+        assert!(!message_contains_image(&[ContentPart::Text {
+            text: "no image".to_string()
+        }]));
+        assert!(!message_contains_image(&[]));
+    }
+
+    #[test]
     fn strip_unsupported_images_replaces_image_parts_with_placeholder() {
         let messages = vec![ProviderInputMessage {
             role: MessageRole::User,
@@ -2895,6 +2916,14 @@ pub(crate) fn build_trigger_message(
 /// True when a run's accumulated content amounts to nothing the user could
 /// see: no text, no thinking, no tool calls. (The empty-Text placeholder a
 /// message row is seeded with doesn't count.)
+/// True when any content part is an image. Image-bearing messages are
+/// preserved on run failure (see `discard_unanswered_run_input`).
+fn message_contains_image(parts: &[ContentPart]) -> bool {
+    parts
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }))
+}
+
 pub(crate) fn run_produced_no_content(parts: &[ContentPart]) -> bool {
     parts
         .iter()
@@ -2909,6 +2938,13 @@ pub(crate) fn run_produced_no_content(parts: &[ContentPart]) -> bool {
 /// never got an answer has no business lingering in the conversation; the
 /// failed run row keeps its error, so the failure banner still explains what
 /// happened, and the typed text stays recoverable via the input history.
+///
+/// Exception: messages carrying a [`ContentPart::Image`] are preserved. Unlike
+/// typed text, an attached image is not recoverable from the composer's input
+/// history, so deleting the message would orphan the stored file. A preserved
+/// image stays in conversation history and is auto-retried on the next turn —
+/// the per-turn `connection_supports_images` gate decides whether it is sent —
+/// so switching to a vision-capable model after the failure just works.
 /// Errors are logged, not propagated — cleanup must never mask the original
 /// failure.
 pub(crate) async fn discard_unanswered_run_input(
@@ -2921,7 +2957,16 @@ pub(crate) async fn discard_unanswered_run_input(
     let mut message_ids: Vec<String> = Vec::new();
     match repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id).await
     {
-        Ok(queued) => message_ids.extend(queued.into_iter().map(|q| q.message.id)),
+        Ok(queued) => {
+            for q in queued {
+                // Preserve image-bearing messages (see fn doc): they are not
+                // recoverable from the composer input history.
+                if message_contains_image(&q.message.content) {
+                    continue;
+                }
+                message_ids.push(q.message.id);
+            }
+        }
         Err(error) => tracing::warn!(
             run_id,
             error,
@@ -2929,10 +2974,26 @@ pub(crate) async fn discard_unanswered_run_input(
         ),
     }
     if let Some(id) = trigger_message_id {
-        if !message_ids.iter().any(|existing| existing == id) {
+        // Skip deletion when the trigger carries an image. On lookup failure,
+        // preserve rather than risk orphaning an image-bearing message.
+        let preserve = match repository::get_message(&deps.pool, id).await {
+            Ok(Some(message)) => message_contains_image(&message.content),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    run_id,
+                    message_id = id,
+                    error,
+                    "Failed to load trigger message while discarding unanswered run input"
+                );
+                true
+            }
+        };
+        if !preserve && !message_ids.iter().any(|existing| existing == id) {
             message_ids.push(id.to_string());
         }
     }
+    // The empty assistant placeholder is always noise — drop it regardless.
     message_ids.extend(assistant_placeholder_id.map(str::to_string));
 
     for message_id in message_ids {
