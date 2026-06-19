@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 // VirtualizedList windows its children by scroll geometry, which jsdom
 // doesn't have (zero heights). Replace it with a plain list that renders
@@ -269,6 +269,34 @@ describe('ChatMessageList', () => {
     // No workspaceId → cannot resolve the store, so the image is not rendered.
     render(<ChatMessageList messages={messages} userLabel="You" />);
     expect(screen.queryByAltText('shot.png')).toBeNull();
+  });
+
+  it('opens a zoom lightbox when a transcript image is clicked, and closes on Escape', async () => {
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            id: 'img-1',
+            path: '.clai/images/abc.png',
+            media_type: 'image/png',
+            filename: 'shot.png',
+          },
+        ],
+      }),
+    ];
+    render(<ChatMessageList messages={messages} workspaceId="ws-1" userLabel="You" />);
+    const thumb = await screen.findByAltText('shot.png');
+    expect(screen.queryByRole('dialog')).toBeNull();
+
+    fireEvent.click(thumb);
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
   it('shows an elapsed timer in the running footer', () => {

@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
+import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
 import VirtualizedList from '../common/VirtualizedList';
@@ -100,9 +101,55 @@ const getImageContent = (message: AssistantMessage): ImagePart[] => {
  * i.e. when its message scrolls into the virtualized view — so a long
  * history with many images never loads them all at once.
  */
+/**
+ * Full-screen zoom overlay for a transcript image. Portals to <body> so it
+ * escapes the virtualized list's transformed/overflow ancestors; closes on
+ * Escape, backdrop click, or the × button. Reuses the already-loaded data URL
+ * (no re-fetch).
+ */
+const ImageLightbox = ({
+  src,
+  alt,
+  onClose,
+}: {
+  src: string;
+  alt: string;
+  onClose: () => void;
+}) => {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  return ReactDOM.createPortal(
+    <div className={styles.imageLightboxBackdrop} onClick={onClose} role="dialog" aria-label={alt}>
+      <img
+        className={styles.imageLightboxImage}
+        src={src}
+        alt={alt}
+        onClick={(event) => event.stopPropagation()}
+      />
+      <button
+        type="button"
+        className={styles.imageLightboxClose}
+        onClick={onClose}
+        aria-label="Close"
+      >
+        ×
+      </button>
+    </div>,
+    document.body
+  );
+};
+ImageLightbox.displayName = 'ImageLightbox';
+
 const ImageAttachment = memo(({ workspaceId, part }: { workspaceId: string; part: ImagePart }) => {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -124,8 +171,26 @@ const ImageAttachment = memo(({ workspaceId, part }: { workspaceId: string; part
   if (!src) {
     return <div className={styles.imageAttachmentLoading} />;
   }
+  const alt = part.filename ?? 'attached image';
   return (
-    <img className={styles.imageAttachment} src={src} alt={part.filename ?? 'attached image'} />
+    <>
+      <img
+        className={styles.imageAttachment}
+        src={src}
+        alt={alt}
+        role="button"
+        tabIndex={0}
+        title="Click to zoom"
+        onClick={() => setZoomed(true)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            setZoomed(true);
+          }
+        }}
+      />
+      {zoomed && <ImageLightbox src={src} alt={alt} onClose={() => setZoomed(false)} />}
+    </>
   );
 });
 ImageAttachment.displayName = 'ImageAttachment';
