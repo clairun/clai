@@ -213,6 +213,14 @@ const TerminalEmulator = ({
     setInputValue(drafts.get(composerKey) ?? '');
     setTerminalMode(terminalModes.get(composerKey) ?? false);
     setSavedComposerState({ activeKey: composerKey, drafts, terminalModes });
+    // Pending attachments belong to the workspace they were attached in (their
+    // stored paths are relative to that workspace's root). Drop them on switch,
+    // otherwise a send in the new workspace ships a path that resolves against
+    // the wrong root and the image is silently lost. Revoke is idempotent.
+    if (attachments.length > 0) {
+      attachments.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+      setAttachments([]);
+    }
   }
 
   // Ctrl+\ (or Cmd+\) toggles terminal mode. Matches the backslash key
@@ -355,10 +363,13 @@ const TerminalEmulator = ({
     // in the page; other routes reject with a hint to open a workspace.
     if (!isSlashCommand) {
       if (onSendToChat) {
-        clearAttachments();
         const result = await onSendToChat(trimmed, pendingImages);
         if (result?.error) {
           addOutputMessage(result.error, 'error');
+        } else {
+          // Clear only on success — a failed turn keeps the image attached so
+          // the user can retry without re-picking it.
+          clearAttachments();
         }
       }
       return;

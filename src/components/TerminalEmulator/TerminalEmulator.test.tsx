@@ -107,7 +107,6 @@ describe('TerminalEmulator per-workspace composer state', () => {
   });
 });
 
-
 describe('TerminalEmulator image attachments', () => {
   beforeAll(() => {
     // jsdom lacks object-URL helpers the composer uses for thumbnails.
@@ -257,5 +256,55 @@ describe('TerminalEmulator image attachments', () => {
       '',
       expect.arrayContaining([expect.objectContaining({ id: 'img-1', type: 'image' })])
     );
+  });
+
+  it('drops a pending attachment on workspace switch (no wrong-root send)', async () => {
+    const user = userEvent.setup();
+    const onAttachImage = vi.fn(async () => ({ part: imagePart }));
+
+    render(
+      <MemoryRouter initialEntries={['/workspace/A']}>
+        <NavTo to="/workspace/B" label="go-B" />
+        <TerminalEmulator onAttachImage={onAttachImage} onSendToChat={vi.fn(async () => ({}))} />
+      </MemoryRouter>
+    );
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const file = new File(['x'], 'shot.png', { type: 'image/png' });
+    fireEvent.paste(input, {
+      clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] },
+    });
+    await screen.findByAltText('shot.png');
+
+    // Switching workspace must drop the attachment — its stored path is
+    // relative to A's root and would silently fail to resolve under B.
+    await user.click(screen.getByText('go-B'));
+    expect(screen.queryByAltText('shot.png')).toBeNull();
+  });
+
+  it('keeps the attachment when the send fails, so it can be retried', async () => {
+    const user = userEvent.setup();
+    const onAttachImage = vi.fn(async () => ({ part: imagePart }));
+    const onSendToChat = vi.fn(async () => ({ error: 'send failed' }));
+
+    render(
+      <MemoryRouter initialEntries={['/workspace/A']}>
+        <TerminalEmulator onAttachImage={onAttachImage} onSendToChat={onSendToChat} />
+      </MemoryRouter>
+    );
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    const file = new File(['x'], 'shot.png', { type: 'image/png' });
+    fireEvent.paste(input, {
+      clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] },
+    });
+    await screen.findByAltText('shot.png');
+
+    await user.type(input, 'hi');
+    await user.keyboard('{Enter}');
+
+    expect(onSendToChat).toHaveBeenCalled();
+    // Failed send keeps the image attached (cleared only on success).
+    expect(await screen.findByAltText('shot.png')).toBeInTheDocument();
   });
 });
