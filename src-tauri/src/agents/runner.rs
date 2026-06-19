@@ -429,10 +429,12 @@ impl std::error::Error for RunnerError {}
 /// scheduled run.
 ///
 /// This is the **same** session row that the workspace card-click path
-/// resolves via `commands::workspace::find_workspace_session` (Interactive
-/// kind, `automation_id == manager_id`, workspace matches). User chats
-/// and scheduler ticks both write here, so the user sees one continuous
-/// thread regardless of how the turn was triggered.
+/// resolves via `commands::workspace::find_workspace_session`: the resolver
+/// returns the most-recent non-task session for this manager in this
+/// workspace, and the workspace itself only owns one such session, which
+/// this helper creates as Interactive. User chats and scheduler ticks both
+/// write here, so the user sees one continuous thread regardless of how
+/// the turn was triggered.
 ///
 /// Reconcile rules: title and most context fields track the live agent
 /// config; **dynamic per-run fields are preserved** when an existing row

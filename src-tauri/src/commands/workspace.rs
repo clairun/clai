@@ -1969,11 +1969,14 @@ pub async fn workspace_update_session_mcp(
             &workspace_pool,
             repository::CreateSessionParams {
                 // Always Interactive: this row IS the canonical workspace
-                // conversation that find_workspace_session resolves, and that
-                // resolver only returns Interactive sessions. Creating a
-                // BackgroundJob here would make the very next resolve miss it
-                // (silently reintroducing the self-task hijack for agent
-                // workspaces).
+                // conversation that find_workspace_session resolves. The
+                // resolver selects the most-recent non-task session for the
+                // manager; the workspace itself only ever owns one such
+                // session, so we keep it Interactive to match the historical
+                // shape (and so any non-task BackgroundJob rows from older
+                // scheduled-run code paths resolve ahead of this one only
+                // because they were updated more recently, not by virtue of
+                // their kind).
                 kind: SessionKind::Interactive,
                 title: Some(descriptor.title.clone()),
                 context: desired_workspace_context(
