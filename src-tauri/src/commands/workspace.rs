@@ -1993,6 +1993,80 @@ pub async fn workspace_store_image(
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceStoreImageFromPathRequest {
+    pub workspace_id: String,
+    /// Absolute path the user picked in the native file dialog.
+    pub path: String,
+}
+
+/// Guess an image MIME type from a file extension.
+///
+/// The native file dialog returns a path, not clipboard bytes, so there is no
+/// MIME to read — derive it from the extension. Returns `None` for anything the
+/// image store would reject anyway, so the caller surfaces a clear error.
+fn image_media_type_from_extension(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Persist an image chosen via the native file dialog and return a
+/// ready-to-attach [`ContentPart::Image`].
+///
+/// This is the reliable cross-platform attach path: clipboard image paste is
+/// unreliable in the Linux WebKitGTK webview, so the composer also offers a
+/// file picker that routes here. Reads the host file the user explicitly
+/// selected, infers the MIME from its extension, then reuses the same image
+/// store (size cap, MIME allowlist, workspace-root sandbox) as the paste path.
+#[tauri::command]
+pub async fn workspace_store_image_from_path(
+    request: WorkspaceStoreImageFromPathRequest,
+    state: State<'_, AppState>,
+) -> Result<ContentPart, String> {
+    let descriptor =
+        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
+    let root_path = descriptor
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(root_path)?;
+
+    let source = PathBuf::from(&request.path);
+    let media_type = image_media_type_from_extension(&source)
+        .ok_or_else(|| "Unsupported image type. Use PNG, JPEG, GIF, or WebP.".to_string())?;
+    let filename = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_string());
+
+    let bytes = tokio::fs::read(&source)
+        .await
+        .map_err(|error| format!("Could not read image file: {}", error))?;
+
+    let stored =
+        crate::assistant::image_store::store_image(root_path, &bytes, media_type, filename)?;
+
+    Ok(ContentPart::Image {
+        id: stored.id,
+        path: stored.path,
+        media_type: stored.media_type,
+        filename: stored.filename,
+        width: None,
+        height: None,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceUpdateMcpRequest {
     pub workspace_id: String,
     pub mcp_server_ids: Vec<String>,

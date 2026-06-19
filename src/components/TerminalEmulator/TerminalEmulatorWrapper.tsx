@@ -10,7 +10,12 @@
 import { useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAssistantStore, assistantClient } from '../../assistant';
-import { getOrCreateWorkspaceSession, storeWorkspaceImage } from '../../workspace/client';
+import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
+import {
+  getOrCreateWorkspaceSession,
+  storeWorkspaceImage,
+  storeWorkspaceImageFromPath,
+} from '../../workspace/client';
 import type { ContentPart } from '../../generated/bindings';
 import TerminalEmulator from './TerminalEmulator';
 
@@ -140,6 +145,47 @@ const TerminalEmulatorWrapper = () => {
     [currentWorkspaceId, isWorkspaceRoute]
   );
 
+  /**
+   * Reliable cross-platform attach: open the native file dialog, gate on the
+   * active connection, and store the chosen image. Clipboard paste is flaky in
+   * the Linux WebKitGTK webview, so this picker is the primary affordance.
+   */
+  const handlePickImage = useCallback(async (): Promise<{
+    part?: ContentPart;
+    error?: string;
+  }> => {
+    if (!isWorkspaceRoute) {
+      return { error: OPEN_WORKSPACE_ERROR };
+    }
+    try {
+      const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
+      const connectionId = binding.providerConnectionId;
+      if (!connectionId) {
+        return {
+          error: 'Add an enabled assistant provider connection before attaching images.',
+        };
+      }
+      const supported = await assistantClient.connectionSupportsImages(connectionId);
+      if (!supported) {
+        return { error: 'The selected model does not support image input.' };
+      }
+      const selected = await openFileDialog({
+        multiple: false,
+        title: 'Attach image',
+        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
+      });
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      if (!path) {
+        return {}; // user cancelled — no attachment, no error
+      }
+      const part = await storeWorkspaceImageFromPath(currentWorkspaceId, path);
+      return { part };
+    } catch (err) {
+      console.error('[TerminalEmulatorWrapper] Workspace image pick error:', err);
+      return { error: errorMessage(err, 'Could not attach image.') };
+    }
+  }, [currentWorkspaceId, isWorkspaceRoute]);
+
   const handleAgentCommand = useCallback(
     async (command: string): Promise<{ error?: string; message?: string }> => {
       const [name] = command.trim().split(/\s+/, 1);
@@ -209,6 +255,7 @@ const TerminalEmulatorWrapper = () => {
       onSendToChat={handleSendToAgent}
       onAgentCommand={handleAgentCommand}
       onAttachImage={handleAttachImage}
+      onPickImage={handlePickImage}
       agentWorking={inputDisabled}
     />
   );

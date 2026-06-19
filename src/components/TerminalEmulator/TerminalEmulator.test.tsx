@@ -181,4 +181,34 @@ describe('TerminalEmulator image attachments', () => {
     await user.click(screen.getByLabelText('Remove image'));
     expect(screen.queryByAltText('shot.png')).toBeNull();
   });
+
+  it('attaches an image via the file-picker button and sends it', async () => {
+    const user = userEvent.setup();
+    const onPickImage = vi.fn(async () => ({ part: imagePart }));
+    const onSendToChat = vi.fn(async () => ({}));
+
+    render(
+      <MemoryRouter initialEntries={['/workspace/A']}>
+        <TerminalEmulator
+          onPickImage={onPickImage}
+          onAttachImage={vi.fn()}
+          onSendToChat={onSendToChat}
+        />
+      </MemoryRouter>
+    );
+
+    await user.click(screen.getByLabelText('Attach image'));
+
+    // Picked images have no object URL, so the tray shows a filename chip.
+    await screen.findByText('shot.png');
+    expect(onPickImage).toHaveBeenCalledTimes(1);
+
+    // Focus the composer (the button had focus) then image-only send (no text).
+    await user.click(screen.getByRole('textbox'));
+    await user.keyboard('{Enter}');
+    expect(onSendToChat).toHaveBeenCalledWith(
+      '',
+      expect.arrayContaining([expect.objectContaining({ id: 'img-1', type: 'image' })])
+    );
+  });
 });

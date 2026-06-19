@@ -36,6 +36,7 @@ interface TerminalEmulatorProps {
   onSendToChat?: (text: string, images: ContentPart[]) => Promise<SendToChatResult | void>;
   onAgentCommand?: (command: string) => Promise<SendToChatResult | void>;
   onAttachImage?: (file: File) => Promise<AttachImageResult>;
+  onPickImage?: () => Promise<AttachImageResult>;
   agentWorking?: boolean;
 }
 
@@ -43,6 +44,7 @@ const TerminalEmulator = ({
   onSendToChat,
   onAgentCommand,
   onAttachImage,
+  onPickImage,
   agentWorking = false,
 }: TerminalEmulatorProps) => {
   const location = useLocation();
@@ -291,6 +293,23 @@ const TerminalEmulator = ({
     }
   };
 
+  // Native file-picker attach (reliable everywhere; paste is flaky on WebKitGTK).
+  const handlePickImage = async () => {
+    if (!onPickImage) return;
+    setIsAttaching(true);
+    try {
+      const res = await onPickImage();
+      if (res.error) {
+        addOutputMessage(res.error, 'error');
+      } else if (res.part) {
+        // No object URL: the picked file lives on disk, not as a browser File.
+        setAttachments((prev) => [...prev, { part: res.part as ContentPart, previewUrl: '' }]);
+      }
+    } finally {
+      setIsAttaching(false);
+    }
+  };
+
   const handleCommandExecution = async (input: string) => {
     const trimmed = input.trim();
     const pendingImages = attachments.map((a) => a.part);
@@ -487,15 +506,26 @@ const TerminalEmulator = ({
             {(attachments.length > 0 || isAttaching) && (
               <div className={styles.attachmentTray} aria-label="Image attachments">
                 {attachments.map((att, index) => (
-                  <div key={att.previewUrl} className={styles.attachmentThumb}>
-                    <img
-                      src={att.previewUrl}
-                      alt={
-                        att.part.type === 'image' && att.part.filename
+                  <div
+                    key={att.part.type === 'image' ? att.part.id : index}
+                    className={styles.attachmentThumb}
+                  >
+                    {att.previewUrl ? (
+                      <img
+                        src={att.previewUrl}
+                        alt={
+                          att.part.type === 'image' && att.part.filename
+                            ? att.part.filename
+                            : 'Attached image'
+                        }
+                      />
+                    ) : (
+                      <span className={styles.attachmentChip}>
+                        {att.part.type === 'image' && att.part.filename
                           ? att.part.filename
-                          : 'Attached image'
-                      }
-                    />
+                          : 'image'}
+                      </span>
+                    )}
                     <button
                       type="button"
                       className={styles.attachmentRemove}
@@ -516,6 +546,21 @@ const TerminalEmulator = ({
 
             {/* Terminal Input - Auto-growing textarea */}
             <div className={styles.terminalInputWrapper} ref={inputWrapperRef}>
+              {onPickImage && isWorkspaceRoute && (
+                <button
+                  type="button"
+                  className={styles.attachButton}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handlePickImage();
+                  }}
+                  disabled={isAttaching}
+                  aria-label="Attach image"
+                  title="Attach image"
+                >
+                  📎
+                </button>
+              )}
               <textarea
                 ref={inputRef}
                 rows={1}

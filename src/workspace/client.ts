@@ -106,6 +106,15 @@ export async function storeWorkspaceImage(
   });
 }
 
+export async function storeWorkspaceImageFromPath(
+  workspaceId: string,
+  path: string,
+): Promise<ContentPart> {
+  return invoke('workspace_store_image_from_path', {
+    request: { workspaceId, path },
+  });
+}
+
 export async function writeWorkspaceFile(
   workspaceId: string,
   path: string,

@@ -83,6 +83,9 @@
   flex: 1;
   position: relative;
   min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
   background: var(--color-overlay-02);
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-md);
@@ -98,7 +101,9 @@
 
 /* Terminal Input - Auto-growing textarea */
 .terminalInput {
+  flex: 1 1 auto;
   width: 100%;
+  min-width: 0;
   height: 20px; /* Single line height by default */
   background: transparent;
   border: none !important;
@@ -406,4 +411,49 @@
 .attachmentSpinner {
   font-size: 12px;
   opacity: 0.7;
+}
+
+
+/* ── Image attach button (native file picker) ───────────────── */
+.attachButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.attachButton:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--color-overlay-02);
+}
+
+.attachButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Filename chip for picked images that have no local thumbnail. */
+.attachmentChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 160px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-overlay-02);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
