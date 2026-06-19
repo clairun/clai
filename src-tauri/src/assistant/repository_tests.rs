@@ -219,10 +219,16 @@ async fn test_list_sessions_ordered_by_updated_at_desc() {
 }
 
 #[tokio::test]
-async fn test_list_sessions_by_kind_excludes_other_kinds() {
+async fn test_list_non_task_sessions_excludes_task_sessions() {
     let pool = setup_test_pool().await;
+    // Minimal stub of the workspace_tasks table the anti-join references.
+    sqlx::query("CREATE TABLE workspace_tasks (id TEXT PRIMARY KEY, session_id TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
 
-    let interactive = create_session(
+    // The interactive chat (canonical conversation).
+    let convo = create_session(
         &pool,
         CreateSessionParams {
             kind: SessionKind::Interactive,
@@ -233,30 +239,59 @@ async fn test_list_sessions_by_kind_excludes_other_kinds() {
     .await
     .unwrap();
 
-    // Two BackgroundJob (task) sessions that must NOT come back.
-    for title in ["Task A", "Task B"] {
-        create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::BackgroundJob,
-                title: Some(title.to_string()),
-                context: sample_context(),
-            },
-        )
+    // A task-delegation session: BackgroundJob + a workspace_tasks row.
+    let task = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::BackgroundJob,
+            title: Some("Task A".to_string()),
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO workspace_tasks (id, session_id) VALUES (?, ?)")
+        .bind("task-1")
+        .bind(&task.id)
+        .execute(&pool)
         .await
         .unwrap();
-    }
 
-    let interactive_only = list_sessions_by_kind(&pool, &SessionKind::Interactive)
+    // A task with no session yet (NULL session_id) must not nuke the result
+    // set via NOT IN / NULL semantics.
+    sqlx::query("INSERT INTO workspace_tasks (id, session_id) VALUES (?, NULL)")
+        .bind("task-pending")
+        .execute(&pool)
         .await
         .unwrap();
-    assert_eq!(interactive_only.len(), 1);
-    assert_eq!(interactive_only[0].id, interactive.id);
 
-    let background = list_sessions_by_kind(&pool, &SessionKind::BackgroundJob)
-        .await
-        .unwrap();
-    assert_eq!(background.len(), 2);
+    // A non-task BackgroundJob session (e.g. a scheduled-run conversation).
+    let scheduled = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::BackgroundJob,
+            title: Some("Scheduled".to_string()),
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = list_non_task_sessions(&pool).await.unwrap();
+    let ids: Vec<&str> = result.iter().map(|s| s.id.as_str()).collect();
+    assert!(
+        ids.contains(&convo.id.as_str()),
+        "interactive conversation kept"
+    );
+    assert!(
+        ids.contains(&scheduled.id.as_str()),
+        "non-task background session kept"
+    );
+    assert!(
+        !ids.contains(&task.id.as_str()),
+        "task-linked session excluded"
+    );
+    assert_eq!(result.len(), 2);
 }
 
 #[tokio::test]
@@ -1028,4 +1063,62 @@ async fn test_full_session_lifecycle() {
     // 6. Delete session
     delete_session(&pool, &session.id).await.unwrap();
     assert!(get_session(&pool, &session.id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_create_session_and_link_task_links_atomically() {
+    let pool = setup_test_pool().await;
+    sqlx::query("CREATE TABLE workspace_tasks (id TEXT PRIMARY KEY, session_id TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Insert a workspace_tasks row first (assignTask's order) without a session_id.
+    sqlx::query("INSERT INTO workspace_tasks (id, session_id) VALUES (?, NULL)")
+        .bind("task-1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // The atomic helper should INSERT the session AND stamp session_id in one
+    // transaction, so list_non_task_sessions (run before/after) reflects the
+    // final state on both sides.
+    let session = create_session_and_link_task(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::BackgroundJob,
+            title: Some("Self-task".to_string()),
+            context: sample_context(),
+        },
+        "task-1",
+    )
+    .await
+    .unwrap();
+
+    // The task row must now point at the session — the anti-join will exclude
+    // it, so a concurrent resolver cannot hijack the conversation view.
+    let linked: Option<String> =
+        sqlx::query_scalar("SELECT session_id FROM workspace_tasks WHERE id = ?")
+            .bind("task-1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(linked.as_deref(), Some(session.id.as_str()));
+
+    // The session must exist as a normal row (no caller-facing change).
+    let fetched = get_session(&pool, &session.id).await.unwrap();
+    assert!(fetched.is_some(), "session row exists after commit");
+
+    // And it must be invisible to list_non_task_sessions — the resolver
+    // property the whole fix hinges on.
+    let non_task_ids: Vec<String> = list_non_task_sessions(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert!(
+        !non_task_ids.contains(&session.id),
+        "task-linked session excluded by anti-join"
+    );
 }

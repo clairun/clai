@@ -265,13 +265,17 @@ async fn assign_task(
         }
     };
 
-    let session = repository::create_session(
+    // Insert the session and stamp its id on the workspace_tasks row in one
+    // SQLite transaction so a concurrent resolver cannot observe the session
+    // before the task row links to it (see create_session_and_link_task).
+    let session = repository::create_session_and_link_task(
         &deps.pool,
         CreateSessionParams {
             kind: SessionKind::BackgroundJob,
             title: Some(format!("Task: {}", title)),
             context: task_session_context(deps, context, &workspace_id, &target_config),
         },
+        &task_id,
     )
     .await?;
 
@@ -311,11 +315,13 @@ async fn assign_task(
     )
     .await?;
 
+    // session_id was already stamped by create_session_and_link_task above;
+    // passing None here lets COALESCE preserve it while we set run_id + status.
     update_task_status(
         &deps.pool,
         &task_id,
         "queued",
-        Some(&session.id),
+        None,
         Some(&run.id),
         None,
         None,

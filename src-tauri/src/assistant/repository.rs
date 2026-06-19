@@ -201,6 +201,74 @@ pub async fn create_session(
     Ok(session)
 }
 
+/// Create a session AND record its id on the given `workspace_tasks` row, in a
+/// single SQLite transaction.
+///
+/// `assignTask` creates the task row first (with `session_id = NULL`), then the
+/// `BackgroundJob` session that runs the task, then later UPDATEs the task row
+/// to stamp the session id. Between the session INSERT and that UPDATE there is
+/// a window where the new session is visible to `list_non_task_sessions` but
+/// has no `workspace_tasks.session_id` link, so the resolver would treat it as
+/// the most-recent non-task session and briefly hijack the conversation view
+/// for self-assigned tasks (manager→manager). Bundling the two writes into one
+/// transaction closes that window: the session only becomes visible to a
+/// concurrent resolver after the task row already points at it, so the anti-join
+/// excludes it.
+pub async fn create_session_and_link_task(
+    pool: &DbPool,
+    params: CreateSessionParams,
+    task_id: &str,
+) -> Result<AssistantSession, String> {
+    let now = now_ms();
+    let session = AssistantSession {
+        id: Uuid::new_v4().to_string(),
+        kind: params.kind,
+        title: params.title,
+        context: params.context,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start session+task link transaction: {e}"))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO assistant_sessions
+            (id, kind, title, context_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&session.id)
+    .bind(to_json_string(&session.kind)?)
+    .bind(&session.title)
+    .bind(to_json_string(&session.context)?)
+    .bind(session.created_at)
+    .bind(session.updated_at)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to create assistant session: {e}"))?;
+
+    sqlx::query(
+        r#"
+        UPDATE workspace_tasks SET session_id = ? WHERE id = ?
+        "#,
+    )
+    .bind(&session.id)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to link session to workspace task: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit session+task link transaction: {e}"))?;
+
+    Ok(session)
+}
+
 pub async fn get_session(
     pool: &DbPool,
     session_id: &str,
@@ -235,32 +303,36 @@ pub async fn list_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, Strin
     rows.iter().map(map_session_row).collect()
 }
 
-/// List sessions of a single `kind`, newest-first.
+/// Sessions that are NOT task delegations.
 ///
-/// Workspace conversation resolution needs only the `Interactive` session, so
-/// this lets callers skip loading the `BackgroundJob` rows — of which there is
-/// one per delegated task, an unbounded set as a workspace ages. Pushing the
-/// `kind` filter into SQL means those rows are never fetched or JSON-parsed.
-/// The `kind` column stores the JSON-serialized enum (e.g. `"interactive"`),
-/// so the predicate is derived from the enum via `to_json_string` rather than
-/// a hardcoded literal that could drift from the serialization.
-pub async fn list_sessions_by_kind(
-    pool: &DbPool,
-    kind: &SessionKind,
-) -> Result<Vec<AssistantSession>, String> {
-    let kind_json = to_json_string(kind)?;
+/// `workspace_assignTask` runs each delegated task in its own `BackgroundJob`
+/// session whose id is recorded in `workspace_tasks.session_id`. Such sessions
+/// must never be mistaken for a workspace's canonical conversation — and when a
+/// manager assigns a task to *itself* the task session even carries the
+/// manager's own `automation_id`, so an `automation_id` filter alone would not
+/// exclude it. Excluding task-linked sessions here, in SQL, keeps resolution
+/// independent of task volume (the unbounded set of task rows is never loaded)
+/// and leaves exactly the candidate conversations: the interactive chat plus
+/// any non-task `BackgroundJob` session (e.g. a scheduled-run conversation that
+/// older builds forked into its own row).
+///
+/// The `session_id IS NOT NULL` guard in the subquery is required: a `NULL` in
+/// a `NOT IN (...)` set makes the whole predicate `NULL` (never true) in SQL,
+/// which would otherwise return zero rows whenever any task has no session yet.
+pub async fn list_non_task_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, String> {
     let rows = sqlx::query(
         r#"
         SELECT id, kind, title, context_json, created_at, updated_at
         FROM assistant_sessions
-        WHERE kind = ?
+        WHERE id NOT IN (
+            SELECT session_id FROM workspace_tasks WHERE session_id IS NOT NULL
+        )
         ORDER BY updated_at DESC
         "#,
     )
-    .bind(kind_json)
     .fetch_all(pool)
     .await
-    .map_err(|e| format!("Failed to list assistant sessions by kind: {}", e))?;
+    .map_err(|e| format!("Failed to list non-task assistant sessions: {}", e))?;
 
     rows.iter().map(map_session_row).collect()
 }
