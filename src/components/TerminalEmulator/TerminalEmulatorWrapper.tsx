@@ -11,6 +11,7 @@ import { useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAssistantStore, assistantClient } from '../../assistant';
 import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
+import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import {
   getOrCreateWorkspaceSession,
   storeWorkspaceImage,
@@ -36,6 +37,44 @@ const fileToBase64 = (file: File): Promise<string> =>
     };
     reader.readAsDataURL(file);
   });
+
+/**
+ * Read an image from the native OS clipboard and convert it to a PNG `File`.
+ * Returns `null` when the clipboard holds no image, so an ordinary text paste
+ * can proceed. WebKit webviews (Linux/mac, what Claude Code users run) don't
+ * surface pasted images to the DOM paste event, so this native read is the
+ * only reliable Ctrl/Cmd+V image path there.
+ */
+async function readClipboardImageAsFile(): Promise<File | null> {
+  let image;
+  try {
+    image = await readImage();
+  } catch {
+    return null; // no image on the clipboard (e.g. a text paste)
+  }
+  try {
+    const rgba = await image.rgba();
+    const { width, height } = await image.size();
+    if (!width || !height) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+    const blob: Blob | null = await new Promise((resolve) =>
+      canvas.toBlob(resolve, 'image/png')
+    );
+    if (!blob) return null;
+    return new File([blob], 'pasted.png', { type: 'image/png' });
+  } finally {
+    try {
+      await image.close();
+    } catch {
+      // best-effort release of the native image resource
+    }
+  }
+}
 
 const TerminalEmulatorWrapper = () => {
   const location = useLocation();
@@ -256,6 +295,7 @@ const TerminalEmulatorWrapper = () => {
       onAgentCommand={handleAgentCommand}
       onAttachImage={handleAttachImage}
       onPickImage={handlePickImage}
+      onReadClipboardImage={readClipboardImageAsFile}
       agentWorking={inputDisabled}
     />
   );

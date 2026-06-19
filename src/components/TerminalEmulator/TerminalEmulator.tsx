@@ -37,6 +37,7 @@ interface TerminalEmulatorProps {
   onAgentCommand?: (command: string) => Promise<SendToChatResult | void>;
   onAttachImage?: (file: File) => Promise<AttachImageResult>;
   onPickImage?: () => Promise<AttachImageResult>;
+  onReadClipboardImage?: () => Promise<File | null>;
   agentWorking?: boolean;
 }
 
@@ -45,6 +46,7 @@ const TerminalEmulator = ({
   onAgentCommand,
   onAttachImage,
   onPickImage,
+  onReadClipboardImage,
   agentWorking = false,
 }: TerminalEmulatorProps) => {
   const location = useLocation();
@@ -269,14 +271,8 @@ const TerminalEmulator = ({
   // Revoke any outstanding preview URLs on unmount.
   useEffect(() => clearAttachments, [clearAttachments]);
 
-  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.items ?? [])
-      .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
-      .map((it) => it.getAsFile())
-      .filter((f): f is File => f !== null);
-    if (files.length === 0) return; // ordinary text paste — let it through
-    e.preventDefault();
-    if (!onAttachImage) return;
+  const attachFiles = async (files: File[]) => {
+    if (!onAttachImage || files.length === 0) return;
     setIsAttaching(true);
     try {
       for (const file of files) {
@@ -291,6 +287,25 @@ const TerminalEmulator = ({
     } finally {
       setIsAttaching(false);
     }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // Chromium/WebView2 (Windows) surfaces pasted images here.
+    const files = Array.from(e.clipboardData?.items ?? [])
+      .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (files.length > 0) {
+      e.preventDefault();
+      await attachFiles(files);
+      return;
+    }
+    // WebKit (Linux/mac) doesn't expose pasted images to the DOM paste event;
+    // fall back to reading the native OS clipboard. A non-image clipboard
+    // returns null, so the ordinary text paste proceeds untouched.
+    if (!onReadClipboardImage) return;
+    const nativeFile = await onReadClipboardImage();
+    if (nativeFile) await attachFiles([nativeFile]);
   };
 
   // Native file-picker attach (reliable everywhere; paste is flaky on WebKitGTK).

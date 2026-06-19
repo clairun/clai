@@ -159,6 +159,53 @@ describe('TerminalEmulator image attachments', () => {
     expect(screen.queryByAltText('shot.png')).toBeNull();
   });
 
+  it('falls back to the native clipboard when the paste event has no image (WebKit)', async () => {
+    const onAttachImage = vi.fn(async () => ({ part: imagePart }));
+    const file = new File(['x'], 'pasted.png', { type: 'image/png' });
+    const onReadClipboardImage = vi.fn(async () => file);
+
+    render(
+      <MemoryRouter initialEntries={['/workspace/A']}>
+        <TerminalEmulator
+          onAttachImage={onAttachImage}
+          onReadClipboardImage={onReadClipboardImage}
+          onSendToChat={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    // Empty DataTransfer — the WebKit case where the webview surfaces no file.
+    fireEvent.paste(input, { clipboardData: { items: [] } });
+
+    await screen.findByAltText('shot.png');
+    expect(onReadClipboardImage).toHaveBeenCalledTimes(1);
+    expect(onAttachImage).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a non-image paste through (native clipboard returns null)', async () => {
+    const onAttachImage = vi.fn(async () => ({ part: imagePart }));
+    const onReadClipboardImage = vi.fn(async () => null);
+
+    render(
+      <MemoryRouter initialEntries={['/workspace/A']}>
+        <TerminalEmulator
+          onAttachImage={onAttachImage}
+          onReadClipboardImage={onReadClipboardImage}
+          onSendToChat={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    const input = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.paste(input, { clipboardData: { items: [] } });
+
+    // Gave the native read a chance, but nothing attached (text paste path).
+    await Promise.resolve();
+    expect(onReadClipboardImage).toHaveBeenCalledTimes(1);
+    expect(onAttachImage).not.toHaveBeenCalled();
+  });
+
   it('removes a pasted image from the tray before send', async () => {
     const user = userEvent.setup();
     const onAttachImage = vi.fn(async () => ({ part: imagePart }));
