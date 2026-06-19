@@ -1266,6 +1266,13 @@ async fn run_codex_turn(
             );
         }
     }
+    // Attach images from the latest user turn. `--image` is valid on both the
+    // fresh `exec` (via shared options) and `exec resume` (ResumeArgsRaw.images)
+    // paths; codex reads the files itself. Only present on the turn the user
+    // actually sent them, so no per-turn re-send.
+    for image_path in resolve_codex_image_paths(deps, session).await {
+        command.arg("--image").arg(image_path);
+    }
     command
         .arg("-")
         .stdin(Stdio::piped())
@@ -1648,6 +1655,60 @@ async fn resolve_cli_image_parts(
         }
     }
     resolved
+}
+
+/// Absolute, store-validated paths of the image parts on the latest user
+/// message. Codex ingests images as files (`codex exec [resume] --image`), so
+/// it gets paths rather than base64. Non-store paths and missing files are
+/// skipped (text still sends).
+async fn resolve_codex_image_paths(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+) -> Vec<PathBuf> {
+    let messages = match repository::list_messages(&deps.pool, &session.id).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            tracing::warn!(%error, "Codex image: message read failed; sending text only");
+            return Vec::new();
+        }
+    };
+    let Some(latest_user) = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == MessageRole::User)
+    else {
+        return Vec::new();
+    };
+    let rels: Vec<String> = latest_user
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Image { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    if rels.is_empty() {
+        return Vec::new();
+    }
+    let Some(root) = workspace_root_for_session(deps, session) else {
+        tracing::warn!("Codex image: no workspace root for session; sending text only");
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(rels.len());
+    for rel in rels {
+        // Defense-in-depth: never hand codex a non-store path.
+        if !crate::assistant::image_store::is_store_relative_path(&rel) {
+            tracing::warn!(path = %rel, "Codex image: non-store path rejected; skipping");
+            continue;
+        }
+        let abs = root.join(&rel);
+        if tokio::fs::try_exists(&abs).await.unwrap_or(false) {
+            out.push(abs);
+        } else {
+            tracing::warn!(path = %abs.display(), "Codex image: file missing; skipping");
+        }
+    }
+    out
 }
 
 fn add_codex_common_args(
