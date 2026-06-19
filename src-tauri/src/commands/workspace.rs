@@ -19,7 +19,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use tauri::State;
+use tauri::{AppHandle, State};
 use ts_rs::TS;
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
@@ -1991,14 +1991,6 @@ pub async fn workspace_store_image(
     })
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceStoreImageFromPathRequest {
-    pub workspace_id: String,
-    /// Absolute path the user picked in the native file dialog.
-    pub path: String,
-}
-
 /// Guess an image MIME type from a file extension.
 ///
 /// The native file dialog returns a path, not clipboard bytes, so there is no
@@ -2028,19 +2020,39 @@ fn image_media_type_from_extension(path: &Path) -> Option<&'static str> {
 /// selected, infers the MIME from its extension, then reuses the same image
 /// store (size cap, MIME allowlist, workspace-root sandbox) as the paste path.
 #[tauri::command]
-pub async fn workspace_store_image_from_path(
-    request: WorkspaceStoreImageFromPathRequest,
+pub async fn workspace_pick_and_store_image(
+    workspace_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<ContentPart, String> {
-    let descriptor =
-        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
+) -> Result<Option<ContentPart>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let descriptor = resolve_workspace_descriptor(state.inner(), Some(workspace_id.clone()))?;
     let root_path = descriptor
         .root_path
         .as_ref()
         .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
     ensure_agent_workspace_root(root_path)?;
 
-    let source = PathBuf::from(&request.path);
+    // The dialog runs in the backend, so the chosen path comes from a genuine
+    // OS user selection — never a renderer-supplied string. A compromised
+    // renderer can `invoke` this command, but cannot dictate which file is
+    // read (it can only pop the picker), so it can't exfiltrate arbitrary
+    // files (e.g. `~/.ssh/id_rsa`) into the image store. This command is async,
+    // so `blocking_pick_file` runs off the main thread (required by the plugin).
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+        .blocking_pick_file();
+
+    let Some(file_path) = picked else {
+        return Ok(None); // user cancelled — no attachment, no error
+    };
+    let source = file_path
+        .into_path()
+        .map_err(|error| format!("Invalid file path: {}", error))?;
+
     let media_type = image_media_type_from_extension(&source)
         .ok_or_else(|| "Unsupported image type. Use PNG, JPEG, GIF, or WebP.".to_string())?;
     let filename = source
@@ -2055,14 +2067,14 @@ pub async fn workspace_store_image_from_path(
     let stored =
         crate::assistant::image_store::store_image(root_path, &bytes, media_type, filename)?;
 
-    Ok(ContentPart::Image {
+    Ok(Some(ContentPart::Image {
         id: stored.id,
         path: stored.path,
         media_type: stored.media_type,
         filename: stored.filename,
         width: None,
         height: None,
-    })
+    }))
 }
 
 #[derive(Debug, Clone, Deserialize)]

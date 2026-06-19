@@ -10,12 +10,11 @@
 import { useCallback } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAssistantStore, assistantClient } from '../../assistant';
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import {
   getOrCreateWorkspaceSession,
   storeWorkspaceImage,
-  storeWorkspaceImageFromPath,
+  pickAndStoreWorkspaceImage,
 } from '../../workspace/client';
 import type { ContentPart } from '../../generated/bindings';
 import TerminalEmulator from './TerminalEmulator';
@@ -208,16 +207,12 @@ const TerminalEmulatorWrapper = () => {
       if (!supported) {
         return { error: 'The selected model does not support image input.' };
       }
-      const selected = await openFileDialog({
-        multiple: false,
-        title: 'Attach image',
-        filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
-      });
-      const path = Array.isArray(selected) ? selected[0] : selected;
-      if (!path) {
-        return {}; // user cancelled — no attachment, no error
+      // Dialog runs backend-side: the picked path never crosses the
+      // renderer boundary, closing the arbitrary-file-read hole.
+      const part = await pickAndStoreWorkspaceImage(currentWorkspaceId);
+      if (!part) {
+        return {}; // user cancelled, no attachment, no error
       }
-      const part = await storeWorkspaceImageFromPath(currentWorkspaceId, path);
       return { part };
     } catch (err) {
       console.error('[TerminalEmulatorWrapper] Workspace image pick error:', err);

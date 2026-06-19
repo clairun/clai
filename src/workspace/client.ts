@@ -106,13 +106,12 @@ export async function storeWorkspaceImage(
   });
 }
 
-export async function storeWorkspaceImageFromPath(
+export async function pickAndStoreWorkspaceImage(
   workspaceId: string,
-  path: string,
-): Promise<ContentPart> {
-  return invoke('workspace_store_image_from_path', {
-    request: { workspaceId, path },
-  });
+): Promise<ContentPart | null> {
+  // The native file dialog runs in the backend so the chosen path never
+  // crosses the renderer trust boundary. Returns null if the user cancels.
+  return invoke('workspace_pick_and_store_image', { workspaceId });
 }
 
 export async function writeWorkspaceFile(
