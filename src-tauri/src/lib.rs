@@ -271,6 +271,7 @@ pub fn run() {
     // Build and run the Tauri application
     tauri::Builder::default()
         // Register Tauri plugins
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_opener::init())
@@ -327,6 +328,7 @@ pub fn run() {
             commands::assistant::assistant_list_runs,
             commands::assistant::assistant_list_tool_calls,
             commands::assistant::assistant_send_message,
+            commands::assistant::assistant_connection_supports_images,
             commands::assistant::assistant_compact_session,
             commands::assistant::assistant_delete_queued_message,
             commands::assistant::assistant_edit_queued_message,
@@ -388,6 +390,8 @@ pub fn run() {
             commands::workspace::workspace_list_dir,
             commands::workspace::workspace_search_artifacts,
             commands::workspace::workspace_write_file,
+            commands::workspace::workspace_store_image,
+            commands::workspace::workspace_pick_and_store_image,
             commands::workspace::workspace_download_file,
             commands::workspace::workspace_update_session_mcp,
             commands::workspace::workspace_set_provider,

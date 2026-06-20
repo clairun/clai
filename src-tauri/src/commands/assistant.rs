@@ -16,6 +16,8 @@ use crate::assistant::types::{
 use crate::config::workspace_config;
 use crate::db::DbPool;
 use crate::AppState;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -240,7 +242,7 @@ pub async fn assistant_delete_session(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, session) = session_pool(state.inner(), &session_id).await?;
     // Hard clear: the schema cascades messages/runs/tool calls/compactions.
     // Refuse while a run is in flight — the engine would keep writing rows
     // for (and emitting events about) a session that no longer exists.
@@ -250,7 +252,21 @@ pub async fn assistant_delete_session(
                 .to_string(),
         );
     }
-    repository::delete_session(&target_pool, &session_id).await
+
+    // Collect this session's image paths *before* the cascade (the DB
+    // cascade kills the messages that point at them). Then delete the
+    // session, then sweep the files from `.clai/images/`. Scoped to
+    // this session's image refs and validated through
+    // `is_store_relative_path`, so we never touch files referenced by
+    // other sessions sharing the same workspace root, and a hostile
+    // crafted `path` can only ever match a real store file (already
+    // validated at send time anyway).
+    let image_paths = collect_session_image_paths(&target_pool, &session_id).await?;
+    let deleted = repository::delete_session(&target_pool, &session_id).await?;
+    if deleted {
+        sweep_session_images(state.inner(), &session, image_paths).await;
+    }
+    Ok(deleted)
 }
 
 #[tauri::command]
@@ -403,14 +419,141 @@ pub async fn assistant_list_tool_calls(
     repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref()).await
 }
 
+/// Validate the attachments on a user send: only `ContentPart::Image` parts may
+/// ride a user message, so the frontend can't smuggle tool/assistant content in.
+/// Walk a session's messages and return the set of image-store
+/// relative paths referenced by its `ContentPart::Image` parts. Used
+/// by clear to know which on-disk files became orphaned by the DB
+/// cascade.
+async fn collect_session_image_paths(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<HashSet<String>, String> {
+    let messages = repository::list_messages(pool, session_id).await?;
+    let mut paths = HashSet::new();
+    for message in messages {
+        for part in message.content {
+            if let ContentPart::Image { path, .. } = part {
+                // Defensive: only ever record paths the store would
+                // emit, even though send-time validation already
+                // rejected anything else.
+                if crate::assistant::image_store::is_store_relative_path(&path) {
+                    paths.insert(path);
+                }
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// Pure helper: turn the workspace root + a set of store-relative
+/// image paths into the absolute file paths on disk. The `path`s
+/// come from `ContentPart::Image.path` and already start with
+/// `.clai/images/<uuid>.<ext>` (validated by
+/// `image_store::is_store_relative_path`), so we join them directly
+/// under the root — *not* under `<root>/.clai/images/`, which would
+/// double the prefix and miss every file. Kept pure so the join
+/// logic is testable without spinning up a DB.
+fn resolve_session_image_files(root: &Path, paths: &HashSet<String>) -> Vec<PathBuf> {
+    paths.iter().map(|p| root.join(p)).collect()
+}
+
+/// Delete each collected image file from `<workspace>/.clai/images/`.
+/// Resolves the workspace root from the session context; a missing
+/// root, missing file, or any other per-file error is logged and
+/// skipped — never blocks the user-facing clear result.
+async fn sweep_session_images(
+    state: &AppState,
+    session: &AssistantSession,
+    paths: HashSet<String>,
+) {
+    if paths.is_empty() {
+        return;
+    }
+    let Some(workspace_id) = session
+        .context
+        .workspace_id
+        .as_deref()
+        .or(session.context.agent_workspace_id.as_deref())
+    else {
+        return;
+    };
+    let Some(root): Option<PathBuf> = state.workspace_root(workspace_id) else {
+        return;
+    };
+    for file in resolve_session_image_files(&root, &paths) {
+        match tokio::fs::remove_file(&file).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    file = %file.display(),
+                    error = %error,
+                    "Clear: failed to remove orphaned image file; ignoring"
+                );
+            }
+        }
+    }
+}
+
+fn validate_send_images(images: &[ContentPart]) -> Result<(), String> {
+    for part in images {
+        match part {
+            // The path must be a store-owned reference (`.clai/images/<uuid>.<ext>`).
+            // Without this check a crafted send could carry an absolute or `..`
+            // path, which the send path would `root.join` + base64 + ship to the
+            // model — an arbitrary-local-file read/exfiltration hole.
+            ContentPart::Image { path, .. } => {
+                if !crate::assistant::image_store::is_store_relative_path(path) {
+                    return Err(format!(
+                        "assistant_send_message: image attachment path is not a workspace                          image-store reference (expected .clai/images/<uuid>.<ext>): {:?}",
+                        path
+                    ));
+                }
+            }
+            // Only image parts may ride a user send, so the frontend can't
+            // smuggle tool/assistant content into a user message.
+            bad => {
+                return Err(format!(
+                    "assistant_send_message only accepts image attachments, got: {:?}",
+                    bad
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the given connection's active model accepts image input. Drives the
+/// composer's paste/attach affordance — a single source of truth so the UI gate
+/// can't drift from the backend send-filter. See
+/// [`crate::assistant::providers::connection_supports_images`].
+#[tauri::command]
+pub async fn assistant_connection_supports_images(
+    connection_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let connection = provider_connection(state.inner(), &connection_id)?;
+    Ok(crate::assistant::providers::connection_supports_images(
+        &connection.provider_id,
+        &connection.model_id,
+    ))
+}
+
 #[tauri::command]
 pub async fn assistant_send_message(
     session_id: String,
     message: String,
     connection_id: String,
+    images: Option<Vec<ContentPart>>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AssistantSendMessageResult, String> {
+    // Only image parts may ride a user send; reject anything else so the
+    // frontend can't smuggle tool/assistant content into a user message.
+    let images = images.unwrap_or_default();
+    validate_send_images(&images)?;
     let (target_pool, mut session) = session_pool(state.inner(), &session_id).await?;
     let connection = provider_connection(state.inner(), &connection_id)?;
     let active_run = repository::get_active_run(&target_pool, &session.id).await?;
@@ -431,10 +574,12 @@ pub async fn assistant_send_message(
     }
 
     let queue_message = active_run.is_some() || has_pending_queue;
-    let assistant_message = repository::create_user_message(
+    let mut content = vec![ContentPart::Text { text: message }];
+    content.extend(images);
+    let assistant_message = repository::create_user_message_with_content(
         &target_pool,
         session.id.clone(),
-        message,
+        content,
         queue_message.then_some(connection_id.as_str()),
     )
     .await?;
@@ -896,4 +1041,95 @@ pub(crate) async fn start_queued_followup_if_idle(
     );
 
     Ok(Some(run))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn image() -> ContentPart {
+        ContentPart::Image {
+            id: "img-1".into(),
+            path: ".clai/images/00000000-0000-4000-8000-000000000000.png".into(),
+            media_type: "image/png".into(),
+            filename: None,
+            width: None,
+            height: None,
+        }
+    }
+
+    fn image_with_path(path: &str) -> ContentPart {
+        ContentPart::Image {
+            id: "img-x".into(),
+            path: path.into(),
+            media_type: "image/png".into(),
+            filename: None,
+            width: None,
+            height: None,
+        }
+    }
+
+    #[test]
+    fn validate_send_images_accepts_only_images() {
+        assert!(validate_send_images(&[]).is_ok());
+        assert!(validate_send_images(&[image(), image()]).is_ok());
+    }
+
+    #[test]
+    fn validate_send_images_rejects_non_store_paths() {
+        // Absolute path → the arbitrary-file-read/exfiltration vector.
+        let err = validate_send_images(&[image_with_path("/etc/passwd")]).unwrap_err();
+        assert!(err.contains("image-store reference"), "got: {err}");
+        // Parent-dir traversal → rejected.
+        assert!(validate_send_images(&[image_with_path("../../secret.png")]).is_err());
+        // Non-UUID stem under the store → rejected.
+        assert!(validate_send_images(&[image_with_path(".clai/images/passwd.png")]).is_err());
+    }
+
+    #[test]
+    fn validate_send_images_rejects_non_image_parts() {
+        let err = validate_send_images(&[
+            image(),
+            ContentPart::Text {
+                text: "sneaky".into(),
+            },
+        ])
+        .unwrap_err();
+        assert!(err.contains("only accepts image attachments"));
+
+        assert!(validate_send_images(&[ContentPart::ToolResult {
+            tool_call_id: "t1".into(),
+            payload: json!({}),
+            started_at: None,
+            completed_at: None,
+        }])
+        .is_err());
+    }
+
+    #[test]
+    fn resolve_session_image_files_joins_root_and_relative_paths() {
+        use std::path::Path;
+        let root = Path::new("/workspaces/foo");
+        let mut paths = HashSet::new();
+        paths.insert(".clai/images/uuid-a.png".to_string());
+        paths.insert(".clai/images/uuid-b.jpg".to_string());
+        let files = resolve_session_image_files(root, &paths);
+        let mut display: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+        display.sort();
+        assert_eq!(
+            display,
+            vec![
+                "/workspaces/foo/.clai/images/uuid-a.png".to_string(),
+                "/workspaces/foo/.clai/images/uuid-b.jpg".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_session_image_files_is_a_noop_for_empty_set() {
+        use std::path::Path;
+        let files = resolve_session_image_files(Path::new("/anywhere"), &HashSet::new());
+        assert!(files.is_empty());
+    }
 }

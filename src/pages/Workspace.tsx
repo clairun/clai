@@ -608,7 +608,12 @@ const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
 // children on first expand, caching them by path. The 5s snapshot poll surfaces
 // new artifacts by bumping `totalCount`, which we use to silently refresh the
 // already-loaded levels so a running agent's output appears without reopening.
-const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: ArtifactsListProps) => {
+const ArtifactsList = ({
+  workspaceId,
+  totalCount,
+  latestModifiedAt,
+  onSelect,
+}: ArtifactsListProps) => {
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [childrenByPath, setChildrenByPath] = useState<Map<string, WorkspaceDirEntry[]>>(
@@ -661,7 +666,7 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
   useEffect(() => {
     autoExpandedRef.current = false;
     loadingRef.current = new Set();
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets file-tree state and triggers a root reload when the workspace switches; the lint cannot model a 'reset then async-load' effect that runs once per workspaceId.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resets file-tree state and triggers a root reload when the workspace switches; the lint cannot model a 'reset then async-load' effect that runs once per workspaceId.
     setExpanded(new Set());
     setChildrenByPath(new Map());
     void loadDir('', true);
@@ -691,7 +696,7 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
     autoExpandedRef.current = true;
     if (root.length === 1 && root[0]!.kind === 'directory') {
       const only = root[0]!.path;
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Auto-expands the single top-level directory on first root load so the user lands inside the workspace folder; guarded by autoExpandedRef and gated on the root shape, which makes it a one-shot effect rather than a prop-resync.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Auto-expands the single top-level directory on first root load so the user lands inside the workspace folder; guarded by autoExpandedRef and gated on the root shape, which makes it a one-shot effect rather than a prop-resync.
       setExpanded(new Set([only]));
       void loadDir(only);
     }
@@ -700,7 +705,7 @@ const ArtifactsList = ({ workspaceId, totalCount, latestModifiedAt, onSelect }: 
   // Debounced server-side search. Empty query → tree view.
   useEffect(() => {
     if (!trimmedQuery) {
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Debounced server-side search bootstrap; async invoke + cancellation token + setTimeout is outside the lint's set-state model, and the empty-query early-return branch makes a 'resync from prop' formulation incomplete.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Debounced server-side search bootstrap; async invoke + cancellation token + setTimeout is outside the lint's set-state model, and the empty-query early-return branch makes a 'resync from prop' formulation incomplete.
       setSearchResults(null);
       setSearching(false);
       return;
@@ -1237,60 +1242,61 @@ const ChatFirstLayout = ({
 
   return (
     <div className={styles.chatFirstContent} ref={cardRef}>
-    {messages.length > 0 ? (
-      <>
-        {/* Keyed by workspace: this component instance is reused across
+      {messages.length > 0 ? (
+        <>
+          {/* Keyed by workspace: this component instance is reused across
             workspace→workspace navigations, so without the key the list
             carries over the previous workspace's scroll position (and its
             measured-height cache) instead of opening at the bottom. */}
-        <ChatMessageList
-          key={workspaceId}
-          messages={messages}
-          toolCalls={toolCalls}
-          streamingText={streamingText}
-          isStreaming={isStreaming}
-          runError={runError}
-          runErrorIsLimit={runErrorIsLimit}
-          runStartedAt={runStartedAt}
-          queuedMessageIds={queuedMessageIds}
-          onDeleteQueuedMessage={onDeleteQueuedMessage}
-          onEditQueuedMessage={onEditQueuedMessage}
-          hasOlderMessages={hasOlderMessages}
-          isLoadingOlderMessages={isLoadingOlderMessages}
-          onLoadOlderMessages={onLoadOlderMessages}
-        />
-        <AskUserPanel sessionId={sessionId} />
-        <InlineApprovalCard workspaceId={workspaceId} />
-        <InlinePathGrantCard workspaceId={workspaceId} />
-      </>
-    ) : isHydrating ? (
-      <div className={styles.chatFirstLoading} aria-live="polite" aria-busy="true">
-        <span className={styles.chatFirstLoadingDot} />
-        <span className={styles.chatFirstLoadingText}>Loading conversation…</span>
-      </div>
-    ) : (
-      <div className={styles.chatFirstEmpty}>
-        <div className={styles.chatFirstEmptyIcon}>
-          <svg
-            width="40"
-            height="40"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-          </svg>
+          <ChatMessageList
+            key={workspaceId}
+            workspaceId={workspaceId}
+            messages={messages}
+            toolCalls={toolCalls}
+            streamingText={streamingText}
+            isStreaming={isStreaming}
+            runError={runError}
+            runErrorIsLimit={runErrorIsLimit}
+            runStartedAt={runStartedAt}
+            queuedMessageIds={queuedMessageIds}
+            onDeleteQueuedMessage={onDeleteQueuedMessage}
+            onEditQueuedMessage={onEditQueuedMessage}
+            hasOlderMessages={hasOlderMessages}
+            isLoadingOlderMessages={isLoadingOlderMessages}
+            onLoadOlderMessages={onLoadOlderMessages}
+          />
+          <AskUserPanel sessionId={sessionId} />
+          <InlineApprovalCard workspaceId={workspaceId} />
+          <InlinePathGrantCard workspaceId={workspaceId} />
+        </>
+      ) : isHydrating ? (
+        <div className={styles.chatFirstLoading} aria-live="polite" aria-busy="true">
+          <span className={styles.chatFirstLoadingDot} />
+          <span className={styles.chatFirstLoadingText}>Loading conversation…</span>
         </div>
-        <p className={styles.chatFirstEmptyTitle}>Start a conversation</p>
-        <p className={styles.chatFirstEmptyText}>
-          Type a message in the terminal below to begin. This workspace can search the web, create
-          documents, and use any attached MCP servers.
-        </p>
-      </div>
-    )}
+      ) : (
+        <div className={styles.chatFirstEmpty}>
+          <div className={styles.chatFirstEmptyIcon}>
+            <svg
+              width="40"
+              height="40"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+          </div>
+          <p className={styles.chatFirstEmptyTitle}>Start a conversation</p>
+          <p className={styles.chatFirstEmptyText}>
+            Type a message in the terminal below to begin. This workspace can search the web, create
+            documents, and use any attached MCP servers.
+          </p>
+        </div>
+      )}
     </div>
   );
 };
@@ -1372,7 +1378,10 @@ const Workspace = () => {
     [patchWorkspaceUi]
   );
 
-  const closePreview = useCallback(() => patchWorkspaceUi({ previewEntry: null }), [patchWorkspaceUi]);
+  const closePreview = useCallback(
+    () => patchWorkspaceUi({ previewEntry: null }),
+    [patchWorkspaceUi]
+  );
   const closeTaskTranscript = useCallback(
     () => patchWorkspaceUi({ viewingTask: null }),
     [patchWorkspaceUi]
@@ -1598,7 +1607,7 @@ const Workspace = () => {
 
   useEffect(() => {
     lastLoadedSessionUpdatedAtRef.current = null;
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Interval poll on loadSnapshot identity: full reload once, then setInterval for lightweight polls. The pattern cannot be expressed without setState in an effect (refs can't trigger renders).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Interval poll on loadSnapshot identity: full reload once, then setInterval for lightweight polls. The pattern cannot be expressed without setState in an effect (refs can't trigger renders).
     loadSnapshot(true);
     const interval = window.setInterval(
       () => loadSnapshot(false, LIGHTWEIGHT_SNAPSHOT_OPTIONS),
@@ -1607,17 +1616,11 @@ const Workspace = () => {
     return () => window.clearInterval(interval);
   }, [loadSnapshot]);
 
-  const memories = useMemo(
-    () => snapshot?.memories || [],
-    [snapshot?.memories]
-  );
+  const memories = useMemo(() => snapshot?.memories || [], [snapshot?.memories]);
   // `artifacts` is now intentionally empty in the snapshot — the panel lazy-
   // loads each directory level on demand. It's kept only so navigatePreviewFile
   // can still resolve a clicked sibling against any entries it has seen.
-  const artifacts = useMemo(
-    () => snapshot?.artifacts || [],
-    [snapshot?.artifacts]
-  );
+  const artifacts = useMemo(() => snapshot?.artifacts || [], [snapshot?.artifacts]);
   const artifactCount = Number(snapshot?.artifactCount ?? 0);
 
   // Open another workspace file in the preview — used when a link inside a
@@ -1693,7 +1696,11 @@ const Workspace = () => {
     if (!sessionId) return;
     const store = useAssistantStore.getState();
     const current = store.sessions[sessionId];
-    if (!current?.hasOlderMessages || !current.olderMessageCursor || current.isLoadingOlderMessages) {
+    if (
+      !current?.hasOlderMessages ||
+      !current.olderMessageCursor ||
+      current.isLoadingOlderMessages
+    ) {
       return;
     }
 
@@ -1739,7 +1746,7 @@ const Workspace = () => {
         const connectionId = binding.providerConnectionId;
         if (!connectionId) {
           throw new Error(
-            'Add an enabled assistant provider connection before sending the fork prompt.',
+            'Add an enabled assistant provider connection before sending the fork prompt.'
           );
         }
 
@@ -1780,8 +1787,7 @@ const Workspace = () => {
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
   const lastRun = getLastRunInfo(sessionState?.runs || activeSnapshot?.runs);
-  const runError =
-    lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
+  const runError = lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
   const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
   // Tell the backend this workspace is being viewed so the rail clears its
   // "unread" indicator. Keyed on isStreaming too: a run that finishes while
@@ -1803,7 +1809,7 @@ const Workspace = () => {
     const stillActive = (snapshot?.runs || []).some(
       (run) => run.id === cancellingRunId && ACTIVE_RUN_STATUSES.includes(run.status)
     );
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Clears the 'stopping…' lock once the cancelled run leaves the active set; the cancel propagation is async (engine checkpoints) so the clear has to observe snapshot.runs in an effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Clears the 'stopping…' lock once the cancelled run leaves the active set; the cancel propagation is async (engine checkpoints) so the clear has to observe snapshot.runs in an effect.
     if (!stillActive) setCancellingRunId(null);
   }, [snapshot, cancellingRunId]);
   const stopBusy = cancellingRunId !== null;
@@ -1923,7 +1929,17 @@ const Workspace = () => {
                       title="Add files to the workspace"
                       aria-label="Add files to the workspace"
                     >
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
                         <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                         <polyline points="14 2 14 8 20 8" />
                         <line x1="12" y1="12" x2="12" y2="18" />
@@ -1937,7 +1953,17 @@ const Workspace = () => {
                       title="Open the workspace in your editor"
                       aria-label="Open the workspace in your editor"
                     >
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
                         <polyline points="16 18 22 12 16 6" />
                         <polyline points="8 6 2 12 8 18" />
                       </svg>
@@ -1949,7 +1975,17 @@ const Workspace = () => {
                       title="Open a terminal at the workspace folder"
                       aria-label="Open a terminal at the workspace folder"
                     >
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
                         <polyline points="4 17 10 11 4 5" />
                         <line x1="12" y1="19" x2="20" y2="19" />
                       </svg>

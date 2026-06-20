@@ -273,9 +273,30 @@ pub async fn run_session_turn(
         let provider_history =
             compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
         let normalized = normalize_history_for_provider(&provider_history);
+        let supports_images =
+            providers::connection_supports_images(&connection.provider_id, &connection.model_id);
+        // Drop image parts from history when the active connection can't accept
+        // them (e.g. user switched to a non-vision provider mid-conversation).
+        // The gate stops *new* image attachments; this keeps replayed history
+        // valid for the current provider. CLI providers already render images as
+        // a text placeholder upstream, so this only bites the HTTP path.
+        let normalized = if supports_images {
+            normalized
+        } else {
+            strip_unsupported_images(normalized)
+        };
 
         let mut provider_messages = vec![system_message.clone()];
         provider_messages.extend(normalized);
+
+        // Resolve image files to inline base64 for image-capable API providers.
+        // CLI providers ingest images via their own mechanism (file paths in the
+        // CLI invocation), not this HTTP request, so they don't need inlining.
+        let images = if supports_images && !providers::is_cli_provider(&connection.provider_id) {
+            resolve_request_images(deps, &session, &provider_messages).await
+        } else {
+            std::collections::HashMap::new()
+        };
 
         let request = CompletionRequest {
             run_id: run_id.clone(),
@@ -285,6 +306,7 @@ pub async fn run_session_turn(
             tools: tool_defs.clone(),
             temperature: None,
             max_output_tokens: None,
+            images,
         };
 
         // Call the provider
@@ -1236,6 +1258,56 @@ mod tests {
     use crate::assistant::types::SessionKind;
     use crate::assistant::types::WorkspaceAgentSummary;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
+
+    #[test]
+    fn message_contains_image_detects_image_parts() {
+        assert!(message_contains_image(&[
+            ContentPart::Text {
+                text: "see this".to_string()
+            },
+            ContentPart::Image {
+                id: "img-1".to_string(),
+                path: "img-1.png".to_string(),
+                media_type: "image/png".to_string(),
+                filename: None,
+                width: None,
+                height: None,
+            },
+        ]));
+        assert!(!message_contains_image(&[ContentPart::Text {
+            text: "no image".to_string()
+        }]));
+        assert!(!message_contains_image(&[]));
+    }
+
+    #[test]
+    fn strip_unsupported_images_replaces_image_parts_with_placeholder() {
+        let messages = vec![ProviderInputMessage {
+            role: MessageRole::User,
+            content: vec![
+                ContentPart::Text {
+                    text: "look at this".to_string(),
+                },
+                ContentPart::Image {
+                    id: "img1".to_string(),
+                    path: ".clai/images/img1.png".to_string(),
+                    media_type: "image/png".to_string(),
+                    filename: None,
+                    width: None,
+                    height: None,
+                },
+            ],
+        }];
+
+        let out = strip_unsupported_images(messages);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content.len(), 2);
+        assert!(matches!(&out[0].content[0], ContentPart::Text { text } if text == "look at this"));
+        assert!(
+            matches!(&out[0].content[1], ContentPart::Text { text } if text == "[image omitted]"),
+            "image part should become a text placeholder"
+        );
+    }
 
     #[test]
     fn build_system_prompt_includes_agent_memory_guidance_for_automations() {
@@ -2540,6 +2612,92 @@ fn normalized_assistant_parts(parts: &[ContentPart]) -> Vec<ContentPart> {
         .collect()
 }
 
+/// Replace `ContentPart::Image` parts with a short text placeholder so a
+/// non-vision provider still receives coherent (if lossy) history. Used only
+/// when `connection_supports_images` is false for the active connection.
+/// Read each `ContentPart::Image` in `messages` from disk and return its bytes
+/// base64-encoded, keyed by image id. Best-effort: a missing/unreadable file is
+/// logged and skipped (the adapter then omits that image block but still sends
+/// the surrounding text). Only called for image-capable API connections.
+async fn resolve_request_images(
+    deps: &AssistantDeps,
+    session: &crate::assistant::types::AssistantSession,
+    messages: &[ProviderInputMessage],
+) -> std::collections::HashMap<String, crate::assistant::types::ResolvedImage> {
+    use base64::Engine as _;
+    let mut out: std::collections::HashMap<String, crate::assistant::types::ResolvedImage> =
+        std::collections::HashMap::new();
+    let root = match session
+        .context
+        .workspace_id
+        .as_deref()
+        .and_then(|id| deps.app.state::<AppState>().workspace_root(id))
+    {
+        Some(root) => root,
+        None => return out,
+    };
+    for message in messages {
+        for part in &message.content {
+            if let ContentPart::Image {
+                id,
+                path,
+                media_type,
+                ..
+            } = part
+            {
+                if out.contains_key(id) {
+                    continue;
+                }
+                // Defense-in-depth: the send path base64-encodes these bytes
+                // to the model, so the read is the real exfiltration sink.
+                // Resolve through symlinks and refuse anything that escapes the
+                // store (a non-store ref, a missing file, or a symlinked entry
+                // pre-planted to point outside `.clai/images/`).
+                let Some(full) = crate::assistant::image_store::resolve_store_path(&root, path)
+                else {
+                    tracing::warn!(image_id = %id, %path, "Rejecting non-store/escaping image path; skipping");
+                    continue;
+                };
+                match tokio::fs::read(&full).await {
+                    Ok(bytes) => {
+                        let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        out.insert(
+                            id.clone(),
+                            crate::assistant::types::ResolvedImage {
+                                media_type: media_type.clone(),
+                                data_base64,
+                            },
+                        );
+                    }
+                    Err(error) => tracing::warn!(
+                        image_id = %id,
+                        path = %full.display(),
+                        %error,
+                        "Failed to read image file for provider request; skipping"
+                    ),
+                }
+            }
+        }
+    }
+    out
+}
+
+fn strip_unsupported_images(messages: Vec<ProviderInputMessage>) -> Vec<ProviderInputMessage> {
+    messages
+        .into_iter()
+        .map(|mut message| {
+            for part in message.content.iter_mut() {
+                if matches!(part, ContentPart::Image { .. }) {
+                    *part = ContentPart::Text {
+                        text: "[image omitted]".to_string(),
+                    };
+                }
+            }
+            message
+        })
+        .collect()
+}
+
 fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<ProviderInputMessage> {
     let mut out: Vec<ProviderInputMessage> = Vec::new();
 
@@ -2758,6 +2916,8 @@ fn assistant_content_is_empty(content: &[ContentPart]) -> bool {
         // there's no answer or action to take.
         ContentPart::Thinking { text, .. } => text.is_empty(),
         ContentPart::ToolUse { .. } | ContentPart::ToolResult { .. } => false,
+        // An image is real content, not an empty turn.
+        ContentPart::Image { .. } => false,
     })
 }
 
@@ -2833,6 +2993,14 @@ pub(crate) fn build_trigger_message(
 /// True when a run's accumulated content amounts to nothing the user could
 /// see: no text, no thinking, no tool calls. (The empty-Text placeholder a
 /// message row is seeded with doesn't count.)
+/// True when any content part is an image. Image-bearing messages are
+/// preserved on run failure (see `discard_unanswered_run_input`).
+fn message_contains_image(parts: &[ContentPart]) -> bool {
+    parts
+        .iter()
+        .any(|part| matches!(part, ContentPart::Image { .. }))
+}
+
 pub(crate) fn run_produced_no_content(parts: &[ContentPart]) -> bool {
     parts
         .iter()
@@ -2847,6 +3015,13 @@ pub(crate) fn run_produced_no_content(parts: &[ContentPart]) -> bool {
 /// never got an answer has no business lingering in the conversation; the
 /// failed run row keeps its error, so the failure banner still explains what
 /// happened, and the typed text stays recoverable via the input history.
+///
+/// Exception: messages carrying a [`ContentPart::Image`] are preserved. Unlike
+/// typed text, an attached image is not recoverable from the composer's input
+/// history, so deleting the message would orphan the stored file. A preserved
+/// image stays in conversation history and is auto-retried on the next turn —
+/// the per-turn `connection_supports_images` gate decides whether it is sent —
+/// so switching to a vision-capable model after the failure just works.
 /// Errors are logged, not propagated — cleanup must never mask the original
 /// failure.
 pub(crate) async fn discard_unanswered_run_input(
@@ -2859,7 +3034,16 @@ pub(crate) async fn discard_unanswered_run_input(
     let mut message_ids: Vec<String> = Vec::new();
     match repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id).await
     {
-        Ok(queued) => message_ids.extend(queued.into_iter().map(|q| q.message.id)),
+        Ok(queued) => {
+            for q in queued {
+                // Preserve image-bearing messages (see fn doc): they are not
+                // recoverable from the composer input history.
+                if message_contains_image(&q.message.content) {
+                    continue;
+                }
+                message_ids.push(q.message.id);
+            }
+        }
         Err(error) => tracing::warn!(
             run_id,
             error,
@@ -2867,10 +3051,26 @@ pub(crate) async fn discard_unanswered_run_input(
         ),
     }
     if let Some(id) = trigger_message_id {
-        if !message_ids.iter().any(|existing| existing == id) {
+        // Skip deletion when the trigger carries an image. On lookup failure,
+        // preserve rather than risk orphaning an image-bearing message.
+        let preserve = match repository::get_message(&deps.pool, id).await {
+            Ok(Some(message)) => message_contains_image(&message.content),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(
+                    run_id,
+                    message_id = id,
+                    error,
+                    "Failed to load trigger message while discarding unanswered run input"
+                );
+                true
+            }
+        };
+        if !preserve && !message_ids.iter().any(|existing| existing == id) {
             message_ids.push(id.to_string());
         }
     }
+    // The empty assistant placeholder is always noise — drop it regardless.
     message_ids.extend(assistant_placeholder_id.map(str::to_string));
 
     for message_id in message_ids {

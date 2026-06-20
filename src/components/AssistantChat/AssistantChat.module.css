@@ -1078,3 +1078,101 @@
   word-break: break-word;
   border-top: 1px solid var(--color-border-light);
 }
+
+/* ── Transcript image attachments (rendered in user message blocks) ────── */
+.imageAttachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.imageAttachment {
+  max-width: 240px;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  object-fit: contain;
+  background: var(--color-overlay-02);
+  cursor: zoom-in;
+  transition: border-color 0.15s ease;
+}
+
+.imageAttachment:hover {
+  border-color: var(--color-primary);
+}
+
+.imageAttachmentLoading {
+  width: 120px;
+  height: 120px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border-light);
+  background: var(--color-overlay-02);
+  animation: imageAttachmentPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes imageAttachmentPulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.imageAttachmentError {
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--color-border-light);
+  color: var(--color-text-secondary);
+  font-size: 0.85em;
+}
+
+/* ── Image zoom lightbox (portaled to <body>) ─────────────────────────── */
+.imageLightboxBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10005;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(0, 0, 0, 0.82);
+  cursor: zoom-out;
+}
+
+.imageLightboxImage {
+  max-width: 95vw;
+  max-height: 95vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+
+.imageLightboxClose {
+  position: fixed;
+  top: 16px;
+  right: 20px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5em;
+  line-height: 1;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.imageLightboxClose:hover {
+  background: rgba(255, 255, 255, 0.24);
+}

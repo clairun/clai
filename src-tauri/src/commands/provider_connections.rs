@@ -368,6 +368,7 @@ pub async fn provider_connection_test(
         tools: vec![],
         temperature: Some(0.0),
         max_output_tokens: Some(1),
+        images: Default::default(),
     };
 
     match adapter.stream_completion(&connection, request).await {

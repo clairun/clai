@@ -9,9 +9,12 @@ use serde_json::json;
 type Bytes = axum::body::Bytes;
 
 use crate::assistant::auth::secrets::ProviderSecretStorage;
+use std::collections::HashMap;
+
 use crate::assistant::types::{
     AuthMode, CompletionRequest, ContentPart, MessageRole, ModelInfo, ProtocolFamily,
-    ProviderConnection, ProviderDescriptor, ProviderEvent, RunUsage, ToolInvocationDraft,
+    ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, RunUsage,
+    ToolInvocationDraft,
 };
 
 use super::types::{ProviderAdapter, ProviderError};
@@ -106,6 +109,11 @@ impl ProviderAdapter for OpenAiAdapter {
                     id: id.clone(),
                     display_name: id,
                     supports_tools: true,
+                    // Best-effort, provider-level (mirrors Anthropic): the
+                    // common OpenAI chat models are vision-capable. A non-vision
+                    // model errors at send time, which the engine surfaces
+                    // non-destructively (the user's message + image are kept).
+                    supports_images: true,
                 })
             })
             .collect();
@@ -176,7 +184,11 @@ fn completions_url(connection: &ProviderConnection) -> String {
 // =============================================================================
 
 fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
-    let messages: Vec<serde_json::Value> = request.messages.iter().map(build_message).collect();
+    let messages: Vec<serde_json::Value> = request
+        .messages
+        .iter()
+        .map(|m| build_message(m, &request.images))
+        .collect();
 
     let mut body = json!({
         "model": request.model_id,
@@ -217,7 +229,10 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
 
 /// Build a single OpenAI message from a ProviderInputMessage.
 /// Handles text, tool_use (assistant with tool_calls), and tool_result (role: tool).
-fn build_message(msg: &crate::assistant::types::ProviderInputMessage) -> serde_json::Value {
+fn build_message(
+    msg: &crate::assistant::types::ProviderInputMessage,
+    images: &HashMap<String, ResolvedImage>,
+) -> serde_json::Value {
     let role = match msg.role {
         MessageRole::System => "system",
         MessageRole::User => "user",
@@ -311,6 +326,45 @@ fn build_message(msg: &crate::assistant::types::ProviderInputMessage) -> serde_j
             message["content"] = json!(text_content);
         }
         return message;
+    }
+
+    // User message carrying resolved images: send a multimodal content array
+    // (text parts + `image_url` data-URL blocks). An image whose bytes weren't
+    // resolved (missing file) is skipped; the surrounding text is still sent.
+    if msg.role == MessageRole::User {
+        let image_blocks: Vec<serde_json::Value> = msg
+            .content
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Image { id, .. } => images.get(id).map(|img| {
+                    json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{};base64,{}", img.media_type, img.data_base64),
+                        }
+                    })
+                }),
+                _ => None,
+            })
+            .collect();
+
+        if !image_blocks.is_empty() {
+            let mut parts: Vec<serde_json::Value> = Vec::new();
+            let text: String = msg
+                .content
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } if !text.is_empty() => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            if !text.is_empty() {
+                parts.push(json!({ "type": "text", "text": text }));
+            }
+            parts.extend(image_blocks);
+            return json!({ "role": "user", "content": parts });
+        }
     }
 
     // Default: text content
@@ -629,7 +683,7 @@ mod tests {
             }],
         };
 
-        let built = build_message(&msg);
+        let built = build_message(&msg, &HashMap::new());
         assert_eq!(built["role"], "tool");
         assert_eq!(built["tool_call_id"], "call_123");
 
@@ -642,6 +696,63 @@ mod tests {
         assert_eq!(parsed["startedAt"], "2023-11-14T22:13:20+00:00");
         assert_eq!(parsed["completedAt"], "2023-11-14T22:13:20.250+00:00");
         assert_eq!(parsed["payload"]["openIssues"], 0);
+    }
+
+    #[test]
+    fn build_message_user_emits_image_url_block() {
+        let msg = ProviderInputMessage {
+            role: MessageRole::User,
+            content: vec![
+                ContentPart::Text {
+                    text: "look at this".into(),
+                },
+                ContentPart::Image {
+                    id: "img-1".into(),
+                    path: ".clai/images/img-1.png".into(),
+                    media_type: "image/png".into(),
+                    filename: None,
+                    width: None,
+                    height: None,
+                },
+            ],
+        };
+        let mut images = HashMap::new();
+        images.insert(
+            "img-1".to_string(),
+            ResolvedImage {
+                media_type: "image/png".into(),
+                data_base64: "QUJD".into(),
+            },
+        );
+
+        let built = build_message(&msg, &images);
+        assert_eq!(built["role"], "user");
+        let content = built["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "look at this");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn build_message_user_unresolved_image_falls_back_to_text() {
+        // No resolved bytes for the image → plain string content, text preserved.
+        let msg = ProviderInputMessage {
+            role: MessageRole::User,
+            content: vec![
+                ContentPart::Text { text: "hi".into() },
+                ContentPart::Image {
+                    id: "img-x".into(),
+                    path: ".clai/images/img-x.png".into(),
+                    media_type: "image/png".into(),
+                    filename: None,
+                    width: None,
+                    height: None,
+                },
+            ],
+        };
+        let built = build_message(&msg, &HashMap::new());
+        assert_eq!(built["content"], "hi");
     }
 
     #[tokio::test]

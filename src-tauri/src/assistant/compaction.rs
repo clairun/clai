@@ -343,6 +343,7 @@ async fn summarize_window(
         tools: Vec::new(),
         temperature: None,
         max_output_tokens: Some(SUMMARY_MAX_OUTPUT_TOKENS),
+        images: Default::default(),
     };
 
     let mut stream = adapter
@@ -550,6 +551,10 @@ fn render_content_parts(
                 "[tool result: {}]",
                 truncate_json(payload, tool_result_max)
             )),
+            // The summariser doesn't need pixels — a placeholder keeps the
+            // turn structure without shipping image bytes (and the summary
+            // model may lack vision).
+            ContentPart::Image { .. } => Some("[image]".to_string()),
         })
         .collect::<Vec<_>>()
         .join("\n")

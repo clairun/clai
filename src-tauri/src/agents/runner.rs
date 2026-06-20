@@ -786,6 +786,8 @@ fn message_contains_output(content: &[ContentPart]) -> bool {
         // Thinking alone doesn't count as user-visible output — it's
         // the model's internal reasoning, not a deliverable.
         ContentPart::Thinking { .. } => false,
+        // A user-attached image is visible, deliverable content.
+        ContentPart::Image { .. } => true,
     })
 }
 

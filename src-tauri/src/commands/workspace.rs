@@ -5,8 +5,8 @@
 
 use crate::assistant::repository;
 use crate::assistant::types::{
-    AssistantMessage, AssistantRun, AssistantSession, SessionContext, SessionKind, ToolInvocation,
-    WorkspaceAgentSummary,
+    AssistantMessage, AssistantRun, AssistantSession, ContentPart, SessionContext, SessionKind,
+    ToolInvocation, WorkspaceAgentSummary,
 };
 use crate::config::{
     workspace_config, AgentConfig, AppConfig, ExecutionCapabilityConfig, WorkspaceAgent,
@@ -19,7 +19,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use tauri::State;
+use tauri::{AppHandle, State};
 use ts_rs::TS;
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
@@ -688,7 +688,10 @@ fn should_skip_fork_copy_path(relative_path: &Path) -> bool {
     }
 
     let name = second.to_string_lossy();
-    name == "config.json" || name == "config.json.tmp" || name.starts_with("data.sqlite")
+    name == "config.json"
+        || name == "config.json.tmp"
+        || name.starts_with("data.sqlite")
+        || name == "images"
 }
 
 fn copy_workspace_durable_files(source_root: &Path, target_root: &Path) -> Result<(), String> {
@@ -1939,6 +1942,146 @@ pub async fn workspace_write_file(
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceStoreImageRequest {
+    pub workspace_id: String,
+    /// Base64-encoded image bytes (no `data:` URL prefix).
+    pub data_base64: String,
+    /// Source MIME type (e.g. `image/png`); normalized server-side.
+    pub media_type: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+/// Persist a pasted/attached image under the workspace's image store and
+/// return a ready-to-attach [`ContentPart::Image`] reference.
+///
+/// The bytes live on disk (see [`crate::assistant::image_store`]); the returned
+/// part only carries a relative path, so it stays small in `content_json` and
+/// gives CLI transports a real file to read at send time.
+#[tauri::command]
+pub async fn workspace_store_image(
+    request: WorkspaceStoreImageRequest,
+    state: State<'_, AppState>,
+) -> Result<ContentPart, String> {
+    use base64::Engine as _;
+
+    let descriptor =
+        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
+    let root_path = descriptor
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(root_path)?;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(request.data_base64.trim())
+        .map_err(|error| format!("Invalid base64 image data: {}", error))?;
+
+    let stored = crate::assistant::image_store::store_image(
+        root_path,
+        &bytes,
+        &request.media_type,
+        request.filename,
+    )?;
+
+    Ok(ContentPart::Image {
+        id: stored.id,
+        path: stored.path,
+        media_type: stored.media_type,
+        filename: stored.filename,
+        width: None,
+        height: None,
+    })
+}
+
+/// Guess an image MIME type from a file extension.
+///
+/// The native file dialog returns a path, not clipboard bytes, so there is no
+/// MIME to read — derive it from the extension. Returns `None` for anything the
+/// image store would reject anyway, so the caller surfaces a clear error.
+fn image_media_type_from_extension(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Persist an image chosen via the native file dialog and return a
+/// ready-to-attach [`ContentPart::Image`].
+///
+/// This is the reliable cross-platform attach path: clipboard image paste is
+/// unreliable in the Linux WebKitGTK webview, so the composer also offers a
+/// file picker that routes here. Reads the host file the user explicitly
+/// selected, infers the MIME from its extension, then reuses the same image
+/// store (size cap, MIME allowlist, workspace-root sandbox) as the paste path.
+#[tauri::command]
+pub async fn workspace_pick_and_store_image(
+    workspace_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ContentPart>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let descriptor = resolve_workspace_descriptor(state.inner(), Some(workspace_id.clone()))?;
+    let root_path = descriptor
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(root_path)?;
+
+    // The dialog runs in the backend, so the chosen path comes from a genuine
+    // OS user selection — never a renderer-supplied string. A compromised
+    // renderer can `invoke` this command, but cannot dictate which file is
+    // read (it can only pop the picker), so it can't exfiltrate arbitrary
+    // files (e.g. `~/.ssh/id_rsa`) into the image store. This command is async,
+    // so `blocking_pick_file` runs off the main thread (required by the plugin).
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+        .blocking_pick_file();
+
+    let Some(file_path) = picked else {
+        return Ok(None); // user cancelled — no attachment, no error
+    };
+    let source = file_path
+        .into_path()
+        .map_err(|error| format!("Invalid file path: {}", error))?;
+
+    let media_type = image_media_type_from_extension(&source)
+        .ok_or_else(|| "Unsupported image type. Use PNG, JPEG, GIF, or WebP.".to_string())?;
+    let filename = source
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_string());
+
+    let bytes = tokio::fs::read(&source)
+        .await
+        .map_err(|error| format!("Could not read image file: {}", error))?;
+
+    let stored =
+        crate::assistant::image_store::store_image(root_path, &bytes, media_type, filename)?;
+
+    Ok(Some(ContentPart::Image {
+        id: stored.id,
+        path: stored.path,
+        media_type: stored.media_type,
+        filename: stored.filename,
+        width: None,
+        height: None,
+    }))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceUpdateMcpRequest {
     pub workspace_id: String,
     pub mcp_server_ids: Vec<String>,
@@ -2887,5 +3030,37 @@ mod tests {
     #[test]
     fn returns_none_when_nothing_matches() {
         assert!(select_workspace_session(vec![], MGR, WS, None).is_none());
+    }
+
+    // Pin the skip list for `copy_workspace_durable_files`. Image
+    // attachments live under `.clai/images/` and are big binaries
+    // already correctly owned by the *source* workspace's store —
+    // copying them into a forked workspace's store just doubles
+    // disk usage and risks one store losing track of a file the
+    // other still references.
+    #[test]
+    fn fork_copy_skips_workspace_local_image_store() {
+        use std::path::Path;
+
+        // The image store is a top-level child of `.clai/`, so the
+        // skip is matched at that depth. The caller only ever hands
+        // us paths of the shape `.clai/<name>`, never `.clai/.../...`.
+        assert!(should_skip_fork_copy_path(Path::new(".clai/images")));
+        // Pre-existing skips must still hold.
+        assert!(should_skip_fork_copy_path(Path::new(".clai/config.json")));
+        assert!(should_skip_fork_copy_path(Path::new(
+            ".clai/config.json.tmp"
+        )));
+        assert!(should_skip_fork_copy_path(Path::new(".clai/data.sqlite")));
+        assert!(should_skip_fork_copy_path(Path::new(
+            ".clai/data.sqlite-wal"
+        )));
+        // Unrelated top-level children of `.clai/` are still copied
+        // (e.g. user-installed skills, terminals, agent templates).
+        assert!(!should_skip_fork_copy_path(Path::new(".clai/skills")));
+        assert!(!should_skip_fork_copy_path(Path::new(".clai/agents")));
+        // Paths outside `.clai/` are not its concern.
+        assert!(!should_skip_fork_copy_path(Path::new("images")));
+        assert!(!should_skip_fork_copy_path(Path::new("src/main.rs")));
     }
 }

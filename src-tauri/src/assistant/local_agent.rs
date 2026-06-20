@@ -92,13 +92,28 @@ fn claude_midrun_input_enabled() -> bool {
 
 /// One NDJSON line carrying a user message in Claude Code's
 /// `--input-format stream-json` mode (trailing newline included).
-fn claude_stream_json_user_line(text: &str) -> String {
+/// Like [`claude_stream_json_user_line`] but also attaches image content
+/// blocks. `images` are `(media_type, base64_data)` pairs already read from
+/// disk. Mirrors the Anthropic Messages API content-block shape, which Claude
+/// Code's `--input-format stream-json` accepts verbatim.
+fn claude_stream_json_user_message(text: &str, images: &[(String, String)]) -> String {
+    let mut content: Vec<Value> = Vec::new();
+    if !text.is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    for (media_type, data) in images {
+        content.push(serde_json::json!({
+            "type": "image",
+            "source": { "type": "base64", "media_type": media_type, "data": data },
+        }));
+    }
+    // A user turn must never be empty; fall back to the (possibly empty) text.
+    if content.is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
     let mut line = serde_json::json!({
         "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{ "type": "text", "text": text }],
-        },
+        "message": { "role": "user", "content": content },
     })
     .to_string();
     line.push('\n');
@@ -782,11 +797,20 @@ async fn try_deliver_queued_to_claude(
     if turn_active {
         payload.push_str(&claude_interrupt_line(&uuid::Uuid::new_v4().to_string()));
     }
+    // Resolve the workspace root once; mid-run messages can carry images just
+    // like the initial turn, so they must ride a stream-json content-block
+    // array, not the text-only line (otherwise the image is silently dropped
+    // while the queue is marked delivered).
+    let root = workspace_root_for_session(deps, session);
     let mut message_ids = Vec::with_capacity(matching.len());
     for queued in &matching {
         let text = message_text(&queued.message);
-        if !text.trim().is_empty() {
-            payload.push_str(&claude_stream_json_user_line(&text));
+        let images = match &root {
+            Some(root) => resolve_cli_image_parts(root, &queued.message.content).await,
+            None => Vec::new(),
+        };
+        if !text.trim().is_empty() || !images.is_empty() {
+            payload.push_str(&claude_stream_json_user_message(&text, &images));
         }
         // Empty messages are still marked delivered below — leaving them
         // pending would retry forever on every poll tick.
@@ -967,7 +991,11 @@ async fn run_claude_turn(
     if let Some(mut stdin) = child.stdin.take() {
         use tokio::io::AsyncWriteExt;
         let initial = if midrun_input {
-            claude_stream_json_user_line(&prompt)
+            // stream-json carries image content blocks on the user turn; the
+            // legacy `-p` text path can't, so images only ride the modern
+            // (default-on) mid-run input mode.
+            let images = resolve_cli_user_images(deps, session, run_id).await;
+            claude_stream_json_user_message(&prompt, &images)
         } else {
             prompt
         };
@@ -1237,6 +1265,13 @@ async fn run_codex_turn(
                 workspace_root.as_ref(),
             );
         }
+    }
+    // Attach images from the latest user turn. `--image` is valid on both the
+    // fresh `exec` (via shared options) and `exec resume` (ResumeArgsRaw.images)
+    // paths; codex reads the files itself. Only present on the turn the user
+    // actually sent them, so no per-turn re-send.
+    for image_path in resolve_codex_image_paths(deps, session, run_id).await {
+        command.arg("--image").arg(image_path);
     }
     command
         .arg("-")
@@ -1550,6 +1585,151 @@ fn workspace_root_for_session(deps: &AssistantDeps, session: &AssistantSession) 
         })
 }
 
+/// `(media_type, base64_data)` for each image on the most recent user message,
+/// read from the workspace image store. Empty when the latest user turn had no
+/// images, the session has no workspace root, or a file can't be read (each
+/// failure is logged and skipped — a missing image never fails the turn, the
+/// surrounding text is still sent).
+/// Image `ContentPart`s contributing to this turn's prompt. Mirrors
+/// [`prepare_prompt`]: the FULL batch of delivered queued messages for the run
+/// when present (so a batched follow-up does not drop all but the newest
+/// image), otherwise the latest user message. Oldest-first, matching the
+/// prompt text order.
+async fn turn_image_parts(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+) -> Vec<ContentPart> {
+    let queued =
+        repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "CLI image: queued-message read failed; sending text only");
+                Vec::new()
+            });
+    let contents: Vec<Vec<ContentPart>> = if !queued.is_empty() {
+        queued.into_iter().map(|q| q.message.content).collect()
+    } else {
+        match repository::list_messages(&deps.pool, &session.id).await {
+            Ok(messages) => messages
+                .into_iter()
+                .rev()
+                .find(|m| m.role == MessageRole::User)
+                .map(|m| vec![m.content])
+                .unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%error, "CLI image: message read failed; sending text only");
+                Vec::new()
+            }
+        }
+    };
+    image_parts_from_contents(contents)
+}
+
+/// Flatten per-message content into just the image parts, preserving order
+/// (message order, then within-message order). The collection step of
+/// [`turn_image_parts`], pulled out so the batch-vs-latest fix is unit-testable
+/// without a DB.
+fn image_parts_from_contents(contents: Vec<Vec<ContentPart>>) -> Vec<ContentPart> {
+    contents
+        .into_iter()
+        .flatten()
+        .filter(|p| matches!(p, ContentPart::Image { .. }))
+        .collect()
+}
+
+async fn resolve_cli_user_images(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+) -> Vec<(String, String)> {
+    let parts = turn_image_parts(deps, session, run_id).await;
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let Some(root) = workspace_root_for_session(deps, session) else {
+        tracing::warn!("CLI image: no workspace root for session; sending text only");
+        return Vec::new();
+    };
+    resolve_cli_image_parts(&root, &parts).await
+}
+
+/// Read the image parts on a message's content into `(media_type, base64)`
+/// pairs. Non-store paths and unreadable files are skipped so the surrounding
+/// text still sends. Shared by the initial-turn and mid-run delivery paths.
+async fn resolve_cli_image_parts(
+    root: &std::path::Path,
+    content: &[ContentPart],
+) -> Vec<(String, String)> {
+    use base64::Engine as _;
+    let mut resolved = Vec::new();
+    for part in content {
+        let ContentPart::Image {
+            path, media_type, ..
+        } = part
+        else {
+            continue;
+        };
+        // Defense-in-depth: resolve through symlinks and refuse store
+        // escapes — the bytes are base64-encoded to the model, so the read is
+        // the real exfiltration sink.
+        let Some(abs) = crate::assistant::image_store::resolve_store_path(root, path) else {
+            tracing::warn!(path = %path, "CLI image: non-store/escaping path rejected; skipping");
+            continue;
+        };
+        match tokio::fs::read(&abs).await {
+            Ok(bytes) => {
+                let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                resolved.push((media_type.clone(), data));
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %abs.display(), "CLI image: read failed; skipping");
+            }
+        }
+    }
+    resolved
+}
+
+/// Absolute, store-validated paths of the image parts contributing to this
+/// turn (the delivered queued batch or the latest user message — see
+/// [`turn_image_parts`]). Codex ingests images as files
+/// (`codex exec [resume] --image`), so it gets paths rather than base64.
+/// Non-store paths and missing files are skipped (text still sends).
+async fn resolve_codex_image_paths(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+) -> Vec<PathBuf> {
+    let rels: Vec<String> = turn_image_parts(deps, session, run_id)
+        .await
+        .into_iter()
+        .filter_map(|part| match part {
+            ContentPart::Image { path, .. } => Some(path),
+            _ => None,
+        })
+        .collect();
+    if rels.is_empty() {
+        return Vec::new();
+    }
+    let Some(root) = workspace_root_for_session(deps, session) else {
+        tracing::warn!("Codex image: no workspace root for session; sending text only");
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(rels.len());
+    for rel in rels {
+        // Defense-in-depth: resolve through symlinks and refuse store
+        // escapes before handing codex a path to read. `resolve_store_path`
+        // canonicalizes (so it also rejects a missing file).
+        match crate::assistant::image_store::resolve_store_path(&root, &rel) {
+            Some(abs) => out.push(abs),
+            None => {
+                tracing::warn!(path = %rel, "Codex image: non-store/escaping/missing path rejected; skipping")
+            }
+        }
+    }
+    out
+}
+
 fn add_codex_common_args(
     command: &mut Command,
     connection: &ProviderConnection,
@@ -1707,18 +1887,19 @@ async fn prepare_prompt(
             queued_messages_prompt(&messages)
         } else {
             let messages = repository::list_messages(&deps.pool, &session.id).await?;
-            messages
+            let latest_user = messages
                 .iter()
                 .rev()
                 .find(|message| message.role == MessageRole::User)
-                .map(message_text)
-                .filter(|text| !text.trim().is_empty())
                 .ok_or_else(|| {
                     LocalAgentRunError::failed(format!(
                         "No user message found for {} run",
                         provider_display_name
                     ))
-                })?
+                })?;
+            // Text may be empty for an image-only turn; the image attaches
+            // separately, so don't treat empty text as "no message".
+            message_text(latest_user)
         }
     };
 
@@ -1874,6 +2055,7 @@ fn cli_context_part_text(part: &ContentPart) -> Option<String> {
             "[tool result: {}]",
             truncate_cli_context_json(payload)
         )),
+        ContentPart::Image { .. } => Some("[image]".to_string()),
     }
 }
 
@@ -3658,6 +3840,10 @@ fn content_part_text(part: &ContentPart) -> Option<String> {
             ..
         } => Some(format!("Tool use `{}`: {}", tool_name, arguments)),
         ContentPart::ToolResult { payload, .. } => Some(format!("Tool result: {}", payload)),
+        // Images on the current turn ride as real content (stream-json blocks /
+        // codex `--image` / API image blocks), so they contribute no prompt
+        // text — a `[image]` placeholder here would just be a redundant echo.
+        ContentPart::Image { .. } => None,
     }
 }
 
@@ -3860,13 +4046,119 @@ mod tests {
 
     #[test]
     fn claude_stream_json_user_line_matches_wire_format() {
-        let line = claude_stream_json_user_line("hello there");
+        let line = claude_stream_json_user_message("hello there", &[]);
         assert!(line.ends_with('\n'), "must be one NDJSON line");
         let value: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(value["type"], "user");
         assert_eq!(value["message"]["role"], "user");
         assert_eq!(value["message"]["content"][0]["type"], "text");
         assert_eq!(value["message"]["content"][0]["text"], "hello there");
+    }
+
+    #[test]
+    fn claude_stream_json_user_message_attaches_image_blocks() {
+        let line = claude_stream_json_user_message(
+            "look at this",
+            &[("image/png".to_string(), "QUJD".to_string())],
+        );
+        let value: Value = serde_json::from_str(line.trim()).unwrap();
+        let content = value["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "text + one image block");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "look at this");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "QUJD");
+    }
+
+    #[test]
+    fn claude_stream_json_user_message_image_only_keeps_message_nonempty() {
+        let line =
+            claude_stream_json_user_message("", &[("image/jpeg".to_string(), "Zm9v".to_string())]);
+        let value: Value = serde_json::from_str(line.trim()).unwrap();
+        let content = value["message"]["content"].as_array().unwrap();
+        // No empty text block when text is empty: just the image.
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "image");
+    }
+
+    #[test]
+    fn image_parts_from_contents_collects_all_messages_in_order() {
+        let img = |id: &str| ContentPart::Image {
+            id: id.into(),
+            path: format!(".clai/images/{id}.png"),
+            media_type: "image/png".into(),
+            filename: None,
+            width: None,
+            height: None,
+        };
+        // Two queued messages, each with text + an image. The batch must yield
+        // BOTH images (the bug dropped all but the newest), in message order.
+        let contents = vec![
+            vec![
+                ContentPart::Text {
+                    text: "first".into(),
+                },
+                img("a"),
+            ],
+            vec![
+                ContentPart::Text {
+                    text: "second".into(),
+                },
+                img("b"),
+            ],
+        ];
+        let parts = image_parts_from_contents(contents);
+        assert_eq!(parts.len(), 2);
+        let ids: Vec<&str> = parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::Image { id, .. } => id.as_str(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn resolve_cli_image_parts_reads_store_files_and_skips_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let uuid = uuid::Uuid::new_v4();
+        let rel = format!(".clai/images/{uuid}.png");
+        let abs = root.join(&rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, b"ABC").unwrap();
+
+        let content = vec![
+            ContentPart::Text {
+                text: "see this".into(),
+            },
+            // store-owned: resolved
+            ContentPart::Image {
+                id: uuid.to_string(),
+                path: rel.clone(),
+                media_type: "image/png".into(),
+                filename: None,
+                width: None,
+                height: None,
+            },
+            // non-store absolute path: must be skipped, never read
+            ContentPart::Image {
+                id: "evil".into(),
+                path: "/etc/hostname".into(),
+                media_type: "image/png".into(),
+                filename: None,
+                width: None,
+                height: None,
+            },
+        ];
+
+        let resolved = resolve_cli_image_parts(root, &content).await;
+        assert_eq!(resolved.len(), 1, "only the store-owned image resolves");
+        assert_eq!(resolved[0].0, "image/png");
+        assert_eq!(resolved[0].1, "QUJD", "base64 of \"ABC\"");
     }
 
     #[test]

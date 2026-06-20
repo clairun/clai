@@ -7,6 +7,7 @@ import {
   dispatchScrollChatToBottom,
   dispatchWorkspaceUiCommand,
 } from '../../utils/workspaceUiEvents';
+import type { ContentPart } from '../../generated/bindings';
 import styles from './TerminalEmulator.module.css';
 
 type OutputType = 'info' | 'success' | 'error' | 'warning';
@@ -23,19 +24,35 @@ interface SendToChatResult {
   message?: string;
 }
 
+type AttachImageResult = { part?: ContentPart; error?: string };
+
+interface ComposerAttachment {
+  part: ContentPart;
+  /** Object URL of the source File, for the local thumbnail preview only. */
+  previewUrl: string;
+}
+
 interface TerminalEmulatorProps {
-  onSendToChat?: (text: string) => Promise<SendToChatResult | void>;
+  onSendToChat?: (text: string, images: ContentPart[]) => Promise<SendToChatResult | void>;
   onAgentCommand?: (command: string) => Promise<SendToChatResult | void>;
+  onAttachImage?: (file: File) => Promise<AttachImageResult>;
+  onPickImage?: () => Promise<AttachImageResult>;
+  onReadClipboardImage?: () => Promise<File | null>;
   agentWorking?: boolean;
 }
 
 const TerminalEmulator = ({
   onSendToChat,
   onAgentCommand,
+  onAttachImage,
+  onPickImage,
+  onReadClipboardImage,
   agentWorking = false,
 }: TerminalEmulatorProps) => {
   const location = useLocation();
   const [inputValue, setInputValue] = useState('');
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [isAttaching, setIsAttaching] = useState(false);
   const [outputMessages, setOutputMessages] = useState<OutputMessage[]>([]);
   const [isOutputVisible, setIsOutputVisible] = useState(true);
   const [isHoveringOutput, setIsHoveringOutput] = useState(false);
@@ -196,6 +213,14 @@ const TerminalEmulator = ({
     setInputValue(drafts.get(composerKey) ?? '');
     setTerminalMode(terminalModes.get(composerKey) ?? false);
     setSavedComposerState({ activeKey: composerKey, drafts, terminalModes });
+    // Pending attachments belong to the workspace they were attached in (their
+    // stored paths are relative to that workspace's root). Drop them on switch,
+    // otherwise a send in the new workspace ships a path that resolves against
+    // the wrong root and the image is silently lost. Revoke is idempotent.
+    if (attachments.length > 0) {
+      attachments.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+      setAttachments([]);
+    }
   }
 
   // Ctrl+\ (or Cmd+\) toggles terminal mode. Matches the backslash key
@@ -236,9 +261,83 @@ const TerminalEmulator = ({
   }, [showTerminal]);
 
   // Handle command execution
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => {
+      const target = prev[index];
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
+  };
+
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      prev.forEach((a) => URL.revokeObjectURL(a.previewUrl));
+      return [];
+    });
+  }, []);
+
+  // Revoke any outstanding preview URLs on unmount.
+  useEffect(() => clearAttachments, [clearAttachments]);
+
+  const attachFiles = async (files: File[]) => {
+    if (!onAttachImage || files.length === 0) return;
+    setIsAttaching(true);
+    try {
+      for (const file of files) {
+        const res = await onAttachImage(file);
+        if (res.error) {
+          addOutputMessage(res.error, 'error');
+        } else if (res.part) {
+          const previewUrl = URL.createObjectURL(file);
+          setAttachments((prev) => [...prev, { part: res.part as ContentPart, previewUrl }]);
+        }
+      }
+    } finally {
+      setIsAttaching(false);
+    }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // Chromium/WebView2 (Windows) surfaces pasted images here.
+    const files = Array.from(e.clipboardData?.items ?? [])
+      .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (files.length > 0) {
+      e.preventDefault();
+      await attachFiles(files);
+      return;
+    }
+    // WebKit (Linux/mac) doesn't expose pasted images to the DOM paste event;
+    // fall back to reading the native OS clipboard. A non-image clipboard
+    // returns null, so the ordinary text paste proceeds untouched.
+    if (!onReadClipboardImage) return;
+    const nativeFile = await onReadClipboardImage();
+    if (nativeFile) await attachFiles([nativeFile]);
+  };
+
+  // Native file-picker attach (reliable everywhere; paste is flaky on WebKitGTK).
+  const handlePickImage = async () => {
+    if (!onPickImage) return;
+    setIsAttaching(true);
+    try {
+      const res = await onPickImage();
+      if (res.error) {
+        addOutputMessage(res.error, 'error');
+      } else if (res.part) {
+        // No object URL: the picked file lives on disk, not as a browser File.
+        setAttachments((prev) => [...prev, { part: res.part as ContentPart, previewUrl: '' }]);
+      }
+    } finally {
+      setIsAttaching(false);
+    }
+  };
+
   const handleCommandExecution = async (input: string) => {
     const trimmed = input.trim();
-    if (!trimmed) return;
+    const pendingImages = attachments.map((a) => a.part);
+    // Allow an image-only send (no text) when attachments are present.
+    if (!trimmed && pendingImages.length === 0) return;
 
     // Clear input immediately and reset textarea height
     setInputValue('');
@@ -264,9 +363,13 @@ const TerminalEmulator = ({
     // in the page; other routes reject with a hint to open a workspace.
     if (!isSlashCommand) {
       if (onSendToChat) {
-        const result = await onSendToChat(trimmed);
+        const result = await onSendToChat(trimmed, pendingImages);
         if (result?.error) {
           addOutputMessage(result.error, 'error');
+        } else {
+          // Clear only on success — a failed turn keeps the image attached so
+          // the user can retry without re-picking it.
+          clearAttachments();
         }
       }
       return;
@@ -408,24 +511,49 @@ const TerminalEmulator = ({
 
           {/* Input Line - Now at the top for better UX */}
           <div className={styles.terminalContent}>
-            {/* Terminal-mode toggle — only where a workspace shell can open.
-                Mirrors the Ctrl+` shortcut. */}
-            {terminalAvailable && (
-              <button
-                type="button"
-                className={styles.modeToggle}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setTerminalMode(true);
-                }}
-                title="Terminal mode (Ctrl+\)"
-                aria-label="Switch to terminal mode"
-              >
-                {'>_'}
-              </button>
+            {/* Pasted/attached image thumbnails, above the input */}
+            {(attachments.length > 0 || isAttaching) && (
+              <div className={styles.attachmentTray} aria-label="Image attachments">
+                {attachments.map((att, index) => (
+                  <div
+                    key={att.part.type === 'image' ? att.part.id : index}
+                    className={styles.attachmentThumb}
+                  >
+                    {att.previewUrl ? (
+                      <img
+                        src={att.previewUrl}
+                        alt={
+                          att.part.type === 'image' && att.part.filename
+                            ? att.part.filename
+                            : 'Attached image'
+                        }
+                      />
+                    ) : (
+                      <span className={styles.attachmentChip}>
+                        {att.part.type === 'image' && att.part.filename
+                          ? att.part.filename
+                          : 'image'}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      className={styles.attachmentRemove}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeAttachment(index);
+                      }}
+                      aria-label="Remove image"
+                      title="Remove image"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                {isAttaching && <span className={styles.attachmentSpinner}>Attaching…</span>}
+              </div>
             )}
 
-            {/* Terminal Input - Auto-growing textarea */}
+            {/* Composer input box */}
             <div className={styles.terminalInputWrapper} ref={inputWrapperRef}>
               <textarea
                 ref={inputRef}
@@ -434,6 +562,7 @@ const TerminalEmulator = ({
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onClick={(e) => e.stopPropagation()}
                 aria-busy={agentWorking || undefined}
                 placeholder={
@@ -449,6 +578,53 @@ const TerminalEmulator = ({
                 autoCapitalize="off"
               />
             </div>
+
+            {/* Action toolbar: attach + terminal-mode, below the input */}
+            {((onPickImage && isWorkspaceRoute) || terminalAvailable) && (
+              <div className={styles.composerToolbar}>
+                {onPickImage && isWorkspaceRoute && (
+                  <button
+                    type="button"
+                    className={styles.attachButton}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handlePickImage();
+                    }}
+                    disabled={isAttaching}
+                    aria-label="Attach image"
+                    title="Attach image"
+                  >
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                    >
+                      <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                    </svg>
+                  </button>
+                )}
+                {terminalAvailable && (
+                  <button
+                    type="button"
+                    className={styles.modeToggle}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setTerminalMode(true);
+                    }}
+                    title="Terminal mode (Ctrl+\)"
+                    aria-label="Switch to terminal mode"
+                  >
+                    {'>_'}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Output Messages Area - Now BELOW the input for better UX */}

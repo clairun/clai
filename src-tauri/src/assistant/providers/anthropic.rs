@@ -9,9 +9,12 @@ use serde_json::json;
 type Bytes = axum::body::Bytes;
 
 use crate::assistant::auth::secrets::ProviderSecretStorage;
+use std::collections::HashMap;
+
 use crate::assistant::types::{
     AuthMode, CompletionRequest, ContentPart, MessageRole, ModelInfo, ProtocolFamily,
-    ProviderConnection, ProviderDescriptor, ProviderEvent, RunUsage, ToolInvocationDraft,
+    ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, RunUsage,
+    ToolInvocationDraft,
 };
 
 use super::types::{ProviderAdapter, ProviderError};
@@ -96,6 +99,9 @@ impl ProviderAdapter for AnthropicAdapter {
                     id,
                     display_name,
                     supports_tools: true,
+                    // Anthropic API models in current rotation are all
+                    // multimodal (Claude 3+ accept image blocks).
+                    supports_images: true,
                 })
             })
             .collect();
@@ -184,7 +190,7 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
                 }
             }
             MessageRole::User | MessageRole::Assistant | MessageRole::Tool => {
-                if let Some(m) = build_message(msg) {
+                if let Some(m) = build_message(msg, &request.images) {
                     messages.push(m);
                 }
             }
@@ -225,11 +231,14 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
 }
 
 /// Build a single Anthropic message. Tool results become role: "user" with tool_result content.
-fn build_message(msg: &crate::assistant::types::ProviderInputMessage) -> Option<serde_json::Value> {
+fn build_message(
+    msg: &crate::assistant::types::ProviderInputMessage,
+    images: &HashMap<String, ResolvedImage>,
+) -> Option<serde_json::Value> {
     match msg.role {
         MessageRole::System => None, // handled separately
         MessageRole::User => {
-            let content = text_content_parts(&msg.content);
+            let content = user_content_parts(&msg.content, images);
             if content.is_empty() {
                 return None;
             }
@@ -310,13 +319,29 @@ fn build_message(msg: &crate::assistant::types::ProviderInputMessage) -> Option<
     }
 }
 
-fn text_content_parts(content: &[ContentPart]) -> Vec<serde_json::Value> {
+/// User-message content blocks: text plus any resolved image blocks. An image
+/// whose bytes were not resolved (missing file) is silently skipped — the
+/// surrounding text is still sent.
+fn user_content_parts(
+    content: &[ContentPart],
+    images: &HashMap<String, ResolvedImage>,
+) -> Vec<serde_json::Value> {
     content
         .iter()
         .filter_map(|p| match p {
             ContentPart::Text { text } if !text.is_empty() => {
                 Some(json!({ "type": "text", "text": text }))
             }
+            ContentPart::Image { id, .. } => images.get(id).map(|img| {
+                json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": img.data_base64,
+                    }
+                })
+            }),
             _ => None,
         })
         .collect()
@@ -665,6 +690,7 @@ mod tests {
             tools: vec![],
             temperature: None,
             max_output_tokens: Some(4096),
+            images: Default::default(),
         };
 
         let body = build_request_body(&request);
@@ -695,7 +721,7 @@ mod tests {
             ],
         };
 
-        let built = build_message(&msg).unwrap();
+        let built = build_message(&msg, &HashMap::new()).unwrap();
         assert_eq!(built["role"], "assistant");
         let content = built["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -703,6 +729,67 @@ mod tests {
         assert_eq!(content[1]["type"], "tool_use");
         assert_eq!(content[1]["id"], "toolu_123");
         assert_eq!(content[1]["name"], "get_weather");
+    }
+
+    #[test]
+    fn build_message_user_includes_resolved_image_block() {
+        let msg = ProviderInputMessage {
+            role: MessageRole::User,
+            content: vec![
+                ContentPart::Text {
+                    text: "what is this?".into(),
+                },
+                ContentPart::Image {
+                    id: "img-1".into(),
+                    path: ".clai/images/img-1.png".into(),
+                    media_type: "image/png".into(),
+                    filename: None,
+                    width: None,
+                    height: None,
+                },
+            ],
+        };
+        let mut images = HashMap::new();
+        images.insert(
+            "img-1".to_string(),
+            ResolvedImage {
+                media_type: "image/png".into(),
+                data_base64: "QUJD".into(),
+            },
+        );
+
+        let built = build_message(&msg, &images).unwrap();
+        assert_eq!(built["role"], "user");
+        let content = built["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "QUJD");
+    }
+
+    #[test]
+    fn build_message_user_skips_unresolved_image() {
+        let msg = ProviderInputMessage {
+            role: MessageRole::User,
+            content: vec![
+                ContentPart::Text { text: "hi".into() },
+                ContentPart::Image {
+                    id: "missing".into(),
+                    path: ".clai/images/missing.png".into(),
+                    media_type: "image/png".into(),
+                    filename: None,
+                    width: None,
+                    height: None,
+                },
+            ],
+        };
+        // No entry for "missing" -> only the text block survives.
+        let built = build_message(&msg, &HashMap::new()).unwrap();
+        let content = built["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
     }
 
     #[test]
@@ -717,7 +804,7 @@ mod tests {
             }],
         };
 
-        let built = build_message(&msg).unwrap();
+        let built = build_message(&msg, &HashMap::new()).unwrap();
         assert_eq!(built["role"], "user");
         let content = built["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_result");
@@ -745,6 +832,7 @@ mod tests {
             }],
             temperature: Some(0.7),
             max_output_tokens: Some(2048),
+            images: Default::default(),
         };
 
         let body = build_request_body(&request);
@@ -882,7 +970,7 @@ mod tests {
             ],
         };
 
-        let built = build_message(&msg).unwrap();
+        let built = build_message(&msg, &HashMap::new()).unwrap();
         let content = built["content"].as_array().unwrap();
         // Thinking must come first (Anthropic requires it for tool-use turns).
         assert_eq!(content[0]["type"], "thinking");
@@ -907,7 +995,7 @@ mod tests {
             ],
         };
 
-        let built = build_message(&msg).unwrap();
+        let built = build_message(&msg, &HashMap::new()).unwrap();
         let content = built["content"].as_array().unwrap();
         // Unsigned thinking can't be re-signed → dropped; only text remains.
         assert_eq!(content.len(), 1);

@@ -40,7 +40,9 @@
         )
       )
     );
-    transition: left var(--transition-fast), width var(--transition-fast);
+    transition:
+      left var(--transition-fast),
+      width var(--transition-fast);
     z-index: 100;
     background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
     border: 1px solid var(--color-border-light);
@@ -59,10 +61,18 @@
 /* Input Area - Primary terminal input with modern design */
 .terminalContent {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
   padding: 10px 14px;
   background: transparent;
+}
+
+/* Action-button row beneath the input (attach, terminal-mode). */
+.composerToolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* Terminal Prompt Symbol - Gradient text */
@@ -80,9 +90,12 @@
 
 /* Terminal Input Wrapper - Modern input field */
 .terminalInputWrapper {
-  flex: 1;
+  flex: 0 0 auto;
   position: relative;
   min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
   background: var(--color-overlay-02);
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-md);
@@ -98,7 +111,9 @@
 
 /* Terminal Input - Auto-growing textarea */
 .terminalInput {
+  flex: 1 1 auto;
   width: 100%;
+  min-width: 0;
   height: 20px; /* Single line height by default */
   background: transparent;
   border: none !important;
@@ -146,7 +161,10 @@
   max-height: calc(50vh - 120px);
   min-height: 0;
   opacity: 1;
-  transition: opacity 0.2s ease, max-height 0.2s ease, padding 0.2s ease;
+  transition:
+    opacity 0.2s ease,
+    max-height 0.2s ease,
+    padding 0.2s ease;
   /* FIXED: Added subtle border-top to separate from input area */
   border-top: 1px solid var(--color-border-light);
 }
@@ -333,7 +351,6 @@
   appearance: none;
   cursor: pointer;
   flex: none;
-  margin-top: 6px;
   padding: 2px 7px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-light);
@@ -351,4 +368,107 @@
   border-color: var(--color-primary);
   color: var(--color-primary);
   box-shadow: var(--shadow-ring-primary);
+}
+
+/* ── Image attachment tray ─────────────────────────────────────────── */
+.attachmentTray {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.attachmentThumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.25);
+  flex: 0 0 auto;
+}
+
+.attachmentThumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attachmentRemove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  line-height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.attachmentRemove:hover {
+  background: rgba(220, 38, 38, 0.9);
+}
+
+.attachmentSpinner {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+/* ── Image attach button (native file picker) ───────────────── */
+.attachButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 24px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  background: var(--color-overlay-02);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  opacity: 0.85;
+  transition: all 0.15s ease;
+}
+
+.attachButton:hover:not(:disabled) {
+  opacity: 1;
+  background: var(--color-bg-elevated);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  box-shadow: var(--shadow-ring-primary);
+}
+
+.attachButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Filename chip for picked images that have no local thumbnail. */
+.attachmentChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 160px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  background: var(--color-overlay-02);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

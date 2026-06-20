@@ -11,6 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   AssistantCompaction,
   AssistantMessage,
+  ContentPart,
   AssistantMessageCursor,
   AssistantMessagePage,
   AssistantRun,
@@ -70,8 +71,18 @@ export async function sendMessage(
   sessionId: string,
   message: string,
   connectionId: string,
+  images: ContentPart[] = [],
 ): Promise<{ session: AssistantSession; message: AssistantMessage; run?: AssistantRun | null; queued: boolean }> {
-  return invoke('assistant_send_message', { sessionId, message, connectionId });
+  return invoke('assistant_send_message', { sessionId, message, connectionId, images });
+}
+
+/**
+ * Whether the connection's active model accepts image input. Backed by the same
+ * resolver as the send-filter, so the composer's paste affordance can't drift
+ * from what the backend will actually send.
+ */
+export async function connectionSupportsImages(connectionId: string): Promise<boolean> {
+  return invoke('assistant_connection_supports_images', { connectionId });
 }
 
 export async function compactSession(

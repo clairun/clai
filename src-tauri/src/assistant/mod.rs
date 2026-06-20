@@ -7,6 +7,7 @@ pub mod auth;
 pub mod compaction;
 pub mod engine;
 pub mod events;
+pub mod image_store;
 pub mod local_agent;
 pub mod local_mcp;
 pub mod providers;

@@ -709,10 +709,31 @@ pub async fn create_message(
     Ok(message)
 }
 
+/// Text-only convenience wrapper around [`create_user_message_with_content`].
+/// Test-only: production code builds content explicitly so it can attach images.
+#[cfg(test)]
 pub async fn create_user_message(
     pool: &DbPool,
     session_id: String,
     text: String,
+    queue_connection_id: Option<&str>,
+) -> Result<AssistantMessage, String> {
+    create_user_message_with_content(
+        pool,
+        session_id,
+        vec![ContentPart::Text { text }],
+        queue_connection_id,
+    )
+    .await
+}
+
+/// Like [`create_user_message`] but with an explicit content vec, so the caller
+/// can attach images (or other parts) alongside the text. The text-only helper
+/// delegates here.
+pub async fn create_user_message_with_content(
+    pool: &DbPool,
+    session_id: String,
+    content: Vec<ContentPart>,
     queue_connection_id: Option<&str>,
 ) -> Result<AssistantMessage, String> {
     let now = now_ms();
@@ -720,7 +741,7 @@ pub async fn create_user_message(
         id: Uuid::new_v4().to_string(),
         session_id,
         role: MessageRole::User,
-        content: vec![ContentPart::Text { text }],
+        content,
         created_at: now,
         provider_metadata: None,
     };
