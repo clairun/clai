@@ -2648,14 +2648,16 @@ async fn resolve_request_images(
                 if out.contains_key(id) {
                     continue;
                 }
-                // Defense-in-depth: never read a non-store path (see
-                // image_store::is_store_relative_path). The send boundary
-                // already rejects these, but the file read is the real sink.
-                if !crate::assistant::image_store::is_store_relative_path(path) {
-                    tracing::warn!(image_id = %id, %path, "Rejecting non-store image path; skipping");
+                // Defense-in-depth: the send path base64-encodes these bytes
+                // to the model, so the read is the real exfiltration sink.
+                // Resolve through symlinks and refuse anything that escapes the
+                // store (a non-store ref, a missing file, or a symlinked entry
+                // pre-planted to point outside `.clai/images/`).
+                let Some(full) = crate::assistant::image_store::resolve_store_path(&root, path)
+                else {
+                    tracing::warn!(image_id = %id, %path, "Rejecting non-store/escaping image path; skipping");
                     continue;
-                }
-                let full = root.join(path);
+                };
                 match tokio::fs::read(&full).await {
                     Ok(bytes) => {
                         let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);

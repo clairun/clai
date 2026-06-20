@@ -8,7 +8,7 @@
 //!
 //! [`ContentPart::Image`]: crate::assistant::types::ContentPart::Image
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Subdirectory (under the workspace root) holding conversation images.
@@ -75,6 +75,9 @@ pub fn store_image(
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create image store {}: {}", dir.display(), e))?;
 
+    // The filename is a fresh server-generated UUID, so an attacker cannot aim
+    // this write at a pre-existing victim file the way a crafted *read* path can
+    // (the read sinks defend against symlinked entries via `resolve_store_path`).
     let id = Uuid::new_v4().to_string();
     let rel = format!("{}/{}.{}", IMAGE_STORE_SUBDIR, id, ext);
     let target = root.join(&rel);
@@ -126,6 +129,26 @@ pub fn is_store_relative_path(path: &str) -> bool {
         return false;
     }
     Uuid::parse_str(stem).is_ok()
+}
+
+/// Resolve a store-relative image ref to its real absolute path, refusing
+/// symlink escapes.
+///
+/// [`is_store_relative_path`] only checks the *string* shape — it cannot tell
+/// whether `.clai/images/<uuid>.png` is a real file or a symlink someone
+/// pre-planted to point at `~/.ssh/id_rsa`. The send path reads these bytes and
+/// base64-encodes them to the model, so a symlinked store entry would exfiltrate
+/// an arbitrary local file through the provider. This canonicalizes both the
+/// store directory and the target (following every symlink) and returns the path
+/// only when the resolved file still lives inside the store. Returns `None` for a
+/// non-store ref, a missing file, or a path that escapes the store.
+pub fn resolve_store_path(root: &Path, rel: &str) -> Option<PathBuf> {
+    if !is_store_relative_path(rel) {
+        return None;
+    }
+    let store_dir = root.join(IMAGE_STORE_SUBDIR).canonicalize().ok()?;
+    let full = root.join(rel).canonicalize().ok()?;
+    full.starts_with(&store_dir).then_some(full)
 }
 
 #[cfg(test)]
@@ -222,5 +245,52 @@ mod tests {
 
         let huge = vec![0u8; MAX_IMAGE_BYTES + 1];
         assert!(store_image(dir.path(), &huge, "image/png", None).is_err());
+    }
+
+    #[test]
+    fn resolve_store_path_returns_real_file_for_store_owned_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = store_image(dir.path(), b"\x89PNG\r\n", "image/png", None).unwrap();
+
+        let resolved = resolve_store_path(dir.path(), &stored.path).expect("store file resolves");
+        assert!(resolved.ends_with(format!("{}.png", stored.id)));
+        assert_eq!(std::fs::read(&resolved).unwrap(), b"\x89PNG\r\n");
+    }
+
+    #[test]
+    fn resolve_store_path_rejects_non_store_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        // String-shape failures are rejected before touching the FS.
+        assert!(resolve_store_path(dir.path(), "/etc/passwd").is_none());
+        assert!(resolve_store_path(dir.path(), "../secret.png").is_none());
+        // Well-shaped but non-existent ref: canonicalize fails -> None.
+        let uuid = Uuid::new_v4();
+        assert!(resolve_store_path(dir.path(), &format!(".clai/images/{uuid}.png")).is_none());
+    }
+
+    // The whole point of resolve_store_path: a path that passes the lexical
+    // `is_store_relative_path` gate but is a symlink escaping the store must be
+    // refused, so a crafted message can't exfiltrate an arbitrary local file.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_store_path_rejects_symlink_escaping_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // A "secret" file outside the store the attacker wants to read.
+        let secret = root.join("secret.txt");
+        std::fs::write(&secret, b"top secret").unwrap();
+
+        // Pre-plant a store-shaped symlink pointing at the secret.
+        let store_dir = root.join(IMAGE_STORE_SUBDIR);
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let uuid = Uuid::new_v4();
+        let rel = format!(".clai/images/{uuid}.png");
+        std::os::unix::fs::symlink(&secret, root.join(&rel)).unwrap();
+
+        // The lexical gate is fooled...
+        assert!(is_store_relative_path(&rel));
+        // ...but resolve_store_path follows the link and refuses the escape.
+        assert!(resolve_store_path(root, &rel).is_none());
     }
 }

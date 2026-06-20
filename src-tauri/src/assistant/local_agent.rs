@@ -1670,13 +1670,13 @@ async fn resolve_cli_image_parts(
         else {
             continue;
         };
-        // Defense-in-depth: never read a non-store path (see
-        // image_store::is_store_relative_path).
-        if !crate::assistant::image_store::is_store_relative_path(path) {
-            tracing::warn!(path = %path, "CLI image: non-store path rejected; skipping");
+        // Defense-in-depth: resolve through symlinks and refuse store
+        // escapes — the bytes are base64-encoded to the model, so the read is
+        // the real exfiltration sink.
+        let Some(abs) = crate::assistant::image_store::resolve_store_path(root, path) else {
+            tracing::warn!(path = %path, "CLI image: non-store/escaping path rejected; skipping");
             continue;
-        }
-        let abs = root.join(path);
+        };
         match tokio::fs::read(&abs).await {
             Ok(bytes) => {
                 let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -1717,16 +1717,14 @@ async fn resolve_codex_image_paths(
     };
     let mut out = Vec::with_capacity(rels.len());
     for rel in rels {
-        // Defense-in-depth: never hand codex a non-store path.
-        if !crate::assistant::image_store::is_store_relative_path(&rel) {
-            tracing::warn!(path = %rel, "Codex image: non-store path rejected; skipping");
-            continue;
-        }
-        let abs = root.join(&rel);
-        if tokio::fs::try_exists(&abs).await.unwrap_or(false) {
-            out.push(abs);
-        } else {
-            tracing::warn!(path = %abs.display(), "Codex image: file missing; skipping");
+        // Defense-in-depth: resolve through symlinks and refuse store
+        // escapes before handing codex a path to read. `resolve_store_path`
+        // canonicalizes (so it also rejects a missing file).
+        match crate::assistant::image_store::resolve_store_path(&root, &rel) {
+            Some(abs) => out.push(abs),
+            None => {
+                tracing::warn!(path = %rel, "Codex image: non-store/escaping/missing path rejected; skipping")
+            }
         }
     }
     out
