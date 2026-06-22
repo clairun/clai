@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -90,6 +90,28 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
     const id = sessionRef.current;
     if (id) void invoke('terminal_write', { sessionId: id, data: `${cmd}\r` });
   };
+
+  // Keep the PTY winsize in lockstep with the xterm grid. fit() resizes the JS
+  // grid; we then *explicitly* push cols/rows to the PTY rather than relying on
+  // xterm's onResize, which only fires when the grid itself changes. A PTY left
+  // stale — a fit that ran before the session id was ready, or a geometry
+  // change xterm rounds to the same grid — is exactly what makes full-screen
+  // TUIs (vim, htop) draw at the old size while flowing shell output looks fine
+  // (the shell wraps to the live grid; a TUI trusts TIOCGWINSZ).
+  const syncSizeToPty = useCallback(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    try {
+      fit.fit();
+    } catch {
+      return; // container detached mid-teardown
+    }
+    const id = sessionRef.current;
+    if (id) {
+      void invoke('terminal_resize', { sessionId: id, cols: term.cols, rows: term.rows });
+    }
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -216,6 +238,10 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
         term.onResize(({ cols, rows }) => {
           void invoke('terminal_resize', { sessionId: id, cols, rows });
         });
+        // The real-size fit may have landed before this session id existed
+        // (the open IPC is async); re-sync now so the PTY isn't stuck at the
+        // tiny startup grid.
+        syncSizeToPty();
         // `!cmd` fast-path on a fresh shell: queue the command and run it once
         // the shell is ready (first prompt). If the prompt already arrived, send
         // now. (An already-running kept-alive shell is fed by the show effect.)
@@ -229,15 +255,10 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
       }
     })();
 
-    // Refit when the card resizes (window resize, or side panels shifting the
-    // conversation column width).
-    const refit = () => {
-      try {
-        fit.fit();
-      } catch {
-        /* container detached mid-teardown */
-      }
-    };
+    // Refit when the card resizes (window resize, side panels shifting the
+    // conversation column, or entering/leaving fullscreen) and push the new
+    // size to the PTY so TUIs reflow.
+    const refit = () => syncSizeToPty();
     window.addEventListener('resize', refit);
     const resizeObserver = new ResizeObserver(refit);
     resizeObserver.observe(container);
@@ -257,7 +278,7 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
       }
       term.dispose();
     };
-  }, [workspaceId]);
+  }, [workspaceId, syncSizeToPty]);
 
   // When this terminal becomes visible again, its xterm may have been laid out
   // at zero size while hidden — refit and refocus once layout settles. Also
@@ -267,11 +288,7 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
   useEffect(() => {
     if (!visible) return undefined;
     const raf = requestAnimationFrame(() => {
-      try {
-        fitRef.current?.fit();
-      } catch {
-        /* container detached */
-      }
+      syncSizeToPty();
       termRef.current?.focus();
       if (shellReadyRef.current && sessionRef.current) {
         const cmd = consumeRef.current?.();
@@ -279,7 +296,22 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
       }
     });
     return () => cancelAnimationFrame(raf);
-  }, [visible]);
+  }, [visible, syncSizeToPty]);
+
+  // Entering/leaving fullscreen changes the card geometry; refit so both the
+  // xterm grid and the PTY winsize match. The rAF catches the snapped height;
+  // the post-transition timeout catches the animated width (.terminal
+  // transitions `width`) in case the webview coalesces away the ResizeObserver
+  // settle tick. Only the on-screen terminal can measure a real size.
+  useEffect(() => {
+    if (!visible) return undefined;
+    const raf = requestAnimationFrame(syncSizeToPty);
+    const settle = window.setTimeout(syncSizeToPty, 320);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(settle);
+    };
+  }, [fullscreen, visible, syncSizeToPty]);
 
   return (
     <div
