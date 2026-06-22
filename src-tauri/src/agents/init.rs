@@ -51,6 +51,19 @@ pub async fn populate_scheduler_from_workspace_agents(
         };
         apply_workspace_schedule(&mut sched, &config);
     }
+
+    // Restore a persisted global "pause all" overlay. This sits on top of the
+    // per-workspace instance state seeded above: while paused the runner skips
+    // every tick, and resuming leaves each workspace's individual pause state
+    // (set via apply_workspace_schedule) intact.
+    let globally_paused = state
+        .config_manager
+        .lock()
+        .map(|cm| cm.get().scheduler_paused)
+        .unwrap_or(false);
+    if globally_paused {
+        sched.pause("Paused by user".to_string());
+    }
 }
 
 /// Reconcile the scheduler's view of a single workspace with its current

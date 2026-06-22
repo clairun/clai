@@ -598,6 +598,14 @@ pub struct AppConfig {
     /// (Settings → Applications).
     #[serde(default)]
     pub system_apps: crate::system_apps::SystemAppsConfig,
+
+    /// Global "pause all" overlay for the agent scheduler. When true, NO
+    /// workspace's scheduled tick runs, regardless of its individual
+    /// `schedule.paused` state — which is preserved underneath and restored
+    /// when this is cleared. Persisted so a deliberate maintenance pause
+    /// survives app restarts. In-flight runs are not interrupted.
+    #[serde(default)]
+    pub scheduler_paused: bool,
 }
 
 impl Default for AppConfig {
@@ -610,6 +618,7 @@ impl Default for AppConfig {
             skill_sources: Vec::new(),
             provider_connections: Vec::new(),
             system_apps: crate::system_apps::SystemAppsConfig::default(),
+            scheduler_paused: false,
         }
     }
 }

@@ -2738,6 +2738,50 @@ pub async fn workspace_set_schedule_paused(
     Ok(())
 }
 
+/// Globally pause or resume the agent scheduler ("pause all workspaces").
+///
+/// A persisted overlay on top of per-workspace pause: while paused, NO
+/// workspace's scheduled tick runs, regardless of its individual
+/// `schedule.paused` state. That per-workspace state is preserved and takes
+/// effect again on resume. In-flight runs are not interrupted — only new
+/// ticks are suppressed. The choice is persisted to `AppConfig` so it survives
+/// an app restart (restored in `populate_scheduler_from_workspace_agents`).
+#[tauri::command]
+pub async fn set_scheduler_paused(paused: bool, state: State<'_, AppState>) -> Result<(), String> {
+    // Persist first so the choice survives a restart even if the process dies
+    // right after; the in-memory scheduler flip below is idempotent.
+    {
+        let config_manager = state
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        config_manager
+            .update(|config| config.scheduler_paused = paused)
+            .map_err(|e| format!("Failed to persist scheduler pause state: {}", e))?;
+    }
+
+    let mut scheduler = state.scheduler.lock().await;
+    if paused {
+        scheduler.pause("Paused by user".to_string());
+    } else {
+        scheduler.resume();
+    }
+
+    Ok(())
+}
+
+/// Whether the agent scheduler is globally paused (the "pause all" overlay).
+/// Reads the persisted user intent so the UI can render the paused banner on
+/// load.
+#[tauri::command]
+pub fn get_scheduler_paused(state: State<'_, AppState>) -> Result<bool, String> {
+    let config_manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    Ok(config_manager.get().scheduler_paused)
+}
+
 /// Delete a general workspace — removes metadata, session data, filesystem
 /// root, and any in-memory state scoped to it (scheduler definitions /
 /// instances, pending permission and path-grant queues). Without this

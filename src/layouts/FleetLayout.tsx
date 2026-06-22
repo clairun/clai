@@ -7,6 +7,8 @@ import {
   getWorkspaceSnapshot,
   runWorkspaceNow,
   setWorkspaceSchedulePaused,
+  getSchedulerPaused,
+  setSchedulerPaused,
   createWorkspace,
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
@@ -92,6 +94,10 @@ const FleetLayout = () => {
   const [forkBusyId, setForkBusyId] = useState<string | null>(null);
   const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
   const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
+  // Global "pause all" overlay (scheduler-wide). Loaded once on mount; the
+  // toggle persists server-side and survives restarts.
+  const [schedulerPaused, setSchedulerPausedState] = useState(false);
+  const [schedulerPauseBusy, setSchedulerPauseBusy] = useState(false);
 
   const activeRunsByWorkspace = useFleetActivity() as Record<string, number>;
   const pendingPermissionCounts = usePermissionAttention() as Record<string, number>;
@@ -344,6 +350,29 @@ const FleetLayout = () => {
     [pauseBusyId, loadWorkspaces],
   );
 
+  // Load the persisted global-pause state once so the banner/toggle reflect
+  // it on first paint (a 5s poll is unnecessary — only this UI flips it).
+  useEffect(() => {
+    getSchedulerPaused()
+      .then(setSchedulerPausedState)
+      .catch(() => {});
+  }, []);
+
+  const handleToggleSchedulerPaused = useCallback(async () => {
+    if (schedulerPauseBusy) return;
+    const next = !schedulerPaused;
+    setSchedulerPauseBusy(true);
+    setSchedulerPausedState(next); // optimistic
+    try {
+      await setSchedulerPaused(next);
+    } catch (err) {
+      setSchedulerPausedState(!next); // revert on failure
+      setError(errText(err, 'Failed to update global pause state.'));
+    } finally {
+      setSchedulerPauseBusy(false);
+    }
+  }, [schedulerPaused, schedulerPauseBusy]);
+
   return (
     <div className={styles.layout}>
       <div className={styles.topBar}>
@@ -369,6 +398,19 @@ const FleetLayout = () => {
         </div>
         <button
           type="button"
+          className={`${styles.pauseAllButton} ${schedulerPaused ? styles.pauseAllButtonActive : ''}`}
+          onClick={handleToggleSchedulerPaused}
+          disabled={schedulerPauseBusy}
+          title={
+            schedulerPaused
+              ? 'Resume all scheduled runs'
+              : 'Pause all scheduled runs across every workspace'
+          }
+        >
+          {schedulerPaused ? 'Resume all' : 'Pause all'}
+        </button>
+        <button
+          type="button"
           className={styles.settingsButton}
           onClick={() => {
             setGlobalSettingsTab(TABS.PROVIDER);
@@ -386,6 +428,13 @@ const FleetLayout = () => {
       </div>
 
       {error && <div className={styles.errorBanner}>{error}</div>}
+
+      {schedulerPaused && (
+        <div className={styles.pausedBanner} role="status">
+          All scheduled runs are paused. Automations won’t run on any workspace
+          until you resume.
+        </div>
+      )}
 
       <div className={styles.body} ref={bodyRef}>
         <WorkspaceRail
