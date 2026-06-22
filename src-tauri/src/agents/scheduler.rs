@@ -471,6 +471,33 @@ mod tests {
     }
 
     #[test]
+    fn test_global_pause_preserves_per_instance_state() {
+        // Global "pause all" is an overlay: while paused nothing runs, and on
+        // resume each instance's individual enabled/disabled state is intact.
+        let mut scheduler = Scheduler::new();
+        scheduler.register_definition(create_test_definition());
+        let a = scheduler
+            .create_instance("test-agent", "space1", "room1")
+            .unwrap();
+        let b = scheduler
+            .create_instance("test-agent", "space2", "room1")
+            .unwrap();
+
+        // B is individually paused (per-workspace), A is active.
+        scheduler.set_instance_enabled(&b, false);
+
+        // Global pause hides everything, including the active A.
+        scheduler.pause("Paused by user".to_string());
+        assert!(scheduler.next_ready().is_none());
+
+        // Resume lifts the overlay: A becomes ready again, but B stays
+        // disabled — its per-workspace pause was preserved, not cleared.
+        scheduler.resume();
+        assert_eq!(scheduler.next_ready(), Some(a));
+        assert!(!scheduler.get_instance(&b).unwrap().enabled);
+    }
+
+    #[test]
     fn test_paused_scheduler_returns_none() {
         let mut scheduler = Scheduler::new();
 

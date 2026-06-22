@@ -231,6 +231,16 @@ export async function setWorkspaceSchedulePaused(
   return invoke('workspace_set_schedule_paused', { workspaceId, paused });
 }
 
+/** Whether the agent scheduler is globally paused (the "pause all" overlay). */
+export async function getSchedulerPaused(): Promise<boolean> {
+  return invoke('get_scheduler_paused');
+}
+
+/** Globally pause/resume the agent scheduler ("pause all workspaces"). */
+export async function setSchedulerPaused(paused: boolean): Promise<void> {
+  return invoke('set_scheduler_paused', { paused });
+}
+
 export async function setWorkspaceTitle(workspaceId: string, title: string): Promise<void> {
   return invoke('workspace_set_title', { workspaceId, title });
 }
