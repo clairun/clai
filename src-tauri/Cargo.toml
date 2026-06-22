@@ -133,6 +133,13 @@ ts-rs = { version = "12.0.1", features = ["serde-compat", "serde-json-impl"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
 
+# Unix-only: needed to SIGKILL the *whole* process group of a timed-out
+# bash_exec child (sandbox -> sh -> cargo -> rustc, …), not just the direct
+# child. Already in the tree transitively (tokio, sqlx, …); declaring it
+# directly only exposes libc::kill. See assistant::sandbox::runner.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Temporary directories for testing
 tempfile = "3"
