@@ -36,6 +36,7 @@ import type {
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
+import { shouldCancelRunOnKey } from '../utils/cancelRunHotkey';
 import styles from './Workspace.module.css';
 
 const DEFAULT_WORKSPACE_ID = 'default';
@@ -1056,7 +1057,7 @@ const WorkspaceHeader = ({
             className={styles.stopBtn}
             onClick={() => onStop?.(activeRunId)}
             disabled={!onStop || !activeRunId || stopBusy}
-            title={stopBusy ? 'Stopping…' : 'Stop current run'}
+            title={stopBusy ? 'Stopping…' : 'Stop current run (Ctrl+C)'}
             aria-label="Stop current run"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -1783,6 +1784,32 @@ const Workspace = () => {
   const activeRun =
     (snapshot?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
+  // Ctrl+C cancels the in-flight run (terminal-style interrupt). The guard
+  // logic lives in shouldCancelRunOnKey so it stays unit-tested: a real text
+  // selection still copies, Ctrl+C inside the integrated terminal reaches the
+  // PTY, and macOS Cmd+C is never intercepted.
+  useEffect(() => {
+    if (!hasActiveRun) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const sel = window.getSelection();
+      const cancel = shouldCancelRunOnKey({
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey,
+        key: e.key,
+        hasActiveRun,
+        hasTextSelection: !!sel && !sel.isCollapsed && sel.toString().length > 0,
+        targetInTerminal: !!target?.closest('.xterm'),
+      });
+      if (!cancel) return;
+      e.preventDefault();
+      void handleStop(activeRun?.id || null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [hasActiveRun, activeRun?.id, handleStop]);
   // Surface the most recent run's failure in the chat. Derived from the
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
