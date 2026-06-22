@@ -196,7 +196,7 @@ describe('TerminalEmulator per-workspace composer state', () => {
     expect(fullscreenOf('A')).toBe('false');
   });
 
-  it('resets fullscreen when leaving terminal mode', async () => {
+  it('keeps a workspace maximized across chat<->terminal toggles', async () => {
     const user = userEvent.setup();
     renderComposer();
 
@@ -204,10 +204,29 @@ describe('TerminalEmulator per-workspace composer state', () => {
     await user.click(screen.getByText('fs-A'));
     expect(fullscreenOf('A')).toBe('true');
 
-    // Back to chat (Ctrl+\) then re-enter: fullscreen must NOT persist.
+    // Back to chat (Ctrl+\\) then re-enter: A reopens maximized, as left.
     await user.keyboard('{Control>}\\{/Control}');
     await user.click(screen.getByRole('button', { name: /terminal mode/i }));
-    expect(fullscreenOf('A')).toBe('false');
+    expect(fullscreenOf('A')).toBe('true');
+  });
+
+  it('tracks fullscreen per workspace (B is not affected by A)', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+
+    // Maximize A's terminal.
+    await user.click(screen.getByRole('button', { name: /terminal mode/i }));
+    await user.click(screen.getByText('fs-A'));
+    expect(fullscreenOf('A')).toBe('true');
+
+    // Open B's terminal — it must start docked, not inherit A's state.
+    await user.click(screen.getByText('go-B'));
+    await user.click(screen.getByRole('button', { name: /terminal mode/i }));
+    expect(fullscreenOf('B')).toBe('false');
+
+    // Back to A — still maximized.
+    await user.click(screen.getByText('go-A'));
+    expect(fullscreenOf('A')).toBe('true');
   });
 });
 

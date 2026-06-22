@@ -65,9 +65,11 @@ const TerminalEmulator = ({
   // screen persist across navigation for the whole app session. Entries are
   // removed only when the shell exits (see onShellExit in the render).
   const [openedTerminals, setOpenedTerminals] = useState<string[]>([]);
-  // Fullscreen fills the detail pane (keeps the left rail) instead of the
-  // bottom card. Transient/global view pref: reset when leaving terminal mode.
-  const [fullscreen, setFullscreen] = useState(false);
+  // Workspaces whose terminal is maximized (fullscreen fills the detail pane and
+  // keeps the left rail). Per-workspace so each terminal reopens the way it was
+  // left — mirroring the kept-alive model above — and persists across chat<->
+  // terminal toggles and workspace switches. Cleared on shell exit. Session-only.
+  const [fullscreenWorkspaces, setFullscreenWorkspaces] = useState<string[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -110,11 +112,9 @@ const TerminalEmulator = ({
   useEffect(() => {
     showTerminalRef.current = showTerminal;
   }, [showTerminal]);
-  // Mirror of fullscreen for the capture-phase shortcut handler.
-  const fullscreenRef = useRef(false);
-  useEffect(() => {
-    fullscreenRef.current = fullscreen;
-  }, [fullscreen]);
+  // Whether the active workspace's terminal is maximized (derived per workspace).
+  const fullscreen =
+    !!currentWorkspaceId && fullscreenWorkspaces.includes(currentWorkspaceId);
 
   // Enter terminal mode for the current workspace AND register it in the
   // kept-alive set so its shell persists for the rest of the app session. The
@@ -127,9 +127,19 @@ const TerminalEmulator = ({
       prev.includes(currentWorkspaceId) ? prev : [...prev, currentWorkspaceId]
     );
     setTerminalMode(true);
-    // Every explicit open starts docked; fullscreen is opt-in per session.
-    setFullscreen(false);
+    // No fullscreen reset here: a workspace reopens in whatever mode it was last
+    // left (docked or maximized), per the fullscreenWorkspaces set.
   }, [terminalAvailable, currentWorkspaceId]);
+
+  // Toggle the active workspace's maximized state (button + Ctrl/Cmd+Shift+Enter).
+  const toggleFullscreen = useCallback(() => {
+    if (!currentWorkspaceId) return;
+    setFullscreenWorkspaces((prev) =>
+      prev.includes(currentWorkspaceId)
+        ? prev.filter((id) => id !== currentWorkspaceId)
+        : [...prev, currentWorkspaceId]
+    );
+  }, [currentWorkspaceId]);
 
   // Maximum number of messages to keep
   const MAX_MESSAGES = 5;
@@ -283,7 +293,7 @@ const TerminalEmulator = ({
         if (!showTerminalRef.current) return;
         e.preventDefault();
         e.stopPropagation();
-        setFullscreen((f) => !f);
+        toggleFullscreen();
         return;
       }
       const isToggleKey = e.code === 'Backslash' || e.code === 'Backquote' || e.key === '\\';
@@ -297,7 +307,7 @@ const TerminalEmulator = ({
     };
     document.addEventListener('keydown', handler, true);
     return () => document.removeEventListener('keydown', handler, true);
-  }, [terminalAvailable, enterTerminalMode]);
+  }, [terminalAvailable, enterTerminalMode, toggleFullscreen]);
 
   // Entering terminal mode shrinks the conversation viewport — nudge it back
   // to the bottom (after the reflow settles) so the latest messages stay in
@@ -566,16 +576,13 @@ const TerminalEmulator = ({
           visible={showTerminal && wsId === currentWorkspaceId}
           consumeInitialCommand={consumeInitialCommand}
           fullscreen={fullscreen && wsId === currentWorkspaceId}
-          onToggleFullscreen={() => setFullscreen((f) => !f)}
-          onBackToChat={() => {
-            setTerminalMode(false);
-            setFullscreen(false);
-          }}
+          onToggleFullscreen={toggleFullscreen}
+          onBackToChat={() => setTerminalMode(false)}
           onShellExit={() => {
             setOpenedTerminals((prev) => prev.filter((id) => id !== wsId));
+            setFullscreenWorkspaces((prev) => prev.filter((id) => id !== wsId));
             if (wsId === currentWorkspaceId) {
               setTerminalMode(false);
-              setFullscreen(false);
             }
           }}
         />
