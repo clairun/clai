@@ -27,6 +27,10 @@ interface WorkspaceRailProps {
   runNowBusyId: string | null;
   forkBusyId: string | null;
   pauseBusyId: string | null;
+  /** Global scheduler pause (overlay across every workspace). */
+  schedulerPaused: boolean;
+  schedulerPauseBusy: boolean;
+  onToggleSchedulerPaused: () => void;
 }
 
 const isProcessing = (
@@ -76,6 +80,9 @@ const WorkspaceRail = ({
   onToggleCollapsed,
   onSelect,
   onCreate,
+  schedulerPaused,
+  schedulerPauseBusy,
+  onToggleSchedulerPaused,
   onRunNow,
   onTogglePause,
   onSettings,
@@ -132,6 +139,17 @@ const WorkspaceRail = ({
         </button>
         {!collapsed && <span className={styles.railTitle}>Workspaces</span>}
         {!collapsed && <span className={styles.railCount}>{workspaces.length}</span>}
+        {!collapsed && schedulerPaused && (
+          <span
+            className={styles.pausedPill}
+            title="Scheduled runs are paused for every workspace"
+          >
+            Paused
+          </span>
+        )}
+      </div>
+
+      <div className={styles.railActions}>
         <button
           type="button"
           className={styles.newButton}
@@ -140,6 +158,21 @@ const WorkspaceRail = ({
           aria-label="New workspace"
         >
           {collapsed ? '+' : '＋ New'}
+        </button>
+        <button
+          type="button"
+          className={`${styles.pauseAllButton} ${schedulerPaused ? styles.pauseAllButtonActive : ''}`}
+          onClick={onToggleSchedulerPaused}
+          disabled={schedulerPauseBusy}
+          title={
+            schedulerPaused
+              ? 'Resume all scheduled runs'
+              : 'Pause all scheduled runs across every workspace'
+          }
+          aria-label={schedulerPaused ? 'Resume all scheduled runs' : 'Pause all scheduled runs'}
+        >
+          {schedulerPaused ? <RunIcon /> : <PauseIcon />}
+          {!collapsed && <span>{schedulerPaused ? 'Resume all' : 'Pause all'}</span>}
         </button>
       </div>
 

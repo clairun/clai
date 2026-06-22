@@ -36,7 +36,7 @@
   justify-content: center;
   gap: 6px;
   padding: 10px 0;
-  height: 90px;
+  height: auto;
 }
 
 .collapseToggle {
@@ -103,6 +103,81 @@
 .newButton:hover {
   border-color: var(--color-primary);
   color: var(--color-primary);
+}
+
+/* Action row: ＋ New + Pause all, directly under the header. */
+.railActions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border-light);
+  flex-shrink: 0;
+}
+.railActions .newButton,
+.railActions .pauseAllButton {
+  flex: 1;
+}
+.railCollapsed .railActions {
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 0;
+}
+.railCollapsed .railActions .newButton,
+.railCollapsed .railActions .pauseAllButton {
+  flex: 0 0 auto;
+}
+
+.pauseAllButton {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), background var(--transition-fast),
+    color var(--transition-fast);
+  white-space: nowrap;
+}
+.pauseAllButton:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.pauseAllButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.railCollapsed .pauseAllButton {
+  padding: 4px 0;
+  width: 28px;
+}
+
+/* While paused the button is the way back: amber, stands out (no banner). */
+.pauseAllButtonActive,
+.pauseAllButtonActive:hover:not(:disabled) {
+  border-color: var(--color-warning-dark);
+  color: var(--color-warning-dark);
+  background: var(--color-warning-bg, transparent);
+}
+
+/* Quiet "Paused" cue next to the WORKSPACES title — not a warning banner. */
+.pausedPill {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-warning-dark);
+  border: 1px solid var(--color-warning-dark);
+  background: var(--color-warning-bg, transparent);
+  border-radius: var(--badge-radius);
+  padding: 1px 6px;
+  white-space: nowrap;
 }
 
 .filterRow {

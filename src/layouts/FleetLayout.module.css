@@ -52,52 +52,6 @@
   color: var(--color-primary);
 }
 
-.pauseAllButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 30px;
-  padding: 0 12px;
-  flex-shrink: 0;
-  border: 1px solid var(--color-border-medium);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-elevated);
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: border-color var(--transition-fast), color var(--transition-fast),
-    background var(--transition-fast);
-}
-
-.pauseAllButton:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
-.pauseAllButton:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* While paused, the button is the obvious way back: make it stand out. */
-.pauseAllButtonActive {
-  border-color: var(--color-warning-dark);
-  color: var(--color-warning-dark);
-  background: var(--color-warning-bg, transparent);
-}
-
-.pausedBanner {
-  flex-shrink: 0;
-  margin: 8px 18px 0;
-  padding: 8px 12px;
-  border: 1px solid var(--color-warning-dark);
-  border-radius: var(--radius-sm);
-  background: var(--color-warning-bg, transparent);
-  color: var(--color-warning-dark);
-  font-size: 12px;
-}
-
 .counterChip strong {
   color: var(--color-text-primary);
   font-weight: 700;
