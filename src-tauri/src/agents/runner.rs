@@ -263,6 +263,31 @@ async fn run_next_agent(
 
     tracing::debug!(agent_name = %agent_config.name, "Got agent config");
 
+    // Don't start a scheduled run while this workspace's canonical manager
+    // session is already busy. The scheduler's one-at-a-time guard only
+    // covers scheduler-started runs; an interactive turn the user kicked
+    // off from the chat UI runs *outside* the scheduler and shares the same
+    // session. Without this check a due tick would start a second,
+    // concurrent run on that session — surfacing as two live conversations
+    // in the workspace. Defer instead: release the instance back to
+    // ready-now (without consuming the schedule) so a later tick fires once
+    // the workspace is idle.
+    if let Some(existing) = find_manager_session(&workspace_pool, &agent_config).await? {
+        let busy = repository::session_has_active_run(&workspace_pool, &existing.id)
+            .await
+            .map_err(RunnerError::AssistantPersistence)?;
+        if busy {
+            tracing::info!(
+                instance_id = %instance_id,
+                session_id = %existing.id,
+                "Workspace session is busy with an active run; deferring scheduled tick"
+            );
+            let mut sched = scheduler.lock().await;
+            sched.defer_running_instance(&instance_id);
+            return Ok(());
+        }
+    }
+
     let connections = resolve_agent_connections(state.inner(), &agent_config)?;
 
     let session = ensure_workspace_manager_session(

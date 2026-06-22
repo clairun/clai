@@ -212,6 +212,30 @@ impl Scheduler {
         }
     }
 
+    /// Releases a currently-running instance back to *ready-now* without
+    /// advancing its schedule. Use this when a due tick could not actually
+    /// run — e.g. the workspace is busy with a user-driven (interactive)
+    /// run — so the next tick re-evaluates and fires as soon as the
+    /// workspace is idle, instead of silently skipping this scheduled fire
+    /// until the next interval.
+    ///
+    /// Differs from [`complete_agent`] in two ways: it does **not** compute
+    /// or persist a next-run anchor (the fire is deferred, not consumed),
+    /// and it does **not** clear `manual_run_pending` (a deferred "Run now"
+    /// must still fire once the workspace frees up).
+    pub fn defer_running_instance(&mut self, instance_id: &str) {
+        if let Some(instance) = self.instances.get_mut(instance_id) {
+            instance.is_running = false;
+            // Ready-now: the next runner tick retries; `is_ready` still
+            // gates on `enabled || manual_run_pending`, so a paused
+            // schedule won't start ticking on its own.
+            instance.next_run_at = None;
+        }
+        if self.running.as_ref() == Some(&instance_id.to_string()) {
+            self.running = None;
+        }
+    }
+
     // =========================================================================
     // State Management
     // =========================================================================
@@ -549,6 +573,64 @@ mod tests {
         scheduler.set_instance_next_run_at(&instance_id, None);
 
         assert!(scheduler.next_ready().is_some());
+    }
+
+    // -------------------------------------------------------------------
+    // defer_running_instance: release a due-but-blocked tick without
+    // consuming the schedule (busy-workspace deferral)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn defer_running_instance_releases_slot_and_stays_ready_now() {
+        let mut scheduler = Scheduler::new();
+        scheduler.register_definition(create_test_definition());
+        let id = scheduler
+            .create_instance("test-agent", "space1", "room1")
+            .unwrap();
+
+        // Claim the instance (simulates a due tick).
+        assert_eq!(scheduler.next_ready(), Some(id.clone()));
+        assert!(scheduler.is_running());
+
+        // Workspace was busy: defer instead of completing.
+        scheduler.defer_running_instance(&id);
+
+        // Slot is released and the instance is immediately ready again,
+        // so the next tick retries (no schedule consumed).
+        assert!(!scheduler.is_running());
+        assert_eq!(scheduler.next_ready(), Some(id));
+    }
+
+    #[test]
+    fn defer_running_instance_preserves_manual_run_pending() {
+        let mut scheduler = Scheduler::new();
+        scheduler.register_definition(create_test_definition());
+        let id = scheduler
+            .create_instance("test-agent", "space1", "room1")
+            .unwrap();
+
+        // Pause the schedule, then queue a one-shot manual run.
+        scheduler.set_instance_enabled(&id, false);
+        assert!(scheduler.force_ready("test-agent"));
+        assert!(scheduler.get_instance(&id).unwrap().manual_run_pending);
+
+        // Manual run is picked up despite being paused.
+        assert_eq!(scheduler.next_ready(), Some(id.clone()));
+
+        // Deferred because the workspace was busy: the manual-run flag must
+        // survive so the run still fires once idle (complete_agent would
+        // have cleared it).
+        scheduler.defer_running_instance(&id);
+        assert!(scheduler.get_instance(&id).unwrap().manual_run_pending);
+        assert_eq!(scheduler.next_ready(), Some(id));
+    }
+
+    #[test]
+    fn defer_running_instance_ignores_unknown_instance() {
+        let mut scheduler = Scheduler::new();
+        // Must not panic on a missing id (covers the early-return branch).
+        scheduler.defer_running_instance("nonexistent");
+        assert!(!scheduler.is_running());
     }
 
     #[test]
