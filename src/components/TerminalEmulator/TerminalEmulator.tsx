@@ -65,12 +65,6 @@ const TerminalEmulator = ({
   // screen persist across navigation for the whole app session. Entries are
   // removed only when the shell exits (see onShellExit in the render).
   const [openedTerminals, setOpenedTerminals] = useState<string[]>([]);
-  // Mirror of terminalMode for event handlers that must read the latest value
-  // without re-subscribing (the Ctrl+\\ listener).
-  const terminalModeRef = useRef(false);
-  useEffect(() => {
-    terminalModeRef.current = terminalMode;
-  }, [terminalMode]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -105,6 +99,14 @@ const TerminalEmulator = ({
     terminalAvailable &&
     !!currentWorkspaceId &&
     openedTerminals.includes(currentWorkspaceId);
+  // Mirror of showTerminal for the capture-phase Ctrl+\\ listener, which must
+  // toggle off what is actually on screen rather than the saved terminalMode
+  // flag: after a background shell exits, terminalMode can stay true while the
+  // composer is shown, and keying off the stale flag would need two presses.
+  const showTerminalRef = useRef(false);
+  useEffect(() => {
+    showTerminalRef.current = showTerminal;
+  }, [showTerminal]);
 
   // Enter terminal mode for the current workspace AND register it in the
   // kept-alive set so its shell persists for the rest of the app session. The
@@ -269,7 +271,7 @@ const TerminalEmulator = ({
         if (!terminalAvailable) return;
         e.preventDefault();
         e.stopPropagation();
-        if (terminalModeRef.current) setTerminalMode(false);
+        if (showTerminalRef.current) setTerminalMode(false);
         else enterTerminalMode();
       }
     };
@@ -520,10 +522,9 @@ const TerminalEmulator = ({
   }, []);
 
   const handleTerminalClick = () => {
-    // In terminal mode the textarea isn't rendered; let the click reach xterm.
-    if (inputRef.current) {
-      inputRef.current.focus();
-    }
+    // Clicking the composer area focuses its textarea. In terminal mode the
+    // composer is hidden (display:none) and xterm owns focus, so skip it.
+    if (!showTerminal) inputRef.current?.focus();
   };
 
   return (

@@ -20,9 +20,22 @@ beforeAll(() => {
 // composer shows it (terminal mode) for the right workspace.
 vi.mock('./WorkspaceTerminal', () => ({
   // Surface `visible` + `workspaceId` so tests can assert keep-alive: a hidden
-  // terminal stays mounted (in the DOM) but `data-visible="false"`.
-  default: ({ visible, workspaceId }: { visible: boolean; workspaceId: string }) => (
-    <div data-testid="workspace-terminal" data-workspace={workspaceId} data-visible={String(visible)} />
+  // terminal stays mounted (in the DOM) but `data-visible="false"`. The
+  // exit button lets tests drive `onShellExit` (a real shell exit / Ctrl-D).
+  default: ({
+    visible,
+    workspaceId,
+    onShellExit,
+  }: {
+    visible: boolean;
+    workspaceId: string;
+    onShellExit: () => void;
+  }) => (
+    <div data-testid="workspace-terminal" data-workspace={workspaceId} data-visible={String(visible)}>
+      <button type="button" onClick={onShellExit}>
+        exit-{workspaceId}
+      </button>
+    </div>
   ),
 }));
 vi.mock('../../workspace/components/WorkspaceContextBar', () => ({
@@ -120,6 +133,32 @@ describe('TerminalEmulator per-workspace composer state', () => {
 
     // Returning to A shows it again (terminal mode stored per workspace).
     await user.click(screen.getByText('go-A'));
+    expect(visibleWorkspaces()).toEqual(['A']);
+  });
+
+  it('reopens a terminal in one Ctrl+\\ after its shell exited while hidden', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+
+    // Open A's terminal, then switch to B so A is mounted-but-hidden.
+    await user.click(screen.getByRole('button', { name: /terminal mode/i }));
+    expect(visibleWorkspaces()).toEqual(['A']);
+    await user.click(screen.getByText('go-B'));
+    expect(visibleWorkspaces()).toEqual([]);
+
+    // A's shell exits while hidden -> A leaves the kept-alive set entirely.
+    await user.click(screen.getByText('exit-A'));
+
+    // Back on A: its saved terminalMode is still true, but with no live
+    // terminal we fall back to the composer (no blank pane), not a mounted
+    // hidden terminal.
+    await user.click(screen.getByText('go-A'));
+    expect(screen.queryAllByTestId('workspace-terminal')).toHaveLength(0);
+
+    // Regression: a SINGLE Ctrl+\ must reopen A's terminal. Before the fix the
+    // toggle keyed off the stale terminalMode flag and the first press was a
+    // no-op, so it took two.
+    await user.keyboard('{Control>}\\{/Control}');
     expect(visibleWorkspaces()).toEqual(['A']);
   });
 });
