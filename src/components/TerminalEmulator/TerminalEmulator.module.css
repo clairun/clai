@@ -53,6 +53,21 @@
   }
 }
 
+/* Fullscreen: fill the detail pane and keep the left rail + top bar visible.
+   Desktop only (the bar is position:fixed there); compound selector beats the
+   media-query .terminal rule above regardless of source order. */
+@media (min-width: 769px) and (pointer: fine) {
+  .terminal.terminalFullscreen {
+    left: var(--fleet-rail-width, 0px);
+    width: calc(100vw - var(--fleet-rail-width, 0px));
+    top: var(--fleet-content-top, 45px);
+    bottom: 0;
+    max-height: none;
+    transform: none;
+    border-radius: 0;
+  }
+}
+
 /* Workspace context bar inside terminal */
 .workspaceContextWrapper {
   padding: 8px 14px 0;

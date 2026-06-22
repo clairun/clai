@@ -65,6 +65,9 @@ const TerminalEmulator = ({
   // screen persist across navigation for the whole app session. Entries are
   // removed only when the shell exits (see onShellExit in the render).
   const [openedTerminals, setOpenedTerminals] = useState<string[]>([]);
+  // Fullscreen fills the detail pane (keeps the left rail) instead of the
+  // bottom card. Transient/global view pref: reset when leaving terminal mode.
+  const [fullscreen, setFullscreen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -107,6 +110,11 @@ const TerminalEmulator = ({
   useEffect(() => {
     showTerminalRef.current = showTerminal;
   }, [showTerminal]);
+  // Mirror of fullscreen for the capture-phase shortcut handler.
+  const fullscreenRef = useRef(false);
+  useEffect(() => {
+    fullscreenRef.current = fullscreen;
+  }, [fullscreen]);
 
   // Enter terminal mode for the current workspace AND register it in the
   // kept-alive set so its shell persists for the rest of the app session. The
@@ -119,6 +127,8 @@ const TerminalEmulator = ({
       prev.includes(currentWorkspaceId) ? prev : [...prev, currentWorkspaceId]
     );
     setTerminalMode(true);
+    // Every explicit open starts docked; fullscreen is opt-in per session.
+    setFullscreen(false);
   }, [terminalAvailable, currentWorkspaceId]);
 
   // Maximum number of messages to keep
@@ -266,6 +276,16 @@ const TerminalEmulator = ({
   // awkward. Capture phase so it fires even when the xterm grid has focus.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Ctrl/Cmd+Shift+Enter toggles fullscreen while the terminal is shown.
+      // (No Esc binding: TUIs like vim need Esc, and this listener is capture
+      // phase, so it would steal it from the shell.)
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Enter') {
+        if (!showTerminalRef.current) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setFullscreen((f) => !f);
+        return;
+      }
       const isToggleKey = e.code === 'Backslash' || e.code === 'Backquote' || e.key === '\\';
       if ((e.ctrlKey || e.metaKey) && !e.altKey && isToggleKey) {
         if (!terminalAvailable) return;
@@ -528,7 +548,13 @@ const TerminalEmulator = ({
   };
 
   return (
-    <div ref={terminalRef} className={styles.terminal} onClick={handleTerminalClick}>
+    <div
+      ref={terminalRef}
+      className={`${styles.terminal} ${
+        showTerminal && fullscreen ? styles.terminalFullscreen : ''
+      }`}
+      onClick={handleTerminalClick}
+    >
       {/* Kept-alive terminals: one per workspace that has opened a terminal.
           They stay mounted for the whole app session so the PTY *and* the
           rendered screen (vim, build logs, scrollback) survive navigation;
@@ -539,10 +565,18 @@ const TerminalEmulator = ({
           workspaceId={wsId}
           visible={showTerminal && wsId === currentWorkspaceId}
           consumeInitialCommand={consumeInitialCommand}
-          onBackToChat={() => setTerminalMode(false)}
+          fullscreen={fullscreen && wsId === currentWorkspaceId}
+          onToggleFullscreen={() => setFullscreen((f) => !f)}
+          onBackToChat={() => {
+            setTerminalMode(false);
+            setFullscreen(false);
+          }}
           onShellExit={() => {
             setOpenedTerminals((prev) => prev.filter((id) => id !== wsId));
-            if (wsId === currentWorkspaceId) setTerminalMode(false);
+            if (wsId === currentWorkspaceId) {
+              setTerminalMode(false);
+              setFullscreen(false);
+            }
           }}
         />
       ))}

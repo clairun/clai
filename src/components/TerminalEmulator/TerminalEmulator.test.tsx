@@ -26,14 +26,26 @@ vi.mock('./WorkspaceTerminal', () => ({
     visible,
     workspaceId,
     onShellExit,
+    fullscreen,
+    onToggleFullscreen,
   }: {
     visible: boolean;
     workspaceId: string;
     onShellExit: () => void;
+    fullscreen: boolean;
+    onToggleFullscreen: () => void;
   }) => (
-    <div data-testid="workspace-terminal" data-workspace={workspaceId} data-visible={String(visible)}>
+    <div
+      data-testid="workspace-terminal"
+      data-workspace={workspaceId}
+      data-visible={String(visible)}
+      data-fullscreen={String(fullscreen)}
+    >
       <button type="button" onClick={onShellExit}>
         exit-{workspaceId}
+      </button>
+      <button type="button" onClick={onToggleFullscreen}>
+        fs-{workspaceId}
       </button>
     </div>
   ),
@@ -160,6 +172,42 @@ describe('TerminalEmulator per-workspace composer state', () => {
     // no-op, so it took two.
     await user.keyboard('{Control>}\\{/Control}');
     expect(visibleWorkspaces()).toEqual(['A']);
+  });
+
+  const fullscreenOf = (ws: string) =>
+    screen
+      .queryAllByTestId('workspace-terminal')
+      .find((el) => el.getAttribute('data-workspace') === ws)
+      ?.getAttribute('data-fullscreen');
+
+  it('toggles fullscreen for the active terminal (button + Ctrl+Shift+Enter)', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+
+    await user.click(screen.getByRole('button', { name: /terminal mode/i }));
+    expect(fullscreenOf('A')).toBe('false');
+
+    // Maximize via the button.
+    await user.click(screen.getByText('fs-A'));
+    expect(fullscreenOf('A')).toBe('true');
+
+    // Ctrl+Shift+Enter restores it.
+    await user.keyboard('{Control>}{Shift>}{Enter}{/Shift}{/Control}');
+    expect(fullscreenOf('A')).toBe('false');
+  });
+
+  it('resets fullscreen when leaving terminal mode', async () => {
+    const user = userEvent.setup();
+    renderComposer();
+
+    await user.click(screen.getByRole('button', { name: /terminal mode/i }));
+    await user.click(screen.getByText('fs-A'));
+    expect(fullscreenOf('A')).toBe('true');
+
+    // Back to chat (Ctrl+\) then re-enter: fullscreen must NOT persist.
+    await user.keyboard('{Control>}\\{/Control}');
+    await user.click(screen.getByRole('button', { name: /terminal mode/i }));
+    expect(fullscreenOf('A')).toBe('false');
   });
 });
 
