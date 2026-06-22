@@ -55,6 +55,10 @@ interface WorkspaceTerminalProps {
    * by the show effect on an already-running kept-alive shell — never both.
    */
   consumeInitialCommand?: () => string | null;
+  /** Whether the terminal fills the detail pane (fullscreen). */
+  fullscreen: boolean;
+  /** Toggle fullscreen (maximize button / Ctrl+Shift+Enter). */
+  onToggleFullscreen: () => void;
 }
 
 const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
@@ -63,6 +67,8 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
   onBackToChat,
   onShellExit,
   consumeInitialCommand,
+  fullscreen,
+  onToggleFullscreen,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<string | null>(null);
@@ -276,7 +282,19 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
   }, [visible]);
 
   return (
-    <div className={styles.panel} style={visible ? undefined : { display: 'none' }}>
+    <div
+      className={`${styles.panel} ${fullscreen ? styles.panelFullscreen : ''}`}
+      style={visible ? undefined : { display: 'none' }}
+    >
+      <button
+        type="button"
+        className={styles.iconFloat}
+        onClick={onToggleFullscreen}
+        title={fullscreen ? 'Exit fullscreen (Ctrl+Shift+Enter)' : 'Fullscreen (Ctrl+Shift+Enter)'}
+        aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+      >
+        {fullscreen ? '⤡' : '⤢'}
+      </button>
       <button
         type="button"
         className={styles.exitFloat}

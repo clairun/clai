@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Outlet, useMatch, useNavigate } from 'react-router-dom';
 import {
   listWorkspaces,
@@ -148,6 +148,24 @@ const FleetLayout = () => {
       document.documentElement.style.removeProperty('--fleet-rail-width');
     };
   }, [collapsed]);
+
+  // Publish the content area's top offset (below the top bar + any error
+  // banner) so the globally-fixed terminal card can fill the detail pane in
+  // fullscreen mode without covering the app chrome. Same publish-as-CSS-var
+  // idiom as --fleet-rail-width above; re-measured when the banner toggles.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const publish = () => {
+      const top = bodyRef.current?.getBoundingClientRect().top ?? 0;
+      document.documentElement.style.setProperty('--fleet-content-top', `${top}px`);
+    };
+    publish();
+    window.addEventListener('resize', publish);
+    return () => {
+      window.removeEventListener('resize', publish);
+      document.documentElement.style.removeProperty('--fleet-content-top');
+    };
+  }, [error]);
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -369,7 +387,7 @@ const FleetLayout = () => {
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <div className={styles.body}>
+      <div className={styles.body} ref={bodyRef}>
         <WorkspaceRail
           workspaces={workspaces}
           selectedId={selectedId}
