@@ -142,8 +142,10 @@
   margin: 0;
   box-shadow: none !important;
   resize: none;
+  /* Default hidden; JS (computeTextareaSize) flips to auto once content passes
+     max-height so long multi-line input scrolls instead of being clipped. */
   overflow-y: hidden;
-  max-height: 80px;
+  max-height: 150px; /* keep in sync with maxHeight in adjustTextareaHeight */
 }
 
 .terminalInput:focus {
