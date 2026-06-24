@@ -9,6 +9,7 @@ import {
 } from '../../utils/workspaceUiEvents';
 import type { ContentPart } from '../../generated/bindings';
 import styles from './TerminalEmulator.module.css';
+import { computeTextareaSize } from '../../utils/composerTextarea';
 
 type OutputType = 'info' | 'success' | 'error' | 'warning';
 
@@ -150,15 +151,12 @@ const TerminalEmulator = ({
   const adjustTextareaHeight = useCallback(() => {
     const textarea = inputRef.current;
     if (textarea) {
-      // Reset height to measure content
+      // Collapse to one line so scrollHeight reflects only the content.
       textarea.style.height = '20px';
-      // Only grow if content exceeds single line
-      const scrollHeight = textarea.scrollHeight;
-      const lineHeight = 20;
-      const maxHeight = 150; // ~6 lines
-      if (scrollHeight > lineHeight) {
-        textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
-      }
+      // Grow to fit, then cap + scroll (kept in sync with the CSS max-height).
+      const { height, overflowY } = computeTextareaSize(textarea.scrollHeight, 20, 150);
+      textarea.style.height = `${height}px`;
+      textarea.style.overflowY = overflowY;
     }
   }, []);
 
@@ -172,6 +170,7 @@ const TerminalEmulator = ({
     const textarea = inputRef.current;
     if (textarea) {
       textarea.style.height = 'auto';
+      textarea.style.overflowY = 'hidden';
     }
   }, []);
 
