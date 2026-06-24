@@ -36,7 +36,7 @@ flatpak build-init flatpak-build io.github.juacker.clai org.gnome.Sdk//49 org.gn
 flatpak build-finish flatpak-build \
   --command=clai \
   --share=ipc --share=network \
-  --socket=fallback-x11 --socket=wayland --device=dri \
+  --socket=x11 --socket=wayland --device=dri \  # x11 (not fallback-x11): arboard image-clipboard needs XWayland
   --filesystem=home \
   --talk-name=org.freedesktop.secrets \
   --talk-name=org.freedesktop.Flatpak

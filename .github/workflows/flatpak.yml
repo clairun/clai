@@ -84,11 +84,16 @@ jobs:
           # the sandboxed shell fail. The bash_exec sandbox runs the host's
           # bwrap through flatpak-spawn because nested user namespaces are
           # blocked inside Flatpak's own sandbox.
+          # --socket=x11 (NOT fallback-x11) is REQUIRED for image paste: arboard
+          # reads the image clipboard via the Wayland data-control protocol,
+          # which GNOME/Mutter does not implement, so it falls back to the X11
+          # (XWayland) clipboard. fallback-x11 withholds the X11 socket whenever
+          # Wayland is present, silently breaking Ctrl+V image paste.
           flatpak build-finish flatpak-build \
             --command=clai \
             --share=ipc \
             --share=network \
-            --socket=fallback-x11 \
+            --socket=x11 \
             --socket=wayland \
             --device=dri \
             --filesystem=home \

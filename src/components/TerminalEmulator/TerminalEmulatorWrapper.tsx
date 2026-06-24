@@ -48,8 +48,14 @@ async function readClipboardImageAsFile(): Promise<File | null> {
   let image;
   try {
     image = await readImage();
-  } catch {
-    return null; // no image on the clipboard (e.g. a text paste)
+  } catch (err) {
+    // A plain text paste lands here too (no image on the clipboard), so this is
+    // not necessarily an error — but a genuine clipboard failure (e.g. the
+    // Flatpak X11 socket being withheld so arboard's XWayland fallback can't
+    // reach an X server) is otherwise indistinguishable and silent. Log at
+    // debug so the real cause is recoverable from devtools without noise.
+    console.debug('readImage() returned no image (text paste or clipboard error):', err);
+    return null;
   }
   try {
     const rgba = await image.rgba();

@@ -82,11 +82,16 @@ cp LICENSE                                         "$BUILD_TREE/files/share/lice
 
 # --talk-name=org.freedesktop.Flatpak is REQUIRED: provider CLIs and the
 # bash_exec sandbox run on the HOST via flatpak-spawn --host.
+# --socket=x11 (NOT fallback-x11) is REQUIRED for image paste: arboard reads
+# the image clipboard via the Wayland data-control protocol, which GNOME/Mutter
+# does not implement, so it falls back to the X11 (XWayland) clipboard. With
+# fallback-x11 the X11 socket is withheld whenever Wayland is present, leaving
+# that fallback with no X server and silently breaking Ctrl+V image paste.
 flatpak build-finish "$BUILD_TREE" \
   --command=clai \
   --share=ipc \
   --share=network \
-  --socket=fallback-x11 \
+  --socket=x11 \
   --socket=wayland \
   --device=dri \
   --filesystem=home \
