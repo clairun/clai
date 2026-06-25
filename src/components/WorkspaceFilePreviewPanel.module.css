@@ -31,6 +31,9 @@
   right: calc(360px + 8px);
   width: auto;
   max-width: none;
+  /* Paint over the floating composer (.terminal, z-index 100) so maximized
+     reading isn't clipped by it. Restore drops back below it. */
+  z-index: 101;
 }
 
 @keyframes previewSlideOut {
