@@ -390,6 +390,9 @@ export default function WorkspaceFilePreviewPanel({
   // resets the affordance.
   const [justCopied, setJustCopied] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  // Maximize the preview to fill the conversation area (keeps the artifacts
+  // list + workspace rail visible). View-only; resets when the panel closes.
+  const [fullscreen, setFullscreen] = useState(false);
   // Which header field was just copied via click-to-copy ('name' = the title,
   // 'path' = the workspace-relative path row). Drives a transient "Copied"
   // tag next to the clicked element; cleared after ~1.2s or on file change.
@@ -598,7 +601,11 @@ export default function WorkspaceFilePreviewPanel({
   const isHtml = looksLikeHtml(file?.viewer || entry.viewer, file?.path || entry.path);
 
   return (
-    <aside className={styles.panel} role="region" aria-label={`${kindLabel}: ${entry.name}`}>
+    <aside
+      className={`${styles.panel} ${fullscreen ? styles.panelFullscreen : ''}`}
+      role="region"
+      aria-label={`${kindLabel}: ${entry.name}`}
+    >
       <div className={styles.header}>
         <div className={styles.headerLeft}>
           <button
@@ -660,6 +667,30 @@ export default function WorkspaceFilePreviewPanel({
               <polyline points="7 10 12 15 17 10" />
               <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
+          </button>
+          <button
+            type="button"
+            className={styles.iconButton}
+            onClick={() => setFullscreen((f) => !f)}
+            title={fullscreen ? 'Restore preview size' : 'Maximize preview'}
+            aria-label={fullscreen ? 'Restore preview size' : 'Maximize preview'}
+            aria-pressed={fullscreen}
+          >
+            {fullscreen ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="4 14 10 14 10 20" />
+                <polyline points="20 10 14 10 14 4" />
+                <line x1="14" y1="10" x2="21" y2="3" />
+                <line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="15 3 21 3 21 9" />
+                <polyline points="9 21 3 21 3 15" />
+                <line x1="21" y1="3" x2="14" y2="10" />
+                <line x1="3" y1="21" x2="10" y2="14" />
+              </svg>
+            )}
           </button>
           <button
             type="button"
