@@ -3,8 +3,8 @@
 //! On Unix the shell is always `/bin/sh`. On Windows there is no guaranteed
 //! POSIX shell, so we locate one: Git for Windows' **Git Bash** (the common
 //! case — CLAI already needs Git on Windows for skills/agents, and the Git
-//! installer bundles Git Bash), then **MSYS2**, then a bare `bash` left to the
-//! OS PATH/PATHEXT resolution.
+//! installer bundles Git Bash), then **MSYS2**, then a bare `bash` resolved by
+//! the OS PATH/PATHEXT.
 //!
 //! Why not `cmd.exe`/PowerShell: the integrated *terminal* uses `cmd.exe`, which
 //! is correct there because the human types the commands. The agent, however,
@@ -12,41 +12,54 @@
 //! `cmd.exe` would spawn but then choke on. Only a real POSIX shell makes
 //! `bash_exec` useful on Windows.
 //!
-//! This PR only resolves the shell. When no POSIX shell exists, the bare `bash`
-//! fallback simply fails to spawn (a generic "program not found"); a follow-up
-//! turns that into actionable guidance ("install Git for Windows").
+//! When no POSIX shell exists at all, [`shell_argv`] returns an actionable
+//! message ([`MISSING_SHELL_NOTICE`]) instead of an argv, so the caller can
+//! guide the user ("install Git for Windows") rather than surfacing a generic
+//! "program not found" spawn failure.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+
+use crate::providers::command_exists;
 
 /// Environment variable a user (or the future Settings entry) can set to point
 /// `bash_exec` at a specific POSIX shell, overriding auto-detection.
 const SHELL_OVERRIDE_ENV: &str = "CLAI_POSIX_SHELL";
 
+/// Guidance shown when no POSIX shell can be found on Windows. Surfaced both as
+/// the tool error and a run notice so the run record explains the failure.
+pub const MISSING_SHELL_NOTICE: &str = "No POSIX shell found, so shell commands cannot run. \
+Install Git for Windows (https://git-scm.com/download/win) — it includes Git Bash — then restart CLAI. \
+Advanced: set the CLAI_POSIX_SHELL environment variable to a bash.exe path.";
+
 /// Build the argv that runs `command` through a login POSIX shell.
 ///
-/// - Unix: `/bin/sh -lc <command>`.
-/// - Windows: `<bash> -lc <command>`, where `<bash>` is the first POSIX shell
-///   found by [`find_windows_posix_shell`], or a bare `bash` (resolved by the
-///   OS via PATH/PATHEXT) when none is found at a known location.
-pub fn shell_argv(command: String) -> Vec<OsString> {
+/// - Unix: `Ok(["/bin/sh", "-lc", <command>])`.
+/// - Windows: `Ok([<bash>, "-lc", <command>])`, where `<bash>` is the first
+///   POSIX shell found by [`find_windows_posix_shell`], or a bare `bash` when
+///   one is resolvable on `PATH`. When none exists, `Err(MISSING_SHELL_NOTICE)`.
+pub fn shell_argv(command: String) -> Result<Vec<OsString>, String> {
     if cfg!(windows) {
         let bash = find_windows_posix_shell()
             .map(PathBuf::into_os_string)
-            .unwrap_or_else(|| OsString::from("bash"));
-        vec![bash, OsString::from("-lc"), OsString::from(command)]
+            .or_else(|| command_exists("bash").then(|| OsString::from("bash")));
+        match bash {
+            Some(bash) => Ok(vec![bash, OsString::from("-lc"), OsString::from(command)]),
+            None => Err(MISSING_SHELL_NOTICE.to_string()),
+        }
     } else {
-        vec![
+        Ok(vec![
             OsString::from("/bin/sh"),
             OsString::from("-lc"),
             OsString::from(command),
-        ]
+        ])
     }
 }
 
 /// Locate a POSIX `bash` on Windows: the `CLAI_POSIX_SHELL` override first, then
 /// the first existing path among the known Git for Windows / MSYS2 locations.
-/// Returns `None` when none is found (the caller falls back to a bare `bash`).
+/// Returns `None` when none is found (the caller falls back to a bare `bash` on
+/// PATH, then to [`MISSING_SHELL_NOTICE`]).
 ///
 /// Compiled on all platforms (so non-Windows CI type-checks it); only invoked
 /// from the `cfg!(windows)` branch of [`shell_argv`].
@@ -104,7 +117,7 @@ mod tests {
     fn unix_shell_argv_uses_bin_sh() {
         // The non-Windows branch is what this CI exercises.
         if !cfg!(windows) {
-            let argv = shell_argv("echo hi".to_string());
+            let argv = shell_argv("echo hi".to_string()).expect("unix always has /bin/sh");
             assert_eq!(
                 argv,
                 vec![
@@ -156,5 +169,12 @@ mod tests {
         assert!(candidates
             .iter()
             .all(|p| p.to_string_lossy().ends_with("bash.exe")));
+    }
+
+    #[test]
+    fn missing_shell_notice_is_actionable() {
+        // Must name the concrete remedy so the run record is self-explanatory.
+        assert!(MISSING_SHELL_NOTICE.contains("Git for Windows"));
+        assert!(MISSING_SHELL_NOTICE.contains(SHELL_OVERRIDE_ENV));
     }
 }
