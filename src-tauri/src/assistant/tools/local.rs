@@ -362,7 +362,7 @@ async fn execute_bash_exec(
         .min(MAX_BASH_OUTPUT_LIMIT);
 
     let output = run_command(SandboxCommand {
-        argv: vec!["/bin/sh".into(), "-lc".into(), params.command.into()],
+        argv: super::posix_shell::shell_argv(params.command),
         cwd,
         timeout_ms,
         max_output_chars: output_limit,
