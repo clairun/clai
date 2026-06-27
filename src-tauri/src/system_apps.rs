@@ -82,7 +82,9 @@ struct EditorSpec {
     in_terminal: bool,
 }
 
-const EDITORS: &[EditorSpec] = &[
+/// Editors offered on Unix (Linux + macOS). The CLI launchers are the
+/// same on both.
+const EDITORS_UNIX: &[EditorSpec] = &[
     EditorSpec {
         id: "vscode",
         name: "Visual Studio Code",
@@ -149,6 +151,89 @@ const EDITORS: &[EditorSpec] = &[
     },
 ];
 
+/// Editors offered on Windows. `code`/`cursor`/`codium`/`subl` install a
+/// `*.cmd`/`*.exe` shim on `PATH`; `spawn_host_detached` resolves PATHEXT via
+/// `where` and launches them directly (no `cmd` wrapper). `notepad` is always
+/// present, guaranteeing the dropdown is never empty.
+const EDITORS_WINDOWS: &[EditorSpec] = &[
+    EditorSpec {
+        id: "vscode",
+        name: "Visual Studio Code",
+        bin: "code",
+        file_args: &["--goto", "{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "cursor",
+        name: "Cursor",
+        bin: "cursor",
+        file_args: &["--goto", "{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "vscodium",
+        name: "VSCodium",
+        bin: "codium",
+        file_args: &["--goto", "{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "sublime",
+        name: "Sublime Text",
+        bin: "subl",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "notepad",
+        name: "Notepad",
+        bin: "notepad",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: false,
+    },
+    EditorSpec {
+        id: "nvim",
+        name: "Neovim",
+        bin: "nvim",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: true,
+    },
+    EditorSpec {
+        id: "vim",
+        name: "Vim",
+        bin: "vim",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: true,
+    },
+    EditorSpec {
+        id: "helix",
+        name: "Helix",
+        bin: "hx",
+        file_args: &["{path}"],
+        dir_args: &["{path}"],
+        in_terminal: true,
+    },
+];
+
+/// The editor probe table for the current OS. A runtime `cfg!` (not an
+/// `#[cfg]` attribute) so every table compiles and type-checks on all
+/// platforms — PR CI only builds Linux, so a Windows-only attribute branch
+/// would ship unchecked.
+fn editors() -> &'static [EditorSpec] {
+    if cfg!(target_os = "windows") {
+        EDITORS_WINDOWS
+    } else {
+        EDITORS_UNIX
+    }
+}
+
 /// Probe-table terminal. `dir_args` open at a working directory
 /// (`{dir}` substituted); `exec_args` introduce a command to run inside
 /// the terminal (appended before the command itself).
@@ -156,17 +241,30 @@ struct TerminalSpec {
     id: &'static str,
     name: &'static str,
     bin: &'static str,
+    /// Args that open the terminal at a working directory (`{dir}`
+    /// substituted). When empty, the directory is instead applied as the
+    /// spawned process's own working directory (see `spawn_terminal_spec`) —
+    /// used by `cmd`/PowerShell, which inherit cwd rather than taking a flag.
     dir_args: &'static [&'static str],
+    /// Introducer placed before an in-terminal command (e.g. `--`, `-e`).
     exec_args: &'static [&'static str],
+    /// Whether this terminal can host an in-terminal editor command. The
+    /// always-present fallbacks (`cmd`/PowerShell/Terminal.app) only open at
+    /// a directory; routing an untrusted editor command through them would
+    /// need shell-specific quoting we don't do, so they decline with a clear
+    /// error and the user is pointed at a real terminal.
+    runs_command: bool,
 }
 
-const TERMINALS: &[TerminalSpec] = &[
+/// Terminals offered on Linux.
+const TERMINALS_UNIX: &[TerminalSpec] = &[
     TerminalSpec {
         id: "ptyxis",
         name: "Ptyxis",
         bin: "ptyxis",
         dir_args: &["--working-directory", "{dir}"],
         exec_args: &["--"],
+        runs_command: true,
     },
     TerminalSpec {
         id: "gnome-terminal",
@@ -174,6 +272,7 @@ const TERMINALS: &[TerminalSpec] = &[
         bin: "gnome-terminal",
         dir_args: &["--working-directory={dir}"],
         exec_args: &["--"],
+        runs_command: true,
     },
     TerminalSpec {
         id: "konsole",
@@ -181,6 +280,7 @@ const TERMINALS: &[TerminalSpec] = &[
         bin: "konsole",
         dir_args: &["--workdir", "{dir}"],
         exec_args: &["-e"],
+        runs_command: true,
     },
     TerminalSpec {
         id: "ghostty",
@@ -188,6 +288,7 @@ const TERMINALS: &[TerminalSpec] = &[
         bin: "ghostty",
         dir_args: &["--working-directory={dir}"],
         exec_args: &["-e"],
+        runs_command: true,
     },
     TerminalSpec {
         id: "kitty",
@@ -195,6 +296,7 @@ const TERMINALS: &[TerminalSpec] = &[
         bin: "kitty",
         dir_args: &["--directory", "{dir}"],
         exec_args: &[],
+        runs_command: true,
     },
     TerminalSpec {
         id: "alacritty",
@@ -202,6 +304,7 @@ const TERMINALS: &[TerminalSpec] = &[
         bin: "alacritty",
         dir_args: &["--working-directory", "{dir}"],
         exec_args: &["-e"],
+        runs_command: true,
     },
     TerminalSpec {
         id: "foot",
@@ -209,6 +312,7 @@ const TERMINALS: &[TerminalSpec] = &[
         bin: "foot",
         dir_args: &["-D", "{dir}"],
         exec_args: &[],
+        runs_command: true,
     },
     TerminalSpec {
         id: "wezterm",
@@ -216,14 +320,106 @@ const TERMINALS: &[TerminalSpec] = &[
         bin: "wezterm",
         dir_args: &["start", "--cwd", "{dir}"],
         exec_args: &["--"],
+        runs_command: true,
     },
 ];
+
+/// Terminals offered on Windows. Windows Terminal (`wt.exe`) hosts commands
+/// cleanly (spawned directly, no `cmd` layer) so it is preferred when present;
+/// `cmd`/PowerShell are always-present fallbacks so "open terminal" never
+/// dead-ends on stock Windows 10 (where `wt` is often absent). The fallbacks
+/// take no directory flag — empty `dir_args` means the directory is applied as
+/// the spawned process's cwd — and open at a folder only.
+const TERMINALS_WINDOWS: &[TerminalSpec] = &[
+    TerminalSpec {
+        id: "wt",
+        name: "Windows Terminal",
+        bin: "wt",
+        dir_args: &["-d", "{dir}"],
+        exec_args: &[],
+        runs_command: true,
+    },
+    TerminalSpec {
+        id: "powershell",
+        name: "PowerShell",
+        bin: "powershell",
+        dir_args: &[],
+        exec_args: &[],
+        runs_command: false,
+    },
+    TerminalSpec {
+        id: "cmd",
+        name: "Command Prompt",
+        bin: "cmd",
+        dir_args: &[],
+        exec_args: &[],
+        runs_command: false,
+    },
+];
+
+/// Terminals offered on macOS: probeable CLI terminals (if installed) plus
+/// Terminal.app, which is always present but invisible to `which`, so it is
+/// launched via `open -a` and offered unconditionally (open-at-folder only).
+const TERMINALS_MACOS: &[TerminalSpec] = &[
+    TerminalSpec {
+        id: "kitty",
+        name: "kitty",
+        bin: "kitty",
+        dir_args: &["--directory", "{dir}"],
+        exec_args: &[],
+        runs_command: true,
+    },
+    TerminalSpec {
+        id: "alacritty",
+        name: "Alacritty",
+        bin: "alacritty",
+        dir_args: &["--working-directory", "{dir}"],
+        exec_args: &["-e"],
+        runs_command: true,
+    },
+    TerminalSpec {
+        id: "wezterm",
+        name: "WezTerm",
+        bin: "wezterm",
+        dir_args: &["start", "--cwd", "{dir}"],
+        exec_args: &["--"],
+        runs_command: true,
+    },
+    TerminalSpec {
+        id: "ghostty",
+        name: "Ghostty",
+        bin: "ghostty",
+        dir_args: &["--working-directory={dir}"],
+        exec_args: &["-e"],
+        runs_command: true,
+    },
+    TerminalSpec {
+        id: "macos-terminal",
+        name: "Terminal",
+        bin: "open",
+        dir_args: &["-a", "Terminal", "{dir}"],
+        exec_args: &[],
+        runs_command: false,
+    },
+];
+
+/// The terminal probe table for the current OS (runtime `cfg!`, see
+/// [`editors`] for why).
+fn terminals() -> &'static [TerminalSpec] {
+    if cfg!(target_os = "windows") {
+        TERMINALS_WINDOWS
+    } else if cfg!(target_os = "macos") {
+        TERMINALS_MACOS
+    } else {
+        TERMINALS_UNIX
+    }
+}
 
 /// Probe the host for known editors/terminals + the xdg default editor
 /// name. Spawns one `which` per table entry — call from the Settings
 /// surface, not hot paths.
 pub fn detect_system_apps() -> SystemAppsStatus {
-    let editors = EDITORS
+    let editors = editors()
         .iter()
         .filter(|spec| command_exists(spec.bin))
         .map(|spec| SystemAppEntry {
@@ -231,7 +427,7 @@ pub fn detect_system_apps() -> SystemAppsStatus {
             name: spec.name.to_string(),
         })
         .collect();
-    let terminals = TERMINALS
+    let terminals = terminals()
         .iter()
         .filter(|spec| command_exists(spec.bin))
         .map(|spec| SystemAppEntry {
@@ -250,6 +446,11 @@ pub fn detect_system_apps() -> SystemAppsStatus {
 /// "gedit". Display-only; opening goes through `xdg-open`, which applies
 /// the real association.
 fn xdg_default_editor_name() -> Option<String> {
+    // xdg-mime is Linux/freedesktop only; macOS & Windows have no equivalent
+    // we surface here (the dropdown just shows "System default").
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
     let output = get_host_command("xdg-mime")
         .args(["query", "default", "text/plain"])
         .output()
@@ -272,6 +473,30 @@ fn substitute(args: &[&str], placeholder: &str, value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Resolve a Windows program name to a full path so it can be spawned
+/// directly (without a `cmd` wrapper). `CreateProcessW` only auto-appends
+/// `.exe`, so a `where` lookup is needed to find `.cmd`/`.bat` shims such as
+/// `code.cmd`. Names that already contain a path separator are returned
+/// as-is; an unresolved name falls back to itself so the spawn surfaces the
+/// real error.
+fn resolve_windows_program(bin: &str) -> String {
+    if bin.contains('\\') || bin.contains('/') {
+        return bin.to_string();
+    }
+    if let Ok(output) = Command::new("where").arg(bin).output() {
+        if output.status.success() {
+            if let Some(first) = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+            {
+                return first.to_string();
+            }
+        }
+    }
+    bin.to_string()
+}
+
 /// Spawn a host command detached (fire and forget). Under Flatpak the
 /// working directory is forwarded with `--directory` (plain
 /// `current_dir` would only move flatpak-spawn itself).
@@ -283,13 +508,25 @@ fn spawn_host_detached(bin: &str, args: &[String], dir: Option<&Path>) -> Result
             command.arg(format!("--directory={}", dir.display()));
         }
         command.arg("--host").arg(bin);
+        command.args(args);
+    } else if cfg!(target_os = "windows") {
+        // Spawn directly (no `cmd /C start`): routing untrusted workspace
+        // paths through `cmd` lets path metacharacters (`& | < > ^ ( )`) be
+        // parsed as commands. `CreateProcessW` only auto-appends `.exe`, so
+        // resolve PATHEXT shims (`code` -> `code.cmd`) via `where`; Rust's std
+        // then launches `.cmd`/`.bat` with hardened argument escaping.
+        command = Command::new(resolve_windows_program(bin));
+        if let Some(dir) = dir {
+            command.current_dir(dir);
+        }
+        command.args(args);
     } else {
         command = Command::new(bin);
         if let Some(dir) = dir {
             command.current_dir(dir);
         }
+        command.args(args);
     }
-    command.args(args);
     let child = command
         .spawn()
         .map_err(|e| format!("Failed to launch `{}`: {}", bin, e))?;
@@ -340,7 +577,7 @@ pub fn open_in_editor(config: &SystemAppsConfig, path: &Path, is_dir: bool) -> R
             spawn_host_detached(&bin, &args, None)
         }
         Some(id) => {
-            let spec = EDITORS
+            let spec = editors()
                 .iter()
                 .find(|spec| spec.id == id)
                 .ok_or_else(|| format!("Unknown editor `{}` — re-select it in Settings.", id))?;
@@ -369,9 +606,21 @@ pub fn open_in_editor(config: &SystemAppsConfig, path: &Path, is_dir: bool) -> R
     }
 }
 
-/// Open `path` with the OS default application for its type (`xdg-open`).
+/// Open `path` with the OS default application for its type: `xdg-open`
+/// on Linux, `open` on macOS, and `explorer.exe <path>` on Windows.
 pub fn open_with_system(path: &Path) -> Result<(), String> {
-    spawn_host_detached("xdg-open", &[path.display().to_string()], None)
+    let path_str = path.display().to_string();
+    if cfg!(target_os = "macos") {
+        spawn_host_detached("open", &[path_str], None)
+    } else if cfg!(target_os = "windows") {
+        // `explorer.exe <path>` opens a file with its associated app or a
+        // folder in Explorer. Spawned directly (not via `cmd`), so an
+        // untrusted path cannot inject `cmd` metacharacters. explorer exits
+        // non-zero even on success; the fire-and-forget reaper ignores it.
+        spawn_host_detached("explorer.exe", &[path_str], None)
+    } else {
+        spawn_host_detached("xdg-open", &[path_str], None)
+    }
 }
 
 /// Open a terminal at `dir`.
@@ -400,29 +649,32 @@ fn run_in_terminal(
             return spawn_host_detached(&bin, &args, Some(dir));
         }
         Some(id) if id != "auto" => {
-            let spec = TERMINALS
+            let spec = terminals()
                 .iter()
                 .find(|spec| spec.id == id)
                 .ok_or_else(|| format!("Unknown terminal `{}` — re-select it in Settings.", id))?;
-            return spawn_terminal_spec(spec, &dir_str, command);
+            return spawn_terminal_spec(spec, &dir_str, dir, command);
         }
         _ => {}
     }
 
-    // Auto chain. xdg-terminal-exec opens the user's preferred terminal,
-    // inherits the working directory, and takes the command verbatim.
-    if command_exists("xdg-terminal-exec") {
+    // Auto chain. The xdg-terminal-exec / $TERMINAL conventions are
+    // Linux-only; other platforms go straight to the probe table.
+    if cfg!(target_os = "linux") && command_exists("xdg-terminal-exec") {
         return spawn_host_detached("xdg-terminal-exec", command, Some(dir));
     }
-    if let Ok(term) = std::env::var("TERMINAL") {
+    if let Some(term) = std::env::var("TERMINAL")
+        .ok()
+        .filter(|_| cfg!(target_os = "linux"))
+    {
         let term = term.trim().to_string();
         if !term.is_empty() && command_exists(&term) {
             // Use the probe entry's syntax when $TERMINAL is a known
             // terminal (matched by binary name); otherwise fall back to
             // the de-facto `-e` convention (xterm, urxvt, st, …).
             let basename = term.rsplit('/').next().unwrap_or(&term);
-            if let Some(spec) = TERMINALS.iter().find(|spec| spec.bin == basename) {
-                return spawn_terminal_spec(spec, &dir_str, command);
+            if let Some(spec) = terminals().iter().find(|spec| spec.bin == basename) {
+                return spawn_terminal_spec(spec, &dir_str, dir, command);
             }
             let mut args: Vec<String> = Vec::new();
             if !command.is_empty() {
@@ -432,27 +684,49 @@ fn run_in_terminal(
             return spawn_host_detached(&term, &args, Some(dir));
         }
     }
-    for spec in TERMINALS {
+    for spec in terminals() {
+        // When an in-terminal command must run, skip terminals that only open
+        // at a folder (cmd/PowerShell/Terminal.app) so we don't dead-end on
+        // one when a capable terminal exists further down the list.
+        if !command.is_empty() && !spec.runs_command {
+            continue;
+        }
         if command_exists(spec.bin) {
-            return spawn_terminal_spec(spec, &dir_str, command);
+            return spawn_terminal_spec(spec, &dir_str, dir, command);
         }
     }
     Err("No terminal emulator found. Pick one in Settings → Applications.".to_string())
 }
 
 /// Build a probe-table terminal invocation: working-directory args, then
-/// the exec introducer + command when one should run inside.
+/// the exec introducer + command when one should run inside. Terminals with
+/// empty `dir_args` (cmd/PowerShell/Terminal.app) receive the directory as
+/// their spawned cwd instead, and decline to host an in-terminal command.
 fn spawn_terminal_spec(
     spec: &TerminalSpec,
     dir_str: &str,
+    dir: &Path,
     command: &[String],
 ) -> Result<(), String> {
+    if !command.is_empty() && !spec.runs_command {
+        return Err(format!(
+            "{} can only open a terminal at a folder, not run an editor inside it. Install Windows Terminal (`wt`) or pick a terminal that supports it in Settings → Applications.",
+            spec.name
+        ));
+    }
     let mut args = substitute(spec.dir_args, "{dir}", dir_str);
     if !command.is_empty() {
         args.extend(spec.exec_args.iter().map(|a| a.to_string()));
         args.extend_from_slice(command);
     }
-    spawn_host_detached(spec.bin, &args, None)
+    // Empty dir_args => the terminal takes no directory flag; apply the
+    // directory as the spawned process's working directory instead.
+    let cwd = if spec.dir_args.is_empty() {
+        Some(dir)
+    } else {
+        None
+    };
+    spawn_host_detached(spec.bin, &args, cwd)
 }
 
 /// Resolve `rel_path` inside `root`, refusing anything that escapes it
@@ -532,17 +806,17 @@ mod tests {
     #[test]
     fn terminal_editors_are_flagged() {
         for id in ["nvim", "vim", "helix"] {
-            let spec = EDITORS.iter().find(|spec| spec.id == id).unwrap();
+            let spec = editors().iter().find(|spec| spec.id == id).unwrap();
             assert!(spec.in_terminal, "{id} must run inside a terminal");
         }
-        let code = EDITORS.iter().find(|spec| spec.id == "vscode").unwrap();
+        let code = editors().iter().find(|spec| spec.id == "vscode").unwrap();
         assert!(!code.in_terminal);
     }
 
     #[test]
     fn terminal_spec_invocation_includes_exec_introducer() {
         // gnome-terminal: dir flag, `--`, then the command.
-        let spec = TERMINALS
+        let spec = TERMINALS_UNIX
             .iter()
             .find(|spec| spec.id == "gnome-terminal")
             .unwrap();
@@ -555,7 +829,97 @@ mod tests {
         );
 
         // kitty: command appended directly, no introducer.
-        let spec = TERMINALS.iter().find(|spec| spec.id == "kitty").unwrap();
+        let spec = TERMINALS_UNIX
+            .iter()
+            .find(|spec| spec.id == "kitty")
+            .unwrap();
         assert!(spec.exec_args.is_empty());
+    }
+
+    #[test]
+    fn platform_probe_tables_are_nonempty() {
+        // The selected table for the build target must never be empty, so the
+        // Settings dropdowns always offer at least one concrete app.
+        assert!(!editors().is_empty());
+        assert!(!terminals().is_empty());
+    }
+
+    #[test]
+    fn windows_editor_table_has_guaranteed_and_common_entries() {
+        let ids: Vec<&str> = EDITORS_WINDOWS.iter().map(|s| s.id).collect();
+        // notepad is always present on Windows, guaranteeing a non-empty list.
+        assert!(ids.contains(&"notepad"), "{ids:?}");
+        assert!(ids.contains(&"vscode"), "{ids:?}");
+        // Terminal editors stay flagged so they route through a terminal.
+        for id in ["nvim", "vim", "helix"] {
+            let spec = EDITORS_WINDOWS.iter().find(|s| s.id == id).unwrap();
+            assert!(spec.in_terminal, "{id} must run inside a terminal");
+        }
+    }
+
+    #[test]
+    fn windows_terminal_table_offers_windows_terminal() {
+        let wt = TERMINALS_WINDOWS.iter().find(|s| s.id == "wt").unwrap();
+        let args = substitute(wt.dir_args, "{dir}", "C:\\work");
+        assert_eq!(args, vec!["-d".to_string(), "C:\\work".to_string()]);
+    }
+
+    #[test]
+    fn windows_terminal_table_has_always_present_fallbacks() {
+        let ids: Vec<&str> = TERMINALS_WINDOWS.iter().map(|s| s.id).collect();
+        // cmd + PowerShell are always present, so "open terminal" never
+        // dead-ends on stock Windows 10 where `wt` may be missing.
+        assert!(ids.contains(&"cmd"), "{ids:?}");
+        assert!(ids.contains(&"powershell"), "{ids:?}");
+        // wt hosts in-terminal editors; the fallbacks only open at a folder
+        // (empty dir_args => cwd is applied at spawn time).
+        let wt = TERMINALS_WINDOWS.iter().find(|s| s.id == "wt").unwrap();
+        assert!(wt.runs_command);
+        for id in ["cmd", "powershell"] {
+            let spec = TERMINALS_WINDOWS.iter().find(|s| s.id == id).unwrap();
+            assert!(!spec.runs_command, "{id} must not host a command");
+            assert!(spec.dir_args.is_empty(), "{id} opens at cwd, no dir flag");
+        }
+    }
+
+    #[test]
+    fn macos_terminal_table_includes_terminal_app() {
+        let term = TERMINALS_MACOS
+            .iter()
+            .find(|s| s.id == "macos-terminal")
+            .unwrap();
+        // Terminal.app is invisible to `which`, so it is launched via `open -a`.
+        assert_eq!(term.bin, "open");
+        let args = substitute(term.dir_args, "{dir}", "/work");
+        assert_eq!(args, vec!["-a", "Terminal", "/work"]);
+        assert!(!term.runs_command);
+    }
+
+    #[test]
+    fn fallback_terminal_rejects_in_terminal_command() {
+        // A folder-only terminal must refuse to host an editor command
+        // (rather than route an untrusted path through it) with clear guidance.
+        let spec = TerminalSpec {
+            id: "cmd",
+            name: "Command Prompt",
+            bin: "cmd",
+            dir_args: &[],
+            exec_args: &[],
+            runs_command: false,
+        };
+        let err =
+            spawn_terminal_spec(&spec, "/w", Path::new("/w"), &["nvim".to_string()]).unwrap_err();
+        assert!(err.contains("only open a terminal at a folder"), "{err}");
+    }
+
+    #[test]
+    fn resolve_windows_program_passes_through_explicit_paths() {
+        // Names with a separator are spawned as-is (no `where` lookup), so this
+        // is safe to assert off-Windows.
+        assert_eq!(
+            resolve_windows_program("C:\\Program Files\\Git\\bin\\bash.exe"),
+            "C:\\Program Files\\Git\\bin\\bash.exe"
+        );
+        assert_eq!(resolve_windows_program("/usr/bin/code"), "/usr/bin/code");
     }
 }
