@@ -102,6 +102,10 @@ struct StdioMcpServerConnection {
     child: Child,
 }
 
+// The variants' sizes differ enough to trip clippy::large_enum_variant only on
+// Windows (platform-dependent type sizes); there are few of these per process
+// and they are not hot, so allow it rather than box the larger variant.
+#[allow(clippy::large_enum_variant)]
 enum ConnectedMcpServer {
     Http(RunningService<RoleClient, ()>),
     Stdio(StdioMcpServerConnection),

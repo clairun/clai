@@ -24,6 +24,10 @@ const ENV_DENY_EXACT: &[&str] = &[
     "SUDO_ASKPASS",
 ];
 
+// Fields are consumed by the Linux (bwrap) and macOS (seatbelt) sandbox
+// backends; on platforms without a sandbox (e.g. Windows -> `unsupported.rs`)
+// the profile is built but never read, so allow the resulting dead_code there.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SandboxProfile {
     pub workspace_root: PathBuf,
@@ -111,12 +115,16 @@ impl SandboxEnv {
         Self { vars: filtered }
     }
 
+    // Read only by the Unix sandbox backends when applying the env to the
+    // sandboxed command; unused on platforms without a sandbox.
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.vars
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 
+    #[allow(dead_code)]
     pub fn home(&self) -> Option<&str> {
         self.vars.get("HOME").map(String::as_str)
     }
