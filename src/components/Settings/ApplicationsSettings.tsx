@@ -60,6 +60,13 @@ const ApplicationsSettings = () => {
         this system.
       </p>
 
+      {status.editors.length === 0 && status.terminals.length === 0 && (
+        <p className={styles.subtle}>
+          No known editors or terminals were detected on this system. Install one (e.g. VS Code or
+          Windows Terminal) and reopen Settings, or pick “Custom…” below to point at any command.
+        </p>
+      )}
+
       <div className={styles.row}>
         <div className={styles.rowLabel}>
           <span className={styles.rowTitle}>Editor</span>
