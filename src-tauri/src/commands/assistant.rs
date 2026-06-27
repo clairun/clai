@@ -1115,7 +1115,12 @@ mod tests {
         paths.insert(".clai/images/uuid-a.png".to_string());
         paths.insert(".clai/images/uuid-b.jpg".to_string());
         let files = resolve_session_image_files(root, &paths);
-        let mut display: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+        // Normalize Windows `\` to `/` so the assertion is separator-agnostic
+        // (no-op on Unix). `root.join(p)` yields `\` joins on Windows.
+        let mut display: Vec<String> = files
+            .iter()
+            .map(|p| p.display().to_string().replace('\\', "/"))
+            .collect();
         display.sort();
         assert_eq!(
             display,
