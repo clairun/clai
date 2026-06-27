@@ -100,15 +100,19 @@ pub(crate) async fn run_spawned_child(
     let status = match timeout(Duration::from_millis(timeout_ms), child.wait()).await {
         Ok(result) => result.map_err(|e| format!("Shell command failed: {}", e))?,
         Err(_) => {
-            // Timed out. SIGKILL the entire process group so descendants
-            // (bwrap/sandbox-exec -> sh -> cargo -> rustc, …) die too — a plain
-            // `child.kill()` only reaps the direct child and would leave the
-            // grandchildren orphaned and alive. Then bound every post-kill
-            // await so a D-state child or a grandchild holding a pipe open
-            // can't wedge the executor (see POST_KILL_REAP_TIMEOUT).
-            kill_process_group(child_pid);
-            // Fallback for the unknown-pid / non-Unix case where the group
-            // kill is a no-op: at least signal the direct child.
+            // Timed out. Kill the entire process tree so descendants
+            // (bwrap/sandbox-exec -> sh -> cargo -> rustc, … or, on Windows,
+            // bash -> node/cargo) die too — a plain `child.kill()` only reaps
+            // the direct child and would leave the grandchildren orphaned and
+            // alive. On Unix this SIGKILLs the child's process group; on
+            // Windows it `taskkill /T`s the tree from the still-live root pid.
+            // Then bound every post-kill await so a D-state child or a
+            // grandchild holding a pipe open can't wedge the executor (see
+            // POST_KILL_REAP_TIMEOUT).
+            kill_process_tree(child_pid);
+            // Fallback: also signal the direct child, for the unknown-pid case
+            // (and any platform without a tree-kill) where the call above is a
+            // no-op, and as a fast backstop while an async taskkill runs.
             let _ = child.start_kill();
             let _ = timeout(POST_KILL_REAP_TIMEOUT, child.wait()).await;
             drain_or_abort(stdout_task).await;
@@ -144,15 +148,20 @@ pub(crate) async fn run_spawned_child(
     })
 }
 
-/// SIGKILL the child's entire process group.
+/// Force-kill the child and its entire descendant tree.
 ///
-/// The child is spawned as a process-group leader (`prepare_stdio` calls
-/// `process_group(0)`), so its pgid equals its pid; signalling the negated pid
-/// reaches every descendant that has not started its own group. A no-op when
-/// the pid is unknown (already reaped) — the caller's `start_kill()` is then
-/// the only available reap — and off Unix, where process groups aren't used.
+/// Unix: the child is spawned as a process-group leader (`prepare_stdio` calls
+/// `process_group(0)`), so its pgid equals its pid; SIGKILLing the negated pid
+/// reaches every descendant that has not started its own group.
+///
+/// Windows: there is no Unix-style process group, so we `taskkill /T` the tree
+/// rooted at the child pid (see [`kill_process_tree_windows`]).
+///
+/// A no-op when the pid is unknown (already reaped) — the caller's
+/// `start_kill()` is then the only available reap — and on platforms with
+/// neither mechanism.
 #[cfg(unix)]
-fn kill_process_group(pid: Option<u32>) {
+fn kill_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     // SAFETY: `kill(2)` with a negative pid targets a process group and has no
     // memory effects. A stale/already-dead group yields ESRCH, which we ignore.
@@ -161,8 +170,46 @@ fn kill_process_group(pid: Option<u32>) {
     }
 }
 
-#[cfg(not(unix))]
-fn kill_process_group(_pid: Option<u32>) {}
+#[cfg(windows)]
+fn kill_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else { return };
+    kill_process_tree_windows(pid);
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn kill_process_tree(_pid: Option<u32>) {}
+
+/// Windows tree-kill via the built-in `taskkill` utility.
+///
+/// `taskkill /T` walks the parent->child relationships from `pid` and force
+/// (`/F`) terminates the root and every descendant — the closest Windows
+/// analog of a process-group SIGKILL. We call it *before* the caller's
+/// `start_kill()` while the root is still alive, so the tree is intact and
+/// fully reachable. Best-effort and detached (no `wait`): a slow `taskkill`
+/// cannot wedge the timeout path, since the bounded post-kill wait in
+/// `run_spawned_child` still applies. `taskkill.exe` ships with Windows and a
+/// process may kill its own descendants without elevation.
+#[cfg(windows)]
+fn kill_process_tree_windows(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(windows_taskkill_args(pid))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+/// Build the `taskkill` argv that force-kills a pid and its whole tree.
+/// Factored out so the argument construction is unit-testable on any host.
+#[cfg(any(windows, test))]
+fn windows_taskkill_args(pid: u32) -> [String; 4] {
+    [
+        "/F".to_string(),
+        "/T".to_string(),
+        "/PID".to_string(),
+        pid.to_string(),
+    ]
+}
 
 /// Await a reader task, but give up and abort it after `POST_KILL_REAP_TIMEOUT`
 /// so a pipe fd held open by a surviving grandchild can't hang the timeout
@@ -181,7 +228,8 @@ pub(crate) fn prepare_stdio(command: &mut Command) {
     // Run the child as its own process-group leader (pgid == child pid) so a
     // timeout can SIGKILL the whole tree — sandbox launcher, shell, and any
     // build/test grandchildren — rather than only the direct child. See
-    // `kill_process_group`.
+    // `kill_process_tree`. Windows has no equivalent spawn-time flag; there the
+    // tree is reaped at timeout via `taskkill /T` instead.
     #[cfg(unix)]
     command.process_group(0);
 }
@@ -192,6 +240,18 @@ fn truncate_string(text: String, limit: usize) -> String {
         return text;
     }
     chars[..limit].iter().collect::<String>() + "\n...[truncated]"
+}
+
+#[cfg(test)]
+mod kill_arg_tests {
+    use super::windows_taskkill_args;
+
+    /// The Windows tree-kill must force-kill (`/F`) the whole tree (`/T`) of
+    /// the given pid. Guards the argv the timeout path hands to `taskkill`.
+    #[test]
+    fn taskkill_args_force_kill_the_pid_tree() {
+        assert_eq!(windows_taskkill_args(4321), ["/F", "/T", "/PID", "4321"]);
+    }
 }
 
 #[cfg(all(test, unix))]

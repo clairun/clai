@@ -361,8 +361,19 @@ async fn execute_bash_exec(
         .unwrap_or(DEFAULT_BASH_OUTPUT_LIMIT)
         .min(MAX_BASH_OUTPUT_LIMIT);
 
+    // Resolve the shell up front. On Windows this can fail when no POSIX
+    // shell is installed; surface that as an actionable notice + error rather
+    // than a cryptic spawn failure for a missing `bash`.
+    let argv = match super::posix_shell::shell_argv(params.command) {
+        Ok(argv) => argv,
+        Err(message) => {
+            context.add_notice(RunNoticeKind::SandboxUnavailable, message.clone());
+            return Err(message);
+        }
+    };
+
     let output = run_command(SandboxCommand {
-        argv: vec!["/bin/sh".into(), "-lc".into(), params.command.into()],
+        argv,
         cwd,
         timeout_ms,
         max_output_chars: output_limit,
