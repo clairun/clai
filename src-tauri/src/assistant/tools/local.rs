@@ -208,7 +208,7 @@ fn execute_fs_list(
     let (entries, truncated) = list_entries_at_path(&path, params.recursive, limit)?;
 
     Ok(serde_json::json!({
-        "path": path.display().to_string(),
+        "path": agent_path_string(&path),
         "entries": serialize_entries(&entries),
         "recursive": params.recursive,
         "truncated": truncated,
@@ -267,7 +267,7 @@ fn execute_fs_read(
     let slice: String = chars[start..end].iter().collect();
 
     Ok(serde_json::json!({
-        "path": path.display().to_string(),
+        "path": agent_path_string(&path),
         "content": slice,
         "truncated": end < chars.len(),
         "offset": start,
@@ -304,7 +304,7 @@ fn execute_fs_write(
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
 
     Ok(serde_json::json!({
-        "path": path.display().to_string(),
+        "path": agent_path_string(&path),
         "bytesWritten": params.content.len()
     }))
 }
@@ -394,7 +394,7 @@ async fn execute_bash_exec(
     .map_err(|error| augment_timeout_error(error, timeout_ms, explicit_timeout))?;
 
     Ok(serde_json::json!({
-        "cwd": output.cwd.display().to_string(),
+        "cwd": agent_path_string(&output.cwd),
         "exitCode": output.exit_code,
         "success": output.success,
         "stdout": output.stdout,
@@ -944,7 +944,7 @@ fn serialize_entries(entries: &[FilesystemEntry]) -> Vec<serde_json::Value> {
         .iter()
         .map(|entry| {
             serde_json::json!({
-                "path": entry.path.display().to_string(),
+                "path": agent_path_string(&entry.path),
                 "kind": entry.kind
             })
         })
@@ -993,6 +993,30 @@ fn path_prefix_intersects(a: &Path, b: &Path) -> bool {
 
 fn path_to_match_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+/// Render a path for agent-facing tool output.
+///
+/// On Windows the agent's `bash_exec` runs inside Git Bash, where `\` is an
+/// escape character, so paths handed to the model must use `/` to round-trip
+/// back into shell commands. We also strip the `\\?\` verbatim prefix that
+/// `std::fs::canonicalize` adds, leaving clean `C:/Users/...` paths that both
+/// the Windows file APIs (for `fs_read`/`fs_write` round-trips) and Git Bash
+/// accept.
+///
+/// On Unix the path is returned verbatim: `\` is a legal byte in a filename,
+/// so rewriting it would corrupt names.
+fn agent_path_string(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        let trimmed = s.strip_prefix(r"\\?\").unwrap_or(s.as_ref());
+        trimmed.replace('\\', "/")
+    }
+    #[cfg(not(windows))]
+    {
+        path.display().to_string()
+    }
 }
 
 /// Why a command was denied. Retained for the back-compat
@@ -1458,7 +1482,7 @@ async fn execute_fs_request_grant(
     params: FsRequestGrantParams,
 ) -> Result<serde_json::Value, String> {
     let canonical = canonicalize_requested_path(&params.path)?;
-    let canonical_str = canonical.to_string_lossy().into_owned();
+    let canonical_str = agent_path_string(&canonical);
 
     // If the path is already covered (by extra_paths, the preset, or an
     // earlier session grant), short-circuit — no user prompt, just say yes.
@@ -1502,7 +1526,7 @@ async fn execute_fs_request_grant(
             context.add_notice(RunNoticeKind::PathGranted, msg);
             Ok(serde_json::json!({
                 "granted": true,
-                "path": path,
+                "path": agent_path_string(std::path::Path::new(&path)),
                 "access": access_to_str(access),
                 "scope": "once",
                 "note": "Valid for the current turn only — NOT retained for later turns. If you need this path again in a future turn, request it again, or ask the user to grant it always.",
@@ -1524,7 +1548,7 @@ async fn execute_fs_request_grant(
             context.add_notice(RunNoticeKind::PathGranted, msg);
             Ok(serde_json::json!({
                 "granted": true,
-                "path": path,
+                "path": agent_path_string(std::path::Path::new(&path)),
                 "access": access_to_str(access),
                 "scope": "always",
             }))
@@ -2462,6 +2486,35 @@ mod tests {
         let error = glob_allowed_paths(outside_pattern, &[grant_for(root)], 10).unwrap_err();
 
         assert!(error.contains("outside the agent's allowed filesystem grants"));
+    }
+
+    #[test]
+    fn agent_path_string_normalizes_paths_for_the_agent() {
+        // Windows branch is exercised by the windows-latest CI job.
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                agent_path_string(std::path::Path::new(r"C:\Users\dev\proj\file.rs")),
+                "C:/Users/dev/proj/file.rs"
+            );
+            // `std::fs::canonicalize` emits a `\\?\` verbatim prefix; strip it.
+            assert_eq!(
+                agent_path_string(std::path::Path::new(r"\\?\C:\Users\dev\file.rs")),
+                "C:/Users/dev/file.rs"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            // Unix: returned verbatim (backslash is a legal filename byte).
+            assert_eq!(
+                agent_path_string(std::path::Path::new("/home/dev/proj/file.rs")),
+                "/home/dev/proj/file.rs"
+            );
+            assert_eq!(
+                agent_path_string(std::path::Path::new("/home/dev/we\\ird")),
+                "/home/dev/we\\ird"
+            );
+        }
     }
 
     #[test]
