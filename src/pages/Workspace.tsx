@@ -1211,14 +1211,25 @@ const ChatFirstLayout = ({
     const publish = () => {
       raf = null;
       const rect = node.getBoundingClientRect();
+      // Measure the CONTENT box, not the border box. On Windows (WebView2 /
+      // Chromium) the conversation's vertical scrollbar is a classic
+      // scrollbar that reserves layout width on the right; on Linux/macOS
+      // (WebKitGTK) it is an overlay scrollbar with zero width. Centering on
+      // getBoundingClientRect()'s right edge therefore shifts the input bar
+      // right by ~half the scrollbar on Windows (the "off-centered" bug).
+      // clientLeft/clientWidth exclude the borders and the scrollbar on every
+      // platform, so the bar aligns with the visible text column — a no-op on
+      // Linux where the scrollbar contributes no width.
+      const contentLeft = rect.left + node.clientLeft;
+      const contentRight = contentLeft + node.clientWidth;
       // When the pane is too narrow the card slides left out of it (its
       // left edge clips under the workspace rail — see .chatFirstContent),
       // but the input bar must stay inside the pane. Publish the VISIBLE
-      // strip instead of the raw card rect, floored at the same minimum
-      // as the CSS --chat-min-width so the bar never shrinks below it.
-      const paneLeft = node.parentElement?.getBoundingClientRect().left ?? rect.left;
-      const visibleLeft = Math.max(rect.left, paneLeft);
-      const width = Math.max(rect.right - visibleLeft, 420);
+      // strip, floored at the same minimum as --chat-min-width so the bar
+      // never shrinks below it.
+      const paneLeft = node.parentElement?.getBoundingClientRect().left ?? contentLeft;
+      const visibleLeft = Math.max(contentLeft, paneLeft);
+      const width = Math.max(contentRight - visibleLeft, 420);
       const rootStyle = document.documentElement.style;
       rootStyle.setProperty('--chat-card-center', `${visibleLeft + width / 2}px`);
       rootStyle.setProperty('--chat-card-width', `${width}px`);
