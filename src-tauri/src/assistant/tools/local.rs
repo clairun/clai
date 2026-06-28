@@ -2342,11 +2342,14 @@ mod tests {
         }
 
         let resolved = canonicalize_requested_path("~/some/subpath").unwrap();
-        // Use canonicalize on the temp dir for comparison since macOS
-        // symlinks /var → /private/var which would otherwise mismatch.
-        let expected_parent = std::fs::canonicalize(temp.path()).unwrap();
-        assert!(resolved.starts_with(&expected_parent));
-        assert!(resolved.ends_with("some/subpath"));
+        // The "~/some/subpath" target does not exist, so the product returns
+        // the normalized (non-canonicalized) form. Compare structurally:
+        // `canonicalize` would add a Windows `\\?\` verbatim prefix and resolve
+        // the macOS `/var`->`/private/var` symlink, both of which break a naive
+        // prefix match. Component-based checks are separator-agnostic.
+        assert!(resolved.is_absolute());
+        assert!(resolved.starts_with(temp.path()));
+        assert!(resolved.ends_with(std::path::Path::new("some").join("subpath")));
 
         unsafe {
             match prev {
@@ -2390,7 +2393,9 @@ mod tests {
                     .strip_prefix(root)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned()
+                    // Normalize Windows `\` to `/` so the assertion is
+                    // separator-agnostic (no-op on Unix).
+                    .replace('\\', "/")
             })
             .collect();
 
@@ -2427,7 +2432,8 @@ mod tests {
                     .strip_prefix(root)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned()
+                    // Normalize Windows `\` to `/` (no-op on Unix).
+                    .replace('\\', "/")
             })
             .collect();
 
@@ -2446,7 +2452,14 @@ mod tests {
         let temp = tempdir().unwrap();
         let root = temp.path();
 
-        let error = glob_allowed_paths("/etc/**/*.conf", &[grant_for(root)], 10).unwrap_err();
+        // `/etc/...` is not absolute on Windows (no drive), so use a
+        // platform-absolute pattern that cannot intersect the temp grant.
+        let outside_pattern = if cfg!(windows) {
+            "C:/Windows/System32/**/*.conf"
+        } else {
+            "/etc/**/*.conf"
+        };
+        let error = glob_allowed_paths(outside_pattern, &[grant_for(root)], 10).unwrap_err();
 
         assert!(error.contains("outside the agent's allowed filesystem grants"));
     }

@@ -26,6 +26,9 @@ pub struct SandboxCommand {
     pub cwd: PathBuf,
     pub timeout_ms: u64,
     pub max_output_chars: usize,
+    // Consumed by the Unix sandbox backends; unused on platforms without a
+    // sandbox (Windows runs the command unsandboxed via `unsupported.rs`).
+    #[allow(dead_code)]
     pub profile: SandboxProfile,
 }
 

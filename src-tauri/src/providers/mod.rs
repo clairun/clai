@@ -97,7 +97,9 @@ pub(crate) fn get_host_command(cmd: &str) -> Command {
 }
 
 /// Common user-local binary paths to search when command isn't in PATH.
-/// These are relative to the user's home directory.
+/// These are relative to the user's home directory. Only used by the
+/// non-Windows `command_exists` fallback (Windows relies on `where`).
+#[cfg(not(target_os = "windows"))]
 const USER_BIN_PATHS: &[&str] = &[
     ".local/bin",      // Standard XDG user binaries
     ".bun/bin",        // Bun global installs
@@ -133,7 +135,9 @@ pub fn get_home_dir() -> Option<String> {
     std::env::var("HOME").ok()
 }
 
-/// Checks if a command exists at a specific path.
+/// Checks if a command exists at a specific path. Only used by the non-Windows
+/// `command_exists` fallback that probes user-local bin paths.
+#[cfg(not(target_os = "windows"))]
 fn command_exists_at_path(path: &str) -> bool {
     if is_flatpak() {
         // Use flatpak-spawn to check file existence on host

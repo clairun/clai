@@ -75,3 +75,49 @@ jobs:
 
       - name: Build Tauri app (debug, no bundle)
         run: npm run tauri -- build --debug --no-bundle
+
+  windows-check:
+    name: Windows check
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # generate_context! (src-tauri/src/lib.rs) embeds frontendDist (../dist)
+      # into the binary at compile time, so the Rust steps below need dist/ to
+      # exist. Build the frontend first (mirrors the Linux job's ordering). The
+      # frontend quality checks (lint/typecheck/tests/bindings) and fmt are
+      # platform-independent and already covered by the Linux `check` job, so we
+      # don't repeat them here — this job exists to compile-check the
+      # Windows-only (`#[cfg(windows)]` / `cfg!(windows)`) Rust paths.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Rust check
+        working-directory: src-tauri
+        run: cargo check
+
+      - name: Rust clippy
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test
