@@ -63,6 +63,9 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
   const [error, setError] = useState<string | null>(null);
   const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
+  // Per-card collapse: squish a card to a one-line summary so a tall (or
+  // stacked) request can't swallow the conversation. Default expanded.
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
   // Subscribe to backend approval-request events AND seed from the
   // backend's pending list on mount. The seed catches requests that
@@ -182,6 +185,15 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     }
   }, [requests.length]);
 
+  const toggleCollapsed = useCallback((requestId: string) => {
+    setCollapsedIds((current) => {
+      const next = new Set(current);
+      if (next.has(requestId)) next.delete(requestId);
+      else next.add(requestId);
+      return next;
+    });
+  }, []);
+
   const dismissRequest = useCallback((requestId: string) => {
     setRequests((current) => current.filter((q) => q.requestId !== requestId));
   }, []);
@@ -290,6 +302,7 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
         {requests.map((req, cardIndex) => {
           const cardState = perCardState[req.requestId] || {};
           const isSubmitting = submittingId === req.requestId;
+          const isCollapsed = collapsedIds.has(req.requestId);
           return (
             <article
               key={req.requestId}
@@ -306,7 +319,21 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                       : 'An agent wants to run:'}
                   </span>
                 </div>
+                <button
+                  type="button"
+                  className={styles.collapseBtn}
+                  onClick={() => toggleCollapsed(req.requestId)}
+                  aria-expanded={!isCollapsed}
+                  aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
+                  title={isCollapsed ? 'Expand' : 'Collapse'}
+                >
+                  {isCollapsed ? '▸' : '▾'}
+                </button>
               </header>
+              {isCollapsed ? (
+                <pre className={`${styles.command} ${styles.collapsedSummary}`}>{req.command}</pre>
+              ) : (
+                <div className={styles.cardBody}>
               <pre className={styles.command}>{req.command}</pre>
               <section className={styles.segments}>
                 <p className={styles.segmentsLabel}>
@@ -419,6 +446,8 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                     Deny entire command
                   </button>
                 </footer>
+              )}
+                </div>
               )}
             </article>
           );

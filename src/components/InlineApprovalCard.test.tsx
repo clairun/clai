@@ -120,4 +120,24 @@ describe('InlineApprovalCard', () => {
 
     await waitFor(() => expect(screen.queryByText('rg --files')).toBeNull());
   });
+
+  it('collapses the card body and expands it again', async () => {
+    const user = userEvent.setup();
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    fireRequest(SINGLE_SEGMENT_REQUEST);
+    await screen.findByText('rg --files');
+
+    // Expanded by default: the decision buttons are present.
+    expect(screen.getByRole('button', { name: /allow once/i })).toBeInTheDocument();
+
+    // Collapse hides the body (buttons) but keeps the command summary.
+    await user.click(screen.getByRole('button', { name: /collapse request/i }));
+    expect(screen.queryByRole('button', { name: /allow once/i })).toBeNull();
+    expect(screen.getByText('rg --files')).toBeInTheDocument();
+
+    // Expand restores the decision buttons.
+    await user.click(screen.getByRole('button', { name: /expand request/i }));
+    expect(screen.getByRole('button', { name: /allow once/i })).toBeInTheDocument();
+  });
 });
