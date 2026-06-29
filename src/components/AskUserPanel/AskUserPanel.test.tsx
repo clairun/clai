@@ -319,3 +319,23 @@ describe('AskUserPanel — snapshot poll race regression', () => {
     expect(screen.getByText('Which option do you want?')).toBeInTheDocument();
   });
 });
+
+describe('AskUserPanel — collapse', () => {
+  it('collapses the body to a one-line summary and expands again', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest());
+
+    // Expanded by default: the options are visible.
+    expect(screen.getByText('Option A')).toBeInTheDocument();
+
+    // Collapse hides the body (options/textarea) but keeps the question
+    // visible as a summary, so the conversation behind it is reachable.
+    await user.click(screen.getByRole('button', { name: /collapse question/i }));
+    expect(screen.queryByText('Option A')).toBeNull();
+    expect(screen.getByText('Which option do you want?')).toBeInTheDocument();
+
+    // Expand restores the full body.
+    await user.click(screen.getByRole('button', { name: /expand question/i }));
+    expect(screen.getByText('Option A')).toBeInTheDocument();
+  });
+});

@@ -36,6 +36,9 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
   const [otherText, setOtherText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  // Collapse the body to a one-line summary so a long question can't swallow
+  // the conversation; the user expands to answer. Resets per new request.
+  const [collapsed, setCollapsed] = useState(false);
   const containerRef = useRef<HTMLElement | null>(null);
   const previousPendingIdRef = useRef<string | null>(null);
 
@@ -51,6 +54,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
     setOtherText('');
     setError('');
     setSubmitting(false);
+    setCollapsed(false);
   }, [pending?.pendingId]);
 
   // Focus the panel when a request appears so keyboard users land
@@ -169,8 +173,22 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
     >
       <header className={styles.header}>
         <span className={styles.chip}>AGENT IS ASKING</span>
+        <button
+          type="button"
+          className={styles.collapseBtn}
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? 'Expand question' : 'Collapse question'}
+          title={collapsed ? 'Expand' : 'Collapse'}
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
       </header>
 
+      {collapsed ? (
+        <div className={styles.collapsedSummary}>{pending.question}</div>
+      ) : (
+        <div className={styles.body}>
       <div className={styles.question}>{pending.question}</div>
 
       {pending.extraContext && (
@@ -269,6 +287,8 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
           {submitting ? 'Sending…' : 'Send answer'}
         </button>
       </div>
+        </div>
+      )}
     </section>
   );
 };
