@@ -321,11 +321,13 @@ pub async fn run_session_turn(
 
     // A single assistant message is reused across attempts (see
     // `ensure_assistant_message_slot`): if the first attempt fails because the
-    // CLI session was lost, we transparently restart with a fresh session and
-    // refill the same chat bubble, so the user never sees a stray empty turn or
-    // a "send your message again" error.
+    // CLI session was lost, or because the provider's remote thread hit a
+    // context limit, we transparently restart with a fresh session and refill
+    // the same chat bubble. That keeps recovery bounded without showing the
+    // user a stray empty turn or a "send your message again" error.
     let mut assistant_slot: Option<AssistantMessage> = None;
-    let mut retried = false;
+    let mut retried_after_session_lost = false;
+    let mut retried_after_context_compaction = false;
 
     let run_result = loop {
         let attempt = match provider_runtime {
@@ -399,19 +401,66 @@ pub async fn run_session_turn(
         // id and retry exactly once with a fresh session — transparently. The
         // retried turn reuses `assistant_slot`, and a freshly-minted session
         // can't itself be "lost", so this is naturally bounded.
-        if !retried {
-            if let Err(LocalAgentRunError::Failed { message, .. }) = &attempt {
-                if is_session_lost_error(provider_runtime, message) {
-                    tracing::info!(
-                        target: "clai::cli_session",
-                        provider = provider_runtime.metadata_source(),
+        if let Err(LocalAgentRunError::Failed { message, .. }) = &attempt {
+            if !retried_after_session_lost && is_session_lost_error(provider_runtime, message) {
+                tracing::info!(
+                    target: "clai::cli_session",
+                    provider = provider_runtime.metadata_source(),
+                    run_id = %run_id,
+                    "{} session was lost; restarting with a fresh session",
+                    provider_runtime.display_name()
+                );
+                clear_cli_session_id(deps, &mut session).await?;
+                retried_after_session_lost = true;
+                continue;
+            }
+
+            if !retried_after_context_compaction
+                && should_recover_cli_context_limit(provider_runtime, message)
+            {
+                tracing::info!(
+                    target: "clai::cli_session",
+                    provider = provider_runtime.metadata_source(),
+                    run_id = %run_id,
+                    "{} reported a context limit; compacting local history and restarting with a fresh session",
+                    provider_runtime.display_name()
+                );
+                match compaction::compact_session_history(
+                    &deps.pool,
+                    &session,
+                    &connection,
+                    CompactionTrigger::ErrorRecovery,
+                    Some(&run_id),
+                    true,
+                )
+                .await
+                {
+                    Ok(Some(outcome)) => {
+                        compaction::reset_cli_session_for_rotation(&deps.pool, &mut session)
+                            .await?;
+                        let _ = emit_event(
+                            &deps.app,
+                            &session,
+                            Some(&run_id),
+                            AssistantUiEvent::SessionCompacted {
+                                compaction: outcome.compaction,
+                                summary_message: outcome.summary_message,
+                            },
+                        );
+                        retried_after_context_compaction = true;
+                        continue;
+                    }
+                    Ok(None) => tracing::warn!(
+                        session_id = %session.id,
                         run_id = %run_id,
-                        "{} session was lost; restarting with a fresh session",
-                        provider_runtime.display_name()
-                    );
-                    clear_cli_session_id(deps, &mut session).await?;
-                    retried = true;
-                    continue;
+                        "Context-limit CLI recovery requested compaction but no compaction was produced"
+                    ),
+                    Err(error) => tracing::warn!(
+                        session_id = %session.id,
+                        run_id = %run_id,
+                        error = %error,
+                        "Context-limit CLI recovery compaction failed"
+                    ),
                 }
             }
         }
@@ -531,6 +580,10 @@ fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) ->
                 || message.contains("session not found")
         }
     }
+}
+
+fn should_recover_cli_context_limit(_provider_runtime: CliProviderRuntime, message: &str) -> bool {
+    compaction::is_context_limit_error(message)
 }
 
 /// Detects a provider usage/rate-limit failure from a CLI error message.
@@ -4383,6 +4436,38 @@ mod tests {
         assert!(!is_session_lost_error(
             CliProviderRuntime::OpenCode,
             "You've hit your usage limit. Try again at 9:47 PM."
+        ));
+    }
+
+    #[test]
+    fn cli_context_limit_errors_are_recoverable() {
+        assert!(should_recover_cli_context_limit(
+            CliProviderRuntime::Codex,
+            "provider error: provider request failed: Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
+        ));
+        assert!(should_recover_cli_context_limit(
+            CliProviderRuntime::ClaudeCode,
+            "prompt is too long for the model context window"
+        ));
+        assert!(should_recover_cli_context_limit(
+            CliProviderRuntime::OpenCode,
+            "input tokens exceed context"
+        ));
+    }
+
+    #[test]
+    fn cli_non_context_errors_are_not_context_recoverable() {
+        assert!(!should_recover_cli_context_limit(
+            CliProviderRuntime::Codex,
+            "Codex exited with status exit status: 2"
+        ));
+        assert!(!should_recover_cli_context_limit(
+            CliProviderRuntime::Codex,
+            "You've hit your usage limit. Try again at 9:47 PM."
+        ));
+        assert!(!should_recover_cli_context_limit(
+            CliProviderRuntime::ClaudeCode,
+            "No conversation found with session ID abc"
         ));
     }
 
