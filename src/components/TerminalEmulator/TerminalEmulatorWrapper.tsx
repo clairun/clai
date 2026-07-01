@@ -100,6 +100,18 @@ const TerminalEmulatorWrapper = () => {
     (state) => (workspaceSessionId ? !!state.sessions[workspaceSessionId]?.isStreaming : false)
   );
 
+  // When a run fails before producing anything (429/400/token-limit), the BE
+  // retracts the user message and the store stashes its text here so the
+  // composer can restore the lost prompt instead of forcing a retype.
+  const recoverablePrompt = useAssistantStore(
+    (state) => (workspaceSessionId ? state.recoverablePrompts[workspaceSessionId] ?? '' : '')
+  );
+  const handleRecoverablePromptConsumed = useCallback(() => {
+    if (workspaceSessionId) {
+      useAssistantStore.getState().clearRecoverablePrompt(workspaceSessionId);
+    }
+  }, [workspaceSessionId]);
+
   const inputDisabled = isWorkspaceRoute && workspaceIsStreaming;
 
   /**
@@ -298,6 +310,8 @@ const TerminalEmulatorWrapper = () => {
       onPickImage={handlePickImage}
       onReadClipboardImage={readClipboardImageAsFile}
       agentWorking={inputDisabled}
+      recoverablePrompt={recoverablePrompt}
+      onRecoverablePromptConsumed={handleRecoverablePromptConsumed}
     />
   );
 };

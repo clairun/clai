@@ -41,6 +41,11 @@ interface TerminalEmulatorProps {
   onPickImage?: () => Promise<AttachImageResult>;
   onReadClipboardImage?: () => Promise<File | null>;
   agentWorking?: boolean;
+  /** Text of a prompt whose send failed asynchronously (run error after the
+   *  composer already cleared); restored into the input box when non-empty
+   *  and the box is empty. Cleared via onRecoverablePromptConsumed. */
+  recoverablePrompt?: string;
+  onRecoverablePromptConsumed?: () => void;
 }
 
 const TerminalEmulator = ({
@@ -50,6 +55,8 @@ const TerminalEmulator = ({
   onPickImage,
   onReadClipboardImage,
   agentWorking = false,
+  recoverablePrompt = '',
+  onRecoverablePromptConsumed,
 }: TerminalEmulatorProps) => {
   const location = useLocation();
   const [inputValue, setInputValue] = useState('');
@@ -278,6 +285,30 @@ const TerminalEmulator = ({
       setAttachments([]);
     }
   }
+
+  // Restore a prompt whose send failed asynchronously (the run errored after
+  // the composer already cleared — 429/400/token-limit). The BE retracts the
+  // user message and the store surfaces its text as `recoverablePrompt`. We
+  // apply it during render (same-component setState, converges — mirrors the
+  // draft swap above) so we never miss it, guarded so we don't clobber text
+  // the user has since typed, and only once per delivery.
+  const [appliedRecoverablePrompt, setAppliedRecoverablePrompt] = useState('');
+  if (recoverablePrompt && recoverablePrompt !== appliedRecoverablePrompt) {
+    setInputValue((current) => restoreFailedPrompt(current, recoverablePrompt));
+    setAppliedRecoverablePrompt(recoverablePrompt);
+  } else if (!recoverablePrompt && appliedRecoverablePrompt) {
+    // Slot cleared (consumed) — reset so a later, even identical, failure
+    // restores again.
+    setAppliedRecoverablePrompt('');
+  }
+  // Clear the store slot once we've surfaced it. `onRecoverablePromptConsumed`
+  // calls a zustand action (not a React state setter), so this is exempt from
+  // the set-state-in-effect rule.
+  useEffect(() => {
+    if (appliedRecoverablePrompt && onRecoverablePromptConsumed) {
+      onRecoverablePromptConsumed();
+    }
+  }, [appliedRecoverablePrompt, onRecoverablePromptConsumed]);
 
   // Ctrl+\ (or Cmd+\) toggles terminal mode. Matches the backslash key
   // (the 'Backslash' code or the '\\' character) and also the physical key

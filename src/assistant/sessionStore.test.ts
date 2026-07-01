@@ -26,7 +26,7 @@ const ASK_REQUEST = {
 beforeEach(() => {
   // Zustand exposes setState on the hook itself; reset the slice that
   // every test below mutates. Avoids cross-test bleed.
-  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {} });
+  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, recoverablePrompts: {} });
 });
 
 describe('initSession', () => {
@@ -234,5 +234,46 @@ describe('setRunStatus', () => {
     store.initSession(SESSION);
     store.setRunStatus(SESSION.id, run('run-1', 'queued'));
     expect(useAssistantStore.getState().sessions[SESSION.id]!.isStreaming).toBe(true);
+  });
+});
+
+describe('removeMessage — recoverable prompt capture', () => {
+  const userMsg = (id: string, text: string): AssistantMessage =>
+    ({ id, role: 'user', content: [{ type: 'text', text }] }) as unknown as AssistantMessage;
+
+  it('stashes a retracted user message text so the composer can restore it', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.addMessage(SESSION.id, userMsg('u-1', '  hello there  '));
+    store.removeMessage(SESSION.id, 'u-1');
+    // Trimmed text is recoverable, keyed by session.
+    expect(useAssistantStore.getState().recoverablePrompts[SESSION.id]).toBe('hello there');
+  });
+
+  it('does not stash when an assistant message is removed', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    const assistant = { id: 'a-1', role: 'assistant', content: [{ type: 'text', text: 'hi' }] } as unknown as AssistantMessage;
+    store.addMessage(SESSION.id, assistant);
+    store.removeMessage(SESSION.id, 'a-1');
+    expect(useAssistantStore.getState().recoverablePrompts[SESSION.id]).toBeUndefined();
+  });
+
+  it('does not stash an empty/whitespace-only user message', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.addMessage(SESSION.id, userMsg('u-2', '   '));
+    store.removeMessage(SESSION.id, 'u-2');
+    expect(useAssistantStore.getState().recoverablePrompts[SESSION.id]).toBeUndefined();
+  });
+
+  it('clearRecoverablePrompt removes the stashed text', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.addMessage(SESSION.id, userMsg('u-3', 'keep me'));
+    store.removeMessage(SESSION.id, 'u-3');
+    expect(useAssistantStore.getState().recoverablePrompts[SESSION.id]).toBe('keep me');
+    store.clearRecoverablePrompt(SESSION.id);
+    expect(useAssistantStore.getState().recoverablePrompts[SESSION.id]).toBeUndefined();
   });
 });

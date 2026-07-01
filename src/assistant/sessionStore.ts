@@ -14,6 +14,7 @@ import type {
   AssistantMessageCursor,
   AssistantRun,
   AssistantSession,
+  ContentPart,
   ToolInvocation,
 } from '../generated/bindings';
 
@@ -68,6 +69,12 @@ export interface AssistantStoreState {
   initSession: (session: AssistantSession & { tabId?: string | null }) => void;
   addMessage: (sessionId: string, message: AssistantMessage) => void;
   removeMessage: (sessionId: string, messageId: string) => void;
+  /** Text of a user message whose run failed and was retracted by the
+   *  backend (429/400/token-limit/spawn error), keyed by session. The
+   *  composer reads this back into the input box so the typed prompt
+   *  isn't lost. Cleared once the composer consumes it. */
+  recoverablePrompts: Record<string, string>;
+  clearRecoverablePrompt: (sessionId: string) => void;
   markMessageQueued: (sessionId: string, messageId: string) => void;
   markQueuedMessagesDelivered: (sessionId: string, messageIds: string[]) => void;
   prependMessagePage: (
@@ -124,6 +131,7 @@ const useAssistantStore = create<AssistantStoreState>()(
     immer((set, get) => ({
       sessions: {},
       activeSessionByTab: {},
+      recoverablePrompts: {},
 
       setActiveSessionForTab: (tabId, sessionId) =>
         set((state) => {
@@ -167,6 +175,20 @@ const useAssistantStore = create<AssistantStoreState>()(
         set((state) => {
           const s = state.sessions[sessionId];
           if (!s) return;
+          // A retracted *user* message means the run failed before producing
+          // anything; stash its typed text so the composer can restore it
+          // instead of forcing the user to retype the prompt.
+          const removed = s.messages.find((m) => m.id === messageId);
+          if (removed && removed.role === 'user') {
+            const text = removed.content
+              .filter((p): p is Extract<ContentPart, { type: 'text' }> => p.type === 'text')
+              .map((p) => p.text)
+              .join('')
+              .trim();
+            if (text) {
+              state.recoverablePrompts[sessionId] = text;
+            }
+          }
           const before = s.messages.length;
           s.messages = s.messages.filter((m) => m.id !== messageId);
           if (s.messages.length < before && s.totalMessageCount !== null) {
@@ -174,6 +196,11 @@ const useAssistantStore = create<AssistantStoreState>()(
           }
           s.queuedMessageIds = s.queuedMessageIds.filter((id) => id !== messageId);
           delete s.streamingTextByMessageId[messageId];
+        }),
+
+      clearRecoverablePrompt: (sessionId) =>
+        set((state) => {
+          delete state.recoverablePrompts[sessionId];
         }),
 
       markMessageQueued: (sessionId, messageId) =>
