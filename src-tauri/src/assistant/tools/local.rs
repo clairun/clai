@@ -1,5 +1,7 @@
+use futures::StreamExt;
 use glob::{MatchOptions, Pattern};
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -30,8 +32,10 @@ const DEFAULT_BASH_OUTPUT_LIMIT: usize = 20_000;
 const MAX_BASH_OUTPUT_LIMIT: usize = 200_000;
 const DEFAULT_WEB_FETCH_CONTENT_LIMIT: usize = 20_000;
 const MAX_WEB_FETCH_CONTENT_LIMIT: usize = 100_000;
+const MAX_WEB_FETCH_BODY_BYTES: usize = MAX_WEB_FETCH_CONTENT_LIMIT * 4;
 const DEFAULT_WEB_FETCH_TIMEOUT_MS: u64 = 15_000;
 const MAX_WEB_FETCH_TIMEOUT_MS: u64 = 30_000;
+const MAX_WEB_FETCH_REDIRECTS: usize = 5;
 const DEFAULT_WEB_SEARCH_MAX_RESULTS: usize = 10;
 const MAX_WEB_SEARCH_MAX_RESULTS: usize = 20;
 const WEB_SEARCH_TIMEOUT_MS: u64 = 10_000;
@@ -2007,30 +2011,9 @@ async fn execute_web_fetch(params: WebFetchParams) -> Result<serde_json::Value, 
         .unwrap_or(DEFAULT_WEB_FETCH_TIMEOUT_MS)
         .min(MAX_WEB_FETCH_TIMEOUT_MS);
 
-    // Basic URL validation
-    let url = params.url.trim();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return Err("URL must start with http:// or https://".to_string());
-    }
-
-    // Block private/local IPs to prevent SSRF
-    if is_private_url(url) {
-        return Err("Fetching private/local URLs is not allowed".to_string());
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    let response = client
-        .get(url)
-        .header("User-Agent", "CLAI/1.0")
-        .header("Accept", "text/html, text/plain, application/xhtml+xml")
-        .send()
-        .await
-        .map_err(|e| format!("Fetch failed: {}", e))?;
+    let url = parse_web_fetch_url(params.url.trim())?;
+    let response = fetch_public_url(url, timeout_ms).await?;
+    let final_url = response.url().clone();
 
     let status = response.status().as_u16();
     if !response.status().is_success() {
@@ -2044,10 +2027,8 @@ async fn execute_web_fetch(params: WebFetchParams) -> Result<serde_json::Value, 
         .unwrap_or("")
         .to_string();
 
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    let body_limit = web_fetch_body_limit(content_limit);
+    let (body, body_truncated) = read_limited_web_fetch_body(response, body_limit).await?;
 
     // Convert HTML to markdown, or return plain text as-is
     let markdown = if content_type.contains("text/html") || content_type.contains("xhtml") {
@@ -2056,17 +2037,18 @@ async fn execute_web_fetch(params: WebFetchParams) -> Result<serde_json::Value, 
         body
     };
 
-    let truncated = markdown.len() > content_limit;
-    let content = if truncated {
+    let markdown_truncated = markdown.len() > content_limit;
+    let content = if markdown_truncated {
         let chars: Vec<char> = markdown.chars().collect();
         let end = content_limit.min(chars.len());
         chars[..end].iter().collect::<String>()
     } else {
         markdown
     };
+    let truncated = body_truncated || markdown_truncated;
 
     Ok(serde_json::json!({
-        "url": url,
+        "url": final_url.as_str(),
         "contentType": content_type,
         "content": content,
         "truncated": truncated,
@@ -2082,42 +2064,219 @@ fn html_to_markdown(html: &str) -> String {
     })
 }
 
-/// Check if a URL points to a private/local address (SSRF protection).
-fn is_private_url(url: &str) -> bool {
-    // Extract host from URL
-    let host = url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("");
+fn parse_web_fetch_url(raw: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(raw)
+        .map_err(|_| "URL must be an absolute http:// or https:// URL".to_string())?;
+    validate_web_fetch_scheme(&url)?;
+    Ok(url)
+}
 
-    matches!(
-        host,
-        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]"
-    ) || host.starts_with("10.")
-        || host.starts_with("192.168.")
-        || host.starts_with("172.16.")
-        || host.starts_with("172.17.")
-        || host.starts_with("172.18.")
-        || host.starts_with("172.19.")
-        || host.starts_with("172.20.")
-        || host.starts_with("172.21.")
-        || host.starts_with("172.22.")
-        || host.starts_with("172.23.")
-        || host.starts_with("172.24.")
-        || host.starts_with("172.25.")
-        || host.starts_with("172.26.")
-        || host.starts_with("172.27.")
-        || host.starts_with("172.28.")
-        || host.starts_with("172.29.")
-        || host.starts_with("172.30.")
-        || host.starts_with("172.31.")
-        || host.ends_with(".local")
-        || host.ends_with(".internal")
+fn validate_web_fetch_scheme(url: &reqwest::Url) -> Result<(), String> {
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err("URL must start with http:// or https://".to_string()),
+    }
+}
+
+async fn fetch_public_url(
+    mut url: reqwest::Url,
+    timeout_ms: u64,
+) -> Result<reqwest::Response, String> {
+    let mut redirects_followed = 0;
+    loop {
+        let dns_override = resolve_public_web_fetch_target(&url).await?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .redirect(reqwest::redirect::Policy::none());
+
+        if let Some((host, addrs)) = &dns_override {
+            builder = builder.resolve_to_addrs(host, addrs);
+        }
+
+        let client = builder
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+        let response = client
+            .get(url.clone())
+            .header("User-Agent", "CLAI/1.0")
+            .header("Accept", "text/html, text/plain, application/xhtml+xml")
+            .send()
+            .await
+            .map_err(|e| format!("Fetch failed: {}", e))?;
+
+        if is_followable_redirect(response.status()) {
+            if redirects_followed >= MAX_WEB_FETCH_REDIRECTS {
+                return Err("Fetch exceeded redirect limit".to_string());
+            }
+            redirects_followed += 1;
+
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| {
+                    format!(
+                        "Fetch returned HTTP {} without a Location header",
+                        response.status().as_u16()
+                    )
+                })?
+                .to_str()
+                .map_err(|_| "Redirect location is not valid UTF-8".to_string())?;
+            url = url
+                .join(location)
+                .map_err(|e| format!("Invalid redirect location: {}", e))?;
+            validate_web_fetch_scheme(&url)?;
+            continue;
+        }
+
+        return Ok(response);
+    }
+}
+
+fn is_followable_redirect(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
+}
+
+async fn resolve_public_web_fetch_target(
+    url: &reqwest::Url,
+) -> Result<Option<(String, Vec<SocketAddr>)>, String> {
+    validate_web_fetch_scheme(url)?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL must include a host".to_string())?;
+    let host_literal = strip_ipv6_url_brackets(host);
+    let normalized_host = host_literal.trim_end_matches('.').to_ascii_lowercase();
+    if is_blocked_web_fetch_hostname(&normalized_host) {
+        return Err("Fetching private/local URLs is not allowed".to_string());
+    }
+
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "URL must include a valid port".to_string())?;
+
+    if let Ok(ip) = host_literal.parse::<IpAddr>() {
+        reject_private_web_fetch_ip(ip)?;
+        return Ok(None);
+    }
+
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("Failed to resolve URL host: {}", e))?
+        .collect();
+    if addrs.is_empty() {
+        return Err("URL host did not resolve to any address".to_string());
+    }
+
+    reject_private_web_fetch_addrs(&addrs)?;
+
+    // Pin the public DNS result into reqwest for this request so a hostname
+    // cannot validate as public and then resolve privately during connect.
+    Ok(Some((host.to_string(), addrs)))
+}
+
+fn is_blocked_web_fetch_hostname(normalized_host: &str) -> bool {
+    normalized_host == "localhost"
+        || normalized_host.ends_with(".localhost")
+        || normalized_host.ends_with(".local")
+        || normalized_host.ends_with(".internal")
+}
+
+fn strip_ipv6_url_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+fn reject_private_web_fetch_ip(ip: IpAddr) -> Result<(), String> {
+    if is_private_web_fetch_ip(ip) {
+        Err("Fetching private/local URLs is not allowed".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn reject_private_web_fetch_addrs(addrs: &[SocketAddr]) -> Result<(), String> {
+    for addr in addrs {
+        reject_private_web_fetch_ip(addr.ip())?;
+    }
+    Ok(())
+}
+
+fn is_private_web_fetch_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_private_web_fetch_ipv4(ip),
+        IpAddr::V6(ip) => is_private_web_fetch_ipv6(ip),
+    }
+}
+
+fn is_private_web_fetch_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 192 && b == 0 && c == 0)
+        || a >= 240
+}
+
+fn is_private_web_fetch_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return is_private_web_fetch_ipv4(mapped);
+    }
+
+    let octets = ip.octets();
+    let segments = ip.segments();
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (octets[0] & 0xfe) == 0xfc
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xffc0) == 0xfec0
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || segments[0] == 0x2002
+}
+
+fn web_fetch_body_limit(content_limit: usize) -> usize {
+    content_limit
+        .saturating_mul(4)
+        .min(MAX_WEB_FETCH_BODY_BYTES)
+}
+
+async fn read_limited_web_fetch_body(
+    response: reqwest::Response,
+    body_limit: usize,
+) -> Result<(String, bool), String> {
+    let mut body = Vec::with_capacity(body_limit.min(16 * 1024));
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Failed to read response body: {}", e))?;
+        if append_limited_web_fetch_body_chunk(&mut body, &chunk, body_limit) {
+            return Ok((String::from_utf8_lossy(&body).into_owned(), true));
+        }
+    }
+
+    Ok((String::from_utf8_lossy(&body).into_owned(), false))
+}
+
+fn append_limited_web_fetch_body_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
+    let remaining = limit.saturating_sub(body.len());
+    if remaining == 0 {
+        return true;
+    }
+
+    if chunk.len() > remaining {
+        body.extend_from_slice(&chunk[..remaining]);
+        return true;
+    }
+
+    body.extend_from_slice(chunk);
+    false
 }
 
 #[cfg(test)]
@@ -2548,21 +2707,87 @@ mod tests {
     }
 
     #[test]
-    fn is_private_url_blocks_local_addresses() {
-        assert!(is_private_url("http://localhost/foo"));
-        assert!(is_private_url("http://127.0.0.1:8080/api"));
-        assert!(is_private_url("http://192.168.1.1/"));
-        assert!(is_private_url("http://10.0.0.1/"));
-        assert!(is_private_url("http://172.16.0.1/"));
-        assert!(is_private_url("http://myhost.local/"));
-        assert!(is_private_url("http://service.internal/"));
+    fn web_fetch_ip_filter_blocks_non_public_ranges() {
+        for ip in [
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "192.168.1.1",
+            "192.0.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "::",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fc00::1",
+            "fe80::1",
+            "fec0::1",
+            "2001:db8::1",
+            "2002:0a00:0001::1",
+        ] {
+            assert!(is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
+        }
     }
 
     #[test]
-    fn is_private_url_allows_public_addresses() {
-        assert!(!is_private_url("https://example.com/"));
-        assert!(!is_private_url("https://docs.rust-lang.org/"));
-        assert!(!is_private_url("http://8.8.8.8/"));
+    fn web_fetch_ip_filter_allows_public_addresses() {
+        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            assert!(!is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn web_fetch_blocks_private_dns_results() {
+        let addrs = [
+            SocketAddr::new("93.184.216.34".parse().unwrap(), 80),
+            SocketAddr::new("192.168.1.1".parse().unwrap(), 80),
+        ];
+
+        let err = reject_private_web_fetch_addrs(&addrs).unwrap_err();
+        assert!(err.contains("private/local"));
+    }
+
+    #[test]
+    fn web_fetch_hostname_filter_blocks_local_names() {
+        for host in [
+            "localhost",
+            "api.localhost",
+            "myhost.local",
+            "service.internal",
+        ] {
+            assert!(is_blocked_web_fetch_hostname(host), "{host}");
+        }
+        assert!(!is_blocked_web_fetch_hostname("example.com"));
+    }
+
+    #[test]
+    fn parse_web_fetch_url_rejects_non_absolute_http_urls() {
+        assert!(parse_web_fetch_url("/relative/path").is_err());
+        assert!(parse_web_fetch_url("ftp://example.com/file").is_err());
+    }
+
+    #[test]
+    fn web_fetch_body_reader_truncates_chunks_at_limit() {
+        let mut body = Vec::new();
+
+        assert!(!append_limited_web_fetch_body_chunk(&mut body, b"hello", 8));
+        assert!(append_limited_web_fetch_body_chunk(&mut body, b" world", 8));
+        assert_eq!(body, b"hello wo");
+    }
+
+    #[test]
+    fn web_fetch_body_limit_scales_but_stays_bounded() {
+        assert_eq!(web_fetch_body_limit(0), 0);
+        assert_eq!(web_fetch_body_limit(1_000), 4_000);
+        assert_eq!(web_fetch_body_limit(MAX_WEB_FETCH_CONTENT_LIMIT), 400_000);
+        assert_eq!(
+            web_fetch_body_limit(MAX_WEB_FETCH_CONTENT_LIMIT * 10),
+            MAX_WEB_FETCH_BODY_BYTES
+        );
     }
 
     #[test]
@@ -2630,6 +2855,25 @@ mod tests {
         let result = execute_web_fetch(params).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("private/local"));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_private_ipv6_literals() {
+        let url = parse_web_fetch_url("http://[::1]/admin").unwrap();
+
+        let err = resolve_public_web_fetch_target(&url).await.unwrap_err();
+        assert!(err.contains("private/local"));
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_redirect_targets_to_private_urls() {
+        let start = parse_web_fetch_url("https://example.com/start").unwrap();
+        let redirected = start.join("http://127.0.0.1/admin").unwrap();
+
+        let err = resolve_public_web_fetch_target(&redirected)
+            .await
+            .unwrap_err();
+        assert!(err.contains("private/local"));
     }
 
     // ------------------------------------------------------------------
