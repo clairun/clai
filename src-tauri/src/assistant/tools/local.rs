@@ -2082,6 +2082,10 @@ async fn fetch_public_url(
     mut url: reqwest::Url,
     timeout_ms: u64,
 ) -> Result<reqwest::Response, String> {
+    // A redirect must never downgrade the transport: if the original request
+    // was https, refuse to follow a redirect to plain http (a MITM/attacker
+    // could otherwise strip TLS by 30x-ing to http).
+    let started_https = url.scheme() == "https";
     let mut redirects_followed = 0;
     loop {
         let dns_override = resolve_public_web_fetch_target(&url).await?;
@@ -2126,6 +2130,11 @@ async fn fetch_public_url(
                 .join(location)
                 .map_err(|e| format!("Invalid redirect location: {}", e))?;
             validate_web_fetch_scheme(&url)?;
+            if started_https && url.scheme() != "https" {
+                return Err(
+                    "Refusing to follow an https->http redirect (transport downgrade)".to_string(),
+                );
+            }
             continue;
         }
 
@@ -2231,6 +2240,22 @@ fn is_private_web_fetch_ipv6(ip: Ipv6Addr) -> bool {
 
     let octets = ip.octets();
     let segments = ip.segments();
+
+    // NAT64: the well-known prefix 64:ff9b::/96 embeds a target IPv4 in the
+    // low 32 bits, so `64:ff9b::7f00:1` would reach 127.0.0.1. Extract and
+    // apply the IPv4 blocklist rather than trusting the v6 literal. The
+    // local-use prefix 64:ff9b:1::/48 (RFC 8215) is site-internal by
+    // definition, so block it wholesale.
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        if segments[2] == 0x0001 {
+            return true;
+        }
+        if segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0 {
+            let embedded = std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+            return is_private_web_fetch_ipv4(embedded);
+        }
+    }
+
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
@@ -2728,6 +2753,10 @@ mod tests {
             "fec0::1",
             "2001:db8::1",
             "2002:0a00:0001::1",
+            // NAT64 well-known prefix embedding 127.0.0.1 (64:ff9b::7f00:1).
+            "64:ff9b::7f00:1",
+            // NAT64 local-use prefix 64:ff9b:1::/48 (site-internal by definition).
+            "64:ff9b:1::1",
         ] {
             assert!(is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
         }
@@ -2735,7 +2764,14 @@ mod tests {
 
     #[test]
     fn web_fetch_ip_filter_allows_public_addresses() {
-        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+        for ip in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            // NAT64 well-known prefix embedding a public IPv4 (8.8.8.8) must
+            // still be reachable — only the embedded IPv4 decides.
+            "64:ff9b::808:808",
+        ] {
             assert!(!is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
         }
     }
