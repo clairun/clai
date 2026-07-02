@@ -1,6 +1,8 @@
 //! Tauri commands for "open in app" actions and the Settings →
 //! Applications section. See `crate::system_apps` for the mechanics.
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Seek};
 use std::path::Path;
 
 use tauri::State;
@@ -109,9 +111,7 @@ pub fn workspace_import_files(
             .ok_or_else(|| format!("`{}` has no file name.", source.display()))?
             .to_string_lossy()
             .to_string();
-        let dest = unique_destination(&dest_dir, &name);
-        std::fs::copy(source, &dest)
-            .map_err(|e| format!("Failed to copy `{}`: {}", source.display(), e))?;
+        let dest = copy_to_unique_destination(source, &dest_dir, &name)?;
         copied.push(
             dest.file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -122,17 +122,60 @@ pub fn workspace_import_files(
 }
 
 /// `report.md` → `report (1).md` → `report (2).md` … until free.
-fn unique_destination(dir: &Path, name: &str) -> std::path::PathBuf {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
+fn destination_candidate(dir: &Path, name: &str, copy_index: u32) -> std::path::PathBuf {
+    if copy_index == 0 {
+        return dir.join(name);
     }
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{}", ext)),
         _ => (name.to_string(), String::new()),
     };
+    dir.join(format!("{} ({}){}", stem, copy_index, ext))
+}
+
+fn copy_to_unique_destination(
+    source: &Path,
+    dir: &Path,
+    name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let mut input =
+        File::open(source).map_err(|e| format!("Failed to open `{}`: {}", source.display(), e))?;
+
+    for n in 0u32.. {
+        let candidate = destination_candidate(dir, name, n);
+        let mut output = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create `{}`: {}",
+                    candidate.display(),
+                    error
+                ));
+            }
+        };
+
+        input
+            .rewind()
+            .map_err(|e| format!("Failed to rewind `{}`: {}", source.display(), e))?;
+        if let Err(error) = io::copy(&mut input, &mut output) {
+            let _ = std::fs::remove_file(&candidate);
+            return Err(format!("Failed to copy `{}`: {}", source.display(), error));
+        }
+        return Ok(candidate);
+    }
+
+    unreachable!("u32 exhausted finding a unique file name")
+}
+
+#[cfg(test)]
+fn unique_destination(dir: &Path, name: &str) -> std::path::PathBuf {
     for n in 1u32.. {
-        let candidate = dir.join(format!("{} ({}){}", stem, n, ext));
+        let candidate = destination_candidate(dir, name, n - 1);
         if !candidate.exists() {
             return candidate;
         }
@@ -167,5 +210,37 @@ mod tests {
             unique_destination(dir.path(), "Makefile"),
             dir.path().join("Makefile (1)")
         );
+    }
+
+    #[test]
+    fn copy_to_unique_destination_does_not_overwrite_existing_file() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("report.md");
+        std::fs::write(&source, "new").unwrap();
+        std::fs::write(dest_dir.path().join("report.md"), "old").unwrap();
+
+        let copied = copy_to_unique_destination(&source, dest_dir.path(), "report.md").unwrap();
+
+        assert_eq!(copied, dest_dir.path().join("report (1).md"));
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.path().join("report.md")).unwrap(),
+            "old"
+        );
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "new");
+    }
+
+    #[test]
+    fn copy_to_unique_destination_handles_extensionless_names() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("Makefile");
+        std::fs::write(&source, "new").unwrap();
+        std::fs::write(dest_dir.path().join("Makefile"), "old").unwrap();
+
+        let copied = copy_to_unique_destination(&source, dest_dir.path(), "Makefile").unwrap();
+
+        assert_eq!(copied, dest_dir.path().join("Makefile (1)"));
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "new");
     }
 }

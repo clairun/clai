@@ -10,7 +10,6 @@ use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
 use crate::assistant::repository;
 use crate::assistant::repository::{CreateMessageParams, CreateRunParams, CreateToolCallParams};
-use crate::assistant::runtime;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
     AssistantMessage, CompactionTrigger, CompletionRequest, ContentPart, MessageRole,
@@ -319,13 +318,11 @@ pub async fn run_session_turn(
                     && compaction::is_context_limit_error(&e.to_string())
                 {
                     retried_after_context_compaction = true;
-                    match compaction::compact_session_history(
+                    match compaction::compact_for_context_limit_recovery(
                         &deps.pool,
                         &session,
                         &connection,
-                        CompactionTrigger::ErrorRecovery,
-                        Some(&run_id),
-                        true,
+                        &run_id,
                     )
                     .await
                     {
@@ -3153,6 +3150,5 @@ async fn cancel_run(
         Some(run_id),
         AssistantUiEvent::RunCancelled { run },
     );
-    runtime::unregister_run(run_id);
     Ok(())
 }

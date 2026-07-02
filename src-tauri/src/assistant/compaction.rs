@@ -214,6 +214,23 @@ pub async fn compact_session_history(
     }))
 }
 
+pub async fn compact_for_context_limit_recovery(
+    pool: &DbPool,
+    session: &AssistantSession,
+    connection: &ProviderConnection,
+    run_id: &str,
+) -> Result<Option<CompactionOutcome>, String> {
+    compact_session_history(
+        pool,
+        session,
+        connection,
+        CompactionTrigger::ErrorRecovery,
+        Some(run_id),
+        true,
+    )
+    .await
+}
+
 fn provider_history_messages_with_compaction(
     messages: &[AssistantMessage],
     latest: Option<&AssistantCompaction>,

@@ -925,8 +925,10 @@ pub(crate) fn spawn_run_task(
     // messages are linked via assistant_message_queue.delivered_run_id.
     trigger_message_id: Option<String>,
 ) {
-    let cancel_token = runtime::register_run(&run_id);
+    let run_registration = runtime::register_run(&run_id);
+    let cancel_token = run_registration.token();
     tauri::async_runtime::spawn(async move {
+        let _run_registration = run_registration;
         let deps = AssistantDeps {
             pool: pool.clone(),
             app: app.clone(),
@@ -943,7 +945,6 @@ pub(crate) fn spawn_run_task(
         if let Err(e) = engine::run_session_turn(&deps, input).await {
             tracing::error!("Assistant engine error for run {}: {}", run_id, e);
         }
-        runtime::unregister_run(&run_id);
         if let Err(e) =
             start_queued_followup_if_idle(pool.clone(), app.clone(), session_id.clone()).await
         {

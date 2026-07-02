@@ -2,8 +2,11 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -14,6 +17,9 @@ use crate::config::{
     SkillSourceDiagnostic, SkillSourceKind,
 };
 use crate::AppState;
+
+const GIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Removes all workspace-local skill references that belong to the given source.
 ///
@@ -517,13 +523,20 @@ fn build_git_command(in_flatpak: bool, current_dir: Option<&Path>) -> Command {
         if let Some(current_dir) = current_dir {
             command.arg(format!("--directory={}", current_dir.display()));
         }
-        command.arg("--host").arg("git");
+        command
+            .arg("--env=GIT_TERMINAL_PROMPT=0")
+            .arg("--env=GIT_ASKPASS=true")
+            .arg("--host")
+            .arg("git");
         command
     } else {
         let mut command = Command::new("git");
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
         }
+        command
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ASKPASS", "true");
         command
     }
 }
@@ -536,9 +549,7 @@ where
     let mut command = build_git_command(crate::providers::is_flatpak(), current_dir);
     command.args(args);
 
-    let output = command
-        .output()
-        .map_err(|error| format!("Failed to execute git: {}", error))?;
+    let output = run_git_command_with_timeout(command, GIT_SYNC_TIMEOUT)?;
     if output.status.success() {
         return Ok(());
     }
@@ -553,6 +564,63 @@ where
         format!("git exited with status {}", output.status)
     };
     Err(message)
+}
+
+fn run_git_command_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to execute git: {}", error))?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture git stdout".to_string())?;
+    let stdout_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).map(|_| buf)
+    });
+
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture git stderr".to_string())?;
+    let stderr_reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        stderr.read_to_end(&mut buf).map(|_| buf)
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("Failed to wait for git: {}", error))?
+        {
+            let stdout = stdout_reader
+                .join()
+                .map_err(|_| "Failed to join git stdout reader".to_string())?
+                .map_err(|error| format!("Failed to read git stdout: {}", error))?;
+            let stderr = stderr_reader
+                .join()
+                .map_err(|_| "Failed to join git stderr reader".to_string())?
+                .map_err(|error| format!("Failed to read git stderr: {}", error))?;
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(format!("git timed out after {} seconds", timeout.as_secs()));
+        }
+
+        thread::sleep(GIT_SYNC_POLL_INTERVAL);
+    }
 }
 
 fn remove_git_cache_if_owned(source: &SkillSourceConfig) -> Result<(), String> {
@@ -577,12 +645,26 @@ fn remove_git_cache_if_owned(source: &SkillSourceConfig) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn command_env_value<'a>(command: &'a Command, key: &str) -> Option<&'a OsStr> {
+        command
+            .get_envs()
+            .find_map(|(name, value)| (name == OsStr::new(key)).then_some(value).flatten())
+    }
+
     #[test]
     fn build_git_command_native_invokes_git_directly() {
         let command = build_git_command(false, None);
         assert_eq!(command.get_program(), OsStr::new("git"));
         assert_eq!(command.get_args().count(), 0);
         assert_eq!(command.get_current_dir(), None);
+        assert_eq!(
+            command_env_value(&command, "GIT_TERMINAL_PROMPT"),
+            Some(OsStr::new("0"))
+        );
+        assert_eq!(
+            command_env_value(&command, "GIT_ASKPASS"),
+            Some(OsStr::new("true"))
+        );
     }
 
     #[test]
@@ -600,7 +682,15 @@ mod tests {
         let command = build_git_command(true, None);
         assert_eq!(command.get_program(), OsStr::new("flatpak-spawn"));
         let args: Vec<&OsStr> = command.get_args().collect();
-        assert_eq!(args, vec![OsStr::new("--host"), OsStr::new("git")]);
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("--env=GIT_TERMINAL_PROMPT=0"),
+                OsStr::new("--env=GIT_ASKPASS=true"),
+                OsStr::new("--host"),
+                OsStr::new("git")
+            ]
+        );
         // No cwd requested -> no --directory and no wrapper cwd.
         assert_eq!(command.get_current_dir(), None);
     }
@@ -617,6 +707,8 @@ mod tests {
             args,
             vec![
                 OsStr::new("--directory=/home/user/.clai/cache/skill-sources/abc"),
+                OsStr::new("--env=GIT_TERMINAL_PROMPT=0"),
+                OsStr::new("--env=GIT_ASKPASS=true"),
                 OsStr::new("--host"),
                 OsStr::new("git"),
             ]

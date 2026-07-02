@@ -709,7 +709,8 @@ async fn run_scheduled_agent_with_fallback(
         // synthetic `scheduled:{instance_id}:{uuid}` string, which meant
         // `assistant_cancel_run(run.id)` couldn't find the token and
         // scheduled runs were effectively un-cancellable from the UI.
-        let cancel_token = runtime::register_run(&run.id);
+        let run_registration = runtime::register_run(&run.id);
+        let cancel_token = run_registration.token();
         let input = RunTurnInput {
             session_id: session.id.clone(),
             run_id: Some(run.id.clone()),
@@ -720,7 +721,7 @@ async fn run_scheduled_agent_with_fallback(
             trigger_message_id: None,
         };
         let result = engine::run_session_turn(&deps, input).await;
-        runtime::unregister_run(&run.id);
+        drop(run_registration);
 
         match result {
             Ok(()) => {
