@@ -318,13 +318,11 @@ pub async fn run_session_turn(
                     && compaction::is_context_limit_error(&e.to_string())
                 {
                     retried_after_context_compaction = true;
-                    match compaction::compact_session_history(
+                    match compaction::compact_for_context_limit_recovery(
                         &deps.pool,
                         &session,
                         &connection,
-                        CompactionTrigger::ErrorRecovery,
-                        Some(&run_id),
-                        true,
+                        &run_id,
                     )
                     .await
                     {
