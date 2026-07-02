@@ -1,36 +1,77 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use tokio_util::sync::CancellationToken;
 
-type ActiveRuns = HashMap<String, CancellationToken>;
+#[derive(Clone)]
+struct ActiveRunEntry {
+    token: CancellationToken,
+    generation: u64,
+}
+
+type ActiveRuns = HashMap<String, ActiveRunEntry>;
 
 static ACTIVE_RUNS: OnceLock<Mutex<ActiveRuns>> = OnceLock::new();
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub struct RunRegistration {
+    run_id: String,
+    token: CancellationToken,
+    generation: u64,
+}
+
+impl RunRegistration {
+    pub fn token(&self) -> CancellationToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for RunRegistration {
+    fn drop(&mut self) {
+        let mut active = active_runs().lock().unwrap();
+        if active
+            .get(&self.run_id)
+            .is_some_and(|entry| entry.generation == self.generation)
+        {
+            active.remove(&self.run_id);
+        }
+    }
+}
 
 fn active_runs() -> &'static Mutex<ActiveRuns> {
     ACTIVE_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub fn register_run(run_id: &str) -> CancellationToken {
+pub fn register_run(run_id: &str) -> RunRegistration {
     let token = CancellationToken::new();
-    active_runs()
-        .lock()
-        .unwrap()
-        .insert(run_id.to_string(), token.clone());
-    token
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    active_runs().lock().unwrap().insert(
+        run_id.to_string(),
+        ActiveRunEntry {
+            token: token.clone(),
+            generation,
+        },
+    );
+    RunRegistration {
+        run_id: run_id.to_string(),
+        token,
+        generation,
+    }
 }
 
 pub fn cancel_run(run_id: &str) -> bool {
-    if let Some(token) = active_runs().lock().unwrap().get(run_id).cloned() {
+    if let Some(token) = active_runs()
+        .lock()
+        .unwrap()
+        .get(run_id)
+        .map(|entry| entry.token.clone())
+    {
         token.cancel();
         return true;
     }
 
     false
-}
-
-pub fn unregister_run(run_id: &str) {
-    active_runs().lock().unwrap().remove(run_id);
 }
 
 #[cfg(test)]
@@ -45,7 +86,8 @@ mod tests {
     #[test]
     fn register_then_cancel_propagates_to_token() {
         let id = "runtime-test-register-then-cancel";
-        let token = register_run(id);
+        let registration = register_run(id);
+        let token = registration.token();
         assert!(!token.is_cancelled(), "fresh token must start uncancelled");
 
         let was_found = cancel_run(id);
@@ -54,8 +96,6 @@ mod tests {
             token.is_cancelled(),
             "the original token handle must observe the cancel"
         );
-
-        unregister_run(id);
     }
 
     #[test]
@@ -71,8 +111,8 @@ mod tests {
     #[test]
     fn unregister_removes_from_active_set() {
         let id = "runtime-test-unregister-removes";
-        let _token = register_run(id);
-        unregister_run(id);
+        let registration = register_run(id);
+        drop(registration);
 
         let was_found = cancel_run(id);
         assert!(!was_found, "unregistered ids must no longer be cancellable");
@@ -86,8 +126,10 @@ mod tests {
         // registration wins. Pin the behavior so a future refactor
         // doesn't accidentally start de-duping or asserting.
         let id = "runtime-test-double-register";
-        let first = register_run(id);
-        let second = register_run(id);
+        let first_registration = register_run(id);
+        let first = first_registration.token();
+        let second_registration = register_run(id);
+        let second = second_registration.token();
 
         // Cancelling now should signal the second (current) token.
         assert!(cancel_run(id));
@@ -96,6 +138,13 @@ mod tests {
         // cancel_run never reaches it.
         assert!(!first.is_cancelled());
 
-        unregister_run(id);
+        drop(first_registration);
+        assert!(
+            cancel_run(id),
+            "dropping an older guard must not unregister the newer token"
+        );
+
+        drop(second_registration);
+        assert!(!cancel_run(id));
     }
 }

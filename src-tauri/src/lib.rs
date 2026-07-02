@@ -56,7 +56,7 @@ pub use workspace_index::WorkspaceIndex;
 /// module's name signals intent at the use site.
 #[doc(hidden)]
 pub mod runtime {
-    pub use crate::assistant::runtime::{cancel_run, register_run, unregister_run};
+    pub use crate::assistant::runtime::{cancel_run, register_run};
 }
 
 /// Shared application state accessible from all commands.

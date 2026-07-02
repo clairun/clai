@@ -10,7 +10,6 @@ use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
 use crate::assistant::repository;
 use crate::assistant::repository::{CreateMessageParams, CreateRunParams, CreateToolCallParams};
-use crate::assistant::runtime;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
     AssistantMessage, CompactionTrigger, CompletionRequest, ContentPart, MessageRole,
@@ -3153,6 +3152,5 @@ async fn cancel_run(
         Some(run_id),
         AssistantUiEvent::RunCancelled { run },
     );
-    runtime::unregister_run(run_id);
     Ok(())
 }

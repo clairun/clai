@@ -382,19 +382,20 @@ fn spawn_task_run(
         )
         .await;
 
-        let cancel_token = crate::assistant::runtime::register_run(&run_id);
+        let run_registration = crate::assistant::runtime::register_run(&run_id);
+        let cancel_token = run_registration.token();
         let input = RunTurnInput {
             session_id: session_id.clone(),
             run_id: Some(run_id.clone()),
             trigger: RunTrigger::WorkspaceTask,
             connection_id,
-            cancel_token: cancel_token.clone(),
+            cancel_token,
             inter_agent_call_depth: None,
             trigger_message_id: None,
         };
 
         let result = engine::run_session_turn(&deps, input).await;
-        crate::assistant::runtime::unregister_run(&run_id);
+        drop(run_registration);
 
         match result {
             Ok(()) => {
