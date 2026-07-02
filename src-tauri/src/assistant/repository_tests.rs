@@ -708,6 +708,67 @@ async fn test_get_active_run_ignores_terminal_runs() {
     );
 }
 
+#[tokio::test]
+async fn test_workspace_has_active_run_tracks_any_session() {
+    let pool = setup_test_pool().await;
+
+    let first = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: Some("first".to_string()),
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    let second = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: Some("second".to_string()),
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(!workspace_has_active_run(&pool).await.unwrap());
+
+    create_run(
+        &pool,
+        CreateRunParams {
+            session_id: first.id.clone(),
+            status: RunStatus::Completed,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn-1".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+            usage: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    create_run(
+        &pool,
+        CreateRunParams {
+            session_id: second.id.clone(),
+            status: RunStatus::WaitingForTool,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn-1".to_string(),
+            provider_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+            usage: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(workspace_has_active_run(&pool).await.unwrap());
+}
+
 // ---------------------------------------------------------------------------
 // Run CRUD
 // ---------------------------------------------------------------------------

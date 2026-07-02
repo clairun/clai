@@ -2794,6 +2794,16 @@ pub async fn workspace_delete(
 ) -> Result<(), String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
 
+    {
+        let workspace_pool = state.workspace_db(&workspace_id).await?;
+        if repository::workspace_has_active_run(&workspace_pool).await? {
+            return Err(format!(
+                "Workspace {} has an active run. Cancel or wait for it to finish before deleting the workspace.",
+                workspace_id
+            ));
+        }
+    }
+
     // Remove from the workspace index first; the returned locator carries
     // the on-disk root we still need below for both config-loading and
     // recursive removal. Closes the cached sqlx pool too.
