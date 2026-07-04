@@ -6,8 +6,8 @@
 
 <p align="center">
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
-  <a href="https://github.com/juacker/clai/releases"><img src="https://img.shields.io/github/v/release/juacker/clai" alt="GitHub release"></a>
-  <a href="https://github.com/juacker/clai/actions/workflows/ci.yml"><img src="https://github.com/juacker/clai/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/clairun/clai/releases"><img src="https://img.shields.io/github/v/release/clairun/clai" alt="GitHub release"></a>
+  <a href="https://github.com/clairun/clai/actions/workflows/ci.yml"><img src="https://github.com/clairun/clai/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
 <p align="center">
@@ -58,7 +58,7 @@ flagged, and selecting a card slides in a live chat preview.
   modes: *Off*, *Restricted* (only allowed command prefixes — `kubectl get`
   permits `kubectl get pods` but not `kubectl delete`), and *Full*.
 - **Default skills + templates** — CLAI registers the read-only
-  `juacker/clai-skills` repository by default and ships agent templates
+  `clairun/clai-skills` repository by default and ships agent templates
   (`code-reviewer`, `sow-tracker`) ready to drop in.
 - **Inspectable tasks** — Delegated work streams a live transcript: the
   helper agent's full conversation, tool calls, and verdict.
@@ -78,7 +78,7 @@ flagged, and selecting a card slides in a live chat preview.
 ## Install
 
 Download the latest build for your platform from the
-[Releases page](https://github.com/juacker/clai/releases):
+[Releases page](https://github.com/clairun/clai/releases):
 
 | Platform    | Download |
 |-------------|----------|
@@ -117,7 +117,7 @@ Code main agent with an OpenAI-compatible reviewer.
 ## Development
 
 ```bash
-git clone https://github.com/juacker/clai.git
+git clone https://github.com/clairun/clai.git
 cd clai
 npm install
 make dev            # run the desktop app in development
@@ -142,7 +142,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - **Scheduler** — Periodic workspaces run from the agent runner, emitting the
   same streaming events as interactive chat.
 - **Skills + templates** — Skills are discovered from read-only local or git
-  sources. The app-managed default source is `juacker/clai-skills`; agent
+  sources. The app-managed default source is `clairun/clai-skills`; agent
   templates are embedded via `include_dir!`.
 
 ## License
