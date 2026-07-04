@@ -8,7 +8,7 @@ pkgver=@PKGVER@
 pkgrel=1
 pkgdesc="Desktop app for building, running, and supervising teams of AI agents"
 arch=('x86_64')
-url="https://github.com/juacker/clai"
+url="https://github.com/clairun/clai"
 license=('MIT')
 depends=('webkit2gtk-4.1' 'gtk3' 'libsecret' 'openssl' 'bubblewrap' 'hicolor-icon-theme')
 # Installs /usr/bin/clai, same as the (unrelated) clai/clai-bin packages

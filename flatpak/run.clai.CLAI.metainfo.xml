@@ -7,7 +7,7 @@
   <project_license>MIT</project_license>
 
   <developer id="run.clai">
-    <name>juacker</name>
+    <name>clairun</name>
   </developer>
 
   <description>
@@ -30,8 +30,8 @@
   </description>
 
   <url type="homepage">https://clai.run</url>
-  <url type="bugtracker">https://github.com/juacker/clai/issues</url>
-  <url type="vcs-browser">https://github.com/juacker/clai</url>
+  <url type="bugtracker">https://github.com/clairun/clai/issues</url>
+  <url type="vcs-browser">https://github.com/clairun/clai</url>
 
   <launchable type="desktop-id">run.clai.CLAI.desktop</launchable>
 

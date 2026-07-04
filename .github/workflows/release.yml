@@ -25,7 +25,7 @@ jobs:
               repo: context.repo.repo,
               tag_name: context.ref.replace('refs/tags/', ''),
               name: `CLAI ${context.ref.replace('refs/tags/', '')}`,
-              body: 'See [CHANGELOG.md](https://github.com/juacker/clai/blob/main/CHANGELOG.md) for details.',
+              body: 'See [CHANGELOG.md](https://github.com/clairun/clai/blob/main/CHANGELOG.md) for details.',
               draft: true,
               prerelease: context.ref.includes('beta') || context.ref.includes('alpha')
             });

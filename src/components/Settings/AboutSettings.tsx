@@ -11,7 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { openExternal } from '../../utils/openExternal';
 import styles from './AboutSettings.module.css';
 
-const REPO_URL = 'https://github.com/juacker/clai';
+const REPO_URL = 'https://github.com/clairun/clai';
 
 const PILLS = ['macOS · Windows · Linux', 'MCP-native', 'MIT licensed'];
 
