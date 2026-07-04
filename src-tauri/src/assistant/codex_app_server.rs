@@ -15,6 +15,15 @@
 //!
 //! Gated behind `CLAI_CODEX_APP_SERVER` (default off) while it bakes; `codex
 //! exec` remains the default transport.
+//!
+//! # Enabling / testing
+//!
+//! Set `CLAI_CODEX_APP_SERVER=1` in the environment CLAI launches under, then
+//! use a Codex connection. Turns run over `codex app-server`; a message sent
+//! while a turn is in flight is injected via `turn/steer` (watch for the
+//! "Steered queued user message(s) into the live Codex turn" log line) instead
+//! of interrupting/restarting the process. Unset the var to fall back to
+//! `codex exec`.
 
 use std::process::Stdio;
 

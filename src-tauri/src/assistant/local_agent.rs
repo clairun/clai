@@ -5331,4 +5331,78 @@ mod tests {
             "Bearer token"
         );
     }
+
+    #[test]
+    fn normalize_app_server_item_maps_discriminants_to_exec_shape() {
+        // agentMessage -> agent_message with text preserved.
+        let agent = serde_json::json!({ "type": "agentMessage", "id": "a1", "text": "hello" });
+        let norm = normalize_app_server_item(&agent).unwrap();
+        assert_eq!(norm["type"], "agent_message");
+        assert_eq!(norm["text"], "hello");
+
+        // mcpToolCall keeps its exec-aligned fields, only the discriminant changes.
+        let tool = serde_json::json!({
+            "type": "mcpToolCall", "id": "t1", "server": "clai", "tool": "bash_exec",
+            "arguments": { "command": "ls" }, "status": "completed"
+        });
+        let norm = normalize_app_server_item(&tool).unwrap();
+        assert_eq!(norm["type"], "mcp_tool_call");
+        assert_eq!(norm["server"], "clai");
+        assert_eq!(norm["tool"], "bash_exec");
+        assert_eq!(norm["arguments"]["command"], "ls");
+
+        for (kind, exec) in [
+            ("commandExecution", "command_execution"),
+            ("fileChange", "file_change"),
+            ("webSearch", "web_search"),
+        ] {
+            let item = serde_json::json!({ "type": kind, "id": "x" });
+            assert_eq!(normalize_app_server_item(&item).unwrap()["type"], exec);
+        }
+
+        // userMessage and unknown kinds are not surfaced.
+        assert!(normalize_app_server_item(&serde_json::json!({ "type": "userMessage" })).is_none());
+        assert!(normalize_app_server_item(&serde_json::json!({ "type": "plan" })).is_none());
+    }
+
+    #[test]
+    fn app_server_reasoning_text_flattens_content_then_summary() {
+        let item = serde_json::json!({
+            "type": "reasoning",
+            "content": [{ "text": "step one" }, { "text": "step two" }],
+            "summary": [{ "text": "ignored while content is present" }]
+        });
+        assert_eq!(app_server_reasoning_text(&item), "step one\nstep two");
+
+        // Falls back to summary only when content is empty.
+        let summary_only = serde_json::json!({
+            "type": "reasoning", "content": [], "summary": [{ "text": "s" }]
+        });
+        assert_eq!(app_server_reasoning_text(&summary_only), "s");
+
+        // Empty reasoning yields no text (item is then dropped by the caller).
+        let empty = serde_json::json!({ "type": "reasoning" });
+        assert!(app_server_reasoning_text(&empty).is_empty());
+        assert!(normalize_app_server_item(&empty).is_none());
+    }
+
+    #[test]
+    fn run_usage_from_app_server_maps_total_breakdown() {
+        let token_usage = serde_json::json!({
+            "total": {
+                "inputTokens": 100, "outputTokens": 40,
+                "reasoningOutputTokens": 10, "cachedInputTokens": 5, "totalTokens": 150
+            },
+            "last": {}
+        });
+        let usage = run_usage_from_app_server(Some(&token_usage)).unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(40));
+        assert_eq!(usage.reasoning_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(150));
+
+        // No usage at all -> None (don't clobber a prior value with zeros).
+        assert!(run_usage_from_app_server(None).is_none());
+        assert!(run_usage_from_app_server(Some(&serde_json::json!({}))).is_none());
+    }
 }
