@@ -34,6 +34,35 @@ use crate::AppState;
 const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
 const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
+
+/// MCP server *startup* timeout (ms) for CLI providers that read `MCP_TIMEOUT`
+/// (Claude Code, Codex). Distinct from the per-tool backstop
+/// ([`CLI_MCP_CLIENT_TIMEOUT`]): a slow first handshake under load shouldn't
+/// fail the run, and runs are bounded by `cancel_token` regardless.
+const MCP_STARTUP_TIMEOUT_MS: &str = "3600000";
+
+/// Env for the Claude Code host process. `idle_ms` is the per-tool MCP idle
+/// timeout rendered from [`CLI_MCP_CLIENT_TIMEOUT`] (single source of truth);
+/// it is passed in rather than hardcoded so the value can't drift.
+///
+/// - `MCP_TIMEOUT`: MCP server startup timeout (see [`MCP_STARTUP_TIMEOUT_MS`]).
+/// - `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`: idle timeout for *remote* (HTTP) MCP
+///   tool calls — CLAI's tool server is registered as HTTP (see
+///   `write_mcp_config`). Claude Code's 300s default aborts any tool call
+///   silent for 5 min: every interactive human wait (`ask_user` / approval /
+///   path grant) and any `bash_exec` over 5 min. Claude Code ignores MCP
+///   progress notifications for timeout purposes, so widening the idle window
+///   is the only reliable fix.
+/// - `ENABLE_TOOL_SEARCH=false`: CC 2.1.x can optimistically enable tool search
+///   and withhold tool defs, but CLAI disallows the search tool (`--tools ""`),
+///   leaving the model with no tools — pin it off (#63120).
+fn claude_code_host_env(idle_ms: &str) -> [(&'static str, &str); 3] {
+    [
+        ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
+        ("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", idle_ms),
+        ("ENABLE_TOOL_SEARCH", "false"),
+    ]
+}
 const CLI_FRESH_CONTEXT_MAX_MESSAGES: usize = 16;
 const CLI_FRESH_CONTEXT_MAX_CHARS: usize = 32_000;
 const CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS: usize = 6_000;
@@ -963,17 +992,15 @@ async fn run_claude_turn(
                 .state::<crate::AppState>()
                 .workspace_root(workspace_id)
         });
-    // MCP_TIMEOUT: Claude Code's ~30s default is shorter than a human takes to
-    // answer an `ask_user` prompt, so the MCP request times out client-side
-    // ("transport dropped mid-call"); 1h is safe since runs are bounded by
-    // `cancel_token`. ENABLE_TOOL_SEARCH=false: CC 2.1.x can optimistically
-    // enable tool search and withhold tool defs, but CLAI disallows the search
-    // tool (`--tools ""`), leaving the model with no tools — pin it off
-    // (#63120). Both are injected via the host-command helper so they survive
-    // the `flatpak-spawn` hop (the host CLI runs in the host's environment).
+    // Env for the Claude Code process — see `claude_code_host_env`. Injected
+    // via the host-command helper so it survives the `flatpak-spawn` hop (the
+    // host CLI runs in the host's environment).
+    let idle_ms = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT
+        .as_millis()
+        .to_string();
     let mut command = crate::providers::build_host_cli_command(
         &binary,
-        &[("MCP_TIMEOUT", "3600000"), ("ENABLE_TOOL_SEARCH", "false")],
+        &claude_code_host_env(&idle_ms),
         working_dir.as_deref(),
     );
     command
@@ -1297,7 +1324,10 @@ async fn run_codex_turn(
     // host's environment, not the sandbox's.
     let mut command = crate::providers::build_host_cli_command(
         &binary,
-        &[(CODEX_MCP_TOKEN_ENV, mcp_token), ("MCP_TIMEOUT", "3600000")],
+        &[
+            (CODEX_MCP_TOKEN_ENV, mcp_token),
+            ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
+        ],
         workspace_root.as_deref(),
     );
     command.arg("exec");
@@ -1810,7 +1840,10 @@ fn add_codex_common_args(
         .arg("-c")
         .arg("mcp_servers.clai.required=true")
         .arg("-c")
-        .arg("mcp_servers.clai.tool_timeout_sec=3600")
+        .arg(format!(
+            "mcp_servers.clai.tool_timeout_sec={}",
+            crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs()
+        ))
         // Bypass Codex's own approval/sandbox layer entirely — this is the
         // direct parallel of `--permission-mode bypassPermissions` that we pass
         // to Claude Code. CLAI provides the external sandbox (our MCP
@@ -1873,7 +1906,7 @@ fn opencode_config_content(mcp_url: &str, mcp_token: &str) -> Result<String, Loc
                 "type": "remote",
                 "url": mcp_url,
                 "enabled": true,
-                "timeout": 3600000,
+                "timeout": crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_millis() as u64,
                 "oauth": false,
                 "headers": {
                     "Authorization": format!("Bearer {}", mcp_token)
@@ -4435,6 +4468,24 @@ mod tests {
             CliProviderRuntime::OpenCode,
             "You've hit your usage limit. Try again at 9:47 PM."
         ));
+    }
+
+    #[test]
+    fn claude_code_env_carries_the_shared_idle_timeout() {
+        // Claude Code aborts remote MCP tool calls silent for 300s by default —
+        // killing every interactive human wait (ask_user, approval, path grant)
+        // and any bash_exec > 5 min. Pin that the idle var is present, rendered
+        // from the shared CLI_MCP_CLIENT_TIMEOUT, and the startup knob is kept.
+        let idle_ms = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT
+            .as_millis()
+            .to_string();
+        let env = claude_code_host_env(&idle_ms);
+        let idle = env
+            .iter()
+            .find(|(k, _)| *k == "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT")
+            .expect("idle-timeout override missing from Claude Code env");
+        assert_eq!(idle.1, idle_ms);
+        assert!(env.iter().any(|(k, _)| *k == "MCP_TIMEOUT"));
     }
 
     #[test]

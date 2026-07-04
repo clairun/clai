@@ -40,10 +40,24 @@ pub const LOCAL_MCP_SERVER_NAME: &str = "clai";
 /// discovered on our local MCP server (`mcp__clai__web_fetch`).
 pub const LOCAL_MCP_TOOL_PREFIX: &str = "mcp__clai__";
 
-/// CLI providers set their local-MCP client timeout to 60 minutes. Human
-/// waits time out just before that so CLAI owns cleanup/cancellation instead
-/// of letting the CLI report an ordinary tool timeout back to the model.
+/// How long an interactive human-wait tool (`ask_user` / command approval /
+/// path grant) blocks on a CLI provider before CLAI cancels it. Kept just
+/// under [`CLI_MCP_CLIENT_TIMEOUT`] so CLAI owns cleanup/cancellation instead
+/// of the CLI reporting a raw tool timeout back to the model.
 pub const CLI_INTERACTIVE_WAIT_TIMEOUT: Duration = Duration::from_secs(55 * 60);
+
+/// Backstop timeout CLAI configures on every CLI provider's MCP *client* so it
+/// won't abort a blocked tool call before CLAI's own interactive wait
+/// ([`CLI_INTERACTIVE_WAIT_TIMEOUT`]) expires. The 5-minute headroom guarantees
+/// CLAI times out first and owns cleanup.
+///
+/// All three CLI providers need this same value; only the transport differs, so
+/// each renders it into its own unit at the call site:
+/// - Claude Code: `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` env var (milliseconds)
+/// - Codex: `mcp_servers.clai.tool_timeout_sec` config flag (seconds)
+/// - OpenCode: `timeout` MCP JSON field (milliseconds)
+pub const CLI_MCP_CLIENT_TIMEOUT: Duration =
+    Duration::from_secs(CLI_INTERACTIVE_WAIT_TIMEOUT.as_secs() + 5 * 60);
 
 /// Strips the CLI-side qualifier from a tool name that was recorded under
 /// (or mimicked from) a Claude Code run: `mcp__clai__web_fetch` →
@@ -205,6 +219,14 @@ impl ToolExecutionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_mcp_client_timeout_outlives_the_interactive_wait() {
+        // CLAI's interactive wait must expire before the CLI client's backstop
+        // so CLAI owns cleanup instead of the CLI reporting a raw tool timeout.
+        assert!(CLI_MCP_CLIENT_TIMEOUT > CLI_INTERACTIVE_WAIT_TIMEOUT);
+        assert_eq!(CLI_MCP_CLIENT_TIMEOUT, Duration::from_secs(60 * 60));
+    }
 
     #[test]
     fn prefix_constant_matches_server_name() {
