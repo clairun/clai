@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::assistant::codex_app_server;
 use crate::assistant::compaction;
 use crate::assistant::engine::{
     build_system_prompt, build_trigger_message, AssistantDeps, AssistantEngineError, RunTurnInput,
@@ -396,18 +397,33 @@ pub async fn run_session_turn(
                 result
             }
             CliProviderRuntime::Codex => {
-                run_codex_turn(
-                    deps,
-                    &mut session,
-                    &connection,
-                    &run_id,
-                    mcp_runtime.url(),
-                    binding_guard.token(),
-                    &input.cancel_token,
-                    &input.trigger,
-                    &mut assistant_slot,
-                )
-                .await
+                if codex_app_server::app_server_enabled() {
+                    run_codex_turn_app_server(
+                        deps,
+                        &mut session,
+                        &connection,
+                        &run_id,
+                        mcp_runtime.url(),
+                        binding_guard.token(),
+                        &input.cancel_token,
+                        &input.trigger,
+                        &mut assistant_slot,
+                    )
+                    .await
+                } else {
+                    run_codex_turn(
+                        deps,
+                        &mut session,
+                        &connection,
+                        &run_id,
+                        mcp_runtime.url(),
+                        binding_guard.token(),
+                        &input.cancel_token,
+                        &input.trigger,
+                        &mut assistant_slot,
+                    )
+                    .await
+                }
             }
             CliProviderRuntime::OpenCode => {
                 run_opencode_turn(
@@ -1468,6 +1484,457 @@ async fn run_codex_turn(
         });
     }
     Ok(usage)
+}
+
+// ---------------------------------------------------------------------------
+// Codex app-server transport driver (CLAI_CODEX_APP_SERVER)
+// ---------------------------------------------------------------------------
+
+/// Run a Codex turn over the `codex app-server` JSON-RPC transport instead of
+/// `codex exec`. Behaviour-parity with [`run_codex_turn`] for now (streaming,
+/// tool calls, usage, errors); `turn/steer` mid-run delivery is layered on in a
+/// follow-up commit. Reuses the shared [`CodexStreamState`] + tool-call helpers
+/// by normalizing app-server items into the exec item shape.
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_turn_app_server(
+    deps: &AssistantDeps,
+    session: &mut AssistantSession,
+    connection: &ProviderConnection,
+    run_id: &str,
+    mcp_url: &str,
+    mcp_token: &str,
+    cancel_token: &CancellationToken,
+    trigger: &crate::assistant::types::RunTrigger,
+    assistant_slot: &mut Option<AssistantMessage>,
+) -> Result<Option<RunUsage>, LocalAgentRunError> {
+    use crate::assistant::codex_app_server as aps;
+
+    let existing_thread_id = session.context.cli_session_id.clone();
+    let prompt = prepare_prompt(
+        deps,
+        session,
+        run_id,
+        trigger,
+        CliProviderRuntime::Codex.metadata_source(),
+        CliProviderRuntime::Codex.display_name(),
+        existing_thread_id.is_none(),
+    )
+    .await?;
+    let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
+    let prompt = codex_turn_prompt(&system_prompt, &prompt);
+    let prompt_chars = prompt.chars().count();
+    if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
+        return Err(LocalAgentRunError::failed(codex_input_too_large_message(
+            prompt_chars,
+        )));
+    }
+
+    let assistant_message = ensure_assistant_message_slot(
+        deps,
+        session,
+        run_id,
+        CliProviderRuntime::Codex.metadata_source(),
+        assistant_slot,
+    )
+    .await?;
+
+    let configured_binary = connection
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("codex");
+    let binary = crate::providers::resolve_command_path(configured_binary)
+        .unwrap_or_else(|| configured_binary.to_string());
+    let workspace_root = workspace_root_for_session(deps, session);
+
+    let command = crate::providers::build_host_cli_command(
+        &binary,
+        &[
+            (CODEX_MCP_TOKEN_ENV, mcp_token),
+            ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
+        ],
+        workspace_root.as_deref(),
+    );
+    let mut transport =
+        aps::AppServerTransport::spawn(command).map_err(LocalAgentRunError::failed)?;
+
+    let stderr_tail: Arc<Mutex<VecDeque<String>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+    if let Some(stderr) = transport.take_stderr() {
+        spawn_stderr_logger(
+            run_id.to_string(),
+            CliProviderRuntime::Codex.display_name(),
+            stderr,
+            stderr_tail.clone(),
+        );
+    }
+
+    let client_version = env!("CARGO_PKG_VERSION");
+    let model = {
+        let m = connection.model_id.trim();
+        (!m.is_empty() && m != "default").then_some(m)
+    };
+    let cwd = workspace_root
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let tool_timeout = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs();
+
+    // Handshake: initialize -> thread/start|resume. Startup notifications are
+    // ignored by the request/await helper.
+    aps_request_await(
+        &mut transport,
+        cancel_token,
+        aps::initialize_request(1, client_version),
+    )
+    .await?;
+    let thread_request = match existing_thread_id.as_deref() {
+        Some(thread_id) => aps::thread_resume_request(2, thread_id, model),
+        None => aps::thread_start_request(
+            2,
+            cwd.as_deref(),
+            model,
+            mcp_url,
+            CODEX_MCP_TOKEN_ENV,
+            tool_timeout,
+        ),
+    };
+    let thread_result = aps_request_await(&mut transport, cancel_token, thread_request).await?;
+    if let Some(thread_id) = thread_result
+        .get("thread")
+        .and_then(|t| t.get("id"))
+        .and_then(Value::as_str)
+    {
+        set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
+    }
+    let thread_id =
+        session.context.cli_session_id.clone().ok_or_else(|| {
+            LocalAgentRunError::failed("codex app-server did not return a thread id")
+        })?;
+
+    // Fire the turn. We do not block on its response; the turn is tracked via
+    // notifications in the loop below.
+    let mut input = vec![aps::text_user_input(&prompt)];
+    for image_path in resolve_codex_image_paths(deps, session, run_id).await {
+        input.push(aps::local_image_user_input(&image_path.to_string_lossy()));
+    }
+    transport
+        .send(&aps::turn_start_request(3, &thread_id, input))
+        .await
+        .map_err(LocalAgentRunError::failed)?;
+
+    let mut state = CodexStreamState::new();
+    let mut usage: Option<RunUsage> = None;
+    let mut result_error: Option<String> = None;
+
+    loop {
+        let message = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                let _ = transport.send(&aps::turn_interrupt_request(99, &thread_id)).await;
+                transport.kill().await;
+                finalize_assistant_message_from_parts(
+                    deps, session, run_id, &assistant_message, &state.parts,
+                )
+                .await?;
+                return Err(LocalAgentRunError::Cancelled { usage });
+            }
+            msg = transport.recv() => msg,
+        };
+        let Some(message) = message else {
+            break; // app-server closed stdout
+        };
+        if aps::is_server_request(&message) {
+            if let Some(id) = message.get("id") {
+                let method = message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let _ = transport
+                    .send(&aps::server_request_response(id, method))
+                    .await;
+            }
+            continue;
+        }
+        let Some(method) = aps::notification_method(&message) else {
+            continue; // responses are not needed after the handshake
+        };
+        let turn_done = handle_app_server_notification(
+            deps,
+            session,
+            run_id,
+            &assistant_message,
+            method,
+            &message,
+            &mut state,
+            &mut usage,
+            &mut result_error,
+        )
+        .await?;
+        if turn_done {
+            break;
+        }
+    }
+
+    transport.kill().await;
+    finalize_assistant_message_from_parts(deps, session, run_id, &assistant_message, &state.parts)
+        .await?;
+
+    if let Some(message) = result_error {
+        let enriched = append_stderr_tail(&message, &stderr_tail);
+        return Err(LocalAgentRunError::Failed {
+            message: enriched,
+            usage,
+        });
+    }
+    Ok(usage)
+}
+
+/// Send a JSON-RPC request and read messages until its matching response,
+/// answering any interleaved server->client requests and ignoring startup
+/// notifications. Returns the response `result` (or a failure on error/close).
+async fn aps_request_await(
+    transport: &mut codex_app_server::AppServerTransport,
+    cancel_token: &CancellationToken,
+    request: Value,
+) -> Result<Value, LocalAgentRunError> {
+    let want_id = request.get("id").and_then(Value::as_i64);
+    transport
+        .send(&request)
+        .await
+        .map_err(LocalAgentRunError::failed)?;
+    loop {
+        let message = tokio::select! {
+            _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled { usage: None }),
+            msg = transport.recv() => msg,
+        };
+        let Some(message) = message else {
+            return Err(LocalAgentRunError::failed(
+                "codex app-server closed the connection during handshake",
+            ));
+        };
+        if codex_app_server::is_server_request(&message) {
+            if let Some(id) = message.get("id") {
+                let method = message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let _ = transport
+                    .send(&codex_app_server::server_request_response(id, method))
+                    .await;
+            }
+            continue;
+        }
+        if codex_app_server::is_response(&message)
+            && codex_app_server::response_id(&message) == want_id
+        {
+            if let Some(error) = message.get("error") {
+                let msg = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("codex app-server request failed");
+                return Err(LocalAgentRunError::failed(msg.to_string()));
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+        // Ignore notifications that arrive during the handshake.
+    }
+}
+
+/// Handle one app-server notification. Returns `true` when the turn is finished
+/// (`turn/completed`). Reuses [`handle_codex_item`] by normalizing app-server
+/// items into the exec item shape.
+#[allow(clippy::too_many_arguments)]
+async fn handle_app_server_notification(
+    deps: &AssistantDeps,
+    session: &mut AssistantSession,
+    run_id: &str,
+    assistant_message: &AssistantMessage,
+    method: &str,
+    message: &Value,
+    state: &mut CodexStreamState,
+    usage: &mut Option<RunUsage>,
+    result_error: &mut Option<String>,
+) -> Result<bool, LocalAgentRunError> {
+    let null = Value::Null;
+    let params = message.get("params").unwrap_or(&null);
+    match method {
+        "thread/started" => {
+            if let Some(thread_id) = params
+                .get("thread")
+                .and_then(|t| t.get("id"))
+                .and_then(Value::as_str)
+            {
+                set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
+            }
+        }
+        "item/started" => {
+            // Persist the running state of an MCP tool call early so the UI can
+            // show it in-flight, mirroring the exec `item.started` handling.
+            if let Some(item) = params.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("mcpToolCall") {
+                    if let Some(normalized) = normalize_app_server_item(item) {
+                        handle_codex_item(
+                            deps,
+                            session,
+                            run_id,
+                            assistant_message,
+                            state,
+                            &normalized,
+                            false,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        "item/completed" => {
+            if let Some(item) = params.get("item") {
+                if let Some(normalized) = normalize_app_server_item(item) {
+                    handle_codex_item(
+                        deps,
+                        session,
+                        run_id,
+                        assistant_message,
+                        state,
+                        &normalized,
+                        true,
+                    )
+                    .await?;
+                }
+            }
+        }
+        "thread/tokenUsage/updated" => {
+            if let Some(parsed) = run_usage_from_app_server(params.get("tokenUsage")) {
+                *usage = Some(parsed);
+            }
+        }
+        "error" => {
+            if result_error.is_none() {
+                let error = params.get("error").unwrap_or(&null);
+                let msg = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex run failed");
+                let code = error.get("codexErrorInfo").and_then(Value::as_str);
+                *result_error = Some(codex_app_server::classify_error_message(code, msg));
+            }
+        }
+        "turn/completed" => {
+            let turn = params.get("turn");
+            if turn.and_then(|t| t.get("status")).and_then(Value::as_str) == Some("failed")
+                && result_error.is_none()
+            {
+                if let Some(error) = turn.and_then(|t| t.get("error")) {
+                    let msg = error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex turn failed");
+                    let code = error.get("codexErrorInfo").and_then(Value::as_str);
+                    *result_error = Some(codex_app_server::classify_error_message(code, msg));
+                }
+            }
+            return Ok(true);
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+/// Normalize an app-server `ThreadItem` (camelCase) into the exec item shape so
+/// the shared [`handle_codex_item`] can persist/emit it unchanged. Returns
+/// `None` for item kinds CLAI does not surface (userMessage, plan, ...).
+fn normalize_app_server_item(item: &Value) -> Option<Value> {
+    let kind = item.get("type").and_then(Value::as_str)?;
+    match kind {
+        "agentMessage" => Some(serde_json::json!({
+            "type": "agent_message",
+            "text": item.get("text").cloned().unwrap_or(Value::Null),
+        })),
+        "reasoning" => {
+            let text = app_server_reasoning_text(item);
+            if text.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({ "type": "reasoning", "text": text }))
+            }
+        }
+        // These already share the exec field names (id/server/tool/arguments/
+        // result/error/status, command, query); only the discriminant differs.
+        "mcpToolCall" | "commandExecution" | "fileChange" | "webSearch" => {
+            let mut normalized = item.clone();
+            let exec_type = match kind {
+                "mcpToolCall" => "mcp_tool_call",
+                "commandExecution" => "command_execution",
+                "fileChange" => "file_change",
+                _ => "web_search",
+            };
+            normalized["type"] = Value::String(exec_type.to_string());
+            Some(normalized)
+        }
+        _ => None,
+    }
+}
+
+/// Flatten an app-server `reasoning` item's `content`/`summary` arrays into a
+/// single string. Elements are either `{ "text": "..." }` objects or bare
+/// strings; anything else is skipped.
+fn app_server_reasoning_text(item: &Value) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for key in ["content", "summary"] {
+        if let Some(arr) = item.get(key).and_then(Value::as_array) {
+            for element in arr {
+                if let Some(text) = element.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        out.push(text.to_string());
+                    }
+                } else if let Some(text) = element.as_str() {
+                    if !text.is_empty() {
+                        out.push(text.to_string());
+                    }
+                }
+            }
+        }
+        if !out.is_empty() {
+            break; // prefer content; fall back to summary only if content empty
+        }
+    }
+    out.join("\n")
+}
+
+/// Map an app-server `ThreadTokenUsage` (`total` breakdown) to [`RunUsage`].
+fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
+    let total = token_usage?.get("total")?;
+    let get = |key: &str| {
+        total
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|v| u64::try_from(v).ok())
+    };
+    let input_tokens = get("inputTokens");
+    let output_tokens = get("outputTokens");
+    let reasoning_tokens = get("reasoningOutputTokens");
+    let total_tokens =
+        get("totalTokens").or(match (input_tokens, output_tokens, reasoning_tokens) {
+            (None, None, None) => None,
+            _ => Some(
+                input_tokens.unwrap_or(0)
+                    + output_tokens.unwrap_or(0)
+                    + reasoning_tokens.unwrap_or(0),
+            ),
+        });
+    if input_tokens.is_none()
+        && output_tokens.is_none()
+        && reasoning_tokens.is_none()
+        && total_tokens.is_none()
+    {
+        return None;
+    }
+    Some(RunUsage {
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        total_tokens,
+    })
 }
 
 fn codex_turn_prompt(system_prompt: &str, prompt: &str) -> String {
