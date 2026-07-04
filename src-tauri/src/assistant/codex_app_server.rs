@@ -259,7 +259,6 @@ pub(crate) fn turn_start_request(id: i64, thread_id: &str, input: Vec<Value>) ->
 
 /// Build `turn/steer` — inject input into the active turn. Guarded by
 /// `expectedTurnId`: the server rejects it if that turn is no longer active.
-#[allow(dead_code)] // wired by the steering stage
 pub(crate) fn turn_steer_request(
     id: i64,
     thread_id: &str,

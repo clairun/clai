@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,9 @@ const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
 const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
 const CODEX_TURN_INPUT_MAX_CHARS: usize = 1_048_576;
+/// How often the app-server driver polls the queue to steer new user
+/// messages into the active turn.
+const STEER_POLL_INTERVAL_MS: u64 = 400;
 
 /// MCP server *startup* timeout (ms) for CLI providers that read `MCP_TIMEOUT`
 /// (Claude Code, Codex). Distinct from the per-tool backstop
@@ -1626,17 +1629,61 @@ async fn run_codex_turn_app_server(
     let mut state = CodexStreamState::new();
     let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
+    // Set on turn/started, cleared on turn/completed. Steering is only valid
+    // while a turn is active, and `turn/steer` must carry this exact id.
+    let mut active_turn_id: Option<String> = None;
+    // Monotonic id for client-initiated requests after the handshake
+    // (steer/interrupt), kept distinct from the handshake ids 1/2/3.
+    let mut next_request_id: i64 = 10;
+    // steer request id -> queued message ids carried by that steer, awaiting
+    // the server's accept/reject response.
+    let mut pending_steer: HashMap<i64, Vec<String>> = HashMap::new();
+    // Message ids with a steer in flight so a later poll tick does not
+    // re-send them before the response lands.
+    let mut inflight_steer: HashSet<String> = HashSet::new();
+    let mut steer_poll =
+        tokio::time::interval(std::time::Duration::from_millis(STEER_POLL_INTERVAL_MS));
+    steer_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let message = tokio::select! {
             _ = cancel_token.cancelled() => {
-                let _ = transport.send(&aps::turn_interrupt_request(99, &thread_id)).await;
+                let _ = transport
+                    .send(&aps::turn_interrupt_request(next_request_id, &thread_id))
+                    .await;
                 transport.kill().await;
                 finalize_assistant_message_from_parts(
                     deps, session, run_id, &assistant_message, &state.parts,
                 )
                 .await?;
                 return Err(LocalAgentRunError::Cancelled { usage });
+            }
+            _ = steer_poll.tick() => {
+                // Steer queued messages into the *live* turn (the win over the
+                // exec stop-and-restart model). Only while a turn is active.
+                if let Some(turn_id) = active_turn_id.clone() {
+                    if let Some((request, message_ids)) = build_codex_steer(
+                        deps,
+                        session,
+                        connection.id.as_str(),
+                        &thread_id,
+                        &turn_id,
+                        next_request_id,
+                        &mut inflight_steer,
+                    )
+                    .await
+                    {
+                        if transport.send(&request).await.is_ok() {
+                            pending_steer.insert(next_request_id, message_ids);
+                        } else {
+                            for id in message_ids {
+                                inflight_steer.remove(&id);
+                            }
+                        }
+                        next_request_id += 1;
+                    }
+                }
+                continue;
             }
             msg = transport.recv() => msg,
         };
@@ -1655,8 +1702,26 @@ async fn run_codex_turn_app_server(
             }
             continue;
         }
+        if aps::is_response(&message) {
+            // The only responses we act on are steer accept/reject; everything
+            // else (handshake echoes, turn/start ack) is informational.
+            if let Some(id) = aps::response_id(&message) {
+                if let Some(message_ids) = pending_steer.remove(&id) {
+                    resolve_codex_steer_response(
+                        deps,
+                        session,
+                        run_id,
+                        &message,
+                        message_ids,
+                        &mut inflight_steer,
+                    )
+                    .await;
+                }
+            }
+            continue;
+        }
         let Some(method) = aps::notification_method(&message) else {
-            continue; // responses are not needed after the handshake
+            continue;
         };
         let turn_done = handle_app_server_notification(
             deps,
@@ -1668,6 +1733,7 @@ async fn run_codex_turn_app_server(
             &mut state,
             &mut usage,
             &mut result_error,
+            &mut active_turn_id,
         )
         .await?;
         if turn_done {
@@ -1754,6 +1820,7 @@ async fn handle_app_server_notification(
     state: &mut CodexStreamState,
     usage: &mut Option<RunUsage>,
     result_error: &mut Option<String>,
+    active_turn_id: &mut Option<String>,
 ) -> Result<bool, LocalAgentRunError> {
     let null = Value::Null;
     let params = message.get("params").unwrap_or(&null);
@@ -1766,6 +1833,13 @@ async fn handle_app_server_notification(
             {
                 set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
             }
+        }
+        "turn/started" => {
+            *active_turn_id = params
+                .get("turn")
+                .and_then(|t| t.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
         }
         "item/started" => {
             // Persist the running state of an MCP tool call early so the UI can
@@ -1833,11 +1907,115 @@ async fn handle_app_server_notification(
                     *result_error = Some(codex_app_server::classify_error_message(code, msg));
                 }
             }
+            *active_turn_id = None;
             return Ok(true);
         }
         _ => {}
     }
     Ok(false)
+}
+
+/// Read pending queued user messages for this connection and build a
+/// `turn/steer` request carrying their text. Image-bearing messages are left
+/// queued for the followup run (which resolves image paths); steering carries
+/// text only. Marks the chosen ids in-flight so a later tick will not re-send
+/// them before the accept/reject response lands. Returns `None` when there is
+/// nothing steerable right now.
+async fn build_codex_steer(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    connection_id: &str,
+    thread_id: &str,
+    turn_id: &str,
+    request_id: i64,
+    inflight: &mut HashSet<String>,
+) -> Option<(Value, Vec<String>)> {
+    // Interrupting while the user is being asked a question would tear the
+    // question down; leave messages queued until it resolves.
+    if crate::assistant::tools::ask_user::session_has_pending_ask(&session.id) {
+        return None;
+    }
+    let pending = repository::list_pending_queued_messages(&deps.pool, &session.id)
+        .await
+        .ok()?;
+    let mut input = Vec::new();
+    let mut ids = Vec::new();
+    for queued in pending {
+        if queued.connection_id != connection_id || inflight.contains(&queued.message.id) {
+            continue;
+        }
+        if queued
+            .message
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. }))
+        {
+            continue; // defer image messages to the followup run
+        }
+        let text = message_text(&queued.message);
+        if text.trim().is_empty() {
+            continue;
+        }
+        input.push(codex_app_server::text_user_input(&text));
+        ids.push(queued.message.id.clone());
+    }
+    if input.is_empty() {
+        return None;
+    }
+    for id in &ids {
+        inflight.insert(id.clone());
+    }
+    Some((
+        codex_app_server::turn_steer_request(request_id, thread_id, turn_id, input),
+        ids,
+    ))
+}
+
+/// Resolve a `turn/steer` response: on accept, mark the carried messages
+/// delivered and notify the UI; on reject (turn ended / id mismatch) leave them
+/// queued so the followup run delivers them. Always clears their in-flight mark.
+async fn resolve_codex_steer_response(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    response: &Value,
+    message_ids: Vec<String>,
+    inflight: &mut HashSet<String>,
+) {
+    for id in &message_ids {
+        inflight.remove(id);
+    }
+    if response.get("error").is_some() {
+        tracing::info!(
+            run_id,
+            count = message_ids.len(),
+            "codex turn/steer rejected; leaving messages queued for the followup run"
+        );
+        return;
+    }
+    match repository::mark_queued_messages_delivered(&deps.pool, &session.id, run_id, &message_ids)
+        .await
+    {
+        Ok(()) => {
+            let _ = emit_event(
+                &deps.app,
+                session,
+                Some(run_id),
+                AssistantUiEvent::QueuedMessagesDelivered {
+                    message_ids: message_ids.clone(),
+                },
+            );
+            tracing::info!(
+                run_id,
+                count = message_ids.len(),
+                "Steered queued user message(s) into the live Codex turn"
+            );
+        }
+        Err(error) => tracing::warn!(
+            run_id, %error,
+            "codex steer accepted but marking delivered failed; the followup run may re-deliver"
+        ),
+    }
 }
 
 /// Normalize an app-server `ThreadItem` (camelCase) into the exec item shape so
