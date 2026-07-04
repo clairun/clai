@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 /// home, so we resolve the *real* host home (via `flatpak-spawn`) and
 /// cache it — this is what makes `~/.clai` (and any `~/...` path) point at
 /// the same location the native `.deb` install uses, rather than an
-/// isolated copy under `~/.var/app/io.github.juacker.clai/`. The host
+/// isolated copy under `~/.var/app/run.clai.CLAI/`. The host
 /// home is reachable inside the sandbox because the Flatpak is granted
 /// `--filesystem=home`. Falls back to `dirs::home_dir()` if resolution
 /// fails, so a missing host-spawn permission degrades to isolated-but-

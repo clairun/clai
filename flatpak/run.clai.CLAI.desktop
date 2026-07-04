@@ -2,7 +2,7 @@
 Name=CLAI
 Comment=Desktop multi-agent orchestration app with MCP-native tools
 Exec=clai
-Icon=io.github.juacker.clai
+Icon=run.clai.CLAI
 Terminal=false
 Type=Application
 Categories=Development;

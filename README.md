@@ -20,9 +20,9 @@
 </p>
 
 <p align="center">
-  <a href="https://juacker.github.io/clai/"><img width="100%" alt="CLAI — a main agent delegating a review task to a Code Reviewer agent" src="docs/clai-hero.gif"></a>
+  <a href="https://clai.run/"><img width="100%" alt="CLAI — a main agent delegating a review task to a Code Reviewer agent" src="docs/clai-hero.gif"></a>
   <br>
-  <a href="https://juacker.github.io/clai/"><strong>▶ Watch the full demo</strong></a>
+  <a href="https://clai.run/"><strong>▶ Watch the full demo</strong></a>
 </p>
 
 ## What it is

@@ -19,7 +19,7 @@ static BUNDLED_AGENT_TEMPLATES: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/embedded/agent-templates");
 
 pub const DEFAULT_SKILL_SOURCE_NAME: &str = "CLAI Skills";
-pub const DEFAULT_SKILL_SOURCE_URI: &str = "https://github.com/juacker/clai-skills.git";
+pub const DEFAULT_SKILL_SOURCE_URI: &str = "https://github.com/clairun/clai-skills.git";
 const DEFAULT_SKILL_SOURCE_CACHE_DIR: &str = "clai-skills";
 
 pub fn bundled_root() -> PathBuf {
@@ -198,7 +198,11 @@ fn is_bundled_source_at(source: &SkillSourceConfig, legacy_root: &Path) -> bool 
 fn is_default_skill_source_uri(uri: &str) -> bool {
     let value = uri.trim().trim_end_matches('/');
     let value = value.strip_suffix(".git").unwrap_or(value);
-    value == "https://github.com/juacker/clai-skills"
+    // The juacker form is the pre-org-move URL: configs written before the
+    // 2026-07-04 transfer still carry it (GitHub redirects the git remote),
+    // and recognizing it prevents ensure-default from adding a duplicate.
+    value == "https://github.com/clairun/clai-skills"
+        || value == "https://github.com/juacker/clai-skills"
 }
 
 #[cfg(test)]

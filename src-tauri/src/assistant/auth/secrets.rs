@@ -1,7 +1,10 @@
 use keyring::Entry;
 
-const SERVICE_NAME: &str = "com.juacker.clai.providers";
-const MCP_SERVICE_NAME: &str = "com.juacker.clai.mcp";
+// Reverse-DNS of clai.run. Renamed from com.juacker.clai.* on 2026-07-04
+// WITHOUT a migration shim (pre-release, no external users): secrets stored
+// under the old service names are simply orphaned and must be re-entered.
+const SERVICE_NAME: &str = "run.clai.providers";
+const MCP_SERVICE_NAME: &str = "run.clai.mcp";
 
 fn entry_for(service_name: &str, secret_ref: &str) -> Result<Entry, keyring::Error> {
     Entry::new(service_name, secret_ref)
