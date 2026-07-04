@@ -19,8 +19,13 @@ use tokio_util::sync::CancellationToken;
 use crate::assistant::auth::McpSecretStorage;
 use crate::config::{McpServerAuth, McpServerConfig, McpServerTransport};
 
-pub const CLAI_CLIENT_METADATA_URL: &str =
-    "https://juacker.github.io/clai/auth/client-metadata.json";
+/// CLAI's OAuth client-ID metadata document (CIMD): the `client_id` IS this
+/// URL, so changing it changes the OAuth client identity. It only applies to
+/// NEWLY added MCP servers: the resolved URL is persisted per server at add
+/// time, so existing connections keep refreshing against the URL stored in
+/// their config (the previous `juacker.github.io/clai/auth/...` document
+/// stays published for exactly that reason).
+pub const CLAI_CLIENT_METADATA_URL: &str = "https://clai.run/auth/client-metadata.json";
 pub const CLAI_OAUTH_CLIENT_NAME: &str = "CLAI";
 pub const OAUTH_CALLBACK_PATH: &str = "/oauth/mcp/callback";
 pub const OAUTH_LOGIN_TIMEOUT_SECS: u64 = 600;
