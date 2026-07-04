@@ -31,7 +31,7 @@ Both require the Flatpak to hold **`--talk-name=org.freedesktop.Flatpak`**
 ar x clai.deb && tar xf data.tar.*
 
 flatpak install -y flathub org.gnome.Platform//49 org.gnome.Sdk//49
-flatpak build-init flatpak-build io.github.juacker.clai org.gnome.Sdk//49 org.gnome.Platform//49
+flatpak build-init flatpak-build run.clai.CLAI org.gnome.Sdk//49 org.gnome.Platform//49
 # ...copy files (see the workflow for the exact layout)...
 flatpak build-finish flatpak-build \
   --command=clai \
@@ -41,8 +41,8 @@ flatpak build-finish flatpak-build \
   --talk-name=org.freedesktop.secrets \
   --talk-name=org.freedesktop.Flatpak
 flatpak build-export repo flatpak-build
-flatpak build-bundle repo clai.flatpak io.github.juacker.clai
-flatpak install --user clai.flatpak && flatpak run io.github.juacker.clai
+flatpak build-bundle repo clai.flatpak run.clai.CLAI
+flatpak install --user clai.flatpak && flatpak run run.clai.CLAI
 ```
 
 ## Verify after building (needs a real Flatpak install)

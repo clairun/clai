@@ -12,7 +12,7 @@
 #
 set -euo pipefail
 
-APP_ID=io.github.juacker.clai
+APP_ID=run.clai.CLAI
 SDK=org.gnome.Sdk//49
 PLATFORM=org.gnome.Platform//49
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

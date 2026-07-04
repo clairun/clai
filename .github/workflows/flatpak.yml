@@ -58,7 +58,7 @@ jobs:
       - name: Create Flatpak
         run: |
           # Initialize flatpak build directory
-          flatpak build-init flatpak-build io.github.juacker.clai org.gnome.Sdk//49 org.gnome.Platform//49
+          flatpak build-init flatpak-build run.clai.CLAI org.gnome.Sdk//49 org.gnome.Platform//49
 
           # Copy files into the build
           mkdir -p flatpak-build/files/bin
@@ -66,14 +66,14 @@ jobs:
           mkdir -p flatpak-build/files/share/icons/hicolor/128x128/apps
           mkdir -p flatpak-build/files/share/icons/hicolor/scalable/apps
           mkdir -p flatpak-build/files/share/metainfo
-          mkdir -p flatpak-build/files/share/licenses/io.github.juacker.clai
+          mkdir -p flatpak-build/files/share/licenses/run.clai.CLAI
 
           cp usr/bin/clai flatpak-build/files/bin/
-          cp flatpak/io.github.juacker.clai.desktop flatpak-build/files/share/applications/
-          cp src-tauri/icons/128x128.png flatpak-build/files/share/icons/hicolor/128x128/apps/io.github.juacker.clai.png
-          cp public/icon.svg flatpak-build/files/share/icons/hicolor/scalable/apps/io.github.juacker.clai.svg
-          cp flatpak/io.github.juacker.clai.metainfo.xml flatpak-build/files/share/metainfo/
-          cp LICENSE flatpak-build/files/share/licenses/io.github.juacker.clai/
+          cp flatpak/run.clai.CLAI.desktop flatpak-build/files/share/applications/
+          cp src-tauri/icons/128x128.png flatpak-build/files/share/icons/hicolor/128x128/apps/run.clai.CLAI.png
+          cp public/icon.svg flatpak-build/files/share/icons/hicolor/scalable/apps/run.clai.CLAI.svg
+          cp flatpak/run.clai.CLAI.metainfo.xml flatpak-build/files/share/metainfo/
+          cp LICENSE flatpak-build/files/share/licenses/run.clai.CLAI/
 
           # Finalize the build
           #
@@ -102,7 +102,7 @@ jobs:
 
           # Export and bundle
           flatpak build-export repo flatpak-build
-          flatpak build-bundle repo clai.flatpak io.github.juacker.clai
+          flatpak build-bundle repo clai.flatpak run.clai.CLAI
 
       - name: Upload to Release
         uses: actions/github-script@v7

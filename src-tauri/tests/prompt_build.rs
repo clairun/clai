@@ -63,7 +63,7 @@ impl PromptBuildFixture {
 
         let default_source = SkillSourceConfig::new_git(
             "CLAI Skills".to_string(),
-            "https://github.com/juacker/clai-skills.git".to_string(),
+            "https://github.com/clairun/clai-skills.git".to_string(),
             None,
             Some(default_skills_root.display().to_string()),
         );
