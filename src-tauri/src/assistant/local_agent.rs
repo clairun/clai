@@ -34,6 +34,7 @@ use crate::AppState;
 const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
 const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
+const CODEX_TURN_INPUT_MAX_CHARS: usize = 1_048_576;
 
 /// MCP server *startup* timeout (ms) for CLI providers that read `MCP_TIMEOUT`
 /// (Claude Code, Codex). Distinct from the per-tool backstop
@@ -529,6 +530,11 @@ pub async fn run_session_turn(
             cancel_run(deps, &session, &run_id, usage.as_ref()).await
         }
         Err(LocalAgentRunError::Failed { message, usage }) => {
+            let message = if should_recover_cli_context_limit(provider_runtime, &message) {
+                cli_context_limit_failure_message(provider_runtime, &message)
+            } else {
+                message
+            };
             if is_usage_limit_error(&message) {
                 // A usage/rate limit is a non-retryable failure (the user must
                 // wait until the stated reset time), distinct from a transient
@@ -1300,6 +1306,12 @@ async fn run_codex_turn(
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
     let prompt = codex_turn_prompt(&system_prompt, &prompt);
+    let prompt_chars = prompt.chars().count();
+    if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
+        return Err(LocalAgentRunError::failed(codex_input_too_large_message(
+            prompt_chars,
+        )));
+    }
 
     let assistant_message = ensure_assistant_message_slot(
         deps,
@@ -1462,6 +1474,28 @@ fn codex_turn_prompt(system_prompt: &str, prompt: &str) -> String {
     format!(
         "System instructions for this CLAI run:\n{}\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.\n\nUser/task prompt:\n{}",
         system_prompt, prompt
+    )
+}
+
+fn codex_input_too_large_message(actual_chars: usize) -> String {
+    format!(
+        "Codex turn input exceeds the maximum length of {} characters (input_too_large, actual_chars={}). CLAI can recover by compacting the conversation and retrying; if this error repeats, run `/compact` or start a new thread before retrying.",
+        CODEX_TURN_INPUT_MAX_CHARS, actual_chars
+    )
+}
+
+fn cli_context_limit_failure_message(
+    provider_runtime: CliProviderRuntime,
+    provider_message: &str,
+) -> String {
+    if provider_message.contains("run `/compact`") {
+        return provider_message.to_string();
+    }
+
+    format!(
+        "{} could not start because the conversation context is too large for the provider's current turn limit. CLAI tried automatic compaction when possible. Run `/compact` or start a new thread, then retry.\n\nProvider error: {}",
+        provider_runtime.display_name(),
+        provider_message
     )
 }
 
@@ -4495,6 +4529,10 @@ mod tests {
             "provider error: provider request failed: Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
         ));
         assert!(should_recover_cli_context_limit(
+            CliProviderRuntime::Codex,
+            "Codex exited with status exit status: 2\n--- stderr ---\nError: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)"
+        ));
+        assert!(should_recover_cli_context_limit(
             CliProviderRuntime::ClaudeCode,
             "prompt is too long for the model context window"
         ));
@@ -4502,6 +4540,18 @@ mod tests {
             CliProviderRuntime::OpenCode,
             "input tokens exceed context"
         ));
+    }
+
+    #[test]
+    fn codex_preflight_input_limit_message_is_recoverable_and_actionable() {
+        let message = codex_input_too_large_message(CODEX_TURN_INPUT_MAX_CHARS + 1);
+
+        assert!(should_recover_cli_context_limit(
+            CliProviderRuntime::Codex,
+            &message
+        ));
+        assert!(message.contains("input_too_large"));
+        assert!(message.contains("/compact"));
     }
 
     #[test]

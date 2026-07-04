@@ -103,6 +103,8 @@ pub fn is_context_limit_error(message: &str) -> bool {
         "prompt is too long",
         "prompt too long",
         "input is too long",
+        "input exceeds the maximum length",
+        "input_too_large",
         "input tokens",
         "exceeds the model",
         "exceeds context",
@@ -670,6 +672,13 @@ mod tests {
         ContentPart::Text {
             text: t.to_string(),
         }
+    }
+
+    #[test]
+    fn context_limit_classifier_matches_codex_turn_start_input_too_large() {
+        assert!(is_context_limit_error(
+            "Error: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)"
+        ));
     }
 
     #[test]
