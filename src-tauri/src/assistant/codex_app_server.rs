@@ -202,8 +202,15 @@ pub(crate) fn local_image_user_input(path: &str) -> Value {
 
 /// The `config` object mirroring the `-c mcp_servers.clai.*` flags the `exec`
 /// path passes, so the app-server turn can reach the same local MCP server.
-pub(crate) fn mcp_servers_config(mcp_url: &str, token_env: &str, tool_timeout_secs: u64) -> Value {
+pub(crate) fn thread_config(mcp_url: &str, token_env: &str, tool_timeout_secs: u64) -> Value {
     json!({
+        // Disable Codex's built-in `shell_tool` (and thus its unmediated native
+        // command execution). `--disable shell_tool` on the exec path is
+        // documented as `-c features.shell_tool=false`; this is its app-server
+        // equivalent. Without it, Codex runs shell commands itself, bypassing
+        // CLAI's permission checks and bwrap sandbox entirely — every command
+        // must instead go through the gated MCP `bash_exec` tool below.
+        "features": { "shell_tool": false },
         "mcp_servers": {
             "clai": {
                 "url": mcp_url,
@@ -219,8 +226,10 @@ pub(crate) fn mcp_servers_config(mcp_url: &str, token_env: &str, tool_timeout_se
 /// Build `thread/start` params. `approvalPolicy: never` + `sandbox:
 /// danger-full-access` is the app-server parallel of `exec`'s
 /// `--dangerously-bypass-approvals-and-sandbox`: CLAI provides the external
-/// sandbox (bwrap) and permission system through its MCP tools, so Codex must
-/// not gate or sandbox anything itself.
+/// sandbox (bwrap) and permission system through its MCP tools. Crucially, the
+/// `config` (see [`thread_config`]) also disables Codex's native `shell_tool`,
+/// so Codex has *no* unmediated execution path — every command routes through
+/// the permission-gated MCP `bash_exec`, matching the exec path exactly.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn thread_start_request(
     id: i64,
@@ -233,7 +242,7 @@ pub(crate) fn thread_start_request(
     let mut params = json!({
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
-        "config": mcp_servers_config(mcp_url, token_env, tool_timeout_secs),
+        "config": thread_config(mcp_url, token_env, tool_timeout_secs),
     });
     if let Some(cwd) = cwd {
         params["cwd"] = json!(cwd);
@@ -244,12 +253,24 @@ pub(crate) fn thread_start_request(
     request(id, "thread/start", params)
 }
 
-/// Build `thread/resume` params for an existing Codex thread id.
-pub(crate) fn thread_resume_request(id: i64, thread_id: &str, model: Option<&str>) -> Value {
+/// Build `thread/resume` params for an existing Codex thread id. Re-applies the
+/// same bypass + [`thread_config`] as `thread/start` (each turn spawns a fresh
+/// `codex app-server` process, so the shell_tool disable and MCP registration
+/// must be set again on resume, mirroring how the exec path re-passes its flags
+/// on `exec resume`).
+pub(crate) fn thread_resume_request(
+    id: i64,
+    thread_id: &str,
+    model: Option<&str>,
+    mcp_url: &str,
+    token_env: &str,
+    tool_timeout_secs: u64,
+) -> Value {
     let mut params = json!({
         "threadId": thread_id,
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
+        "config": thread_config(mcp_url, token_env, tool_timeout_secs),
     });
     if let Some(model) = model {
         params["model"] = json!(model);
@@ -415,6 +436,25 @@ mod tests {
         assert_eq!(clai["bearer_token_env_var"], "CLAI_MCP_TOKEN");
         assert_eq!(clai["enabled"], true);
         assert_eq!(clai["tool_timeout_sec"], 3600);
+        // Codex's native shell must be disabled so it has no ungated
+        // execution path (parity with exec's `--disable shell_tool`).
+        assert_eq!(params["config"]["features"]["shell_tool"], false);
+    }
+
+    #[test]
+    fn thread_resume_disables_shell_tool_and_carries_mcp_config() {
+        let req = thread_resume_request(2, "thread-1", Some("gpt-5.5"), "u", "T", 42);
+        let params = &req["params"];
+        assert_eq!(req["method"], "thread/resume");
+        assert_eq!(params["threadId"], "thread-1");
+        assert_eq!(params["approvalPolicy"], "never");
+        assert_eq!(params["sandbox"], "danger-full-access");
+        assert_eq!(params["config"]["features"]["shell_tool"], false);
+        assert_eq!(params["config"]["mcp_servers"]["clai"]["url"], "u");
+        assert_eq!(
+            params["config"]["mcp_servers"]["clai"]["tool_timeout_sec"],
+            42
+        );
     }
 
     #[test]

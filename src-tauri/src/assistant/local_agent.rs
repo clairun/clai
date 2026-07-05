@@ -1537,7 +1537,7 @@ async fn run_codex_turn_app_server(
         )));
     }
 
-    let assistant_message = ensure_assistant_message_slot(
+    let mut assistant_message = ensure_assistant_message_slot(
         deps,
         session,
         run_id,
@@ -1597,7 +1597,14 @@ async fn run_codex_turn_app_server(
     )
     .await?;
     let thread_request = match existing_thread_id.as_deref() {
-        Some(thread_id) => aps::thread_resume_request(2, thread_id, model),
+        Some(thread_id) => aps::thread_resume_request(
+            2,
+            thread_id,
+            model,
+            mcp_url,
+            CODEX_MCP_TOKEN_ENV,
+            tool_timeout,
+        ),
         None => aps::thread_start_request(
             2,
             cwd.as_deref(),
@@ -1721,7 +1728,7 @@ async fn run_codex_turn_app_server(
             // else (handshake echoes, turn/start ack) is informational.
             if let Some(id) = aps::response_id(&message) {
                 if let Some(message_ids) = pending_steer.remove(&id) {
-                    resolve_codex_steer_response(
+                    let accepted = resolve_codex_steer_response(
                         deps,
                         session,
                         run_id,
@@ -1730,6 +1737,23 @@ async fn run_codex_turn_app_server(
                         &mut inflight_steer,
                     )
                     .await;
+                    // The steered user message was written to the conversation
+                    // when the user hit send (an earlier `created_at`). Close
+                    // the current assistant message and open a fresh one so the
+                    // post-steer output sorts *after* that user message instead
+                    // of accreting into one bubble that renders before it.
+                    if accepted {
+                        assistant_message = split_codex_assistant_message(
+                            deps,
+                            session,
+                            run_id,
+                            CliProviderRuntime::Codex.metadata_source(),
+                            &assistant_message,
+                            &mut state,
+                            assistant_slot,
+                        )
+                        .await?;
+                    }
                 }
             }
             continue;
@@ -1995,6 +2019,49 @@ async fn build_codex_steer(
     ))
 }
 
+/// After a `turn/steer` is accepted, close the current assistant message and
+/// open a fresh one. The steered user message already sits in the conversation
+/// with the `created_at` it got when the user hit send, so without this split
+/// the whole turn accretes into a single assistant message whose `created_at`
+/// is frozen at turn start — making the reply (including the handling of the
+/// steered comment) render *before* the comment itself. Splitting yields the
+/// natural order: pre-steer output, the user's message, then post-steer output.
+async fn split_codex_assistant_message(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    metadata_source: &str,
+    current: &AssistantMessage,
+    state: &mut CodexStreamState,
+    slot: &mut Option<AssistantMessage>,
+) -> Result<AssistantMessage, LocalAgentRunError> {
+    let has_content = !non_empty_content_parts(&state.parts).is_empty()
+        || !state.persisted_tool_item_ids.is_empty();
+    if has_content {
+        // Persist the pre-steer segment as its own completed message.
+        finalize_assistant_message_from_parts(deps, session, run_id, current, &state.parts).await?;
+    } else {
+        // Nothing emitted yet: drop the empty placeholder rather than leave an
+        // empty bubble before the user's steered message.
+        let _ = repository::delete_message(&deps.pool, &current.id).await;
+        let _ = emit_event(
+            &deps.app,
+            session,
+            Some(run_id),
+            AssistantUiEvent::MessageDeleted {
+                message_id: current.id.clone(),
+            },
+        );
+    }
+    // Start the post-steer segment fresh. Keep the tool-item dedup set so an
+    // item echoed across the split is not persisted twice; reset the delta
+    // throttle so the new message's first delta emits promptly.
+    state.parts.clear();
+    state.last_update_emit_at = None;
+    *slot = None;
+    ensure_assistant_message_slot(deps, session, run_id, metadata_source, slot).await
+}
+
 /// Resolve a `turn/steer` response: on accept, mark the carried messages
 /// delivered and notify the UI; on reject (turn ended / id mismatch) leave them
 /// queued so the followup run delivers them. Always clears their in-flight mark.
@@ -2005,7 +2072,7 @@ async fn resolve_codex_steer_response(
     response: &Value,
     message_ids: Vec<String>,
     inflight: &mut HashSet<String>,
-) {
+) -> bool {
     for id in &message_ids {
         inflight.remove(id);
     }
@@ -2015,7 +2082,7 @@ async fn resolve_codex_steer_response(
             count = message_ids.len(),
             "codex turn/steer rejected; leaving messages queued for the followup run"
         );
-        return;
+        return false;
     }
     match repository::mark_queued_messages_delivered(&deps.pool, &session.id, run_id, &message_ids)
         .await
@@ -2040,6 +2107,10 @@ async fn resolve_codex_steer_response(
             "codex steer accepted but marking delivered failed; the followup run may re-deliver"
         ),
     }
+    // Accepted by Codex (the input entered the live turn) regardless of the DB
+    // mark result — the caller splits the assistant message either way so the
+    // post-steer output is ordered after the user's message.
+    true
 }
 
 /// Normalize an app-server `ThreadItem` (camelCase) into the exec item shape so
