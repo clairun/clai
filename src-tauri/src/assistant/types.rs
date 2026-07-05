@@ -418,7 +418,10 @@ pub struct ToolInvocation {
 pub struct ProviderConnection {
     pub id: String,
     pub name: String,
-    pub provider_id: String,
+    /// Wire/execution protocol adapter key: openai | anthropic | claude |
+    /// codex | opencode | gemini. Drives adapter/CLI dispatch.
+    /// (Stage 2 adds a `provider_id` brand/catalog field alongside this.)
+    pub protocol_id: String,
     pub auth_mode: AuthMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,

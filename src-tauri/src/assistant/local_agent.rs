@@ -261,12 +261,12 @@ pub async fn run_session_turn(
     }
 
     let provider_runtime =
-        match CliProviderRuntime::for_provider_id(connection.provider_id.as_str()) {
+        match CliProviderRuntime::for_provider_id(connection.protocol_id.as_str()) {
             Some(runtime) => runtime,
             None => {
                 let message = format!(
                     "CLI provider '{}' is registered but not implemented yet",
-                    connection.provider_id
+                    connection.protocol_id
                 );
                 fail_run(deps, &session, &run_id, None, &message).await?;
                 discard_if_unanswered(deps, &session, &run_id, &input, &None).await;
@@ -287,7 +287,7 @@ pub async fn run_session_turn(
         .context
         .cli_session_provider
         .as_deref()
-        .is_some_and(|owner| owner != connection.provider_id)
+        .is_some_and(|owner| owner != connection.protocol_id)
         && session.context.cli_session_id.is_some()
     {
         clear_cli_session_id(deps, &mut session).await?;
@@ -363,7 +363,7 @@ pub async fn run_session_turn(
         let attempt = match provider_runtime {
             CliProviderRuntime::ClaudeCode => {
                 let (cli_session_id, is_new_session) =
-                    ensure_cli_session_id(deps, &mut session, &connection.provider_id).await?;
+                    ensure_cli_session_id(deps, &mut session, &connection.protocol_id).await?;
                 let mcp_config_path =
                     match write_mcp_config(mcp_runtime.url(), binding_guard.token()) {
                         Ok(path) => path,
@@ -693,7 +693,7 @@ async fn resolve_run_id(
                     status: RunStatus::Queued,
                     trigger: input.trigger.clone(),
                     connection_id: connection.id.clone(),
-                    provider_id: connection.provider_id.clone(),
+                    provider_id: connection.protocol_id.clone(),
                     model_id: connection.model_id.clone(),
                     usage: None,
                     error: None,

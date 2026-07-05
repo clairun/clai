@@ -536,7 +536,7 @@ pub async fn assistant_connection_supports_images(
 ) -> Result<bool, String> {
     let connection = provider_connection(state.inner(), &connection_id)?;
     Ok(crate::assistant::providers::connection_supports_images(
-        &connection.provider_id,
+        &connection.protocol_id,
         &connection.model_id,
     ))
 }
@@ -631,7 +631,7 @@ pub async fn assistant_send_message(
             status: RunStatus::Queued,
             trigger: RunTrigger::UserMessage,
             connection_id: connection_id.clone(),
-            provider_id: connection.provider_id.clone(),
+            provider_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
             usage: None,
             error: None,
@@ -702,7 +702,7 @@ pub async fn assistant_compact_session(
         });
     };
 
-    if crate::assistant::providers::is_cli_provider(&connection.provider_id) {
+    if crate::assistant::providers::is_cli_provider(&connection.protocol_id) {
         compaction::reset_cli_session_for_rotation(&target_pool, &mut session).await?;
     }
 
@@ -846,7 +846,7 @@ pub async fn assistant_retry_run(
             status: RunStatus::Queued,
             trigger: RunTrigger::Retry,
             connection_id: connection_id.clone(),
-            provider_id: connection.provider_id.clone(),
+            provider_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
             usage: None,
             error: None,
@@ -991,7 +991,7 @@ pub(crate) async fn start_queued_followup_if_idle(
             status: RunStatus::Queued,
             trigger: RunTrigger::UserMessage,
             connection_id: connection_id.clone(),
-            provider_id: connection.provider_id.clone(),
+            provider_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
             usage: None,
             error: None,

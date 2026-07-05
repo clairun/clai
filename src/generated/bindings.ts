@@ -64,7 +64,7 @@ media_type: string, filename?: string | null, width?: number | null, height?: nu
 
 export type CreateMcpServerRequest = { name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
-export type CreateProviderConnectionRequest = { name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
+export type CreateProviderConnectionRequest = { name: string, protocolId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
 export type FilesystemPathAccess = "read_only" | "read_write";
 
@@ -126,7 +126,13 @@ export type PermissionScope = "agent";
 
 export type ProtocolFamily = "open_ai_compatible" | "anthropic" | "custom";
 
-export type ProviderConnection = { id: string, name: string, providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
+export type ProviderConnection = { id: string, name: string, 
+/**
+ * Wire/execution protocol adapter key: openai | anthropic | claude |
+ * codex | opencode | gemini. Drives adapter/CLI dispatch.
+ * (Stage 2 adds a `provider_id` brand/catalog field alongside this.)
+ */
+protocolId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
@@ -253,7 +259,7 @@ export type ToolInvocation = { id: string, runId: string, sessionId: string, too
 
 export type UpdateMcpServerRequest = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
-export type UpdateProviderConnectionRequest = { id: string, name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
+export type UpdateProviderConnectionRequest = { id: string, name: string, protocolId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 
 export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, role: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
 /**

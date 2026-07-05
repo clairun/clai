@@ -18,7 +18,7 @@ const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
 interface ConnectionForm {
   id: string | null;
   name: string;
-  providerId: string;
+  protocolId: string;
   apiKey: string;
   baseUrl: string;
   modelId: string;
@@ -61,7 +61,7 @@ const secondaryButtonStyle: React.CSSProperties = {
 const initialForm: ConnectionForm = {
   id: null,
   name: '',
-  providerId: 'openai',
+  protocolId: 'openai',
   apiKey: '',
   baseUrl: '',
   modelId: '',
@@ -99,8 +99,8 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
   const [descriptorModels, setDescriptorModels] = useState<ModelInfo[]>([]);
 
   const selectedAdapter = useMemo(
-    () => adapters.find((adapter) => adapter.id === form.providerId) || null,
-    [adapters, form.providerId],
+    () => adapters.find((adapter) => adapter.id === form.protocolId) || null,
+    [adapters, form.protocolId],
   );
   const isCliAdapter = selectedAdapter?.isCliBacked === true;
 
@@ -131,14 +131,14 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
 
   useEffect(() => {
     if (!isCliAdapter) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- CLI adapter model fetch keyed on isCliAdapter/form.providerId: clears models when switching away from CLI, otherwise fetches descriptor models for the selected provider with a cancellation guard. Effect is required for the async fetch + cleanup; the rule cannot model the isCliAdapter branch.
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- CLI adapter model fetch keyed on isCliAdapter/form.protocolId: clears models when switching away from CLI, otherwise fetches descriptor models for the selected provider with a cancellation guard. Effect is required for the async fetch + cleanup; the rule cannot model the isCliAdapter branch.
       setDescriptorModels([]);
       return undefined;
     }
     let cancelled = false;
     (async () => {
       try {
-        const models = await assistantClient.listProviderDescriptorModels(form.providerId);
+        const models = await assistantClient.listProviderDescriptorModels(form.protocolId);
         if (cancelled) return;
         const list = models || [];
         setDescriptorModels(list);
@@ -152,7 +152,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     return () => {
       cancelled = true;
     };
-  }, [isCliAdapter, form.providerId]);
+  }, [isCliAdapter, form.protocolId]);
 
   // Provider-connection dependents (workspace agents that reference a
   // connection) are no longer enumerated client-side — the backend
@@ -164,7 +164,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     setEditingId(null);
     setForm({
       ...initialForm,
-      providerId: adapters[0]?.id || 'openai',
+      protocolId: adapters[0]?.id || 'openai',
     });
   }, [adapters]);
 
@@ -180,7 +180,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     setForm({
       id: connection.id,
       name: connection.name,
-      providerId: connection.providerId,
+      protocolId: connection.protocolId,
       apiKey: '',
       baseUrl: connection.baseUrl || '',
       modelId: connection.modelId,
@@ -234,7 +234,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
         await assistantClient.updateProviderConnection({
           id: editingId,
           name: form.name.trim(),
-          providerId: form.providerId,
+          protocolId: form.protocolId,
           apiKey: isCliAdapter ? null : form.apiKey.trim() || null,
           authMode,
           baseUrl: form.baseUrl.trim() || null,
@@ -246,7 +246,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
       } else {
         await assistantClient.createProviderConnection({
           name: form.name.trim(),
-          providerId: form.providerId,
+          protocolId: form.protocolId,
           apiKey: isCliAdapter ? null : form.apiKey.trim(),
           authMode,
           baseUrl: form.baseUrl.trim() || null,
@@ -396,7 +396,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                 <span className={styles.providerCommand}>
                   <code>{connection.modelId.trim() || 'default model'}</code> • <code>
                     {connection.authMode === 'subscription_login'
-                      ? (connection.baseUrl || CLI_BINARY_PLACEHOLDERS[connection.providerId] || connection.providerId)
+                      ? (connection.baseUrl || CLI_BINARY_PLACEHOLDERS[connection.protocolId] || connection.protocolId)
                       : (connection.baseUrl || 'api.openai.com/v1')}
                   </code>
                 </span>
@@ -477,13 +477,13 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                 <select
                   id="provider-conn-adapter"
                   className={modalStyles.select}
-                  value={form.providerId}
+                  value={form.protocolId}
                   onChange={(e) =>
                     // Reset the model when switching providers: a model id valid for
                     // one CLI (e.g. `sonnet`) is meaningless for another (Codex), and
                     // a controlled <select> would otherwise keep the stale value in
                     // state while visually showing the new provider's first option.
-                    setForm((current) => ({ ...current, providerId: e.target.value, modelId: '' }))
+                    setForm((current) => ({ ...current, protocolId: e.target.value, modelId: '' }))
                   }
                   disabled={saving || editingId !== null}
                 >
@@ -579,7 +579,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                   onChange={(e) => setForm((current) => ({ ...current, baseUrl: e.target.value }))}
                   placeholder={
                     isCliAdapter
-                      ? CLI_BINARY_PLACEHOLDERS[form.providerId] || 'claude'
+                      ? CLI_BINARY_PLACEHOLDERS[form.protocolId] || 'claude'
                       : 'https://api.openai.com/v1'
                   }
                   disabled={saving}

@@ -456,7 +456,7 @@ mod attach_provider_tests {
         ProviderConnection {
             id: id.to_string(),
             name: format!("conn-{id}"),
-            provider_id: "claude-code".to_string(),
+            protocol_id: "claude-code".to_string(),
             auth_mode: AuthMode::SubscriptionLogin,
             base_url: None,
             secret_ref: format!("provider-connection::{id}"),

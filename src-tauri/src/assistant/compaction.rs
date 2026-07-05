@@ -142,7 +142,7 @@ pub async fn compact_session_history(
         return Ok(None);
     };
 
-    let strategy = if providers::is_cli_provider(&connection.provider_id) {
+    let strategy = if providers::is_cli_provider(&connection.protocol_id) {
         CompactionStrategy::SessionRotationSummary
     } else {
         CompactionStrategy::LocalSummary
@@ -157,7 +157,7 @@ pub async fn compact_session_history(
             source_from_message_id: window.source_from_message_id.clone(),
             source_to_message_id: window.source_to_message_id.clone(),
             created_run_id: run_id.map(str::to_string),
-            provider_id: connection.provider_id.clone(),
+            provider_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
             input_message_count: window.messages.len() as i64,
         },
@@ -341,7 +341,7 @@ async fn summarize_window(
         return Ok(fallback_summary(messages));
     }
 
-    let adapter = providers::resolve_adapter(&connection.provider_id).map_err(|e| e.to_string())?;
+    let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| e.to_string())?;
     let transcript = transcript_for_summary(messages);
     let request = CompletionRequest {
         run_id: format!("compaction-{}", compaction_id),

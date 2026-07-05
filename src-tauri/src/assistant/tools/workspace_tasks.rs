@@ -307,7 +307,7 @@ async fn assign_task(
             status: RunStatus::Queued,
             trigger: RunTrigger::WorkspaceTask,
             connection_id: connection.id.clone(),
-            provider_id: connection.provider_id.clone(),
+            provider_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
             usage: None,
             error: None,

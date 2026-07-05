@@ -12,7 +12,7 @@ use crate::AppState;
 #[ts(export, export_to = "bindings.ts")]
 pub struct CreateProviderConnectionRequest {
     pub name: String,
-    pub provider_id: String,
+    pub protocol_id: String,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -30,7 +30,7 @@ pub struct CreateProviderConnectionRequest {
 pub struct UpdateProviderConnectionRequest {
     pub id: String,
     pub name: String,
-    pub provider_id: String,
+    pub protocol_id: String,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -62,8 +62,8 @@ pub async fn provider_connection_create(
     request: CreateProviderConnectionRequest,
     state: State<'_, AppState>,
 ) -> Result<ProviderConnection, String> {
-    let descriptor = providers::get_provider_descriptor(&request.provider_id)
-        .ok_or_else(|| format!("Unsupported provider: {}", request.provider_id))?;
+    let descriptor = providers::get_provider_descriptor(&request.protocol_id)
+        .ok_or_else(|| format!("Unsupported provider: {}", request.protocol_id))?;
 
     if !descriptor.supported_auth_modes.contains(
         &request
@@ -73,7 +73,7 @@ pub async fn provider_connection_create(
     ) {
         return Err(format!(
             "Provider '{}' does not support the requested auth mode",
-            request.provider_id
+            request.protocol_id
         ));
     }
 
@@ -95,7 +95,7 @@ pub async fn provider_connection_create(
     let connection = ProviderConnection {
         id,
         name: request.name.trim().to_string(),
-        provider_id: request.provider_id,
+        protocol_id: request.protocol_id,
         auth_mode,
         base_url: request
             .base_url
@@ -132,8 +132,8 @@ pub async fn provider_connection_update(
         .get_provider_connection(&request.id)
         .ok_or_else(|| format!("Provider connection not found: {}", request.id))?;
 
-    let descriptor = providers::get_provider_descriptor(&request.provider_id)
-        .ok_or_else(|| format!("Unsupported provider: {}", request.provider_id))?;
+    let descriptor = providers::get_provider_descriptor(&request.protocol_id)
+        .ok_or_else(|| format!("Unsupported provider: {}", request.protocol_id))?;
 
     if !descriptor.supported_auth_modes.contains(
         &request
@@ -143,7 +143,7 @@ pub async fn provider_connection_update(
     ) {
         return Err(format!(
             "Provider '{}' does not support the requested auth mode",
-            request.provider_id
+            request.protocol_id
         ));
     }
 
@@ -163,7 +163,7 @@ pub async fn provider_connection_update(
     let updated = ProviderConnection {
         id: request.id,
         name: request.name.trim().to_string(),
-        provider_id: request.provider_id,
+        protocol_id: request.protocol_id,
         auth_mode,
         base_url: request
             .base_url
@@ -280,11 +280,11 @@ pub async fn provider_connection_list_models(
         .get_provider_connection(&id)
         .ok_or_else(|| format!("Provider connection not found: {}", id))?;
 
-    if let Some(models) = cli::models_for_provider(&connection.provider_id) {
+    if let Some(models) = cli::models_for_provider(&connection.protocol_id) {
         return Ok(models);
     }
 
-    let adapter = providers::resolve_adapter(&connection.provider_id).map_err(|e| e.to_string())?;
+    let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| e.to_string())?;
     adapter
         .list_models(&connection)
         .await
@@ -306,20 +306,20 @@ pub async fn provider_connection_test(
     tracing::info!(
         connection_id = %connection.id,
         connection_name = %connection.name,
-        provider_id = %connection.provider_id,
+        provider_id = %connection.protocol_id,
         model_id = %connection.model_id,
         base_url = ?connection.base_url,
         auth_mode = ?connection.auth_mode,
         "Testing provider connection"
     );
 
-    if providers::is_cli_provider(&connection.provider_id) {
+    if providers::is_cli_provider(&connection.protocol_id) {
         return test_cli_provider_connection(&connection).await;
     }
 
-    let adapter = providers::resolve_adapter(&connection.provider_id).map_err(|e| {
+    let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| {
         tracing::error!(
-            provider_id = %connection.provider_id,
+            provider_id = %connection.protocol_id,
             error = %e,
             "Failed to resolve provider adapter"
         );
@@ -425,7 +425,7 @@ pub async fn provider_connection_test(
             tracing::error!(
                 connection_id = %connection.id,
                 connection_name = %connection.name,
-                provider_id = %connection.provider_id,
+                provider_id = %connection.protocol_id,
                 base_url = ?connection.base_url,
                 error = %error,
                 "Provider connection test failed"
@@ -447,15 +447,15 @@ async fn test_cli_provider_connection(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .or_else(|| cli::command_for_provider(&connection.provider_id).map(str::to_string))
-        .ok_or_else(|| format!("Unsupported CLI provider: {}", connection.provider_id))?;
+        .or_else(|| cli::command_for_provider(&connection.protocol_id).map(str::to_string))
+        .ok_or_else(|| format!("Unsupported CLI provider: {}", connection.protocol_id))?;
 
     // Resolve to an absolute host path and run host-aware (via
     // `flatpak-spawn --host` under Flatpak) — the same path the actual run
     // uses, so a passing test reflects a launchable CLI.
     let resolved =
         crate::providers::resolve_command_path(&command).unwrap_or_else(|| command.clone());
-    let args: &[&str] = match connection.provider_id.as_str() {
+    let args: &[&str] = match connection.protocol_id.as_str() {
         cli::CLAUDE_CODE_PROVIDER_ID => &["auth", "status"],
         cli::CODEX_PROVIDER_ID => &["login", "status"],
         _ => &["--version"],
@@ -475,7 +475,7 @@ async fn test_cli_provider_connection(
         });
     }
 
-    if connection.provider_id == cli::CLAUDE_CODE_PROVIDER_ID {
+    if connection.protocol_id == cli::CLAUDE_CODE_PROVIDER_ID {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let value: serde_json::Value = serde_json::from_str(&stdout)
             .map_err(|e| format!("Claude auth status returned invalid JSON: {}", e))?;
@@ -489,7 +489,7 @@ async fn test_cli_provider_connection(
                 error: Some("Claude Code is installed but not logged in".to_string()),
             });
         }
-    } else if connection.provider_id == cli::CODEX_PROVIDER_ID {
+    } else if connection.protocol_id == cli::CODEX_PROVIDER_ID {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.contains("Logged in") {
             return Ok(TestResult {

@@ -682,7 +682,7 @@ async fn run_scheduled_agent_with_fallback(
         tracing::info!(
             session_id = %session.id,
             connection_id = %connection.id,
-            provider_id = %connection.provider_id,
+            provider_id = %connection.protocol_id,
             model_id = %connection.model_id,
             fallback_index = index,
             "Starting scheduled assistant run"
@@ -695,7 +695,7 @@ async fn run_scheduled_agent_with_fallback(
                 status: RunStatus::Queued,
                 trigger: RunTrigger::Scheduled,
                 connection_id: connection.id.clone(),
-                provider_id: connection.provider_id.clone(),
+                provider_id: connection.protocol_id.clone(),
                 model_id: connection.model_id.clone(),
                 usage: None,
                 error: None,

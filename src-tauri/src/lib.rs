@@ -215,7 +215,7 @@ pub fn run() {
                 secret_ref: format!("provider-connection::{}", id),
                 id,
                 name,
-                provider_id: provider_id.to_string(),
+                protocol_id: provider_id.to_string(),
                 auth_mode: crate::assistant::types::AuthMode::SubscriptionLogin,
                 base_url: None,
                 model_id: String::new(),
