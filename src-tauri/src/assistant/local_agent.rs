@@ -40,6 +40,11 @@ const CODEX_TURN_INPUT_MAX_CHARS: usize = 1_048_576;
 /// messages into the active turn.
 const STEER_POLL_INTERVAL_MS: u64 = 400;
 
+/// Bound on each app-server handshake request (`initialize`,
+/// `thread/start|resume`). Generous: covers a cold `codex` start on a slow
+/// disk, but converts a wedged server into a clear fast-fail.
+const APP_SERVER_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// MCP server *startup* timeout (ms) for CLI providers that read `MCP_TIMEOUT`
 /// (Claude Code, Codex). Distinct from the per-tool backstop
 /// ([`CLI_MCP_CLIENT_TIMEOUT`]): a slow first handshake under load shouldn't
@@ -1494,10 +1499,10 @@ async fn run_codex_turn(
 // ---------------------------------------------------------------------------
 
 /// Run a Codex turn over the `codex app-server` JSON-RPC transport instead of
-/// `codex exec`. Behaviour-parity with [`run_codex_turn`] for now (streaming,
-/// tool calls, usage, errors); `turn/steer` mid-run delivery is layered on in a
-/// follow-up commit. Reuses the shared [`CodexStreamState`] + tool-call helpers
-/// by normalizing app-server items into the exec item shape.
+/// `codex exec`: streaming, tool calls, usage, errors, plus real-time mid-run
+/// input via `turn/steer` (queued messages are injected into the live turn).
+/// Reuses the shared [`CodexStreamState`] + tool-call helpers by normalizing
+/// app-server items into the exec item shape.
 #[allow(clippy::too_many_arguments)]
 async fn run_codex_turn_app_server(
     deps: &AssistantDeps,
@@ -1636,7 +1641,10 @@ async fn run_codex_turn_app_server(
     // (steer/interrupt), kept distinct from the handshake ids 1/2/3.
     let mut next_request_id: i64 = 10;
     // steer request id -> queued message ids carried by that steer, awaiting
-    // the server's accept/reject response.
+    // the server's accept/reject response. Best-effort and per-turn: the map
+    // lives only until `turn/completed` breaks the loop, and an entry whose
+    // response never arrives just leaves its messages pending in the DB for
+    // the follow-up run (no delivery is lost, nothing outlives the turn).
     let mut pending_steer: HashMap<i64, Vec<String>> = HashMap::new();
     // Message ids with a steer in flight so a later poll tick does not
     // re-send them before the response lands.
@@ -1688,7 +1696,13 @@ async fn run_codex_turn_app_server(
             msg = transport.recv() => msg,
         };
         let Some(message) = message else {
-            break; // app-server closed stdout
+            // Stdout closed without `turn/completed`: the server died mid-turn.
+            // Surface it as a failure so the run isn't finalized as a silently
+            // truncated success (partial parts are still persisted below).
+            if result_error.is_none() {
+                result_error = Some("codex app-server closed the connection mid-turn".to_string());
+            }
+            break;
         };
         if aps::is_server_request(&message) {
             if let Some(id) = message.get("id") {
@@ -1764,6 +1778,10 @@ async fn aps_request_await(
     request: Value,
 ) -> Result<Value, LocalAgentRunError> {
     let want_id = request.get("id").and_then(Value::as_i64);
+    // Bound the handshake so a stalled `codex app-server` (broken install,
+    // auth stall) fails fast with a clear error instead of hanging the run
+    // until the user cancels. Mirrors the MCP_STARTUP_TIMEOUT_MS posture.
+    let deadline = tokio::time::Instant::now() + APP_SERVER_HANDSHAKE_TIMEOUT;
     transport
         .send(&request)
         .await
@@ -1771,6 +1789,12 @@ async fn aps_request_await(
     loop {
         let message = tokio::select! {
             _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled { usage: None }),
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(LocalAgentRunError::failed(format!(
+                    "codex app-server did not answer the handshake within {}s",
+                    APP_SERVER_HANDSHAKE_TIMEOUT.as_secs()
+                )));
+            }
             msg = transport.recv() => msg,
         };
         let Some(message) = message else {
@@ -5363,6 +5387,17 @@ mod tests {
         // userMessage and unknown kinds are not surfaced.
         assert!(normalize_app_server_item(&serde_json::json!({ "type": "userMessage" })).is_none());
         assert!(normalize_app_server_item(&serde_json::json!({ "type": "plan" })).is_none());
+    }
+
+    #[test]
+    fn normalize_app_server_item_maps_missing_agent_text_to_null() {
+        // Some servers may omit `text` on agentMessage; the normalized exec
+        // shape must carry an explicit null (=> handled as "no text"), not
+        // panic or invent content.
+        let item = serde_json::json!({"id": "item_1", "type": "agentMessage"});
+        let normalized = normalize_app_server_item(&item).expect("normalizes");
+        assert_eq!(normalized["type"], "agent_message");
+        assert!(normalized["text"].is_null());
     }
 
     #[test]
