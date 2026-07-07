@@ -431,6 +431,12 @@ mod tests {
     }
 
     #[test]
+    fn get_entry_returns_none_for_unknown_brand() {
+        assert!(get_entry("definitely-not-a-provider").is_none());
+        assert!(get_entry("openai").is_some());
+    }
+
+    #[test]
     fn hosted_endpoints_are_locked() {
         let e = get_entry("openai").expect("openai present");
         assert!(e.base_url_locked);

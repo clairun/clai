@@ -811,4 +811,31 @@ mod tests {
             Ok(ProviderEvent::TextDelta { text }) if text == "€"
         )));
     }
+    fn conn_with_brand(brand: &str) -> ProviderConnection {
+        ProviderConnection {
+            id: "t".into(),
+            name: "t".into(),
+            protocol_id: "openai".into(),
+            provider_id: brand.into(),
+            auth_mode: AuthMode::DeveloperApiKey,
+            base_url: None,
+            secret_ref: "provider-connection::t".into(),
+            model_id: String::new(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn catalog_extra_headers_are_brand_scoped() {
+        // OpenRouter's attribution headers come from its catalog entry.
+        let openrouter = catalog_extra_headers(&conn_with_brand("openrouter"));
+        assert!(openrouter.iter().any(|(k, _)| k == "HTTP-Referer"));
+        assert!(openrouter.iter().any(|(k, _)| k == "X-Title"));
+        // A brand with no extra headers (or no catalog entry) yields none.
+        assert!(catalog_extra_headers(&conn_with_brand("openai")).is_empty());
+        assert!(catalog_extra_headers(&conn_with_brand("not-a-brand")).is_empty());
+    }
 }
