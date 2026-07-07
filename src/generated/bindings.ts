@@ -133,7 +133,12 @@ export type PermissionRequest = { requestId: string, workspaceId: string | null,
 
 export type PermissionScope = "agent";
 
-export type ProbeModelsRequest = { protocolId: string, baseUrl: string | null, apiKey: string | null, };
+export type ProbeModelsRequest = { protocolId: string,
+/**
+ * Brand/catalog id, if probing a catalog preset. Needed so brand-scoped
+ * quirks (OpenRouter headers, MiniMax's curated-only model list) apply.
+ */
+providerId: string | null, baseUrl: string | null, apiKey: string | null, };
 
 export type ProtocolFamily = "open_ai_compatible" | "anthropic" | "custom";
 
@@ -164,7 +169,7 @@ baseUrlLocked: boolean,
  */
 requiresApiKey: boolean, 
 /**
- * Frontend asset path, e.g. `provider-catalog/groq.svg`.
+ * Frontend asset path, e.g. `provider-catalog/openrouter.svg`.
  */
 logoAsset: string, 
 /**
@@ -191,8 +196,8 @@ export type ProviderCategory = "hosted" | "self_hosted" | "cli" | "custom";
 
 export type ProviderConnection = { id: string, name: string, 
 /**
- * Wire/execution protocol adapter key: openai | anthropic | claude |
- * codex | opencode | gemini. Drives adapter/CLI dispatch.
+ * Wire/execution protocol adapter key: openai | anthropic | claude-code |
+ * codex | opencode. Drives adapter/CLI dispatch.
  *
  * `#[serde(default)]` so a *legacy* config (which stored the protocol
  * under the old `providerId` key, now absorbed by the brand `provider_id`
@@ -201,7 +206,7 @@ export type ProviderConnection = { id: string, name: string,
  */
 protocolId: string, 
 /**
- * Brand/catalog id (`openai`, `groq`, `ollama`, `minimax`, `claude-code`,
+ * Brand/catalog id (`openai`, `ollama`, `minimax`, `claude-code`,
  * …) — the `ProviderCatalogEntry::id` this connection was created from.
  * Drives the logo, display grouping, and per-provider quirk data. For a
  * vanilla OpenAI/Anthropic or CLI connection, brand == protocol value.

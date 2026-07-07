@@ -55,6 +55,10 @@ pub struct UpdateProviderConnectionRequest {
 #[ts(export, export_to = "bindings.ts")]
 pub struct ProbeModelsRequest {
     pub protocol_id: String,
+    /// Brand/catalog id, if probing a catalog preset. Needed so brand-scoped
+    /// quirks (OpenRouter headers, MiniMax's curated-only model list) apply.
+    #[serde(default)]
+    pub provider_id: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
     #[serde(default)]
@@ -109,12 +113,19 @@ pub async fn provider_catalog_probe_models(
     } else {
         false
     };
+    let brand_id = request
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| request.protocol_id.clone());
 
     let connection = ProviderConnection {
         id: probe_id,
         name: "probe".to_string(),
         protocol_id: request.protocol_id.clone(),
-        provider_id: request.protocol_id.clone(),
+        provider_id: brand_id,
         auth_mode: AuthMode::DeveloperApiKey,
         base_url: request
             .base_url
@@ -444,27 +455,40 @@ pub async fn provider_connection_test(
         e.to_string()
     })?;
 
-    // Try list_models first; if that fails (some providers don't implement it),
-    // fall back to a minimal completion request to verify auth and connectivity.
-    match adapter.list_models(&connection).await {
-        Ok(models) => {
-            tracing::info!(
-                connection_id = %connection.id,
-                model_count = models.len(),
-                "Provider connection test succeeded (via list_models)"
-            );
-            return Ok(TestResult {
-                success: true,
-                error: None,
-            });
+    // Try a live model-list call first; if that fails (some providers don't
+    // implement it), fall back to a minimal completion request to verify auth
+    // and connectivity. Catalog entries with no live model endpoint skip this
+    // so the test cannot pass solely from a curated static list.
+    let has_live_models_endpoint = catalog::get_entry(&connection.provider_id)
+        .map(|entry| !matches!(entry.models_endpoint_style, catalog::ModelsEndpointStyle::None))
+        .unwrap_or(true);
+    if has_live_models_endpoint {
+        match adapter.list_models(&connection).await {
+            Ok(models) => {
+                tracing::info!(
+                    connection_id = %connection.id,
+                    model_count = models.len(),
+                    "Provider connection test succeeded (via list_models)"
+                );
+                return Ok(TestResult {
+                    success: true,
+                    error: None,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(
+                    connection_id = %connection.id,
+                    error = %error,
+                    "list_models failed, falling back to completion test"
+                );
+            }
         }
-        Err(error) => {
-            tracing::warn!(
-                connection_id = %connection.id,
-                error = %error,
-                "list_models failed, falling back to completion test"
-            );
-        }
+    } else {
+        tracing::info!(
+            connection_id = %connection.id,
+            provider_id = %connection.provider_id,
+            "Skipping model-list test for provider without a live models endpoint"
+        );
     }
 
     // Fallback: send a minimal completion request

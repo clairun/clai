@@ -11,9 +11,9 @@
 //!
 //! - **`protocol_id`** — the wire/execution backend that drives dispatch
 //!   (`resolve_adapter` / `is_cli_provider` / `CliProviderRuntime`). One of
-//!   `openai` | `anthropic` | `claude` | `codex` | `opencode` | `gemini`.
+//!   `openai` | `anthropic` | `claude-code` | `codex` | `opencode`.
 //! - **`id`** (== a connection's brand `provider_id`) — the catalog/brand key
-//!   (`groq`, `mistral`, `ollama`, …), used for the logo, display name, preset
+//!   (`openrouter`, `ollama`, `minimax`, …), used for the logo, display name, preset
 //!   memory, and per-provider quirk data.
 //!
 //! Provider divergence is expressed as **data on the entry** (`extra_headers`,
@@ -78,7 +78,7 @@ pub struct ProviderCatalogEntry {
     pub base_url_locked: bool,
     /// `false` for keyless self-hosted providers (ollama / lmstudio / vllm).
     pub requires_api_key: bool,
-    /// Frontend asset path, e.g. `provider-catalog/groq.svg`.
+    /// Frontend asset path, e.g. `provider-catalog/openrouter.svg`.
     pub logo_asset: String,
     /// Fallback model list when a live `/v1/models` probe is unavailable.
     pub curated_models: Vec<ModelInfo>,
@@ -94,11 +94,15 @@ pub struct ProviderCatalogEntry {
 }
 
 fn model(id: &str) -> ModelInfo {
+    model_with_capabilities(id, true, true)
+}
+
+fn model_with_capabilities(id: &str, supports_tools: bool, supports_images: bool) -> ModelInfo {
     ModelInfo {
         id: id.to_string(),
         display_name: id.to_string(),
-        supports_tools: true,
-        supports_images: true,
+        supports_tools,
+        supports_images,
     }
 }
 
@@ -144,26 +148,6 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             &["gpt-5.1", "gpt-5.1-mini", "gpt-4.1", "o4-mini"],
         ),
         hosted_openai(
-            "groq",
-            "Groq",
-            "Ultra-low-latency inference on open models.",
-            "https://api.groq.com/openai/v1",
-            "https://console.groq.com/keys",
-            &[
-                "llama-3.3-70b-versatile",
-                "llama-3.1-8b-instant",
-                "moonshotai/kimi-k2-instruct",
-            ],
-        ),
-        hosted_openai(
-            "mistral",
-            "Mistral",
-            "Mistral's open and commercial models.",
-            "https://api.mistral.ai/v1",
-            "https://console.mistral.ai/api-keys",
-            &["mistral-large-latest", "mistral-small-latest"],
-        ),
-        hosted_openai(
             "deepseek",
             "DeepSeek",
             "DeepSeek chat and reasoning models.",
@@ -172,52 +156,12 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             &["deepseek-chat", "deepseek-reasoner"],
         ),
         hosted_openai(
-            "xai",
-            "xAI (Grok)",
-            "Grok models from xAI.",
-            "https://api.x.ai/v1",
-            "https://console.x.ai",
-            &["grok-4", "grok-4-fast"],
-        ),
-        hosted_openai(
-            "together",
-            "Together AI",
-            "Open models at scale (Llama, Qwen, DeepSeek, …).",
-            "https://api.together.xyz/v1",
-            "https://api.together.ai/settings/api-keys",
-            &[],
-        ),
-        hosted_openai(
-            "fireworks",
-            "Fireworks AI",
-            "Fast open-model inference.",
-            "https://api.fireworks.ai/inference/v1",
-            "https://fireworks.ai/account/api-keys",
-            &[],
-        ),
-        hosted_openai(
-            "cerebras",
-            "Cerebras",
-            "Wafer-scale inference for open models.",
-            "https://api.cerebras.ai/v1",
-            "https://cloud.cerebras.ai",
-            &["llama-3.3-70b", "qwen-3-235b-a22b-instruct-2507"],
-        ),
-        hosted_openai(
             "perplexity",
             "Perplexity",
             "Sonar models with built-in web search.",
             "https://api.perplexity.ai",
             "https://www.perplexity.ai/settings/api",
             &["sonar", "sonar-pro", "sonar-reasoning"],
-        ),
-        hosted_openai(
-            "gemini",
-            "Google Gemini",
-            "Gemini models via the OpenAI-compatible endpoint.",
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-            "https://aistudio.google.com/apikey",
-            &["gemini-2.5-pro", "gemini-2.5-flash"],
         ),
         hosted_openai(
             "zai",
@@ -275,7 +219,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         base_url_locked: true,
         requires_api_key: true,
         logo_asset: "provider-catalog/minimax.svg".to_string(),
-        curated_models: ["MiniMax-M2"].iter().map(|m| model(m)).collect(),
+        curated_models: vec![model_with_capabilities("MiniMax-M2", true, false)],
         docs_url: Some("https://www.minimax.io/platform".to_string()),
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::None,
@@ -431,6 +375,17 @@ mod tests {
     }
 
     #[test]
+    fn minimax_declares_curated_only_non_vision_models() {
+        let e = get_entry("minimax").expect("minimax present");
+        assert!(matches!(e.models_endpoint_style, ModelsEndpointStyle::None));
+        assert!(e
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| !caps.supports_images));
+        assert!(e.curated_models.iter().all(|m| !m.supports_images));
+    }
+
+    #[test]
     fn get_entry_returns_none_for_unknown_brand() {
         assert!(get_entry("definitely-not-a-provider").is_none());
         assert!(get_entry("openai").is_some());
@@ -441,5 +396,20 @@ mod tests {
         let e = get_entry("openai").expect("openai present");
         assert!(e.base_url_locked);
         assert!(e.requires_api_key);
+    }
+
+    #[test]
+    fn long_tail_hosted_providers_are_not_bundled() {
+        for id in [
+            "cerebras",
+            "fireworks",
+            "gemini",
+            "groq",
+            "mistral",
+            "together",
+            "xai",
+        ] {
+            assert!(get_entry(id).is_none(), "{id} should not be in the catalog");
+        }
     }
 }

@@ -536,8 +536,7 @@ pub async fn assistant_connection_supports_images(
 ) -> Result<bool, String> {
     let connection = provider_connection(state.inner(), &connection_id)?;
     Ok(crate::assistant::providers::connection_supports_images(
-        &connection.protocol_id,
-        &connection.model_id,
+        &connection,
     ))
 }
 

@@ -418,8 +418,8 @@ pub struct ToolInvocation {
 pub struct ProviderConnection {
     pub id: String,
     pub name: String,
-    /// Wire/execution protocol adapter key: openai | anthropic | claude |
-    /// codex | opencode | gemini. Drives adapter/CLI dispatch.
+    /// Wire/execution protocol adapter key: openai | anthropic | claude-code |
+    /// codex | opencode. Drives adapter/CLI dispatch.
     ///
     /// `#[serde(default)]` so a *legacy* config (which stored the protocol
     /// under the old `providerId` key, now absorbed by the brand `provider_id`
@@ -427,7 +427,7 @@ pub struct ProviderConnection {
     /// `ConfigManager` then migrates it — see `normalize_provider_connections`.
     #[serde(default)]
     pub protocol_id: String,
-    /// Brand/catalog id (`openai`, `groq`, `ollama`, `minimax`, `claude-code`,
+    /// Brand/catalog id (`openai`, `ollama`, `minimax`, `claude-code`,
     /// …) — the `ProviderCatalogEntry::id` this connection was created from.
     /// Drives the logo, display grouping, and per-provider quirk data. For a
     /// vanilla OpenAI/Anthropic or CLI connection, brand == protocol value.

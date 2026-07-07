@@ -272,8 +272,7 @@ pub async fn run_session_turn(
         let provider_history =
             compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
         let normalized = normalize_history_for_provider(&provider_history);
-        let supports_images =
-            providers::connection_supports_images(&connection.protocol_id, &connection.model_id);
+        let supports_images = providers::connection_supports_images(&connection);
         // Drop image parts from history when the active connection can't accept
         // them (e.g. user switched to a non-vision provider mid-conversation).
         // The gate stops *new* image attachments; this keeps replayed history

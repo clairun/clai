@@ -17,6 +17,7 @@ use crate::assistant::types::{
     ToolInvocationDraft,
 };
 
+use super::catalog::{self, ModelsEndpointStyle};
 use super::types::{ProviderAdapter, ProviderError};
 
 pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
@@ -51,6 +52,13 @@ impl ProviderAdapter for AnthropicAdapter {
         &self,
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
+        // Quirk-as-data: an entry that declares no live models endpoint returns
+        // its curated list instead of hitting `/models`.
+        if let Some(entry) = catalog::get_entry(&connection.provider_id) {
+            if matches!(entry.models_endpoint_style, ModelsEndpointStyle::None) {
+                return Ok(entry.curated_models);
+            }
+        }
         let api_key = get_api_key(connection)?;
         let base = base_url(connection);
         let url = format!("{}/v1/models", base);

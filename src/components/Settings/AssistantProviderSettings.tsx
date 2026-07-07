@@ -220,12 +220,6 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     };
   }, [isCliAdapter, form.protocolId]);
 
-  // Provider-connection dependents (workspace agents that reference a
-  // connection) are no longer enumerated client-side — the backend
-  // `provider_connection_delete` refuses deletion with a clear message
-  // including the count when dependents exist.
-  const dependencyCounts = useMemo(() => new Map(), []);
-
   const beginCreate = useCallback(() => {
     setEditingId(null);
     setSelectedEntry(null);
@@ -321,6 +315,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     try {
       const models = await assistantClient.probeCatalogModels({
         protocolId: form.protocolId,
+        providerId: selectedEntry?.id || form.providerId || null,
         baseUrl: form.baseUrl.trim() || selectedEntry?.defaultBaseUrl || null,
         apiKey: form.apiKey.trim() || null,
       });
@@ -607,9 +602,6 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                         ? (connection.baseUrl || CLI_BINARY_PLACEHOLDERS[connection.protocolId] || connection.protocolId)
                         : (connection.baseUrl || 'api.openai.com/v1')}
                     </code>
-                  </span>
-                  <span className={styles.providerCommand}>
-                    used by {dependencyCounts.get(connection.id) || 0} agent(s)
                   </span>
                 </div>
               </div>
