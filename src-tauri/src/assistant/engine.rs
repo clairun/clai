@@ -98,7 +98,7 @@ pub async fn run_session_turn(
         None => None,
     };
 
-    if providers::is_cli_provider(&connection.provider_id) {
+    if providers::is_cli_provider(&connection.protocol_id) {
         return crate::assistant::local_agent::run_session_turn(deps, input).await;
     }
 
@@ -121,7 +121,7 @@ pub async fn run_session_turn(
                     status: RunStatus::Queued,
                     trigger: input.trigger.clone(),
                     connection_id: connection.id.clone(),
-                    provider_id: connection.provider_id.clone(),
+                    protocol_id: connection.protocol_id.clone(),
                     model_id: connection.model_id.clone(),
                     usage: None,
                     error: None,
@@ -147,7 +147,7 @@ pub async fn run_session_turn(
     }
 
     // Resolve adapter
-    let adapter = providers::resolve_adapter(&connection.provider_id)?;
+    let adapter = providers::resolve_adapter(&connection.protocol_id)?;
 
     // Get available tools for this session's context
     let external_tools = {
@@ -272,8 +272,7 @@ pub async fn run_session_turn(
         let provider_history =
             compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
         let normalized = normalize_history_for_provider(&provider_history);
-        let supports_images =
-            providers::connection_supports_images(&connection.provider_id, &connection.model_id);
+        let supports_images = providers::connection_supports_images(&connection);
         // Drop image parts from history when the active connection can't accept
         // them (e.g. user switched to a non-vision provider mid-conversation).
         // The gate stops *new* image attachments; this keeps replayed history
@@ -291,7 +290,7 @@ pub async fn run_session_turn(
         // Resolve image files to inline base64 for image-capable API providers.
         // CLI providers ingest images via their own mechanism (file paths in the
         // CLI invocation), not this HTTP request, so they don't need inlining.
-        let images = if supports_images && !providers::is_cli_provider(&connection.provider_id) {
+        let images = if supports_images && !providers::is_cli_provider(&connection.protocol_id) {
             resolve_request_images(deps, &session, &provider_messages).await
         } else {
             std::collections::HashMap::new()

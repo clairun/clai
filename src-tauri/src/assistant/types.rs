@@ -317,7 +317,7 @@ pub struct AssistantRun {
     pub status: RunStatus,
     pub trigger: RunTrigger,
     pub connection_id: String,
-    pub provider_id: String,
+    pub protocol_id: String,
     pub model_id: String,
     pub started_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,7 +373,7 @@ pub struct AssistantCompaction {
     pub summary_message_id: Option<MessageId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_run_id: Option<RunId>,
-    pub provider_id: String,
+    pub protocol_id: String,
     pub model_id: String,
     pub input_message_count: i64,
     pub created_at: i64,
@@ -418,6 +418,20 @@ pub struct ToolInvocation {
 pub struct ProviderConnection {
     pub id: String,
     pub name: String,
+    /// Wire/execution protocol adapter key: openai | anthropic | claude-code |
+    /// codex | opencode. Drives adapter/CLI dispatch.
+    ///
+    /// `#[serde(default)]` so a *legacy* config (which stored the protocol
+    /// under the old `providerId` key, now absorbed by the brand `provider_id`
+    /// field below) still deserializes instead of crashing the app on load.
+    /// `ConfigManager` then migrates it — see `normalize_provider_connections`.
+    #[serde(default)]
+    pub protocol_id: String,
+    /// Brand/catalog id (`openai`, `ollama`, `minimax`, `claude-code`,
+    /// …) — the `ProviderCatalogEntry::id` this connection was created from.
+    /// Drives the logo, display grouping, and per-provider quirk data. For a
+    /// vanilla OpenAI/Anthropic or CLI connection, brand == protocol value.
+    #[serde(default)]
     pub provider_id: String,
     pub auth_mode: AuthMode,
     #[serde(skip_serializing_if = "Option::is_none")]

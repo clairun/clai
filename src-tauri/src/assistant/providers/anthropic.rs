@@ -17,6 +17,7 @@ use crate::assistant::types::{
     ToolInvocationDraft,
 };
 
+use super::catalog::{self, ModelsEndpointStyle};
 use super::types::{ProviderAdapter, ProviderError};
 
 pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
@@ -51,13 +52,31 @@ impl ProviderAdapter for AnthropicAdapter {
         &self,
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
+        // Quirk-as-data: route model listing per the catalog entry's declared
+        // style — curated list only, or a dedicated models URL apart from the
+        // chat base (e.g. MiniMax).
+        if let Some(entry) = catalog::get_entry(&connection.provider_id) {
+            match &entry.models_endpoint_style {
+                ModelsEndpointStyle::None => return Ok(entry.curated_models.clone()),
+                ModelsEndpointStyle::OpenAiCompatible { url } => {
+                    let api_key = get_api_key(connection)?;
+                    return super::fetch_models_openai_compatible(
+                        url,
+                        Some(api_key.as_str()),
+                        entry.capabilities.as_ref(),
+                    )
+                    .await;
+                }
+                ModelsEndpointStyle::Standard => {}
+            }
+        }
         let api_key = get_api_key(connection)?;
         let base = base_url(connection);
         let url = format!("{}/v1/models", base);
 
         tracing::info!(
             url = %url,
-            provider_id = %connection.provider_id,
+            protocol_id = %connection.protocol_id,
             "Fetching models from Anthropic-compatible provider"
         );
 

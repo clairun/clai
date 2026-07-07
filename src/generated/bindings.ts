@@ -5,7 +5,7 @@ export type AddSkillSourceRequest = { name: string, kind: string | null, path: s
 
 export type AskUserOption = { label: string, description: string | null, };
 
-export type AssistantCompaction = { id: string, sessionId: string, trigger: CompactionTrigger, strategy: CompactionStrategy, status: CompactionStatus, sourceFromMessageId: string | null, sourceToMessageId: string | null, summaryMessageId: string | null, createdRunId: string | null, providerId: string, modelId: string, inputMessageCount: bigint, createdAt: bigint, completedAt: bigint | null, error: string | null, };
+export type AssistantCompaction = { id: string, sessionId: string, trigger: CompactionTrigger, strategy: CompactionStrategy, status: CompactionStatus, sourceFromMessageId: string | null, sourceToMessageId: string | null, summaryMessageId: string | null, createdRunId: string | null, protocolId: string, modelId: string, inputMessageCount: bigint, createdAt: bigint, completedAt: bigint | null, error: string | null, };
 
 export type AssistantEventEnvelope = { sessionId: string, runId: string | null, 
 /**
@@ -28,7 +28,7 @@ export type AssistantMessagePage = { messages: Array<AssistantMessage>, toolCall
  */
 totalCount: number, };
 
-export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, providerId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, usage: RunUsage | null, error: string | null, notices?: Array<RunNotice>, };
+export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, usage: RunUsage | null, error: string | null, notices?: Array<RunNotice>, };
 
 export type AssistantSession = { id: string, kind: SessionKind, title: string | null, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
 
@@ -64,7 +64,11 @@ media_type: string, filename?: string | null, width?: number | null, height?: nu
 
 export type CreateMcpServerRequest = { name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
-export type CreateProviderConnectionRequest = { name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
+export type CreateProviderConnectionRequest = { name: string, protocolId: string, 
+/**
+ * Brand/catalog id. Defaults to `protocol_id` when omitted.
+ */
+providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
 export type FilesystemPathAccess = "read_only" | "read_write";
 
@@ -96,6 +100,11 @@ export type ModelInfo = { id: string, displayName: string, supportsTools: boolea
  */
 supportsImages: boolean, };
 
+/**
+ * How to list models for the provider (quirk-as-data).
+ */
+export type ModelsEndpointStyle = "standard" | "none" | { "open_ai_compatible": { url: string, } };
+
 export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
 /**
@@ -124,9 +133,90 @@ export type PermissionRequest = { requestId: string, workspaceId: string | null,
 
 export type PermissionScope = "agent";
 
+export type ProbeModelsRequest = { protocolId: string, 
+/**
+ * Existing connection to probe with. When present and no replacement
+ * `api_key` is supplied, the probe reuses the connection's stored secret.
+ */
+connectionId: string | null, 
+/**
+ * Brand/catalog id, if probing a catalog preset. Needed so brand-scoped
+ * quirks (OpenRouter headers, MiniMax's dedicated models endpoint) apply.
+ */
+providerId: string | null, baseUrl: string | null, apiKey: string | null, };
+
 export type ProtocolFamily = "open_ai_compatible" | "anthropic" | "custom";
 
-export type ProviderConnection = { id: string, name: string, providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
+/**
+ * Provider-level capability defaults, used when a live model list is
+ * unavailable/thin (keyless or offline providers).
+ */
+export type ProviderCaps = { supportsTools: boolean, supportsImages: boolean, };
+
+/**
+ * A single predefined provider preset.
+ */
+export type ProviderCatalogEntry = { 
+/**
+ * Brand/catalog id — becomes the connection's `provider_id`.
+ */
+id: string, displayName: string, description: string, category: ProviderCategory, 
+/**
+ * Wire protocol adapter key — becomes the connection's `protocol_id`.
+ */
+protocolId: string, defaultBaseUrl: string | null, 
+/**
+ * Hosted SaaS: endpoint fixed (advanced-override only). Self-hosted/custom: editable.
+ */
+baseUrlLocked: boolean, 
+/**
+ * `false` for keyless self-hosted providers (ollama / lmstudio / vllm).
+ */
+requiresApiKey: boolean, 
+/**
+ * Frontend asset path, e.g. `provider-catalog/openrouter.svg`.
+ */
+logoAsset: string, 
+/**
+ * Fallback model list when a live `/v1/models` probe is unavailable.
+ */
+curatedModels: Array<ModelInfo>, 
+/**
+ * "Where do I get my API key?" link.
+ */
+docsUrl: string | null, 
+/**
+ * Extra request headers (e.g. OpenRouter attribution).
+ */
+extraHeaders: Array<[string, string]>, modelsEndpointStyle: ModelsEndpointStyle, 
+/**
+ * Capability defaults when the models endpoint is thin/absent.
+ */
+capabilities: ProviderCaps | null, };
+
+/**
+ * Where a catalog entry sits in the picker (also drives form defaults).
+ */
+export type ProviderCategory = "hosted" | "self_hosted" | "cli" | "custom";
+
+export type ProviderConnection = { id: string, name: string, 
+/**
+ * Wire/execution protocol adapter key: openai | anthropic | claude-code |
+ * codex | opencode. Drives adapter/CLI dispatch.
+ *
+ * `#[serde(default)]` so a *legacy* config (which stored the protocol
+ * under the old `providerId` key, now absorbed by the brand `provider_id`
+ * field below) still deserializes instead of crashing the app on load.
+ * `ConfigManager` then migrates it — see `normalize_provider_connections`.
+ */
+protocolId: string, 
+/**
+ * Brand/catalog id (`openai`, `ollama`, `minimax`, `claude-code`,
+ * …) — the `ProviderCatalogEntry::id` this connection was created from.
+ * Drives the logo, display grouping, and per-provider quirk data. For a
+ * vanilla OpenAI/Anthropic or CLI connection, brand == protocol value.
+ */
+providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
@@ -253,7 +343,11 @@ export type ToolInvocation = { id: string, runId: string, sessionId: string, too
 
 export type UpdateMcpServerRequest = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
-export type UpdateProviderConnectionRequest = { id: string, name: string, providerId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
+export type UpdateProviderConnectionRequest = { id: string, name: string, protocolId: string, 
+/**
+ * Brand/catalog id. Defaults to `protocol_id` when omitted.
+ */
+providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 
 export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, role: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
 /**

@@ -17,6 +17,7 @@ use crate::assistant::types::{
     ToolInvocationDraft,
 };
 
+use super::catalog::{self, ModelsEndpointStyle};
 use super::types::{ProviderAdapter, ProviderError};
 
 pub const OPENAI_PROVIDER_ID: &str = "openai";
@@ -48,7 +49,24 @@ impl ProviderAdapter for OpenAiAdapter {
         &self,
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
-        let api_key = get_api_key(connection)?;
+        let api_key = get_api_key_opt(connection);
+        // Quirk-as-data: route model listing per the catalog entry's declared
+        // style — curated list only, or a dedicated models URL apart from the
+        // chat base (e.g. MiniMax).
+        if let Some(entry) = catalog::get_entry(&connection.provider_id) {
+            match &entry.models_endpoint_style {
+                ModelsEndpointStyle::None => return Ok(entry.curated_models.clone()),
+                ModelsEndpointStyle::OpenAiCompatible { url } => {
+                    return super::fetch_models_openai_compatible(
+                        url,
+                        api_key.as_deref(),
+                        entry.capabilities.as_ref(),
+                    )
+                    .await;
+                }
+                ModelsEndpointStyle::Standard => {}
+            }
+        }
         let models_url = {
             let base = connection
                 .base_url
@@ -64,20 +82,22 @@ impl ProviderAdapter for OpenAiAdapter {
 
         tracing::info!(
             url = %models_url,
-            provider_id = %connection.provider_id,
+            protocol_id = %connection.protocol_id,
             "Fetching models from provider"
         );
 
         let client = Client::new();
-        let resp = client
-            .get(&models_url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(url = %models_url, error = %e, "HTTP request failed");
-                ProviderError::RequestFailed(e.to_string())
-            })?;
+        let mut builder = client.get(&models_url);
+        if let Some(key) = &api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+        for (name, value) in catalog_extra_headers(connection) {
+            builder = builder.header(name, value);
+        }
+        let resp = builder.send().await.map_err(|e| {
+            tracing::error!(url = %models_url, error = %e, "HTTP request failed");
+            ProviderError::RequestFailed(e.to_string())
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -129,16 +149,22 @@ impl ProviderAdapter for OpenAiAdapter {
         Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>,
         ProviderError,
     > {
-        let api_key = get_api_key(connection)?;
+        let api_key = get_api_key_opt(connection);
         let url = completions_url(connection);
         let body = build_request_body(&request);
 
         let client = Client::new();
-        let resp = client
+        let mut builder = client
             .post(url)
-            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .json(&body)
+            .json(&body);
+        if let Some(key) = &api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+        for (name, value) in catalog_extra_headers(connection) {
+            builder = builder.header(name, value);
+        }
+        let resp = builder
             .send()
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
@@ -159,10 +185,25 @@ impl ProviderAdapter for OpenAiAdapter {
     }
 }
 
-fn get_api_key(connection: &ProviderConnection) -> Result<String, ProviderError> {
+/// Read the stored API key, if any. Returns `None` for keyless self-hosted
+/// providers (ollama / LM Studio / vLLM) that store no secret — the request is
+/// then sent without an `Authorization` header. A hosted provider with no key
+/// simply gets a 401 from the server, which surfaces as a normal error.
+/// Per-provider extra headers declared as data on the catalog entry (resolved
+/// via the connection's brand `provider_id`) — e.g. OpenRouter's attribution
+/// headers. Empty for connections with no catalog entry.
+fn catalog_extra_headers(connection: &ProviderConnection) -> Vec<(String, String)> {
+    catalog::get_entry(&connection.provider_id)
+        .map(|e| e.extra_headers)
+        .unwrap_or_default()
+}
+
+fn get_api_key_opt(connection: &ProviderConnection) -> Option<String> {
     ProviderSecretStorage::get_secret(&connection.secret_ref)
-        .map_err(|e| ProviderError::RequestFailed(format!("Failed to read API key: {}", e)))?
-        .ok_or(ProviderError::NotConfigured)
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn completions_url(connection: &ProviderConnection) -> String {
@@ -779,5 +820,32 @@ mod tests {
             event,
             Ok(ProviderEvent::TextDelta { text }) if text == "€"
         )));
+    }
+    fn conn_with_brand(brand: &str) -> ProviderConnection {
+        ProviderConnection {
+            id: "t".into(),
+            name: "t".into(),
+            protocol_id: "openai".into(),
+            provider_id: brand.into(),
+            auth_mode: AuthMode::DeveloperApiKey,
+            base_url: None,
+            secret_ref: "provider-connection::t".into(),
+            model_id: String::new(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn catalog_extra_headers_are_brand_scoped() {
+        // OpenRouter's attribution headers come from its catalog entry.
+        let openrouter = catalog_extra_headers(&conn_with_brand("openrouter"));
+        assert!(openrouter.iter().any(|(k, _)| k == "HTTP-Referer"));
+        assert!(openrouter.iter().any(|(k, _)| k == "X-Title"));
+        // A brand with no extra headers (or no catalog entry) yields none.
+        assert!(catalog_extra_headers(&conn_with_brand("openai")).is_empty());
+        assert!(catalog_extra_headers(&conn_with_brand("not-a-brand")).is_empty());
     }
 }
