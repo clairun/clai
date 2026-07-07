@@ -13,6 +13,7 @@ import styles from './ProviderSettings.module.css';
 // same pattern (and stylesheet) as the MCP server form, so the two item
 // editors look and behave identically.
 import modalStyles from './McpServerFormModal.module.css';
+import { openExternal } from '../../utils/openExternal';
 
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
 
@@ -80,10 +81,98 @@ const CLI_BINARY_PLACEHOLDERS: Record<string, string> = {
   opencode: 'opencode',
 };
 
+const OFFICIAL_PROVIDER_BASE_URLS: Record<string, string> = {
+  openai: 'https://api.openai.com/v1',
+  anthropic: 'https://api.anthropic.com',
+};
+
+const DARK_THEME_LOGOS = new Set(['anthropic', 'codex', 'opencode']);
+
+const normalizeBaseUrl = (value?: string | null): string =>
+  (value || '').trim().replace(/\/+$/, '').toLowerCase();
+
+const customProviderIdForProtocol = (protocolId: string): string | null => {
+  if (protocolId === 'openai') return 'custom-openai';
+  if (protocolId === 'anthropic') return 'custom-anthropic';
+  return null;
+};
+
+const isCustomEndpointForProtocolBrand = (
+  protocolId: string,
+  providerId: string,
+  baseUrl?: string | null,
+): boolean => {
+  if (providerId !== protocolId) return false;
+  const officialBaseUrl = OFFICIAL_PROVIDER_BASE_URLS[protocolId];
+  if (!officialBaseUrl) return false;
+  const currentBaseUrl = normalizeBaseUrl(baseUrl);
+  return currentBaseUrl.length > 0 && currentBaseUrl !== normalizeBaseUrl(officialBaseUrl);
+};
+
+const catalogProviderIdForEndpoint = (
+  connection: ProviderConnection,
+  catalog: ProviderCatalogEntry[],
+): string | null => {
+  const currentBaseUrl = normalizeBaseUrl(connection.baseUrl);
+  if (!currentBaseUrl) return null;
+  return catalog.find((entry) =>
+    entry.protocolId === connection.protocolId
+    && normalizeBaseUrl(entry.defaultBaseUrl) === currentBaseUrl
+  )?.id || null;
+};
+
+const displayProviderIdForConnection = (
+  connection: ProviderConnection,
+  catalog: ProviderCatalogEntry[] = [],
+): string => {
+  const providerId = connection.providerId || connection.protocolId;
+  if (providerId === connection.protocolId) {
+    const catalogMatch = catalogProviderIdForEndpoint(connection, catalog);
+    if (catalogMatch) return catalogMatch;
+  }
+  if (isCustomEndpointForProtocolBrand(connection.protocolId, providerId, connection.baseUrl)) {
+    return customProviderIdForProtocol(connection.protocolId) || providerId;
+  }
+  return providerId;
+};
+
+const catalogEntryForConnection = (
+  connection: ProviderConnection,
+  catalog: ProviderCatalogEntry[],
+): ProviderCatalogEntry | null => {
+  const displayProviderId = displayProviderIdForConnection(connection, catalog);
+  return catalog.find((entry) => entry.id === displayProviderId)
+    || catalog.find((entry) => entry.id === connection.providerId)
+    || null;
+};
+
+const useAppTheme = (): 'light' | 'dark' => {
+  const getTheme = () =>
+    document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+  const [theme, setTheme] = useState<'light' | 'dark'>(getTheme);
+
+  useEffect(() => {
+    const observer = new MutationObserver(() => setTheme(getTheme()));
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['data-theme'],
+    });
+    return () => observer.disconnect();
+  }, []);
+
+  return theme;
+};
+
 /** Brand logo with a monogram fallback so a missing SVG never breaks the UI. */
 const ProviderLogo = ({ providerId, size = 28 }: { providerId: string; size?: number }) => {
-  const [failed, setFailed] = useState(false);
-  const letter = (providerId || '?').trim().charAt(0).toUpperCase() || '?';
+  const theme = useAppTheme();
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const normalizedProviderId = (providerId || '').trim();
+  const themedProviderId = theme === 'dark' && DARK_THEME_LOGOS.has(normalizedProviderId)
+    ? `${normalizedProviderId}-dark`
+    : normalizedProviderId;
+  const imageSrc = themedProviderId ? `/provider-catalog/${themedProviderId}.svg` : '';
+  const letter = (normalizedProviderId || '?').charAt(0).toUpperCase() || '?';
   const box: React.CSSProperties = {
     width: size,
     height: size,
@@ -94,7 +183,8 @@ const ProviderLogo = ({ providerId, size = 28 }: { providerId: string; size?: nu
     justifyContent: 'center',
     objectFit: 'contain',
   };
-  if (failed || !providerId) {
+
+  if (failedSrc === imageSrc || !normalizedProviderId) {
     return (
       <div
         style={{
@@ -113,10 +203,10 @@ const ProviderLogo = ({ providerId, size = 28 }: { providerId: string; size?: nu
   }
   return (
     <img
-      src={`/provider-catalog/${providerId}.svg`}
+      src={imageSrc}
       alt=""
       style={box}
-      onError={() => setFailed(true)}
+      onError={() => setFailedSrc(imageSrc)}
     />
   );
 };
@@ -270,15 +360,17 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
 
   const beginEdit = useCallback(
     (connection: ProviderConnection) => {
+      const nextSelectedEntry = catalogEntryForConnection(connection, catalog);
+      const nextProviderId = nextSelectedEntry?.id || displayProviderIdForConnection(connection, catalog);
       setEditingId(connection.id);
-      setSelectedEntry(catalog.find((e) => e.id === connection.providerId) || null);
+      setSelectedEntry(nextSelectedEntry);
       setProbeModels([]);
       setShowAdvancedUrl(Boolean(connection.baseUrl));
       setForm({
         id: connection.id,
         name: connection.name,
         protocolId: connection.protocolId,
-        providerId: connection.providerId || connection.protocolId,
+        providerId: nextProviderId,
         apiKey: '',
         baseUrl: connection.baseUrl || '',
         modelId: connection.modelId,
@@ -315,6 +407,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     try {
       const models = await assistantClient.probeCatalogModels({
         protocolId: form.protocolId,
+        connectionId: editingId,
         providerId: selectedEntry?.id || form.providerId || null,
         baseUrl: form.baseUrl.trim() || selectedEntry?.defaultBaseUrl || null,
         apiKey: form.apiKey.trim() || null,
@@ -334,7 +427,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     } finally {
       setProbing(false);
     }
-  }, [form.protocolId, form.baseUrl, form.apiKey, selectedEntry]);
+  }, [editingId, form.protocolId, form.providerId, form.baseUrl, form.apiKey, selectedEntry]);
 
   const handleSubmit = useCallback(async () => {
     if (!form.name.trim()) {
@@ -587,7 +680,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
-                <ProviderLogo providerId={connection.providerId || connection.protocolId} size={28} />
+                <ProviderLogo providerId={displayProviderIdForConnection(connection, catalog)} size={28} />
                 <div className={styles.providerInfo}>
                   <div className={styles.providerMain}>
                     <span className={styles.providerName}>{connection.name}</span>
@@ -762,8 +855,13 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                   {selectedEntry?.docsUrl && (
                     <a
                       href={selectedEntry.docsUrl}
-                      target="_blank"
-                      rel="noreferrer"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        if (!selectedEntry.docsUrl) return;
+                        openExternal(selectedEntry.docsUrl).catch((err) => {
+                          console.error('[AssistantProviderSettings] Failed to open provider docs:', err);
+                        });
+                      }}
                       style={{ fontSize: '11px', color: 'var(--color-primary)', marginTop: '4px', display: 'inline-block' }}
                     >
                       Where do I get an API key? ↗

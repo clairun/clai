@@ -55,6 +55,10 @@ pub struct UpdateProviderConnectionRequest {
 #[ts(export, export_to = "bindings.ts")]
 pub struct ProbeModelsRequest {
     pub protocol_id: String,
+    /// Existing connection to probe with. When present and no replacement
+    /// `api_key` is supplied, the probe reuses the connection's stored secret.
+    #[serde(default)]
+    pub connection_id: Option<String>,
     /// Brand/catalog id, if probing a catalog preset. Needed so brand-scoped
     /// quirks (OpenRouter headers, MiniMax's curated-only model list) apply.
     #[serde(default)]
@@ -93,25 +97,49 @@ pub async fn provider_catalog_list() -> Result<Vec<ProviderCatalogEntry>, String
 #[tauri::command]
 pub async fn provider_catalog_probe_models(
     request: ProbeModelsRequest,
+    state: State<'_, AppState>,
 ) -> Result<Vec<ModelInfo>, String> {
     // CLI providers have static lists — no live probe needed.
     if let Some(models) = cli::models_for_provider(&request.protocol_id) {
         return Ok(models);
     }
 
+    let existing_connection = if let Some(connection_id) = request
+        .connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let config = state
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        Some(
+            config
+                .get_provider_connection(connection_id)
+                .ok_or_else(|| format!("Provider connection not found: {}", connection_id))?,
+        )
+    } else {
+        None
+    };
+
     let probe_id = uuid::Uuid::new_v4().to_string();
-    let secret_ref = format!("provider-probe::{}", probe_id);
+    let probe_secret_ref = format!("provider-probe::{}", probe_id);
     let key = request
         .api_key
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty());
-    let stored_key = if let Some(key) = key {
-        ProviderSecretStorage::set_secret(&secret_ref, key)
+    let mut stored_key = false;
+    let secret_ref = if let Some(key) = key {
+        ProviderSecretStorage::set_secret(&probe_secret_ref, key)
             .map_err(|e| format!("Failed to store probe credential: {}", e))?;
-        true
+        stored_key = true;
+        probe_secret_ref.clone()
+    } else if let Some(existing) = existing_connection.as_ref() {
+        existing.secret_ref.clone()
     } else {
-        false
+        probe_secret_ref.clone()
     };
     let brand_id = request
         .provider_id
@@ -119,26 +147,45 @@ pub async fn provider_catalog_probe_models(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string)
+        .or_else(|| existing_connection.as_ref().map(|conn| conn.provider_id.clone()))
         .unwrap_or_else(|| request.protocol_id.clone());
 
     let connection = ProviderConnection {
-        id: probe_id,
+        id: existing_connection
+            .as_ref()
+            .map(|conn| conn.id.clone())
+            .unwrap_or(probe_id),
         name: "probe".to_string(),
         protocol_id: request.protocol_id.clone(),
         provider_id: brand_id,
-        auth_mode: AuthMode::DeveloperApiKey,
+        auth_mode: existing_connection
+            .as_ref()
+            .map(|conn| conn.auth_mode.clone())
+            .unwrap_or(AuthMode::DeveloperApiKey),
         base_url: request
             .base_url
             .as_deref()
             .map(str::trim)
             .filter(|v| !v.is_empty())
-            .map(str::to_string),
+            .map(str::to_string)
+            .or_else(|| existing_connection.as_ref().and_then(|conn| conn.base_url.clone())),
         secret_ref: secret_ref.clone(),
-        model_id: String::new(),
-        account_label: None,
+        model_id: existing_connection
+            .as_ref()
+            .map(|conn| conn.model_id.clone())
+            .unwrap_or_default(),
+        account_label: existing_connection
+            .as_ref()
+            .and_then(|conn| conn.account_label.clone()),
         enabled: true,
-        created_at: 0,
-        updated_at: 0,
+        created_at: existing_connection
+            .as_ref()
+            .map(|conn| conn.created_at)
+            .unwrap_or(0),
+        updated_at: existing_connection
+            .as_ref()
+            .map(|conn| conn.updated_at)
+            .unwrap_or(0),
     };
 
     let adapter = providers::resolve_adapter(&request.protocol_id).map_err(|e| e.to_string());
@@ -151,7 +198,7 @@ pub async fn provider_catalog_probe_models(
     };
 
     if stored_key {
-        let _ = ProviderSecretStorage::clear_secret(&secret_ref);
+        let _ = ProviderSecretStorage::clear_secret(&probe_secret_ref);
     }
     result
 }
