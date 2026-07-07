@@ -133,12 +133,12 @@ export type PermissionRequest = { requestId: string, workspaceId: string | null,
 
 export type PermissionScope = "agent";
 
-export type ProbeModelsRequest = { protocolId: string,
+export type ProbeModelsRequest = { protocolId: string, 
 /**
  * Existing connection to probe with. When present and no replacement
  * `api_key` is supplied, the probe reuses the connection's stored secret.
  */
-connectionId: string | null,
+connectionId: string | null, 
 /**
  * Brand/catalog id, if probing a catalog preset. Needed so brand-scoped
  * quirks (OpenRouter headers, MiniMax's curated-only model list) apply.
