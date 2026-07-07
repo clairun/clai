@@ -235,6 +235,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
           id: editingId,
           name: form.name.trim(),
           protocolId: form.protocolId,
+          providerId: form.protocolId,
           apiKey: isCliAdapter ? null : form.apiKey.trim() || null,
           authMode,
           baseUrl: form.baseUrl.trim() || null,
@@ -247,6 +248,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
         await assistantClient.createProviderConnection({
           name: form.name.trim(),
           protocolId: form.protocolId,
+          providerId: form.protocolId,
           apiKey: isCliAdapter ? null : form.apiKey.trim(),
           authMode,
           baseUrl: form.baseUrl.trim() || null,

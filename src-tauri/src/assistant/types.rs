@@ -420,8 +420,13 @@ pub struct ProviderConnection {
     pub name: String,
     /// Wire/execution protocol adapter key: openai | anthropic | claude |
     /// codex | opencode | gemini. Drives adapter/CLI dispatch.
-    /// (Stage 2 adds a `provider_id` brand/catalog field alongside this.)
     pub protocol_id: String,
+    /// Brand/catalog id (`openai`, `groq`, `ollama`, `minimax`, `claude-code`,
+    /// …) — the `ProviderCatalogEntry::id` this connection was created from.
+    /// Drives the logo, display grouping, and per-provider quirk data. For a
+    /// vanilla OpenAI/Anthropic or CLI connection, brand == protocol value.
+    #[serde(default)]
+    pub provider_id: String,
     pub auth_mode: AuthMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,

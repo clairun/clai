@@ -216,6 +216,7 @@ pub fn run() {
                 id,
                 name,
                 protocol_id: provider_id.to_string(),
+                provider_id: provider_id.to_string(),
                 auth_mode: crate::assistant::types::AuthMode::SubscriptionLogin,
                 base_url: None,
                 model_id: String::new(),
@@ -357,6 +358,7 @@ pub fn run() {
             commands::provider::get_provider_models,
             // Provider connection commands for app-owned assistant runtime
             commands::provider_connections::provider_connection_list_available,
+            commands::provider_connections::provider_catalog_list,
             commands::provider_connections::provider_connection_create,
             commands::provider_connections::provider_connection_update,
             commands::provider_connections::provider_connection_delete,

@@ -64,7 +64,11 @@ media_type: string, filename?: string | null, width?: number | null, height?: nu
 
 export type CreateMcpServerRequest = { name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
-export type CreateProviderConnectionRequest = { name: string, protocolId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
+export type CreateProviderConnectionRequest = { name: string, protocolId: string, 
+/**
+ * Brand/catalog id. Defaults to `protocol_id` when omitted.
+ */
+providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
 export type FilesystemPathAccess = "read_only" | "read_write";
 
@@ -96,6 +100,11 @@ export type ModelInfo = { id: string, displayName: string, supportsTools: boolea
  */
 supportsImages: boolean, };
 
+/**
+ * How to list models for the provider (quirk-as-data).
+ */
+export type ModelsEndpointStyle = "standard" | "none";
+
 export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
 /**
@@ -126,13 +135,71 @@ export type PermissionScope = "agent";
 
 export type ProtocolFamily = "open_ai_compatible" | "anthropic" | "custom";
 
+/**
+ * Provider-level capability defaults, used when a live model list is
+ * unavailable/thin (keyless or offline providers).
+ */
+export type ProviderCaps = { supportsTools: boolean, supportsImages: boolean, };
+
+/**
+ * A single predefined provider preset.
+ */
+export type ProviderCatalogEntry = { 
+/**
+ * Brand/catalog id — becomes the connection's `provider_id`.
+ */
+id: string, displayName: string, description: string, category: ProviderCategory, 
+/**
+ * Wire protocol adapter key — becomes the connection's `protocol_id`.
+ */
+protocolId: string, defaultBaseUrl: string | null, 
+/**
+ * Hosted SaaS: endpoint fixed (advanced-override only). Self-hosted/custom: editable.
+ */
+baseUrlLocked: boolean, 
+/**
+ * `false` for keyless self-hosted providers (ollama / lmstudio / vllm).
+ */
+requiresApiKey: boolean, 
+/**
+ * Frontend asset path, e.g. `provider-catalog/groq.svg`.
+ */
+logoAsset: string, 
+/**
+ * Fallback model list when a live `/v1/models` probe is unavailable.
+ */
+curatedModels: Array<ModelInfo>, 
+/**
+ * "Where do I get my API key?" link.
+ */
+docsUrl: string | null, 
+/**
+ * Extra request headers (e.g. OpenRouter attribution).
+ */
+extraHeaders: Array<[string, string]>, modelsEndpointStyle: ModelsEndpointStyle, 
+/**
+ * Capability defaults when the models endpoint is thin/absent.
+ */
+capabilities: ProviderCaps | null, };
+
+/**
+ * Where a catalog entry sits in the picker (also drives form defaults).
+ */
+export type ProviderCategory = "hosted" | "self_hosted" | "cli" | "custom";
+
 export type ProviderConnection = { id: string, name: string, 
 /**
  * Wire/execution protocol adapter key: openai | anthropic | claude |
  * codex | opencode | gemini. Drives adapter/CLI dispatch.
- * (Stage 2 adds a `provider_id` brand/catalog field alongside this.)
  */
-protocolId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
+protocolId: string, 
+/**
+ * Brand/catalog id (`openai`, `groq`, `ollama`, `minimax`, `claude-code`,
+ * …) — the `ProviderCatalogEntry::id` this connection was created from.
+ * Drives the logo, display grouping, and per-provider quirk data. For a
+ * vanilla OpenAI/Anthropic or CLI connection, brand == protocol value.
+ */
+providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
@@ -259,7 +326,11 @@ export type ToolInvocation = { id: string, runId: string, sessionId: string, too
 
 export type UpdateMcpServerRequest = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
-export type UpdateProviderConnectionRequest = { id: string, name: string, protocolId: string, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
+export type UpdateProviderConnectionRequest = { id: string, name: string, protocolId: string, 
+/**
+ * Brand/catalog id. Defaults to `protocol_id` when omitted.
+ */
+providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 
 export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, role: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
 /**

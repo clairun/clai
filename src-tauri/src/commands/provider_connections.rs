@@ -3,7 +3,8 @@ use tauri::State;
 use ts_rs::TS;
 
 use crate::assistant::auth::ProviderSecretStorage;
-use crate::assistant::providers::{self, cli};
+use crate::assistant::providers::catalog::ProviderCatalogEntry;
+use crate::assistant::providers::{self, catalog, cli};
 use crate::assistant::types::{AuthMode, ModelInfo, ProviderConnection, ProviderDescriptor};
 use crate::AppState;
 
@@ -13,6 +14,9 @@ use crate::AppState;
 pub struct CreateProviderConnectionRequest {
     pub name: String,
     pub protocol_id: String,
+    /// Brand/catalog id. Defaults to `protocol_id` when omitted.
+    #[serde(default)]
+    pub provider_id: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -31,6 +35,9 @@ pub struct UpdateProviderConnectionRequest {
     pub id: String,
     pub name: String,
     pub protocol_id: String,
+    /// Brand/catalog id. Defaults to `protocol_id` when omitted.
+    #[serde(default)]
+    pub provider_id: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -55,6 +62,13 @@ pub struct TestResult {
 #[tauri::command]
 pub async fn provider_connection_list_available() -> Result<Vec<ProviderDescriptor>, String> {
     Ok(providers::supported_providers())
+}
+
+/// The bundled predefined-provider catalog (presets with endpoint + logo +
+/// curated models). Frontend uses it to offer a pick-a-provider flow.
+#[tauri::command]
+pub async fn provider_catalog_list() -> Result<Vec<ProviderCatalogEntry>, String> {
+    Ok(catalog::catalog_entries())
 }
 
 #[tauri::command]
@@ -92,10 +106,18 @@ pub async fn provider_connection_create(
     }
 
     let now = chrono::Utc::now().timestamp_millis();
+    let brand_id = request
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| request.protocol_id.clone());
     let connection = ProviderConnection {
         id,
         name: request.name.trim().to_string(),
         protocol_id: request.protocol_id,
+        provider_id: brand_id,
         auth_mode,
         base_url: request
             .base_url
@@ -160,10 +182,24 @@ pub async fn provider_connection_update(
         }
     }
 
+    let brand_id = request
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if existing.provider_id.is_empty() {
+                request.protocol_id.clone()
+            } else {
+                existing.provider_id.clone()
+            }
+        });
     let updated = ProviderConnection {
         id: request.id,
         name: request.name.trim().to_string(),
         protocol_id: request.protocol_id,
+        provider_id: brand_id,
         auth_mode,
         base_url: request
             .base_url

@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod catalog;
 pub mod cli;
 pub mod openai;
 pub mod registry;
