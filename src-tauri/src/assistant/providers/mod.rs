@@ -143,7 +143,9 @@ mod tests {
             "anthropic",
             ""
         )));
-        assert!(connection_supports_images(&connection("openai", "openai", "")));
+        assert!(connection_supports_images(&connection(
+            "openai", "openai", ""
+        )));
         // Unknown provider → conservative false.
         assert!(!connection_supports_images(&connection("acme", "acme", "")));
     }

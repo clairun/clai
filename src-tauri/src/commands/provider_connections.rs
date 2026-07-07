@@ -147,7 +147,11 @@ pub async fn provider_catalog_probe_models(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_string)
-        .or_else(|| existing_connection.as_ref().map(|conn| conn.provider_id.clone()))
+        .or_else(|| {
+            existing_connection
+                .as_ref()
+                .map(|conn| conn.provider_id.clone())
+        })
         .unwrap_or_else(|| request.protocol_id.clone());
 
     let connection = ProviderConnection {
@@ -168,7 +172,11 @@ pub async fn provider_catalog_probe_models(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(str::to_string)
-            .or_else(|| existing_connection.as_ref().and_then(|conn| conn.base_url.clone())),
+            .or_else(|| {
+                existing_connection
+                    .as_ref()
+                    .and_then(|conn| conn.base_url.clone())
+            }),
         secret_ref: secret_ref.clone(),
         model_id: existing_connection
             .as_ref()
@@ -507,7 +515,12 @@ pub async fn provider_connection_test(
     // and connectivity. Catalog entries with no live model endpoint skip this
     // so the test cannot pass solely from a curated static list.
     let has_live_models_endpoint = catalog::get_entry(&connection.provider_id)
-        .map(|entry| !matches!(entry.models_endpoint_style, catalog::ModelsEndpointStyle::None))
+        .map(|entry| {
+            !matches!(
+                entry.models_endpoint_style,
+                catalog::ModelsEndpointStyle::None
+            )
+        })
         .unwrap_or(true);
     if has_live_models_endpoint {
         match adapter.list_models(&connection).await {
