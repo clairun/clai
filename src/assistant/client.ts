@@ -19,6 +19,7 @@ import type {
   CreateProviderConnectionRequest,
   ModelInfo,
   ProviderConnection,
+  ProbeModelsRequest,
   ProviderCatalogEntry,
   ProviderDescriptor,
   TestResult,
@@ -187,4 +188,8 @@ export async function listAvailableProviderAdapters(): Promise<ProviderDescripto
 
 export async function listProviderCatalog(): Promise<ProviderCatalogEntry[]> {
   return invoke('provider_catalog_list');
+}
+
+export async function probeCatalogModels(request: ProbeModelsRequest): Promise<ModelInfo[]> {
+  return invoke('provider_catalog_probe_models', { request });
 }

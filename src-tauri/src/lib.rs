@@ -359,6 +359,7 @@ pub fn run() {
             // Provider connection commands for app-owned assistant runtime
             commands::provider_connections::provider_connection_list_available,
             commands::provider_connections::provider_catalog_list,
+            commands::provider_connections::provider_catalog_probe_models,
             commands::provider_connections::provider_connection_create,
             commands::provider_connections::provider_connection_update,
             commands::provider_connections::provider_connection_delete,

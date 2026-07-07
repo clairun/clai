@@ -133,6 +133,8 @@ export type PermissionRequest = { requestId: string, workspaceId: string | null,
 
 export type PermissionScope = "agent";
 
+export type ProbeModelsRequest = { protocolId: string, baseUrl: string | null, apiKey: string | null, };
+
 export type ProtocolFamily = "open_ai_compatible" | "anthropic" | "custom";
 
 /**

@@ -50,6 +50,17 @@ pub struct UpdateProviderConnectionRequest {
     pub enabled: bool,
 }
 
+#[derive(Debug, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct ProbeModelsRequest {
+    pub protocol_id: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
 #[derive(Debug, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -69,6 +80,69 @@ pub async fn provider_connection_list_available() -> Result<Vec<ProviderDescript
 #[tauri::command]
 pub async fn provider_catalog_list() -> Result<Vec<ProviderCatalogEntry>, String> {
     Ok(catalog::catalog_entries())
+}
+
+/// Probe a provider's live model list at creation time — before a connection
+/// is saved. Builds an ephemeral connection (transient secret, cleared after
+/// the call) and reuses the adapter's `list_models`. On failure the caller
+/// falls back to the catalog entry's `curated_models`.
+#[tauri::command]
+pub async fn provider_catalog_probe_models(
+    request: ProbeModelsRequest,
+) -> Result<Vec<ModelInfo>, String> {
+    // CLI providers have static lists — no live probe needed.
+    if let Some(models) = cli::models_for_provider(&request.protocol_id) {
+        return Ok(models);
+    }
+
+    let probe_id = uuid::Uuid::new_v4().to_string();
+    let secret_ref = format!("provider-probe::{}", probe_id);
+    let key = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let stored_key = if let Some(key) = key {
+        ProviderSecretStorage::set_secret(&secret_ref, key)
+            .map_err(|e| format!("Failed to store probe credential: {}", e))?;
+        true
+    } else {
+        false
+    };
+
+    let connection = ProviderConnection {
+        id: probe_id,
+        name: "probe".to_string(),
+        protocol_id: request.protocol_id.clone(),
+        provider_id: request.protocol_id.clone(),
+        auth_mode: AuthMode::DeveloperApiKey,
+        base_url: request
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+        secret_ref: secret_ref.clone(),
+        model_id: String::new(),
+        account_label: None,
+        enabled: true,
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    let adapter = providers::resolve_adapter(&request.protocol_id).map_err(|e| e.to_string());
+    let result = match adapter {
+        Ok(adapter) => adapter
+            .list_models(&connection)
+            .await
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e),
+    };
+
+    if stored_key {
+        let _ = ProviderSecretStorage::clear_secret(&secret_ref);
+    }
+    result
 }
 
 #[tauri::command]
@@ -94,18 +168,6 @@ pub async fn provider_connection_create(
     let id = uuid::Uuid::new_v4().to_string();
     let auth_mode = request.auth_mode.unwrap_or(AuthMode::DeveloperApiKey);
     let secret_ref = format!("provider-connection::{}", id);
-    if auth_mode == AuthMode::DeveloperApiKey {
-        let api_key = request
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| "API key is required for developer API key connections".to_string())?;
-        ProviderSecretStorage::set_secret(&secret_ref, api_key)
-            .map_err(|e| format!("Failed to store provider credential: {}", e))?;
-    }
-
-    let now = chrono::Utc::now().timestamp_millis();
     let brand_id = request
         .provider_id
         .as_deref()
@@ -113,6 +175,26 @@ pub async fn provider_connection_create(
         .filter(|v| !v.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| request.protocol_id.clone());
+    // Keyless self-hosted catalog entries (ollama / LM Studio / vLLM) may be
+    // created without an API key; store one only when provided.
+    let requires_key = catalog::get_entry(&brand_id)
+        .map(|e| e.requires_api_key)
+        .unwrap_or(true);
+    if auth_mode == AuthMode::DeveloperApiKey {
+        let api_key = request
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match api_key {
+            Some(key) => ProviderSecretStorage::set_secret(&secret_ref, key)
+                .map_err(|e| format!("Failed to store provider credential: {}", e))?,
+            None if requires_key => return Err("API key is required for this provider".to_string()),
+            None => { /* keyless: no secret stored */ }
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
     let connection = ProviderConnection {
         id,
         name: request.name.trim().to_string(),

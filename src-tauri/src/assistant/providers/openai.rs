@@ -48,7 +48,7 @@ impl ProviderAdapter for OpenAiAdapter {
         &self,
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
-        let api_key = get_api_key(connection)?;
+        let api_key = get_api_key_opt(connection);
         let models_url = {
             let base = connection
                 .base_url
@@ -69,15 +69,14 @@ impl ProviderAdapter for OpenAiAdapter {
         );
 
         let client = Client::new();
-        let resp = client
-            .get(&models_url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(url = %models_url, error = %e, "HTTP request failed");
-                ProviderError::RequestFailed(e.to_string())
-            })?;
+        let mut builder = client.get(&models_url);
+        if let Some(key) = &api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+        let resp = builder.send().await.map_err(|e| {
+            tracing::error!(url = %models_url, error = %e, "HTTP request failed");
+            ProviderError::RequestFailed(e.to_string())
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -129,16 +128,19 @@ impl ProviderAdapter for OpenAiAdapter {
         Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>,
         ProviderError,
     > {
-        let api_key = get_api_key(connection)?;
+        let api_key = get_api_key_opt(connection);
         let url = completions_url(connection);
         let body = build_request_body(&request);
 
         let client = Client::new();
-        let resp = client
+        let mut builder = client
             .post(url)
-            .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
-            .json(&body)
+            .json(&body);
+        if let Some(key) = &api_key {
+            builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+        let resp = builder
             .send()
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
@@ -159,10 +161,16 @@ impl ProviderAdapter for OpenAiAdapter {
     }
 }
 
-fn get_api_key(connection: &ProviderConnection) -> Result<String, ProviderError> {
+/// Read the stored API key, if any. Returns `None` for keyless self-hosted
+/// providers (ollama / LM Studio / vLLM) that store no secret — the request is
+/// then sent without an `Authorization` header. A hosted provider with no key
+/// simply gets a 401 from the server, which surfaces as a normal error.
+fn get_api_key_opt(connection: &ProviderConnection) -> Option<String> {
     ProviderSecretStorage::get_secret(&connection.secret_ref)
-        .map_err(|e| ProviderError::RequestFailed(format!("Failed to read API key: {}", e)))?
-        .ok_or(ProviderError::NotConfigured)
+        .ok()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn completions_url(connection: &ProviderConnection) -> String {
