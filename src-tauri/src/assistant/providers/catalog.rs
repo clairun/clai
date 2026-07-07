@@ -383,7 +383,6 @@ fn self_hosted(
 }
 
 /// Look up a catalog entry by its brand id.
-#[allow(dead_code)] // wired by the probe (stage 3) + quirk plumbing (stage 4)
 pub fn get_entry(provider_id: &str) -> Option<ProviderCatalogEntry> {
     catalog_entries().into_iter().find(|e| e.id == provider_id)
 }

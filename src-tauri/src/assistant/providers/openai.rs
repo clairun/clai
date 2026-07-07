@@ -17,6 +17,7 @@ use crate::assistant::types::{
     ToolInvocationDraft,
 };
 
+use super::catalog::{self, ModelsEndpointStyle};
 use super::types::{ProviderAdapter, ProviderError};
 
 pub const OPENAI_PROVIDER_ID: &str = "openai";
@@ -49,6 +50,13 @@ impl ProviderAdapter for OpenAiAdapter {
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
         let api_key = get_api_key_opt(connection);
+        // Quirk-as-data: an entry that declares no live models endpoint returns
+        // its curated list instead of hitting `/models`.
+        if let Some(entry) = catalog::get_entry(&connection.provider_id) {
+            if matches!(entry.models_endpoint_style, ModelsEndpointStyle::None) {
+                return Ok(entry.curated_models);
+            }
+        }
         let models_url = {
             let base = connection
                 .base_url
@@ -72,6 +80,9 @@ impl ProviderAdapter for OpenAiAdapter {
         let mut builder = client.get(&models_url);
         if let Some(key) = &api_key {
             builder = builder.header("Authorization", format!("Bearer {}", key));
+        }
+        for (name, value) in catalog_extra_headers(connection) {
+            builder = builder.header(name, value);
         }
         let resp = builder.send().await.map_err(|e| {
             tracing::error!(url = %models_url, error = %e, "HTTP request failed");
@@ -140,6 +151,9 @@ impl ProviderAdapter for OpenAiAdapter {
         if let Some(key) = &api_key {
             builder = builder.header("Authorization", format!("Bearer {}", key));
         }
+        for (name, value) in catalog_extra_headers(connection) {
+            builder = builder.header(name, value);
+        }
         let resp = builder
             .send()
             .await
@@ -165,6 +179,15 @@ impl ProviderAdapter for OpenAiAdapter {
 /// providers (ollama / LM Studio / vLLM) that store no secret — the request is
 /// then sent without an `Authorization` header. A hosted provider with no key
 /// simply gets a 401 from the server, which surfaces as a normal error.
+/// Per-provider extra headers declared as data on the catalog entry (resolved
+/// via the connection's brand `provider_id`) — e.g. OpenRouter's attribution
+/// headers. Empty for connections with no catalog entry.
+fn catalog_extra_headers(connection: &ProviderConnection) -> Vec<(String, String)> {
+    catalog::get_entry(&connection.provider_id)
+        .map(|e| e.extra_headers)
+        .unwrap_or_default()
+}
+
 fn get_api_key_opt(connection: &ProviderConnection) -> Option<String> {
     ProviderSecretStorage::get_secret(&connection.secret_ref)
         .ok()
