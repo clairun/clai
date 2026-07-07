@@ -57,7 +57,7 @@ impl ProviderAdapter for AnthropicAdapter {
 
         tracing::info!(
             url = %url,
-            provider_id = %connection.protocol_id,
+            protocol_id = %connection.protocol_id,
             "Fetching models from Anthropic-compatible provider"
         );
 

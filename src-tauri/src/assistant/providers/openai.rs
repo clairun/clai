@@ -72,7 +72,7 @@ impl ProviderAdapter for OpenAiAdapter {
 
         tracing::info!(
             url = %models_url,
-            provider_id = %connection.protocol_id,
+            protocol_id = %connection.protocol_id,
             "Fetching models from provider"
         );
 

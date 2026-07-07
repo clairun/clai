@@ -424,7 +424,7 @@ pub async fn provider_connection_test(
     tracing::info!(
         connection_id = %connection.id,
         connection_name = %connection.name,
-        provider_id = %connection.protocol_id,
+        protocol_id = %connection.protocol_id,
         model_id = %connection.model_id,
         base_url = ?connection.base_url,
         auth_mode = ?connection.auth_mode,
@@ -437,7 +437,7 @@ pub async fn provider_connection_test(
 
     let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| {
         tracing::error!(
-            provider_id = %connection.protocol_id,
+            protocol_id = %connection.protocol_id,
             error = %e,
             "Failed to resolve provider adapter"
         );
@@ -543,7 +543,7 @@ pub async fn provider_connection_test(
             tracing::error!(
                 connection_id = %connection.id,
                 connection_name = %connection.name,
-                provider_id = %connection.protocol_id,
+                protocol_id = %connection.protocol_id,
                 base_url = ?connection.base_url,
                 error = %error,
                 "Provider connection test failed"
