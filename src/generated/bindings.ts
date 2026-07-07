@@ -5,7 +5,7 @@ export type AddSkillSourceRequest = { name: string, kind: string | null, path: s
 
 export type AskUserOption = { label: string, description: string | null, };
 
-export type AssistantCompaction = { id: string, sessionId: string, trigger: CompactionTrigger, strategy: CompactionStrategy, status: CompactionStatus, sourceFromMessageId: string | null, sourceToMessageId: string | null, summaryMessageId: string | null, createdRunId: string | null, providerId: string, modelId: string, inputMessageCount: bigint, createdAt: bigint, completedAt: bigint | null, error: string | null, };
+export type AssistantCompaction = { id: string, sessionId: string, trigger: CompactionTrigger, strategy: CompactionStrategy, status: CompactionStatus, sourceFromMessageId: string | null, sourceToMessageId: string | null, summaryMessageId: string | null, createdRunId: string | null, protocolId: string, modelId: string, inputMessageCount: bigint, createdAt: bigint, completedAt: bigint | null, error: string | null, };
 
 export type AssistantEventEnvelope = { sessionId: string, runId: string | null, 
 /**
@@ -28,7 +28,7 @@ export type AssistantMessagePage = { messages: Array<AssistantMessage>, toolCall
  */
 totalCount: number, };
 
-export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, providerId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, usage: RunUsage | null, error: string | null, notices?: Array<RunNotice>, };
+export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, usage: RunUsage | null, error: string | null, notices?: Array<RunNotice>, };
 
 export type AssistantSession = { id: string, kind: SessionKind, title: string | null, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
 

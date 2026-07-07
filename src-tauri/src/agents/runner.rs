@@ -695,7 +695,7 @@ async fn run_scheduled_agent_with_fallback(
                 status: RunStatus::Queued,
                 trigger: RunTrigger::Scheduled,
                 connection_id: connection.id.clone(),
-                provider_id: connection.protocol_id.clone(),
+                protocol_id: connection.protocol_id.clone(),
                 model_id: connection.model_id.clone(),
                 usage: None,
                 error: None,

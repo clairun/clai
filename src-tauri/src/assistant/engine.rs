@@ -121,7 +121,7 @@ pub async fn run_session_turn(
                     status: RunStatus::Queued,
                     trigger: input.trigger.clone(),
                     connection_id: connection.id.clone(),
-                    provider_id: connection.protocol_id.clone(),
+                    protocol_id: connection.protocol_id.clone(),
                     model_id: connection.model_id.clone(),
                     usage: None,
                     error: None,

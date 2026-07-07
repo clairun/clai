@@ -693,7 +693,7 @@ async fn resolve_run_id(
                     status: RunStatus::Queued,
                     trigger: input.trigger.clone(),
                     connection_id: connection.id.clone(),
-                    provider_id: connection.protocol_id.clone(),
+                    protocol_id: connection.protocol_id.clone(),
                     model_id: connection.model_id.clone(),
                     usage: None,
                     error: None,

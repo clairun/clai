@@ -157,7 +157,7 @@ pub async fn compact_session_history(
             source_from_message_id: window.source_from_message_id.clone(),
             source_to_message_id: window.source_to_message_id.clone(),
             created_run_id: run_id.map(str::to_string),
-            provider_id: connection.protocol_id.clone(),
+            protocol_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
             input_message_count: window.messages.len() as i64,
         },

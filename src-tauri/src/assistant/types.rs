@@ -317,7 +317,7 @@ pub struct AssistantRun {
     pub status: RunStatus,
     pub trigger: RunTrigger,
     pub connection_id: String,
-    pub provider_id: String,
+    pub protocol_id: String,
     pub model_id: String,
     pub started_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,7 +373,7 @@ pub struct AssistantCompaction {
     pub summary_message_id: Option<MessageId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_run_id: Option<RunId>,
-    pub provider_id: String,
+    pub protocol_id: String,
     pub model_id: String,
     pub input_message_count: i64,
     pub created_at: i64,

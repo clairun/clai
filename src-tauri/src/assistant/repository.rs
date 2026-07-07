@@ -29,7 +29,7 @@ pub struct CreateRunParams {
     pub status: RunStatus,
     pub trigger: RunTrigger,
     pub connection_id: String,
-    pub provider_id: String,
+    pub protocol_id: String,
     pub model_id: String,
     pub usage: Option<RunUsage>,
     pub error: Option<String>,
@@ -51,7 +51,7 @@ pub struct CreateCompactionParams {
     pub source_from_message_id: Option<String>,
     pub source_to_message_id: Option<String>,
     pub created_run_id: Option<String>,
-    pub provider_id: String,
+    pub protocol_id: String,
     pub model_id: String,
     pub input_message_count: i64,
 }
@@ -126,7 +126,7 @@ fn map_run_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantRun, String> {
         status: parse_json::<RunStatus>(&row.get::<String, _>("status"), "run status")?,
         trigger: parse_json::<RunTrigger>(&row.get::<String, _>("trigger"), "run trigger")?,
         connection_id: row.get("connection_id"),
-        provider_id: row.get("provider_id"),
+        protocol_id: row.get("protocol_id"),
         model_id: row.get("model_id"),
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
@@ -157,7 +157,7 @@ fn map_compaction_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantCompacti
         source_to_message_id: row.get("source_to_message_id"),
         summary_message_id: row.get("summary_message_id"),
         created_run_id: row.get("created_run_id"),
-        provider_id: row.get("provider_id"),
+        protocol_id: row.get("protocol_id"),
         model_id: row.get("model_id"),
         input_message_count: row.get("input_message_count"),
         created_at: row.get("created_at"),
@@ -806,7 +806,7 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
         status: params.status,
         trigger: params.trigger,
         connection_id: params.connection_id,
-        provider_id: params.provider_id,
+        protocol_id: params.protocol_id,
         model_id: params.model_id,
         started_at: now_ms(),
         completed_at: None,
@@ -818,7 +818,7 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
     sqlx::query(
         r#"
         INSERT INTO assistant_runs
-            (id, session_id, status, trigger, connection_id, provider_id, model_id, usage_json, error, notices_json, started_at, completed_at)
+            (id, session_id, status, trigger, connection_id, protocol_id, model_id, usage_json, error, notices_json, started_at, completed_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
@@ -827,7 +827,7 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
     .bind(to_json_string(&run.status)?)
     .bind(to_json_string(&run.trigger)?)
     .bind(&run.connection_id)
-    .bind(&run.provider_id)
+    .bind(&run.protocol_id)
     .bind(&run.model_id)
     .bind(run.usage.as_ref().map(to_json_string).transpose()?)
     .bind(&run.error)
@@ -846,7 +846,7 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
 pub async fn list_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, provider_id, model_id, usage_json, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, usage_json, error, notices_json, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
         ORDER BY started_at DESC
@@ -903,7 +903,7 @@ pub async fn get_active_run(
 ) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, provider_id, model_id, usage_json, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, usage_json, error, notices_json, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
           AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
@@ -1034,7 +1034,7 @@ pub async fn mark_queued_messages_delivered(
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, provider_id, model_id, usage_json, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, usage_json, error, notices_json, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1076,7 +1076,7 @@ pub async fn update_run_status(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, provider_id, model_id, usage_json, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, usage_json, error, notices_json, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1125,7 +1125,7 @@ pub async fn complete_run(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, provider_id, model_id, usage_json, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, usage_json, error, notices_json, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1188,7 +1188,7 @@ pub async fn create_compaction(
         source_to_message_id: params.source_to_message_id,
         summary_message_id: None,
         created_run_id: params.created_run_id,
-        provider_id: params.provider_id,
+        protocol_id: params.protocol_id,
         model_id: params.model_id,
         input_message_count: params.input_message_count,
         created_at: now,
@@ -1200,7 +1200,7 @@ pub async fn create_compaction(
         r#"
         INSERT INTO assistant_compactions
             (id, session_id, trigger, strategy, status, source_from_message_id, source_to_message_id,
-             summary_message_id, created_run_id, provider_id, model_id, input_message_count,
+             summary_message_id, created_run_id, protocol_id, model_id, input_message_count,
              created_at, completed_at, error)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
@@ -1214,7 +1214,7 @@ pub async fn create_compaction(
     .bind(&compaction.source_to_message_id)
     .bind(&compaction.summary_message_id)
     .bind(&compaction.created_run_id)
-    .bind(&compaction.provider_id)
+    .bind(&compaction.protocol_id)
     .bind(&compaction.model_id)
     .bind(compaction.input_message_count)
     .bind(compaction.created_at)
@@ -1263,7 +1263,7 @@ pub async fn get_compaction(
     let row = sqlx::query(
         r#"
         SELECT id, session_id, trigger, strategy, status, source_from_message_id,
-               source_to_message_id, summary_message_id, created_run_id, provider_id,
+               source_to_message_id, summary_message_id, created_run_id, protocol_id,
                model_id, input_message_count, created_at, completed_at, error
         FROM assistant_compactions
         WHERE id = ?
@@ -1284,7 +1284,7 @@ pub async fn latest_completed_compaction(
     let row = sqlx::query(
         r#"
         SELECT id, session_id, trigger, strategy, status, source_from_message_id,
-               source_to_message_id, summary_message_id, created_run_id, provider_id,
+               source_to_message_id, summary_message_id, created_run_id, protocol_id,
                model_id, input_message_count, created_at, completed_at, error
         FROM assistant_compactions
         WHERE session_id = ?
