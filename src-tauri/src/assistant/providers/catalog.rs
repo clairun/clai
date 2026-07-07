@@ -49,6 +49,11 @@ pub enum ModelsEndpointStyle {
     Standard,
     /// No live model listing; use `curated_models` only.
     None,
+    /// Live model listing at an absolute OpenAI-compatible URL (Bearer auth,
+    /// `{"data":[{"id":..}]}` response) hosted apart from the chat `base_url`
+    /// — e.g. MiniMax pairs an Anthropic-compatible chat base with an
+    /// OpenAI-style models endpoint.
+    OpenAiCompatible { url: String },
 }
 
 /// Provider-level capability defaults, used when a live model list is
@@ -222,7 +227,9 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         curated_models: vec![model_with_capabilities("MiniMax-M2", true, false)],
         docs_url: Some("https://www.minimax.io/platform".to_string()),
         extra_headers: Vec::new(),
-        models_endpoint_style: ModelsEndpointStyle::None,
+        models_endpoint_style: ModelsEndpointStyle::OpenAiCompatible {
+            url: "https://api.minimax.io/v1/models".to_string(),
+        },
         capabilities: Some(ProviderCaps {
             supports_tools: true,
             supports_images: false,
@@ -375,9 +382,13 @@ mod tests {
     }
 
     #[test]
-    fn minimax_declares_curated_only_non_vision_models() {
+    fn minimax_lists_models_from_dedicated_openai_style_endpoint() {
         let e = get_entry("minimax").expect("minimax present");
-        assert!(matches!(e.models_endpoint_style, ModelsEndpointStyle::None));
+        assert!(matches!(
+            e.models_endpoint_style,
+            ModelsEndpointStyle::OpenAiCompatible { ref url }
+                if url == "https://api.minimax.io/v1/models"
+        ));
         assert!(e
             .capabilities
             .as_ref()

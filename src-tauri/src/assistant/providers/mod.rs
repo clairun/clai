@@ -5,7 +5,7 @@ pub mod openai;
 pub mod registry;
 pub mod types;
 
-use crate::assistant::types::ProviderConnection;
+use crate::assistant::types::{ModelInfo, ProviderConnection};
 
 pub use registry::{
     get_provider_descriptor, is_cli_provider, resolve_adapter, supported_providers,
@@ -52,6 +52,62 @@ pub fn connection_supports_images(connection: &ProviderConnection) -> bool {
         connection.protocol_id.as_str(),
         anthropic::ANTHROPIC_PROVIDER_ID | openai::OPENAI_PROVIDER_ID
     )
+}
+
+/// Fetch a model list from an absolute OpenAI-compatible models URL
+/// (`Authorization: Bearer`, `{"data":[{"id":..}]}` response shape).
+///
+/// Backs `catalog::ModelsEndpointStyle::OpenAiCompatible`: brands whose chat
+/// protocol lives on one base URL while their models endpoint lives on
+/// another (e.g. MiniMax's Anthropic-compatible chat base vs
+/// `https://api.minimax.io/v1/models`). Capability flags come from the
+/// catalog entry's provider-level `capabilities` because a bare id list
+/// carries no per-model data.
+pub(crate) async fn fetch_models_openai_compatible(
+    url: &str,
+    api_key: Option<&str>,
+    caps: Option<&catalog::ProviderCaps>,
+) -> Result<Vec<ModelInfo>, types::ProviderError> {
+    tracing::info!(url = %url, "Fetching models from dedicated models endpoint");
+    let mut builder = reqwest::Client::new().get(url);
+    if let Some(key) = api_key {
+        builder = builder.header("Authorization", format!("Bearer {}", key));
+    }
+    let resp = builder.send().await.map_err(|e| {
+        tracing::error!(url = %url, error = %e, "HTTP request failed");
+        types::ProviderError::RequestFailed(e.to_string())
+    })?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        tracing::error!(url = %url, status = %status, body = %body, "Provider returned error");
+        return Err(types::ProviderError::RequestFailed(format!(
+            "HTTP {}: {}",
+            status, body
+        )));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| types::ProviderError::RequestFailed(e.to_string()))?;
+    let (supports_tools, supports_images) = caps
+        .map(|c| (c.supports_tools, c.supports_images))
+        .unwrap_or((true, true));
+    let models = body["data"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?.to_string();
+            Some(ModelInfo {
+                id: id.clone(),
+                display_name: id,
+                supports_tools,
+                supports_images,
+            })
+        })
+        .collect();
+    Ok(models)
 }
 
 /// Parse a tool call's accumulated raw `arguments` text into params.

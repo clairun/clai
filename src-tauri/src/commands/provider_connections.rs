@@ -60,7 +60,7 @@ pub struct ProbeModelsRequest {
     #[serde(default)]
     pub connection_id: Option<String>,
     /// Brand/catalog id, if probing a catalog preset. Needed so brand-scoped
-    /// quirks (OpenRouter headers, MiniMax's curated-only model list) apply.
+    /// quirks (OpenRouter headers, MiniMax's dedicated models endpoint) apply.
     #[serde(default)]
     pub provider_id: Option<String>,
     #[serde(default)]

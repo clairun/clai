@@ -103,7 +103,7 @@ supportsImages: boolean, };
 /**
  * How to list models for the provider (quirk-as-data).
  */
-export type ModelsEndpointStyle = "standard" | "none";
+export type ModelsEndpointStyle = "standard" | "none" | { "open_ai_compatible": { url: string, } };
 
 export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
@@ -141,7 +141,7 @@ export type ProbeModelsRequest = { protocolId: string,
 connectionId: string | null, 
 /**
  * Brand/catalog id, if probing a catalog preset. Needed so brand-scoped
- * quirks (OpenRouter headers, MiniMax's curated-only model list) apply.
+ * quirks (OpenRouter headers, MiniMax's dedicated models endpoint) apply.
  */
 providerId: string | null, baseUrl: string | null, apiKey: string | null, };
 
