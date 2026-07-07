@@ -102,3 +102,126 @@ jobs:
               release_id: ${{ needs.create-release.outputs.release_id }},
               draft: false
             });
+
+  # Mirror the published release into Cloudflare R2 so downloads are served
+  # first-party from https://download.clai.run instead of github.com.
+  #
+  # Layout in the `clai-releases` bucket:
+  #   v26.7.6/clai_26.7.6_x64-setup.exe   immutable, cached forever
+  #   latest/clai_x64-setup.exe           stable alias, 5-minute edge cache
+  #
+  # GitHub Releases remains the source of truth (and the Tauri updater
+  # endpoint); this mirror only powers the website download links. The job
+  # is a silent no-op until the R2_* secrets are configured, so tagging a
+  # release never fails while the Cloudflare side is not set up yet.
+  #
+  # Required repository secrets (R2 API token with Object Read & Write on
+  # the clai-releases bucket):
+  #   R2_ACCOUNT_ID         Cloudflare account id
+  #   R2_ACCESS_KEY_ID      S3 access key id from the R2 API token
+  #   R2_SECRET_ACCESS_KEY  S3 secret access key from the R2 API token
+  sync-to-r2:
+    name: Mirror release to R2
+    needs: publish
+    runs-on: ubuntu-latest
+    # Serialize mirrors from tags pushed in quick succession so two prune
+    # steps never race on the same prefix listing.
+    concurrency:
+      group: r2-release-mirror
+      cancel-in-progress: false
+    env:
+      TAG: ${{ github.ref_name }}
+      BUCKET: clai-releases
+      KEEP_VERSIONS: '10'
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      AWS_DEFAULT_REGION: auto
+      R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      # R2 does not implement the newer S3 integrity checksums that recent
+      # AWS CLI versions send by default; "when_required" is Cloudflare's
+      # documented compatibility setting.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+    steps:
+      - name: Check R2 credentials
+        id: creds
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || [ -z "$R2_ACCOUNT_ID" ]; then
+            echo "::notice::R2 secrets not configured; skipping release mirror."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            # The tag becomes an R2 object-key prefix; refuse surprising
+            # shapes (slashes etc.) before any aws call sees it.
+            if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.]+)*$'; then
+              echo "::error::Unexpected tag format: $TAG"
+              exit 1
+            fi
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download release assets
+        if: steps.creds.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist
+          ls -l dist
+
+      - name: Upload versioned artifacts
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          aws s3 cp dist "s3://$BUCKET/$TAG/" \
+            --recursive \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Update latest/ aliases
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          # Pre-releases are mirrored under their version prefix above but
+          # must never become the default download.
+          case "$TAG" in
+            *beta*|*alpha*)
+              echo "Pre-release $TAG: leaving latest/ untouched."
+              exit 0
+              ;;
+          esac
+          version="${TAG#v}"
+          shopt -s nullglob
+          for file in dist/*; do
+            name="$(basename "$file")"
+            # Strip the version from asset names so the website can link to
+            # stable URLs, e.g.
+            #   clai_26.7.6_x64-setup.exe -> clai_x64-setup.exe
+            #   clai-26.7.6-1.x86_64.rpm  -> clai.x86_64.rpm
+            alias="${name/_${version}/}"
+            alias="${alias/-${version}-1/}"
+            aws s3 cp "$file" "s3://$BUCKET/latest/$alias" \
+              --endpoint-url "$R2_ENDPOINT" \
+              --cache-control "public, max-age=300"
+          done
+
+      - name: Prune old versions
+        if: steps.creds.outputs.configured == 'true'
+        run: |
+          # Keep the newest KEEP_VERSIONS version prefixes (semver order via
+          # sort -V); never touch latest/ or the version just published. The
+          # current tag is removed from the candidate list up front so the
+          # retention count stays exact even when the tag being published is
+          # not the newest (hotfix on an older line).
+          listing="$(aws s3 ls "s3://$BUCKET/" --endpoint-url "$R2_ENDPOINT")"
+          versions="$(printf '%s\n' "$listing" \
+            | awk '$1 == "PRE" { sub("/", "", $2); print $2 }' \
+            | grep -E '^v[0-9]' | sort -V || true)"
+          total="$(printf '%s\n' "$versions" | grep -c . || true)"
+          if [ "$total" -le "$KEEP_VERSIONS" ]; then
+            echo "Stored versions ($total) within retention ($KEEP_VERSIONS); nothing to prune."
+            exit 0
+          fi
+          printf '%s\n' "$versions" | grep -Fxv "$TAG" \
+            | head -n "$((total - KEEP_VERSIONS))" | while read -r old; do
+            [ -n "$old" ] || continue
+            echo "Pruning $old"
+            aws s3 rm "s3://$BUCKET/$old/" --recursive --endpoint-url "$R2_ENDPOINT"
+          done
