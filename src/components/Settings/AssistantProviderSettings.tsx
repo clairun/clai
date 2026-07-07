@@ -86,7 +86,7 @@ const OFFICIAL_PROVIDER_BASE_URLS: Record<string, string> = {
   anthropic: 'https://api.anthropic.com',
 };
 
-const DARK_THEME_LOGOS = new Set(['anthropic', 'codex', 'opencode']);
+const DARK_THEME_LOGOS = new Set(['anthropic', 'codex', 'opencode', 'ollama', 'lmstudio']);
 
 const normalizeBaseUrl = (value?: string | null): string =>
   (value || '').trim().replace(/\/+$/, '').toLowerCase();
