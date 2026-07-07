@@ -420,6 +420,12 @@ pub struct ProviderConnection {
     pub name: String,
     /// Wire/execution protocol adapter key: openai | anthropic | claude |
     /// codex | opencode | gemini. Drives adapter/CLI dispatch.
+    ///
+    /// `#[serde(default)]` so a *legacy* config (which stored the protocol
+    /// under the old `providerId` key, now absorbed by the brand `provider_id`
+    /// field below) still deserializes instead of crashing the app on load.
+    /// `ConfigManager` then migrates it — see `normalize_provider_connections`.
+    #[serde(default)]
     pub protocol_id: String,
     /// Brand/catalog id (`openai`, `groq`, `ollama`, `minimax`, `claude-code`,
     /// …) — the `ProviderCatalogEntry::id` this connection was created from.
