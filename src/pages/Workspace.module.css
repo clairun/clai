@@ -815,6 +815,29 @@
   overflow-y: auto;
   contain: layout paint style;
   overflow-anchor: none;
+  /* Right gutter: WebKitGTK uses a native OVERLAY scrollbar that ignores
+     ::-webkit-scrollbar styling, floats over the rows, and expands/steals
+     the pointer within ~14px of the right edge. Reserve that strip so the
+     rows' hover-revealed delete button never sits underneath it. */
+  padding-right: 16px;
+}
+
+/* Style the scrollbar (same pattern as .chatFirstContent) so WebKitGTK
+   renders a thin CLASSIC scrollbar that occupies its own layout space,
+   instead of the default OVERLAY scrollbar — which floats over the rows,
+   widens on hover, and steals the pointer exactly where the row's delete
+   button sits. */
+.drawerVirtualList::-webkit-scrollbar {
+  width: 6px;
+}
+
+.drawerVirtualList::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.drawerVirtualList::-webkit-scrollbar-thumb {
+  background: var(--color-overlay-14);
+  border-radius: var(--radius-full);
 }
 
 .drawerListItem {
