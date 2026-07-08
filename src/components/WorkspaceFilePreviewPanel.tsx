@@ -35,6 +35,10 @@ interface WorkspaceFilePreviewPanelProps {
   // parent can swap the previewed artifact. Omit to disable in-app link
   // navigation (links then do nothing rather than escaping the sandbox).
   onNavigate?: (path: string) => void;
+  // Delete the previewed file. When provided, a trash button appears in the
+  // header. The parent owns the confirm/backend-call/refresh; the panel just
+  // triggers it. Omit (e.g. for memory files) to hide the affordance.
+  onDelete?: () => void;
 }
 
 // ── Syntax-highlighting setup ──────────────────────────────────────────────
@@ -374,8 +378,21 @@ export default function WorkspaceFilePreviewPanel({
   entry,
   onClose,
   onNavigate,
+  onDelete,
 }: WorkspaceFilePreviewPanelProps) {
   const [file, setFile] = useState<LoadedFile | null>(null);
+  // Armed two-click delete (no blocking dialog — window.confirm doesn't
+  // reliably block in the Tauri webview). First click arms (red), second
+  // deletes. The armed state stores WHICH path is armed, so navigating to
+  // another file disarms by derivation (no reset effect), and it
+  // auto-expires after a few seconds.
+  const [armedDeletePath, setArmedDeletePath] = useState<string | null>(null);
+  const deleteArmed = armedDeletePath !== null && armedDeletePath === entry?.path;
+  useEffect(() => {
+    if (armedDeletePath === null) return undefined;
+    const timer = window.setTimeout(() => setArmedDeletePath(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [armedDeletePath]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [htmlMode, setHtmlMode] = useState<HtmlMode>('preview');
@@ -668,6 +685,28 @@ export default function WorkspaceFilePreviewPanel({
               <line x1="12" y1="15" x2="12" y2="3" />
             </svg>
           </button>
+          {onDelete && (
+            <button
+              type="button"
+              className={`${styles.iconButton} ${deleteArmed ? styles.iconButtonArmed : ''}`}
+              onClick={() => {
+                if (!deleteArmed) {
+                  setArmedDeletePath(entry?.path ?? null);
+                  return;
+                }
+                setArmedDeletePath(null);
+                onDelete();
+              }}
+              disabled={!entry?.path}
+              title={deleteArmed ? 'Click again to delete' : 'Delete file'}
+              aria-label={deleteArmed ? 'Click again to delete' : 'Delete file'}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </button>
+          )}
           <button
             type="button"
             className={styles.iconButton}

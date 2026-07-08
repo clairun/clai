@@ -124,6 +124,14 @@ export async function writeWorkspaceFile(
   });
 }
 
+/** Delete an artifact file or folder (recursive) from the workspace. Backend
+ *  refuses the root and protected dirs (.clai/.git/target/…). */
+export async function deleteWorkspacePath(workspaceId: string, path: string): Promise<void> {
+  return invoke('workspace_delete_path', {
+    request: { workspaceId, path },
+  });
+}
+
 export async function downloadWorkspaceFile(
   workspaceId: string,
   path: string,

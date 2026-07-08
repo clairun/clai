@@ -146,6 +146,13 @@
   color: var(--color-text-primary);
 }
 
+.iconButtonArmed,
+.iconButtonArmed:hover:not(:disabled) {
+  background: var(--color-critical, #e5484d);
+  border-color: var(--color-critical, #e5484d);
+  color: #fff;
+}
+
 .iconButton:disabled {
   opacity: 0.4;
   cursor: default;

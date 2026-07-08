@@ -1942,6 +1942,75 @@ pub async fn workspace_write_file(
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceDeletePathRequest {
+    pub workspace_id: String,
+    /// Path to delete, relative to the workspace root.
+    pub path: String,
+}
+
+/// True when the path's first component is a protected/skipped directory
+/// (`.clai`, `.git`, `target`, …). These never surface as artifact rows, but
+/// the delete command enforces it regardless so a crafted request can't wipe
+/// the DB, git, or build state.
+fn is_protected_artifact_path(relative_path: &Path) -> bool {
+    match relative_path.components().next() {
+        Some(Component::Normal(first)) => first
+            .to_str()
+            .map(|name| SKIPPED_ARTIFACT_DIRS.contains(&name))
+            .unwrap_or(false),
+        _ => true, // empty, `..`, or non-normal leading component: refuse
+    }
+}
+
+/// Delete a single artifact file or folder (recursive) from the workspace.
+///
+/// Guards: the resolved path must stay inside the workspace root, must not be
+/// the root itself, and must not target a protected directory
+/// (`SKIPPED_ARTIFACT_DIRS`). Folders are removed recursively.
+#[tauri::command]
+pub async fn workspace_delete_path(
+    request: WorkspaceDeletePathRequest,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let descriptor =
+        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
+    let root_path = descriptor
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(root_path)?;
+
+    let rel = request.path.trim();
+    if rel.is_empty() {
+        return Err("Cannot delete the workspace root.".to_string());
+    }
+    let relative = Path::new(rel);
+    if is_protected_artifact_path(relative) {
+        return Err(format!("Refusing to delete a protected path: {}", rel));
+    }
+
+    let target = normalize_path(root_path.join(relative));
+    if !target.starts_with(root_path) {
+        return Err(format!("Path {} is outside the workspace root", rel));
+    }
+    if target == *root_path {
+        return Err("Cannot delete the workspace root.".to_string());
+    }
+
+    let metadata = fs::symlink_metadata(&target)
+        .map_err(|error| format!("Path not found: {}: {}", rel, error))?;
+    if metadata.is_dir() {
+        fs::remove_dir_all(&target)
+            .map_err(|error| format!("Failed to delete {}: {}", rel, error))?;
+    } else {
+        fs::remove_file(&target).map_err(|error| format!("Failed to delete {}: {}", rel, error))?;
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceStoreImageRequest {
     pub workspace_id: String,
     /// Base64-encoded image bytes (no `data:` URL prefix).
@@ -3116,5 +3185,25 @@ mod tests {
         // Paths outside `.clai/` are not its concern.
         assert!(!should_skip_fork_copy_path(Path::new("images")));
         assert!(!should_skip_fork_copy_path(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn protected_artifact_path_guards_dbs_and_traversal() {
+        // Protected first-component dirs are refused.
+        assert!(is_protected_artifact_path(Path::new(".clai")));
+        assert!(is_protected_artifact_path(Path::new(".clai/data.sqlite")));
+        assert!(is_protected_artifact_path(Path::new(".git/config")));
+        assert!(is_protected_artifact_path(Path::new("target/debug")));
+        assert!(is_protected_artifact_path(Path::new("node_modules/x")));
+        // Empty / traversal / non-normal leading components are refused too.
+        assert!(is_protected_artifact_path(Path::new("")));
+        assert!(is_protected_artifact_path(Path::new("../escape")));
+        assert!(is_protected_artifact_path(Path::new("/abs")));
+        // Ordinary artifacts are deletable.
+        assert!(!is_protected_artifact_path(Path::new("report.md")));
+        assert!(!is_protected_artifact_path(Path::new(
+            "work/repo/src/main.rs"
+        )));
+        assert!(!is_protected_artifact_path(Path::new("images/pic.png")));
     }
 }
