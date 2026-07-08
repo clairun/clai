@@ -5,6 +5,10 @@ on:
     workflows: ["Release"]
     types:
       - completed
+  # Manual runs rebuild the flatpak for the LATEST release and re-mirror it
+  # to R2 — the backfill path when the mirror below was added after a
+  # release, or when a flatpak needs regenerating without a new tag.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,7 +17,16 @@ jobs:
   build:
     name: Build Flatpak
     runs-on: ubuntu-22.04
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Serialize runs from tags pushed in quick succession: a slower build for
+    # an older release must not finish after a newer one and overwrite the
+    # release asset and latest/clai.flatpak with stale content.
+    concurrency:
+      group: flatpak-build
+      cancel-in-progress: false
+    # Manual dispatches only count from main: a branch dispatch would build
+    # the flatpak from that branch's packaging files and overwrite both the
+    # release asset and the latest/ mirror with unreleased content.
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout
@@ -38,8 +51,11 @@ jobs:
       - name: Download deb package
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Env indirection, not ${{ }} inline in the script: a quote in the
+          # API-provided JSON must never be able to alter shell source.
+          RELEASE_JSON: ${{ steps.release.outputs.result }}
         run: |
-          RELEASE_TAG=$(echo '${{ steps.release.outputs.result }}' | jq -r '.tag')
+          RELEASE_TAG=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag')
           gh release download "$RELEASE_TAG" --pattern "*.deb" --output clai.deb
 
       - name: Extract binary from deb
@@ -106,10 +122,14 @@ jobs:
 
       - name: Upload to Release
         uses: actions/github-script@v7
+        env:
+          # Same env indirection as the shell steps: never inline the
+          # API-provided JSON into script source.
+          RELEASE_JSON: ${{ steps.release.outputs.result }}
         with:
           script: |
             const fs = require('fs');
-            const releaseId = JSON.parse('${{ steps.release.outputs.result }}').id;
+            const releaseId = JSON.parse(process.env.RELEASE_JSON).id;
 
             // Check if asset already exists and delete it
             const assets = await github.rest.repos.listReleaseAssets({
@@ -134,3 +154,64 @@ jobs:
               name: 'clai.flatpak',
               data: fs.readFileSync('clai.flatpak')
             });
+
+      # The Release workflow's sync-to-r2 job runs before this workflow even
+      # starts (workflow_run fires on completion), so clai.flatpak is never
+      # in the release when that mirror executes. Mirror it from here instead,
+      # with the same guards: silent no-op without secrets, tag-shape
+      # validation, immutable versioned copy, and a latest/ alias that
+      # pre-releases never touch.
+      - name: Check R2 credentials
+        id: creds
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          # Env indirection, not ${{ }} inline in the script: a quote in the
+          # API-provided JSON must never be able to alter shell source.
+          RELEASE_JSON: ${{ steps.release.outputs.result }}
+        run: |
+          TAG=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag')
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || [ -z "$R2_ACCOUNT_ID" ]; then
+            echo "::notice::R2 secrets not configured; skipping flatpak mirror."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            # The tag becomes an R2 object-key prefix; refuse surprising
+            # shapes (slashes etc.) before any aws call sees it.
+            if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+(\.[0-9]+)*(-[0-9A-Za-z.]+)*$'; then
+              echo "::error::Unexpected tag format: $TAG"
+              exit 1
+            fi
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mirror flatpak to R2
+        if: steps.creds.outputs.configured == 'true'
+        env:
+          BUCKET: clai-releases
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          # R2 does not implement the newer S3 integrity checksums that recent
+          # AWS CLI versions send by default; "when_required" is Cloudflare's
+          # documented compatibility setting.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          RELEASE_JSON: ${{ steps.release.outputs.result }}
+        run: |
+          TAG=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag')
+          aws s3 cp clai.flatpak "s3://$BUCKET/$TAG/clai.flatpak" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable"
+          # getLatestRelease never returns pre-releases, but keep the same
+          # guard as the main mirror in case that lookup ever changes.
+          case "$TAG" in
+            *beta*|*alpha*)
+              echo "Pre-release $TAG: leaving latest/ untouched."
+              exit 0
+              ;;
+          esac
+          aws s3 cp clai.flatpak "s3://$BUCKET/latest/clai.flatpak" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=300"
