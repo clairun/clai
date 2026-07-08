@@ -817,6 +817,24 @@
   overflow-anchor: none;
 }
 
+/* Style the scrollbar (same pattern as .chatFirstContent) so WebKitGTK
+   renders a thin CLASSIC scrollbar that occupies its own layout space,
+   instead of the default OVERLAY scrollbar — which floats over the rows,
+   widens on hover, and steals the pointer exactly where the row's delete
+   button sits. */
+.drawerVirtualList::-webkit-scrollbar {
+  width: 6px;
+}
+
+.drawerVirtualList::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.drawerVirtualList::-webkit-scrollbar-thumb {
+  background: var(--color-overlay-14);
+  border-radius: var(--radius-full);
+}
+
 .drawerListItem {
   display: block;
   width: 100%;
