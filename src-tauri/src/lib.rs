@@ -393,6 +393,7 @@ pub fn run() {
             commands::workspace::workspace_list_dir,
             commands::workspace::workspace_search_artifacts,
             commands::workspace::workspace_write_file,
+            commands::workspace::workspace_delete_path,
             commands::workspace::workspace_store_image,
             commands::workspace::workspace_pick_and_store_image,
             commands::workspace::workspace_download_file,

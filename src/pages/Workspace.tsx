@@ -20,6 +20,7 @@ import {
   listWorkspaceDir,
   markWorkspaceOpened,
   openWorkspacePath,
+  deleteWorkspacePath,
   runWorkspaceNow,
   searchWorkspaceArtifacts,
   setWorkspaceSchedulePaused,
@@ -543,14 +544,32 @@ const FileGlyph = () => (
   </svg>
 );
 
+const TrashGlyph = () => (
+  <svg
+    width="13"
+    height="13"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+  </svg>
+);
+
 interface ArtifactTreeRowProps {
   row: ArtifactRow;
   isExpanded: boolean;
   onToggle: (path: string) => void;
   onSelect?: (entry: WorkspaceFileEntry) => void;
+  onDelete?: (entry: WorkspaceDirEntry) => void;
 }
 
-const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect }: ArtifactTreeRowProps) => {
+const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect, onDelete }: ArtifactTreeRowProps) => {
   if (row.kind === 'loading') {
     return (
       <div
@@ -570,27 +589,43 @@ const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect }: ArtifactTreeRo
     else onSelect?.(dirEntryToFileEntry(entry));
   };
   return (
-    <button
-      type="button"
-      className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}`}
-      style={{ paddingInlineStart: 8 + depth * 14 }}
-      onClick={handleClick}
-      title={entry.path}
-      aria-expanded={isFolder ? isExpanded : undefined}
-    >
-      <span className={styles.fileTreeChevronSlot}>
-        {isFolder && <ChevronIcon open={isExpanded} />}
-      </span>
-      <span className={styles.fileTreeIcon}>{isFolder ? <FolderGlyph /> : <FileGlyph />}</span>
-      <span className={styles.fileTreeName}>{entry.name}</span>
-      <span className={styles.fileTreeMeta}>
-        {isFolder
-          ? Number(entry.childCount ?? 0)
-          : entry.updatedAt
-            ? formatTimestamp(entry.updatedAt)
-            : ''}
-      </span>
-    </button>
+    <div className={styles.fileTreeRowWrap}>
+      <button
+        type="button"
+        className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}`}
+        style={{ paddingInlineStart: 8 + depth * 14 }}
+        onClick={handleClick}
+        title={entry.path}
+        aria-expanded={isFolder ? isExpanded : undefined}
+      >
+        <span className={styles.fileTreeChevronSlot}>
+          {isFolder && <ChevronIcon open={isExpanded} />}
+        </span>
+        <span className={styles.fileTreeIcon}>{isFolder ? <FolderGlyph /> : <FileGlyph />}</span>
+        <span className={styles.fileTreeName}>{entry.name}</span>
+        <span className={styles.fileTreeMeta}>
+          {isFolder
+            ? Number(entry.childCount ?? 0)
+            : entry.updatedAt
+              ? formatTimestamp(entry.updatedAt)
+              : ''}
+        </span>
+      </button>
+      {onDelete && (
+        <button
+          type="button"
+          className={styles.fileTreeDelete}
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete(entry);
+          }}
+          title={`Delete ${entry.name}`}
+          aria-label={`Delete ${entry.name}`}
+        >
+          <TrashGlyph />
+        </button>
+      )}
+    </div>
   );
 };
 
@@ -601,6 +636,9 @@ interface ArtifactsListProps {
    *  content-only edits and renames, which leave `totalCount` unchanged. */
   latestModifiedAt: number;
   onSelect?: (entry: WorkspaceFileEntry) => void;
+  /** Called after a file/folder is deleted, with its workspace-relative path,
+   *  so the parent can close a preview showing the (now-gone) file. */
+  onDeleted?: (path: string) => void;
 }
 
 const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
@@ -614,6 +652,7 @@ const ArtifactsList = ({
   totalCount,
   latestModifiedAt,
   onSelect,
+  onDeleted,
 }: ArtifactsListProps) => {
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -748,6 +787,44 @@ const ArtifactsList = ({
     [loadDir]
   );
 
+  // Delete a file or folder (recursive) after confirmation, then refresh the
+  // parent directory level so the row disappears. Folder deletes surface the
+  // recursive file count in the prompt.
+  const handleDelete = useCallback(
+    async (entry: WorkspaceDirEntry) => {
+      const isFolder = entry.kind === 'directory';
+      const count = Number(entry.childCount ?? 0);
+      const message = isFolder
+        ? `Delete folder \u201c${entry.name}\u201d and its ${count} file${count === 1 ? '' : 's'}? This cannot be undone.`
+        : `Delete \u201c${entry.name}\u201d? This cannot be undone.`;
+      if (!window.confirm(message)) return;
+      try {
+        await deleteWorkspacePath(workspaceId, entry.path);
+        onDeleted?.(entry.path);
+        // Drop the deleted subtree from the expanded set so a same-named
+        // folder recreated later doesn't inherit a stale open state.
+        if (isFolder) {
+          setExpanded((prev) => {
+            const next = new Set<string>();
+            const prefix = `${entry.path}/`;
+            for (const p of prev) {
+              if (p !== entry.path && !p.startsWith(prefix)) next.add(p);
+            }
+            return next;
+          });
+        }
+        const parent = entry.path.includes('/')
+          ? entry.path.slice(0, entry.path.lastIndexOf('/'))
+          : '';
+        await loadDir(parent, true);
+      } catch (error) {
+        console.error(`Failed to delete "${entry.path}":`, error);
+        window.alert(`Failed to delete \u201c${entry.name}\u201d: ${String(error)}`);
+      }
+    },
+    [workspaceId, loadDir, onDeleted]
+  );
+
   const visibleRows = useMemo(
     () => flattenLoadedTree(childrenByPath, expanded),
     [childrenByPath, expanded]
@@ -761,9 +838,10 @@ const ArtifactsList = ({
         isExpanded={row.kind === 'entry' && expanded.has(row.entry.path)}
         onToggle={handleToggle}
         onSelect={onSelect}
+        onDelete={handleDelete}
       />
     ),
-    [expanded, handleToggle, onSelect]
+    [expanded, handleToggle, onSelect, handleDelete]
   );
 
   return (
@@ -1388,6 +1466,20 @@ const Workspace = () => {
     [patchWorkspaceUi]
   );
 
+  // When an artifact is deleted from the tree, close the preview if it was
+  // showing the deleted file (or a file inside a deleted folder).
+  const handleArtifactDeleted = useCallback(
+    (deletedPath: string) => {
+      const open = previewEntry?.entry?.path;
+      if (!open) return;
+      if (open === deletedPath || open.startsWith(`${deletedPath}/`)) {
+        patchWorkspaceUi({ previewEntry: null });
+      }
+    },
+    [previewEntry, patchWorkspaceUi]
+  );
+
+
   const isSidePanelOpen = !!previewEntry || !!viewingTask;
 
   // ── Workspace Settings modal (replaces the legacy AgentFormModal
@@ -1488,6 +1580,23 @@ const Workspace = () => {
     },
     [workspaceId]
   );
+
+  // Delete the file currently open in the preview panel (artifacts only —
+  // memory files are protected). Confirms, deletes, closes the panel, and
+  // refreshes the snapshot so the artifact tree/count update promptly.
+  const handlePreviewDelete = useCallback(async () => {
+    const entry = previewEntry?.entry;
+    if (!entry?.path) return;
+    if (!window.confirm(`Delete \u201c${entry.name}\u201d? This cannot be undone.`)) return;
+    try {
+      await deleteWorkspacePath(workspaceId, entry.path);
+      patchWorkspaceUi({ previewEntry: null });
+      await loadSnapshot(false);
+    } catch (error) {
+      console.error(`Failed to delete "${entry.path}":`, error);
+      window.alert(`Failed to delete \u201c${entry.name}\u201d: ${String(error)}`);
+    }
+  }, [previewEntry, workspaceId, patchWorkspaceUi, loadSnapshot]);
 
   // ── Workspace Settings modal openers ───────────────────────────────────
   const openSettings = useCallback((selection?: SettingsSelection | null) => {
@@ -1933,6 +2042,7 @@ const Workspace = () => {
             entry={previewEntry.entry}
             onClose={closePreview}
             onNavigate={navigatePreviewFile}
+            onDelete={previewEntry.kind === 'artifact' ? handlePreviewDelete : undefined}
           />
         )}
 
@@ -2078,6 +2188,7 @@ const Workspace = () => {
                   totalCount={artifactCount}
                   latestModifiedAt={Number(snapshot?.artifactLatestModifiedAt ?? 0)}
                   onSelect={(entry) => openPreviewEntry({ kind: 'artifact', entry })}
+                  onDeleted={handleArtifactDeleted}
                 />
               )}
             </div>

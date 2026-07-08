@@ -892,6 +892,57 @@
   outline-offset: -2px;
 }
 
+/* Row wrapper: hosts the main clickable row plus a hover-revealed delete
+   button (nested <button> is invalid, so the delete is a sibling). */
+.fileTreeRowWrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.fileTreeRowWrap .fileTreeRow {
+  flex: 1;
+  min-width: 0;
+}
+
+.fileTreeDelete {
+  position: absolute;
+  inset-inline-end: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--transition-fast),
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.fileTreeRowWrap:hover .fileTreeDelete,
+.fileTreeDelete:focus-visible {
+  opacity: 1;
+}
+
+.fileTreeDelete:hover {
+  background: var(--color-critical-alpha-15, rgba(229, 72, 77, 0.14));
+  color: var(--color-critical, #e5484d);
+}
+
+.fileTreeDelete:focus-visible {
+  outline: 2px solid var(--color-primary-alpha-30);
+  outline-offset: -2px;
+}
+
 .fileTreeRowFolder .fileTreeName {
   font-weight: 500;
 }
