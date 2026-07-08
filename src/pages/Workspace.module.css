@@ -943,6 +943,24 @@
   outline-offset: -2px;
 }
 
+/* Armed state (first click): solid red so "click again deletes" is
+   unmistakable. Kept visible even mid-transition. */
+.fileTreeDeleteArmed,
+.fileTreeRowWrap:hover .fileTreeDeleteArmed,
+.fileTreeDeleteArmed:hover {
+  opacity: 1;
+  background: var(--color-critical, #e5484d);
+  color: #fff;
+}
+
+/* The delete button overlaps the right edge where the date/count meta sits;
+   fade the meta out while the row is hovered (or the button focused) so the
+   trash icon gets clean space. */
+.fileTreeRowWrap:hover .fileTreeMeta,
+.fileTreeRowWrap:focus-within .fileTreeMeta {
+  opacity: 0;
+}
+
 .fileTreeRowFolder .fileTreeName {
   font-weight: 500;
 }

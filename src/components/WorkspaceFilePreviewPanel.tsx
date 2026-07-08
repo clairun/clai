@@ -381,6 +381,18 @@ export default function WorkspaceFilePreviewPanel({
   onDelete,
 }: WorkspaceFilePreviewPanelProps) {
   const [file, setFile] = useState<LoadedFile | null>(null);
+  // Armed two-click delete (no blocking dialog — window.confirm doesn't
+  // reliably block in the Tauri webview). First click arms (red), second
+  // deletes. The armed state stores WHICH path is armed, so navigating to
+  // another file disarms by derivation (no reset effect), and it
+  // auto-expires after a few seconds.
+  const [armedDeletePath, setArmedDeletePath] = useState<string | null>(null);
+  const deleteArmed = armedDeletePath !== null && armedDeletePath === entry?.path;
+  useEffect(() => {
+    if (armedDeletePath === null) return undefined;
+    const timer = window.setTimeout(() => setArmedDeletePath(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [armedDeletePath]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [htmlMode, setHtmlMode] = useState<HtmlMode>('preview');
@@ -676,11 +688,18 @@ export default function WorkspaceFilePreviewPanel({
           {onDelete && (
             <button
               type="button"
-              className={styles.iconButton}
-              onClick={onDelete}
+              className={`${styles.iconButton} ${deleteArmed ? styles.iconButtonArmed : ''}`}
+              onClick={() => {
+                if (!deleteArmed) {
+                  setArmedDeletePath(entry?.path ?? null);
+                  return;
+                }
+                setArmedDeletePath(null);
+                onDelete();
+              }}
               disabled={!entry?.path}
-              title="Delete file"
-              aria-label="Delete file"
+              title={deleteArmed ? 'Click again to delete' : 'Delete file'}
+              aria-label={deleteArmed ? 'Click again to delete' : 'Delete file'}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <polyline points="3 6 5 6 21 6" />

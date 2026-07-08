@@ -570,6 +570,27 @@ interface ArtifactTreeRowProps {
 }
 
 const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect, onDelete }: ArtifactTreeRowProps) => {
+  // Two-click delete (Insomnia-style): the first click ARMS the button (turns
+  // red), the second click deletes. No blocking dialog — window.confirm does
+  // not reliably block in the Tauri webview, and a popup per delete is
+  // annoying when clearing several files. Arming auto-expires after a few
+  // seconds and mouse-leave disarms, so a stray click can't linger.
+  const [deleteArmed, setDeleteArmed] = useState(false);
+  const disarmTimerRef = useRef<number | null>(null);
+  const disarmDelete = useCallback(() => {
+    if (disarmTimerRef.current !== null) {
+      window.clearTimeout(disarmTimerRef.current);
+      disarmTimerRef.current = null;
+    }
+    setDeleteArmed(false);
+  }, []);
+  useEffect(
+    () => () => {
+      if (disarmTimerRef.current !== null) window.clearTimeout(disarmTimerRef.current);
+    },
+    []
+  );
+
   if (row.kind === 'loading') {
     return (
       <div
@@ -589,7 +610,7 @@ const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect, onDelete }: Arti
     else onSelect?.(dirEntryToFileEntry(entry));
   };
   return (
-    <div className={styles.fileTreeRowWrap}>
+    <div className={styles.fileTreeRowWrap} onMouseLeave={disarmDelete}>
       <button
         type="button"
         className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}`}
@@ -614,13 +635,28 @@ const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect, onDelete }: Arti
       {onDelete && (
         <button
           type="button"
-          className={styles.fileTreeDelete}
+          className={`${styles.fileTreeDelete} ${deleteArmed ? styles.fileTreeDeleteArmed : ''}`}
           onClick={(event) => {
             event.stopPropagation();
+            if (!deleteArmed) {
+              setDeleteArmed(true);
+              disarmTimerRef.current = window.setTimeout(() => {
+                disarmTimerRef.current = null;
+                setDeleteArmed(false);
+              }, 3000);
+              return;
+            }
+            disarmDelete();
             onDelete(entry);
           }}
-          title={`Delete ${entry.name}`}
-          aria-label={`Delete ${entry.name}`}
+          title={
+            deleteArmed
+              ? isFolder
+                ? `Click again to delete \u201c${entry.name}\u201d and its ${Number(entry.childCount ?? 0)} file${Number(entry.childCount ?? 0) === 1 ? '' : 's'}`
+                : `Click again to delete \u201c${entry.name}\u201d`
+              : `Delete ${entry.name}`
+          }
+          aria-label={deleteArmed ? `Click again to delete ${entry.name}` : `Delete ${entry.name}`}
         >
           <TrashGlyph />
         </button>
@@ -787,17 +823,13 @@ const ArtifactsList = ({
     [loadDir]
   );
 
-  // Delete a file or folder (recursive) after confirmation, then refresh the
-  // parent directory level so the row disappears. Folder deletes surface the
-  // recursive file count in the prompt.
+  // Delete a file or folder (recursive), then refresh the parent directory
+  // level so the row disappears. Confirmation happens in the row itself (the
+  // armed two-click trash button) — window.confirm does not reliably block
+  // in the Tauri webview.
   const handleDelete = useCallback(
     async (entry: WorkspaceDirEntry) => {
       const isFolder = entry.kind === 'directory';
-      const count = Number(entry.childCount ?? 0);
-      const message = isFolder
-        ? `Delete folder \u201c${entry.name}\u201d and its ${count} file${count === 1 ? '' : 's'}? This cannot be undone.`
-        : `Delete \u201c${entry.name}\u201d? This cannot be undone.`;
-      if (!window.confirm(message)) return;
       try {
         await deleteWorkspacePath(workspaceId, entry.path);
         onDeleted?.(entry.path);
@@ -1582,12 +1614,12 @@ const Workspace = () => {
   );
 
   // Delete the file currently open in the preview panel (artifacts only —
-  // memory files are protected). Confirms, deletes, closes the panel, and
-  // refreshes the snapshot so the artifact tree/count update promptly.
+  // memory files are protected). Confirmation is the armed two-click on the
+  // panel's own delete button. Deletes, closes the panel, and refreshes the
+  // snapshot so the artifact tree/count update promptly.
   const handlePreviewDelete = useCallback(async () => {
     const entry = previewEntry?.entry;
     if (!entry?.path) return;
-    if (!window.confirm(`Delete \u201c${entry.name}\u201d? This cannot be undone.`)) return;
     try {
       await deleteWorkspacePath(workspaceId, entry.path);
       patchWorkspaceUi({ previewEntry: null });
