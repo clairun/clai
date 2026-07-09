@@ -566,7 +566,7 @@
 /* ── Workspace body: chat (full width) + floating side drawer ──
    The drawer is absolutely positioned over the right edge so opening or
    closing it does NOT shift the chat. The chat inside `.workspaceMain`
-   keeps its `max-width: 860px; margin: 0 auto` centering throughout. */
+   keeps its `max-width: var(--chat-max-width)` centering throughout. */
 
 .workspaceBody {
   position: relative;
@@ -581,6 +581,10 @@
      sliver. Kept in sync with the JS floor in ChatFirstLayout's
      geometry publisher (Workspace.tsx). */
   --chat-min-width: 420px;
+  /* Readable cap for the conversation column. Single source of truth:
+     threaded through the card width, its centering margin, and the
+     side-panel gap formula below so they can never drift. */
+  --chat-max-width: 1024px;
   /* Side-panel width — file preview & task transcript share this.
      Sized against the PANE (100% = workspaceBody; both consumers resolve
      percentages against it), not the viewport: 42vw used to overshoot
@@ -612,9 +616,9 @@
    the panel rather than touching it or floating far away.
 
    Two regimes, both targeting a 24px gap:
-    A. Chat fits at 860px centered: solve `chat_right + 24 = panel_left`
-       → padding = 1644 + 2*panel_width − W.   (1644 = 860 + 2*368 + 2*24)
-    B. Chat collapses to content area (W − padding < 860): solve directly
+    A. Chat fits at cap centered: solve `chat_right + 24 = panel_left`
+       → padding = (cap + 784) + 2*panel_width − W.   (784 = 2*368 + 2*24)
+    B. Chat collapses to content area (W − padding < cap): solve directly
        → padding = 368 + panel_width + 24 = 392 + panel_width.
    The actual padding is `max(0, min(A, B))`:
      - very wide viewports → A goes negative → padding = 0, chat stays
@@ -631,7 +635,7 @@
   padding-right: max(
     0px,
     min(
-      calc(1644px + 2 * var(--preview-panel-width, 600px) - 100%),
+      calc(var(--chat-max-width, 1024px) + 784px + 2 * var(--preview-panel-width, 600px) - 100%),
       calc(392px + var(--preview-panel-width, 600px))
     )
   );
@@ -644,7 +648,7 @@
    disappearing behind the drawer. This is the `--preview-panel-width: 0` form
    of `.workspaceMainWithPreview` above. */
 .workspaceMainWithDrawer {
-  padding-right: max(0px, min(calc(1644px - 100%), 392px));
+  padding-right: max(0px, min(calc(var(--chat-max-width, 1024px) + 784px - 100%), 392px));
 }
 
 .workspaceDrawer {
@@ -1067,21 +1071,21 @@
   box-shadow: var(--shadow-md);
   overflow: auto;
   /* Width: fill the available column, between the readable floor and the
-     860px cap. Margin-left replaces `margin: 0 auto` with an explicit
+     --chat-max-width cap. Margin-left replaces `margin: 0 auto` with an explicit
      three-regime formula (100% = the column width after any side-panel
      padding):
-       - column ≥ 860 → (100% − 860)/2 wins → centered, as before
-       - floor ≤ column < 860 → both terms ≤ 0, outer min(0)... left term
+       - column ≥ cap → (100% − cap)/2 wins → centered, as before
+       - floor ≤ column < cap → both terms ≤ 0, outer min(0)... left term
          is 0 → pinned left, fills the column, as before
        - column < floor → 100% − floor (negative) wins → the card keeps
          the floor width and slides left out of the pane; ancestors clip
          it at the pane edge so it reads as sliding under the workspace
          rail, while its right edge still clears the floating panels. */
-  width: clamp(var(--chat-min-width, 420px), 100%, 860px);
+  width: clamp(var(--chat-min-width, 420px), 100%, var(--chat-max-width, 1024px));
   margin: 0;
   margin-left: max(
     min(0px, calc(100% - var(--chat-min-width, 420px))),
-    calc((100% - 860px) / 2)
+    calc((100% - var(--chat-max-width, 1024px)) / 2)
   );
   /* Float the card above the fixed composer/terminal. As a flex:1 item this
      shrinks the card's rendered height (keeping its rounded bottom visible

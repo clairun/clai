@@ -26,7 +26,7 @@
        Fleet rail occupies the left edge (--fleet-rail-width, published
        by FleetLayout), so shift right by half its width. Width takes the
        larger of 80% of the detail pane and the chat card's own width
-       (min(860px, detail − 48px page padding)), so the bar matches the
+       (min(1024px, detail − 48px page padding); == --chat-max-width), so the bar matches the
        conversation on small screens instead of sitting narrower. */
     left: var(--chat-card-center, calc(50% + var(--fleet-rail-width, 0px) / 2));
     transform: translateX(-50%);
@@ -36,7 +36,7 @@
         --chat-card-width,
         max(
           calc((100vw - var(--fleet-rail-width, 0px)) * 0.8),
-          min(860px, calc(100vw - var(--fleet-rail-width, 0px) - 48px))
+          min(1024px, calc(100vw - var(--fleet-rail-width, 0px) - 48px))
         )
       )
     );
