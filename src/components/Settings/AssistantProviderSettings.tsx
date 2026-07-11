@@ -219,9 +219,10 @@ interface AssistantProviderSettingsProps {
 
 const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSettingsProps) => {
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
-  // Connection id -> last-4 API-key hint (••••1234), for identifying which
-  // key a connection stores. Loaded separately (keyring reads).
-  const [secretHints, setSecretHints] = useState<Record<string, string>>({});
+  // Last-4 API-key hint (••••1234) for the connection currently being
+  // edited. Fetched LAZILY on edit-open (one keyring read), never for the
+  // whole list.
+  const [editSecretHint, setEditSecretHint] = useState<string | null>(null);
   const [adapters, setAdapters] = useState<ProviderDescriptor[]>([]);
   const [catalog, setCatalog] = useState<ProviderCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -267,16 +268,14 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextConnections, nextAdapters, nextCatalog, nextHints] = await Promise.all([
+      const [nextConnections, nextAdapters, nextCatalog] = await Promise.all([
         assistantClient.listProviderConnections(),
         assistantClient.listAvailableProviderAdapters().catch(() => []),
         assistantClient.listProviderCatalog().catch(() => []),
-        assistantClient.listProviderSecretHints().catch(() => ({})),
       ]);
       setConnections(nextConnections || []);
       setAdapters(nextAdapters || []);
       setCatalog(nextCatalog || []);
-      setSecretHints(nextHints || {});
       setError(null);
     } catch (err) {
       console.error('[AssistantProviderSettings] Failed to load:', err);
@@ -317,6 +316,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
 
   const beginCreate = useCallback(() => {
     setEditingId(null);
+    setEditSecretHint(null);
     setSelectedEntry(null);
     setFormError(null);
     setSuccess(null);
@@ -327,6 +327,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
 
   const chooseCatalogEntry = useCallback((entry: ProviderCatalogEntry) => {
     setEditingId(null);
+    setEditSecretHint(null);
     setSelectedEntry(entry);
     setProbeModels([]);
     setShowAdvancedUrl(false);
@@ -346,6 +347,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
 
   const chooseCliAdapter = useCallback((adapter: ProviderDescriptor) => {
     setEditingId(null);
+    setEditSecretHint(null);
     setSelectedEntry(null);
     setProbeModels([]);
     setShowAdvancedUrl(false);
@@ -385,6 +387,13 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
       setFormError(null);
       setSuccess(null);
       setFormOpen(true);
+      // Lazy hint fetch: one keyring read, only for the connection the user
+      // actually opened. Cleared first so a stale hint never shows.
+      setEditSecretHint(null);
+      assistantClient
+        .getProviderSecretHint(connection.id)
+        .then((hint) => setEditSecretHint(hint))
+        .catch(() => setEditSecretHint(null));
     },
     [catalog],
   );
@@ -700,9 +709,6 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                         ? (connection.baseUrl || CLI_BINARY_PLACEHOLDERS[connection.protocolId] || connection.protocolId)
                         : (connection.baseUrl || 'api.openai.com/v1')}
                     </code>
-                    {secretHints[connection.id] && (
-                      <> • <code title="Stored API key (last 4 characters)">key ••••{secretHints[connection.id]}</code></>
-                    )}
                   </span>
                 </div>
               </div>
@@ -859,8 +865,8 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                     onChange={(e) => setForm((current) => ({ ...current, apiKey: e.target.value }))}
                     placeholder={
                       editingId
-                        ? secretHints[editingId]
-                          ? `\u2022\u2022\u2022\u2022${secretHints[editingId]} \u2014 leave blank to keep`
+                        ? editSecretHint
+                          ? `\u2022\u2022\u2022\u2022${editSecretHint} \u2014 leave blank to keep`
                           : 'Leave blank to keep existing key'
                         : 'sk-...'
                     }

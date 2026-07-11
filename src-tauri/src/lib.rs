@@ -365,7 +365,7 @@ pub fn run() {
             commands::provider_connections::provider_connection_delete,
             commands::provider_connections::provider_connection_get,
             commands::provider_connections::provider_connection_list,
-            commands::provider_connections::provider_connection_secret_hints,
+            commands::provider_connections::provider_connection_secret_hint,
             commands::provider_connections::provider_connection_list_models,
             commands::provider_connections::provider_descriptor_models,
             commands::provider_connections::provider_connection_test,
