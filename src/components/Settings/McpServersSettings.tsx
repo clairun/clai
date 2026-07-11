@@ -325,7 +325,11 @@ const McpServersSettings = () => {
                   )}
                 </div>
                 <div className={styles.serverMeta}>
-                  {server.transport?.type === 'http' ? 'HTTP' : 'Stdio'} · {authSummary(server.auth)}
+                  {/* Auth only applies to HTTP transports; stdio has no auth
+                      concept, so showing "No auth" there is just noise. */}
+                  {server.transport?.type === 'http'
+                    ? `HTTP · ${authSummary(server.auth)}`
+                    : 'Stdio'}
                 </div>
                 <div className={styles.serverTransport}>{transportSummary(server.transport)}</div>
               </div>
