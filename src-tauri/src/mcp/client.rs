@@ -443,7 +443,7 @@ impl McpClientManager {
 
     async fn connect_server(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
         match &config.transport {
-            crate::config::McpServerTransport::Http { url } => {
+            crate::config::McpServerTransport::Http { url, .. } => {
                 // Build on rmcp's own bundled reqwest client via `from_config`
                 // so CLAI doesn't have to share reqwest's major version with
                 // rmcp (rmcp 1.7 uses reqwest 0.13; CLAI stays on 0.12).
@@ -501,7 +501,7 @@ impl McpClientManager {
 
                 Ok(ConnectedMcpServer::Http(service))
             }
-            crate::config::McpServerTransport::Stdio { command, args } => {
+            crate::config::McpServerTransport::Stdio { command, args, .. } => {
                 let mut cmd = Command::new(command);
                 cmd.args(args);
                 cmd.stdin(Stdio::piped());

@@ -76,6 +76,31 @@ export type InterAgentCallContext = { callId: string, callerAgentId: string | nu
 
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
+/**
+ * A single environment variable (stdio) or HTTP header (http) entry for an
+ * MCP server. Secret entries store their value in the OS vault under
+ * `secret_ref` and leave `value` empty; non-secret entries store the value
+ * inline. See `design/mcp-env-vars-design.md`.
+ */
+export type McpEnvVar = { 
+/**
+ * Env variable name, or HTTP header name.
+ */
+key: string, 
+/**
+ * Plain value — present only for non-secret entries.
+ */
+value?: string | null, 
+/**
+ * Vault reference — present only for secret entries.
+ */
+secretRef?: string | null, 
+/**
+ * When true the value lives in the vault under `secret_ref`; otherwise
+ * the plain `value` is used.
+ */
+secret: boolean, };
+
 export type McpOAuthStartResponse = { loginId: string, serverId: string, authorizationUrl: string, expiresAt: string, };
 
 export type McpServerAuthRequest = { "type": "none" } | { "type": "bearer_token", token: string | null, } | { "type": "oauth", scopes: Array<string>, client_id: string | null, client_secret: string | null, client_metadata_url: string | null, };
@@ -87,7 +112,16 @@ export type McpServerResponse = { id: string, name: string, enabled: boolean, tr
 /**
  * User-configured MCP server transport.
  */
-export type McpServerTransport = { "type": "stdio", command: string, args: Array<string>, } | { "type": "http", url: string, };
+export type McpServerTransport = { "type": "stdio", command: string, args: Array<string>, 
+/**
+ * Environment variables layered on top of CLAI's inherited env when
+ * the stdio subprocess is spawned.
+ */
+env: Array<McpEnvVar>, } | { "type": "http", url: string, 
+/**
+ * Extra HTTP headers sent with each request (alongside any auth).
+ */
+headers: Array<McpEnvVar>, };
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 

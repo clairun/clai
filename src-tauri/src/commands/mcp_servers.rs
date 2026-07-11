@@ -482,6 +482,7 @@ pub async fn finish_mcp_oauth_login(
                     server.enabled = pending.draft.enabled;
                     server.transport = McpServerTransport::Http {
                         url: pending.draft.url.clone(),
+                        headers: Vec::new(),
                     };
                     server.auth = auth.clone();
                 })
@@ -499,6 +500,7 @@ pub async fn finish_mcp_oauth_login(
                 enabled: pending.draft.enabled,
                 transport: McpServerTransport::Http {
                     url: pending.draft.url.clone(),
+                    headers: Vec::new(),
                 },
                 auth,
                 created_at: now.clone(),
