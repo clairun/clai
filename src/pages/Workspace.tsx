@@ -67,6 +67,13 @@ type WorkspaceUiState = {
   previewEntry: PreviewEntry | null;
   viewingTask: WorkspaceTaskResponse | null;
 };
+// Stable fallbacks for store-derived values, so re-renders without session
+// data don't hand new `[]`/`{}` identities to memoized children each time.
+const EMPTY_MESSAGES: AssistantMessage[] = [];
+const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+const EMPTY_QUEUED_IDS: string[] = [];
+const EMPTY_STREAMING: Record<string, string> = {};
+
 const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
   previewEntry: null,
@@ -1271,7 +1278,6 @@ interface ChatFirstLayoutProps {
   // conversation is empty before its history finishes loading).
   isHydrating: boolean;
   toolCalls: ToolInvocation[];
-  streamingText: Record<string, string>;
   isStreaming: boolean;
   runError: string | null;
   runErrorIsLimit: boolean;
@@ -1290,7 +1296,6 @@ const ChatFirstLayout = ({
   messages,
   isHydrating,
   toolCalls,
-  streamingText,
   isStreaming,
   runError,
   runErrorIsLimit,
@@ -1302,6 +1307,12 @@ const ChatFirstLayout = ({
   isLoadingOlderMessages,
   onLoadOlderMessages,
 }: ChatFirstLayoutProps) => {
+  // Streaming deltas are the highest-frequency store updates (many per
+  // second). Subscribing here — instead of in the Workspace page shell —
+  // scopes each delta's re-render to the chat area only.
+  const streamingText = useAssistantStore((state) =>
+    (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
+  );
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   // Publish the conversation card's viewport geometry as document-level
@@ -1533,8 +1544,40 @@ const Workspace = () => {
   const snapshotReady = snapshot?.workspaceId === workspaceId;
   const activeSnapshot = snapshotReady ? snapshot : null;
   const sessionId = activeSnapshot?.session?.id || null;
-  const sessionState = useAssistantStore((state) =>
-    sessionId ? state.sessions[sessionId] || null : null
+  // Narrow store subscriptions: each value the page shell renders gets its
+  // own selector, so this (very large) component body only re-runs when one
+  // of these actually changes. Subscribing to the whole `sessions[sessionId]`
+  // object re-rendered the entire page on every session mutation. Streaming
+  // text deltas are deliberately NOT subscribed here — ChatFirstLayout owns
+  // that subscription so per-token updates re-render only the chat area.
+  // Selectors return raw store references (stable across unrelated
+  // mutations); snapshot fallbacks are applied below.
+  const storeMessages = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.messages : undefined
+  );
+  const storeTotalMessageCount = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.totalMessageCount : undefined
+  );
+  const storeToolCalls = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.toolCalls : undefined
+  );
+  const isStreaming = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.isStreaming || false : false
+  );
+  const runStartedAt = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.runStartedAt ?? null : null
+  );
+  const storeQueuedMessageIds = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.queuedMessageIds : undefined
+  );
+  const hasOlderMessages = useAssistantStore((state) =>
+    sessionId ? !!state.sessions[sessionId]?.hasOlderMessages : false
+  );
+  const isLoadingOlderMessages = useAssistantStore((state) =>
+    sessionId ? !!state.sessions[sessionId]?.isLoadingOlderMessages : false
+  );
+  const storeRuns = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.runs : undefined
   );
   const lastLoadedSessionUpdatedAtRef = useRef<NumericTimestamp>(null);
 
@@ -1789,7 +1832,7 @@ const Workspace = () => {
     },
     [artifacts, memories, patchWorkspaceUi]
   );
-  const messages = sessionState?.messages || activeSnapshot?.messages || [];
+  const messages = storeMessages || activeSnapshot?.messages || EMPTY_MESSAGES;
   // While the initial entry load is in flight and no messages have arrived
   // yet, the conversation is unknown — not provably empty. Suppress the
   // "Start a conversation" empty state until loading settles so an existing
@@ -1798,16 +1841,12 @@ const Workspace = () => {
   // Conversation total from the backend page responses (kept live by the
   // store as messages stream in); before the first page load reports it,
   // the loaded window is the best available answer.
-  const totalMessageCount = sessionState?.totalMessageCount ?? messages.length;
-  const toolCalls = sessionState?.toolCalls || activeSnapshot?.toolCalls || [];
-  const streamingText = sessionState?.streamingTextByMessageId || {};
-  const isStreaming = sessionState?.isStreaming || false;
-  const runStartedAt = sessionState?.runStartedAt ?? null;
+  const totalMessageCount = storeTotalMessageCount ?? messages.length;
+  const toolCalls = storeToolCalls || activeSnapshot?.toolCalls || EMPTY_TOOL_CALLS;
   // Store is the live source once the session is hydrated; the snapshot
   // covers the first render before hydration.
-  const queuedMessageIds = sessionState?.queuedMessageIds ?? activeSnapshot?.queuedMessageIds ?? [];
-  const hasOlderMessages = !!sessionState?.hasOlderMessages;
-  const isLoadingOlderMessages = !!sessionState?.isLoadingOlderMessages;
+  const queuedMessageIds =
+    storeQueuedMessageIds ?? activeSnapshot?.queuedMessageIds ?? EMPTY_QUEUED_IDS;
   const handleDeleteQueuedMessage = useCallback(
     (messageId: string) => {
       if (!sessionId) return;
@@ -1954,7 +1993,7 @@ const Workspace = () => {
   // Surface the most recent run's failure in the chat. Derived from the
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
-  const lastRun = getLastRunInfo(sessionState?.runs || activeSnapshot?.runs);
+  const lastRun = getLastRunInfo(storeRuns || activeSnapshot?.runs);
   const runError = lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
   const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
   // Tell the backend this workspace is being viewed so the rail clears its
@@ -2053,7 +2092,6 @@ const Workspace = () => {
             messages={messages}
             isHydrating={isHydrating}
             toolCalls={toolCalls}
-            streamingText={streamingText}
             isStreaming={isStreaming}
             runError={runError}
             runErrorIsLimit={runErrorIsLimit}

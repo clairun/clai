@@ -26,7 +26,12 @@ const ASK_REQUEST = {
 beforeEach(() => {
   // Zustand exposes setState on the hook itself; reset the slice that
   // every test below mutates. Avoids cross-test bleed.
-  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, recoverablePrompts: {} });
+  useAssistantStore.setState({
+    sessions: {},
+    streamingText: {},
+    activeSessionByTab: {},
+    recoverablePrompts: {},
+  });
 });
 
 describe('initSession', () => {
@@ -90,7 +95,7 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
   // Regression: ask_user panel was being unmounted within ~5s because
   // Workspace.jsx polls workspace_get_snapshot every 5s and the wholesale
   // replacement in loadSessionData was wiping pendingAskUser. Same race
-  // existed (and is also fixed) for streamingTextByMessageId/isStreaming.
+  // existed (and is also fixed) for streaming text/isStreaming.
 
   it('preserves pendingAskUser across a snapshot refresh', () => {
     const store = useAssistantStore.getState();
@@ -102,15 +107,15 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     );
   });
 
-  it('preserves streamingTextByMessageId across a snapshot refresh', () => {
+  it('preserves streaming text across a snapshot refresh', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
     store.appendDelta(SESSION.id, 'msg-1', 'Hello ');
     store.appendDelta(SESSION.id, 'msg-1', 'world');
     store.loadSessionData(SESSION.id, SESSION, [], [], []);
-    expect(
-      useAssistantStore.getState().sessions[SESSION.id]!.streamingTextByMessageId['msg-1'],
-    ).toBe('Hello world');
+    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe(
+      'Hello world',
+    );
     expect(useAssistantStore.getState().sessions[SESSION.id]!.isStreaming).toBe(true);
   });
 
@@ -226,7 +231,7 @@ describe('setRunStatus', () => {
     store.setRunStatus(SESSION.id, run('run-1', 'completed'));
     const s = useAssistantStore.getState().sessions[SESSION.id]!;
     expect(s.isStreaming).toBe(false);
-    expect(s.streamingTextByMessageId).toEqual({});
+    expect(useAssistantStore.getState().streamingText[SESSION.id]).toBeUndefined();
   });
 
   it('sets streaming on queued/running/waiting_for_tool', () => {
@@ -275,5 +280,59 @@ describe('removeMessage — recoverable prompt capture', () => {
     expect(useAssistantStore.getState().recoverablePrompts[SESSION.id]).toBe('keep me');
     store.clearRecoverablePrompt(SESSION.id);
     expect(useAssistantStore.getState().recoverablePrompts[SESSION.id]).toBeUndefined();
+  });
+});
+
+describe('appendDelta — session identity stability (streaming perf contract)', () => {
+  // The accumulator lives OUTSIDE SessionState precisely so that per-token
+  // deltas do not hand `sessions[sessionId]` a new identity, which would
+  // re-render every whole-session subscriber (the Workspace page shell)
+  // many times per second. These tests pin that contract.
+
+  it('accumulates text in the top-level streamingText map', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.appendDelta(SESSION.id, 'msg-1', 'Hello ');
+    store.appendDelta(SESSION.id, 'msg-1', 'world');
+    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe(
+      'Hello world',
+    );
+  });
+
+  it('does not change the session object identity after the first delta', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    // First delta flips isStreaming (one legitimate session write).
+    store.appendDelta(SESSION.id, 'msg-1', 'a');
+    const before = useAssistantStore.getState().sessions[SESSION.id];
+    store.appendDelta(SESSION.id, 'msg-1', 'b');
+    store.appendDelta(SESSION.id, 'msg-2', 'c');
+    const after = useAssistantStore.getState().sessions[SESSION.id];
+    expect(after).toBe(before);
+  });
+
+  it('is a no-op for an unknown session (no orphan accumulator)', () => {
+    useAssistantStore.getState().appendDelta('ghost', 'msg-1', 'x');
+    expect(useAssistantStore.getState().streamingText['ghost']).toBeUndefined();
+  });
+
+  it('completeMessage atomically clears the accumulator for that message', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.addMessage(SESSION.id, msg('msg-1'));
+    store.appendDelta(SESSION.id, 'msg-1', 'partial');
+    store.appendDelta(SESSION.id, 'msg-2', 'other');
+    store.completeMessage(SESSION.id, msg('msg-1'));
+    const streaming = useAssistantStore.getState().streamingText[SESSION.id]!;
+    expect(streaming['msg-1']).toBeUndefined();
+    expect(streaming['msg-2']).toBe('other');
+  });
+
+  it('removeSession drops the session accumulator', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.appendDelta(SESSION.id, 'msg-1', 'x');
+    store.removeSession(SESSION.id);
+    expect(useAssistantStore.getState().streamingText[SESSION.id]).toBeUndefined();
   });
 });

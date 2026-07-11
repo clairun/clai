@@ -35,8 +35,6 @@ export interface SessionState {
   messages: AssistantMessage[];
   runs: AssistantRun[];
   toolCalls: ToolInvocation[];
-  /** Per-message accumulator for streaming text deltas. Keyed by message id. */
-  streamingTextByMessageId: Record<string, string>;
   /** True while a run is queued/running/waiting_for_tool. Drives the chat activity indicator. */
   isStreaming: boolean;
   /** Epoch ms (client clock) when the current run started running, for the
@@ -61,6 +59,22 @@ export interface SessionState {
 
 export interface AssistantStoreState {
   sessions: Record<string, SessionState>;
+  /**
+   * Per-message accumulator for streaming text deltas, keyed by session id
+   * then message id.
+   *
+   * Kept OUTSIDE `SessionState` on purpose. Deltas arrive many times per
+   * second while an agent streams, and writing them inside the session draft
+   * gives `sessions[sessionId]` a new identity on every delta (immer
+   * structural sharing) — re-rendering every whole-session subscriber (the
+   * Workspace page shell) once per token chunk. As a top-level sibling map,
+   * a delta only invalidates `streamingText` subscribers, while actions that
+   * must touch both (e.g. `completeMessage` swapping the accumulator for the
+   * final message) still update them atomically inside a single `set()`, so
+   * there is no flicker frame between "streamed text gone" and "final
+   * message present".
+   */
+  streamingText: Record<string, Record<string, string>>;
   activeSessionByTab: Record<string, string>;
 
   setActiveSessionForTab: (tabId: string, sessionId: string) => void;
@@ -112,7 +126,6 @@ const createInitialSessionState = (session: AssistantSession): SessionState => (
   messages: [],
   runs: [],
   toolCalls: [],
-  streamingTextByMessageId: {},
   isStreaming: false,
   runStartedAt: null,
   pendingAskUser: null,
@@ -130,6 +143,7 @@ const useAssistantStore = create<AssistantStoreState>()(
   devtools(
     immer((set, get) => ({
       sessions: {},
+      streamingText: {},
       activeSessionByTab: {},
       recoverablePrompts: {},
 
@@ -195,7 +209,8 @@ const useAssistantStore = create<AssistantStoreState>()(
             s.totalMessageCount = Math.max(0, s.totalMessageCount - 1);
           }
           s.queuedMessageIds = s.queuedMessageIds.filter((id) => id !== messageId);
-          delete s.streamingTextByMessageId[messageId];
+          const acc = state.streamingText[sessionId];
+          if (acc) delete acc[messageId];
         }),
 
       clearRecoverablePrompt: (sessionId) =>
@@ -257,11 +272,14 @@ const useAssistantStore = create<AssistantStoreState>()(
       appendDelta: (sessionId, messageId, text) =>
         set((state) => {
           const s = state.sessions[sessionId];
-          if (s) {
-            s.streamingTextByMessageId[messageId] =
-              (s.streamingTextByMessageId[messageId] || '') + text;
-            s.isStreaming = true;
-          }
+          if (!s) return;
+          const acc = (state.streamingText[sessionId] ??= {});
+          acc[messageId] = (acc[messageId] || '') + text;
+          // Guarded write: assigning `true` unconditionally would mark the
+          // session draft modified on every delta, changing the identity of
+          // `sessions[sessionId]` per token chunk — exactly what keeping the
+          // accumulator outside the session object is meant to prevent.
+          if (!s.isStreaming) s.isStreaming = true;
         }),
 
       completeMessage: (sessionId, message) =>
@@ -272,7 +290,8 @@ const useAssistantStore = create<AssistantStoreState>()(
           if (idx >= 0) {
             s.messages[idx] = message;
           }
-          delete s.streamingTextByMessageId[message.id];
+          const acc = state.streamingText[sessionId];
+          if (acc) delete acc[message.id];
           // Intentionally do NOT clear `isStreaming` here. A run typically
           // alternates between assistant text turns and tool-execution
           // phases; clearing on every message completion makes the activity
@@ -299,7 +318,8 @@ const useAssistantStore = create<AssistantStoreState>()(
           if (idx >= 0) {
             s.messages[idx] = message;
           }
-          delete s.streamingTextByMessageId[message.id];
+          const acc = state.streamingText[sessionId];
+          if (acc) delete acc[message.id];
         }),
 
       setRunStatus: (sessionId, run) =>
@@ -314,7 +334,7 @@ const useAssistantStore = create<AssistantStoreState>()(
           }
           if ((TERMINAL_STATUSES as readonly string[]).includes(run.status)) {
             s.isStreaming = false;
-            s.streamingTextByMessageId = {};
+            delete state.streamingText[sessionId];
             s.runStartedAt = null;
             s.pendingAskUser = null;
           } else if ((ACTIVE_STATUSES as readonly string[]).includes(run.status)) {
@@ -403,7 +423,9 @@ const useAssistantStore = create<AssistantStoreState>()(
             // The DB only persists assistant text at end-of-run, so a poll
             // tick that lands mid-stream would otherwise wipe the deltas the
             // user is watching arrive, making text flicker on and off.
-            streamingTextByMessageId: existing?.streamingTextByMessageId || {},
+            // (The streaming-text accumulator itself lives in the top-level
+            // `streamingText` map, so a session replacement here cannot wipe
+            // it by construction.)
             isStreaming: existing?.isStreaming || false,
             // Run start is FE-only live state the BE snapshot doesn't carry;
             // preserve it so a poll tick mid-run doesn't reset the elapsed timer.
@@ -420,6 +442,7 @@ const useAssistantStore = create<AssistantStoreState>()(
       removeSession: (sessionId) =>
         set((state) => {
           delete state.sessions[sessionId];
+          delete state.streamingText[sessionId];
           for (const [tabId, sid] of Object.entries(state.activeSessionByTab)) {
             if (sid === sessionId) {
               delete state.activeSessionByTab[tabId];

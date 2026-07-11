@@ -17,12 +17,19 @@ interface EnsureSessionContext {
 
 const normalizeIdList = (ids: string[] | undefined | null): string[] => [...(ids || [])].sort();
 
+const EMPTY_STREAMING: Record<string, string> = {};
+
 export function useAssistantSession(tabId: string) {
   const sessionId = useAssistantStore(
     (state) => state.activeSessionByTab[tabId]
   );
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] : null
+  );
+  // Separate subscription: the accumulator lives outside SessionState so
+  // per-delta updates don't invalidate the whole-session subscription above.
+  const streamingText = useAssistantStore(
+    (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
   );
 
   // Mirror sessionId into a ref so stable callbacks (sendMessage in particular)
@@ -140,7 +147,7 @@ export function useAssistantSession(tabId: string) {
     session: sessionState?.session || null,
     messages: sessionState?.messages || [],
     runs: sessionState?.runs || [],
-    streamingText: sessionState?.streamingTextByMessageId || {},
+    streamingText,
     isStreaming: sessionState?.isStreaming || false,
     ensureSession,
     sendMessage,
