@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::assistant::auth::McpSecretStorage;
+use crate::assistant::auth::{secret_hint, McpSecretStorage};
 use crate::config::{McpServerAuth, McpServerConfig, McpServerTransport};
 use crate::mcp::oauth;
 use crate::AppState;
@@ -317,17 +317,6 @@ impl McpServerResponse {
 /// Vault-ref namespace + key for a secret env var / header.
 fn env_secret_ref(server_id: &str, ns: &str, key: &str) -> String {
     format!("mcp-server::{}::{}::{}", server_id, ns, key)
-}
-
-/// Last-4-char identification hint for a secret value, only when it is long
-/// enough (>= 8 chars) that revealing 4 can't expose most of it.
-fn secret_hint(value: &str) -> Option<String> {
-    if value.chars().count() < 8 {
-        return None;
-    }
-    let mut last4: Vec<char> = value.chars().rev().take(4).collect();
-    last4.reverse();
-    Some(last4.into_iter().collect())
 }
 
 /// Map a stored [`McpEnvVar`] to its response shape: plain value for

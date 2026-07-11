@@ -446,6 +446,35 @@ pub async fn provider_connection_list(
         .get_provider_connections())
 }
 
+/// Last-4 identification hint for ONE connection's stored API key (design
+/// D12, mirroring the MCP secret hints). Looked up lazily when the user
+/// opens a connection for editing — never for the whole list, so opening
+/// Settings does not fan out a keyring/DBus read per connection.
+#[tauri::command]
+pub async fn provider_connection_secret_hint(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    // Copy the connection out, then read the vault OUTSIDE the config lock
+    // (keyring reads can be slow; never hold the lock across them).
+    let connection = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connection(&id);
+    let Some(connection) = connection else {
+        return Ok(None);
+    };
+    if connection.auth_mode == AuthMode::SubscriptionLogin {
+        return Ok(None); // CLI login — no stored API key.
+    }
+    Ok(ProviderSecretStorage::get_secret(&connection.secret_ref)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(crate::assistant::auth::secret_hint))
+}
+
 #[tauri::command]
 pub async fn provider_descriptor_models(provider_id: String) -> Result<Vec<ModelInfo>, String> {
     cli::models_for_provider(&provider_id)

@@ -150,6 +150,13 @@ export async function listProviderConnections(): Promise<ProviderConnection[]> {
   return invoke('provider_connection_list');
 }
 
+/** Last-4 hint for ONE connection's stored API key. Looked up lazily when
+ * the user opens a connection for editing — a keyring read per call, so
+ * never fanned out across the whole list. */
+export async function getProviderSecretHint(id: string): Promise<string | null> {
+  return invoke('provider_connection_secret_hint', { id });
+}
+
 export async function getProviderConnection(id: string): Promise<ProviderConnection | null> {
   return invoke('provider_connection_get', { id });
 }

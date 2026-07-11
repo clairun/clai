@@ -135,3 +135,16 @@ impl McpSecretStorage {
         }
     }
 }
+
+/// Last-4-char identification hint for a secret value, only when it is long
+/// enough (>= 8 chars) that revealing 4 cannot leak most of it. Shared by
+/// the MCP env/header secrets and provider API keys (design D12): computed
+/// LIVE from the vault value — never persisted to disk.
+pub fn secret_hint(value: &str) -> Option<String> {
+    if value.chars().count() < 8 {
+        return None;
+    }
+    let mut last4: Vec<char> = value.chars().rev().take(4).collect();
+    last4.reverse();
+    Some(last4.into_iter().collect())
+}

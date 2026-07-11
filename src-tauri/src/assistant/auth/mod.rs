@@ -1,3 +1,3 @@
 pub mod secrets;
 
-pub use secrets::{McpSecretStorage, ProviderSecretStorage};
+pub use secrets::{secret_hint, McpSecretStorage, ProviderSecretStorage};
