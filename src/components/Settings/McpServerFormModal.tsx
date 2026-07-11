@@ -21,6 +21,44 @@ interface McpServerFormModalProps {
 type TransportType = 'stdio' | 'http';
 type AuthType = 'none' | 'bearer_token' | 'oauth';
 
+/** A single env var (stdio) / header (http) row in the editor. */
+interface EnvRow {
+  key: string;
+  value: string;
+  secret: boolean;
+  /** A secret is already stored for this key (edit mode). */
+  hasSecret: boolean;
+  /** Last-4 identification hint for a stored secret, if long enough. */
+  hint: string | null;
+}
+
+/** Build editor rows from the response entries (McpEnvVarResponse[]). */
+function rowsFromEntries(
+  entries: ReadonlyArray<{ key: string; value: string | null; secret: boolean; hint: string | null }> | undefined | null
+): EnvRow[] {
+  return (entries || []).map((e) => ({
+    key: e.key,
+    value: e.secret ? '' : e.value || '',
+    secret: e.secret,
+    hasSecret: e.secret,
+    hint: e.hint ?? null,
+  }));
+}
+
+/**
+ * Convert an editor row to the request McpEnvVar shape. Secret rows send the
+ * typed value (or omit it to keep the stored one); the secret_ref is assigned
+ * server-side. Rows with an empty key are dropped by the caller.
+ */
+function rowToEnvVar(row: EnvRow): Record<string, unknown> {
+  const key = row.key.trim();
+  if (row.secret) {
+    const typed = row.value.trim();
+    return typed ? { key, value: typed, secret: true } : { key, secret: true };
+  }
+  return { key, value: row.value, secret: false };
+}
+
 interface OAuthLoginState {
   loginId: string;
   authorizationUrl: string;
@@ -49,6 +87,94 @@ const parseList = (value: string): string[] => value
 const errText = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
+const EnvVarEditor = ({
+  label,
+  addLabel,
+  rows,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  addLabel: string;
+  rows: EnvRow[];
+  onChange: (rows: EnvRow[]) => void;
+  disabled: boolean;
+}) => {
+  const update = (i: number, patch: Partial<EnvRow>) =>
+    onChange(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const remove = (i: number) => onChange(rows.filter((_, idx) => idx !== i));
+  const add = () =>
+    onChange([...rows, { key: '', value: '', secret: false, hasSecret: false, hint: null }]);
+
+  return (
+    <div className={styles.field}>
+      <label className={styles.label}>{label}</label>
+      {rows.length > 0 && (
+        <div className={styles.envRows}>
+          {rows.map((row, i) => {
+            const storedPlaceholder = row.hasSecret
+              ? row.hint
+                ? `\u2022\u2022\u2022\u2022${row.hint} — enter to replace`
+                : 'stored — enter to replace'
+              : 'value';
+            return (
+              <div className={styles.envRow} key={i}>
+                <input
+                  className={`${styles.input} ${styles.envKey}`}
+                  type="text"
+                  value={row.key}
+                  onChange={(e) => update(i, { key: e.target.value })}
+                  placeholder="KEY"
+                  disabled={disabled}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                />
+                <input
+                  className={`${styles.input} ${styles.envValue}`}
+                  type={row.secret ? 'password' : 'text'}
+                  value={row.value}
+                  onChange={(e) => update(i, { value: e.target.value })}
+                  placeholder={row.secret ? storedPlaceholder : 'value'}
+                  disabled={disabled}
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                />
+                <label className={styles.envSecretToggle} title="Store this value in the OS keyring">
+                  <input
+                    type="checkbox"
+                    checked={row.secret}
+                    onChange={(e) => update(i, { secret: e.target.checked })}
+                    disabled={disabled}
+                  />
+                  secret
+                </label>
+                <button
+                  type="button"
+                  className={styles.envRemove}
+                  onClick={() => remove(i)}
+                  disabled={disabled}
+                  aria-label={`Remove ${row.key || 'entry'}`}
+                  title="Remove"
+                >
+                  {'\u00d7'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <button type="button" className={styles.envAdd} onClick={add} disabled={disabled}>
+        + {addLabel}
+      </button>
+      <span className={styles.hint}>
+        Secret values are stored in your OS keyring, never in config.json.
+      </span>
+    </div>
+  );
+};
+
 const McpServerFormModal = ({
   isOpen,
   onClose,
@@ -66,6 +192,8 @@ const McpServerFormModal = ({
   const [hasStoredSecret, setHasStoredSecret] = useState(false);
   const [command, setCommand] = useState('');
   const [argsText, setArgsText] = useState('');
+  const [envRows, setEnvRows] = useState<EnvRow[]>([]);
+  const [headerRows, setHeaderRows] = useState<EnvRow[]>([]);
   const [url, setUrl] = useState('');
   const [scopesText, setScopesText] = useState('');
   const [clientId, setClientId] = useState('');
@@ -111,6 +239,8 @@ const McpServerFormModal = ({
       if (server.transport?.type === 'http') {
         setTransportType('http');
         setUrl(server.transport.url || catalogEntry?.endpointUrl || '');
+        setHeaderRows(rowsFromEntries(server.transport?.headers));
+        setEnvRows([]);
         setAuthType((server.auth?.type || 'none') as AuthType);
         setHasStoredSecret(server.auth?.type === 'bearer_token' ? server.auth.has_secret : false);
         setBearerToken('');
@@ -128,6 +258,8 @@ const McpServerFormModal = ({
         setTransportType('stdio');
         setCommand(server.transport?.command || '');
         setArgsText((server.transport?.args || []).join('\n'));
+        setEnvRows(rowsFromEntries(server.transport?.env));
+        setHeaderRows([]);
         setAuthType('none');
         setHasStoredSecret(false);
         setBearerToken('');
@@ -145,6 +277,8 @@ const McpServerFormModal = ({
       setBearerToken('');
       setCommand('');
       setArgsText('');
+      setEnvRows([]);
+      setHeaderRows([]);
       setUrl(catalogEntry.endpointUrl);
       setScopesText((catalogEntry.suggestedScopes || []).join('\n'));
       setClientId('');
@@ -158,6 +292,8 @@ const McpServerFormModal = ({
       setBearerToken('');
       setCommand('');
       setArgsText('');
+      setEnvRows([]);
+      setHeaderRows([]);
       setUrl('');
       setScopesText('');
       setClientId('');
@@ -229,7 +365,13 @@ const McpServerFormModal = ({
         setError('HTTP transport requires a URL');
         return null;
       }
-      transport = { type: 'http', url: trimmedUrl };
+      transport = {
+        type: 'http',
+        url: trimmedUrl,
+        headers: headerRows
+          .filter((r) => r.key.trim())
+          .map(rowToEnvVar),
+      };
     } else {
       const trimmedCommand = command.trim();
       if (!trimmedCommand) {
@@ -243,6 +385,7 @@ const McpServerFormModal = ({
           .split('\n')
           .map((arg) => arg.trim())
           .filter(Boolean),
+        env: envRows.filter((r) => r.key.trim()).map(rowToEnvVar),
       };
     }
 
@@ -511,6 +654,14 @@ const McpServerFormModal = ({
                     />
                     <span className={styles.hint}>One argument per line.</span>
                   </div>
+
+                  <EnvVarEditor
+                    label="Environment variables"
+                    addLabel="Add variable"
+                    rows={envRows}
+                    onChange={setEnvRows}
+                    disabled={formDisabled}
+                  />
                 </>
               ) : (
                 <>
@@ -526,6 +677,14 @@ const McpServerFormModal = ({
                       disabled={formDisabled}
                     />
                   </div>
+
+                  <EnvVarEditor
+                    label="Custom headers"
+                    addLabel="Add header"
+                    rows={headerRows}
+                    onChange={setHeaderRows}
+                    disabled={formDisabled}
+                  />
 
                   <div className={styles.field}>
                     <label className={styles.label} htmlFor="mcp-auth-type">Authentication</label>
