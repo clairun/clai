@@ -50,10 +50,8 @@ const remarkPlugins = [remarkGfm];
  * The components object is also memoized to prevent ReactMarkdown from
  * re-processing on every render.
  */
-const MarkdownMessage = memo(({ content, isStreaming = false }: MarkdownMessageProps) => {
-  // Memoize the components object to prevent ReactMarkdown from re-rendering
-  // when the parent re-renders but content hasn't changed
-  const components = useMemo<Components>(() => ({
+const useMarkdownComponents = (isStreaming: boolean): Components =>
+  useMemo<Components>(() => ({
     // Customize rendering of specific elements. react-markdown v10 dropped
     // `inline` from the official code-renderer prop type, but still passes
     // it at runtime; read it through a widened local type.
@@ -128,14 +126,25 @@ const MarkdownMessage = memo(({ content, isStreaming = false }: MarkdownMessageP
     hr: () => <hr className={styles.horizontalRule} />,
   }), [isStreaming]); // styles object is stable; isStreaming feeds mermaid blocks
 
+export const MarkdownBlock = memo(({ content, isStreaming = false }: MarkdownMessageProps) => {
+  const components = useMarkdownComponents(isStreaming);
+
+  return (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      components={components}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
+MarkdownBlock.displayName = 'MarkdownBlock';
+
+const MarkdownMessage = memo(({ content, isStreaming = false }: MarkdownMessageProps) => {
   return (
     <div className={styles.markdownContainer}>
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        components={components}
-      >
-        {content}
-      </ReactMarkdown>
+      <MarkdownBlock content={content} isStreaming={isStreaming} />
     </div>
   );
 });

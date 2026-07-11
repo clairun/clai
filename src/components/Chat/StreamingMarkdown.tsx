@@ -1,5 +1,6 @@
-import React, { memo, useEffect, useRef, useState } from 'react';
-import MarkdownMessage from './MarkdownMessage';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import MarkdownMessage, { MarkdownBlock } from './MarkdownMessage';
+import styles from './MarkdownMessage.module.css';
 
 /**
  * StreamingMarkdown
@@ -23,17 +24,29 @@ import MarkdownMessage from './MarkdownMessage';
  * and stops animating.
  */
 
-const TYPEWRITER_FRAME_RATE = 60; // assume RAF ~60fps
-const TYPEWRITER_BASE_CPS = 240;  // baseline visible characters/second
-const TYPEWRITER_MIN_ADVANCE = Math.max(2, Math.ceil(TYPEWRITER_BASE_CPS / TYPEWRITER_FRAME_RATE));
+const TYPEWRITER_DEFAULT_FRAME_RATE = 60; // assume RAF ~60fps
+const TYPEWRITER_LINUX_FRAME_RATE = 18;   // WebKitGTK has less headroom for markdown/layout work
+const TYPEWRITER_BASE_CPS = 240;          // baseline visible characters/second
 const TYPEWRITER_CATCHUP_FRACTION = 0.18;       // while streaming
 const TYPEWRITER_DRAIN_FRACTION   = 0.35;       // after stream ends — drain faster
+
+const isLinuxRuntime = (): boolean => {
+  if (typeof document !== 'undefined') {
+    const platform = document.documentElement.getAttribute('data-platform');
+    if (platform) return platform === 'linux';
+  }
+  return typeof navigator !== 'undefined' && /linux/i.test(navigator.userAgent);
+};
+
+const resolveTypewriterFrameRate = (): number =>
+  isLinuxRuntime() ? TYPEWRITER_LINUX_FRAME_RATE : TYPEWRITER_DEFAULT_FRAME_RATE;
 
 const useTypewriterBuffer = (accumulated: string, isStreaming: boolean): string => {
   const [displayed, setDisplayed] = useState(() => (isStreaming ? '' : accumulated || ''));
   const accRef = useRef(accumulated || '');
   const lenRef = useRef(displayed.length);
   const streamingRef = useRef(isStreaming);
+  const lastCommitAtRef = useRef(0);
 
   // Mirror the changing inputs into refs so the RAF `tick` callback always
   // reads the latest values without being in the effect dep list (and
@@ -60,22 +73,31 @@ const useTypewriterBuffer = (accumulated: string, isStreaming: boolean): string 
     let cancelled = false;
     let frame: number | null = null;
 
-    const tick = () => {
+    const tick = (now: number) => {
       if (cancelled) return;
       const target = accRef.current.length;
       const cur = lenRef.current;
+      const frameRate = resolveTypewriterFrameRate();
+      const minFrameMs = 1000 / frameRate;
+      const elapsed = now - lastCommitAtRef.current;
 
       if (cur < target) {
+        if (lastCommitAtRef.current > 0 && elapsed < minFrameMs) {
+          frame = requestAnimationFrame(tick);
+          return;
+        }
         const lag = target - cur;
         const fraction = streamingRef.current
           ? TYPEWRITER_CATCHUP_FRACTION
           : TYPEWRITER_DRAIN_FRACTION;
+        const minAdvance = Math.max(2, Math.ceil(TYPEWRITER_BASE_CPS / frameRate));
         const advance = Math.min(
           lag,
-          Math.max(TYPEWRITER_MIN_ADVANCE, Math.ceil(lag * fraction))
+          Math.max(minAdvance, Math.ceil(lag * fraction))
         );
         const newLen = cur + advance;
         lenRef.current = newLen;
+        lastCommitAtRef.current = now;
         setDisplayed(accRef.current.slice(0, newLen));
         frame = requestAnimationFrame(tick);
         return;
@@ -159,6 +181,90 @@ interface StreamingMarkdownProps {
   isStreaming?: boolean;
 }
 
+interface MarkdownSplit {
+  completed: string[];
+  tail: string;
+}
+
+interface FenceState {
+  char: '`' | '~';
+  length: number;
+  rest: string;
+}
+
+const matchFence = (line: string): FenceState | null => {
+  const match = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+  if (!match) return null;
+  const marker = match[2]!;
+  const char = marker[0] === '`' ? '`' : '~';
+  return { char, length: marker.length, rest: match[3] ?? '' };
+};
+
+export const splitStableMarkdownBlocks = (text: string): MarkdownSplit => {
+  if (!text) return { completed: [], tail: '' };
+
+  const completed: string[] = [];
+  let fence: FenceState | null = null;
+  let blockStart = 0;
+  let lineStart = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] !== '\n') continue;
+
+    const line = text.slice(lineStart, index);
+    const marker = matchFence(line);
+    if (marker) {
+      if (!fence) {
+        fence = marker;
+      } else if (
+        marker.char === fence.char
+        && marker.length >= fence.length
+        && marker.rest.trim() === ''
+      ) {
+        fence = null;
+      }
+    }
+
+    if (!fence && line.trim() === '') {
+      const block = text.slice(blockStart, index + 1);
+      if (block.trim()) {
+        completed.push(block);
+      }
+      blockStart = index + 1;
+    }
+
+    lineStart = index + 1;
+  }
+
+  return {
+    completed,
+    tail: text.slice(blockStart),
+  };
+};
+
+const blockKey = (block: string, index: number): string => `${index}:${block.length}`;
+
+const StableMarkdownBlock = memo(({ content }: { content: string }) => (
+  <MarkdownBlock content={content} isStreaming={false} />
+));
+
+StableMarkdownBlock.displayName = 'StableMarkdownBlock';
+
+const StreamingMarkdownBlocks = memo(({ content, isStreaming }: { content: string; isStreaming: boolean }) => {
+  const split = useMemo(() => splitStableMarkdownBlocks(content), [content]);
+
+  return (
+    <div className={styles.markdownContainer}>
+      {split.completed.map((block, index) => (
+        <StableMarkdownBlock key={blockKey(block, index)} content={block} />
+      ))}
+      {split.tail && <MarkdownBlock content={split.tail} isStreaming={isStreaming} />}
+    </div>
+  );
+});
+
+StreamingMarkdownBlocks.displayName = 'StreamingMarkdownBlocks';
+
 const StreamingMarkdown = memo(({ content, isStreaming = false }: StreamingMarkdownProps) => {
   const source = content || '';
   const displayed = useTypewriterBuffer(source, isStreaming);
@@ -168,7 +274,10 @@ const StreamingMarkdown = memo(({ content, isStreaming = false }: StreamingMarkd
   const isCatchingUp = displayed.length < source.length;
   const useBuffered = isStreaming || isCatchingUp;
   const safe = useBuffered ? stabilizePartialMarkdown(displayed) : source;
-  return <MarkdownMessage content={safe} isStreaming={useBuffered} />;
+  if (!useBuffered) {
+    return <MarkdownMessage content={safe} isStreaming={false} />;
+  }
+  return <StreamingMarkdownBlocks content={safe} isStreaming={useBuffered} />;
 });
 
 StreamingMarkdown.displayName = 'StreamingMarkdown';
