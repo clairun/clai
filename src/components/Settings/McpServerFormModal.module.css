@@ -756,3 +756,76 @@
   flex-direction: column;
   gap: 20px;
 }
+
+
+.envRows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.envRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.envKey {
+  flex: 0 0 34%;
+  min-width: 0;
+}
+
+.envValue {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.envSecretToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.envRemove {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border-light);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.envRemove:hover:not(:disabled) {
+  border-color: var(--color-critical, #e5484d);
+  color: var(--color-critical, #e5484d);
+}
+
+.envAdd {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px dashed var(--color-border-light);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.envAdd:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}

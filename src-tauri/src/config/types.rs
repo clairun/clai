@@ -127,6 +127,28 @@ impl AiProvider {
 // MCP Server Config
 // =============================================================================
 
+/// A single environment variable (stdio) or HTTP header (http) entry for an
+/// MCP server. Secret entries store their value in the OS vault under
+/// `secret_ref` and leave `value` empty; non-secret entries store the value
+/// inline. See `design/mcp-env-vars-design.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct McpEnvVar {
+    /// Env variable name, or HTTP header name.
+    pub key: String,
+    /// Plain value — present only for non-secret entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Vault reference — present only for secret entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_ref: Option<String>,
+    /// When true the value lives in the vault under `secret_ref`; otherwise
+    /// the plain `value` is used.
+    #[serde(default)]
+    pub secret: bool,
+}
+
 /// User-configured MCP server transport.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -136,9 +158,16 @@ pub enum McpServerTransport {
         command: String,
         #[serde(default)]
         args: Vec<String>,
+        /// Environment variables layered on top of CLAI's inherited env when
+        /// the stdio subprocess is spawned.
+        #[serde(default)]
+        env: Vec<McpEnvVar>,
     },
     Http {
         url: String,
+        /// Extra HTTP headers sent with each request (alongside any auth).
+        #[serde(default)]
+        headers: Vec<McpEnvVar>,
     },
 }
 
@@ -782,5 +811,57 @@ mod tests {
         agent.schedule_enabled = true;
         let err = agent.validate().unwrap_err();
         assert!(err.to_lowercase().contains("cron"));
+    }
+
+    #[test]
+    fn mcp_transport_loads_legacy_config_without_env_or_headers() {
+        // Old configs predate env/headers — they must still deserialize
+        // (regression against the fail-closed loader lesson).
+        let stdio: McpServerTransport =
+            serde_json::from_str(r#"{"type":"stdio","command":"uvx","args":["x"]}"#).unwrap();
+        match stdio {
+            McpServerTransport::Stdio { command, args, env } => {
+                assert_eq!(command, "uvx");
+                assert_eq!(args, vec!["x".to_string()]);
+                assert!(env.is_empty());
+            }
+            _ => panic!("expected stdio"),
+        }
+        let http: McpServerTransport =
+            serde_json::from_str(r#"{"type":"http","url":"https://x/mcp"}"#).unwrap();
+        match http {
+            McpServerTransport::Http { url, headers } => {
+                assert_eq!(url, "https://x/mcp");
+                assert!(headers.is_empty());
+            }
+            _ => panic!("expected http"),
+        }
+    }
+
+    #[test]
+    fn mcp_env_var_round_trips_secret_and_plain_shapes() {
+        // Plain: value inline, no secret_ref, not skipped.
+        let plain = McpEnvVar {
+            key: "LOG_LEVEL".into(),
+            value: Some("debug".into()),
+            secret_ref: None,
+            secret: false,
+        };
+        let j = serde_json::to_string(&plain).unwrap();
+        assert!(j.contains("\"value\":\"debug\""));
+        assert!(!j.contains("secretRef"));
+        assert_eq!(serde_json::from_str::<McpEnvVar>(&j).unwrap(), plain);
+
+        // Secret: secret_ref present, value omitted.
+        let secret = McpEnvVar {
+            key: "API_KEY".into(),
+            value: None,
+            secret_ref: Some("mcp-server::abc::env::API_KEY".into()),
+            secret: true,
+        };
+        let j = serde_json::to_string(&secret).unwrap();
+        assert!(j.contains("secretRef"));
+        assert!(!j.contains("\"value\""));
+        assert_eq!(serde_json::from_str::<McpEnvVar>(&j).unwrap(), secret);
     }
 }

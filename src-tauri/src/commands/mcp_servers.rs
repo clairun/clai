@@ -199,14 +199,45 @@ pub enum McpServerAuthResponse {
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
+pub struct McpEnvVarResponse {
+    pub key: String,
+    /// Plain value for non-secret entries; `None` for secrets (never leaked).
+    pub value: Option<String>,
+    pub secret: bool,
+    /// Last-4 hint (e.g. `1234`) for a secret whose stored value is >= 8 chars,
+    /// so the user can identify which secret is set. `None` otherwise.
+    pub hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum McpServerTransportResponse {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: Vec<McpEnvVarResponse>,
+    },
+    Http {
+        url: String,
+        headers: Vec<McpEnvVarResponse>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct McpServerResponse {
     pub id: String,
     pub name: String,
     pub enabled: bool,
-    pub transport: McpServerTransport,
+    pub transport: McpServerTransportResponse,
     pub auth: McpServerAuthResponse,
     pub created_at: String,
     pub updated_at: String,
+    /// Advisory, non-blocking warning (e.g. stdio binary not found on save).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]
@@ -246,7 +277,7 @@ impl McpServerResponse {
             id: server.id,
             name: server.name,
             enabled: server.enabled,
-            transport: server.transport,
+            transport: transport_to_response(&server.transport),
             auth: match server.auth {
                 McpServerAuth::None => McpServerAuthResponse::None,
                 McpServerAuth::BearerToken { secret_ref } => McpServerAuthResponse::BearerToken {
@@ -278,7 +309,201 @@ impl McpServerResponse {
             },
             created_at: server.created_at,
             updated_at: server.updated_at,
+            warning: None,
         }
+    }
+}
+
+/// Vault-ref namespace + key for a secret env var / header.
+fn env_secret_ref(server_id: &str, ns: &str, key: &str) -> String {
+    format!("mcp-server::{}::{}::{}", server_id, ns, key)
+}
+
+/// Last-4-char identification hint for a secret value, only when it is long
+/// enough (>= 8 chars) that revealing 4 can't expose most of it.
+fn secret_hint(value: &str) -> Option<String> {
+    if value.chars().count() < 8 {
+        return None;
+    }
+    let mut last4: Vec<char> = value.chars().rev().take(4).collect();
+    last4.reverse();
+    Some(last4.into_iter().collect())
+}
+
+/// Map a stored [`McpEnvVar`] to its response shape: plain value for
+/// non-secrets; for secrets, a last-4 hint read live from the vault (never
+/// the value, never the secret_ref).
+fn env_var_response(var: &crate::config::McpEnvVar) -> McpEnvVarResponse {
+    if !var.secret {
+        return McpEnvVarResponse {
+            key: var.key.clone(),
+            value: var.value.clone(),
+            secret: false,
+            hint: None,
+        };
+    }
+    let hint = var
+        .secret_ref
+        .as_deref()
+        .and_then(|r| McpSecretStorage::get_secret(r).ok().flatten())
+        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| secret_hint(&v));
+    McpEnvVarResponse {
+        key: var.key.clone(),
+        value: None,
+        secret: true,
+        hint,
+    }
+}
+
+fn transport_to_response(transport: &McpServerTransport) -> McpServerTransportResponse {
+    match transport {
+        McpServerTransport::Stdio { command, args, env } => McpServerTransportResponse::Stdio {
+            command: command.clone(),
+            args: args.clone(),
+            env: env.iter().map(env_var_response).collect(),
+        },
+        McpServerTransport::Http { url, headers } => McpServerTransportResponse::Http {
+            url: url.clone(),
+            headers: headers.iter().map(env_var_response).collect(),
+        },
+    }
+}
+
+/// Persist secret values to the vault and rewrite secret entries to carry a
+/// `secret_ref` (value cleared). Non-secret entries pass through. On update,
+/// a secret entry submitted with no value keeps its existing secret_ref
+/// (from `previous`) so the user needn't re-enter it.
+fn materialize_secret_vars(
+    server_id: &str,
+    ns: &str,
+    incoming: Vec<crate::config::McpEnvVar>,
+    previous: &[crate::config::McpEnvVar],
+) -> Result<Vec<crate::config::McpEnvVar>, String> {
+    let mut out = Vec::with_capacity(incoming.len());
+    for var in incoming {
+        if !var.secret {
+            out.push(crate::config::McpEnvVar {
+                key: var.key,
+                value: var.value,
+                secret_ref: None,
+                secret: false,
+            });
+            continue;
+        }
+        let secret_ref = env_secret_ref(server_id, ns, &var.key);
+        match var.value {
+            Some(ref v) if !v.is_empty() => {
+                McpSecretStorage::set_secret(&secret_ref, v)
+                    .map_err(|e| format!("Failed to store MCP secret `{}`: {}", var.key, e))?;
+                out.push(crate::config::McpEnvVar {
+                    key: var.key,
+                    value: None,
+                    secret_ref: Some(secret_ref),
+                    secret: true,
+                });
+            }
+            _ => {
+                // No new value: keep the existing stored secret if there is one.
+                let prev = previous
+                    .iter()
+                    .find(|p| p.secret && p.key == var.key && p.secret_ref.is_some());
+                if let Some(prev) = prev {
+                    out.push(crate::config::McpEnvVar {
+                        key: var.key,
+                        value: None,
+                        secret_ref: prev.secret_ref.clone(),
+                        secret: true,
+                    });
+                } else {
+                    tracing::warn!(key = %var.key, "secret MCP var has no value and no prior secret; dropping");
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn materialize_transport_secrets(
+    server_id: &str,
+    incoming: McpServerTransport,
+    previous: Option<&McpServerTransport>,
+) -> Result<McpServerTransport, String> {
+    match incoming {
+        McpServerTransport::Stdio { command, args, env } => {
+            let prev: &[crate::config::McpEnvVar] = match previous {
+                Some(McpServerTransport::Stdio { env, .. }) => env,
+                _ => &[],
+            };
+            Ok(McpServerTransport::Stdio {
+                command,
+                args,
+                env: materialize_secret_vars(server_id, "env", env, prev)?,
+            })
+        }
+        McpServerTransport::Http { url, headers } => {
+            let prev: &[crate::config::McpEnvVar] = match previous {
+                Some(McpServerTransport::Http { headers, .. }) => headers,
+                _ => &[],
+            };
+            Ok(McpServerTransport::Http {
+                url,
+                headers: materialize_secret_vars(server_id, "header", headers, prev)?,
+            })
+        }
+    }
+}
+
+fn transport_secret_refs(transport: &McpServerTransport) -> Vec<String> {
+    let vars: &[crate::config::McpEnvVar] = match transport {
+        McpServerTransport::Stdio { env, .. } => env,
+        McpServerTransport::Http { headers, .. } => headers,
+    };
+    vars.iter()
+        .filter(|v| v.secret)
+        .filter_map(|v| v.secret_ref.clone())
+        .collect()
+}
+
+/// Clear vault entries for secrets present in `previous` but not in `next`
+/// (removed vars, or vars flipped to non-secret / renamed).
+fn clear_orphaned_transport_secrets(previous: &McpServerTransport, next: &McpServerTransport) {
+    let keep: std::collections::HashSet<String> = transport_secret_refs(next).into_iter().collect();
+    for r in transport_secret_refs(previous) {
+        if !keep.contains(&r) {
+            let _ = McpSecretStorage::clear_secret(&r);
+        }
+    }
+}
+
+fn clear_transport_secrets(transport: &McpServerTransport) {
+    for r in transport_secret_refs(transport) {
+        let _ = McpSecretStorage::clear_secret(&r);
+    }
+}
+
+/// Advisory (non-blocking) check that a stdio server's command is resolvable
+/// on the same PATH the spawn will use. Returns a warning string if not.
+fn stdio_binary_warning(transport: &McpServerTransport) -> Option<String> {
+    let McpServerTransport::Stdio { command, .. } = transport else {
+        return None;
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        return None;
+    }
+    let resolvable = if command.contains('/') || command.contains('\\') {
+        std::path::Path::new(command).exists()
+    } else {
+        crate::providers::command_exists(command)
+    };
+    if resolvable {
+        None
+    } else {
+        Some(format!(
+            "`{}` was not found on PATH — the server may fail to start. Use the full path to the binary if it is installed.",
+            command
+        ))
     }
 }
 
@@ -482,6 +707,7 @@ pub async fn finish_mcp_oauth_login(
                     server.enabled = pending.draft.enabled;
                     server.transport = McpServerTransport::Http {
                         url: pending.draft.url.clone(),
+                        headers: Vec::new(),
                     };
                     server.auth = auth.clone();
                 })
@@ -499,6 +725,7 @@ pub async fn finish_mcp_oauth_login(
                 enabled: pending.draft.enabled,
                 transport: McpServerTransport::Http {
                     url: pending.draft.url.clone(),
+                    headers: Vec::new(),
                 },
                 auth,
                 created_at: now.clone(),
@@ -574,6 +801,7 @@ pub async fn create_mcp_server(
         let mut server = McpServerConfig::new(request.name, request.transport);
         server.enabled = request.enabled;
         server.auth = build_auth_for_new_server(&server.id, &request.auth)?;
+        server.transport = materialize_transport_secrets(&server.id, server.transport, None)?;
         config_manager
             .add_mcp_server(server.clone())
             .map_err(|e| format!("Failed to create MCP server: {}", e))?;
@@ -582,7 +810,10 @@ pub async fn create_mcp_server(
 
     sync_mcp_client_manager(&state).await;
 
-    Ok(McpServerResponse::from_config(server))
+    let warning = stdio_binary_warning(&server.transport);
+    let mut response = McpServerResponse::from_config(server);
+    response.warning = warning;
+    Ok(response)
 }
 
 #[tauri::command]
@@ -601,12 +832,18 @@ pub async fn update_mcp_server(
             .ok_or_else(|| format!("MCP server not found: {}", request.id))?;
         let next_auth = build_auth_for_existing_server(&existing, &request.auth)?;
         let name_changed = existing.name != request.name;
+        let next_transport = materialize_transport_secrets(
+            &request.id,
+            request.transport.clone(),
+            Some(&existing.transport),
+        )?;
+        clear_orphaned_transport_secrets(&existing.transport, &next_transport);
 
         config_manager
             .update_mcp_server(&request.id, |server| {
                 server.name = request.name.clone();
                 server.enabled = request.enabled;
-                server.transport = request.transport.clone();
+                server.transport = next_transport.clone();
                 server.auth = next_auth.clone();
             })
             .map_err(|e| format!("Failed to update MCP server: {}", e))?;
@@ -632,7 +869,10 @@ pub async fn update_mcp_server(
 
     sync_mcp_client_manager(&state).await;
 
-    Ok(McpServerResponse::from_config(server))
+    let warning = stdio_binary_warning(&server.transport);
+    let mut response = McpServerResponse::from_config(server);
+    response.warning = warning;
+    Ok(response)
 }
 
 #[tauri::command]
@@ -649,6 +889,7 @@ pub async fn delete_mcp_server(id: String, state: State<'_, AppState>) -> Result
 
         if let Some(server) = config_manager.get_mcp_server(&id) {
             clear_auth_secret(&server.id, &server.auth)?;
+            clear_transport_secrets(&server.transport);
         }
 
         let removed = config_manager
@@ -863,5 +1104,74 @@ fn validate_http_url(raw_url: &str) -> Result<String, String> {
             "MCP OAuth requires an HTTP or HTTPS URL, got scheme `{}`",
             scheme
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::McpEnvVar;
+
+    #[test]
+    fn secret_hint_reveals_last4_only_when_long_enough() {
+        assert_eq!(secret_hint("sk-verysecret1234"), Some("1234".to_string()));
+        assert_eq!(secret_hint("abcdefgh"), Some("efgh".to_string())); // exactly 8
+        assert_eq!(secret_hint("short"), None); // 5 < 8
+        assert_eq!(secret_hint("1234567"), None); // 7 < 8
+    }
+
+    #[test]
+    fn env_var_response_plain_carries_value_no_hint() {
+        let r = env_var_response(&McpEnvVar {
+            key: "LOG_LEVEL".into(),
+            value: Some("debug".into()),
+            secret_ref: None,
+            secret: false,
+        });
+        assert_eq!(r.value.as_deref(), Some("debug"));
+        assert!(!r.secret);
+        assert!(r.hint.is_none());
+    }
+
+    #[test]
+    fn transport_secret_refs_collects_only_secret_entries() {
+        let t = McpServerTransport::Stdio {
+            command: "uvx".into(),
+            args: vec![],
+            env: vec![
+                McpEnvVar {
+                    key: "PLAIN".into(),
+                    value: Some("x".into()),
+                    secret_ref: None,
+                    secret: false,
+                },
+                McpEnvVar {
+                    key: "SECRET".into(),
+                    value: None,
+                    secret_ref: Some("mcp-server::s::env::SECRET".into()),
+                    secret: true,
+                },
+            ],
+        };
+        assert_eq!(
+            transport_secret_refs(&t),
+            vec!["mcp-server::s::env::SECRET"]
+        );
+    }
+
+    #[test]
+    fn stdio_binary_warning_flags_missing_command() {
+        let t = McpServerTransport::Stdio {
+            command: "clai-definitely-not-a-real-binary-xyz".into(),
+            args: vec![],
+            env: vec![],
+        };
+        assert!(stdio_binary_warning(&t).is_some());
+        // http transport never warns
+        let h = McpServerTransport::Http {
+            url: "https://x/mcp".into(),
+            headers: vec![],
+        };
+        assert!(stdio_binary_warning(&h).is_none());
     }
 }

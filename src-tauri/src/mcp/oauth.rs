@@ -273,7 +273,7 @@ pub async fn runtime_auth_manager_for_server(
         return Err("MCP server is not configured for OAuth".to_string());
     };
 
-    let McpServerTransport::Http { url } = &config.transport else {
+    let McpServerTransport::Http { url, .. } = &config.transport else {
         return Err("OAuth is only supported for HTTP MCP servers".to_string());
     };
 

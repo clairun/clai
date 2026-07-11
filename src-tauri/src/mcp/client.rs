@@ -21,7 +21,7 @@ use tokio::{
 
 use crate::assistant::auth::McpSecretStorage;
 use crate::assistant::types::ToolDefinition;
-use crate::config::{ClaiConfig, McpServerAuth, McpServerConfig};
+use crate::config::{ClaiConfig, McpEnvVar, McpServerAuth, McpServerConfig};
 use crate::mcp::oauth;
 
 /// External MCP connect + tool discovery must not hang the `clai` bridge's
@@ -160,6 +160,57 @@ struct ManagedMcpServer {
 #[derive(Default)]
 pub struct McpClientManager {
     servers: HashMap<String, ManagedMcpServer>,
+}
+
+/// Resolve an [`McpEnvVar`] to its concrete value: the plain `value` for a
+/// non-secret entry, or the vault secret for a secret entry. Returns `None`
+/// (with a warning) for a malformed or missing-secret entry so a single bad
+/// var can't abort the whole server connection. The secret is read here, at
+/// spawn/connect time — never persisted in config, argv, or logs.
+fn resolve_mcp_env_value(var: &McpEnvVar) -> Option<String> {
+    if !var.secret {
+        return var.value.clone();
+    }
+    match var.secret_ref.as_deref() {
+        Some(secret_ref) => match McpSecretStorage::get_secret(secret_ref) {
+            Ok(Some(value)) => Some(value),
+            Ok(None) => {
+                tracing::warn!(key = %var.key, "MCP secret var missing from vault; skipping");
+                None
+            }
+            Err(error) => {
+                tracing::warn!(key = %var.key, %error, "Failed to read MCP secret var; skipping");
+                None
+            }
+        },
+        None => {
+            tracing::warn!(key = %var.key, "MCP secret var has no secret_ref; skipping");
+            None
+        }
+    }
+}
+
+/// Build the custom-header map for an HTTP MCP server, resolving secret values
+/// from the vault. Invalid header names/values are skipped with a warning.
+fn build_mcp_custom_headers(
+    headers: &[McpEnvVar],
+) -> std::collections::HashMap<http::HeaderName, http::HeaderValue> {
+    let mut map = std::collections::HashMap::new();
+    for var in headers {
+        let Some(value) = resolve_mcp_env_value(var) else {
+            continue;
+        };
+        match (
+            http::HeaderName::from_bytes(var.key.as_bytes()),
+            http::HeaderValue::from_str(&value),
+        ) {
+            (Ok(name), Ok(val)) => {
+                map.insert(name, val);
+            }
+            _ => tracing::warn!(key = %var.key, "Invalid MCP HTTP header name/value; skipping"),
+        }
+    }
+    map
 }
 
 impl McpClientManager {
@@ -443,12 +494,16 @@ impl McpClientManager {
 
     async fn connect_server(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
         match &config.transport {
-            crate::config::McpServerTransport::Http { url } => {
+            crate::config::McpServerTransport::Http { url, headers } => {
                 // Build on rmcp's own bundled reqwest client via `from_config`
                 // so CLAI doesn't have to share reqwest's major version with
                 // rmcp (rmcp 1.7 uses reqwest 0.13; CLAI stays on 0.12).
                 let mut transport_config =
                     StreamableHttpClientTransportConfig::with_uri(url.clone());
+                let custom_headers = build_mcp_custom_headers(headers);
+                if !custom_headers.is_empty() {
+                    transport_config = transport_config.custom_headers(custom_headers);
+                }
                 let service = match &config.auth {
                     McpServerAuth::None => {
                         ().serve(StreamableHttpClientTransport::from_config(transport_config))
@@ -501,9 +556,15 @@ impl McpClientManager {
 
                 Ok(ConnectedMcpServer::Http(service))
             }
-            crate::config::McpServerTransport::Stdio { command, args } => {
+            crate::config::McpServerTransport::Stdio { command, args, env } => {
                 let mut cmd = Command::new(command);
                 cmd.args(args);
+                // Inherit CLAI's env; overlay the user's configured vars on top.
+                for var in env {
+                    if let Some(value) = resolve_mcp_env_value(var) {
+                        cmd.env(&var.key, value);
+                    }
+                }
                 cmd.stdin(Stdio::piped());
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
@@ -675,5 +736,39 @@ mod tests {
     fn parser_rejects_non_mcp_names() {
         assert!(parse_qualified_tool_name("fs_read").is_none());
         assert!(parse_qualified_tool_name("mcp__onlyserver").is_none());
+    }
+
+    #[test]
+    fn resolve_mcp_env_value_returns_plain_value_without_touching_vault() {
+        let var = McpEnvVar {
+            key: "LOG_LEVEL".into(),
+            value: Some("debug".into()),
+            secret_ref: None,
+            secret: false,
+        };
+        assert_eq!(resolve_mcp_env_value(&var), Some("debug".to_string()));
+    }
+
+    #[test]
+    fn build_mcp_custom_headers_maps_plain_and_skips_invalid() {
+        let headers = vec![
+            McpEnvVar {
+                key: "X-Org-Id".into(),
+                value: Some("acme".into()),
+                secret_ref: None,
+                secret: false,
+            },
+            // Invalid header name (space) — must be skipped, not panic.
+            McpEnvVar {
+                key: "Bad Header".into(),
+                value: Some("x".into()),
+                secret_ref: None,
+                secret: false,
+            },
+        ];
+        let map = build_mcp_custom_headers(&headers);
+        assert_eq!(map.len(), 1);
+        let name = http::HeaderName::from_static("x-org-id");
+        assert_eq!(map.get(&name).unwrap(), "acme");
     }
 }
