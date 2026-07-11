@@ -4,8 +4,8 @@ use crate::assistant::repository::{
 };
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
-    ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger, SessionContext,
-    SessionKind,
+    AssistantMessage, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
+    SessionContext, SessionKind,
 };
 use crate::config::{workspace_config, AgentConfig, AppConfig, WorkspaceAgent, WorkspaceConfig};
 use crate::db::DbPool;
@@ -813,21 +813,34 @@ fn classify_worker_status(summary: Option<&str>, fallback: &'static str) -> &'st
 
 async fn latest_assistant_text(pool: &DbPool, session_id: &str) -> Result<Option<String>, String> {
     let messages = repository::list_messages(pool, session_id).await?;
+    Ok(final_assistant_text(&messages))
+}
+
+/// The last non-empty text the assistant produced in a session, used as the
+/// task's result summary and for BLOCKED-status classification.
+///
+/// Both messages AND the parts within a message are scanned newest-first.
+/// Some providers (Codex via the appserver) accumulate an entire run —
+/// opening remark, tool_use items, final verdict — as content parts of a
+/// single assistant message. Scanning parts oldest-first there returns the
+/// worker's *opening sentence* instead of its final verdict/summary, and
+/// makes `BLOCKED:` prefixes in the final text undetectable.
+fn final_assistant_text(messages: &[AssistantMessage]) -> Option<String> {
     for message in messages.iter().rev() {
         if message.role != MessageRole::Assistant {
             continue;
         }
-        for part in &message.content {
+        for part in message.content.iter().rev() {
             let ContentPart::Text { text } = part else {
                 continue;
             };
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                return Ok(Some(trimmed.to_string()));
+                return Some(trimmed.to_string());
             }
         }
     }
-    Ok(None)
+    None
 }
 
 fn now_ms() -> i64 {
@@ -940,6 +953,108 @@ mod tests {
     #[test]
     fn is_attention_status_empty_is_false() {
         assert!(!is_attention_status(""));
+    }
+
+    // -----------------------------------------------------------------
+    // final_assistant_text
+    // -----------------------------------------------------------------
+
+    fn msg(role: MessageRole, content: Vec<ContentPart>) -> AssistantMessage {
+        AssistantMessage {
+            id: "m".to_string(),
+            session_id: "s".to_string(),
+            role,
+            content,
+            created_at: 0,
+            provider_metadata: None,
+        }
+    }
+
+    fn text(t: &str) -> ContentPart {
+        ContentPart::Text {
+            text: t.to_string(),
+        }
+    }
+
+    #[test]
+    fn final_assistant_text_empty_returns_none() {
+        assert_eq!(final_assistant_text(&[]), None);
+    }
+
+    #[test]
+    fn final_assistant_text_takes_last_assistant_message() {
+        let messages = vec![
+            msg(MessageRole::Assistant, vec![text("first reply")]),
+            msg(MessageRole::User, vec![text("user says")]),
+            msg(MessageRole::Assistant, vec![text("final reply")]),
+        ];
+        assert_eq!(
+            final_assistant_text(&messages),
+            Some("final reply".to_string())
+        );
+    }
+
+    #[test]
+    fn final_assistant_text_takes_last_text_part_within_message() {
+        // Regression: Codex-style sessions store an entire run as ONE
+        // assistant message whose parts are [opening text, tool_use...,
+        // final verdict text]. The summary must be the final text part,
+        // not the opening remark.
+        let messages = vec![msg(
+            MessageRole::Assistant,
+            vec![
+                text("I'm applying the code-review checklist."),
+                ContentPart::ToolUse {
+                    tool_call_id: "t1".to_string(),
+                    tool_name: "bash_exec".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+                text("Verdict: production_quality. No findings."),
+            ],
+        )];
+        assert_eq!(
+            final_assistant_text(&messages),
+            Some("Verdict: production_quality. No findings.".to_string())
+        );
+    }
+
+    #[test]
+    fn final_assistant_text_skips_trailing_empty_text_parts() {
+        let messages = vec![msg(
+            MessageRole::Assistant,
+            vec![text("real summary"), text("   \n  ")],
+        )];
+        assert_eq!(
+            final_assistant_text(&messages),
+            Some("real summary".to_string())
+        );
+    }
+
+    #[test]
+    fn final_assistant_text_blocked_prefix_reaches_classifier() {
+        // End-to-end shape of the blocked-worker path for accumulated
+        // single-message sessions: the BLOCKED verdict is the LAST part.
+        let messages = vec![msg(
+            MessageRole::Assistant,
+            vec![text("Starting work."), text("BLOCKED: missing API key")],
+        )];
+        let summary = final_assistant_text(&messages);
+        assert_eq!(
+            classify_worker_status(summary.as_deref(), "completed"),
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn final_assistant_text_ignores_non_assistant_messages() {
+        let messages = vec![
+            msg(MessageRole::Assistant, vec![text("assistant text")]),
+            msg(MessageRole::Tool, vec![text("tool output")]),
+        ];
+        assert_eq!(
+            final_assistant_text(&messages),
+            Some("assistant text".to_string())
+        );
     }
 
     // -----------------------------------------------------------------
