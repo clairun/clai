@@ -3,6 +3,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
+import { shouldUseWebglRenderer } from './webglSupport';
 import '@xterm/xterm/css/xterm.css';
 import styles from './WorkspaceTerminal.module.css';
 
@@ -132,17 +133,21 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
     termRef.current = term;
     fitRef.current = fit;
 
-    // Prefer the WebGL renderer (fastest); fall back to the DOM renderer if
-    // the WebKit webview can't provide a GL context. If the GL context is later
-    // lost (e.g. while the terminal is hidden), the addon disposes itself and
+    // Prefer the WebGL renderer (fastest) — but only when the WebGL2 context
+    // is hardware-backed. On software rasterizers (llvmpipe/SwiftShader,
+    // common on Linux WebKitGTK) the DOM renderer is faster, so we skip the
+    // addon there (see webglSupport.ts). If the GL context is later lost
+    // (e.g. while the terminal is hidden), the addon disposes itself and
     // xterm reverts to the DOM renderer — the text buffer is renderer-agnostic,
     // so the screen content (vim, scrollback) survives a hide/show cycle.
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => webgl.dispose());
-      term.loadAddon(webgl);
-    } catch {
-      /* DOM renderer fallback — still correct, just slower. */
+    if (shouldUseWebglRenderer()) {
+      try {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => webgl.dispose());
+        term.loadAddon(webgl);
+      } catch {
+        /* DOM renderer fallback — still correct, just slower. */
+      }
     }
 
     fit.fit();
