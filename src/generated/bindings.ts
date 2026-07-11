@@ -101,13 +101,28 @@ secretRef?: string | null,
  */
 secret: boolean, };
 
+export type McpEnvVarResponse = { key: string, 
+/**
+ * Plain value for non-secret entries; `None` for secrets (never leaked).
+ */
+value: string | null, secret: boolean, 
+/**
+ * Last-4 hint (e.g. `1234`) for a secret whose stored value is >= 8 chars,
+ * so the user can identify which secret is set. `None` otherwise.
+ */
+hint: string | null, };
+
 export type McpOAuthStartResponse = { loginId: string, serverId: string, authorizationUrl: string, expiresAt: string, };
 
 export type McpServerAuthRequest = { "type": "none" } | { "type": "bearer_token", token: string | null, } | { "type": "oauth", scopes: Array<string>, client_id: string | null, client_secret: string | null, client_metadata_url: string | null, };
 
 export type McpServerAuthResponse = { "type": "none" } | { "type": "bearer_token", has_secret: boolean, } | { "type": "oauth", connected: boolean, needs_login: boolean, authorization_server_issuer: string | null, scopes: Array<string>, client_id_configured: boolean, client_secret_configured: boolean, client_metadata_url: string | null, last_error: string | null, };
 
-export type McpServerResponse = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthResponse, createdAt: string, updatedAt: string, };
+export type McpServerResponse = { id: string, name: string, enabled: boolean, transport: McpServerTransportResponse, auth: McpServerAuthResponse, createdAt: string, updatedAt: string, 
+/**
+ * Advisory, non-blocking warning (e.g. stdio binary not found on save).
+ */
+warning: string | null, };
 
 /**
  * User-configured MCP server transport.
@@ -122,6 +137,8 @@ env: Array<McpEnvVar>, } | { "type": "http", url: string,
  * Extra HTTP headers sent with each request (alongside any auth).
  */
 headers: Array<McpEnvVar>, };
+
+export type McpServerTransportResponse = { "type": "stdio", command: string, args: Array<string>, env: Array<McpEnvVarResponse>, } | { "type": "http", url: string, headers: Array<McpEnvVarResponse>, };
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
