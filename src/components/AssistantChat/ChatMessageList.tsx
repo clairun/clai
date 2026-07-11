@@ -639,6 +639,13 @@ const ChatMessageList = ({
     []
   );
 
+  const throttledMeasureKeys = useMemo(() => {
+    if (!isStreaming) return undefined;
+    const streamingMessageIds = Object.keys(streamingText).filter((id) => streamingText[id]);
+    if (streamingMessageIds.length === 0) return undefined;
+    return new Set(streamingMessageIds.map((id) => `message:${id}`));
+  }, [isStreaming, streamingText]);
+
   // Set lookup for the queued chip; stable reference while the id list
   // doesn't change so memoized MessageBlocks don't re-render.
   const queuedIdSet = useMemo(() => new Set(queuedMessageIds ?? []), [queuedMessageIds]);
@@ -732,6 +739,7 @@ const ChatMessageList = ({
       scrollToBottomSignal={messages.length + scrollNudge * 1_000_000}
       scrollToBottomBehavior="auto"
       forceScrollToBottomKey={lastUserMessageId}
+      throttledMeasureKeys={throttledMeasureKeys}
       onApproachTop={handleApproachTop}
     />
   );
