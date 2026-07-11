@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  isMaskedRenderer,
   isSoftwareRenderer,
   probeWebglRenderer,
   resetWebglProbeCacheForTests,
@@ -73,6 +74,21 @@ describe('isSoftwareRenderer', () => {
   });
 });
 
+describe('isMaskedRenderer', () => {
+  it('flags the WebKit "Apple GPU" privacy mask regardless of case', () => {
+    expect(isMaskedRenderer('Apple GPU')).toBe(true);
+    expect(isMaskedRenderer('apple gpu')).toBe(true);
+  });
+
+  it('does not flag real device names', () => {
+    // "Apple M2" is an actual unmasked device string, not the privacy mask.
+    expect(isMaskedRenderer('Apple M2')).toBe(false);
+    expect(isMaskedRenderer('NVIDIA GeForce RTX 3060/PCIe/SSE2')).toBe(false);
+    expect(isMaskedRenderer('llvmpipe (LLVM 15.0.7, 256 bits)')).toBe(false);
+    expect(isMaskedRenderer('ANGLE (Apple, ANGLE Metal Renderer: Apple M1)')).toBe(false);
+  });
+});
+
 describe('probeWebglRenderer', () => {
   it('returns hardware for a hardware renderer string', () => {
     const { gl, loseContext } = makeFakeGl();
@@ -108,6 +124,14 @@ describe('probeWebglRenderer', () => {
     expect(probeWebglRenderer(factory)).toBe('unavailable');
   });
 
+  it('returns generic for the masked "Apple GPU" string', () => {
+    // WebKitGTK masks every backend (hardware or llvmpipe) as "Apple GPU",
+    // so the probe must not classify it as hardware.
+    const { gl, loseContext } = makeFakeGl({ renderer: 'Apple GPU' });
+    expect(probeWebglRenderer(canvasFactoryFor(gl))).toBe('generic');
+    expect(loseContext).toHaveBeenCalledTimes(1);
+  });
+
   it('returns unknown when the renderer string cannot be read', () => {
     const { gl, loseContext } = makeFakeGl({ throwOnGetParameter: true });
     expect(probeWebglRenderer(canvasFactoryFor(gl))).toBe('unknown');
@@ -136,6 +160,12 @@ describe('shouldUseWebglRenderer', () => {
 
   it('is true on hardware WebGL2', () => {
     const { gl } = makeFakeGl();
+    stubDocumentCanvas(gl);
+    expect(shouldUseWebglRenderer()).toBe(true);
+  });
+
+  it('is true on a masked renderer string, keeping pre-probe behavior', () => {
+    const { gl } = makeFakeGl({ renderer: 'Apple GPU' });
     stubDocumentCanvas(gl);
     expect(shouldUseWebglRenderer()).toBe(true);
   });

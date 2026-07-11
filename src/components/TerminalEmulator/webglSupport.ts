@@ -32,6 +32,23 @@ export function isSoftwareRenderer(renderer: string): boolean {
   return SOFTWARE_RENDERER_PATTERNS.some((pattern) => normalized.includes(pattern));
 }
 
+// Renderer strings that are privacy masks rather than real device names, so
+// they carry no hardware-vs-software signal. WebKit reports the literal
+// "Apple GPU" from Safari 14+ as anti-fingerprinting — on macOS that is real
+// Apple-silicon hardware, but Linux WebKitGTK returns the same mask for any
+// backend, including llvmpipe. Verified on WebKitGTK 2.x where the unmasked
+// renderer probe returns "Apple GPU" while the process renders on Intel Xe.
+const MASKED_RENDERER_PATTERNS = ['apple gpu'];
+
+/**
+ * True when a WebGL renderer string is a known privacy mask that hides the
+ * real device, so no software/hardware classification is possible.
+ */
+export function isMaskedRenderer(renderer: string): boolean {
+  const normalized = renderer.toLowerCase();
+  return MASKED_RENDERER_PATTERNS.some((pattern) => normalized.includes(pattern));
+}
+
 export type WebglProbeResult =
   // WebGL2 context exists and the renderer string looks hardware-backed.
   | 'hardware'
@@ -39,6 +56,9 @@ export type WebglProbeResult =
   | 'software'
   // No WebGL2 context at all (addon would throw anyway).
   | 'unavailable'
+  // Context exists but the renderer string is a known privacy mask (e.g.
+  // "Apple GPU" on WebKit) that hides the real backend. No signal either way.
+  | 'generic'
   // Context exists but the renderer string could not be read — treat as
   // usable, matching the previous always-try behavior.
   | 'unknown';
@@ -67,6 +87,7 @@ export function probeWebglRenderer(
       ? (gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) as string | null)
       : (gl.getParameter(gl.RENDERER) as string | null);
     if (typeof renderer !== 'string' || renderer.length === 0) return 'unknown';
+    if (isMaskedRenderer(renderer)) return 'generic';
     return isSoftwareRenderer(renderer) ? 'software' : 'hardware';
   } catch {
     return 'unknown';
@@ -84,14 +105,16 @@ export function probeWebglRenderer(
 let cachedDecision: boolean | null = null;
 
 /**
- * Whether the terminal should load xterm's WebglAddon. True for hardware (or
- * unidentifiable) WebGL2 contexts; false when WebGL2 is missing or software-
- * rendered, in which case xterm's DOM renderer is the faster correct choice.
+ * Whether the terminal should load xterm's WebglAddon. True for hardware,
+ * masked ('generic'), or unreadable ('unknown') WebGL2 contexts — masked and
+ * unreadable strings carry no signal, so we keep the previous always-try
+ * behavior rather than guessing software. False when WebGL2 is missing or
+ * provably software-rendered, where xterm's DOM renderer is the faster choice.
  */
 export function shouldUseWebglRenderer(): boolean {
   if (cachedDecision === null) {
     const result = probeWebglRenderer();
-    cachedDecision = result === 'hardware' || result === 'unknown';
+    cachedDecision = result === 'hardware' || result === 'generic' || result === 'unknown';
   }
   return cachedDecision;
 }
