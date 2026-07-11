@@ -123,7 +123,7 @@ describe('useAssistantEvents — run lifecycle', () => {
       payload: { message_id: 'msg-1', text: 'world' },
     });
     expect(
-      useAssistantStore.getState().sessions[SESSION.id]!.streamingTextByMessageId['msg-1'],
+      useAssistantStore.getState().streamingText[SESSION.id]!['msg-1'],
     ).toBe('Hello world');
   });
 });
