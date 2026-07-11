@@ -11,6 +11,7 @@ import React, {
 const DEFAULT_ESTIMATE_SIZE = 160;
 const DEFAULT_OVERSCAN = 900;
 const NEAR_BOTTOM_THRESHOLD = 180;
+const DEFAULT_THROTTLED_MEASURE_MS = 250;
 // How close to the top (px) a user-initiated upward scroll must get before
 // onApproachTop fires. Generous on purpose: pages prepend while the reader
 // still has runway, so they never hit a hard top edge mid-read.
@@ -27,45 +28,96 @@ interface MeasuredItemProps {
   top: number;
   children: React.ReactNode;
   onMeasure: (key: string, height: number) => void;
+  throttleMeasure: boolean;
+  measureThrottleMs: number;
 }
 
-const MeasuredItem = memo(({ cacheKey, top, children, onMeasure }: MeasuredItemProps) => {
-  const ref = useRef<HTMLDivElement | null>(null);
+const MeasuredItem = memo(
+  ({
+    cacheKey,
+    top,
+    children,
+    onMeasure,
+    throttleMeasure,
+    measureThrottleMs,
+  }: MeasuredItemProps) => {
+    const ref = useRef<HTMLDivElement | null>(null);
 
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node) return undefined;
+    useLayoutEffect(() => {
+      const node = ref.current;
+      if (!node) return undefined;
 
-    const measure = () => {
-      onMeasure(cacheKey, node.getBoundingClientRect().height);
-    };
+      let timeoutId: number | null = null;
+      let lastMeasureAt = 0;
 
-    measure();
+      const now = () => (
+        typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : Date.now()
+      );
 
-    if (typeof ResizeObserver === 'undefined') {
-      return undefined;
-    }
+      const clearPendingMeasure = () => {
+        if (timeoutId !== null) {
+          window.clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+      };
 
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [cacheKey, onMeasure]);
+      const measure = () => {
+        clearPendingMeasure();
+        lastMeasureAt = now();
+        onMeasure(cacheKey, node.getBoundingClientRect().height);
+      };
 
-  return (
-    <div
-      ref={ref}
-      style={{
-        position: 'absolute',
-        top,
-        left: 0,
-        right: 0,
-        width: '100%',
-      }}
-    >
-      {children}
-    </div>
-  );
-});
+      const scheduleMeasure = () => {
+        if (!throttleMeasure) {
+          measure();
+          return;
+        }
+
+        const elapsed = now() - lastMeasureAt;
+        if (elapsed >= measureThrottleMs) {
+          measure();
+          return;
+        }
+
+        if (timeoutId !== null) return;
+        timeoutId = window.setTimeout(measure, Math.max(0, measureThrottleMs - elapsed));
+      };
+
+      // Mounts and throttle-mode changes measure immediately. That gives new
+      // rows a real size right away, and gives rows one final exact size when
+      // callers stop throttling an active streaming item.
+      measure();
+
+      if (typeof ResizeObserver === 'undefined') {
+        return clearPendingMeasure;
+      }
+
+      const observer = new ResizeObserver(scheduleMeasure);
+      observer.observe(node);
+      return () => {
+        observer.disconnect();
+        clearPendingMeasure();
+      };
+    }, [cacheKey, measureThrottleMs, onMeasure, throttleMeasure]);
+
+    return (
+      <div
+        ref={ref}
+        style={{
+          position: 'absolute',
+          top,
+          left: 0,
+          right: 0,
+          width: '100%',
+        }}
+      >
+        {children}
+      </div>
+    );
+  }
+);
 
 MeasuredItem.displayName = 'MeasuredItem';
 
@@ -127,6 +179,12 @@ interface VirtualizedListProps<T> {
   // message that was just sent), scroll to the bottom unconditionally — even
   // if the user had scrolled up — and resume following new content.
   forceScrollToBottomKey?: string | number | null;
+  // Keys whose repeated ResizeObserver measurements should be throttled.
+  // Initial mount and the transition back to unthrottled still measure
+  // immediately, so callers can use this for actively streaming rows without
+  // leaving a stale final height.
+  throttledMeasureKeys?: ReadonlySet<string>;
+  measureThrottleMs?: number;
   onNearBottomChange?: (isNearBottom: boolean) => void;
   // Fired when a *user-initiated* upward scroll brings the viewport within
   // NEAR_TOP_THRESHOLD of the top (and on wheel-up while already pinned at
@@ -152,6 +210,8 @@ const VirtualizedListInner = <T,>({
   scrollToBottomSignal = null,
   scrollToBottomBehavior = 'auto',
   forceScrollToBottomKey = null,
+  throttledMeasureKeys,
+  measureThrottleMs = DEFAULT_THROTTLED_MEASURE_MS,
   onNearBottomChange,
   onApproachTop,
 }: VirtualizedListProps<T>) => {
@@ -527,6 +587,8 @@ const VirtualizedListInner = <T,>({
             cacheKey={position.key}
             top={position.top}
             onMeasure={handleMeasure}
+            throttleMeasure={throttledMeasureKeys?.has(position.key) ?? false}
+            measureThrottleMs={measureThrottleMs}
           >
             {renderItem(item, index)}
           </MeasuredItem>
