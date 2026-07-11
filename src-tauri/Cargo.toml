@@ -33,6 +33,7 @@ serde_json = "1"
 # HTTP client - like axios for Rust
 # Features: json (automatic JSON parsing), stream (for SSE), gzip (compression)
 reqwest = { version = "0.12", features = ["json", "stream", "gzip"] }
+http = "1"  # HeaderName/HeaderValue for MCP custom headers (shared 1.x in tree)
 
 # Async runtime - required by reqwest
 # The "full" feature enables all async utilities

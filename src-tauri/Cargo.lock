@@ -653,6 +653,7 @@ dependencies = [
  "futures",
  "glob",
  "htmd",
+ "http",
  "iana-time-zone",
  "include_dir",
  "jsonschema",
