@@ -219,6 +219,9 @@ interface AssistantProviderSettingsProps {
 
 const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSettingsProps) => {
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
+  // Connection id -> last-4 API-key hint (••••1234), for identifying which
+  // key a connection stores. Loaded separately (keyring reads).
+  const [secretHints, setSecretHints] = useState<Record<string, string>>({});
   const [adapters, setAdapters] = useState<ProviderDescriptor[]>([]);
   const [catalog, setCatalog] = useState<ProviderCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -264,14 +267,16 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [nextConnections, nextAdapters, nextCatalog] = await Promise.all([
+      const [nextConnections, nextAdapters, nextCatalog, nextHints] = await Promise.all([
         assistantClient.listProviderConnections(),
         assistantClient.listAvailableProviderAdapters().catch(() => []),
         assistantClient.listProviderCatalog().catch(() => []),
+        assistantClient.listProviderSecretHints().catch(() => ({})),
       ]);
       setConnections(nextConnections || []);
       setAdapters(nextAdapters || []);
       setCatalog(nextCatalog || []);
+      setSecretHints(nextHints || {});
       setError(null);
     } catch (err) {
       console.error('[AssistantProviderSettings] Failed to load:', err);
@@ -695,6 +700,9 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                         ? (connection.baseUrl || CLI_BINARY_PLACEHOLDERS[connection.protocolId] || connection.protocolId)
                         : (connection.baseUrl || 'api.openai.com/v1')}
                     </code>
+                    {secretHints[connection.id] && (
+                      <> • <code title="Stored API key (last 4 characters)">key ••••{secretHints[connection.id]}</code></>
+                    )}
                   </span>
                 </div>
               </div>
@@ -849,7 +857,13 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                     type="password"
                     value={form.apiKey}
                     onChange={(e) => setForm((current) => ({ ...current, apiKey: e.target.value }))}
-                    placeholder={editingId ? 'Leave blank to keep existing key' : 'sk-...'}
+                    placeholder={
+                      editingId
+                        ? secretHints[editingId]
+                          ? `\u2022\u2022\u2022\u2022${secretHints[editingId]} \u2014 leave blank to keep`
+                          : 'Leave blank to keep existing key'
+                        : 'sk-...'
+                    }
                     disabled={saving}
                   />
                   {selectedEntry?.docsUrl && (

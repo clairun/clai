@@ -150,6 +150,13 @@ export async function listProviderConnections(): Promise<ProviderConnection[]> {
   return invoke('provider_connection_list');
 }
 
+/** Last-4 hints for stored provider API keys, keyed by connection id.
+ * Separate from the list call: each hint costs a keyring read, so only the
+ * Settings surface should ask for them. */
+export async function listProviderSecretHints(): Promise<Record<string, string>> {
+  return invoke('provider_connection_secret_hints');
+}
+
 export async function getProviderConnection(id: string): Promise<ProviderConnection | null> {
   return invoke('provider_connection_get', { id });
 }

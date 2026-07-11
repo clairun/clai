@@ -446,6 +446,39 @@ pub async fn provider_connection_list(
         .get_provider_connections())
 }
 
+/// Last-4 identification hints for stored provider API keys, keyed by
+/// connection id (design D12, mirroring the MCP secret hints). A SEPARATE
+/// command — not folded into `provider_connection_list` — because the list
+/// is called from hot paths (e.g. the workspace context bar) and each hint
+/// costs a keyring/DBus round-trip; hints are only needed by the Settings
+/// surface. Connections without a stored key (CLI logins, keyless
+/// self-hosted) or with short (< 8 char) secrets are simply absent.
+#[tauri::command]
+pub async fn provider_connection_secret_hints(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    // Copy the connections out, then read the vault OUTSIDE the config lock
+    // (keyring reads can be slow; never hold the lock across them).
+    let connections = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get_provider_connections();
+
+    let mut hints = std::collections::HashMap::new();
+    for connection in connections {
+        if connection.auth_mode == AuthMode::SubscriptionLogin {
+            continue; // CLI login — no stored API key.
+        }
+        if let Ok(Some(secret)) = ProviderSecretStorage::get_secret(&connection.secret_ref) {
+            if let Some(hint) = crate::assistant::auth::secret_hint(&secret) {
+                hints.insert(connection.id, hint);
+            }
+        }
+    }
+    Ok(hints)
+}
+
 #[tauri::command]
 pub async fn provider_descriptor_models(provider_id: String) -> Result<Vec<ModelInfo>, String> {
     cli::models_for_provider(&provider_id)
