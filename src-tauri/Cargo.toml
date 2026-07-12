@@ -1,6 +1,6 @@
 [package]
 name = "clai"
-version = "26.7.11"
+version = "26.7.12"
 description = "Desktop multi-agent orchestration app with MCP-native tools"
 authors = ["juacker"]
 edition = "2021"
