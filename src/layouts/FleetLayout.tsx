@@ -440,10 +440,9 @@ const FleetLayout = () => {
         </button>
       </div>
 
-      {error && <div className={styles.errorBanner}>{error}</div>}
-      {flash && <div className={styles.flashBanner}>{flash}</div>}
-
       <div className={styles.body} ref={bodyRef}>
+        {error && <div className={styles.errorBanner}>{error}</div>}
+        {flash && <div className={styles.flashBanner}>{flash}</div>}
         <WorkspaceRail
           workspaces={workspaces}
           selectedId={selectedId}

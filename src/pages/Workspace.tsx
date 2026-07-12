@@ -637,6 +637,10 @@ const ArtifactTreeRow = ({
           JSON.stringify({ workspaceId, path: entry.path, kind: entry.kind, name: entry.name })
         );
         event.dataTransfer.effectAllowed = 'copy';
+        // Drag ghost = the row itself (name + icon), not the whole wrapper —
+        // otherwise the hover-only delete/trash button bleeds into the image.
+        const rowEl = event.currentTarget.querySelector('button');
+        if (rowEl) event.dataTransfer.setDragImage(rowEl, 16, 12);
       }}
     >
       <button

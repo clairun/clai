@@ -66,7 +66,12 @@
 }
 
 .errorBanner {
-  flex-shrink: 0;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.28));
   margin: 8px 18px 0;
   padding: 8px 12px;
   border: 1px solid var(--color-critical-border);
@@ -77,7 +82,12 @@
 }
 
 .flashBanner {
-  flex-shrink: 0;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.28));
   margin: 8px 18px 0;
   padding: 8px 12px;
   border: 1px solid var(--color-border-light);
@@ -88,6 +98,7 @@
 }
 
 .body {
+  position: relative;
   flex: 1;
   display: flex;
   min-height: 0;
