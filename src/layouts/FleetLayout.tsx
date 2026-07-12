@@ -10,6 +10,7 @@ import {
   getSchedulerPaused,
   setSchedulerPaused,
   createWorkspace,
+  copyWorkspacePath,
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
@@ -69,6 +70,7 @@ const FleetLayout = () => {
 
   const [workspaces, setWorkspaces] = useState<WorkspaceListEntry[]>([]);
   const [error, setError] = useState('');
+  const [flash, setFlash] = useState('');
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(COLLAPSED_KEY) === '1';
@@ -373,6 +375,30 @@ const FleetLayout = () => {
     }
   }, [schedulerPaused, schedulerPauseBusy]);
 
+  const handleArtifactDrop = useCallback(
+    async (
+      destWorkspaceId: string,
+      drag: { workspaceId: string; path: string; kind: string; name: string }
+    ) => {
+      if (destWorkspaceId === drag.workspaceId) {
+        setFlash('That artifact is already in this workspace.');
+        window.setTimeout(() => setFlash(''), 3000);
+        return;
+      }
+      try {
+        await copyWorkspacePath(drag.workspaceId, drag.path, destWorkspaceId);
+        const destTitle =
+          workspaces.find((w) => w.id === destWorkspaceId)?.title || 'workspace';
+        setError('');
+        setFlash(`Copied “${drag.name}” to ${destTitle}.`);
+        window.setTimeout(() => setFlash(''), 3000);
+      } catch (err) {
+        setError(errText(err, `Failed to copy “${drag.name}”.`));
+      }
+    },
+    [workspaces]
+  );
+
   return (
     <div className={styles.layout}>
       <div className={styles.topBar}>
@@ -415,6 +441,7 @@ const FleetLayout = () => {
       </div>
 
       {error && <div className={styles.errorBanner}>{error}</div>}
+      {flash && <div className={styles.flashBanner}>{flash}</div>}
 
       <div className={styles.body} ref={bodyRef}>
         <WorkspaceRail
@@ -437,6 +464,7 @@ const FleetLayout = () => {
           schedulerPaused={schedulerPaused}
           schedulerPauseBusy={schedulerPauseBusy}
           onToggleSchedulerPaused={handleToggleSchedulerPaused}
+          onArtifactDrop={handleArtifactDrop}
         />
         <div className={styles.detail}>
           <Outlet context={{ workspaces, loadWorkspaces }} />
