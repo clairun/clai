@@ -305,10 +305,25 @@ const renderBody = (
   htmlBundle: string | null,
   bundling: boolean,
   onMarkdownLinkClick: (event: React.MouseEvent) => void,
+  onOpenExternal: () => void,
 ) => {
   if (!file) return null;
   if (file.error) {
-    return <div className={styles.error}>{file.error}</div>;
+    // Binary files are routed to the OS app before ever reaching the preview
+    // (viewer === 'external'), but an unrecognized binary extension can still
+    // land here and fail the UTF-8 read — offer to open it with the OS app.
+    return (
+      <div className={styles.error}>
+        <div>{file.error}</div>
+        <button
+          type="button"
+          className={styles.openExternalButton}
+          onClick={onOpenExternal}
+        >
+          Open with the system app
+        </button>
+      </div>
+    );
   }
   if (!file.content) {
     return <div className={styles.empty}>This file is empty.</div>;
@@ -524,6 +539,13 @@ export default function WorkspaceFilePreviewPanel({
     const slash = entry.path.lastIndexOf('/');
     return slash === -1 ? entry.path : entry.path.slice(slash + 1);
   })();
+
+  const handleOpenExternal = () => {
+    if (!entry?.path) return;
+    openWorkspacePath(workspaceId, entry.path, 'system').catch((err) => {
+      setError(err instanceof Error ? err.message : 'Failed to open with the system app.');
+    });
+  };
 
   const handleOpenInEditor = async () => {
     if (!entry?.path) return;
@@ -789,7 +811,7 @@ export default function WorkspaceFilePreviewPanel({
         )}
         {loading && <div className={styles.empty}>Loading…</div>}
         {!loading && error && <div className={styles.error}>{error}</div>}
-        {!loading && !error && renderBody(file, htmlMode, htmlBundle, bundling, handleMarkdownLinkClick)}
+        {!loading && !error && renderBody(file, htmlMode, htmlBundle, bundling, handleMarkdownLinkClick, handleOpenExternal)}
       </div>
     </aside>
   );

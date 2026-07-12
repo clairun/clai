@@ -300,3 +300,18 @@
   background: var(--color-bg-elevated);
 }
 
+.openExternalButton {
+  margin-top: 12px;
+  padding: 6px 12px;
+  font-size: 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.openExternalButton:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
