@@ -2077,38 +2077,88 @@ pub async fn workspace_copy_path(
         .ok_or_else(|| "The destination workspace does not expose a filesystem root".to_string())?;
     ensure_agent_workspace_root(dest_root)?;
 
-    let rel = request.path.trim();
+    let (source, is_dir, name) = resolve_copy_source(source_root, &request.path)?;
+
+    // The traversal + copy is unbounded (a folder can be arbitrarily large),
+    // so run it off the async executor thread.
+    let dest_root = dest_root.clone();
+    let name_for_copy = name.clone();
+    let created = tokio::task::spawn_blocking(move || {
+        copy_artifact_to_unique_destination(&source, &dest_root, &name_for_copy, is_dir)
+    })
+    .await
+    .map_err(|error| format!("Copy task did not complete: {}", error))??;
+
+    Ok(created
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&name)
+        .to_string())
+}
+
+/// Validate + resolve a copy *source* path relative to `source_root`.
+///
+/// Rejects: the root itself, traversal/non-normal components, a protected dir
+/// (`SKIPPED_ARTIFACT_DIRS`) at ANY depth (not just the first component), and a
+/// symlink item. Resolves intermediate symlinks via `canonicalize` and
+/// requires the canonical path to stay within the canonical root, so a
+/// symlinked parent component can't escape the workspace. Returns
+/// `(canonical source, is_dir, display name)`.
+fn resolve_copy_source(source_root: &Path, rel: &str) -> Result<(PathBuf, bool, String), String> {
+    let rel = rel.trim();
     if rel.is_empty() {
         return Err("Cannot copy the workspace root.".to_string());
     }
     let relative = Path::new(rel);
-    if is_protected_artifact_path(relative) {
-        return Err(format!("Refusing to copy a protected path: {}", rel));
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => {
+                if name
+                    .to_str()
+                    .map(|n| SKIPPED_ARTIFACT_DIRS.contains(&n))
+                    .unwrap_or(false)
+                {
+                    return Err(format!("Refusing to copy a protected path: {}", rel));
+                }
+            }
+            Component::CurDir => {}
+            // `..`, absolute prefixes, root: refuse before touching the fs.
+            _ => return Err(format!("Path {} is outside the workspace root", rel)),
+        }
     }
 
-    let source = normalize_path(source_root.join(relative));
-    if !source.starts_with(source_root) {
+    let requested = normalize_path(source_root.join(relative));
+    if !requested.starts_with(source_root) {
         return Err(format!("Path {} is outside the workspace root", rel));
     }
-    if source == *source_root {
+    if requested == *source_root {
         return Err("Cannot copy the workspace root.".to_string());
     }
 
-    let metadata = fs::symlink_metadata(&source)
+    let link_meta = fs::symlink_metadata(&requested)
         .map_err(|error| format!("Path not found: {}: {}", rel, error))?;
+    if link_meta.file_type().is_symlink() {
+        return Err(format!("Refusing to copy a symlink: {}", rel));
+    }
 
-    let name = source
+    // Resolve intermediate symlinks and re-check containment.
+    let canon_root = source_root
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve the source workspace root: {}", error))?;
+    let canon_source = requested
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve {}: {}", rel, error))?;
+    if !canon_source.starts_with(&canon_root) {
+        return Err(format!("Path {} resolves outside the workspace root", rel));
+    }
+
+    let name = requested
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| format!("`{}` has no file name.", rel))?
         .to_string();
 
-    let dest = copy_artifact_to_unique_destination(&source, dest_root, &name, metadata.is_dir())?;
-    Ok(dest
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(&name)
-        .to_string())
+    Ok((canon_source, link_meta.file_type().is_dir(), name))
 }
 
 /// Copy `source` (file or dir) into `dest_dir` under a collision-free name
@@ -3432,5 +3482,45 @@ mod tests {
         assert!(!out.join(".git").exists(), ".git must be skipped");
         #[cfg(unix)]
         assert!(!out.join("link").exists(), "symlink must be skipped");
+    }
+
+    #[test]
+    fn resolve_copy_source_guards_traversal_and_protected() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("proj/.git")).unwrap();
+        std::fs::write(root.path().join("proj/.git/config"), b"x").unwrap();
+        std::fs::write(root.path().join("proj/a.txt"), b"a").unwrap();
+
+        let (src, is_dir, name) = resolve_copy_source(root.path(), "proj/a.txt").unwrap();
+        assert!(!is_dir);
+        assert_eq!(name, "a.txt");
+        assert!(src.ends_with("a.txt"));
+
+        // Protected dir at a non-leading component must be rejected (not just
+        // the first-component delete policy).
+        assert!(resolve_copy_source(root.path(), "proj/.git/config").is_err());
+        // Traversal / non-normal components rejected before touching the fs.
+        assert!(resolve_copy_source(root.path(), "../etc/hosts").is_err());
+        assert!(resolve_copy_source(root.path(), "proj/../../etc").is_err());
+        // Empty / root rejected.
+        assert!(resolve_copy_source(root.path(), "   ").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_copy_source_rejects_symlink_item_and_escaping_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret"), b"s").unwrap();
+
+        // A top-level symlink item pointing outside is rejected as a symlink.
+        std::os::unix::fs::symlink(outside.path().join("secret"), root.path().join("link"))
+            .unwrap();
+        assert!(resolve_copy_source(root.path(), "link").is_err());
+
+        // An intermediate symlinked directory that escapes the root is rejected
+        // by canonical containment (the final component is a real file).
+        std::os::unix::fs::symlink(outside.path(), root.path().join("outdir")).unwrap();
+        assert!(resolve_copy_source(root.path(), "outdir/secret").is_err());
     }
 }

@@ -71,6 +71,7 @@ const FleetLayout = () => {
   const [workspaces, setWorkspaces] = useState<WorkspaceListEntry[]>([]);
   const [error, setError] = useState('');
   const [flash, setFlash] = useState('');
+  const flashTimerRef = useRef<number | null>(null);
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(COLLAPSED_KEY) === '1';
@@ -375,14 +376,29 @@ const FleetLayout = () => {
     }
   }, [schedulerPaused, schedulerPauseBusy]);
 
+  // Transient flash toast with a single, cleared timer (no stacked timers).
+  const showFlash = useCallback((message: string) => {
+    if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    setFlash(message);
+    flashTimerRef.current = window.setTimeout(() => {
+      setFlash('');
+      flashTimerRef.current = null;
+    }, 3000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    },
+    []
+  );
+
   const handleArtifactDrop = useCallback(
     async (
       destWorkspaceId: string,
       drag: { workspaceId: string; path: string; kind: string; name: string }
     ) => {
       if (destWorkspaceId === drag.workspaceId) {
-        setFlash('That artifact is already in this workspace.');
-        window.setTimeout(() => setFlash(''), 3000);
+        showFlash('That artifact is already in this workspace.');
         return;
       }
       try {
@@ -390,13 +406,12 @@ const FleetLayout = () => {
         const destTitle =
           workspaces.find((w) => w.id === destWorkspaceId)?.title || 'workspace';
         setError('');
-        setFlash(`Copied “${drag.name}” to ${destTitle}.`);
-        window.setTimeout(() => setFlash(''), 3000);
+        showFlash(`Copied “${drag.name}” to ${destTitle}.`);
       } catch (err) {
         setError(errText(err, `Failed to copy “${drag.name}”.`));
       }
     },
-    [workspaces]
+    [workspaces, showFlash]
   );
 
   return (
@@ -441,8 +456,12 @@ const FleetLayout = () => {
       </div>
 
       <div className={styles.body} ref={bodyRef}>
-        {error && <div className={styles.errorBanner}>{error}</div>}
-        {flash && <div className={styles.flashBanner}>{flash}</div>}
+        {(error || flash) && (
+          <div className={styles.bannerStack}>
+            {error && <div className={styles.errorBanner}>{error}</div>}
+            {flash && <div className={styles.flashBanner}>{flash}</div>}
+          </div>
+        )}
         <WorkspaceRail
           workspaces={workspaces}
           selectedId={selectedId}

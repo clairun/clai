@@ -258,7 +258,9 @@ const WorkspaceRail = ({
                   if (
                     drag &&
                     typeof drag.path === 'string' &&
-                    typeof drag.workspaceId === 'string'
+                    typeof drag.workspaceId === 'string' &&
+                    typeof drag.kind === 'string' &&
+                    typeof drag.name === 'string'
                   ) {
                     onArtifactDrop(ws.id, drag);
                   }
