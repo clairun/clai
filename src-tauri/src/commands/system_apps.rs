@@ -122,7 +122,7 @@ pub fn workspace_import_files(
 }
 
 /// `report.md` → `report (1).md` → `report (2).md` … until free.
-fn destination_candidate(dir: &Path, name: &str, copy_index: u32) -> std::path::PathBuf {
+pub(crate) fn destination_candidate(dir: &Path, name: &str, copy_index: u32) -> std::path::PathBuf {
     if copy_index == 0 {
         return dir.join(name);
     }
@@ -133,7 +133,7 @@ fn destination_candidate(dir: &Path, name: &str, copy_index: u32) -> std::path::
     dir.join(format!("{} ({}){}", stem, copy_index, ext))
 }
 
-fn copy_to_unique_destination(
+pub(crate) fn copy_to_unique_destination(
     source: &Path,
     dir: &Path,
     name: &str,

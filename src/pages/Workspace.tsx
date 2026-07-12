@@ -571,12 +571,20 @@ const TrashGlyph = () => (
 interface ArtifactTreeRowProps {
   row: ArtifactRow;
   isExpanded: boolean;
+  workspaceId: string;
   onToggle: (path: string) => void;
   onSelect?: (entry: WorkspaceFileEntry) => void;
   onDelete?: (entry: WorkspaceDirEntry) => void;
 }
 
-const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect, onDelete }: ArtifactTreeRowProps) => {
+const ArtifactTreeRow = ({
+  row,
+  isExpanded,
+  workspaceId,
+  onToggle,
+  onSelect,
+  onDelete,
+}: ArtifactTreeRowProps) => {
   // Two-click delete (Insomnia-style): the first click ARMS the button (turns
   // red), the second click deletes. No blocking dialog — window.confirm does
   // not reliably block in the Tauri webview, and a popup per delete is
@@ -617,7 +625,24 @@ const ArtifactTreeRow = ({ row, isExpanded, onToggle, onSelect, onDelete }: Arti
     else onSelect?.(dirEntryToFileEntry(entry));
   };
   return (
-    <div className={styles.fileTreeRowWrap} onMouseLeave={disarmDelete}>
+    <div
+      className={styles.fileTreeRowWrap}
+      onMouseLeave={disarmDelete}
+      draggable
+      onDragStart={(event) => {
+        // Payload for cross-workspace copy: dropped onto a rail row in
+        // WorkspaceRail. A custom MIME keeps it distinct from OS file drops.
+        event.dataTransfer.setData(
+          'application/x-clai-artifact',
+          JSON.stringify({ workspaceId, path: entry.path, kind: entry.kind, name: entry.name })
+        );
+        event.dataTransfer.effectAllowed = 'copy';
+        // Drag ghost = the row itself (name + icon), not the whole wrapper —
+        // otherwise the hover-only delete/trash button bleeds into the image.
+        const rowEl = event.currentTarget.querySelector('button');
+        if (rowEl) event.dataTransfer.setDragImage(rowEl, 16, 12);
+      }}
+    >
       <button
         type="button"
         className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}`}
@@ -875,12 +900,13 @@ const ArtifactsList = ({
       <ArtifactTreeRow
         row={row}
         isExpanded={row.kind === 'entry' && expanded.has(row.entry.path)}
+        workspaceId={workspaceId}
         onToggle={handleToggle}
         onSelect={onSelect}
         onDelete={handleDelete}
       />
     ),
-    [expanded, handleToggle, onSelect, handleDelete]
+    [expanded, handleToggle, onSelect, handleDelete, workspaceId]
   );
 
   return (

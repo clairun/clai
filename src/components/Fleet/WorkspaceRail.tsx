@@ -31,6 +31,12 @@ interface WorkspaceRailProps {
   schedulerPaused: boolean;
   schedulerPauseBusy: boolean;
   onToggleSchedulerPaused: () => void;
+  /** Drop handler for an artifact dragged from the artifacts drawer onto a
+   *  workspace row — copies it into that workspace. */
+  onArtifactDrop?: (
+    destWorkspaceId: string,
+    drag: { workspaceId: string; path: string; kind: string; name: string }
+  ) => void;
 }
 
 const isProcessing = (
@@ -91,9 +97,11 @@ const WorkspaceRail = ({
   runNowBusyId,
   forkBusyId,
   pauseBusyId,
+  onArtifactDrop,
 }: WorkspaceRailProps) => {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
   // Sort: attention first, then scheduled, then most-recently-updated.
   const sorted = useMemo(
@@ -220,12 +228,45 @@ const WorkspaceRail = ({
           return (
             <div
               key={ws.id}
-              className={rowClasses}
+              className={`${rowClasses}${
+                dropTargetId === ws.id ? ` ${styles.rowDropTarget}` : ''
+              }`}
               onClick={() => onSelect(ws.id)}
               role="button"
               tabIndex={0}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') onSelect(ws.id);
+              }}
+              onDragOver={(e) => {
+                if (!onArtifactDrop) return;
+                if (!e.dataTransfer.types.includes('application/x-clai-artifact')) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+                if (dropTargetId !== ws.id) setDropTargetId(ws.id);
+              }}
+              onDragLeave={() => {
+                setDropTargetId((prev) => (prev === ws.id ? null : prev));
+              }}
+              onDrop={(e) => {
+                if (!onArtifactDrop) return;
+                const raw = e.dataTransfer.getData('application/x-clai-artifact');
+                setDropTargetId(null);
+                if (!raw) return;
+                e.preventDefault();
+                try {
+                  const drag = JSON.parse(raw);
+                  if (
+                    drag &&
+                    typeof drag.path === 'string' &&
+                    typeof drag.workspaceId === 'string' &&
+                    typeof drag.kind === 'string' &&
+                    typeof drag.name === 'string'
+                  ) {
+                    onArtifactDrop(ws.id, drag);
+                  }
+                } catch {
+                  // Ignore malformed / foreign drops.
+                }
               }}
               title={collapsed ? ws.title : undefined}
             >

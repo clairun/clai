@@ -65,8 +65,23 @@
   color: var(--color-warning-dark);
 }
 
+.bannerStack {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  /* Container ignores pointer events so the gap doesn't block the rail;
+     the banners themselves re-enable them. */
+  pointer-events: none;
+}
+
 .errorBanner {
   flex-shrink: 0;
+  pointer-events: auto;
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.28));
   margin: 8px 18px 0;
   padding: 8px 12px;
   border: 1px solid var(--color-critical-border);
@@ -76,7 +91,21 @@
   font-size: 12px;
 }
 
+.flashBanner {
+  flex-shrink: 0;
+  pointer-events: auto;
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.28));
+  margin: 8px 18px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font-size: 12px;
+}
+
 .body {
+  position: relative;
   flex: 1;
   display: flex;
   min-height: 0;

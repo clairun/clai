@@ -132,6 +132,18 @@ export async function deleteWorkspacePath(workspaceId: string, path: string): Pr
   });
 }
 
+/** Copy a file/folder from one workspace into another (drag-and-drop). Returns
+ *  the created name at the destination root. */
+export async function copyWorkspacePath(
+  sourceWorkspaceId: string,
+  path: string,
+  destWorkspaceId: string
+): Promise<string> {
+  return invoke('workspace_copy_path', {
+    request: { sourceWorkspaceId, path, destWorkspaceId },
+  });
+}
+
 export async function downloadWorkspaceFile(
   workspaceId: string,
   path: string,

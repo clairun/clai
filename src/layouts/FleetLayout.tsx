@@ -10,6 +10,7 @@ import {
   getSchedulerPaused,
   setSchedulerPaused,
   createWorkspace,
+  copyWorkspacePath,
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
@@ -69,6 +70,8 @@ const FleetLayout = () => {
 
   const [workspaces, setWorkspaces] = useState<WorkspaceListEntry[]>([]);
   const [error, setError] = useState('');
+  const [flash, setFlash] = useState('');
+  const flashTimerRef = useRef<number | null>(null);
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem(COLLAPSED_KEY) === '1';
@@ -373,6 +376,44 @@ const FleetLayout = () => {
     }
   }, [schedulerPaused, schedulerPauseBusy]);
 
+  // Transient flash toast with a single, cleared timer (no stacked timers).
+  const showFlash = useCallback((message: string) => {
+    if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    setFlash(message);
+    flashTimerRef.current = window.setTimeout(() => {
+      setFlash('');
+      flashTimerRef.current = null;
+    }, 3000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (flashTimerRef.current !== null) window.clearTimeout(flashTimerRef.current);
+    },
+    []
+  );
+
+  const handleArtifactDrop = useCallback(
+    async (
+      destWorkspaceId: string,
+      drag: { workspaceId: string; path: string; kind: string; name: string }
+    ) => {
+      if (destWorkspaceId === drag.workspaceId) {
+        showFlash('That artifact is already in this workspace.');
+        return;
+      }
+      try {
+        await copyWorkspacePath(drag.workspaceId, drag.path, destWorkspaceId);
+        const destTitle =
+          workspaces.find((w) => w.id === destWorkspaceId)?.title || 'workspace';
+        setError('');
+        showFlash(`Copied “${drag.name}” to ${destTitle}.`);
+      } catch (err) {
+        setError(errText(err, `Failed to copy “${drag.name}”.`));
+      }
+    },
+    [workspaces, showFlash]
+  );
+
   return (
     <div className={styles.layout}>
       <div className={styles.topBar}>
@@ -414,9 +455,13 @@ const FleetLayout = () => {
         </button>
       </div>
 
-      {error && <div className={styles.errorBanner}>{error}</div>}
-
       <div className={styles.body} ref={bodyRef}>
+        {(error || flash) && (
+          <div className={styles.bannerStack}>
+            {error && <div className={styles.errorBanner}>{error}</div>}
+            {flash && <div className={styles.flashBanner}>{flash}</div>}
+          </div>
+        )}
         <WorkspaceRail
           workspaces={workspaces}
           selectedId={selectedId}
@@ -437,6 +482,7 @@ const FleetLayout = () => {
           schedulerPaused={schedulerPaused}
           schedulerPauseBusy={schedulerPauseBusy}
           onToggleSchedulerPaused={handleToggleSchedulerPaused}
+          onArtifactDrop={handleArtifactDrop}
         />
         <div className={styles.detail}>
           <Outlet context={{ workspaces, loadWorkspaces }} />
