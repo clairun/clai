@@ -476,7 +476,40 @@ fn viewer_for_path(path: &Path) -> String {
         return "json".to_string();
     }
 
+    // Binary / rich formats the in-app preview can't render as UTF-8 text.
+    // The frontend treats "external" by launching the OS default app for the
+    // file (see `open_workspace_path` target "system") instead of opening the
+    // text preview panel, which would otherwise fail with a UTF-8 error.
+    if is_external_viewer_ext(&ext) {
+        return "external".to_string();
+    }
+
     "text".to_string()
+}
+
+/// Extensions whose files are opened with the OS default application rather
+/// than the in-app text preview. Kept deliberately broad across documents,
+/// archives, media, and binaries — anything a dev workspace might hold that
+/// is not UTF-8 text.
+fn is_external_viewer_ext(ext: &str) -> bool {
+    matches!(
+        ext,
+        // Documents
+        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods"
+            | "odp" | "rtf" | "epub"
+        // Images (no inline image preview yet — open externally)
+            | "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tiff" | "tif" | "avif"
+        // Audio / video
+            | "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac"
+            | "mp4" | "mov" | "mkv" | "webm" | "avi" | "wmv" | "m4v"
+        // Archives
+            | "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "zst"
+        // Binaries / other
+            | "exe" | "dll" | "so" | "dylib" | "bin" | "o" | "a"
+            | "wasm" | "class" | "jar"
+            | "sqlite" | "db" | "parquet"
+            | "woff" | "woff2" | "ttf" | "otf" | "eot"
+    )
 }
 
 /// Best-effort MIME type from a file extension, used to build `data:` URIs
@@ -3205,5 +3238,18 @@ mod tests {
             "work/repo/src/main.rs"
         )));
         assert!(!is_protected_artifact_path(Path::new("images/pic.png")));
+    }
+
+    #[test]
+    fn viewer_for_path_classifies_binary_as_external() {
+        use std::path::Path;
+        assert_eq!(viewer_for_path(Path::new("report.pdf")), "external");
+        assert_eq!(viewer_for_path(Path::new("photo.PNG")), "external");
+        assert_eq!(viewer_for_path(Path::new("archive.zip")), "external");
+        assert_eq!(viewer_for_path(Path::new("data.sqlite")), "external");
+        // Text/known viewers are unchanged.
+        assert_eq!(viewer_for_path(Path::new("notes.md")), "markdown");
+        assert_eq!(viewer_for_path(Path::new("main.rs")), "text");
+        assert_eq!(viewer_for_path(Path::new("data.json")), "json");
     }
 }

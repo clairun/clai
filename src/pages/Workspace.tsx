@@ -2026,7 +2026,7 @@ const Workspace = () => {
   // import files picked in the native dialog (under Flatpak the
   // FileChooser portal grants access to the picked files).
   const handleOpenWorkspaceIn = useCallback(
-    async (target: 'editor' | 'terminal') => {
+    async (target: 'editor' | 'terminal' | 'system') => {
       try {
         await openWorkspacePath(workspaceId, null, target);
       } catch (err) {
@@ -2034,6 +2034,22 @@ const Workspace = () => {
       }
     },
     [workspaceId]
+  );
+
+  // Select an artifact: binary/rich files (viewer === 'external') can't be
+  // rendered in the text preview, so launch the OS default app instead of
+  // opening a panel that would error on non-UTF-8 content.
+  const handleSelectArtifact = useCallback(
+    (entry: WorkspaceFileEntry) => {
+      if (entry.viewer === 'external') {
+        openWorkspacePath(workspaceId, entry.relativePath, 'system').catch((err) => {
+          setError(errorMessage(err, `Failed to open ${entry.name} with the system app.`));
+        });
+        return;
+      }
+      openPreviewEntry({ kind: 'artifact', entry });
+    },
+    [workspaceId, openPreviewEntry]
   );
 
   const handleAddFiles = useCallback(async () => {
@@ -2156,6 +2172,27 @@ const Workspace = () => {
                     <button
                       type="button"
                       className={styles.workspaceDrawerIconAction}
+                      onClick={() => handleOpenWorkspaceIn('system')}
+                      title="Open the workspace folder in your file browser"
+                      aria-label="Open the workspace folder in your file browser"
+                    >
+                      <svg
+                        width="15"
+                        height="15"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.workspaceDrawerIconAction}
                       onClick={() => handleOpenWorkspaceIn('editor')}
                       title="Open the workspace in your editor"
                       aria-label="Open the workspace in your editor"
@@ -2257,7 +2294,7 @@ const Workspace = () => {
                   workspaceId={workspaceId}
                   totalCount={artifactCount}
                   latestModifiedAt={Number(snapshot?.artifactLatestModifiedAt ?? 0)}
-                  onSelect={(entry) => openPreviewEntry({ kind: 'artifact', entry })}
+                  onSelect={handleSelectArtifact}
                   onDeleted={handleArtifactDeleted}
                 />
               )}
