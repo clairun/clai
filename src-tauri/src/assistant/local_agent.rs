@@ -35,6 +35,7 @@ const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
 const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
 const CODEX_TURN_INPUT_MAX_CHARS: usize = 1_048_576;
+const CODEX_TURN_INPUT_SAFETY_MARGIN_CHARS: usize = 4_096;
 
 /// MCP server *startup* timeout (ms) for CLI providers that read `MCP_TIMEOUT`
 /// (Claude Code, Codex). Distinct from the per-tool backstop
@@ -1471,10 +1472,42 @@ async fn run_codex_turn(
 }
 
 fn codex_turn_prompt(system_prompt: &str, prompt: &str) -> String {
-    format!(
-        "System instructions for this CLAI run:\n{}\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.\n\nUser/task prompt:\n{}",
-        system_prompt, prompt
-    )
+    const PREFIX: &str = "System instructions for this CLAI run:\n";
+    const BETWEEN: &str = "\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.\n\nUser/task prompt:\n";
+    const OMITTED: &str = "\n\n[... middle system instructions omitted to fit the Codex turn-input limit; the leading and trailing instructions and the current task are preserved. ...]\n\n";
+
+    let fixed_chars = PREFIX.chars().count() + BETWEEN.chars().count() + prompt.chars().count();
+    let target_chars = CODEX_TURN_INPUT_MAX_CHARS - CODEX_TURN_INPUT_SAFETY_MARGIN_CHARS;
+    let system_budget = target_chars.saturating_sub(fixed_chars);
+    let system_prompt = truncate_codex_system_prompt(system_prompt, system_budget, OMITTED);
+
+    format!("{PREFIX}{system_prompt}{BETWEEN}{prompt}")
+}
+
+fn truncate_codex_system_prompt(value: &str, max_chars: usize, omission: &str) -> String {
+    let value_chars = value.chars().count();
+    if value_chars <= max_chars {
+        return value.to_string();
+    }
+
+    let omission_chars = omission.chars().count();
+    if max_chars <= omission_chars {
+        return omission.chars().take(max_chars).collect();
+    }
+
+    let content_budget = max_chars - omission_chars;
+    let head_chars = content_budget * 2 / 3;
+    let tail_chars = content_budget - head_chars;
+    let head: String = value.chars().take(head_chars).collect();
+    let tail: String = value
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}{omission}{tail}")
 }
 
 fn codex_input_too_large_message(actual_chars: usize) -> String {
@@ -4370,6 +4403,33 @@ mod tests {
             "rendered recent context too large: {}",
             rendered.len()
         );
+    }
+
+    #[test]
+    fn codex_turn_prompt_budgets_oversized_system_instructions() {
+        let system_prompt = "system instruction\n".repeat(CODEX_TURN_INPUT_MAX_CHARS / 8);
+        let user_prompt = "keep this current task verbatim";
+
+        let prompt = codex_turn_prompt(&system_prompt, user_prompt);
+
+        assert!(prompt.contains(user_prompt));
+        assert!(prompt.contains("system instructions omitted"));
+        assert!(prompt.chars().count() <= CODEX_TURN_INPUT_MAX_CHARS);
+        assert!(
+            prompt.chars().count()
+                <= CODEX_TURN_INPUT_MAX_CHARS - CODEX_TURN_INPUT_SAFETY_MARGIN_CHARS
+        );
+    }
+
+    #[test]
+    fn codex_turn_prompt_truncation_is_unicode_safe_and_preserves_both_ends() {
+        let system_prompt = format!("BEGIN-{}-END", "🦀".repeat(100));
+        let truncated = truncate_codex_system_prompt(&system_prompt, 80, "[omitted]");
+
+        assert_eq!(truncated.chars().count(), 80);
+        assert!(truncated.starts_with("BEGIN-"));
+        assert!(truncated.ends_with("-END"));
+        assert!(truncated.contains("[omitted]"));
     }
 
     #[test]
