@@ -3391,7 +3391,6 @@ mod tests {
 
     #[test]
     fn copy_artifact_handles_files_dirs_collisions_and_skips() {
-        use std::os::unix::fs::symlink;
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
 
@@ -3423,13 +3422,15 @@ mod tests {
         std::fs::write(tree.join("a.txt"), b"a").unwrap();
         std::fs::write(tree.join("sub/b.txt"), b"b").unwrap();
         std::fs::write(tree.join(".git/config"), b"x").unwrap();
-        symlink("/etc/hostname", tree.join("link")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hostname", tree.join("link")).unwrap();
 
         let out = copy_artifact_to_unique_destination(&tree, dst.path(), "proj", true).unwrap();
         assert_eq!(out.file_name().unwrap(), "proj");
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"a");
         assert_eq!(std::fs::read(out.join("sub/b.txt")).unwrap(), b"b");
         assert!(!out.join(".git").exists(), ".git must be skipped");
+        #[cfg(unix)]
         assert!(!out.join("link").exists(), "symlink must be skipped");
     }
 }
