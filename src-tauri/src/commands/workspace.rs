@@ -2044,6 +2044,142 @@ pub async fn workspace_delete_path(
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceCopyPathRequest {
+    pub source_workspace_id: String,
+    /// Path to copy, relative to the SOURCE workspace root.
+    pub path: String,
+    pub dest_workspace_id: String,
+}
+
+/// Copy a file or folder from one workspace into another (drag-and-drop from
+/// the artifacts drawer). Always a copy — never a move, so the source can't be
+/// destroyed by a drag. The item lands at the destination workspace ROOT under
+/// a collision-free name; folders are copied recursively. Returns the created
+/// name (relative to the destination root).
+#[tauri::command]
+pub async fn workspace_copy_path(
+    request: WorkspaceCopyPathRequest,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let source_desc =
+        resolve_workspace_descriptor(state.inner(), Some(request.source_workspace_id.clone()))?;
+    let source_root = source_desc
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "The source workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(source_root)?;
+
+    let dest_desc =
+        resolve_workspace_descriptor(state.inner(), Some(request.dest_workspace_id.clone()))?;
+    let dest_root = dest_desc
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "The destination workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(dest_root)?;
+
+    let rel = request.path.trim();
+    if rel.is_empty() {
+        return Err("Cannot copy the workspace root.".to_string());
+    }
+    let relative = Path::new(rel);
+    if is_protected_artifact_path(relative) {
+        return Err(format!("Refusing to copy a protected path: {}", rel));
+    }
+
+    let source = normalize_path(source_root.join(relative));
+    if !source.starts_with(source_root) {
+        return Err(format!("Path {} is outside the workspace root", rel));
+    }
+    if source == *source_root {
+        return Err("Cannot copy the workspace root.".to_string());
+    }
+
+    let metadata = fs::symlink_metadata(&source)
+        .map_err(|error| format!("Path not found: {}: {}", rel, error))?;
+
+    let name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("`{}` has no file name.", rel))?
+        .to_string();
+
+    let dest = copy_artifact_to_unique_destination(&source, dest_root, &name, metadata.is_dir())?;
+    Ok(dest
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&name)
+        .to_string())
+}
+
+/// Copy `source` (file or dir) into `dest_dir` under a collision-free name
+/// (`foo` → `foo (1)` → …). Files reuse the exclusive-create import helper;
+/// dirs are created exclusively then filled by [`copy_dir_recursive`].
+fn copy_artifact_to_unique_destination(
+    source: &Path,
+    dest_dir: &Path,
+    name: &str,
+    is_dir: bool,
+) -> Result<std::path::PathBuf, String> {
+    if !is_dir {
+        return crate::commands::system_apps::copy_to_unique_destination(source, dest_dir, name);
+    }
+    for n in 0u32.. {
+        let candidate = crate::commands::system_apps::destination_candidate(dest_dir, name, n);
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                if let Err(error) = copy_dir_recursive(source, &candidate) {
+                    let _ = fs::remove_dir_all(&candidate);
+                    return Err(error);
+                }
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create `{}`: {}",
+                    candidate.display(),
+                    error
+                ));
+            }
+        }
+    }
+    unreachable!("u32 exhausted finding a unique directory name")
+}
+
+/// Recursively copy `src` into the (already-created) `dst`. Symlinks are
+/// skipped (avoids loops and escaping the workspace tree), and protected/heavy
+/// dirs (`.git`, `node_modules`, `target`, …) are skipped so a folder copy
+/// doesn't drag in VCS/build state.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    for entry in
+        fs::read_dir(src).map_err(|e| format!("Failed to read `{}`: {}", src.display(), e))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read `{}`: {}", src.display(), e))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("Failed to stat `{}`: {}", entry.path().display(), e))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let from = entry.path();
+        if file_type.is_dir() && should_skip_artifact_dir(&from) {
+            continue;
+        }
+        let to = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            fs::create_dir(&to)
+                .map_err(|e| format!("Failed to create `{}`: {}", to.display(), e))?;
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)
+                .map_err(|e| format!("Failed to copy `{}`: {}", from.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceStoreImageRequest {
     pub workspace_id: String,
     /// Base64-encoded image bytes (no `data:` URL prefix).
@@ -3251,5 +3387,49 @@ mod tests {
         assert_eq!(viewer_for_path(Path::new("notes.md")), "markdown");
         assert_eq!(viewer_for_path(Path::new("main.rs")), "text");
         assert_eq!(viewer_for_path(Path::new("data.json")), "json");
+    }
+
+    #[test]
+    fn copy_artifact_handles_files_dirs_collisions_and_skips() {
+        use std::os::unix::fs::symlink;
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        // A file copies, and a second copy of the same name gets suffixed.
+        std::fs::write(src.path().join("note.md"), b"hello").unwrap();
+        let a = copy_artifact_to_unique_destination(
+            &src.path().join("note.md"),
+            dst.path(),
+            "note.md",
+            false,
+        )
+        .unwrap();
+        assert_eq!(a.file_name().unwrap(), "note.md");
+        let b = copy_artifact_to_unique_destination(
+            &src.path().join("note.md"),
+            dst.path(),
+            "note.md",
+            false,
+        )
+        .unwrap();
+        assert_eq!(b.file_name().unwrap(), "note (1).md");
+        assert_eq!(std::fs::read(dst.path().join("note.md")).unwrap(), b"hello");
+
+        // A directory copies recursively, but symlinks and protected dirs
+        // (.git) are skipped.
+        let tree = src.path().join("proj");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        std::fs::create_dir_all(tree.join(".git")).unwrap();
+        std::fs::write(tree.join("a.txt"), b"a").unwrap();
+        std::fs::write(tree.join("sub/b.txt"), b"b").unwrap();
+        std::fs::write(tree.join(".git/config"), b"x").unwrap();
+        symlink("/etc/hostname", tree.join("link")).unwrap();
+
+        let out = copy_artifact_to_unique_destination(&tree, dst.path(), "proj", true).unwrap();
+        assert_eq!(out.file_name().unwrap(), "proj");
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(out.join("sub/b.txt")).unwrap(), b"b");
+        assert!(!out.join(".git").exists(), ".git must be skipped");
+        assert!(!out.join("link").exists(), "symlink must be skipped");
     }
 }
