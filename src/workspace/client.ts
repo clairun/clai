@@ -144,6 +144,18 @@ export async function copyWorkspacePath(
   });
 }
 
+/** Move a file/folder into another folder in the same workspace. Returns the
+ *  final workspace-relative path after collision-free naming. */
+export async function moveWorkspacePath(
+  workspaceId: string,
+  path: string,
+  destDirPath: string
+): Promise<string> {
+  return invoke('workspace_move_path', {
+    request: { workspaceId, path, destDirPath },
+  });
+}
+
 export async function downloadWorkspaceFile(
   workspaceId: string,
   path: string,

@@ -2051,6 +2051,16 @@ pub struct WorkspaceCopyPathRequest {
     pub dest_workspace_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceMovePathRequest {
+    pub workspace_id: String,
+    /// Path to move, relative to the workspace root.
+    pub path: String,
+    /// Destination directory, relative to the same workspace root.
+    pub dest_dir_path: String,
+}
+
 /// Copy a file or folder from one workspace into another (drag-and-drop from
 /// the artifacts drawer). Always a copy — never a move, so the source can't be
 /// destroyed by a drag. The item lands at the destination workspace ROOT under
@@ -2094,6 +2104,50 @@ pub async fn workspace_copy_path(
         .and_then(|value| value.to_str())
         .unwrap_or(&name)
         .to_string())
+}
+
+/// Move a file or folder into another folder within the same workspace. The
+/// source lands under a collision-free name and the returned path is relative
+/// to the workspace root.
+#[tauri::command]
+pub async fn workspace_move_path(
+    request: WorkspaceMovePathRequest,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let descriptor =
+        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
+    let root_path = descriptor
+        .root_path
+        .as_ref()
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(root_path)?;
+
+    move_artifact_within_workspace_root(root_path, &request.path, &request.dest_dir_path).await
+}
+
+async fn move_artifact_within_workspace_root(
+    root_path: &Path,
+    path: &str,
+    dest_dir_path: &str,
+) -> Result<String, String> {
+    let (source, is_dir, name) = resolve_copy_source(root_path, path)?;
+    let dest_dir = resolve_artifact_destination_dir(root_path, dest_dir_path)?;
+    ensure_move_destination_allowed(&source, &dest_dir, is_dir)?;
+
+    let canon_root = root_path
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve the workspace root: {}", error))?;
+
+    let source_for_move = source.clone();
+    let dest_dir_for_move = dest_dir.clone();
+    let name_for_move = name.clone();
+    let moved = tokio::task::spawn_blocking(move || {
+        move_artifact_to_unique_destination(&source_for_move, &dest_dir_for_move, &name_for_move)
+    })
+    .await
+    .map_err(|error| format!("Move task did not complete: {}", error))??;
+
+    workspace_relative_path(&canon_root, &moved)
 }
 
 /// Validate + resolve a copy *source* path relative to `source_root`.
@@ -2161,6 +2215,67 @@ fn resolve_copy_source(source_root: &Path, rel: &str) -> Result<(PathBuf, bool, 
     Ok((canon_source, link_meta.file_type().is_dir(), name))
 }
 
+/// Validate + resolve a move destination directory relative to `workspace_root`.
+fn resolve_artifact_destination_dir(workspace_root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel = rel.trim();
+    let relative = Path::new(rel);
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => {
+                if name
+                    .to_str()
+                    .map(|n| SKIPPED_ARTIFACT_DIRS.contains(&n))
+                    .unwrap_or(false)
+                {
+                    return Err(format!("Refusing to move into a protected path: {}", rel));
+                }
+            }
+            Component::CurDir => {}
+            _ => return Err(format!("Path {} is outside the workspace root", rel)),
+        }
+    }
+
+    let requested = normalize_path(workspace_root.join(relative));
+    if !requested.starts_with(workspace_root) {
+        return Err(format!("Path {} is outside the workspace root", rel));
+    }
+
+    let link_meta = fs::symlink_metadata(&requested)
+        .map_err(|error| format!("Destination folder not found: {}: {}", rel, error))?;
+    if link_meta.file_type().is_symlink() {
+        return Err(format!("Refusing to move into a symlink: {}", rel));
+    }
+    if !link_meta.file_type().is_dir() {
+        return Err(format!("Destination is not a folder: {}", rel));
+    }
+
+    let canon_root = workspace_root
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve the workspace root: {}", error))?;
+    let canon_dest = requested
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve destination {}: {}", rel, error))?;
+    if !canon_dest.starts_with(&canon_root) {
+        return Err(format!(
+            "Destination {} resolves outside the workspace root",
+            rel
+        ));
+    }
+
+    Ok(canon_dest)
+}
+
+fn ensure_move_destination_allowed(
+    source: &Path,
+    dest_dir: &Path,
+    is_dir: bool,
+) -> Result<(), String> {
+    if is_dir && dest_dir.starts_with(source) {
+        return Err("Cannot move a folder into itself or one of its subfolders.".to_string());
+    }
+    Ok(())
+}
+
 /// Copy `source` (file or dir) into `dest_dir` under a collision-free name
 /// (`foo` → `foo (1)` → …). Files reuse the exclusive-create import helper;
 /// dirs are created exclusively then filled by [`copy_dir_recursive`].
@@ -2194,6 +2309,132 @@ fn copy_artifact_to_unique_destination(
         }
     }
     unreachable!("u32 exhausted finding a unique directory name")
+}
+
+fn move_artifact_to_unique_destination(
+    source: &Path,
+    dest_dir: &Path,
+    name: &str,
+) -> Result<PathBuf, String> {
+    if source
+        .parent()
+        .map(|parent| parent == dest_dir)
+        .unwrap_or(false)
+    {
+        return Ok(source.to_path_buf());
+    }
+
+    for n in 0u32.. {
+        let candidate = crate::commands::system_apps::destination_candidate(dest_dir, name, n);
+        if candidate == source {
+            return Ok(source.to_path_buf());
+        }
+
+        match rename_no_replace(source, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to move `{}` to `{}`: {}",
+                    source.display(),
+                    candidate.display(),
+                    error
+                ));
+            }
+        }
+    }
+    unreachable!("u32 exhausted finding a unique move name")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn path_to_cstring(path: &Path) -> std::io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Path contains an interior NUL byte: {}", path.display()),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn rename_no_replace(source: &Path, dest: &Path) -> std::io::Result<()> {
+    let source = path_to_cstring(source)?;
+    let dest = path_to_cstring(dest)?;
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            dest.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn rename_no_replace(source: &Path, dest: &Path) -> std::io::Result<()> {
+    let source = path_to_cstring(source)?;
+    let dest = path_to_cstring(dest)?;
+    let rc = unsafe { libc::renamex_np(source.as_ptr(), dest.as_ptr(), libc::RENAME_EXCL) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn rename_no_replace(source: &Path, dest: &Path) -> std::io::Result<()> {
+    let source = path_to_windows_wide(source)?;
+    let dest = path_to_windows_wide(dest)?;
+    let rc = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(source.as_ptr(), dest.as_ptr(), 0)
+    };
+    if rc != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn path_to_windows_wide(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Path contains an interior NUL byte: {}", path.display()),
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn rename_no_replace(_source: &Path, _dest: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "atomic no-overwrite rename is not supported on this platform",
+    ))
+}
+
+fn workspace_relative_path(root: &Path, path: &Path) -> Result<String, String> {
+    let rel = path
+        .strip_prefix(root)
+        .map_err(|_| format!("Path {} is outside the workspace root", path.display()))?;
+    let rel = rel
+        .to_str()
+        .ok_or_else(|| format!("Path {} is not valid UTF-8", path.display()))?;
+    Ok(rel.replace(std::path::MAIN_SEPARATOR, "/"))
 }
 
 /// Recursively copy `src` into the (already-created) `dst`. Symlinks are
@@ -3504,6 +3745,110 @@ mod tests {
         assert!(resolve_copy_source(root.path(), "proj/../../etc").is_err());
         // Empty / root rejected.
         assert!(resolve_copy_source(root.path(), "   ").is_err());
+    }
+
+    #[test]
+    fn resolve_artifact_destination_dir_guards_traversal_protected_and_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("proj/out")).unwrap();
+        std::fs::create_dir_all(root.path().join("proj/.git/inner")).unwrap();
+        std::fs::write(root.path().join("proj/file.txt"), b"x").unwrap();
+
+        let root_dest = resolve_artifact_destination_dir(root.path(), "").unwrap();
+        assert_eq!(root_dest, root.path().canonicalize().unwrap());
+
+        let nested = resolve_artifact_destination_dir(root.path(), "proj/out").unwrap();
+        assert_eq!(nested, root.path().join("proj/out").canonicalize().unwrap());
+
+        assert!(resolve_artifact_destination_dir(root.path(), "../outside").is_err());
+        assert!(resolve_artifact_destination_dir(root.path(), "proj/.git").is_err());
+        assert!(resolve_artifact_destination_dir(root.path(), "proj/.git/inner").is_err());
+        assert!(resolve_artifact_destination_dir(root.path(), "proj/file.txt").is_err());
+    }
+
+    #[tokio::test]
+    async fn move_artifact_within_workspace_root_moves_and_returns_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::create_dir_all(root.path().join("dest")).unwrap();
+        std::fs::write(root.path().join("src/note.md"), b"new").unwrap();
+        std::fs::write(root.path().join("dest/note.md"), b"existing").unwrap();
+
+        let moved = move_artifact_within_workspace_root(root.path(), "src/note.md", "dest")
+            .await
+            .unwrap();
+
+        assert_eq!(moved, "dest/note (1).md");
+        assert!(!root.path().join("src/note.md").exists());
+        assert_eq!(
+            std::fs::read(root.path().join("dest/note.md")).unwrap(),
+            b"existing"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("dest/note (1).md")).unwrap(),
+            b"new"
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn rename_no_replace_rejects_existing_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.txt");
+        let dest = root.path().join("dest.txt");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&dest, b"dest").unwrap();
+
+        let error = rename_no_replace(&source, &dest).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&source).unwrap(), b"source");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"dest");
+    }
+
+    #[test]
+    fn move_artifact_handles_collisions_and_current_parent_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let source_parent = root.path().join("src");
+        let dest = root.path().join("dest");
+        std::fs::create_dir_all(&source_parent).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(source_parent.join("note.md"), b"new").unwrap();
+        std::fs::write(dest.join("note.md"), b"existing").unwrap();
+
+        let moved =
+            move_artifact_to_unique_destination(&source_parent.join("note.md"), &dest, "note.md")
+                .unwrap();
+        assert_eq!(moved.file_name().unwrap(), "note (1).md");
+        assert!(!source_parent.join("note.md").exists());
+        assert_eq!(std::fs::read(dest.join("note.md")).unwrap(), b"existing");
+        assert_eq!(std::fs::read(dest.join("note (1).md")).unwrap(), b"new");
+
+        std::fs::write(dest.join("same-parent.txt"), b"same").unwrap();
+        let same_parent = move_artifact_to_unique_destination(
+            &dest.join("same-parent.txt"),
+            &dest,
+            "same-parent.txt",
+        )
+        .unwrap();
+        assert_eq!(same_parent, dest.join("same-parent.txt"));
+        assert_eq!(
+            std::fs::read(dest.join("same-parent.txt")).unwrap(),
+            b"same"
+        );
+    }
+
+    #[test]
+    fn move_artifact_rejects_folder_into_self_or_descendant() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("proj/child")).unwrap();
+        let source = root.path().join("proj").canonicalize().unwrap();
+        let child = root.path().join("proj/child").canonicalize().unwrap();
+        let parent = root.path().canonicalize().unwrap();
+
+        assert!(ensure_move_destination_allowed(&source, &source, true).is_err());
+        assert!(ensure_move_destination_allowed(&source, &child, true).is_err());
+        assert!(ensure_move_destination_allowed(&source, &parent, true).is_ok());
+        assert!(ensure_move_destination_allowed(&source, &child, false).is_ok());
     }
 
     #[cfg(unix)]
