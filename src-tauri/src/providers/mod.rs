@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 use crate::config::AiProvider;
+use crate::windows_console::HideConsoleWindow;
 
 // =============================================================================
 // Available Provider Info
@@ -87,13 +88,17 @@ pub fn is_snap() -> bool {
 ///
 /// In Flatpak, this wraps the command with `flatpak-spawn --host`.
 pub(crate) fn get_host_command(cmd: &str) -> Command {
-    if is_flatpak() {
+    let mut command = if is_flatpak() {
         let mut command = Command::new("flatpak-spawn");
         command.arg("--host").arg(cmd);
         command
     } else {
         Command::new(cmd)
-    }
+    };
+    // Probes (`which`/`where`, `--version`, `xdg-mime`) must never flash a
+    // console window on Windows; see windows_console.rs.
+    command.hide_console_window();
+    command
 }
 
 /// Common user-local binary paths to search when command isn't in PATH.
@@ -283,6 +288,10 @@ fn build_host_cli_command_impl(
     if let Some(dir) = working_dir {
         command.current_dir(dir);
     }
+    // Provider CLIs are background children of a GUI app; without this every
+    // session spawn would flash a console window on Windows
+    // (windows_console.rs).
+    command.hide_console_window();
     command
 }
 

@@ -16,6 +16,7 @@ use crate::config::{
     discover_skills, discover_skills_with_diagnostics, SkillDefinition, SkillSourceConfig,
     SkillSourceDiagnostic, SkillSourceKind,
 };
+use crate::windows_console::HideConsoleWindow;
 use crate::AppState;
 
 const GIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
@@ -518,7 +519,7 @@ fn sync_git_skill_source(source: &mut SkillSourceConfig) -> Result<(), String> {
 /// the same path inside the sandbox (`--filesystem=home`), so the directory
 /// resolves to the same location on both sides of the hop.
 fn build_git_command(in_flatpak: bool, current_dir: Option<&Path>) -> Command {
-    if in_flatpak {
+    let mut command = if in_flatpak {
         let mut command = Command::new("flatpak-spawn");
         if let Some(current_dir) = current_dir {
             command.arg(format!("--directory={}", current_dir.display()));
@@ -538,7 +539,12 @@ fn build_git_command(in_flatpak: bool, current_dir: Option<&Path>) -> Command {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_ASKPASS", "true");
         command
-    }
+    };
+    // Background git must not flash a console window on Windows. Applied
+    // after the branch (a no-op for the Linux-only flatpak arm) so a future
+    // refactor cannot drop it from one arm.
+    command.hide_console_window();
+    command
 }
 
 fn run_git<I, S>(current_dir: Option<&Path>, args: I) -> Result<(), String>
