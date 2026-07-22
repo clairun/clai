@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::providers::{command_exists, get_host_command, is_flatpak};
+use crate::windows_console::HideConsoleWindow;
 
 /// A probe-table entry the UI can offer in a dropdown.
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -483,7 +484,9 @@ fn resolve_windows_program(bin: &str) -> String {
     if bin.contains('\\') || bin.contains('/') {
         return bin.to_string();
     }
-    if let Ok(output) = Command::new("where").arg(bin).output() {
+    let mut probe = Command::new("where");
+    probe.arg(bin).hide_console_window();
+    if let Ok(output) = probe.output() {
         if output.status.success() {
             if let Some(first) = String::from_utf8_lossy(&output.stdout)
                 .lines()
@@ -497,10 +500,31 @@ fn resolve_windows_program(bin: &str) -> String {
     bin.to_string()
 }
 
+/// Whether the spawned host app may show a console window on Windows.
+///
+/// Everything CLAI launches is `Hidden` (GUI editors, `.cmd` shims,
+/// `explorer.exe` — `CREATE_NO_WINDOW` never affects their GUI windows)
+/// EXCEPT terminal launches, where the console window is exactly what the
+/// user asked for (`cmd`/`powershell` fallbacks; `wt` draws its own window
+/// either way). Not `#[cfg]`-gated so both variants compile on every
+/// platform; on non-Windows the distinction is a no-op.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum HostWindow {
+    /// Suppress the child's console window (see windows_console.rs).
+    Hidden,
+    /// Let the child create a visible console: it IS the launched terminal.
+    Visible,
+}
+
 /// Spawn a host command detached (fire and forget). Under Flatpak the
 /// working directory is forwarded with `--directory` (plain
 /// `current_dir` would only move flatpak-spawn itself).
-fn spawn_host_detached(bin: &str, args: &[String], dir: Option<&Path>) -> Result<(), String> {
+fn spawn_host_detached(
+    bin: &str,
+    args: &[String],
+    dir: Option<&Path>,
+    window: HostWindow,
+) -> Result<(), String> {
     let mut command: Command;
     if is_flatpak() {
         command = Command::new("flatpak-spawn");
@@ -526,6 +550,9 @@ fn spawn_host_detached(bin: &str, args: &[String], dir: Option<&Path>) -> Result
             command.current_dir(dir);
         }
         command.args(args);
+    }
+    if window == HostWindow::Hidden {
+        command.hide_console_window();
     }
     let child = command
         .spawn()
@@ -574,7 +601,12 @@ pub fn open_in_editor(config: &SystemAppsConfig, path: &Path, is_dir: bool) -> R
                 .filter(|t| !t.trim().is_empty())
                 .ok_or_else(|| "Custom editor command is not configured.".to_string())?;
             let (bin, args) = parse_custom_template(template, "{path}", &path_str)?;
-            spawn_host_detached(&bin, &args, None)
+            // Visible: a custom command may be a console editor (vim, hx…)
+            // with no `in_terminal` flag to route it through a terminal —
+            // hiding its console would leave it running invisibly. GUI custom
+            // editors are unaffected either way; only `.cmd` shims of GUI
+            // editors keep a brief flash, and those have probe-table entries.
+            spawn_host_detached(&bin, &args, None, HostWindow::Visible)
         }
         Some(id) => {
             let spec = editors()
@@ -600,7 +632,7 @@ pub fn open_in_editor(config: &SystemAppsConfig, path: &Path, is_dir: bool) -> R
                 command.extend(args);
                 run_in_terminal(config, dir, &command)
             } else {
-                spawn_host_detached(spec.bin, &args, None)
+                spawn_host_detached(spec.bin, &args, None, HostWindow::Hidden)
             }
         }
     }
@@ -611,15 +643,15 @@ pub fn open_in_editor(config: &SystemAppsConfig, path: &Path, is_dir: bool) -> R
 pub fn open_with_system(path: &Path) -> Result<(), String> {
     let path_str = path.display().to_string();
     if cfg!(target_os = "macos") {
-        spawn_host_detached("open", &[path_str], None)
+        spawn_host_detached("open", &[path_str], None, HostWindow::Hidden)
     } else if cfg!(target_os = "windows") {
         // `explorer.exe <path>` opens a file with its associated app or a
         // folder in Explorer. Spawned directly (not via `cmd`), so an
         // untrusted path cannot inject `cmd` metacharacters. explorer exits
         // non-zero even on success; the fire-and-forget reaper ignores it.
-        spawn_host_detached("explorer.exe", &[path_str], None)
+        spawn_host_detached("explorer.exe", &[path_str], None, HostWindow::Hidden)
     } else {
-        spawn_host_detached("xdg-open", &[path_str], None)
+        spawn_host_detached("xdg-open", &[path_str], None, HostWindow::Hidden)
     }
 }
 
@@ -646,7 +678,7 @@ fn run_in_terminal(
                 .ok_or_else(|| "Custom terminal command is not configured.".to_string())?;
             let (bin, mut args) = parse_custom_template(template, "{dir}", &dir_str)?;
             args.extend_from_slice(command);
-            return spawn_host_detached(&bin, &args, Some(dir));
+            return spawn_host_detached(&bin, &args, Some(dir), HostWindow::Visible);
         }
         Some(id) if id != "auto" => {
             let spec = terminals()
@@ -661,7 +693,7 @@ fn run_in_terminal(
     // Auto chain. The xdg-terminal-exec / $TERMINAL conventions are
     // Linux-only; other platforms go straight to the probe table.
     if cfg!(target_os = "linux") && command_exists("xdg-terminal-exec") {
-        return spawn_host_detached("xdg-terminal-exec", command, Some(dir));
+        return spawn_host_detached("xdg-terminal-exec", command, Some(dir), HostWindow::Visible);
     }
     if let Some(term) = std::env::var("TERMINAL")
         .ok()
@@ -681,7 +713,7 @@ fn run_in_terminal(
                 args.push("-e".to_string());
                 args.extend_from_slice(command);
             }
-            return spawn_host_detached(&term, &args, Some(dir));
+            return spawn_host_detached(&term, &args, Some(dir), HostWindow::Visible);
         }
     }
     for spec in terminals() {
@@ -726,7 +758,7 @@ fn spawn_terminal_spec(
     } else {
         None
     };
-    spawn_host_detached(spec.bin, &args, cwd)
+    spawn_host_detached(spec.bin, &args, cwd, HostWindow::Visible)
 }
 
 /// Resolve `rel_path` inside `root`, refusing anything that escapes it

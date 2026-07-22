@@ -35,6 +35,7 @@ mod mcp;
 mod paths;
 mod providers;
 mod system_apps;
+mod windows_console;
 mod workspace_index;
 
 use std::path::{Path, PathBuf};

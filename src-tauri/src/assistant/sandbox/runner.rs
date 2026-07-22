@@ -194,11 +194,15 @@ fn kill_process_tree(_pid: Option<u32>) {}
 /// process may kill its own descendants without elevation.
 #[cfg(windows)]
 fn kill_process_tree_windows(pid: u32) {
+    use crate::windows_console::HideConsoleWindow;
     let _ = std::process::Command::new("taskkill")
         .args(windows_taskkill_args(pid))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // taskkill is a console app: unhidden it would flash a console
+        // window every time a timed-out bash_exec child is killed.
+        .hide_console_window()
         .spawn();
 }
 

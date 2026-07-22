@@ -23,6 +23,7 @@ use crate::assistant::auth::McpSecretStorage;
 use crate::assistant::types::ToolDefinition;
 use crate::config::{ClaiConfig, McpEnvVar, McpServerAuth, McpServerConfig};
 use crate::mcp::oauth;
+use crate::windows_console::HideConsoleWindow;
 
 /// External MCP connect + tool discovery must not hang the `clai` bridge's
 /// `list_tools` — Claude Code waits on that call to expose *any* tool, so a
@@ -569,6 +570,9 @@ impl McpClientManager {
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
                 cmd.kill_on_drop(true);
+                // Stdio servers are background children of a GUI app; keep
+                // them from flashing a console window on Windows.
+                cmd.hide_console_window();
 
                 let mut child = cmd.spawn().map_err(|error| {
                     format!(
