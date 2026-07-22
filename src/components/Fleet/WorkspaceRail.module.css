@@ -229,6 +229,41 @@
   color: var(--color-text-primary);
 }
 
+/* Labeled group headings (Needs attention / Starred / Recent). Only
+   rendered when grouping is in effect — a bare recency list stays
+   headerless. */
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 9px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+  user-select: none;
+}
+
+.sectionHeaderIcon {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Collapsed rail has no room for headers — a thin divider separates the
+   sections instead. */
+.sectionDivider {
+  flex-shrink: 0;
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--color-border, var(--color-overlay-08));
+}
+
+/* Filled/star state of the per-row star toggle. */
+.starButtonActive {
+  color: var(--color-warning-dark, #b8860b);
+}
+
 .railList {
   flex: 1;
   overflow-y: auto;
@@ -408,7 +443,8 @@
   gap: 2px;
 }
 
-.row:hover .rowActions {
+.row:hover .rowActions,
+.row:focus-within .rowActions {
   display: inline-flex;
 }
 

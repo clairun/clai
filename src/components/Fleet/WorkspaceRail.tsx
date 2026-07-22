@@ -21,6 +21,7 @@ interface WorkspaceRailProps {
   onCreate: () => void;
   onRunNow: (id: string) => void;
   onTogglePause: (id: string, currentlyPaused: boolean) => void;
+  onToggleStar: (id: string, currentlyStarred: boolean) => void;
   onSettings: (id: string) => void;
   onFork: (id: string) => void;
   onDelete: (id: string, title: string) => void;
@@ -52,6 +53,12 @@ const hasAttention = (
   num(ws.failedTaskCount) > 0 ||
   num(ws.blockedTaskCount) > 0;
 
+type RailSection = {
+  key: 'attention' | 'starred' | 'recent';
+  label: string;
+  items: WorkspaceListEntry[];
+};
+
 const RunIcon = () => (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
     <path d="M8 5v14l11-7z" />
@@ -65,17 +72,41 @@ const PauseIcon = () => (
   </svg>
 );
 
+const StarIcon = ({ filled }: { filled: boolean }) => (
+  <svg
+    width="12"
+    height="12"
+    viewBox="0 0 24 24"
+    fill={filled ? 'currentColor' : 'none'}
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+  </svg>
+);
+
 /**
  * Persistent left navigator for the unified Fleet/Workspace view. Lists
- * every workspace; clicking a row selects it (the host navigates to
- * `/workspace/:id`). Attention workspaces (pending approval, failed or
- * blocked tasks) are pinned to the top with a badge so cross-workspace
- * issues surface without a separate panel.
+ * every workspace grouped into explicit, labeled sections (Claude-style)
+ * so ordering is never a mystery:
+ *
+ *   1. "Needs attention" — pending approvals, failed or blocked tasks.
+ *   2. "Starred" — user-pinned workspaces (star via hover icon or ⋯ menu).
+ *   3. "Recent" — everything else, most-recently-updated first.
+ *
+ * Within each section rows keep the recency order. Scheduled workspaces
+ * are NOT sorted separately — their cadence renders as a per-row label,
+ * an attribute rather than a position. Section headers only appear when
+ * grouping is actually in effect (a bare recency list stays headerless).
  *
  * Collapsible: the collapsed state shows just a status dot + initial,
- * with the full title on hover (title attr). The host owns the collapsed
- * flag (persisted to localStorage) and all data/actions; this component
- * is presentational plus a small amount of per-row menu state.
+ * with the full title on hover (title attr) and thin dividers between
+ * sections. The host owns the collapsed flag (persisted to localStorage)
+ * and all data/actions; this component is presentational plus a small
+ * amount of per-row menu state.
  */
 const WorkspaceRail = ({
   workspaces,
@@ -91,6 +122,7 @@ const WorkspaceRail = ({
   onToggleSchedulerPaused,
   onRunNow,
   onTogglePause,
+  onToggleStar,
   onSettings,
   onFork,
   onDelete,
@@ -103,19 +135,10 @@ const WorkspaceRail = ({
   const [query, setQuery] = useState('');
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
-  // Sort: attention first, then scheduled, then most-recently-updated.
+  // Pure recency sort — grouping happens per-section below.
   const sorted = useMemo(
-    () =>
-      [...workspaces].sort((a, b) => {
-        const aAtt = hasAttention(a, attentionCounts);
-        const bAtt = hasAttention(b, attentionCounts);
-        if (aAtt !== bAtt) return aAtt ? -1 : 1;
-        const aSched = !!a.scheduleEnabled;
-        const bSched = !!b.scheduleEnabled;
-        if (aSched !== bSched) return aSched ? -1 : 1;
-        return num(b.updatedAt) - num(a.updatedAt);
-      }),
-    [workspaces, attentionCounts],
+    () => [...workspaces].sort((a, b) => num(b.updatedAt) - num(a.updatedAt)),
+    [workspaces],
   );
 
   // Name filter. Applied only when expanded — collapsed has no input, so
@@ -125,6 +148,264 @@ const WorkspaceRail = ({
     if (collapsed || !q) return sorted;
     return sorted.filter((ws) => (ws.title || '').toLowerCase().includes(q));
   }, [sorted, query, collapsed]);
+
+  // Partition into labeled sections. Attention outranks starred: a starred
+  // workspace that needs input surfaces under "Needs attention" (the star
+  // state stays visible via the hover toggle / menu). Empty sections are
+  // dropped entirely.
+  const sections = useMemo<RailSection[]>(() => {
+    const attention: WorkspaceListEntry[] = [];
+    const starred: WorkspaceListEntry[] = [];
+    const recent: WorkspaceListEntry[] = [];
+    for (const ws of visible) {
+      if (hasAttention(ws, attentionCounts)) attention.push(ws);
+      else if (ws.starred) starred.push(ws);
+      else recent.push(ws);
+    }
+    return [
+      { key: 'attention' as const, label: 'Needs attention', items: attention },
+      { key: 'starred' as const, label: 'Starred', items: starred },
+      { key: 'recent' as const, label: 'Recent', items: recent },
+    ].filter((section) => section.items.length > 0);
+  }, [visible, attentionCounts]);
+
+  // A lone "Recent" section is just a plain list — no header noise.
+  const showHeaders =
+    sections.length > 1 || (sections.length === 1 && sections[0]?.key !== 'recent');
+
+  const renderRow = (ws: WorkspaceListEntry) => {
+    const processing = isProcessing(ws, activeRuns);
+    const pending = attentionCounts[ws.id] || 0;
+    const status = deriveCardStatus(ws, processing, pending > 0);
+    const isSelected = ws.id === selectedId;
+    const scheduleLabel = formatScheduleLabel(ws.scheduleKind);
+    const isPaused = !!ws.schedulePaused;
+    const isStarred = !!ws.starred;
+    const attentionCount = pending + num(ws.failedTaskCount) + num(ws.blockedTaskCount);
+    // A run completed since the user last opened this workspace.
+    // Suppressed while selected — the open page is marking it seen.
+    const isUnread = !!ws.unread && !isSelected;
+    const initial = (ws.title || '?').trim().charAt(0).toUpperCase() || '?';
+    const rowClasses = [styles.row, isSelected ? styles.rowSelected : ''].join(' ');
+
+    return (
+      <div
+        key={ws.id}
+        className={`${rowClasses}${
+          dropTargetId === ws.id ? ` ${styles.rowDropTarget}` : ''
+        }`}
+        onClick={() => onSelect(ws.id)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onSelect(ws.id);
+        }}
+        onDragOver={(e) => {
+          if (!onArtifactDrop) return;
+          if (!e.dataTransfer.types.includes('application/x-clai-artifact')) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'copy';
+          if (dropTargetId !== ws.id) setDropTargetId(ws.id);
+        }}
+        onDragLeave={() => {
+          setDropTargetId((prev) => (prev === ws.id ? null : prev));
+        }}
+        onDrop={(e) => {
+          if (!onArtifactDrop) return;
+          const raw = e.dataTransfer.getData('application/x-clai-artifact');
+          setDropTargetId(null);
+          if (!raw) return;
+          e.preventDefault();
+          try {
+            const drag = JSON.parse(raw);
+            if (
+              drag &&
+              typeof drag.path === 'string' &&
+              typeof drag.workspaceId === 'string' &&
+              typeof drag.kind === 'string' &&
+              typeof drag.name === 'string'
+            ) {
+              onArtifactDrop(ws.id, drag);
+            }
+          } catch {
+            // Ignore malformed / foreign drops.
+          }
+        }}
+        title={collapsed ? ws.title : undefined}
+      >
+        <span
+          className={`${styles.statusDot} ${styles[`statusDot_${status}`]}`}
+          aria-hidden="true"
+          title={CARD_STATUS_LABEL[status]}
+        />
+        {collapsed ? (
+          <>
+            <span className={styles.collapsedInitial}>{initial}</span>
+            {attentionCount > 0 ? (
+              <span className={styles.collapsedBadge} />
+            ) : isUnread ? (
+              <span className={styles.collapsedUnreadDot} title="New activity" />
+            ) : null}
+          </>
+        ) : (
+          <>
+            <span className={styles.rowBody}>
+              <span className={styles.rowTitle}>{ws.title}</span>
+              {ws.scheduleEnabled && (
+                <span
+                  className={`${styles.rowMeta} ${isPaused ? styles.rowMetaPaused : ''}`}
+                >
+                  {isPaused
+                    ? `Paused${scheduleLabel ? ` · ${scheduleLabel}` : ''}`
+                    : scheduleLabel || 'Scheduled'}
+                </span>
+              )}
+            </span>
+
+            {attentionCount > 0 && (
+              <span className={styles.attentionBadge} title="Needs attention">
+                {attentionCount}
+              </span>
+            )}
+
+            {isUnread && attentionCount === 0 && (
+              <span
+                className={styles.unreadDot}
+                title="New activity since you last opened this workspace"
+                aria-label="Unread activity"
+              />
+            )}
+
+            <span className={styles.rowActions}>
+              <button
+                type="button"
+                className={`${styles.iconButton} ${isStarred ? styles.starButtonActive : ''}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onToggleStar(ws.id, isStarred);
+                }}
+                title={isStarred ? 'Unstar workspace' : 'Star workspace'}
+                aria-label={isStarred ? 'Unstar workspace' : 'Star workspace'}
+                aria-pressed={isStarred}
+              >
+                <StarIcon filled={isStarred} />
+              </button>
+              {ws.scheduleEnabled && (
+                <>
+                  <button
+                    type="button"
+                    className={styles.iconButton}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRunNow(ws.id);
+                    }}
+                    disabled={processing || runNowBusyId === ws.id}
+                    title={processing ? 'Already running' : 'Run now'}
+                    aria-label="Run now"
+                  >
+                    <RunIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.iconButton}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onTogglePause(ws.id, isPaused);
+                    }}
+                    disabled={pauseBusyId === ws.id}
+                    title={isPaused ? 'Resume schedule' : 'Pause schedule'}
+                    aria-label={isPaused ? 'Resume schedule' : 'Pause schedule'}
+                  >
+                    <PauseIcon />
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                className={styles.iconButton}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpenMenuId((cur) => (cur === ws.id ? null : ws.id));
+                }}
+                title="More actions"
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={openMenuId === ws.id}
+              >
+                ⋯
+              </button>
+            </span>
+
+            {openMenuId === ws.id && (
+              <>
+                <button
+                  type="button"
+                  className={styles.menuBackdrop}
+                  aria-hidden="true"
+                  tabIndex={-1}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setOpenMenuId(null);
+                  }}
+                />
+                <div className={styles.menu} role="menu">
+                  <button
+                    type="button"
+                    className={styles.menuItem}
+                    role="menuitem"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(null);
+                      onToggleStar(ws.id, isStarred);
+                    }}
+                  >
+                    {isStarred ? 'Unstar workspace' : 'Star workspace'}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.menuItem}
+                    role="menuitem"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(null);
+                      onSettings(ws.id);
+                    }}
+                  >
+                    Settings
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.menuItem}
+                    role="menuitem"
+                    disabled={forkBusyId === ws.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(null);
+                      onFork(ws.id);
+                    }}
+                  >
+                    {forkBusyId === ws.id ? 'Forking…' : 'Fork workspace'}
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.menuItem} ${styles.menuItemDanger}`}
+                    role="menuitem"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId(null);
+                      onDelete(ws.id, ws.title);
+                    }}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
 
   return (
     <nav
@@ -211,213 +492,24 @@ const WorkspaceRail = ({
       )}
 
       <div className={styles.railList}>
-        {visible.map((ws) => {
-          const processing = isProcessing(ws, activeRuns);
-          const pending = attentionCounts[ws.id] || 0;
-          const status = deriveCardStatus(ws, processing, pending > 0);
-          const isSelected = ws.id === selectedId;
-          const scheduleLabel = formatScheduleLabel(ws.scheduleKind);
-          const isPaused = !!ws.schedulePaused;
-          const attentionCount = pending + num(ws.failedTaskCount) + num(ws.blockedTaskCount);
-          // A run completed since the user last opened this workspace.
-          // Suppressed while selected — the open page is marking it seen.
-          const isUnread = !!ws.unread && !isSelected;
-          const initial = (ws.title || '?').trim().charAt(0).toUpperCase() || '?';
-          const rowClasses = [styles.row, isSelected ? styles.rowSelected : ''].join(' ');
-
-          return (
-            <div
-              key={ws.id}
-              className={`${rowClasses}${
-                dropTargetId === ws.id ? ` ${styles.rowDropTarget}` : ''
-              }`}
-              onClick={() => onSelect(ws.id)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') onSelect(ws.id);
-              }}
-              onDragOver={(e) => {
-                if (!onArtifactDrop) return;
-                if (!e.dataTransfer.types.includes('application/x-clai-artifact')) return;
-                e.preventDefault();
-                e.dataTransfer.dropEffect = 'copy';
-                if (dropTargetId !== ws.id) setDropTargetId(ws.id);
-              }}
-              onDragLeave={() => {
-                setDropTargetId((prev) => (prev === ws.id ? null : prev));
-              }}
-              onDrop={(e) => {
-                if (!onArtifactDrop) return;
-                const raw = e.dataTransfer.getData('application/x-clai-artifact');
-                setDropTargetId(null);
-                if (!raw) return;
-                e.preventDefault();
-                try {
-                  const drag = JSON.parse(raw);
-                  if (
-                    drag &&
-                    typeof drag.path === 'string' &&
-                    typeof drag.workspaceId === 'string' &&
-                    typeof drag.kind === 'string' &&
-                    typeof drag.name === 'string'
-                  ) {
-                    onArtifactDrop(ws.id, drag);
-                  }
-                } catch {
-                  // Ignore malformed / foreign drops.
-                }
-              }}
-              title={collapsed ? ws.title : undefined}
-            >
-              <span
-                className={`${styles.statusDot} ${styles[`statusDot_${status}`]}`}
-                aria-hidden="true"
-                title={CARD_STATUS_LABEL[status]}
-              />
-              {collapsed ? (
-                <>
-                  <span className={styles.collapsedInitial}>{initial}</span>
-                  {attentionCount > 0 ? (
-                    <span className={styles.collapsedBadge} />
-                  ) : isUnread ? (
-                    <span className={styles.collapsedUnreadDot} title="New activity" />
-                  ) : null}
-                </>
-              ) : (
-                <>
-                  <span className={styles.rowBody}>
-                    <span className={styles.rowTitle}>{ws.title}</span>
-                    {ws.scheduleEnabled && (
-                      <span
-                        className={`${styles.rowMeta} ${isPaused ? styles.rowMetaPaused : ''}`}
-                      >
-                        {isPaused
-                          ? `Paused${scheduleLabel ? ` · ${scheduleLabel}` : ''}`
-                          : scheduleLabel || 'Scheduled'}
-                      </span>
-                    )}
+        {sections.map((section, index) => (
+          <React.Fragment key={section.key}>
+            {!collapsed && showHeaders && (
+              <div className={styles.sectionHeader} role="presentation">
+                {section.key === 'starred' && (
+                  <span className={styles.sectionHeaderIcon} aria-hidden="true">
+                    <StarIcon filled />
                   </span>
-
-                  {attentionCount > 0 && (
-                    <span className={styles.attentionBadge} title="Needs attention">
-                      {attentionCount}
-                    </span>
-                  )}
-
-                  {isUnread && attentionCount === 0 && (
-                    <span
-                      className={styles.unreadDot}
-                      title="New activity since you last opened this workspace"
-                      aria-label="Unread activity"
-                    />
-                  )}
-
-                  <span className={styles.rowActions}>
-                    {ws.scheduleEnabled && (
-                      <>
-                        <button
-                          type="button"
-                          className={styles.iconButton}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onRunNow(ws.id);
-                          }}
-                          disabled={processing || runNowBusyId === ws.id}
-                          title={processing ? 'Already running' : 'Run now'}
-                          aria-label="Run now"
-                        >
-                          <RunIcon />
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.iconButton}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onTogglePause(ws.id, isPaused);
-                          }}
-                          disabled={pauseBusyId === ws.id}
-                          title={isPaused ? 'Resume schedule' : 'Pause schedule'}
-                          aria-label={isPaused ? 'Resume schedule' : 'Pause schedule'}
-                        >
-                          <PauseIcon />
-                        </button>
-                      </>
-                    )}
-                    <button
-                      type="button"
-                      className={styles.iconButton}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setOpenMenuId((cur) => (cur === ws.id ? null : ws.id));
-                      }}
-                      title="More actions"
-                      aria-label="More actions"
-                      aria-haspopup="menu"
-                      aria-expanded={openMenuId === ws.id}
-                    >
-                      ⋯
-                    </button>
-                  </span>
-
-                  {openMenuId === ws.id && (
-                    <>
-                      <button
-                        type="button"
-                        className={styles.menuBackdrop}
-                        aria-hidden="true"
-                        tabIndex={-1}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setOpenMenuId(null);
-                        }}
-                      />
-                      <div className={styles.menu} role="menu">
-                        <button
-                          type="button"
-                          className={styles.menuItem}
-                          role="menuitem"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setOpenMenuId(null);
-                            onSettings(ws.id);
-                          }}
-                        >
-                          Settings
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.menuItem}
-                          role="menuitem"
-                          disabled={forkBusyId === ws.id}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setOpenMenuId(null);
-                            onFork(ws.id);
-                          }}
-                        >
-                          {forkBusyId === ws.id ? 'Forking…' : 'Fork workspace'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`${styles.menuItem} ${styles.menuItemDanger}`}
-                          role="menuitem"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setOpenMenuId(null);
-                            onDelete(ws.id, ws.title);
-                          }}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })}
+                )}
+                {section.label}
+              </div>
+            )}
+            {collapsed && index > 0 && (
+              <div className={styles.sectionDivider} aria-hidden="true" />
+            )}
+            {section.items.map(renderRow)}
+          </React.Fragment>
+        ))}
 
         {workspaces.length === 0 && !collapsed && (
           <div className={styles.emptyRail}>

@@ -2883,6 +2883,9 @@ pub struct WorkspaceListEntry {
     /// the rail renders an "unread" dot until `workspace_mark_opened`
     /// clears it.
     pub unread: bool,
+    /// User starred this workspace — the rail pins it in the "Starred"
+    /// section. Derived from `WorkspaceConfig::starred_at > 0`.
+    pub starred: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -3034,6 +3037,9 @@ pub async fn workspace_fork(
         // unread/seen state.
         last_run_completed_at: 0,
         last_opened_at: 0,
+        // A star marks the SOURCE workspace as important; the fork starts
+        // life unstarred like any other new workspace.
+        starred_at: 0,
         default_agent_id,
         schedule,
         agents,
@@ -3154,6 +3160,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             next_run_in_seconds,
             unread: locator.last_run_completed_at > 0
                 && locator.last_run_completed_at > locator.last_opened_at,
+            starred: locator.starred_at > 0,
             created_at: load_workspace_config_for_id(state.inner(), &locator.id)
                 .map(|(_, config)| config.created_at)
                 .unwrap_or_default(),
@@ -3503,6 +3510,25 @@ pub async fn workspace_mark_opened(
     // schedule re-fire on every app restart.
     update_workspace_config_for_id(state.inner(), &workspace_id, |config| {
         config.last_opened_at = now_millis();
+        Ok(())
+    })?;
+
+    Ok(())
+}
+
+/// Star or unstar a workspace (the rail pins starred workspaces in a
+/// dedicated section). Persists a timestamp (0 = unstarred). Deliberately
+/// does NOT bump `updated_at`, so starring never reorders the
+/// recency-sorted workspace list.
+#[tauri::command]
+pub async fn workspace_set_starred(
+    workspace_id: String,
+    starred: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    update_workspace_config_for_id(state.inner(), &workspace_id, |config| {
+        config.starred_at = if starred { now_millis() } else { 0 };
         Ok(())
     })?;
 

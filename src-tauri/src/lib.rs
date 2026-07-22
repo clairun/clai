@@ -419,6 +419,7 @@ pub fn run() {
             commands::workspace::workspace_delete,
             commands::workspace::workspace_set_title,
             commands::workspace::workspace_mark_opened,
+            commands::workspace::workspace_set_starred,
             commands::workspace_agents::workspace_get_agent,
             commands::workspace_agents::workspace_create_agent,
             commands::workspace_agents::workspace_update_agent,

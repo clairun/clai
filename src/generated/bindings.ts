@@ -457,7 +457,12 @@ scheduleKind: ScheduleKind | null, nextRunInSeconds: bigint | null,
  * the rail renders an "unread" dot until `workspace_mark_opened`
  * clears it.
  */
-unread: boolean, createdAt: bigint, updatedAt: bigint, };
+unread: boolean, 
+/**
+ * User starred this workspace — the rail pins it in the "Starred"
+ * section. Derived from `WorkspaceConfig::starred_at > 0`.
+ */
+starred: boolean, createdAt: bigint, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 
