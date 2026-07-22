@@ -461,7 +461,13 @@ unread: boolean, createdAt: bigint, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 
-export type WorkspaceSnapshot = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, selectedMcpServerNames: Array<string>, session: AssistantSession | null, messages: Array<AssistantMessage>, runs: Array<AssistantRun>, toolCalls: Array<ToolInvocation>, memories: Array<WorkspaceFileEntry>, artifacts: Array<WorkspaceFileEntry>, 
+export type WorkspaceSnapshot = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, selectedMcpServerNames: Array<string>, 
+/**
+ * Attached-but-toggled-off MCP servers for the workspace conversation,
+ * sourced from the workspace config (the canonical store). Disjoint from
+ * `selected_mcp_server_ids`, which is the effective enabled set.
+ */
+disabledMcpServerIds: Array<string>, session: AssistantSession | null, messages: Array<AssistantMessage>, runs: Array<AssistantRun>, toolCalls: Array<ToolInvocation>, memories: Array<WorkspaceFileEntry>, artifacts: Array<WorkspaceFileEntry>, 
 /**
  * True recursive artifact count for the workspace root, independent of
  * any list cap. The artifacts panel lazy-loads its tree one directory

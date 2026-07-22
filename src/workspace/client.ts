@@ -185,12 +185,17 @@ export async function importWorkspaceFiles(
   return invoke('workspace_import_files', { workspaceId, sourcePaths, destRelPath: null });
 }
 
+/** Persist the workspace's MCP selection.
+ *  `mcpServerIds` is the effective (enabled) set that runs connect to;
+ *  `disabledMcpServerIds` remembers attached-but-toggled-off servers so the
+ *  context-bar toggle survives app restarts. */
 export async function updateWorkspaceSessionMcp(
   workspaceId: string,
-  mcpServerIds: string[]
+  mcpServerIds: string[],
+  disabledMcpServerIds: string[] = []
 ): Promise<void> {
   return invoke('workspace_update_session_mcp', {
-    request: { workspaceId, mcpServerIds },
+    request: { workspaceId, mcpServerIds, disabledMcpServerIds },
   });
 }
 

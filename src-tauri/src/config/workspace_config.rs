@@ -152,6 +152,14 @@ pub struct WorkspaceConfig {
     pub schedule: WorkspaceSchedule,
     #[serde(default)]
     pub agents: Vec<WorkspaceAgent>,
+    /// MCP servers attached to the workspace conversation but toggled off in
+    /// the context bar. The manager agent's `selected_mcp_servers` remains the
+    /// *effective* (enabled) set that sessions and scheduled runs consume;
+    /// this list only remembers the "attached but disabled" badges so the
+    /// toggle survives app restarts. `workspace_update_session_mcp` keeps the
+    /// two lists disjoint.
+    #[serde(default)]
+    pub disabled_mcp_servers: Vec<McpRef>,
 }
 
 fn default_workspace_config_version() -> u32 {
@@ -205,6 +213,7 @@ impl WorkspaceConfig {
             default_agent_id: manager_id.clone(),
             schedule: WorkspaceSchedule::default(),
             agents: vec![WorkspaceAgent::new_manager(manager_id, now)],
+            disabled_mcp_servers: Vec::new(),
         }
     }
 

@@ -10,17 +10,46 @@ fn default_true() -> bool {
     true
 }
 
-/// Rewrites every workspace agent's `selected_mcp_servers` so its
-/// `McpRef.name` entries point at the *current* AppConfig server names.
-/// Used after rename — workspace configs store MCP references by name
+/// Rewrite a by-name MCP ref list after a server rename: refs carrying
+/// `old_name` are pointed at `new_name`, then the whole list is normalized
+/// against the (post-rename) app config, dropping refs that resolve to
+/// nothing. Runs against `app_config` captured *after* the rename, which is
+/// why the old→new rewrite must happen before resolution.
+fn refresh_mcp_refs_after_rename(
+    app_config: &crate::config::AppConfig,
+    refs: &[crate::config::workspace_config::McpRef],
+    old_name: &str,
+    new_name: &str,
+) -> Vec<crate::config::workspace_config::McpRef> {
+    let renamed: Vec<crate::config::workspace_config::McpRef> = refs
+        .iter()
+        .map(|mcp_ref| crate::config::workspace_config::McpRef {
+            name: if mcp_ref.name == old_name {
+                new_name.to_string()
+            } else {
+                mcp_ref.name.clone()
+            },
+        })
+        .collect();
+    let ids = crate::config::workspace_config::refs_to_mcp_ids(app_config, &renamed);
+    let resolved: Vec<String> = ids
+        .into_iter()
+        .filter(|id| app_config.mcp_servers.iter().any(|s| s.id == *id))
+        .collect();
+    crate::config::workspace_config::mcp_ids_to_refs(app_config, &resolved)
+}
+
+/// Rewrites every workspace config's MCP refs (each agent's
+/// `selected_mcp_servers` plus the workspace-level `disabled_mcp_servers`)
+/// after a server rename. Workspace configs store MCP references by name
 /// (so they remain portable across machines, where ids differ), which
 /// means renaming a server in AppConfig silently de-references all
-/// existing selections until they're rewritten. Pass the new app config
-/// so this works inside the same critical section that performed the
-/// rename.
+/// existing refs until they are rewritten.
 fn sweep_workspace_agent_mcp_renames(
     state: &AppState,
     app_config: &crate::config::AppConfig,
+    old_name: &str,
+    new_name: &str,
 ) -> Result<(), String> {
     let locators = state
         .workspace_index
@@ -36,27 +65,30 @@ fn sweep_workspace_agent_mcp_renames(
                 let mut changed = false;
                 let now = chrono::Utc::now().timestamp_millis();
                 for agent in &mut config.agents {
-                    // Resolve each existing ref to an id (lookup by name with
-                    // fallback to name-as-id), then convert back to a ref using
-                    // the current config. Any McpRef whose name was renamed
-                    // gets refreshed; entries that resolved through the
-                    // name-as-id fallback are dropped (they were already
-                    // pointing at nothing).
-                    let ids = crate::config::workspace_config::refs_to_mcp_ids(
+                    let new_refs = refresh_mcp_refs_after_rename(
                         app_config,
                         &agent.selected_mcp_servers,
+                        old_name,
+                        new_name,
                     );
-                    let resolved: Vec<String> = ids
-                        .into_iter()
-                        .filter(|id| app_config.mcp_servers.iter().any(|s| s.id == *id))
-                        .collect();
-                    let new_refs =
-                        crate::config::workspace_config::mcp_ids_to_refs(app_config, &resolved);
                     if new_refs != agent.selected_mcp_servers {
                         agent.selected_mcp_servers = new_refs;
                         agent.updated_at = now;
                         changed = true;
                     }
+                }
+                // The workspace-level disabled list stores the same by-name
+                // refs; refresh it too or a rename silently detaches
+                // attached-but-disabled servers.
+                let new_refs = refresh_mcp_refs_after_rename(
+                    app_config,
+                    &config.disabled_mcp_servers,
+                    old_name,
+                    new_name,
+                );
+                if new_refs != config.disabled_mcp_servers {
+                    config.disabled_mcp_servers = new_refs;
+                    changed = true;
                 }
                 if changed {
                     config.updated_at = now;
@@ -111,6 +143,21 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
                         agent.updated_at = now;
                         changed = true;
                     }
+                }
+                // Deleted servers must also leave the workspace-level
+                // disabled list, or the ref lingers as invisible state.
+                let disabled_ids = crate::config::workspace_config::refs_to_mcp_ids(
+                    &app_config,
+                    &config.disabled_mcp_servers,
+                );
+                if disabled_ids.iter().any(|id| id == server_id) {
+                    let filtered: Vec<String> = disabled_ids
+                        .into_iter()
+                        .filter(|id| id != server_id)
+                        .collect();
+                    config.disabled_mcp_servers =
+                        crate::config::workspace_config::mcp_ids_to_refs(&app_config, &filtered);
+                    changed = true;
                 }
                 if changed {
                     config.updated_at = now;
@@ -678,7 +725,7 @@ pub async fn finish_mcp_oauth_login(
         scopes: pending.draft.scopes.clone(),
     };
 
-    let (server, name_changed, app_config_after) = {
+    let (server, name_changed, old_name, app_config_after) = {
         let config_manager = state
             .config_manager
             .lock()
@@ -705,7 +752,8 @@ pub async fn finish_mcp_oauth_login(
                 .get_mcp_server(existing_id)
                 .ok_or_else(|| "MCP server not found after OAuth update".to_string())?;
             let app_config_after = config_manager.get();
-            (server, name_changed, app_config_after)
+            let old_name = existing.name.clone();
+            (server, name_changed, old_name, app_config_after)
         } else {
             let now = chrono::Utc::now().to_rfc3339();
             let server = McpServerConfig {
@@ -724,12 +772,17 @@ pub async fn finish_mcp_oauth_login(
                 .add_mcp_server(server.clone())
                 .map_err(|e| format!("Failed to create MCP server: {}", e))?;
             let app_config_after = config_manager.get();
-            (server, false, app_config_after)
+            (server, false, String::new(), app_config_after)
         }
     };
 
     if name_changed {
-        sweep_workspace_agent_mcp_renames(state.inner(), &app_config_after)?;
+        sweep_workspace_agent_mcp_renames(
+            state.inner(),
+            &app_config_after,
+            &old_name,
+            &server.name,
+        )?;
     }
 
     sync_mcp_client_manager(&state).await;
@@ -810,7 +863,7 @@ pub async fn update_mcp_server(
     request: UpdateMcpServerRequest,
     state: State<'_, AppState>,
 ) -> Result<McpServerResponse, String> {
-    let (server, name_changed, app_config_after) = {
+    let (server, name_changed, old_name, app_config_after) = {
         let config_manager = state
             .config_manager
             .lock()
@@ -821,6 +874,7 @@ pub async fn update_mcp_server(
             .ok_or_else(|| format!("MCP server not found: {}", request.id))?;
         let next_auth = build_auth_for_existing_server(&existing, &request.auth)?;
         let name_changed = existing.name != request.name;
+        let old_name = existing.name.clone();
         let next_transport = materialize_transport_secrets(
             &request.id,
             request.transport.clone(),
@@ -844,7 +898,7 @@ pub async fn update_mcp_server(
         // (which runs after the config_manager lock is released) sees
         // the new name when re-resolving workspace `McpRef`s.
         let app_config_after = config_manager.get();
-        (server, name_changed, app_config_after)
+        (server, name_changed, old_name, app_config_after)
     };
 
     // Workspace configs store MCP refs by name (portable across machines
@@ -853,7 +907,12 @@ pub async fn update_mcp_server(
     // stale name that fails to resolve. Rewrite the refs to the current
     // name now so selections stay live.
     if name_changed {
-        sweep_workspace_agent_mcp_renames(state.inner(), &app_config_after)?;
+        sweep_workspace_agent_mcp_renames(
+            state.inner(),
+            &app_config_after,
+            &old_name,
+            &server.name,
+        )?;
     }
 
     sync_mcp_client_manager(&state).await;
@@ -1100,6 +1159,52 @@ fn validate_http_url(raw_url: &str) -> Result<String, String> {
 mod tests {
     use super::*;
     use crate::config::McpEnvVar;
+
+    fn app_config_with_server(id: &str, name: &str) -> crate::config::AppConfig {
+        let mut config = crate::config::AppConfig::default();
+        config.mcp_servers.push(McpServerConfig {
+            id: id.to_string(),
+            name: name.to_string(),
+            enabled: true,
+            transport: McpServerTransport::Http {
+                url: "https://example.com".to_string(),
+                headers: Vec::new(),
+            },
+            auth: McpServerAuth::None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        });
+        config
+    }
+
+    #[test]
+    fn refresh_mcp_refs_after_rename_rewrites_old_name() {
+        // The sweep runs with the POST-rename config: a ref still carrying
+        // the old name must be rewritten to the new one, not dropped.
+        let config = app_config_with_server("srv-1", "New");
+        let refs = vec![crate::config::workspace_config::McpRef {
+            name: "Old".to_string(),
+        }];
+        let refreshed = refresh_mcp_refs_after_rename(&config, &refs, "Old", "New");
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].name, "New");
+    }
+
+    #[test]
+    fn refresh_mcp_refs_after_rename_drops_unresolvable_refs() {
+        let config = app_config_with_server("srv-1", "New");
+        let refs = vec![
+            crate::config::workspace_config::McpRef {
+                name: "Old".to_string(),
+            },
+            crate::config::workspace_config::McpRef {
+                name: "Ghost".to_string(),
+            },
+        ];
+        let refreshed = refresh_mcp_refs_after_rename(&config, &refs, "Old", "New");
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].name, "New");
+    }
 
     #[test]
     fn secret_hint_reveals_last4_only_when_long_enough() {
