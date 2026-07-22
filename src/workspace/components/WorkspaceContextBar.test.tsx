@@ -45,6 +45,10 @@ const snapshot = (
   providerConnectionIds: [],
   selectedMcpServerIds: [],
   disabledMcpServerIds: [],
+  // A manager row exists by default (as it does for every real general
+  // workspace), making the config-derived lists authoritative. Tests for
+  // the manager-less legacy fallback override this to null.
+  defaultWorkspaceAgentId: 'agent-mgr',
   session: { context },
   ...extra,
 });
@@ -135,13 +139,43 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     expect(screen.queryByTitle('Alpha: click to disable')).toBeNull();
   });
 
-  it('falls back to the legacy session list when the config records nothing', async () => {
-    // Sessions that predate the config mirror (or manager-less workspaces)
-    // keep their enabled list on the session row only.
-    mocks.getWorkspaceSnapshot.mockResolvedValue(snapshot({ mcpServerIds: ['srv-a'] }));
+  it('falls back to the session list only for manager-less workspaces', async () => {
+    // Without a manager row the config cannot record a selection, so the
+    // session's enabled list stays canonical.
+    mocks.getWorkspaceSnapshot.mockResolvedValue(
+      snapshot({ mcpServerIds: ['srv-a'] }, { defaultWorkspaceAgentId: null })
+    );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
     expect(await screen.findByTitle('Alpha: click to disable')).toBeTruthy();
+  });
+
+  it('treats an empty config selection as authoritative when a manager exists', async () => {
+    // Mirrors the backend rule: a manager row with zero MCP refs means zero
+    // servers — a Settings remove-all (or a pre-mirror legacy session) must
+    // not resurrect the session's stale list.
+    mocks.getWorkspaceSnapshot.mockResolvedValue(snapshot({ mcpServerIds: ['srv-a'] }));
+
+    render(<WorkspaceContextBar workspaceId="ws-1" />);
+    expect(await screen.findByText('Add MCP')).toBeTruthy();
+    expect(screen.queryByTitle('Alpha: click to disable')).toBeNull();
+  });
+
+  it('refetches the snapshot when workspace settings change', async () => {
+    // The bar is self-loading; a Settings save dispatches
+    // workspace-settings-changed so stale local state is replaced before the
+    // next persist could overwrite the config.
+    mocks.getWorkspaceSnapshot.mockResolvedValue(
+      snapshot({}, { selectedMcpServerIds: ['srv-a'] })
+    );
+
+    render(<WorkspaceContextBar workspaceId="ws-1" />);
+    expect(await screen.findByTitle('Alpha: click to disable')).toBeTruthy();
+
+    mocks.getWorkspaceSnapshot.mockResolvedValue(snapshot({}, { selectedMcpServerIds: [] }));
+    window.dispatchEvent(new CustomEvent('workspace-settings-changed'));
+
+    await waitFor(() => expect(screen.queryByTitle('Alpha: click to disable')).toBeNull());
   });
 
   it('rolls back the optimistic toggle when the backend rejects the update', async () => {

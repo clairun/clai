@@ -12,6 +12,9 @@ import styles from './WorkspaceContextBar.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
+// Dispatched by WorkspaceSettingsModal after a successful save so the
+// self-loading bar refetches instead of persisting stale local state.
+const WORKSPACE_SETTINGS_CHANGED_EVENT = 'workspace-settings-changed';
 const SNAPSHOT_OPTIONS = {
   includeSessionPayload: false,
   includeFiles: false,
@@ -59,15 +62,16 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
           // The workspace config is the canonical MCP store: the snapshot's
           // selectedMcpServerIds carries the *effective* (enabled) set and
           // disabledMcpServerIds the toggled-off remainder; badges show the
-          // union. Mirror the backend's precedence: the config-derived lists
-          // win (so a Workspace Settings change shows immediately), and the
-          // session context's enabled list only fills in when the config
-          // records nothing — legacy sessions that predate the config mirror
-          // and manager-less workspaces.
+          // union. Mirror the backend's precedence exactly: when a manager
+          // row exists (defaultWorkspaceAgentId is set) the config-derived
+          // lists are authoritative even when empty — a Settings remove-all
+          // must not resurrect the session's stale list. Only manager-less
+          // workspaces, where the config cannot record a selection, fall
+          // back to the session context's enabled list.
           const configEnabled = snap?.selectedMcpServerIds || [];
           const disabled = snap?.disabledMcpServerIds || [];
           const enabled =
-            configEnabled.length || disabled.length
+            snap?.defaultWorkspaceAgentId || configEnabled.length || disabled.length
               ? configEnabled
               : snap?.session?.context?.mcpServerIds || [];
           setLocalMcpServerIds([...enabled, ...disabled.filter((id) => !enabled.includes(id))]);
@@ -86,7 +90,11 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
     };
 
     loadSnapshot();
-    return () => { cancelled = true; };
+    window.addEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadSnapshot);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadSnapshot);
+    };
   }, [workspaceId]);
 
   // Load available MCP servers and provider connections

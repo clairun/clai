@@ -250,6 +250,10 @@ interface WorkspaceSettingsModalProps {
   onChanged?: () => void;
 }
 
+// Keep in sync with WorkspaceContextBar: the self-loading context bar
+// listens for this to refetch its snapshot after a settings save.
+const WORKSPACE_SETTINGS_CHANGED_EVENT = 'workspace-settings-changed';
+
 const WorkspaceSettingsModal = ({
   isOpen,
   onClose,
@@ -436,6 +440,7 @@ const WorkspaceSettingsModal = ({
     }
 
     setSaving(false);
+    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
     await Promise.resolve(onChanged?.());
     onClose();
   }, [saving, dirty, navigateTo, onChanged, onClose]);
@@ -495,6 +500,7 @@ const WorkspaceSettingsModal = ({
     sectionRefs.current.delete(key);
     dirtyCallbacks.current.delete(key);
     navigateTo({ kind: 'general' });
+    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
     onChanged?.();
   }, [navigateTo, onChanged]);
 
