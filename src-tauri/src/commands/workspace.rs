@@ -1378,9 +1378,11 @@ fn desired_workspace_context(
     // MCP selection: the manager row's `selected_mcp_servers` holds every
     // attached server, and each ref's `disabled` flag records the context-bar
     // toggle (the descriptor surfaces the two partitions).
-    // Sessions only ever receive the derived enabled list. Fall back to the
-    // session's list solely for legacy sessions that predate the config
-    // mirror, where the config has no selection recorded.
+    // Sessions only ever receive the derived enabled list. When a manager row
+    // exists, its refs are authoritative even when empty — "no refs" means
+    // "no MCP servers", so a Settings remove-all clears live sessions too.
+    // Session lists from before the config mirror are intentionally dropped;
+    // re-attach the servers once to migrate.
     let mcp_server_ids = if descriptor.agent_id.is_some() {
         // Agent workspaces: MCP comes from agent config (descriptor)
         descriptor.selected_mcp_server_ids.clone()
@@ -1399,18 +1401,6 @@ fn desired_workspace_context(
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
-    } else if descriptor.selected_mcp_server_ids.is_empty()
-        && descriptor.disabled_mcp_server_ids.is_empty()
-    {
-        // A manager row exists but records nothing: fall back to the
-        // session's list for legacy sessions that predate the config mirror.
-        // Only an entirely empty config counts as "no selection recorded" —
-        // an empty enabled list next to a non-empty disabled list means the
-        // user toggled every attached server off, and the session must not
-        // resurrect its stale enabled set.
-        existing_session
-            .map(|session| session.context.mcp_server_ids.clone())
             .unwrap_or_default()
     } else {
         descriptor.selected_mcp_server_ids.clone()
@@ -4023,16 +4013,17 @@ mod tests {
     }
 
     #[test]
-    fn desired_workspace_context_falls_back_to_legacy_session_mcp() {
-        // Sessions that predate the config mirror keep their MCP selection
-        // when the config has none recorded.
+    fn desired_workspace_context_empty_manager_config_clears_session_mcp() {
+        // With a manager row present, an empty ref list is authoritative:
+        // a Settings remove-all (or a pre-mirror legacy session) yields no
+        // MCP servers instead of resurrecting the session's stale list.
         let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
         existing.context.mcp_server_ids = vec!["legacy".into()];
 
         let manager = manager_config();
         let context =
             desired_workspace_context(&descriptor(None), Some(&existing), vec![], Some(&manager));
-        assert_eq!(context.mcp_server_ids, vec!["legacy".to_string()]);
+        assert!(context.mcp_server_ids.is_empty());
     }
 
     #[test]
