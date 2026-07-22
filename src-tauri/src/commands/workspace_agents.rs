@@ -166,7 +166,6 @@ pub async fn workspace_update_agent(
     let agent_id = request.agent_id.clone();
     let workspace_id = request.workspace_id.clone();
     let ((), config) = update_workspace_config(state.inner(), &workspace_id, |config| {
-        let is_default_agent = config.default_agent_id == request.agent_id;
         let Some(agent) = config
             .agents
             .iter_mut()
@@ -179,25 +178,16 @@ pub async fn workspace_update_agent(
         agent.description = request.description;
         agent.selected_skills =
             workspace_config::skill_ids_to_refs(&app_config, &request.selected_skill_ids);
-        agent.selected_mcp_servers =
-            workspace_config::mcp_ids_to_refs(&request.selected_mcp_server_ids);
-        let selected_ids: Vec<String> = agent
-            .selected_mcp_servers
-            .iter()
-            .map(|mcp_ref| mcp_ref.id.clone())
-            .collect();
+        // Settings edits attachment only; the context-bar `disabled` flag is
+        // preserved for servers that stay attached (merge_mcp_selection).
+        agent.selected_mcp_servers = workspace_config::merge_mcp_selection(
+            &agent.selected_mcp_servers,
+            &request.selected_mcp_server_ids,
+        );
         agent.provider_connection_ids = request.provider_connection_ids;
         agent.execution = request.execution;
         agent.enabled = request.enabled;
         agent.updated_at = now;
-        if is_default_agent {
-            // Re-selecting a server for the workspace manager re-enables it:
-            // drop it from the workspace-level disabled list so the config
-            // keeps the enabled/disabled lists disjoint.
-            config
-                .disabled_mcp_servers
-                .retain(|mcp_ref| !selected_ids.contains(&mcp_ref.id));
-        }
         config.updated_at = now;
         Ok(())
     })?;

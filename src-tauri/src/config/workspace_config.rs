@@ -152,14 +152,6 @@ pub struct WorkspaceConfig {
     pub schedule: WorkspaceSchedule,
     #[serde(default)]
     pub agents: Vec<WorkspaceAgent>,
-    /// MCP servers attached to the workspace conversation but toggled off in
-    /// the context bar. The manager agent's `selected_mcp_servers` remains the
-    /// *effective* (enabled) set that sessions and scheduled runs consume;
-    /// this list only remembers the "attached but disabled" badges so the
-    /// toggle survives app restarts. `workspace_update_session_mcp` keeps the
-    /// two lists disjoint.
-    #[serde(default)]
-    pub disabled_mcp_servers: Vec<McpRef>,
 }
 
 fn default_workspace_config_version() -> u32 {
@@ -203,6 +195,13 @@ pub enum SkillRef {
 pub struct McpRef {
     #[serde(default)]
     pub id: String,
+    /// Context-bar toggle for the workspace manager: `true` keeps the server
+    /// attached to the workspace conversation but excluded from sessions and
+    /// scheduled runs. An absent key or `false` means enabled; member agents
+    /// never set it. Legacy workspace-level `disabledMcpServers` keys are
+    /// ignored by serde and disappear on the next save.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 
 impl WorkspaceConfig {
@@ -219,7 +218,6 @@ impl WorkspaceConfig {
             default_agent_id: manager_id.clone(),
             schedule: WorkspaceSchedule::default(),
             agents: vec![WorkspaceAgent::new_manager(manager_id, now)],
-            disabled_mcp_servers: Vec::new(),
         }
     }
 
@@ -313,9 +311,6 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
 /// by name; those refs are removed on load (the next save persists the
 /// removal) and the user re-attaches the server from the UI.
 fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
-    config
-        .disabled_mcp_servers
-        .retain(|mcp_ref| !mcp_ref.id.is_empty());
     for agent in &mut config.agents {
         agent
             .selected_mcp_servers
@@ -453,11 +448,51 @@ pub fn refs_to_skill_ids(config: &AppConfig, refs: &[SkillRef]) -> Vec<String> {
 }
 
 pub fn mcp_ids_to_refs(ids: &[String]) -> Vec<McpRef> {
-    ids.iter().map(|id| McpRef { id: id.clone() }).collect()
+    ids.iter()
+        .map(|id| McpRef {
+            id: id.clone(),
+            disabled: false,
+        })
+        .collect()
 }
 
+/// Every attached server id, the context-bar toggle notwithstanding. Use for
+/// Settings surfaces that edit attachment; sessions and runs must use
+/// [`enabled_mcp_ids`] instead.
 pub fn refs_to_mcp_ids(refs: &[McpRef]) -> Vec<String> {
     refs.iter().map(|mcp_ref| mcp_ref.id.clone()).collect()
+}
+
+/// The effective enabled set consumed by sessions and scheduled runs.
+pub fn enabled_mcp_ids(refs: &[McpRef]) -> Vec<String> {
+    refs.iter()
+        .filter(|mcp_ref| !mcp_ref.disabled)
+        .map(|mcp_ref| mcp_ref.id.clone())
+        .collect()
+}
+
+/// Attached-but-toggled-off servers (the context-bar badges).
+pub fn disabled_mcp_ids(refs: &[McpRef]) -> Vec<String> {
+    refs.iter()
+        .filter(|mcp_ref| mcp_ref.disabled)
+        .map(|mcp_ref| mcp_ref.id.clone())
+        .collect()
+}
+
+/// Rebuilds an agent's MCP refs from a Settings save. The request carries
+/// attachment only (which servers are checked); the context-bar `disabled`
+/// flag is preserved for ids that stay attached and dropped together with
+/// the ref when a server is unchecked.
+pub fn merge_mcp_selection(previous: &[McpRef], requested_ids: &[String]) -> Vec<McpRef> {
+    requested_ids
+        .iter()
+        .map(|id| McpRef {
+            id: id.clone(),
+            disabled: previous
+                .iter()
+                .any(|mcp_ref| mcp_ref.id == *id && mcp_ref.disabled),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -546,28 +581,105 @@ mod attach_provider_tests {
         let path = config_path(tmp.path());
         let mut raw: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        raw["disabledMcpServers"] = serde_json::json!([
-            { "name": "legacy-by-name" },
-            { "id": "srv-1" }
-        ]);
+        // Legacy workspace-level key: serde ignores it and the next save
+        // drops it — parsing must not fail.
+        raw["disabledMcpServers"] = serde_json::json!([{ "id": "srv-1" }]);
         raw["agents"][0]["selectedMcpServers"] = serde_json::json!([
             { "name": "legacy-by-name" },
-            { "id": "srv-2" }
+            { "id": "srv-2" },
+            { "id": "srv-3", "disabled": true }
         ]);
         fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
 
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(
-            loaded.disabled_mcp_servers,
-            vec![McpRef {
-                id: "srv-1".to_string()
-            }]
-        );
-        assert_eq!(
             loaded.agents[0].selected_mcp_servers,
-            vec![McpRef {
-                id: "srv-2".to_string()
-            }]
+            vec![
+                McpRef {
+                    id: "srv-2".to_string(),
+                    disabled: false
+                },
+                McpRef {
+                    id: "srv-3".to_string(),
+                    disabled: true
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn mcp_ref_disabled_flag_round_trips_and_defaults_off() {
+        // `disabled: false` must not serialize (the absent key means
+        // enabled); `disabled: true` must round-trip.
+        let enabled = McpRef {
+            id: "srv-a".to_string(),
+            disabled: false,
+        };
+        assert!(serde_json::to_value(&enabled)
+            .unwrap()
+            .get("disabled")
+            .is_none());
+
+        let disabled = McpRef {
+            id: "srv-b".to_string(),
+            disabled: true,
+        };
+        let json = serde_json::to_value(&disabled).unwrap();
+        assert_eq!(json["disabled"], serde_json::json!(true));
+        let back: McpRef = serde_json::from_value(json).unwrap();
+        assert!(back.disabled);
+
+        let absent: McpRef = serde_json::from_value(serde_json::json!({ "id": "srv-c" })).unwrap();
+        assert!(!absent.disabled);
+    }
+
+    #[test]
+    fn enabled_and_disabled_mcp_ids_partition_refs() {
+        let refs = vec![
+            McpRef {
+                id: "srv-a".to_string(),
+                disabled: false,
+            },
+            McpRef {
+                id: "srv-b".to_string(),
+                disabled: true,
+            },
+        ];
+        assert_eq!(enabled_mcp_ids(&refs), vec!["srv-a".to_string()]);
+        assert_eq!(disabled_mcp_ids(&refs), vec!["srv-b".to_string()]);
+        assert_eq!(
+            refs_to_mcp_ids(&refs),
+            vec!["srv-a".to_string(), "srv-b".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_mcp_selection_preserves_disabled_flags() {
+        let previous = vec![
+            McpRef {
+                id: "srv-a".to_string(),
+                disabled: false,
+            },
+            McpRef {
+                id: "srv-b".to_string(),
+                disabled: true,
+            },
+        ];
+        // srv-b stays attached (its toggle survives), srv-c is newly
+        // attached (enabled), srv-a is unchecked (dropped with its flag).
+        let merged = merge_mcp_selection(&previous, &["srv-b".to_string(), "srv-c".to_string()]);
+        assert_eq!(
+            merged,
+            vec![
+                McpRef {
+                    id: "srv-b".to_string(),
+                    disabled: true
+                },
+                McpRef {
+                    id: "srv-c".to_string(),
+                    disabled: false
+                }
+            ]
         );
     }
 

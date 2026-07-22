@@ -11,8 +11,7 @@ fn default_true() -> bool {
 }
 
 /// Removes the given MCP server id from every workspace config's MCP refs
-/// (each agent's `selected_mcp_servers` plus the workspace-level
-/// `disabled_mcp_servers`).
+/// (each agent's `selected_mcp_servers`, disabled refs included).
 fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<(), String> {
     let locators = state
         .workspace_index
@@ -36,15 +35,6 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
                         agent.updated_at = now;
                         changed = true;
                     }
-                }
-                // Deleted servers must also leave the workspace-level
-                // disabled list, or the ref lingers as invisible state.
-                let before = config.disabled_mcp_servers.len();
-                config
-                    .disabled_mcp_servers
-                    .retain(|mcp_ref| mcp_ref.id != server_id);
-                if config.disabled_mcp_servers.len() != before {
-                    changed = true;
                 }
                 if changed {
                     config.updated_at = now;

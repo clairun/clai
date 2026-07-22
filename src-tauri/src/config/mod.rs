@@ -267,8 +267,8 @@ impl ConfigManager {
     /// Removes an MCP server.
     ///
     /// Callers must additionally sweep every workspace config's MCP refs
-    /// (each agent's `selected_mcp_servers` plus the workspace-level
-    /// `disabled_mcp_servers`) to drop stale ids — that sweep is
+    /// (each agent's `selected_mcp_servers`, disabled refs included) to drop
+    /// stale ids — that sweep is
     /// `commands::mcp_servers::sweep_workspace_agent_mcp_ids`.
     pub fn remove_mcp_server(&self, id: &str) -> Result<bool, ConfigError> {
         let mut removed = false;
