@@ -108,8 +108,12 @@ pub struct WorkspaceSnapshot {
     pub provider_connection_names: Vec<String>,
     #[serde(default)]
     pub selected_mcp_server_ids: Vec<String>,
+    /// Attached-but-toggled-off MCP servers for the workspace conversation,
+    /// sourced from the manager row's `disabled` ref flags in the workspace
+    /// config (the canonical store). Disjoint from
+    /// `selected_mcp_server_ids`, which is the effective enabled set.
     #[serde(default)]
-    pub selected_mcp_server_names: Vec<String>,
+    pub disabled_mcp_server_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<AssistantSession>,
     #[serde(default)]
@@ -328,7 +332,7 @@ pub(crate) struct WorkspaceDescriptor {
     pub(crate) root_path: Option<PathBuf>,
     provider_connection_ids: Vec<String>,
     selected_mcp_server_ids: Vec<String>,
-    selected_mcp_server_names: Vec<String>,
+    disabled_mcp_server_ids: Vec<String>,
     execution: ExecutionCapabilityConfig,
     tool_scopes: Vec<String>,
     automation_name: Option<String>,
@@ -820,7 +824,6 @@ pub(crate) fn resolve_workspace_descriptor(
 ) -> Result<WorkspaceDescriptor, String> {
     let workspace_id = resolve_workspace_id(state, workspace_id)?;
     let (root_path, config) = load_workspace_config_for_id(state, &workspace_id)?;
-    let app_config = app_config(state)?;
     let manager = config
         .agents
         .iter()
@@ -831,20 +834,15 @@ pub(crate) fn resolve_workspace_descriptor(
     if manager.is_none() {
         execution.web.enabled = true;
     }
+    // Both partitions come from the manager row's refs: `disabled: true`
+    // marks a server attached to the conversation but toggled off in the
+    // context bar; everything else is the effective enabled set.
     let selected_mcp_server_ids = manager
-        .map(|agent| workspace_config::refs_to_mcp_ids(&app_config, &agent.selected_mcp_servers))
+        .map(|agent| workspace_config::enabled_mcp_ids(&agent.selected_mcp_servers))
         .unwrap_or_default();
-    let selected_mcp_server_names = selected_mcp_server_ids
-        .iter()
-        .map(|id| {
-            app_config
-                .mcp_servers
-                .iter()
-                .find(|server| server.id == *id)
-                .map(|server| server.name.clone())
-                .unwrap_or_else(|| id.clone())
-        })
-        .collect();
+    let disabled_mcp_server_ids = manager
+        .map(|agent| workspace_config::disabled_mcp_ids(&agent.selected_mcp_servers))
+        .unwrap_or_default();
 
     Ok(WorkspaceDescriptor {
         workspace_id,
@@ -862,7 +860,7 @@ pub(crate) fn resolve_workspace_descriptor(
             })
             .unwrap_or_default(),
         selected_mcp_server_ids,
-        selected_mcp_server_names,
+        disabled_mcp_server_ids,
         execution,
         tool_scopes: vec!["fs".to_string(), "web".to_string()],
         automation_name: manager.map(|agent| agent.name.clone()),
@@ -1029,10 +1027,7 @@ fn workspace_agent_row_from_config(
         name: agent.name.clone(),
         description: agent.description.clone(),
         selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
-        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
-            app_config,
-            &agent.selected_mcp_servers,
-        ),
+        selected_mcp_server_ids: workspace_config::enabled_mcp_ids(&agent.selected_mcp_servers),
         provider_connection_ids: agent.provider_connection_ids.clone(),
         execution: agent.execution.clone(),
         created_at: agent.created_at,
@@ -1379,15 +1374,34 @@ fn desired_workspace_context(
     workspace_agents: Vec<WorkspaceAgentSummary>,
     workspace_manager: Option<&AgentConfig>,
 ) -> SessionContext {
-    // For general workspaces, MCP servers are user-managed on the session itself
-    // (via workspace_update_session_mcp), so preserve the existing session's MCP
-    // config instead of overwriting from the descriptor (which has empty defaults).
+    // The workspace config is the canonical store for a general workspace's
+    // MCP selection: the manager row's `selected_mcp_servers` holds every
+    // attached server, and each ref's `disabled` flag records the context-bar
+    // toggle (the descriptor surfaces the two partitions).
+    // Sessions only ever receive the derived enabled list. When a manager row
+    // exists, its refs are authoritative even when empty — "no refs" means
+    // "no MCP servers", so a Settings remove-all clears live sessions too.
+    // Session lists from before the config mirror are intentionally dropped;
+    // re-attach the servers once to migrate.
     let mcp_server_ids = if descriptor.agent_id.is_some() {
         // Agent workspaces: MCP comes from agent config (descriptor)
         descriptor.selected_mcp_server_ids.clone()
-    } else if let Some(session) = existing_session {
-        // General workspaces: preserve session's MCP config
-        session.context.mcp_server_ids.clone()
+    } else if workspace_manager.is_none() {
+        // No manager row: the config cannot record any MCP selection (both
+        // partitions live on the manager's `selected_mcp_servers`), so the
+        // session's list stays canonical. The disabled filter is defensive —
+        // without a manager row the descriptor's disabled list is empty.
+        existing_session
+            .map(|session| {
+                session
+                    .context
+                    .mcp_server_ids
+                    .iter()
+                    .filter(|id| !descriptor.disabled_mcp_server_ids.contains(*id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     } else {
         descriptor.selected_mcp_server_ids.clone()
     };
@@ -1571,7 +1585,7 @@ pub async fn workspace_get_snapshot(
         provider_connection_ids: provider_selection.ids,
         provider_connection_names: provider_selection.names,
         selected_mcp_server_ids: descriptor.selected_mcp_server_ids,
-        selected_mcp_server_names: descriptor.selected_mcp_server_names,
+        disabled_mcp_server_ids: descriptor.disabled_mcp_server_ids,
         session,
         messages,
         runs,
@@ -2614,6 +2628,24 @@ pub async fn workspace_pick_and_store_image(
 pub struct WorkspaceUpdateMcpRequest {
     pub workspace_id: String,
     pub mcp_server_ids: Vec<String>,
+    /// Attached servers the user toggled off. Defaults to empty so older
+    /// frontends that only send `mcp_server_ids` keep working.
+    #[serde(default)]
+    pub disabled_mcp_server_ids: Vec<String>,
+}
+
+/// Split an MCP update request into the effective (enabled) list and the
+/// disabled list, enforcing that the two are disjoint: a server listed as
+/// disabled is removed from the enabled set no matter what the caller sent.
+fn sanitize_mcp_selection(request: &WorkspaceUpdateMcpRequest) -> (Vec<String>, Vec<String>) {
+    let disabled: Vec<String> = request.disabled_mcp_server_ids.clone();
+    let enabled: Vec<String> = request
+        .mcp_server_ids
+        .iter()
+        .filter(|id| !disabled.contains(id))
+        .cloned()
+        .collect();
+    (enabled, disabled)
 }
 
 /// Update the MCP server IDs for a workspace session.
@@ -2664,8 +2696,9 @@ pub async fn workspace_update_session_mcp(
         .await?
     };
 
+    let (enabled_mcp_ids, disabled_mcp_ids) = sanitize_mcp_selection(&request);
     let mut updated = session;
-    updated.context.mcp_server_ids = request.mcp_server_ids.clone();
+    updated.context.mcp_server_ids = enabled_mcp_ids.clone();
     updated.context.workspace_agents = workspace_agents;
     if descriptor.agent_id.is_none() {
         if let Some(manager) = workspace_manager.as_ref() {
@@ -2676,24 +2709,41 @@ pub async fn workspace_update_session_mcp(
                 .as_ref()
                 .map(|_| descriptor.workspace_id.clone());
             updated.context.automation_name = Some(manager.name.clone());
+        }
 
-            // Persist the MCP selection onto the workspace's manager row so
-            // it survives across sessions and shows in Workspace Settings.
-            let app_config = app_config(state.inner())?;
-            update_workspace_config_for_id(state.inner(), &descriptor.workspace_id, |config| {
+        // Persist the MCP selection into the workspace config — the canonical
+        // store. The manager row's `selected_mcp_servers` records every
+        // attached server; toggled-off ones carry `disabled: true` so the
+        // context-bar toggle survives app restarts while sessions and
+        // scheduled runs consume only the enabled refs. Without a manager
+        // row nothing persists — consistent with the enabled set, which also
+        // only lives on the manager row.
+        let manager_id = workspace_manager.as_ref().map(|manager| manager.id.clone());
+        update_workspace_config_for_id(state.inner(), &descriptor.workspace_id, |config| {
+            let now = chrono::Utc::now().timestamp_millis();
+            if let Some(manager_id) = manager_id.as_deref() {
                 if let Some(agent) = config
                     .agents
                     .iter_mut()
-                    .find(|agent| agent.id == manager.id)
+                    .find(|agent| agent.id == manager_id)
                 {
-                    agent.selected_mcp_servers =
-                        workspace_config::mcp_ids_to_refs(&app_config, &request.mcp_server_ids);
-                    agent.updated_at = chrono::Utc::now().timestamp_millis();
-                    config.updated_at = agent.updated_at;
+                    agent.selected_mcp_servers = enabled_mcp_ids
+                        .iter()
+                        .map(|id| workspace_config::McpRef {
+                            id: id.clone(),
+                            disabled: false,
+                        })
+                        .chain(disabled_mcp_ids.iter().map(|id| workspace_config::McpRef {
+                            id: id.clone(),
+                            disabled: true,
+                        }))
+                        .collect();
+                    agent.updated_at = now;
+                    config.updated_at = now;
                 }
-                Ok(())
-            })?;
-        }
+            }
+            Ok(())
+        })?;
     }
     updated.updated_at = chrono::Utc::now().timestamp_millis();
     repository::update_session(&workspace_pool, &updated).await?;
@@ -3867,5 +3917,142 @@ mod tests {
         // by canonical containment (the final component is a real file).
         std::os::unix::fs::symlink(outside.path(), root.path().join("outdir")).unwrap();
         assert!(resolve_copy_source(root.path(), "outdir/secret").is_err());
+    }
+
+    fn descriptor(agent_id: Option<&str>) -> WorkspaceDescriptor {
+        WorkspaceDescriptor {
+            workspace_id: WS.to_string(),
+            kind: "general".to_string(),
+            title: "Test".to_string(),
+            agent_id: agent_id.map(str::to_string),
+            root_path: None,
+            provider_connection_ids: vec![],
+            selected_mcp_server_ids: vec![],
+            disabled_mcp_server_ids: vec![],
+            execution: ExecutionCapabilityConfig::default(),
+            tool_scopes: vec![],
+            automation_name: None,
+        }
+    }
+
+    #[test]
+    fn sanitize_mcp_selection_keeps_lists_disjoint() {
+        let request = WorkspaceUpdateMcpRequest {
+            workspace_id: WS.to_string(),
+            mcp_server_ids: vec!["a".into(), "b".into(), "c".into()],
+            disabled_mcp_server_ids: vec!["b".into(), "d".into()],
+        };
+        let (enabled, disabled) = sanitize_mcp_selection(&request);
+        assert_eq!(enabled, vec!["a".to_string(), "c".to_string()]);
+        assert_eq!(disabled, vec!["b".to_string(), "d".to_string()]);
+    }
+
+    #[test]
+    fn sanitize_mcp_selection_defaults_to_no_disabled() {
+        // Older frontends omit disabledMcpServerIds; serde defaults it to
+        // empty and the enabled list must pass through untouched.
+        let request: WorkspaceUpdateMcpRequest = serde_json::from_value(serde_json::json!({
+            "workspaceId": WS,
+            "mcpServerIds": ["a", "b"],
+        }))
+        .unwrap();
+        let (enabled, disabled) = sanitize_mcp_selection(&request);
+        assert_eq!(enabled, vec!["a".to_string(), "b".to_string()]);
+        assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn desired_workspace_context_general_workspaces_take_mcp_from_config() {
+        // The workspace config (via the descriptor) is the canonical store:
+        // its enabled list wins over whatever the session row carries.
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        existing.context.mcp_server_ids = vec!["stale".into()];
+
+        let mut desc = descriptor(None);
+        desc.selected_mcp_server_ids = vec!["a".into()];
+        let manager = manager_config();
+        let context = desired_workspace_context(&desc, Some(&existing), vec![], Some(&manager));
+        assert_eq!(context.mcp_server_ids, vec!["a".to_string()]);
+    }
+
+    fn manager_config() -> crate::config::AgentConfig {
+        crate::config::AgentConfig::new(
+            "Manager".to_string(),
+            String::new(),
+            crate::config::workspace_config::ScheduleKind::default(),
+        )
+    }
+
+    #[test]
+    fn desired_workspace_context_all_disabled_config_beats_stale_session() {
+        // With a manager row present, selected=[] + disabled=[b] means
+        // "every attached server toggled off" — the fallback must not
+        // resurrect the session's list.
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        existing.context.mcp_server_ids = vec!["stale".into()];
+
+        let mut desc = descriptor(None);
+        desc.disabled_mcp_server_ids = vec!["b".into()];
+        let manager = manager_config();
+        let context = desired_workspace_context(&desc, Some(&existing), vec![], Some(&manager));
+        assert!(context.mcp_server_ids.is_empty());
+    }
+
+    #[test]
+    fn desired_workspace_context_manager_less_keeps_session_minus_disabled() {
+        // Without a manager row the config cannot record an enabled
+        // selection, so the session's list stays canonical — but the
+        // config-level disabled toggle still applies to it.
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        existing.context.mcp_server_ids = vec!["a".into(), "b".into()];
+
+        let mut desc = descriptor(None);
+        desc.disabled_mcp_server_ids = vec!["b".into()];
+        let context = desired_workspace_context(&desc, Some(&existing), vec![], None);
+        assert_eq!(context.mcp_server_ids, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn desired_workspace_context_empty_manager_config_clears_session_mcp() {
+        // With a manager row present, an empty ref list is authoritative:
+        // a Settings remove-all (or a pre-mirror legacy session) yields no
+        // MCP servers instead of resurrecting the session's stale list.
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        existing.context.mcp_server_ids = vec!["legacy".into()];
+
+        let manager = manager_config();
+        let context =
+            desired_workspace_context(&descriptor(None), Some(&existing), vec![], Some(&manager));
+        assert!(context.mcp_server_ids.is_empty());
+    }
+
+    #[test]
+    fn workspace_config_mcp_disabled_flag_backward_compatible() {
+        // Manager refs written before the `disabled` flag existed must parse
+        // as enabled, and a `disabled: true` ref must round-trip.
+        let mut config = workspace_config::WorkspaceConfig::new(
+            WS.to_string(),
+            "Test".to_string(),
+            1,
+            MGR.to_string(),
+        );
+        config.agents[0].selected_mcp_servers = vec![
+            workspace_config::McpRef {
+                id: "srv-a".to_string(),
+                disabled: false,
+            },
+            workspace_config::McpRef {
+                id: "srv-b".to_string(),
+                disabled: true,
+            },
+        ];
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json["agents"][0]["selectedMcpServers"][0]
+            .get("disabled")
+            .is_none());
+        let back: workspace_config::WorkspaceConfig = serde_json::from_value(json).unwrap();
+        let refs = &back.agents[0].selected_mcp_servers;
+        assert_eq!(workspace_config::enabled_mcp_ids(refs), vec!["srv-a"]);
+        assert_eq!(workspace_config::disabled_mcp_ids(refs), vec!["srv-b"]);
     }
 }

@@ -12,6 +12,9 @@ import styles from './WorkspaceContextBar.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
+// Dispatched by WorkspaceSettingsModal after a successful save so the
+// self-loading bar refetches instead of persisting stale local state.
+const WORKSPACE_SETTINGS_CHANGED_EVENT = 'workspace-settings-changed';
 const SNAPSHOT_OPTIONS = {
   includeSessionPayload: false,
   includeFiles: false,
@@ -56,7 +59,23 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
         if (agent) {
           setAgentMcpServerIds(snap?.selectedMcpServerIds || []);
         } else {
-          setLocalMcpServerIds(snap?.session?.context?.mcpServerIds || []);
+          // The workspace config is the canonical MCP store: the snapshot's
+          // selectedMcpServerIds carries the *effective* (enabled) set and
+          // disabledMcpServerIds the toggled-off remainder; badges show the
+          // union. Mirror the backend's precedence exactly: when a manager
+          // row exists (defaultWorkspaceAgentId is set) the config-derived
+          // lists are authoritative even when empty — a Settings remove-all
+          // must not resurrect the session's stale list. Only manager-less
+          // workspaces, where the config cannot record a selection, fall
+          // back to the session context's enabled list.
+          const configEnabled = snap?.selectedMcpServerIds || [];
+          const disabled = snap?.disabledMcpServerIds || [];
+          const enabled =
+            snap?.defaultWorkspaceAgentId || configEnabled.length || disabled.length
+              ? configEnabled
+              : snap?.session?.context?.mcpServerIds || [];
+          setLocalMcpServerIds([...enabled, ...disabled.filter((id) => !enabled.includes(id))]);
+          setLocalDisabledIds(disabled);
         }
         // Reflect the workspace's actual provider. The backend lists it
         // preferred-first, so [0] is the connection interactive sends and
@@ -71,7 +90,11 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
     };
 
     loadSnapshot();
-    return () => { cancelled = true; };
+    window.addEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadSnapshot);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadSnapshot);
+    };
   }, [workspaceId]);
 
   // Load available MCP servers and provider connections
@@ -124,15 +147,31 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
   );
 
   const persistMcpChange = useCallback(
-    async (nextIds: string[]) => {
-      setLocalMcpServerIds(nextIds);
+    async (attachedIds: string[], disabledIds: string[]) => {
+      const prevAttached = localMcpServerIds;
+      const prevDisabled = localDisabledIds;
+      setLocalMcpServerIds(attachedIds);
+      setLocalDisabledIds(disabledIds);
       try {
-        await updateWorkspaceSessionMcp(workspaceId, nextIds);
+        // The backend receives the effective (enabled) list plus the
+        // disabled remainder, so the toggle persists across restarts and
+        // disabled servers are excluded from runs.
+        await updateWorkspaceSessionMcp(
+          workspaceId,
+          attachedIds.filter((id) => !disabledIds.includes(id)),
+          disabledIds
+        );
       } catch (err) {
         console.error('[WorkspaceContextBar] Failed to persist MCP change:', err);
+        // Roll back the optimistic update so the badges reflect what the
+        // backend actually has — but only if no newer update has replaced
+        // this request's state in the meantime (identity check against the
+        // exact arrays this request set).
+        setLocalMcpServerIds((current) => (current === attachedIds ? prevAttached : current));
+        setLocalDisabledIds((current) => (current === disabledIds ? prevDisabled : current));
       }
     },
-    [workspaceId]
+    [workspaceId, localMcpServerIds, localDisabledIds]
   );
 
   const handleAddMcp = useCallback(
@@ -141,30 +180,32 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
       const nextIds = localMcpServerIds.includes(serverId)
         ? localMcpServerIds
         : [...localMcpServerIds, serverId];
-      persistMcpChange(nextIds);
+      persistMcpChange(nextIds, localDisabledIds);
     },
-    [isAgent, localMcpServerIds, persistMcpChange]
+    [isAgent, localMcpServerIds, localDisabledIds, persistMcpChange]
   );
 
   const handleRemoveMcp = useCallback(
     (serverId: string) => {
       if (isAgent) return;
-      persistMcpChange(localMcpServerIds.filter((id) => id !== serverId));
+      persistMcpChange(
+        localMcpServerIds.filter((id) => id !== serverId),
+        localDisabledIds.filter((id) => id !== serverId)
+      );
     },
-    [isAgent, localMcpServerIds, persistMcpChange]
+    [isAgent, localMcpServerIds, localDisabledIds, persistMcpChange]
   );
 
   const handleToggleMcp = useCallback(
     (serverId: string) => {
       if (isAgent) return;
       const isDisabled = localDisabledIds.includes(serverId);
-      setLocalDisabledIds(
-        isDisabled
-          ? localDisabledIds.filter((id) => id !== serverId)
-          : [...localDisabledIds, serverId]
-      );
+      const nextDisabled = isDisabled
+        ? localDisabledIds.filter((id) => id !== serverId)
+        : [...localDisabledIds, serverId];
+      persistMcpChange(localMcpServerIds, nextDisabled);
     },
-    [isAgent, localDisabledIds]
+    [isAgent, localMcpServerIds, localDisabledIds, persistMcpChange]
   );
 
   const enabledProviders = useMemo(

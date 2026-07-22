@@ -133,10 +133,7 @@ pub async fn workspace_create_agent(
             &app_config,
             &request.selected_skill_ids,
         ),
-        selected_mcp_servers: workspace_config::mcp_ids_to_refs(
-            &app_config,
-            &request.selected_mcp_server_ids,
-        ),
+        selected_mcp_servers: workspace_config::mcp_ids_to_refs(&request.selected_mcp_server_ids),
         provider_connection_ids: request.provider_connection_ids,
         execution,
         created_at: now,
@@ -181,8 +178,12 @@ pub async fn workspace_update_agent(
         agent.description = request.description;
         agent.selected_skills =
             workspace_config::skill_ids_to_refs(&app_config, &request.selected_skill_ids);
-        agent.selected_mcp_servers =
-            workspace_config::mcp_ids_to_refs(&app_config, &request.selected_mcp_server_ids);
+        // Settings edits attachment only; the context-bar `disabled` flag is
+        // preserved for servers that stay attached (merge_mcp_selection).
+        agent.selected_mcp_servers = workspace_config::merge_mcp_selection(
+            &agent.selected_mcp_servers,
+            &request.selected_mcp_server_ids,
+        );
         agent.provider_connection_ids = request.provider_connection_ids;
         agent.execution = request.execution;
         agent.enabled = request.enabled;
@@ -309,10 +310,7 @@ pub(crate) fn detail_from_agent(
         name: agent.name.clone(),
         description: agent.description.clone(),
         selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
-        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
-            app_config,
-            &agent.selected_mcp_servers,
-        ),
+        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(&agent.selected_mcp_servers),
         provider_connection_ids: agent.provider_connection_ids.clone(),
         execution: agent.execution.clone(),
         enabled: agent.enabled,

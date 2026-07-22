@@ -96,8 +96,7 @@ fn load_workspace_agent_as_config(
                     crate::config::workspace_config::ScheduleKind::default()
                 },
                 enabled: agent.enabled,
-                selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
-                    &app_config,
+                selected_mcp_server_ids: workspace_config::enabled_mcp_ids(
                     &agent.selected_mcp_servers,
                 ),
                 provider_connection_ids: agent.provider_connection_ids.clone(),

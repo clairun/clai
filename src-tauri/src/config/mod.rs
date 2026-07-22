@@ -266,9 +266,10 @@ impl ConfigManager {
 
     /// Removes an MCP server.
     ///
-    /// Callers must additionally sweep `workspace_agents.selected_mcp_server_ids`
-    /// in the DB to drop stale references — that sweep lives in
-    /// `commands::mcp_servers`.
+    /// Callers must additionally sweep every workspace config's MCP refs
+    /// (each agent's `selected_mcp_servers`, disabled refs included) to drop
+    /// stale ids — that sweep is
+    /// `commands::mcp_servers::sweep_workspace_agent_mcp_ids`.
     pub fn remove_mcp_server(&self, id: &str) -> Result<bool, ConfigError> {
         let mut removed = false;
         self.update(|config| {
