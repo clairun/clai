@@ -2392,7 +2392,31 @@ fn rename_no_replace(source: &Path, dest: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn rename_no_replace(source: &Path, dest: &Path) -> std::io::Result<()> {
-    fs::rename(source, dest)
+    let source = path_to_windows_wide(source)?;
+    let dest = path_to_windows_wide(dest)?;
+    let rc = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(source.as_ptr(), dest.as_ptr(), 0)
+    };
+    if rc != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn path_to_windows_wide(path: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Path contains an interior NUL byte: {}", path.display()),
+        ));
+    }
+    wide.push(0);
+    Ok(wide)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
