@@ -1,8 +1,8 @@
 //! Codex `app-server` transport — JSON-RPC over a long-lived child process.
 //!
-//! The default Codex path (`run_codex_turn`) shells out to `codex exec`, whose
-//! stdin is consumed once for the initial prompt and then closed. That makes
-//! mid-run input impossible without killing and restarting the process.
+//! The legacy Codex fallback (`run_codex_turn`) shells out to `codex exec`,
+//! whose stdin is consumed once for the initial prompt and then closed. That
+//! makes mid-run input impossible without killing and restarting the process.
 //!
 //! `codex app-server` is the JSON-RPC protocol that powers every first-party
 //! Codex surface (VS Code extension, desktop app, web). It exposes `turn/steer`,
@@ -13,16 +13,16 @@
 //! persistence, steering policy) lives in `local_agent.rs` so it can reuse the
 //! shared Codex stream helpers.
 //!
-//! Gated behind `CLAI_CODEX_APP_SERVER` (default off) while it bakes; `codex
-//! exec` remains the default transport.
+//! Used by default for Codex connections; `codex exec` remains available as an
+//! explicit fallback.
 //!
 //! # Enabling / testing
 //!
-//! Set `CLAI_CODEX_APP_SERVER=1` in the environment CLAI launches under, then
-//! use a Codex connection. Turns run over `codex app-server`; a message sent
+//! Use a Codex connection. Turns run over `codex app-server`; a message sent
 //! while a turn is in flight is injected via `turn/steer` (watch for the
 //! "Steered queued user message(s) into the live Codex turn" log line) instead
-//! of interrupting/restarting the process. Unset the var to fall back to
+//! of interrupting/restarting the process. Set `CLAI_CODEX_APP_SERVER=0`
+//! (`false`, `no`, `off`, and an empty value also work) to fall back to
 //! `codex exec`.
 
 use std::process::Stdio;
@@ -32,20 +32,21 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-/// Env var that opts a Codex connection into the app-server transport.
+/// Env var that can force the Codex app-server transport on/off.
 pub(crate) const APP_SERVER_ENABLED_ENV: &str = "CLAI_CODEX_APP_SERVER";
 
-/// Whether the app-server transport is enabled for this process. Off unless the
-/// env var is explicitly truthy, so `codex exec` stays the default.
+/// Whether the app-server transport is enabled for this process. Enabled by
+/// default; explicit false-y env values (empty string, `0`, `false`, `no`,
+/// `off`) keep `codex exec` available as a rollback path.
 pub(crate) fn app_server_enabled() -> bool {
-    matches!(
+    !matches!(
         std::env::var(APP_SERVER_ENABLED_ENV)
             .ok()
             .as_deref()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
+        Some("") | Some("0") | Some("false") | Some("no") | Some("off")
     )
 }
 
@@ -381,23 +382,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enabled_only_for_truthy_values() {
+    fn enabled_by_default_unless_explicitly_disabled() {
         for (val, want) in [
             ("1", true),
             ("true", true),
             ("TRUE", true),
             ("on", true),
             ("yes", true),
+            ("maybe", true),
             ("0", false),
             ("false", false),
+            ("FALSE", false),
+            ("off", false),
+            ("no", false),
             ("", false),
-            ("maybe", false),
         ] {
             std::env::set_var(APP_SERVER_ENABLED_ENV, val);
             assert_eq!(app_server_enabled(), want, "value {val:?}");
         }
         std::env::remove_var(APP_SERVER_ENABLED_ENV);
-        assert!(!app_server_enabled());
+        assert!(app_server_enabled());
     }
 
     #[test]

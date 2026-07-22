@@ -1505,7 +1505,8 @@ async fn run_codex_turn(
 }
 
 // ---------------------------------------------------------------------------
-// Codex app-server transport driver (CLAI_CODEX_APP_SERVER)
+// Codex app-server transport driver (default; false-y CLAI_CODEX_APP_SERVER
+// falls back to codex exec)
 // ---------------------------------------------------------------------------
 
 /// Run a Codex turn over the `codex app-server` JSON-RPC transport instead of
