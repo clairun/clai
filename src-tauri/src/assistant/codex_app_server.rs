@@ -238,10 +238,12 @@ pub(crate) fn thread_start_request(
     mcp_url: &str,
     token_env: &str,
     tool_timeout_secs: u64,
+    developer_instructions: &str,
 ) -> Value {
     let mut params = json!({
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
+        "developerInstructions": developer_instructions,
         "config": thread_config(mcp_url, token_env, tool_timeout_secs),
     });
     if let Some(cwd) = cwd {
@@ -265,11 +267,13 @@ pub(crate) fn thread_resume_request(
     mcp_url: &str,
     token_env: &str,
     tool_timeout_secs: u64,
+    developer_instructions: &str,
 ) -> Value {
     let mut params = json!({
         "threadId": thread_id,
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
+        "developerInstructions": developer_instructions,
         "config": thread_config(mcp_url, token_env, tool_timeout_secs),
     });
     if let Some(model) = model {
@@ -425,6 +429,7 @@ mod tests {
             "http://127.0.0.1:9/mcp",
             "CLAI_MCP_TOKEN",
             3600,
+            "Follow CLAI instructions",
         );
         let params = &req["params"];
         assert_eq!(params["approvalPolicy"], "never");
@@ -439,17 +444,29 @@ mod tests {
         // Codex's native shell must be disabled so it has no ungated
         // execution path (parity with exec's `--disable shell_tool`).
         assert_eq!(params["config"]["features"]["shell_tool"], false);
+        assert_eq!(params["developerInstructions"], "Follow CLAI instructions");
+        assert!(params["config"].get("developer_instructions").is_none());
     }
 
     #[test]
     fn thread_resume_disables_shell_tool_and_carries_mcp_config() {
-        let req = thread_resume_request(2, "thread-1", Some("gpt-5.5"), "u", "T", 42);
+        let req = thread_resume_request(
+            2,
+            "thread-1",
+            Some("gpt-5.5"),
+            "u",
+            "T",
+            42,
+            "Resume instructions",
+        );
         let params = &req["params"];
         assert_eq!(req["method"], "thread/resume");
         assert_eq!(params["threadId"], "thread-1");
         assert_eq!(params["approvalPolicy"], "never");
         assert_eq!(params["sandbox"], "danger-full-access");
         assert_eq!(params["config"]["features"]["shell_tool"], false);
+        assert_eq!(params["developerInstructions"], "Resume instructions");
+        assert!(params["config"].get("developer_instructions").is_none());
         assert_eq!(params["config"]["mcp_servers"]["clai"]["url"], "u");
         assert_eq!(
             params["config"]["mcp_servers"]["clai"]["tool_timeout_sec"],
@@ -459,7 +476,7 @@ mod tests {
 
     #[test]
     fn thread_start_omits_default_model() {
-        let req = thread_start_request(2, None, None, "u", "T", 60);
+        let req = thread_start_request(2, None, None, "u", "T", 60, "instructions");
         assert!(req["params"].get("model").is_none());
         assert!(req["params"].get("cwd").is_none());
     }

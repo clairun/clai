@@ -75,6 +75,7 @@ fn claude_code_host_env(idle_ms: &str) -> [(&'static str, &str); 3] {
 }
 const CLI_FRESH_CONTEXT_MAX_MESSAGES: usize = 16;
 const CLI_FRESH_CONTEXT_MAX_CHARS: usize = 32_000;
+const CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES: usize = 64_000;
 const CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS: usize = 6_000;
 const CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS: usize = 1_200;
 
@@ -1329,8 +1330,9 @@ async fn run_codex_turn(
     )
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
-    let prompt = codex_turn_prompt(&system_prompt, &prompt);
+    let developer_instructions = codex_developer_instructions(&system_prompt);
     let prompt_chars = prompt.chars().count();
+    trace_codex_input_sizes(run_id, "exec", &developer_instructions, &prompt);
     if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
         return Err(LocalAgentRunError::failed(codex_input_too_large_message(
             prompt_chars,
@@ -1370,7 +1372,14 @@ async fn run_codex_turn(
     match existing_thread_id.as_deref() {
         Some(thread_id) => {
             command.arg("resume");
-            add_codex_common_args(&mut command, connection, mcp_url, false, None);
+            add_codex_common_args(
+                &mut command,
+                connection,
+                mcp_url,
+                &developer_instructions,
+                false,
+                None,
+            );
             command.arg(thread_id);
         }
         None => {
@@ -1378,6 +1387,7 @@ async fn run_codex_turn(
                 &mut command,
                 connection,
                 mcp_url,
+                &developer_instructions,
                 true,
                 workspace_root.as_ref(),
             );
@@ -1529,8 +1539,9 @@ async fn run_codex_turn_app_server(
     )
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
-    let prompt = codex_turn_prompt(&system_prompt, &prompt);
+    let developer_instructions = codex_developer_instructions(&system_prompt);
     let prompt_chars = prompt.chars().count();
+    trace_codex_input_sizes(run_id, "app-server", &developer_instructions, &prompt);
     if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
         return Err(LocalAgentRunError::failed(codex_input_too_large_message(
             prompt_chars,
@@ -1604,6 +1615,7 @@ async fn run_codex_turn_app_server(
             mcp_url,
             CODEX_MCP_TOKEN_ENV,
             tool_timeout,
+            &developer_instructions,
         ),
         None => aps::thread_start_request(
             2,
@@ -1612,6 +1624,7 @@ async fn run_codex_turn_app_server(
             mcp_url,
             CODEX_MCP_TOKEN_ENV,
             tool_timeout,
+            &developer_instructions,
         ),
     };
     let thread_result = aps_request_await(&mut transport, cancel_token, thread_request).await?;
@@ -1724,8 +1737,15 @@ async fn run_codex_turn_app_server(
             continue;
         }
         if aps::is_response(&message) {
+            if aps::response_id(&message) == Some(3) {
+                if let Some(error) = app_server_turn_start_error(&message) {
+                    result_error = Some(error);
+                    break;
+                }
+                continue;
+            }
             // The only responses we act on are steer accept/reject; everything
-            // else (handshake echoes, turn/start ack) is informational.
+            // else (handshake echoes) is informational.
             if let Some(id) = aps::response_id(&message) {
                 if let Some(message_ids) = pending_steer.remove(&id) {
                     let accepted = resolve_codex_steer_response(
@@ -1791,6 +1811,16 @@ async fn run_codex_turn_app_server(
         });
     }
     Ok(usage)
+}
+
+fn app_server_turn_start_error(response: &Value) -> Option<String> {
+    response.get("error").map(|error| {
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("codex app-server rejected turn/start")
+            .to_string()
+    })
 }
 
 /// Send a JSON-RPC request and read messages until its matching response,
@@ -1988,6 +2018,7 @@ async fn build_codex_steer(
         .ok()?;
     let mut input = Vec::new();
     let mut ids = Vec::new();
+    let mut total_chars = 0usize;
     for queued in pending {
         if queued.connection_id != connection_id || inflight.contains(&queued.message.id) {
             continue;
@@ -2004,6 +2035,14 @@ async fn build_codex_steer(
         if text.trim().is_empty() {
             continue;
         }
+        let text_chars = text.chars().count();
+        if total_chars.saturating_add(text_chars) > CODEX_TURN_INPUT_MAX_CHARS {
+            // Preserve queue order and leave this and later messages for the
+            // normal follow-up turn, whose preflight and compaction recovery
+            // produce the actionable oversized-input error.
+            break;
+        }
+        total_chars += text_chars;
         input.push(codex_app_server::text_user_input(&text));
         ids.push(queued.message.id.clone());
     }
@@ -2210,11 +2249,27 @@ fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
     })
 }
 
-fn codex_turn_prompt(system_prompt: &str, prompt: &str) -> String {
+fn codex_developer_instructions(system_prompt: &str) -> String {
     format!(
-        "System instructions for this CLAI run:\n{}\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.\n\nUser/task prompt:\n{}",
-        system_prompt, prompt
+        "System instructions for this CLAI run:\n{}\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.",
+        system_prompt
     )
+}
+
+fn trace_codex_input_sizes(
+    run_id: &str,
+    transport: &str,
+    developer_instructions: &str,
+    prompt: &str,
+) {
+    tracing::info!(
+        target: "clai::cli_session",
+        run_id,
+        transport,
+        developer_instruction_chars = developer_instructions.chars().count(),
+        user_input_chars = prompt.chars().count(),
+        "Prepared separate Codex developer instructions and user input"
+    );
 }
 
 fn codex_input_too_large_message(actual_chars: usize) -> String {
@@ -2589,6 +2644,7 @@ fn add_codex_common_args(
     command: &mut Command,
     connection: &ProviderConnection,
     mcp_url: &str,
+    developer_instructions: &str,
     include_new_session_flags: bool,
     workspace_root: Option<&PathBuf>,
 ) {
@@ -2599,6 +2655,11 @@ fn add_codex_common_args(
         .arg("--ignore-rules")
         .arg("--disable")
         .arg("shell_tool")
+        .arg("-c")
+        .arg(format!(
+            "developer_instructions={}",
+            toml_string_value(developer_instructions)
+        ))
         .arg("-c")
         .arg(format!(
             "mcp_servers.clai.url={}",
@@ -2807,13 +2868,26 @@ fn fresh_cli_session_context_prompt(
     recent_messages: &[AssistantMessage],
     prompt: &str,
 ) -> String {
-    let summary = summary.map(str::trim).filter(|value| !value.is_empty());
+    let summary = summary
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_cli_context_head_tail(value, CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES));
     let recent_context = render_cli_fresh_context(recent_messages);
+    tracing::info!(
+        target: "clai::cli_session",
+        compacted_summary_chars = summary
+            .as_deref()
+            .map(|value| value.chars().count())
+            .unwrap_or_default(),
+        recent_context_chars = recent_context.chars().count(),
+        current_prompt_chars = prompt.chars().count(),
+        "Prepared fresh CLI session context components"
+    );
     let mut out = String::from(
         "This is a new CLI session. CLAI has carried forward the conversation context below. Continue from it; do not treat the current prompt in isolation.",
     );
 
-    if let Some(summary) = summary {
+    if let Some(summary) = summary.as_deref() {
         out.push_str("\n\nEarlier compacted summary:\n");
         out.push_str(summary);
     }
@@ -2938,6 +3012,27 @@ fn truncate_cli_context_text(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}{}", &value[..end], SUFFIX)
+}
+
+fn truncate_cli_context_head_tail(value: &str, max_bytes: usize) -> String {
+    const OMITTED: &str = "\n\n[... middle of oversized compacted summary omitted ...]\n\n";
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    if max_bytes <= OMITTED.len() {
+        return truncate_cli_context_text(OMITTED, max_bytes);
+    }
+
+    let content_budget = max_bytes - OMITTED.len();
+    let head_budget = content_budget * 2 / 3;
+    let tail_budget = content_budget - head_budget;
+    let head = truncate_cli_context_text(value, head_budget);
+    let tail_start = value.len().saturating_sub(tail_budget);
+    let mut tail_start = tail_start;
+    while tail_start < value.len() && !value.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!("{head}{OMITTED}{}", &value[tail_start..])
 }
 
 fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
@@ -5110,6 +5205,46 @@ mod tests {
             "rendered recent context too large: {}",
             rendered.len()
         );
+    }
+
+    #[test]
+    fn fresh_cli_session_context_bounds_summary_and_preserves_both_ends() {
+        let summary = format!(
+            "SUMMARY_HEAD{}SUMMARY_TAIL",
+            "é".repeat(CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES)
+        );
+
+        let prompt = fresh_cli_session_context_prompt(Some(&summary), &[], "continue");
+
+        assert!(prompt.contains("SUMMARY_HEAD"));
+        assert!(prompt.contains("SUMMARY_TAIL"));
+        assert!(prompt.contains("middle of oversized compacted summary omitted"));
+        assert!(prompt.len() < CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES + 1_000);
+    }
+
+    #[test]
+    fn codex_keeps_developer_instructions_separate_from_user_input() {
+        let developer = codex_developer_instructions("CLAI_SYSTEM_SENTINEL");
+        let user_input = "CLAI_USER_SENTINEL";
+
+        assert!(developer.contains("CLAI_SYSTEM_SENTINEL"));
+        assert!(!developer.contains(user_input));
+        assert_eq!(user_input, "CLAI_USER_SENTINEL");
+    }
+
+    #[test]
+    fn app_server_turn_start_rejection_surfaces_error_message() {
+        let rejected = serde_json::json!({
+            "id": 3,
+            "error": { "code": -32602, "message": "turn input is invalid" }
+        });
+        let accepted = serde_json::json!({ "id": 3, "result": { "turn": { "id": "t1" } } });
+
+        assert_eq!(
+            app_server_turn_start_error(&rejected).as_deref(),
+            Some("turn input is invalid")
+        );
+        assert!(app_server_turn_start_error(&accepted).is_none());
     }
 
     #[test]
