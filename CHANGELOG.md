@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Codex
+
+- **Codex now uses `codex app-server` by default.** This enables live mid-turn
+  steering for queued user messages. Set `CLAI_CODEX_APP_SERVER=0` (also
+  accepts `false`, `no`, `off`, or an empty value) to fall back to legacy
+  `codex exec`.
+
 ### Shell permissions
 
 - **Restricted mode is now interactive.** When an agent in Restricted

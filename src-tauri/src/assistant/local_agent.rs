@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::assistant::codex_app_server;
 use crate::assistant::compaction;
 use crate::assistant::engine::{
     build_system_prompt, build_trigger_message, AssistantDeps, AssistantEngineError, RunTurnInput,
@@ -35,6 +36,14 @@ const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
 const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
 const CODEX_TURN_INPUT_MAX_CHARS: usize = 1_048_576;
+/// How often the app-server driver polls the queue to steer new user
+/// messages into the active turn.
+const STEER_POLL_INTERVAL_MS: u64 = 400;
+
+/// Bound on each app-server handshake request (`initialize`,
+/// `thread/start|resume`). Generous: covers a cold `codex` start on a slow
+/// disk, but converts a wedged server into a clear fast-fail.
+const APP_SERVER_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// MCP server *startup* timeout (ms) for CLI providers that read `MCP_TIMEOUT`
 /// (Claude Code, Codex). Distinct from the per-tool backstop
@@ -66,6 +75,7 @@ fn claude_code_host_env(idle_ms: &str) -> [(&'static str, &str); 3] {
 }
 const CLI_FRESH_CONTEXT_MAX_MESSAGES: usize = 16;
 const CLI_FRESH_CONTEXT_MAX_CHARS: usize = 32_000;
+const CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES: usize = 64_000;
 const CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS: usize = 6_000;
 const CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS: usize = 1_200;
 
@@ -396,18 +406,33 @@ pub async fn run_session_turn(
                 result
             }
             CliProviderRuntime::Codex => {
-                run_codex_turn(
-                    deps,
-                    &mut session,
-                    &connection,
-                    &run_id,
-                    mcp_runtime.url(),
-                    binding_guard.token(),
-                    &input.cancel_token,
-                    &input.trigger,
-                    &mut assistant_slot,
-                )
-                .await
+                if codex_app_server::app_server_enabled() {
+                    run_codex_turn_app_server(
+                        deps,
+                        &mut session,
+                        &connection,
+                        &run_id,
+                        mcp_runtime.url(),
+                        binding_guard.token(),
+                        &input.cancel_token,
+                        &input.trigger,
+                        &mut assistant_slot,
+                    )
+                    .await
+                } else {
+                    run_codex_turn(
+                        deps,
+                        &mut session,
+                        &connection,
+                        &run_id,
+                        mcp_runtime.url(),
+                        binding_guard.token(),
+                        &input.cancel_token,
+                        &input.trigger,
+                        &mut assistant_slot,
+                    )
+                    .await
+                }
             }
             CliProviderRuntime::OpenCode => {
                 run_opencode_turn(
@@ -1305,8 +1330,9 @@ async fn run_codex_turn(
     )
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
-    let prompt = codex_turn_prompt(&system_prompt, &prompt);
+    let developer_instructions = codex_developer_instructions(&system_prompt);
     let prompt_chars = prompt.chars().count();
+    trace_codex_input_sizes(run_id, "exec", &developer_instructions, &prompt);
     if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
         return Err(LocalAgentRunError::failed(codex_input_too_large_message(
             prompt_chars,
@@ -1346,7 +1372,14 @@ async fn run_codex_turn(
     match existing_thread_id.as_deref() {
         Some(thread_id) => {
             command.arg("resume");
-            add_codex_common_args(&mut command, connection, mcp_url, false, None);
+            add_codex_common_args(
+                &mut command,
+                connection,
+                mcp_url,
+                &developer_instructions,
+                false,
+                None,
+            );
             command.arg(thread_id);
         }
         None => {
@@ -1354,6 +1387,7 @@ async fn run_codex_turn(
                 &mut command,
                 connection,
                 mcp_url,
+                &developer_instructions,
                 true,
                 workspace_root.as_ref(),
             );
@@ -1470,11 +1504,773 @@ async fn run_codex_turn(
     Ok(usage)
 }
 
-fn codex_turn_prompt(system_prompt: &str, prompt: &str) -> String {
-    format!(
-        "System instructions for this CLAI run:\n{}\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.\n\nUser/task prompt:\n{}",
-        system_prompt, prompt
+// ---------------------------------------------------------------------------
+// Codex app-server transport driver (default; false-y CLAI_CODEX_APP_SERVER
+// falls back to codex exec)
+// ---------------------------------------------------------------------------
+
+/// Run a Codex turn over the `codex app-server` JSON-RPC transport instead of
+/// `codex exec`: streaming, tool calls, usage, errors, plus real-time mid-run
+/// input via `turn/steer` (queued messages are injected into the live turn).
+/// Reuses the shared [`CodexStreamState`] + tool-call helpers by normalizing
+/// app-server items into the exec item shape.
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_turn_app_server(
+    deps: &AssistantDeps,
+    session: &mut AssistantSession,
+    connection: &ProviderConnection,
+    run_id: &str,
+    mcp_url: &str,
+    mcp_token: &str,
+    cancel_token: &CancellationToken,
+    trigger: &crate::assistant::types::RunTrigger,
+    assistant_slot: &mut Option<AssistantMessage>,
+) -> Result<Option<RunUsage>, LocalAgentRunError> {
+    use crate::assistant::codex_app_server as aps;
+
+    let existing_thread_id = session.context.cli_session_id.clone();
+    let prompt = prepare_prompt(
+        deps,
+        session,
+        run_id,
+        trigger,
+        CliProviderRuntime::Codex.metadata_source(),
+        CliProviderRuntime::Codex.display_name(),
+        existing_thread_id.is_none(),
     )
+    .await?;
+    let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
+    let developer_instructions = codex_developer_instructions(&system_prompt);
+    let prompt_chars = prompt.chars().count();
+    trace_codex_input_sizes(run_id, "app-server", &developer_instructions, &prompt);
+    if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
+        return Err(LocalAgentRunError::failed(codex_input_too_large_message(
+            prompt_chars,
+        )));
+    }
+
+    let mut assistant_message = ensure_assistant_message_slot(
+        deps,
+        session,
+        run_id,
+        CliProviderRuntime::Codex.metadata_source(),
+        assistant_slot,
+    )
+    .await?;
+
+    let configured_binary = connection
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("codex");
+    let binary = crate::providers::resolve_command_path(configured_binary)
+        .unwrap_or_else(|| configured_binary.to_string());
+    let workspace_root = workspace_root_for_session(deps, session);
+
+    let command = crate::providers::build_host_cli_command(
+        &binary,
+        &[
+            (CODEX_MCP_TOKEN_ENV, mcp_token),
+            ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
+        ],
+        workspace_root.as_deref(),
+    );
+    let mut transport =
+        aps::AppServerTransport::spawn(command).map_err(LocalAgentRunError::failed)?;
+
+    let stderr_tail: Arc<Mutex<VecDeque<String>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+    if let Some(stderr) = transport.take_stderr() {
+        spawn_stderr_logger(
+            run_id.to_string(),
+            CliProviderRuntime::Codex.display_name(),
+            stderr,
+            stderr_tail.clone(),
+        );
+    }
+
+    let client_version = env!("CARGO_PKG_VERSION");
+    let model = {
+        let m = connection.model_id.trim();
+        (!m.is_empty() && m != "default").then_some(m)
+    };
+    let cwd = workspace_root
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let tool_timeout = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs();
+
+    // Handshake: initialize -> thread/start|resume. Startup notifications are
+    // ignored by the request/await helper.
+    aps_request_await(
+        &mut transport,
+        cancel_token,
+        aps::initialize_request(1, client_version),
+    )
+    .await?;
+    let thread_request = match existing_thread_id.as_deref() {
+        Some(thread_id) => aps::thread_resume_request(
+            2,
+            thread_id,
+            model,
+            mcp_url,
+            CODEX_MCP_TOKEN_ENV,
+            tool_timeout,
+            &developer_instructions,
+        ),
+        None => aps::thread_start_request(
+            2,
+            cwd.as_deref(),
+            model,
+            mcp_url,
+            CODEX_MCP_TOKEN_ENV,
+            tool_timeout,
+            &developer_instructions,
+        ),
+    };
+    let thread_result = aps_request_await(&mut transport, cancel_token, thread_request).await?;
+    if let Some(thread_id) = thread_result
+        .get("thread")
+        .and_then(|t| t.get("id"))
+        .and_then(Value::as_str)
+    {
+        set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
+    }
+    let thread_id =
+        session.context.cli_session_id.clone().ok_or_else(|| {
+            LocalAgentRunError::failed("codex app-server did not return a thread id")
+        })?;
+
+    // Fire the turn. We do not block on its response; the turn is tracked via
+    // notifications in the loop below.
+    let mut input = vec![aps::text_user_input(&prompt)];
+    for image_path in resolve_codex_image_paths(deps, session, run_id).await {
+        input.push(aps::local_image_user_input(&image_path.to_string_lossy()));
+    }
+    transport
+        .send(&aps::turn_start_request(3, &thread_id, input))
+        .await
+        .map_err(LocalAgentRunError::failed)?;
+
+    let mut state = CodexStreamState::new();
+    let mut usage: Option<RunUsage> = None;
+    let mut result_error: Option<String> = None;
+    // Set on turn/started, cleared on turn/completed. Steering is only valid
+    // while a turn is active, and `turn/steer` must carry this exact id.
+    let mut active_turn_id: Option<String> = None;
+    // Monotonic id for client-initiated requests after the handshake
+    // (steer/interrupt), kept distinct from the handshake ids 1/2/3.
+    let mut next_request_id: i64 = 10;
+    // steer request id -> queued message ids carried by that steer, awaiting
+    // the server's accept/reject response. Best-effort and per-turn: the map
+    // lives only until `turn/completed` breaks the loop, and an entry whose
+    // response never arrives just leaves its messages pending in the DB for
+    // the follow-up run (no delivery is lost, nothing outlives the turn).
+    let mut pending_steer: HashMap<i64, Vec<String>> = HashMap::new();
+    // Message ids with a steer in flight so a later poll tick does not
+    // re-send them before the response lands.
+    let mut inflight_steer: HashSet<String> = HashSet::new();
+    let mut steer_poll =
+        tokio::time::interval(std::time::Duration::from_millis(STEER_POLL_INTERVAL_MS));
+    steer_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        let message = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                let _ = transport
+                    .send(&aps::turn_interrupt_request(next_request_id, &thread_id))
+                    .await;
+                transport.kill().await;
+                finalize_assistant_message_from_parts(
+                    deps, session, run_id, &assistant_message, &state.parts,
+                )
+                .await?;
+                return Err(LocalAgentRunError::Cancelled { usage });
+            }
+            _ = steer_poll.tick() => {
+                // Steer queued messages into the *live* turn (the win over the
+                // exec stop-and-restart model). Only while a turn is active.
+                if let Some(turn_id) = active_turn_id.clone() {
+                    if let Some((request, message_ids)) = build_codex_steer(
+                        deps,
+                        session,
+                        connection.id.as_str(),
+                        &thread_id,
+                        &turn_id,
+                        next_request_id,
+                        &mut inflight_steer,
+                    )
+                    .await
+                    {
+                        if transport.send(&request).await.is_ok() {
+                            pending_steer.insert(next_request_id, message_ids);
+                        } else {
+                            for id in message_ids {
+                                inflight_steer.remove(&id);
+                            }
+                        }
+                        next_request_id += 1;
+                    }
+                }
+                continue;
+            }
+            msg = transport.recv() => msg,
+        };
+        let Some(message) = message else {
+            // Stdout closed without `turn/completed`: the server died mid-turn.
+            // Surface it as a failure so the run isn't finalized as a silently
+            // truncated success (partial parts are still persisted below).
+            if result_error.is_none() {
+                result_error = Some("codex app-server closed the connection mid-turn".to_string());
+            }
+            break;
+        };
+        if aps::is_server_request(&message) {
+            if let Some(id) = message.get("id") {
+                let method = message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let _ = transport
+                    .send(&aps::server_request_response(id, method))
+                    .await;
+            }
+            continue;
+        }
+        if aps::is_response(&message) {
+            if aps::response_id(&message) == Some(3) {
+                if let Some(error) = app_server_turn_start_error(&message) {
+                    result_error = Some(error);
+                    break;
+                }
+                continue;
+            }
+            // The only responses we act on are steer accept/reject; everything
+            // else (handshake echoes) is informational.
+            if let Some(id) = aps::response_id(&message) {
+                if let Some(message_ids) = pending_steer.remove(&id) {
+                    let accepted = resolve_codex_steer_response(
+                        deps,
+                        session,
+                        run_id,
+                        &message,
+                        message_ids,
+                        &mut inflight_steer,
+                    )
+                    .await;
+                    // The steered user message was written to the conversation
+                    // when the user hit send (an earlier `created_at`). Close
+                    // the current assistant message and open a fresh one so the
+                    // post-steer output sorts *after* that user message instead
+                    // of accreting into one bubble that renders before it.
+                    if accepted {
+                        assistant_message = split_codex_assistant_message(
+                            deps,
+                            session,
+                            run_id,
+                            CliProviderRuntime::Codex.metadata_source(),
+                            &assistant_message,
+                            &mut state,
+                            assistant_slot,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(method) = aps::notification_method(&message) else {
+            continue;
+        };
+        let turn_done = handle_app_server_notification(
+            deps,
+            session,
+            run_id,
+            &assistant_message,
+            method,
+            &message,
+            &mut state,
+            &mut usage,
+            &mut result_error,
+            &mut active_turn_id,
+        )
+        .await?;
+        if turn_done {
+            break;
+        }
+    }
+
+    transport.kill().await;
+    finalize_assistant_message_from_parts(deps, session, run_id, &assistant_message, &state.parts)
+        .await?;
+
+    if let Some(message) = result_error {
+        let enriched = append_stderr_tail(&message, &stderr_tail);
+        return Err(LocalAgentRunError::Failed {
+            message: enriched,
+            usage,
+        });
+    }
+    Ok(usage)
+}
+
+fn app_server_turn_start_error(response: &Value) -> Option<String> {
+    response.get("error").map(|error| {
+        error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("codex app-server rejected turn/start")
+            .to_string()
+    })
+}
+
+/// Send a JSON-RPC request and read messages until its matching response,
+/// answering any interleaved server->client requests and ignoring startup
+/// notifications. Returns the response `result` (or a failure on error/close).
+async fn aps_request_await(
+    transport: &mut codex_app_server::AppServerTransport,
+    cancel_token: &CancellationToken,
+    request: Value,
+) -> Result<Value, LocalAgentRunError> {
+    let want_id = request.get("id").and_then(Value::as_i64);
+    // Bound the handshake so a stalled `codex app-server` (broken install,
+    // auth stall) fails fast with a clear error instead of hanging the run
+    // until the user cancels. Mirrors the MCP_STARTUP_TIMEOUT_MS posture.
+    let deadline = tokio::time::Instant::now() + APP_SERVER_HANDSHAKE_TIMEOUT;
+    transport
+        .send(&request)
+        .await
+        .map_err(LocalAgentRunError::failed)?;
+    loop {
+        let message = tokio::select! {
+            _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled { usage: None }),
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(LocalAgentRunError::failed(format!(
+                    "codex app-server did not answer the handshake within {}s",
+                    APP_SERVER_HANDSHAKE_TIMEOUT.as_secs()
+                )));
+            }
+            msg = transport.recv() => msg,
+        };
+        let Some(message) = message else {
+            return Err(LocalAgentRunError::failed(
+                "codex app-server closed the connection during handshake",
+            ));
+        };
+        if codex_app_server::is_server_request(&message) {
+            if let Some(id) = message.get("id") {
+                let method = message
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let _ = transport
+                    .send(&codex_app_server::server_request_response(id, method))
+                    .await;
+            }
+            continue;
+        }
+        if codex_app_server::is_response(&message)
+            && codex_app_server::response_id(&message) == want_id
+        {
+            if let Some(error) = message.get("error") {
+                let msg = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("codex app-server request failed");
+                return Err(LocalAgentRunError::failed(msg.to_string()));
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+        // Ignore notifications that arrive during the handshake.
+    }
+}
+
+/// Handle one app-server notification. Returns `true` when the turn is finished
+/// (`turn/completed`). Reuses [`handle_codex_item`] by normalizing app-server
+/// items into the exec item shape.
+#[allow(clippy::too_many_arguments)]
+async fn handle_app_server_notification(
+    deps: &AssistantDeps,
+    session: &mut AssistantSession,
+    run_id: &str,
+    assistant_message: &AssistantMessage,
+    method: &str,
+    message: &Value,
+    state: &mut CodexStreamState,
+    usage: &mut Option<RunUsage>,
+    result_error: &mut Option<String>,
+    active_turn_id: &mut Option<String>,
+) -> Result<bool, LocalAgentRunError> {
+    let null = Value::Null;
+    let params = message.get("params").unwrap_or(&null);
+    match method {
+        "thread/started" => {
+            if let Some(thread_id) = params
+                .get("thread")
+                .and_then(|t| t.get("id"))
+                .and_then(Value::as_str)
+            {
+                set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
+            }
+        }
+        "turn/started" => {
+            *active_turn_id = params
+                .get("turn")
+                .and_then(|t| t.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        "item/started" => {
+            // Persist the running state of an MCP tool call early so the UI can
+            // show it in-flight, mirroring the exec `item.started` handling.
+            if let Some(item) = params.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("mcpToolCall") {
+                    if let Some(normalized) = normalize_app_server_item(item) {
+                        handle_codex_item(
+                            deps,
+                            session,
+                            run_id,
+                            assistant_message,
+                            state,
+                            &normalized,
+                            false,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+        "item/completed" => {
+            if let Some(item) = params.get("item") {
+                if let Some(normalized) = normalize_app_server_item(item) {
+                    handle_codex_item(
+                        deps,
+                        session,
+                        run_id,
+                        assistant_message,
+                        state,
+                        &normalized,
+                        true,
+                    )
+                    .await?;
+                }
+            }
+        }
+        "thread/tokenUsage/updated" => {
+            if let Some(parsed) = run_usage_from_app_server(params.get("tokenUsage")) {
+                *usage = Some(parsed);
+            }
+        }
+        "error" => {
+            if result_error.is_none() {
+                let error = params.get("error").unwrap_or(&null);
+                let msg = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Codex run failed");
+                let code = error.get("codexErrorInfo").and_then(Value::as_str);
+                *result_error = Some(codex_app_server::classify_error_message(code, msg));
+            }
+        }
+        "turn/completed" => {
+            let turn = params.get("turn");
+            if turn.and_then(|t| t.get("status")).and_then(Value::as_str) == Some("failed")
+                && result_error.is_none()
+            {
+                if let Some(error) = turn.and_then(|t| t.get("error")) {
+                    let msg = error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Codex turn failed");
+                    let code = error.get("codexErrorInfo").and_then(Value::as_str);
+                    *result_error = Some(codex_app_server::classify_error_message(code, msg));
+                }
+            }
+            *active_turn_id = None;
+            return Ok(true);
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+/// Read pending queued user messages for this connection and build a
+/// `turn/steer` request carrying their text. Image-bearing messages are left
+/// queued for the followup run (which resolves image paths); steering carries
+/// text only. Marks the chosen ids in-flight so a later tick will not re-send
+/// them before the accept/reject response lands. Returns `None` when there is
+/// nothing steerable right now.
+async fn build_codex_steer(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    connection_id: &str,
+    thread_id: &str,
+    turn_id: &str,
+    request_id: i64,
+    inflight: &mut HashSet<String>,
+) -> Option<(Value, Vec<String>)> {
+    // Interrupting while the user is being asked a question would tear the
+    // question down; leave messages queued until it resolves.
+    if crate::assistant::tools::ask_user::session_has_pending_ask(&session.id) {
+        return None;
+    }
+    let pending = repository::list_pending_queued_messages(&deps.pool, &session.id)
+        .await
+        .ok()?;
+    let mut input = Vec::new();
+    let mut ids = Vec::new();
+    let mut total_chars = 0usize;
+    for queued in pending {
+        if queued.connection_id != connection_id || inflight.contains(&queued.message.id) {
+            continue;
+        }
+        if queued
+            .message
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. }))
+        {
+            continue; // defer image messages to the followup run
+        }
+        let text = message_text(&queued.message);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let text_chars = text.chars().count();
+        if total_chars.saturating_add(text_chars) > CODEX_TURN_INPUT_MAX_CHARS {
+            // Preserve queue order and leave this and later messages for the
+            // normal follow-up turn, whose preflight and compaction recovery
+            // produce the actionable oversized-input error.
+            break;
+        }
+        total_chars += text_chars;
+        input.push(codex_app_server::text_user_input(&text));
+        ids.push(queued.message.id.clone());
+    }
+    if input.is_empty() {
+        return None;
+    }
+    for id in &ids {
+        inflight.insert(id.clone());
+    }
+    Some((
+        codex_app_server::turn_steer_request(request_id, thread_id, turn_id, input),
+        ids,
+    ))
+}
+
+/// After a `turn/steer` is accepted, close the current assistant message and
+/// open a fresh one. The steered user message already sits in the conversation
+/// with the `created_at` it got when the user hit send, so without this split
+/// the whole turn accretes into a single assistant message whose `created_at`
+/// is frozen at turn start — making the reply (including the handling of the
+/// steered comment) render *before* the comment itself. Splitting yields the
+/// natural order: pre-steer output, the user's message, then post-steer output.
+async fn split_codex_assistant_message(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    metadata_source: &str,
+    current: &AssistantMessage,
+    state: &mut CodexStreamState,
+    slot: &mut Option<AssistantMessage>,
+) -> Result<AssistantMessage, LocalAgentRunError> {
+    let has_content = !non_empty_content_parts(&state.parts).is_empty()
+        || !state.persisted_tool_item_ids.is_empty();
+    if has_content {
+        // Persist the pre-steer segment as its own completed message.
+        finalize_assistant_message_from_parts(deps, session, run_id, current, &state.parts).await?;
+    } else {
+        // Nothing emitted yet: drop the empty placeholder rather than leave an
+        // empty bubble before the user's steered message.
+        let _ = repository::delete_message(&deps.pool, &current.id).await;
+        let _ = emit_event(
+            &deps.app,
+            session,
+            Some(run_id),
+            AssistantUiEvent::MessageDeleted {
+                message_id: current.id.clone(),
+            },
+        );
+    }
+    // Start the post-steer segment fresh. Keep the tool-item dedup set so an
+    // item echoed across the split is not persisted twice; reset the delta
+    // throttle so the new message's first delta emits promptly.
+    state.parts.clear();
+    state.last_update_emit_at = None;
+    *slot = None;
+    ensure_assistant_message_slot(deps, session, run_id, metadata_source, slot).await
+}
+
+/// Resolve a `turn/steer` response: on accept, mark the carried messages
+/// delivered and notify the UI; on reject (turn ended / id mismatch) leave them
+/// queued so the followup run delivers them. Always clears their in-flight mark.
+async fn resolve_codex_steer_response(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    response: &Value,
+    message_ids: Vec<String>,
+    inflight: &mut HashSet<String>,
+) -> bool {
+    for id in &message_ids {
+        inflight.remove(id);
+    }
+    if response.get("error").is_some() {
+        tracing::info!(
+            run_id,
+            count = message_ids.len(),
+            "codex turn/steer rejected; leaving messages queued for the followup run"
+        );
+        return false;
+    }
+    match repository::mark_queued_messages_delivered(&deps.pool, &session.id, run_id, &message_ids)
+        .await
+    {
+        Ok(()) => {
+            let _ = emit_event(
+                &deps.app,
+                session,
+                Some(run_id),
+                AssistantUiEvent::QueuedMessagesDelivered {
+                    message_ids: message_ids.clone(),
+                },
+            );
+            tracing::info!(
+                run_id,
+                count = message_ids.len(),
+                "Steered queued user message(s) into the live Codex turn"
+            );
+        }
+        Err(error) => tracing::warn!(
+            run_id, %error,
+            "codex steer accepted but marking delivered failed; the followup run may re-deliver"
+        ),
+    }
+    // Accepted by Codex (the input entered the live turn) regardless of the DB
+    // mark result — the caller splits the assistant message either way so the
+    // post-steer output is ordered after the user's message.
+    true
+}
+
+/// Normalize an app-server `ThreadItem` (camelCase) into the exec item shape so
+/// the shared [`handle_codex_item`] can persist/emit it unchanged. Returns
+/// `None` for item kinds CLAI does not surface (userMessage, plan, ...).
+fn normalize_app_server_item(item: &Value) -> Option<Value> {
+    let kind = item.get("type").and_then(Value::as_str)?;
+    match kind {
+        "agentMessage" => Some(serde_json::json!({
+            "type": "agent_message",
+            "text": item.get("text").cloned().unwrap_or(Value::Null),
+        })),
+        "reasoning" => {
+            let text = app_server_reasoning_text(item);
+            if text.is_empty() {
+                None
+            } else {
+                Some(serde_json::json!({ "type": "reasoning", "text": text }))
+            }
+        }
+        // These already share the exec field names (id/server/tool/arguments/
+        // result/error/status, command, query); only the discriminant differs.
+        "mcpToolCall" | "commandExecution" | "fileChange" | "webSearch" => {
+            let mut normalized = item.clone();
+            let exec_type = match kind {
+                "mcpToolCall" => "mcp_tool_call",
+                "commandExecution" => "command_execution",
+                "fileChange" => "file_change",
+                _ => "web_search",
+            };
+            normalized["type"] = Value::String(exec_type.to_string());
+            Some(normalized)
+        }
+        _ => None,
+    }
+}
+
+/// Flatten an app-server `reasoning` item's `content`/`summary` arrays into a
+/// single string. Elements are either `{ "text": "..." }` objects or bare
+/// strings; anything else is skipped.
+fn app_server_reasoning_text(item: &Value) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for key in ["content", "summary"] {
+        if let Some(arr) = item.get(key).and_then(Value::as_array) {
+            for element in arr {
+                if let Some(text) = element.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        out.push(text.to_string());
+                    }
+                } else if let Some(text) = element.as_str() {
+                    if !text.is_empty() {
+                        out.push(text.to_string());
+                    }
+                }
+            }
+        }
+        if !out.is_empty() {
+            break; // prefer content; fall back to summary only if content empty
+        }
+    }
+    out.join("\n")
+}
+
+/// Map an app-server `ThreadTokenUsage` (`total` breakdown) to [`RunUsage`].
+fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
+    let total = token_usage?.get("total")?;
+    let get = |key: &str| {
+        total
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|v| u64::try_from(v).ok())
+    };
+    let input_tokens = get("inputTokens");
+    let output_tokens = get("outputTokens");
+    let reasoning_tokens = get("reasoningOutputTokens");
+    let total_tokens =
+        get("totalTokens").or(match (input_tokens, output_tokens, reasoning_tokens) {
+            (None, None, None) => None,
+            _ => Some(
+                input_tokens.unwrap_or(0)
+                    + output_tokens.unwrap_or(0)
+                    + reasoning_tokens.unwrap_or(0),
+            ),
+        });
+    if input_tokens.is_none()
+        && output_tokens.is_none()
+        && reasoning_tokens.is_none()
+        && total_tokens.is_none()
+    {
+        return None;
+    }
+    Some(RunUsage {
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        total_tokens,
+    })
+}
+
+fn codex_developer_instructions(system_prompt: &str) -> String {
+    format!(
+        "System instructions for this CLAI run:\n{}\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.",
+        system_prompt
+    )
+}
+
+fn trace_codex_input_sizes(
+    run_id: &str,
+    transport: &str,
+    developer_instructions: &str,
+    prompt: &str,
+) {
+    tracing::info!(
+        target: "clai::cli_session",
+        run_id,
+        transport,
+        developer_instruction_chars = developer_instructions.chars().count(),
+        user_input_chars = prompt.chars().count(),
+        "Prepared separate Codex developer instructions and user input"
+    );
 }
 
 fn codex_input_too_large_message(actual_chars: usize) -> String {
@@ -1849,6 +2645,7 @@ fn add_codex_common_args(
     command: &mut Command,
     connection: &ProviderConnection,
     mcp_url: &str,
+    developer_instructions: &str,
     include_new_session_flags: bool,
     workspace_root: Option<&PathBuf>,
 ) {
@@ -1859,6 +2656,11 @@ fn add_codex_common_args(
         .arg("--ignore-rules")
         .arg("--disable")
         .arg("shell_tool")
+        .arg("-c")
+        .arg(format!(
+            "developer_instructions={}",
+            toml_string_value(developer_instructions)
+        ))
         .arg("-c")
         .arg(format!(
             "mcp_servers.clai.url={}",
@@ -2067,13 +2869,26 @@ fn fresh_cli_session_context_prompt(
     recent_messages: &[AssistantMessage],
     prompt: &str,
 ) -> String {
-    let summary = summary.map(str::trim).filter(|value| !value.is_empty());
+    let summary = summary
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_cli_context_head_tail(value, CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES));
     let recent_context = render_cli_fresh_context(recent_messages);
+    tracing::info!(
+        target: "clai::cli_session",
+        compacted_summary_chars = summary
+            .as_deref()
+            .map(|value| value.chars().count())
+            .unwrap_or_default(),
+        recent_context_chars = recent_context.chars().count(),
+        current_prompt_chars = prompt.chars().count(),
+        "Prepared fresh CLI session context components"
+    );
     let mut out = String::from(
         "This is a new CLI session. CLAI has carried forward the conversation context below. Continue from it; do not treat the current prompt in isolation.",
     );
 
-    if let Some(summary) = summary {
+    if let Some(summary) = summary.as_deref() {
         out.push_str("\n\nEarlier compacted summary:\n");
         out.push_str(summary);
     }
@@ -2198,6 +3013,27 @@ fn truncate_cli_context_text(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     format!("{}{}", &value[..end], SUFFIX)
+}
+
+fn truncate_cli_context_head_tail(value: &str, max_bytes: usize) -> String {
+    const OMITTED: &str = "\n\n[... middle of oversized compacted summary omitted ...]\n\n";
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    if max_bytes <= OMITTED.len() {
+        return truncate_cli_context_text(OMITTED, max_bytes);
+    }
+
+    let content_budget = max_bytes - OMITTED.len();
+    let head_budget = content_budget * 2 / 3;
+    let tail_budget = content_budget - head_budget;
+    let head = truncate_cli_context_text(value, head_budget);
+    let tail_start = value.len().saturating_sub(tail_budget);
+    let mut tail_start = tail_start;
+    while tail_start < value.len() && !value.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!("{head}{OMITTED}{}", &value[tail_start..])
 }
 
 fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
@@ -4373,6 +5209,46 @@ mod tests {
     }
 
     #[test]
+    fn fresh_cli_session_context_bounds_summary_and_preserves_both_ends() {
+        let summary = format!(
+            "SUMMARY_HEAD{}SUMMARY_TAIL",
+            "é".repeat(CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES)
+        );
+
+        let prompt = fresh_cli_session_context_prompt(Some(&summary), &[], "continue");
+
+        assert!(prompt.contains("SUMMARY_HEAD"));
+        assert!(prompt.contains("SUMMARY_TAIL"));
+        assert!(prompt.contains("middle of oversized compacted summary omitted"));
+        assert!(prompt.len() < CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES + 1_000);
+    }
+
+    #[test]
+    fn codex_keeps_developer_instructions_separate_from_user_input() {
+        let developer = codex_developer_instructions("CLAI_SYSTEM_SENTINEL");
+        let user_input = "CLAI_USER_SENTINEL";
+
+        assert!(developer.contains("CLAI_SYSTEM_SENTINEL"));
+        assert!(!developer.contains(user_input));
+        assert_eq!(user_input, "CLAI_USER_SENTINEL");
+    }
+
+    #[test]
+    fn app_server_turn_start_rejection_surfaces_error_message() {
+        let rejected = serde_json::json!({
+            "id": 3,
+            "error": { "code": -32602, "message": "turn input is invalid" }
+        });
+        let accepted = serde_json::json!({ "id": 3, "result": { "turn": { "id": "t1" } } });
+
+        assert_eq!(
+            app_server_turn_start_error(&rejected).as_deref(),
+            Some("turn input is invalid")
+        );
+        assert!(app_server_turn_start_error(&accepted).is_none());
+    }
+
+    #[test]
     fn injected_turn_ledger_double_interrupt_frees_the_cut_turns_slot() {
         // Regression: a second queued message interrupting the FIRST
         // injected message's turn. The interrupted wind-down used to skip
@@ -4685,5 +5561,90 @@ mod tests {
             value["mcp"]["clai"]["headers"]["Authorization"],
             "Bearer token"
         );
+    }
+
+    #[test]
+    fn normalize_app_server_item_maps_discriminants_to_exec_shape() {
+        // agentMessage -> agent_message with text preserved.
+        let agent = serde_json::json!({ "type": "agentMessage", "id": "a1", "text": "hello" });
+        let norm = normalize_app_server_item(&agent).unwrap();
+        assert_eq!(norm["type"], "agent_message");
+        assert_eq!(norm["text"], "hello");
+
+        // mcpToolCall keeps its exec-aligned fields, only the discriminant changes.
+        let tool = serde_json::json!({
+            "type": "mcpToolCall", "id": "t1", "server": "clai", "tool": "bash_exec",
+            "arguments": { "command": "ls" }, "status": "completed"
+        });
+        let norm = normalize_app_server_item(&tool).unwrap();
+        assert_eq!(norm["type"], "mcp_tool_call");
+        assert_eq!(norm["server"], "clai");
+        assert_eq!(norm["tool"], "bash_exec");
+        assert_eq!(norm["arguments"]["command"], "ls");
+
+        for (kind, exec) in [
+            ("commandExecution", "command_execution"),
+            ("fileChange", "file_change"),
+            ("webSearch", "web_search"),
+        ] {
+            let item = serde_json::json!({ "type": kind, "id": "x" });
+            assert_eq!(normalize_app_server_item(&item).unwrap()["type"], exec);
+        }
+
+        // userMessage and unknown kinds are not surfaced.
+        assert!(normalize_app_server_item(&serde_json::json!({ "type": "userMessage" })).is_none());
+        assert!(normalize_app_server_item(&serde_json::json!({ "type": "plan" })).is_none());
+    }
+
+    #[test]
+    fn normalize_app_server_item_maps_missing_agent_text_to_null() {
+        // Some servers may omit `text` on agentMessage; the normalized exec
+        // shape must carry an explicit null (=> handled as "no text"), not
+        // panic or invent content.
+        let item = serde_json::json!({"id": "item_1", "type": "agentMessage"});
+        let normalized = normalize_app_server_item(&item).expect("normalizes");
+        assert_eq!(normalized["type"], "agent_message");
+        assert!(normalized["text"].is_null());
+    }
+
+    #[test]
+    fn app_server_reasoning_text_flattens_content_then_summary() {
+        let item = serde_json::json!({
+            "type": "reasoning",
+            "content": [{ "text": "step one" }, { "text": "step two" }],
+            "summary": [{ "text": "ignored while content is present" }]
+        });
+        assert_eq!(app_server_reasoning_text(&item), "step one\nstep two");
+
+        // Falls back to summary only when content is empty.
+        let summary_only = serde_json::json!({
+            "type": "reasoning", "content": [], "summary": [{ "text": "s" }]
+        });
+        assert_eq!(app_server_reasoning_text(&summary_only), "s");
+
+        // Empty reasoning yields no text (item is then dropped by the caller).
+        let empty = serde_json::json!({ "type": "reasoning" });
+        assert!(app_server_reasoning_text(&empty).is_empty());
+        assert!(normalize_app_server_item(&empty).is_none());
+    }
+
+    #[test]
+    fn run_usage_from_app_server_maps_total_breakdown() {
+        let token_usage = serde_json::json!({
+            "total": {
+                "inputTokens": 100, "outputTokens": 40,
+                "reasoningOutputTokens": 10, "cachedInputTokens": 5, "totalTokens": 150
+            },
+            "last": {}
+        });
+        let usage = run_usage_from_app_server(Some(&token_usage)).unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(40));
+        assert_eq!(usage.reasoning_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(150));
+
+        // No usage at all -> None (don't clobber a prior value with zeros).
+        assert!(run_usage_from_app_server(None).is_none());
+        assert!(run_usage_from_app_server(Some(&serde_json::json!({}))).is_none());
     }
 }
