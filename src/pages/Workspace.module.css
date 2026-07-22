@@ -914,6 +914,12 @@
   background: var(--color-overlay-04);
 }
 
+.fileTreeRowDropTarget,
+.fileTreeRowDropTarget:hover {
+  background: var(--color-primary-alpha-12, rgba(99, 102, 241, 0.12));
+  box-shadow: inset 0 0 0 1px var(--color-primary-alpha-30, rgba(99, 102, 241, 0.3));
+}
+
 .fileTreeRow:focus-visible {
   outline: 2px solid var(--color-primary-alpha-30);
   outline-offset: -2px;

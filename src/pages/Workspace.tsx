@@ -21,6 +21,7 @@ import {
   markWorkspaceOpened,
   openWorkspacePath,
   deleteWorkspacePath,
+  moveWorkspacePath,
   runWorkspaceNow,
   searchWorkspaceArtifacts,
   setWorkspaceSchedulePaused,
@@ -575,7 +576,68 @@ interface ArtifactTreeRowProps {
   onToggle: (path: string) => void;
   onSelect?: (entry: WorkspaceFileEntry) => void;
   onDelete?: (entry: WorkspaceDirEntry) => void;
+  draggingArtifact?: ArtifactDragPayload | null;
+  dropTargetPath?: string | null;
+  onDragStarted?: (drag: ArtifactDragPayload) => void;
+  onDragEnded?: () => void;
+  onFolderDragOver?: (
+    entry: WorkspaceDirEntry,
+    event: React.DragEvent<HTMLDivElement>
+  ) => void;
+  onFolderDragLeave?: (
+    entry: WorkspaceDirEntry,
+    event: React.DragEvent<HTMLDivElement>
+  ) => void;
+  onFolderDrop?: (entry: WorkspaceDirEntry, event: React.DragEvent<HTMLDivElement>) => void;
 }
+
+interface ArtifactDragPayload {
+  workspaceId: string;
+  path: string;
+  kind: string;
+  name: string;
+}
+
+const ARTIFACT_DND_MIME = 'application/x-clai-artifact';
+const ARTIFACT_FOLDER_HOVER_EXPAND_MS = 2000;
+
+const artifactParentPath = (path: string): string =>
+  path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+
+const parseArtifactDragPayload = (raw: string): ArtifactDragPayload | null => {
+  try {
+    const parsed = JSON.parse(raw) as Partial<ArtifactDragPayload>;
+    if (
+      typeof parsed.workspaceId === 'string' &&
+      typeof parsed.path === 'string' &&
+      typeof parsed.kind === 'string' &&
+      typeof parsed.name === 'string'
+    ) {
+      return {
+        workspaceId: parsed.workspaceId,
+        path: parsed.path,
+        kind: parsed.kind,
+        name: parsed.name,
+      };
+    }
+  } catch {
+    // Ignore malformed drag payloads from outside CLAI.
+  }
+  return null;
+};
+
+const canMoveArtifactToFolder = (
+  drag: ArtifactDragPayload | null | undefined,
+  workspaceId: string,
+  destPath: string
+): drag is ArtifactDragPayload => {
+  if (!drag || drag.workspaceId !== workspaceId) return false;
+  if (artifactParentPath(drag.path) === destPath) return false;
+  if (drag.kind === 'directory' && (drag.path === destPath || destPath.startsWith(`${drag.path}/`))) {
+    return false;
+  }
+  return true;
+};
 
 const ArtifactTreeRow = ({
   row,
@@ -584,6 +646,13 @@ const ArtifactTreeRow = ({
   onToggle,
   onSelect,
   onDelete,
+  draggingArtifact,
+  dropTargetPath,
+  onDragStarted,
+  onDragEnded,
+  onFolderDragOver,
+  onFolderDragLeave,
+  onFolderDrop,
 }: ArtifactTreeRowProps) => {
   // Two-click delete (Insomnia-style): the first click ARMS the button (turns
   // red), the second click deletes. No blocking dialog — window.confirm does
@@ -620,6 +689,8 @@ const ArtifactTreeRow = ({
 
   const { entry, depth } = row;
   const isFolder = entry.kind === 'directory';
+  const isMoveDropTarget =
+    isFolder && dropTargetPath === entry.path && canMoveArtifactToFolder(draggingArtifact, workspaceId, entry.path);
   const handleClick = () => {
     if (isFolder) onToggle(entry.path);
     else onSelect?.(dirEntryToFileEntry(entry));
@@ -632,20 +703,26 @@ const ArtifactTreeRow = ({
       onDragStart={(event) => {
         // Payload for cross-workspace copy: dropped onto a rail row in
         // WorkspaceRail. A custom MIME keeps it distinct from OS file drops.
-        event.dataTransfer.setData(
-          'application/x-clai-artifact',
-          JSON.stringify({ workspaceId, path: entry.path, kind: entry.kind, name: entry.name })
-        );
-        event.dataTransfer.effectAllowed = 'copy';
+        const payload = { workspaceId, path: entry.path, kind: entry.kind, name: entry.name };
+        event.dataTransfer.setData(ARTIFACT_DND_MIME, JSON.stringify(payload));
+        event.dataTransfer.effectAllowed = 'copyMove';
+        onDragStarted?.(payload);
         // Drag ghost = the row itself (name + icon), not the whole wrapper —
         // otherwise the hover-only delete/trash button bleeds into the image.
         const rowEl = event.currentTarget.querySelector('button');
         if (rowEl) event.dataTransfer.setDragImage(rowEl, 16, 12);
       }}
+      onDragEnd={onDragEnded}
+      onDragEnter={isFolder ? (event) => onFolderDragOver?.(entry, event) : undefined}
+      onDragOver={isFolder ? (event) => onFolderDragOver?.(entry, event) : undefined}
+      onDragLeave={isFolder ? (event) => onFolderDragLeave?.(entry, event) : undefined}
+      onDrop={isFolder ? (event) => onFolderDrop?.(entry, event) : undefined}
     >
       <button
         type="button"
-        className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}`}
+        className={`${styles.fileTreeRow} ${isFolder ? styles.fileTreeRowFolder : styles.fileTreeRowFile}${
+          isMoveDropTarget ? ` ${styles.fileTreeRowDropTarget}` : ''
+        }`}
         style={{ paddingInlineStart: 8 + depth * 14 }}
         onClick={handleClick}
         title={entry.path}
@@ -707,6 +784,8 @@ interface ArtifactsListProps {
   /** Called after a file/folder is deleted, with its workspace-relative path,
    *  so the parent can close a preview showing the (now-gone) file. */
   onDeleted?: (path: string) => void;
+  /** Called after a file/folder moves within the same workspace. */
+  onMoved?: (oldPath: string) => void;
 }
 
 const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
@@ -721,6 +800,7 @@ const ArtifactsList = ({
   latestModifiedAt,
   onSelect,
   onDeleted,
+  onMoved,
 }: ArtifactsListProps) => {
   const [query, setQuery] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -729,10 +809,22 @@ const ArtifactsList = ({
   );
   const loadingRef = useRef<Set<string>>(new Set());
   const autoExpandedRef = useRef(false);
+  const [draggingArtifact, setDraggingArtifact] = useState<ArtifactDragPayload | null>(null);
+  const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
+  const hoverExpandTimerRef = useRef<number | null>(null);
+  const hoverExpandPathRef = useRef<string | null>(null);
 
   const [searchResults, setSearchResults] = useState<WorkspaceFileEntry[] | null>(null);
   const [searching, setSearching] = useState(false);
   const trimmedQuery = query.trim();
+
+  const clearHoverExpandTimer = useCallback(() => {
+    if (hoverExpandTimerRef.current !== null) {
+      window.clearTimeout(hoverExpandTimerRef.current);
+      hoverExpandTimerRef.current = null;
+    }
+    hoverExpandPathRef.current = null;
+  }, []);
 
   // Mirror of `childrenByPath` so callbacks/effects can read the latest
   // value without subscribing to it (avoids re-firing the workspace-change
@@ -741,6 +833,13 @@ const ArtifactsList = ({
   useEffect(() => {
     childrenByPathRef.current = childrenByPath;
   });
+
+  const expandedRef = useRef(expanded);
+  useEffect(() => {
+    expandedRef.current = expanded;
+  });
+
+  useEffect(() => () => clearHoverExpandTimer(), [clearHoverExpandTimer]);
 
   // Load (or reload) a single directory level. `force` bypasses the cache so the
   // poll-driven refresh can pick up newly created files. The cache check
@@ -774,11 +873,15 @@ const ArtifactsList = ({
   useEffect(() => {
     autoExpandedRef.current = false;
     loadingRef.current = new Set();
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resets file-tree state and triggers a root reload when the workspace switches; the lint cannot model a 'reset then async-load' effect that runs once per workspaceId.
+    clearHoverExpandTimer();
+    /* eslint-disable react-hooks/set-state-in-effect -- Resets file-tree drag/tree state and triggers a root reload when the workspace switches; the lint cannot model a 'reset then async-load' effect that runs once per workspaceId. */
+    setDraggingArtifact(null);
+    setDropTargetPath(null);
     setExpanded(new Set());
     setChildrenByPath(new Map());
+    /* eslint-enable react-hooks/set-state-in-effect */
     void loadDir('', true);
-  }, [workspaceId, loadDir]);
+  }, [workspaceId, loadDir, clearHoverExpandTimer]);
 
   // When the artifact tree changes, refresh every directory level we've
   // already loaded so the open tree stays live. Keyed on the count (files
@@ -889,6 +992,105 @@ const ArtifactsList = ({
     [workspaceId, loadDir, onDeleted]
   );
 
+  const handleDragEnded = useCallback(() => {
+    clearHoverExpandTimer();
+    setDraggingArtifact(null);
+    setDropTargetPath(null);
+  }, [clearHoverExpandTimer]);
+
+  const scheduleFolderHoverExpand = useCallback(
+    (path: string) => {
+      if (expandedRef.current.has(path) || hoverExpandPathRef.current === path) return;
+      clearHoverExpandTimer();
+      hoverExpandPathRef.current = path;
+      hoverExpandTimerRef.current = window.setTimeout(() => {
+        hoverExpandTimerRef.current = null;
+        hoverExpandPathRef.current = null;
+        setExpanded((prev) => {
+          if (prev.has(path)) return prev;
+          const next = new Set(prev);
+          next.add(path);
+          return next;
+        });
+        void loadDir(path);
+      }, ARTIFACT_FOLDER_HOVER_EXPAND_MS);
+    },
+    [clearHoverExpandTimer, loadDir]
+  );
+
+  const handleFolderDragOver = useCallback(
+    (entry: WorkspaceDirEntry, event: React.DragEvent<HTMLDivElement>) => {
+      if (!canMoveArtifactToFolder(draggingArtifact, workspaceId, entry.path)) {
+        setDropTargetPath((current) => (current === entry.path ? null : current));
+        if (hoverExpandPathRef.current === entry.path) clearHoverExpandTimer();
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = 'move';
+      setDropTargetPath((current) => (current === entry.path ? current : entry.path));
+      scheduleFolderHoverExpand(entry.path);
+    },
+    [clearHoverExpandTimer, draggingArtifact, scheduleFolderHoverExpand, workspaceId]
+  );
+
+  const handleFolderDragLeave = useCallback(
+    (entry: WorkspaceDirEntry, event: React.DragEvent<HTMLDivElement>) => {
+      const related = event.relatedTarget as Node | null;
+      if (related && event.currentTarget.contains(related)) return;
+      setDropTargetPath((current) => (current === entry.path ? null : current));
+      if (hoverExpandPathRef.current === entry.path) clearHoverExpandTimer();
+    },
+    [clearHoverExpandTimer]
+  );
+
+  const handleFolderDrop = useCallback(
+    async (entry: WorkspaceDirEntry, event: React.DragEvent<HTMLDivElement>) => {
+      const transferPayload = parseArtifactDragPayload(event.dataTransfer.getData(ARTIFACT_DND_MIME));
+      const drag = draggingArtifact ?? transferPayload;
+      clearHoverExpandTimer();
+      setDropTargetPath(null);
+
+      if (!canMoveArtifactToFolder(drag, workspaceId, entry.path)) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      try {
+        await moveWorkspacePath(workspaceId, drag.path, entry.path);
+        onMoved?.(drag.path);
+
+        if (drag.kind === 'directory') {
+          const prefix = `${drag.path}/`;
+          setExpanded((prev) => {
+            const next = new Set<string>();
+            for (const path of prev) {
+              if (path !== drag.path && !path.startsWith(prefix)) next.add(path);
+            }
+            return next;
+          });
+          setChildrenByPath((prev) => {
+            const next = new Map(prev);
+            for (const path of next.keys()) {
+              if (path === drag.path || path.startsWith(prefix)) next.delete(path);
+            }
+            return next;
+          });
+        }
+
+        const refreshPaths = new Set([artifactParentPath(drag.path), entry.path]);
+        await Promise.all(Array.from(refreshPaths).map((path) => loadDir(path, true)));
+      } catch (error) {
+        console.error(`Failed to move "${drag.path}" into "${entry.path}":`, error);
+        window.alert(`Failed to move \u201c${drag.name}\u201d: ${String(error)}`);
+      } finally {
+        setDraggingArtifact(null);
+      }
+    },
+    [clearHoverExpandTimer, draggingArtifact, loadDir, onMoved, workspaceId]
+  );
+
   const visibleRows = useMemo(
     () => flattenLoadedTree(childrenByPath, expanded),
     [childrenByPath, expanded]
@@ -904,9 +1106,28 @@ const ArtifactsList = ({
         onToggle={handleToggle}
         onSelect={onSelect}
         onDelete={handleDelete}
+        draggingArtifact={draggingArtifact}
+        dropTargetPath={dropTargetPath}
+        onDragStarted={setDraggingArtifact}
+        onDragEnded={handleDragEnded}
+        onFolderDragOver={handleFolderDragOver}
+        onFolderDragLeave={handleFolderDragLeave}
+        onFolderDrop={handleFolderDrop}
       />
     ),
-    [expanded, handleToggle, onSelect, handleDelete, workspaceId]
+    [
+      draggingArtifact,
+      dropTargetPath,
+      expanded,
+      handleDelete,
+      handleDragEnded,
+      handleFolderDragLeave,
+      handleFolderDragOver,
+      handleFolderDrop,
+      handleToggle,
+      onSelect,
+      workspaceId,
+    ]
   );
 
   return (
@@ -1542,6 +1763,19 @@ const Workspace = () => {
       const open = previewEntry?.entry?.path;
       if (!open) return;
       if (open === deletedPath || open.startsWith(`${deletedPath}/`)) {
+        patchWorkspaceUi({ previewEntry: null });
+      }
+    },
+    [previewEntry, patchWorkspaceUi]
+  );
+
+  // When an artifact moves inside the tree, close a preview still pointing at
+  // the old location.
+  const handleArtifactMoved = useCallback(
+    (oldPath: string) => {
+      const open = previewEntry?.entry?.path;
+      if (!open) return;
+      if (open === oldPath || open.startsWith(`${oldPath}/`)) {
         patchWorkspaceUi({ previewEntry: null });
       }
     },
@@ -2322,6 +2556,7 @@ const Workspace = () => {
                   latestModifiedAt={Number(snapshot?.artifactLatestModifiedAt ?? 0)}
                   onSelect={handleSelectArtifact}
                   onDeleted={handleArtifactDeleted}
+                  onMoved={handleArtifactMoved}
                 />
               )}
             </div>
