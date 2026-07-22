@@ -97,7 +97,6 @@ fn load_workspace_agent_as_config(
                 },
                 enabled: agent.enabled,
                 selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
-                    &app_config,
                     &agent.selected_mcp_servers,
                 ),
                 provider_connection_ids: agent.provider_connection_ids.clone(),

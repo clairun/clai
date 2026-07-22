@@ -838,7 +838,7 @@ pub(crate) fn resolve_workspace_descriptor(
         execution.web.enabled = true;
     }
     let selected_mcp_server_ids = manager
-        .map(|agent| workspace_config::refs_to_mcp_ids(&app_config, &agent.selected_mcp_servers))
+        .map(|agent| workspace_config::refs_to_mcp_ids(&agent.selected_mcp_servers))
         .unwrap_or_default();
     let selected_mcp_server_names = selected_mcp_server_ids
         .iter()
@@ -855,7 +855,7 @@ pub(crate) fn resolve_workspace_descriptor(
     // `selected_mcp_servers` without touching the workspace-level disabled
     // list, so a server re-selected there must not surface as disabled here.
     let disabled_mcp_server_ids: Vec<String> =
-        workspace_config::refs_to_mcp_ids(&app_config, &config.disabled_mcp_servers)
+        workspace_config::refs_to_mcp_ids(&config.disabled_mcp_servers)
             .into_iter()
             .filter(|id| !selected_mcp_server_ids.contains(id))
             .collect();
@@ -1044,10 +1044,7 @@ fn workspace_agent_row_from_config(
         name: agent.name.clone(),
         description: agent.description.clone(),
         selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
-        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
-            app_config,
-            &agent.selected_mcp_servers,
-        ),
+        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(&agent.selected_mcp_servers),
         provider_connection_ids: agent.provider_connection_ids.clone(),
         execution: agent.execution.clone(),
         created_at: agent.created_at,
@@ -2749,12 +2746,10 @@ pub async fn workspace_update_session_mcp(
         // toggle survives app restarts. The disabled list is written even
         // when no manager row exists, so the toggle still persists for a
         // manager-less workspace.
-        let app_config = app_config(state.inner())?;
         let manager_id = workspace_manager.as_ref().map(|manager| manager.id.clone());
         update_workspace_config_for_id(state.inner(), &descriptor.workspace_id, |config| {
             let now = chrono::Utc::now().timestamp_millis();
-            config.disabled_mcp_servers =
-                workspace_config::mcp_ids_to_refs(&app_config, &disabled_mcp_ids);
+            config.disabled_mcp_servers = workspace_config::mcp_ids_to_refs(&disabled_mcp_ids);
             if let Some(manager_id) = manager_id.as_deref() {
                 if let Some(agent) = config
                     .agents
@@ -2762,7 +2757,7 @@ pub async fn workspace_update_session_mcp(
                     .find(|agent| agent.id == manager_id)
                 {
                     agent.selected_mcp_servers =
-                        workspace_config::mcp_ids_to_refs(&app_config, &enabled_mcp_ids);
+                        workspace_config::mcp_ids_to_refs(&enabled_mcp_ids);
                     agent.updated_at = now;
                 }
             }
@@ -4067,11 +4062,11 @@ mod tests {
         assert!(parsed.disabled_mcp_servers.is_empty());
 
         config.disabled_mcp_servers = vec![workspace_config::McpRef {
-            name: "b".to_string(),
+            id: "srv-b".to_string(),
         }];
         let json = serde_json::to_value(&config).unwrap();
         let back: workspace_config::WorkspaceConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.disabled_mcp_servers.len(), 1);
-        assert_eq!(back.disabled_mcp_servers[0].name, "b");
+        assert_eq!(back.disabled_mcp_servers[0].id, "srv-b");
     }
 }

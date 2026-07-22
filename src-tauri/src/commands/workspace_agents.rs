@@ -133,10 +133,7 @@ pub async fn workspace_create_agent(
             &app_config,
             &request.selected_skill_ids,
         ),
-        selected_mcp_servers: workspace_config::mcp_ids_to_refs(
-            &app_config,
-            &request.selected_mcp_server_ids,
-        ),
+        selected_mcp_servers: workspace_config::mcp_ids_to_refs(&request.selected_mcp_server_ids),
         provider_connection_ids: request.provider_connection_ids,
         execution,
         created_at: now,
@@ -183,11 +180,11 @@ pub async fn workspace_update_agent(
         agent.selected_skills =
             workspace_config::skill_ids_to_refs(&app_config, &request.selected_skill_ids);
         agent.selected_mcp_servers =
-            workspace_config::mcp_ids_to_refs(&app_config, &request.selected_mcp_server_ids);
-        let selected_names: Vec<String> = agent
+            workspace_config::mcp_ids_to_refs(&request.selected_mcp_server_ids);
+        let selected_ids: Vec<String> = agent
             .selected_mcp_servers
             .iter()
-            .map(|mcp_ref| mcp_ref.name.clone())
+            .map(|mcp_ref| mcp_ref.id.clone())
             .collect();
         agent.provider_connection_ids = request.provider_connection_ids;
         agent.execution = request.execution;
@@ -199,7 +196,7 @@ pub async fn workspace_update_agent(
             // keeps the enabled/disabled lists disjoint.
             config
                 .disabled_mcp_servers
-                .retain(|mcp_ref| !selected_names.contains(&mcp_ref.name));
+                .retain(|mcp_ref| !selected_ids.contains(&mcp_ref.id));
         }
         config.updated_at = now;
         Ok(())
@@ -323,10 +320,7 @@ pub(crate) fn detail_from_agent(
         name: agent.name.clone(),
         description: agent.description.clone(),
         selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
-        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(
-            app_config,
-            &agent.selected_mcp_servers,
-        ),
+        selected_mcp_server_ids: workspace_config::refs_to_mcp_ids(&agent.selected_mcp_servers),
         provider_connection_ids: agent.provider_connection_ids.clone(),
         execution: agent.execution.clone(),
         enabled: agent.enabled,

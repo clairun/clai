@@ -193,10 +193,16 @@ pub enum SkillRef {
     Remote { url: String, slug: String },
 }
 
+/// Reference to an AppConfig MCP server, stored by server id. The id is
+/// resolved to a display name at render time. Legacy configs stored
+/// `{ "name": ... }` refs; those deserialize with an empty id and are
+/// dropped on [`load`] — users re-attach the server instead of CLAI
+/// guessing a name→id migration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct McpRef {
-    pub name: String,
+    #[serde(default)]
+    pub id: String,
 }
 
 impl WorkspaceConfig {
@@ -297,7 +303,24 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
         path: path.clone(),
         source,
     })?;
-    serde_json::from_str(&contents).map_err(|source| WorkspaceConfigError::Parse { path, source })
+    let mut config: WorkspaceConfig = serde_json::from_str(&contents)
+        .map_err(|source| WorkspaceConfigError::Parse { path, source })?;
+    prune_legacy_mcp_refs(&mut config);
+    Ok(config)
+}
+
+/// Drops MCP refs without a server id. Legacy configs referenced servers
+/// by name; those refs are removed on load (the next save persists the
+/// removal) and the user re-attaches the server from the UI.
+fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
+    config
+        .disabled_mcp_servers
+        .retain(|mcp_ref| !mcp_ref.id.is_empty());
+    for agent in &mut config.agents {
+        agent
+            .selected_mcp_servers
+            .retain(|mcp_ref| !mcp_ref.id.is_empty());
+    }
 }
 
 pub fn save(root: &Path, config: &WorkspaceConfig) -> Result<(), WorkspaceConfigError> {
@@ -429,31 +452,12 @@ pub fn refs_to_skill_ids(config: &AppConfig, refs: &[SkillRef]) -> Vec<String> {
         .collect()
 }
 
-pub fn mcp_ids_to_refs(config: &AppConfig, ids: &[String]) -> Vec<McpRef> {
-    ids.iter()
-        .map(|id| {
-            let name = config
-                .mcp_servers
-                .iter()
-                .find(|server| server.id == *id)
-                .map(|server| server.name.clone())
-                .unwrap_or_else(|| id.clone());
-            McpRef { name }
-        })
-        .collect()
+pub fn mcp_ids_to_refs(ids: &[String]) -> Vec<McpRef> {
+    ids.iter().map(|id| McpRef { id: id.clone() }).collect()
 }
 
-pub fn refs_to_mcp_ids(config: &AppConfig, refs: &[McpRef]) -> Vec<String> {
-    refs.iter()
-        .map(|mcp_ref| {
-            config
-                .mcp_servers
-                .iter()
-                .find(|server| server.name == mcp_ref.name)
-                .map(|server| server.id.clone())
-                .unwrap_or_else(|| mcp_ref.name.clone())
-        })
-        .collect()
+pub fn refs_to_mcp_ids(refs: &[McpRef]) -> Vec<String> {
+    refs.iter().map(|mcp_ref| mcp_ref.id.clone()).collect()
 }
 
 #[cfg(test)]
@@ -529,6 +533,43 @@ mod attach_provider_tests {
     // -------------------------------------------------------------------
     // update(): atomic read-modify-write
     // -------------------------------------------------------------------
+
+    #[test]
+    fn load_drops_legacy_name_only_mcp_refs() {
+        // Legacy configs stored MCP refs as { "name": ... }. Per the
+        // migration policy those refs are dropped on load (users re-attach
+        // the server); id-based refs survive untouched.
+        let tmp = tempfile::tempdir().unwrap();
+        let config = workspace();
+        save(tmp.path(), &config).unwrap();
+
+        let path = config_path(tmp.path());
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        raw["disabledMcpServers"] = serde_json::json!([
+            { "name": "legacy-by-name" },
+            { "id": "srv-1" }
+        ]);
+        raw["agents"][0]["selectedMcpServers"] = serde_json::json!([
+            { "name": "legacy-by-name" },
+            { "id": "srv-2" }
+        ]);
+        fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.disabled_mcp_servers,
+            vec![McpRef {
+                id: "srv-1".to_string()
+            }]
+        );
+        assert_eq!(
+            loaded.agents[0].selected_mcp_servers,
+            vec![McpRef {
+                id: "srv-2".to_string()
+            }]
+        );
+    }
 
     #[test]
     fn update_persists_mutation_and_returns_saved_config() {
