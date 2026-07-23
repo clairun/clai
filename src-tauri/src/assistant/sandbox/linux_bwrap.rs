@@ -35,8 +35,8 @@ fn launch_argv(bwrap_args: Vec<OsString>, in_flatpak: bool) -> (&'static str, Ve
     }
 }
 
-pub async fn run(command: SandboxCommand) -> Result<SandboxCommandOutput, String> {
-    validate_grants_exist(&command).await?;
+pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, String> {
+    prune_missing_grants(&mut command).await;
     let args = bwrap_args(&command)?;
     let in_flatpak = crate::providers::is_flatpak();
     let (program, launch_args) = launch_argv(args, in_flatpak);
@@ -202,10 +202,18 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
     Ok(())
 }
 
-/// Verify every path grant still exists before launching, so a stale grant
-/// surfaces as a clear message rather than a silently-skipped bind (grants use
-/// `*-bind-try`, so a vanished one would otherwise just be absent inside the
-/// sandbox).
+/// Drop path grants whose host path no longer exists before launching.
+///
+/// A grant can outlive its target — e.g. an `always`-scoped grant pointing at
+/// a directory the user later deleted. Failing hard here would kill EVERY
+/// sandboxed command for that agent with no way to recover (observed
+/// 2026-07-05: one stale grant made all `bash_exec` calls abort with
+/// "Sandbox path grant does not exist"). Pruning instead makes the stale path
+/// simply absent inside the sandbox, which matches what an unsandboxed shell
+/// would see (plain ENOENT at use time) — grants already bind with
+/// `*-bind-try`, so bwrap itself never aborts on them. Pruning can only ever
+/// REMOVE access, never widen it. Each pruned grant is logged so the stale
+/// entry can be cleaned from agent settings.
 ///
 /// Existence MUST be probed in the same mount namespace the bind resolves in.
 /// In a Flatpak build the inner `bwrap` runs on the host via
@@ -213,33 +221,38 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
 /// *host* filesystem — but this process runs in the Flatpak namespace, where
 /// `/tmp` is a private tmpfs and `/opt`, `/mnt`, … aren't mapped at all. A
 /// plain in-process `Path::exists()` would then report a perfectly valid host
-/// path (e.g. `/tmp/foo`) as missing and wrongly abort the command. So inside
+/// path (e.g. `/tmp/foo`) as missing and wrongly prune a live grant. So inside
 /// Flatpak we probe on the host with `flatpak-spawn --host test -e`.
-async fn validate_grants_exist(command: &SandboxCommand) -> Result<(), String> {
+async fn prune_missing_grants(command: &mut SandboxCommand) {
     let in_flatpak = crate::providers::is_flatpak();
-    for grant in &command.profile.path_grants {
+    let mut kept = Vec::with_capacity(command.profile.path_grants.len());
+    for grant in command.profile.path_grants.drain(..) {
         let exists = if in_flatpak {
             host_path_exists(&grant.host_path).await
         } else {
             grant.host_path.exists()
         };
-        if !exists {
-            return Err(format!(
-                "Sandbox path grant does not exist: {}",
+        if exists {
+            kept.push(grant);
+        } else {
+            tracing::warn!(
+                "Skipping filesystem path grant whose path no longer exists: {} — the \
+                 sandbox launches without it. Remove the stale grant from agent \
+                 settings to silence this warning.",
                 grant.host_path.display()
-            ));
+            );
         }
     }
-    Ok(())
+    command.profile.path_grants = kept;
 }
 
 /// Probe path existence on the *host* via `flatpak-spawn --host test -e`.
 ///
 /// Fails open (returns `true`) when the probe itself can't be spawned — e.g.
 /// `flatpak-spawn` is missing because the `org.freedesktop.Flatpak` talk
-/// permission isn't granted. In that case the real sandbox launch fails with
-/// the dedicated "flatpak-spawn not found" message, which is clearer than a
-/// misattributed "grant does not exist".
+/// permission isn't granted. Failing open keeps the grant, whose `*-bind-try`
+/// bind then degrades gracefully on its own; the real sandbox launch surfaces
+/// the dedicated "flatpak-spawn not found" message for the spawn problem.
 async fn host_path_exists(path: &Path) -> bool {
     let status = Command::new(FLATPAK_SPAWN_BIN)
         .arg("--host")
@@ -1190,6 +1203,7 @@ mod tests {
     #[test]
     fn missing_grant_binds_leniently_so_sandbox_still_launches() {
         let workspace = tempfile::tempdir().unwrap();
+        let stale = vanished_path();
         let command = SandboxCommand {
             argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
             cwd: workspace.path().to_path_buf(),
@@ -1198,7 +1212,7 @@ mod tests {
             profile: SandboxProfile {
                 workspace_root: workspace.path().to_path_buf(),
                 path_grants: vec![SandboxPathGrant {
-                    host_path: PathBuf::from("/tmp/clai-this-path-does-not-exist-xyz.md"),
+                    host_path: stale.clone(),
                     access: SandboxPathAccess::ReadOnly,
                 }],
                 network: SandboxNetworkMode::Host,
@@ -1218,7 +1232,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
 
-        let grant_str = "/tmp/clai-this-path-does-not-exist-xyz.md".to_string();
+        let grant_str = stale.display().to_string();
         let mut found = false;
         for chunk_start in (0..rendered.len().saturating_sub(2)).step_by(3) {
             if rendered[chunk_start + 2] == grant_str {
@@ -1232,26 +1246,46 @@ mod tests {
         assert!(found, "grant bind not emitted; rendered: {rendered:?}");
     }
 
-    // Outside Flatpak, grant existence is probed in-process (the same namespace
-    // bwrap runs in), so a genuinely-missing grant is rejected up front with a
-    // clear message instead of a cryptic bind failure.
+    /// A path that is guaranteed absent: a tempdir created and immediately
+    /// dropped (deleted). Safer than hardcoding a literal that could one day
+    /// exist and silently un-pin the regression.
+    fn vanished_path() -> PathBuf {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-grant");
+        drop(dir);
+        assert!(!path.exists());
+        path
+    }
+
+    // A grant whose path has vanished (e.g. an `always` grant to a workspace
+    // the user deleted) is PRUNED so the command still runs; live grants are
+    // kept. Previously this aborted every bash_exec up front with
+    // "Sandbox path grant does not exist".
     #[tokio::test]
-    async fn validate_grants_exist_rejects_missing_grant_off_flatpak() {
+    async fn prune_missing_grants_drops_stale_grant_and_keeps_live_ones() {
         if crate::providers::is_flatpak() {
-            return; // off-Flatpak assertion only
+            return; // off-Flatpak assertion only (in-process existence probe)
         }
         let workspace = tempfile::tempdir().unwrap();
-        let command = SandboxCommand {
+        let live = tempfile::tempdir().unwrap();
+        let live_grant = SandboxPathGrant {
+            host_path: live.path().to_path_buf(),
+            access: SandboxPathAccess::ReadWrite,
+        };
+        let mut command = SandboxCommand {
             argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
             cwd: workspace.path().to_path_buf(),
             timeout_ms: 1_000,
             max_output_chars: 1_000,
             profile: SandboxProfile {
                 workspace_root: workspace.path().to_path_buf(),
-                path_grants: vec![SandboxPathGrant {
-                    host_path: PathBuf::from("/tmp/clai-this-path-does-not-exist-xyz.md"),
-                    access: SandboxPathAccess::ReadOnly,
-                }],
+                path_grants: vec![
+                    SandboxPathGrant {
+                        host_path: vanished_path(),
+                        access: SandboxPathAccess::ReadOnly,
+                    },
+                    live_grant.clone(),
+                ],
                 network: SandboxNetworkMode::Host,
                 session_bus: SandboxSessionBusMode::Deny,
                 env: SandboxEnv::filtered_from_iter(
@@ -1262,33 +1296,33 @@ mod tests {
             },
         };
 
-        let err = validate_grants_exist(&command)
-            .await
-            .expect_err("missing grant should be rejected");
-        assert!(
-            err.contains("Sandbox path grant does not exist"),
-            "unexpected error: {err}"
+        prune_missing_grants(&mut command).await;
+
+        assert_eq!(
+            command.profile.path_grants,
+            vec![live_grant],
+            "stale grant should be pruned, live grant kept"
         );
     }
 
-    // An existing grant passes validation (and bwrap_args no longer blocks on
-    // grant existence at all — that responsibility moved to validate_grants_exist).
+    // End-to-end regression for the "deleted grant path breaks bash_exec
+    // entirely" bug: launch a real sandbox with a grant whose path doesn't
+    // exist and assert the command still runs.
     #[tokio::test]
-    async fn validate_grants_exist_accepts_present_grant() {
+    async fn run_succeeds_despite_missing_grant_path() {
         let workspace = tempfile::tempdir().unwrap();
-        let granted = tempfile::tempdir().unwrap();
         let command = SandboxCommand {
             argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
             cwd: workspace.path().to_path_buf(),
-            timeout_ms: 1_000,
+            timeout_ms: 5_000,
             max_output_chars: 1_000,
             profile: SandboxProfile {
                 workspace_root: workspace.path().to_path_buf(),
                 path_grants: vec![SandboxPathGrant {
-                    host_path: granted.path().to_path_buf(),
+                    host_path: vanished_path(),
                     access: SandboxPathAccess::ReadOnly,
                 }],
-                network: SandboxNetworkMode::Host,
+                network: SandboxNetworkMode::Disabled,
                 session_bus: SandboxSessionBusMode::Deny,
                 env: SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
@@ -1298,11 +1332,17 @@ mod tests {
             },
         };
 
-        // In Flatpak this probes the host (tempdir exists there too); off
-        // Flatpak it probes in-process. Either way a present path passes.
-        validate_grants_exist(&command)
-            .await
-            .expect("present grant should pass validation");
+        let output = match run(command).await {
+            Ok(output) => output,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
+        };
+
+        assert!(
+            output.success,
+            "command should succeed despite the stale grant; stderr: {}",
+            output.stderr
+        );
     }
 
     // End-to-end variant of the regression test: build a real workspace under
