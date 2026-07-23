@@ -8,6 +8,8 @@
 
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import type { AppUpdateCheckResult, AppUpdateStatus, AutoUpdateConfig } from '../../generated/bindings';
+import { installAppUpdate, installEventText, updateErrorText } from '../../utils/appUpdates';
 import { openExternal } from '../../utils/openExternal';
 import styles from './AboutSettings.module.css';
 
@@ -23,6 +25,12 @@ const GitHubIcon = () => (
 
 const AboutSettings = () => {
   const [version, setVersion] = useState('');
+  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [updateError, setUpdateError] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [savingAutoUpdate, setSavingAutoUpdate] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [installProgress, setInstallProgress] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -41,6 +49,85 @@ const AboutSettings = () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<AppUpdateStatus>('get_app_update_status')
+      .then((status) => {
+        if (!cancelled) setUpdateStatus(status);
+      })
+      .catch((err) => {
+        if (!cancelled) setUpdateError(updateErrorText(err, 'Failed to read update status.'));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persistAutoUpdate = (enabled: boolean) => {
+    if (!updateStatus || savingAutoUpdate) return;
+    const previousSettings = updateStatus.settings;
+    const settings: AutoUpdateConfig = { enabled };
+    setSavingAutoUpdate(true);
+    setUpdateError('');
+    setUpdateStatus((current) => (current ? { ...current, settings } : current));
+    invoke<AutoUpdateConfig>('set_auto_update_settings', { settings })
+      .then((saved) => {
+        setUpdateStatus((current) => (current ? { ...current, settings: saved } : current));
+      })
+      .catch((err) => {
+        setUpdateError(updateErrorText(err, 'Failed to save update settings.'));
+        setUpdateStatus((current) =>
+          current ? { ...current, settings: previousSettings } : current,
+        );
+      })
+      .finally(() => {
+        setSavingAutoUpdate(false);
+      });
+  };
+
+  const checkForUpdates = async () => {
+    setChecking(true);
+    setUpdateError('');
+    try {
+      const result = await invoke<AppUpdateCheckResult>('check_for_app_update');
+      setUpdateStatus({
+        settings: result.settings,
+        support: result.support,
+        lastCheck: result.lastCheck,
+      });
+    } catch (err) {
+      setUpdateError(updateErrorText(err, 'Failed to check for updates.'));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setInstalling(true);
+    setInstallProgress('Starting download...');
+    setUpdateError('');
+    try {
+      await installAppUpdate((event) => {
+        setInstallProgress(installEventText(event));
+      });
+    } catch (err) {
+      setUpdateError(updateErrorText(err, 'Failed to install update.'));
+      setInstalling(false);
+    }
+  };
+
+  const support = updateStatus?.support;
+  const lastCheck = updateStatus?.lastCheck;
+  const availableUpdate = lastCheck?.update ?? null;
+  const supportsUpdates = support?.supported ?? false;
+  const supportDescription = updateStatus
+    ? support?.reason || `${support?.platform ?? 'Desktop'} ${support?.bundleType ?? 'native'}`
+    : 'Checking update support...';
+  const supportBadge = updateStatus ? (supportsUpdates ? 'Available' : 'Unavailable') : 'Checking';
+  const updateSummary = availableUpdate
+    ? `CLAI v${availableUpdate.version} is available.`
+    : lastCheck?.error || (lastCheck ? 'CLAI is up to date.' : 'Not checked yet.');
 
   return (
     <div className={styles.hero}>
@@ -73,6 +160,67 @@ const AboutSettings = () => {
         <GitHubIcon />
         <span>View on GitHub</span>
       </button>
+
+      <div className={styles.updatePanel}>
+        <div className={styles.updateHeader}>
+          <div className={styles.updateTitleGroup}>
+            <span className={styles.updateTitle}>Updates</span>
+            <span className={styles.updateDesc}>{supportDescription}</span>
+          </div>
+          <span className={`${styles.updateBadge} ${supportsUpdates ? styles.updateBadgeOk : ''}`}>
+            {supportBadge}
+          </span>
+        </div>
+
+        <label className={styles.toggleRow}>
+          <span className={styles.toggleCopy}>
+            <span className={styles.toggleTitle}>Automatically check for updates</span>
+            <span className={styles.toggleDesc}>Enabled by default for supported builds.</span>
+          </span>
+          <span
+            className={`${styles.toggle} ${
+              updateStatus?.settings.enabled ? styles.toggleOn : ''
+            }`}
+          >
+            <input
+              type="checkbox"
+              className={styles.toggleInput}
+              checked={updateStatus?.settings.enabled ?? true}
+              onChange={(event) => persistAutoUpdate(event.target.checked)}
+              disabled={!updateStatus || savingAutoUpdate}
+            />
+            <span className={styles.toggleTrack}>
+              <span className={styles.toggleThumb} />
+            </span>
+          </span>
+        </label>
+
+        <div className={styles.updateStatus}>
+          <span>{installing ? installProgress : updateSummary}</span>
+          {updateError && <span className={styles.updateError}>{updateError}</span>}
+        </div>
+
+        <div className={styles.updateActions}>
+          <button
+            type="button"
+            className={styles.secondaryButton}
+            onClick={checkForUpdates}
+            disabled={checking || !supportsUpdates}
+          >
+            {checking ? 'Checking...' : 'Check for updates'}
+          </button>
+          {availableUpdate && (
+            <button
+              type="button"
+              className={styles.primaryButton}
+              onClick={installUpdate}
+              disabled={installing}
+            >
+              {installing ? 'Installing...' : 'Install and restart'}
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 };

@@ -85,3 +85,193 @@
   border-color: var(--color-border-hover);
   background: var(--color-bg-tertiary);
 }
+
+.updatePanel {
+  width: min(100%, 560px);
+  margin-top: 24px;
+  padding: 14px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  text-align: left;
+}
+
+.updateHeader,
+.toggleRow,
+.updateActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.updateTitleGroup,
+.toggleCopy,
+.updateStatus {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.updateTitle,
+.toggleTitle {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.updateDesc,
+.toggleDesc,
+.updateStatus {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.updateBadge {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--badge-radius);
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.updateBadgeOk {
+  border-color: var(--color-success-border, var(--color-success-alpha-20));
+  background: var(--color-success-bg, var(--color-success-alpha-10));
+  color: var(--color-success-dark);
+}
+
+.toggleRow {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+.toggle {
+  position: relative;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 24px;
+}
+
+.toggleInput {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.toggleTrack {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-medium);
+  background: var(--color-bg-tertiary);
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.toggleThumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast);
+}
+
+.toggleOn .toggleTrack {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+}
+
+.toggleOn .toggleThumb {
+  transform: translateX(18px);
+}
+
+.toggleInput:focus-visible + .toggleTrack {
+  box-shadow: var(--shadow-input-focus);
+}
+
+.updateStatus {
+  margin-top: 14px;
+  line-height: 1.4;
+}
+
+.updateError {
+  color: var(--color-critical);
+}
+
+.updateActions {
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
+.primaryButton,
+.secondaryButton {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.primaryButton {
+  border: 1px solid var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-text-on-primary);
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 88%, black);
+}
+
+.secondaryButton {
+  border: 1px solid var(--color-border-medium);
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+}
+
+.secondaryButton:hover:not(:disabled) {
+  border-color: var(--color-border-hover);
+  background: var(--color-bg-tertiary);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.toggleInput:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+@media (max-width: 520px) {
+  .updateHeader,
+  .toggleRow,
+  .updateActions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .updateActions {
+    align-items: stretch;
+  }
+
+  .primaryButton,
+  .secondaryButton {
+    width: 100%;
+  }
+}

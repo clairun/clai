@@ -8,7 +8,7 @@ pub mod types;
 pub mod workspace_config;
 
 pub use types::{
-    AgentConfig, AiProvider, AppConfig, ClaiConfig, ExecutionCapabilityConfig,
+    AgentConfig, AiProvider, AppConfig, AutoUpdateConfig, ClaiConfig, ExecutionCapabilityConfig,
     FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, McpEnvVar, McpServerAuth,
     McpServerConfig, McpServerTransport, SandboxNetworkConfig, SandboxSessionBusConfig,
     ShellAccessMode, SkillSourceConfig, SkillSourceKind,
