@@ -22,9 +22,9 @@ enum PathFilter {
     Subpath(String),
 }
 
-pub async fn run(command: SandboxCommand) -> Result<SandboxCommandOutput, String> {
+pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, String> {
     validate_profile_paths(&command)?;
-    validate_grants_exist(&command)?;
+    prune_missing_grants(&mut command);
 
     let private_tmp = create_private_tmp_dir(&command.profile.workspace_root)?;
     let profile = match seatbelt_profile(&command, &private_tmp) {
@@ -99,16 +99,28 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_grants_exist(command: &SandboxCommand) -> Result<(), String> {
-    for grant in &command.profile.path_grants {
-        if !grant.host_path.exists() {
-            return Err(format!(
-                "Sandbox path grant does not exist: {}",
+/// Drop path grants whose host path no longer exists before building the
+/// seatbelt profile. A stale grant (e.g. an `always`-scoped grant to a
+/// directory the user later deleted) must degrade to "that path is simply
+/// absent inside the sandbox" — the same ENOENT an unsandboxed shell would
+/// hit — instead of aborting EVERY sandboxed command for the agent. Pruning
+/// can only ever REMOVE access, never widen it. Mirrors
+/// `linux_bwrap::prune_missing_grants` (which additionally has to probe the
+/// host namespace under Flatpak; macOS has no such split, so a plain
+/// in-process probe is correct).
+fn prune_missing_grants(command: &mut SandboxCommand) {
+    command.profile.path_grants.retain(|grant| {
+        let exists = grant.host_path.exists();
+        if !exists {
+            tracing::warn!(
+                "Skipping filesystem path grant whose path no longer exists: {} — the \
+                 sandbox launches without it. Remove the stale grant from agent \
+                 settings to silence this warning.",
                 grant.host_path.display()
-            ));
+            );
         }
-    }
-    Ok(())
+        exists
+    });
 }
 
 fn create_private_tmp_dir(workspace_root: &Path) -> Result<PathBuf, String> {
@@ -315,7 +327,13 @@ fn add_grant_filters(
     metadata_filters: &mut BTreeSet<PathFilter>,
     grant: &SandboxPathGrant,
 ) -> Result<(), String> {
-    let path = canonicalize_existing(&grant.host_path)?;
+    // Tolerate a grant vanishing between the prune in `run` and profile
+    // construction (or a caller that skipped the prune): skipping the filter
+    // only removes access, matching the lenient `*-bind-try` semantics of the
+    // Linux backend, whereas erroring would abort the whole command.
+    let Ok(path) = canonicalize_existing(&grant.host_path) else {
+        return Ok(());
+    };
     if path.is_dir() {
         add_dir_filter(read_filters, metadata_filters, &path)?;
         if grant.access == SandboxPathAccess::ReadWrite {
@@ -473,6 +491,18 @@ mod tests {
         SandboxEnv, SandboxPathGrant, SandboxProfile, SandboxSessionBusMode,
     };
 
+
+    /// A path that is guaranteed absent: a tempdir created and immediately
+    /// dropped (deleted). Safer than hardcoding a literal that could one day
+    /// exist and silently un-pin the regression.
+    fn vanished_path() -> PathBuf {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale-grant");
+        drop(dir);
+        assert!(!path.exists());
+        path
+    }
+
     fn sample_command(workspace: &Path) -> SandboxCommand {
         SandboxCommand {
             argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
@@ -613,6 +643,56 @@ mod tests {
             .expect("write section should exist");
         assert!(!write_section.contains(&format!("(subpath \"{}\")", ro_path)));
         assert!(write_section.contains(&format!("(subpath \"{}\")", rw_path)));
+    }
+
+    // Regression for "a deleted filesystem-grant path breaks bash_exec
+    // entirely": a stale grant is pruned (live ones kept) instead of failing
+    // the whole command up front.
+    #[test]
+    fn prune_missing_grants_drops_stale_grant_and_keeps_live_ones() {
+        let workspace = tempfile::tempdir().unwrap();
+        let live = tempfile::tempdir().unwrap();
+        let live_grant = SandboxPathGrant {
+            host_path: live.path().to_path_buf(),
+            access: SandboxPathAccess::ReadWrite,
+        };
+        let mut command = sample_command(workspace.path());
+        command.profile.path_grants = vec![
+            SandboxPathGrant {
+                host_path: vanished_path(),
+                access: SandboxPathAccess::ReadOnly,
+            },
+            live_grant.clone(),
+        ];
+
+        prune_missing_grants(&mut command);
+
+        assert_eq!(
+            command.profile.path_grants,
+            vec![live_grant],
+            "stale grant should be pruned, live grant kept"
+        );
+    }
+
+    // Even if a stale grant survives to profile construction (TOCTOU between
+    // the prune and the build), the profile builds without it instead of
+    // erroring the whole command.
+    #[test]
+    fn profile_builds_despite_missing_grant_path() {
+        let workspace = tempfile::tempdir().unwrap();
+        let private_tmp = tempfile::tempdir_in(workspace.path()).unwrap();
+        let mut command = sample_command(workspace.path());
+        command.profile.path_grants = vec![SandboxPathGrant {
+            host_path: vanished_path(),
+            access: SandboxPathAccess::ReadOnly,
+        }];
+
+        let profile = seatbelt_profile(&command, private_tmp.path())
+            .expect("profile should build despite the stale grant");
+        assert!(
+            !profile.contains("stale-grant"),
+            "stale grant path must not appear in the profile:\n{profile}"
+        );
     }
 
     #[test]
