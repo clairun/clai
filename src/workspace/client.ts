@@ -268,6 +268,18 @@ export async function setWorkspaceSchedulePaused(
   return invoke('workspace_set_schedule_paused', { workspaceId, paused });
 }
 
+/**
+ * Star or unstar a workspace — the rail pins starred workspaces in a
+ * dedicated "Starred" section. Does not bump `updatedAt`, so toggling the
+ * star never reorders the recency-sorted list.
+ */
+export async function setWorkspaceStarred(
+  workspaceId: string,
+  starred: boolean
+): Promise<void> {
+  return invoke('workspace_set_starred', { workspaceId, starred });
+}
+
 /** Whether the agent scheduler is globally paused (the "pause all" overlay). */
 export async function getSchedulerPaused(): Promise<boolean> {
   return invoke('get_scheduler_paused');

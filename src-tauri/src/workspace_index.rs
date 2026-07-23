@@ -19,6 +19,9 @@ pub struct WorkspaceLocator {
     /// `insert_config`.
     pub last_run_completed_at: i64,
     pub last_opened_at: i64,
+    /// Mirrors `WorkspaceConfig::starred_at` (> 0 = starred) so the rail's
+    /// "Starred" section can be derived without re-reading configs.
+    pub starred_at: i64,
     pub default_agent_id: String,
     pub schedule_enabled: bool,
     pub schedule_paused: bool,
@@ -137,6 +140,7 @@ impl WorkspaceIndex {
                 updated_at: config.updated_at,
                 last_run_completed_at: config.last_run_completed_at,
                 last_opened_at: config.last_opened_at,
+                starred_at: config.starred_at,
                 default_agent_id: config.default_agent_id.clone(),
                 schedule_enabled: config.schedule.enabled,
                 schedule_paused: config.schedule.paused,

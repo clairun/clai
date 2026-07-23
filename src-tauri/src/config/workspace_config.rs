@@ -145,6 +145,11 @@ pub struct WorkspaceConfig {
     /// would reorder the rail's recency sort just by looking at a workspace.
     #[serde(default)]
     pub last_opened_at: i64,
+    /// Unix ms when the user starred this workspace in the rail, or 0 when
+    /// not starred. Stored as a timestamp (not a bool) so the UI can sort
+    /// recently-starred entries first if it ever wants to; `> 0` = starred.
+    #[serde(default)]
+    pub starred_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_provider_connection_id: Option<String>,
     pub default_agent_id: String,
@@ -214,6 +219,7 @@ impl WorkspaceConfig {
             updated_at: now,
             last_run_completed_at: 0,
             last_opened_at: 0,
+            starred_at: 0,
             preferred_provider_connection_id: None,
             default_agent_id: manager_id.clone(),
             schedule: WorkspaceSchedule::default(),
@@ -751,5 +757,26 @@ mod attach_provider_tests {
         let on_disk = load(&root).unwrap();
         assert_eq!(on_disk.schedule.next_run_at_unix_ms, Some(999));
         assert_eq!(on_disk.last_opened_at, 555);
+    }
+
+    /// `starredAt` must default to 0 (unstarred) for configs written before
+    /// the field existed, and survive an `update` roundtrip once set.
+    #[test]
+    fn starred_at_defaults_to_zero_and_roundtrips() {
+        // Legacy config JSON without the field deserializes as unstarred.
+        let mut legacy = serde_json::to_value(workspace()).unwrap();
+        legacy.as_object_mut().unwrap().remove("starredAt");
+        let parsed: WorkspaceConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(parsed.starred_at, 0);
+
+        // Set-then-load roundtrip through the atomic updater.
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        update(tmp.path(), |config| {
+            config.starred_at = 1234;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(load(tmp.path()).unwrap().starred_at, 1234);
     }
 }

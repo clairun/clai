@@ -7,6 +7,7 @@ import {
   getWorkspaceSnapshot,
   runWorkspaceNow,
   setWorkspaceSchedulePaused,
+  setWorkspaceStarred,
   getSchedulerPaused,
   setSchedulerPaused,
   createWorkspace,
@@ -353,6 +354,29 @@ const FleetLayout = () => {
     [pauseBusyId, loadWorkspaces],
   );
 
+  // Optimistic star toggle. No busy-lock: toggles are idempotent writes,
+  // so the last click wins; on failure the flip is reverted.
+  const handleToggleStar = useCallback(
+    async (id: string, currentlyStarred: boolean) => {
+      if (!id) return;
+      const nextStarred = !currentlyStarred;
+      setWorkspaces((prev) =>
+        prev.map((w) => (w.id === id ? { ...w, starred: nextStarred } : w)),
+      );
+      try {
+        await setWorkspaceStarred(id, nextStarred);
+        setError('');
+        await loadWorkspaces();
+      } catch (err) {
+        setError(errText(err, 'Failed to update star.'));
+        setWorkspaces((prev) =>
+          prev.map((w) => (w.id === id ? { ...w, starred: currentlyStarred } : w)),
+        );
+      }
+    },
+    [loadWorkspaces],
+  );
+
   // Load the persisted global-pause state once so the rail toggle reflects
   // it on first paint (a 5s poll is unnecessary — only this UI flips it).
   useEffect(() => {
@@ -473,6 +497,7 @@ const FleetLayout = () => {
           onCreate={handleCreate}
           onRunNow={handleRunNow}
           onTogglePause={handleTogglePause}
+          onToggleStar={handleToggleStar}
           onSettings={handleOpenSettings}
           onFork={handleFork}
           onDelete={handleRequestDelete}
