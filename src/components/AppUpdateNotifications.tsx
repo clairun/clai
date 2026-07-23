@@ -4,10 +4,12 @@ import { listen } from '@tauri-apps/api/event';
 import type { AppUpdateAvailableEvent, AppUpdateInfo, AppUpdateStatus } from '../generated/bindings';
 import {
   APP_UPDATE_AVAILABLE_EVENT,
+  LATEST_RELEASE_URL,
   installAppUpdate,
   installEventText,
   updateErrorText,
 } from '../utils/appUpdates';
+import { openExternal } from '../utils/openExternal';
 import styles from './WorkspaceTaskNotifications.module.css';
 
 interface NotificationItem {
@@ -91,11 +93,21 @@ const AppUpdateNotifications = () => {
     }
   }, []);
 
+  const viewRelease = useCallback(() => {
+    openExternal(LATEST_RELEASE_URL).catch((error) => {
+      console.error('[AppUpdateNotifications] Failed to open release page:', error);
+    });
+  }, []);
+
   if (!item) return null;
 
+  const installable = item.update.installable;
   const body = item.error
     ? item.error
-    : item.progress || `CLAI v${item.update.version} is ready to install.`;
+    : item.progress ||
+      (installable
+        ? `CLAI v${item.update.version} is ready to install.`
+        : `CLAI v${item.update.version} is available. This build updates outside CLAI — get it from GitHub Releases.`);
 
   return (
     <div
@@ -111,14 +123,20 @@ const AppUpdateNotifications = () => {
         </div>
         <p className={styles.body}>{body}</p>
         <div className={styles.actions}>
-          <button
-            type="button"
-            className={styles.openButton}
-            onClick={install}
-            disabled={item.installing}
-          >
-            {item.installing ? 'Installing...' : 'Install and restart'}
-          </button>
+          {installable ? (
+            <button
+              type="button"
+              className={styles.openButton}
+              onClick={install}
+              disabled={item.installing}
+            >
+              {item.installing ? 'Installing...' : 'Install and restart'}
+            </button>
+          ) : (
+            <button type="button" className={styles.openButton} onClick={viewRelease}>
+              View release
+            </button>
+          )}
           <button
             type="button"
             className={styles.dismissButton}

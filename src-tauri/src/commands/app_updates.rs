@@ -19,6 +19,12 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(120);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Release manifest used for notify-only version checks on builds that
+/// cannot self-install (e.g. Flatpak). Keep in sync with the updater
+/// endpoint in `tauri.conf.json`.
+const LATEST_MANIFEST_URL: &str =
+    "https://github.com/clairun/clai/releases/latest/download/latest.json";
+
 #[derive(Clone, Default)]
 pub struct AppUpdateRuntime {
     last_check: Arc<Mutex<Option<AppUpdateLastCheck>>>,
@@ -47,7 +53,12 @@ impl AppUpdateRuntime {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct AppUpdateSupportStatus {
+    /// The build can download and install updates itself.
     pub supported: bool,
+    /// The build can at least check for newer releases (a superset of
+    /// `supported`: notify-only channels like Flatpak can check but not
+    /// install).
+    pub can_check: bool,
     pub platform: String,
     pub arch: String,
     pub channel: String,
@@ -63,6 +74,10 @@ pub struct AppUpdateInfo {
     pub version: String,
     pub date: Option<String>,
     pub body: Option<String>,
+    /// False for notify-only channels: the user must update through their
+    /// package channel (e.g. download the new Flatpak bundle) instead of the
+    /// in-app installer.
+    pub installable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -107,6 +122,16 @@ pub enum AppUpdateInstallEvent {
     Progress { downloaded: u64, total: Option<u64> },
     DownloadFinished,
     Installing,
+}
+
+/// Subset of the updater `latest.json` manifest used for notify-only checks.
+#[derive(Debug, Deserialize)]
+struct UpdateManifest {
+    version: String,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    pub_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,13 +274,7 @@ async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckRe
     let support = detect_support_status();
     let checked_at = chrono::Utc::now().to_rfc3339();
 
-    let last_check = if !support.supported {
-        AppUpdateLastCheck {
-            checked_at,
-            update: None,
-            error: support.reason.clone(),
-        }
-    } else {
+    let last_check = if support.supported {
         match app
             .updater_builder()
             .timeout(CHECK_TIMEOUT)
@@ -280,6 +299,29 @@ async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckRe
                 error: Some(error),
             },
         }
+    } else if support.can_check {
+        // Notify-only channels (Flatpak): the build cannot install updates
+        // itself, but we still tell the user a newer release exists so they
+        // can fetch it through their package channel.
+        let current_version = app.package_info().version.to_string();
+        match fetch_update_manifest().await {
+            Ok(manifest) => AppUpdateLastCheck {
+                checked_at,
+                update: notify_update_from_manifest(&current_version, &manifest),
+                error: None,
+            },
+            Err(error) => AppUpdateLastCheck {
+                checked_at,
+                update: None,
+                error: Some(error),
+            },
+        }
+    } else {
+        AppUpdateLastCheck {
+            checked_at,
+            update: None,
+            error: support.reason.clone(),
+        }
     };
 
     state.app_updates.record_check(last_check.clone());
@@ -296,7 +338,69 @@ fn update_info(update: &Update) -> AppUpdateInfo {
         version: update.version.clone(),
         date: update.date.as_ref().map(ToString::to_string),
         body: update.body.clone(),
+        installable: true,
     }
+}
+
+async fn fetch_update_manifest() -> Result<UpdateManifest, String> {
+    let response = reqwest::Client::new()
+        .get(LATEST_MANIFEST_URL)
+        .timeout(CHECK_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch the release manifest: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Release manifest request failed with status {}.",
+            response.status()
+        ));
+    }
+    response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse the release manifest: {e}"))
+}
+
+fn notify_update_from_manifest(
+    current_version: &str,
+    manifest: &UpdateManifest,
+) -> Option<AppUpdateInfo> {
+    if !version_is_newer(&manifest.version, current_version) {
+        return None;
+    }
+    Some(AppUpdateInfo {
+        current_version: current_version.to_string(),
+        version: manifest.version.clone(),
+        date: manifest.pub_date.clone(),
+        body: manifest
+            .notes
+            .as_deref()
+            .map(str::trim)
+            .filter(|notes| !notes.is_empty())
+            .map(str::to_string),
+        installable: false,
+    })
+}
+
+/// Numeric dot-component comparison for CalVer strings like `26.7.12`,
+/// tolerant of a leading `v` and of `-`/`+` suffixes (`26.7.12-38-gabc`
+/// compares as `26.7.12`). Unparseable versions never report an update.
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    match (parse_version_parts(candidate), parse_version_parts(current)) {
+        (Some(candidate), Some(current)) => candidate > current,
+        _ => false,
+    }
+}
+
+fn parse_version_parts(value: &str) -> Option<Vec<u64>> {
+    let core = value.trim().trim_start_matches(['v', 'V']);
+    let core = core.split(['-', '+']).next()?;
+    if core.is_empty() {
+        return None;
+    }
+    core.split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
 }
 
 fn detect_support_status() -> AppUpdateSupportStatus {
@@ -327,7 +431,7 @@ fn support_from_probe(probe: SupportProbe<'_>) -> AppUpdateSupportStatus {
         return unsupported(
             probe,
             "flatpak",
-            "This Flatpak build is updated by Flatpak, not by CLAI itself.",
+            "This Flatpak build cannot update itself; download new releases from GitHub.",
         );
     }
 
@@ -418,6 +522,7 @@ fn linux_support_from_probe(probe: SupportProbe<'_>) -> AppUpdateSupportStatus {
 fn supported(probe: SupportProbe<'_>, channel: &str) -> AppUpdateSupportStatus {
     AppUpdateSupportStatus {
         supported: true,
+        can_check: true,
         platform: probe.target_os.to_string(),
         arch: probe.arch.to_string(),
         channel: channel.to_string(),
@@ -429,6 +534,11 @@ fn supported(probe: SupportProbe<'_>, channel: &str) -> AppUpdateSupportStatus {
 fn unsupported(probe: SupportProbe<'_>, channel: &str, reason: &str) -> AppUpdateSupportStatus {
     AppUpdateSupportStatus {
         supported: false,
+        // Flatpak bundles are side-loaded (no origin remote), so Flatpak
+        // itself never updates them — notify-only is the only signal those
+        // users get. Package-manager installs (e.g. AUR) do receive updates
+        // through their repo, so they stay silent.
+        can_check: channel == "flatpak",
         platform: probe.target_os.to_string(),
         arch: probe.arch.to_string(),
         channel: channel.to_string(),
@@ -506,13 +616,14 @@ mod tests {
     }
 
     #[test]
-    fn flatpak_is_externally_managed_even_with_native_bundle_type() {
+    fn flatpak_is_notify_only_even_with_native_bundle_type() {
         let mut probe = probe("linux", Some("deb"));
         probe.flatpak = true;
 
         let status = support_from_probe(probe);
 
         assert!(!status.supported);
+        assert!(status.can_check);
         assert_eq!(status.channel, "flatpak");
     }
 
@@ -527,6 +638,7 @@ mod tests {
         probe.os_release = Some("ID=arch\n");
         let status = support_from_probe(probe);
         assert!(!status.supported);
+        assert!(!status.can_check);
         assert_eq!(status.channel, "package_manager");
     }
 
@@ -557,6 +669,7 @@ mod tests {
         let status = support_from_probe(probe("macos", Some("app")));
 
         assert!(status.supported);
+        assert!(status.can_check);
         assert_eq!(status.channel, "native");
     }
 
@@ -565,5 +678,48 @@ mod tests {
         let ids = os_release_ids("NAME=Example\nID=\"ubuntu\"\nID_LIKE='debian rhel'\n");
 
         assert_eq!(ids, vec!["ubuntu", "debian", "rhel"]);
+    }
+
+    #[test]
+    fn version_is_newer_compares_calver_numerically() {
+        assert!(version_is_newer("26.7.13", "26.7.12"));
+        assert!(version_is_newer("26.10.1", "26.9.30"));
+        assert!(version_is_newer("v26.8.1", "26.7.12"));
+        assert!(version_is_newer("26.7.12.1", "26.7.12"));
+        assert!(version_is_newer("26.8.1", "26.7.12-38-g6148106"));
+
+        assert!(!version_is_newer("26.7.12", "26.7.12"));
+        assert!(!version_is_newer("26.7.11", "26.7.12"));
+        assert!(!version_is_newer("not-a-version", "26.7.12"));
+        assert!(!version_is_newer("26.8.1", "not-a-version"));
+        assert!(!version_is_newer("", "26.7.12"));
+    }
+
+    #[test]
+    fn notify_update_reports_newer_manifest_as_non_installable() {
+        let manifest = UpdateManifest {
+            version: "26.8.1".to_string(),
+            notes: Some("  ".to_string()),
+            pub_date: Some("2026-08-01T00:00:00Z".to_string()),
+        };
+
+        let update = notify_update_from_manifest("26.7.12", &manifest).expect("update expected");
+        assert!(!update.installable);
+        assert_eq!(update.version, "26.8.1");
+        assert_eq!(update.current_version, "26.7.12");
+        assert_eq!(update.body, None, "blank notes should be dropped");
+        assert_eq!(update.date.as_deref(), Some("2026-08-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn notify_update_ignores_same_or_older_manifest() {
+        let manifest = UpdateManifest {
+            version: "26.7.12".to_string(),
+            notes: None,
+            pub_date: None,
+        };
+
+        assert!(notify_update_from_manifest("26.7.12", &manifest).is_none());
+        assert!(notify_update_from_manifest("26.8.1", &manifest).is_none());
     }
 }

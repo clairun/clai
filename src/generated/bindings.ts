@@ -7,7 +7,13 @@ export type AppUpdateAvailableEvent = { update: AppUpdateInfo, };
 
 export type AppUpdateCheckResult = { settings: AutoUpdateConfig, support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck, };
 
-export type AppUpdateInfo = { currentVersion: string, version: string, date: string | null, body: string | null, };
+export type AppUpdateInfo = { currentVersion: string, version: string, date: string | null, body: string | null, 
+/**
+ * False for notify-only channels: the user must update through their
+ * package channel (e.g. download the new Flatpak bundle) instead of the
+ * in-app installer.
+ */
+installable: boolean, };
 
 export type AppUpdateInstallEvent = { "type": "started" } | { "type": "progress", downloaded: bigint, total: bigint | null, } | { "type": "downloadFinished" } | { "type": "installing" };
 
@@ -15,7 +21,17 @@ export type AppUpdateLastCheck = { checkedAt: string, update: AppUpdateInfo | nu
 
 export type AppUpdateStatus = { settings: AutoUpdateConfig, support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck | null, };
 
-export type AppUpdateSupportStatus = { supported: boolean, platform: string, arch: string, channel: string, bundleType: string | null, reason: string | null, };
+export type AppUpdateSupportStatus = { 
+/**
+ * The build can download and install updates itself.
+ */
+supported: boolean, 
+/**
+ * The build can at least check for newer releases (a superset of
+ * `supported`: notify-only channels like Flatpak can check but not
+ * install).
+ */
+canCheck: boolean, platform: string, arch: string, channel: string, bundleType: string | null, reason: string | null, };
 
 export type AskUserOption = { label: string, description: string | null, };
 

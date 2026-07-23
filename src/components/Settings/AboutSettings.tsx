@@ -9,7 +9,12 @@
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppUpdateCheckResult, AppUpdateStatus, AutoUpdateConfig } from '../../generated/bindings';
-import { installAppUpdate, installEventText, updateErrorText } from '../../utils/appUpdates';
+import {
+  LATEST_RELEASE_URL,
+  installAppUpdate,
+  installEventText,
+  updateErrorText,
+} from '../../utils/appUpdates';
 import { openExternal } from '../../utils/openExternal';
 import styles from './AboutSettings.module.css';
 
@@ -121,10 +126,17 @@ const AboutSettings = () => {
   const lastCheck = updateStatus?.lastCheck;
   const availableUpdate = lastCheck?.update ?? null;
   const supportsUpdates = support?.supported ?? false;
+  const canCheck = support?.canCheck ?? false;
   const supportDescription = updateStatus
     ? support?.reason || `${support?.platform ?? 'Desktop'} ${support?.bundleType ?? 'native'}`
     : 'Checking update support...';
-  const supportBadge = updateStatus ? (supportsUpdates ? 'Available' : 'Unavailable') : 'Checking';
+  const supportBadge = !updateStatus
+    ? 'Checking'
+    : supportsUpdates
+      ? 'Available'
+      : canCheck
+        ? 'Notify only'
+        : 'Unavailable';
   const updateSummary = availableUpdate
     ? `CLAI v${availableUpdate.version} is available.`
     : lastCheck?.error || (lastCheck ? 'CLAI is up to date.' : 'Not checked yet.');
@@ -205,20 +217,33 @@ const AboutSettings = () => {
             type="button"
             className={styles.secondaryButton}
             onClick={checkForUpdates}
-            disabled={checking || !supportsUpdates}
+            disabled={checking || !canCheck}
           >
             {checking ? 'Checking...' : 'Check for updates'}
           </button>
-          {availableUpdate && (
-            <button
-              type="button"
-              className={styles.primaryButton}
-              onClick={installUpdate}
-              disabled={installing}
-            >
-              {installing ? 'Installing...' : 'Install and restart'}
-            </button>
-          )}
+          {availableUpdate &&
+            (availableUpdate.installable ? (
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={installUpdate}
+                disabled={installing}
+              >
+                {installing ? 'Installing...' : 'Install and restart'}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={() => {
+                  openExternal(LATEST_RELEASE_URL).catch((err) =>
+                    console.error('[AboutSettings] Failed to open release page:', err)
+                  );
+                }}
+              >
+                View release
+              </button>
+            ))}
         </div>
       </div>
     </div>

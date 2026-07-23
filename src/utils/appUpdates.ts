@@ -3,6 +3,9 @@ import type { AppUpdateInstallEvent } from '../generated/bindings';
 
 export const APP_UPDATE_AVAILABLE_EVENT = 'app-updates://available';
 
+/** Where notify-only builds (e.g. Flatpak) send users to fetch the update. */
+export const LATEST_RELEASE_URL = 'https://github.com/clairun/clai/releases/latest';
+
 export const updateErrorText = (error: unknown, fallback: string): string =>
   typeof error === 'string' ? error : fallback;
 
