@@ -408,19 +408,61 @@ pub async fn submit_permission_decision(
 
 /// Writes always-allow / always-deny decisions into the workspace config's
 /// per-agent execution policy.
+///
+/// The read-modify-write runs inside [`workspace_config::update`] (which
+/// serializes writers behind a process-wide lock), so a concurrent config
+/// write — starring a workspace, re-anchoring a schedule — can no longer be
+/// clobbered by this save. A bare load→mutate→save here previously lost
+/// such updates and refreshed the workspace index from the stale snapshot.
 pub fn persist_decisions_to_agent(
     state: &AppState,
     workspace_id: &str,
     agent_id: &str,
     decisions: &[SegmentDecision],
 ) -> Result<(), String> {
+    // Fast path: nothing durable to write (Once-only decisions, or Always
+    // decisions with blank prefixes). Skip the lock + disk round-trip.
+    let has_persistent = decisions.iter().any(|decision| {
+        matches!(
+            decision,
+            SegmentDecision::AllowAlways { prefix, .. }
+            | SegmentDecision::DenyAlways { prefix, .. }
+                if !prefix.trim().is_empty()
+        )
+    });
+    if !has_persistent {
+        return Ok(());
+    }
+
     let root = state
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let mut config = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
-        return Err(format!("Workspace agent not found: {}", agent_id));
-    };
+    let ((), config) = workspace_config::update(&root, |config| {
+        let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
+            return Err(format!("Workspace agent not found: {}", agent_id));
+        };
+        if apply_decisions_to_shell_policy(agent, decisions) {
+            let now = chrono::Utc::now().timestamp_millis();
+            agent.updated_at = now;
+            config.updated_at = now;
+        }
+        Ok(())
+    })?;
+    state
+        .workspace_index
+        .write()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .insert_config(root, &config);
+    Ok(())
+}
+
+/// Applies always-allow / always-deny decisions to an agent's shell command
+/// policy lists. Returns whether anything changed. Pure list surgery — no
+/// I/O, no timestamps — so it is unit-testable without an [`AppState`].
+fn apply_decisions_to_shell_policy(
+    agent: &mut workspace_config::WorkspaceAgent,
+    decisions: &[SegmentDecision],
+) -> bool {
     let mut changed = false;
 
     for decision in decisions {
@@ -483,18 +525,7 @@ pub fn persist_decisions_to_agent(
         }
     }
 
-    if changed {
-        agent.updated_at = chrono::Utc::now().timestamp_millis();
-        config.updated_at = agent.updated_at;
-        workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
-        state
-            .workspace_index
-            .write()
-            .map_err(|e| format!("Workspace index lock error: {}", e))?
-            .insert_config(root, &config);
-    }
-
-    Ok(())
+    changed
 }
 
 /// Emits the per-workspace pending-count update so the fleet card UI can
@@ -523,6 +554,139 @@ pub fn emit_permission_resolved(app: &tauri::AppHandle, request_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_agent() -> workspace_config::WorkspaceAgent {
+        workspace_config::WorkspaceAgent::new_manager("agent-1".to_string(), 1_000)
+    }
+
+    fn allow_always(prefix: &str) -> SegmentDecision {
+        SegmentDecision::AllowAlways {
+            scope: PermissionScope::Agent,
+            prefix: prefix.to_string(),
+        }
+    }
+
+    fn deny_always(prefix: &str) -> SegmentDecision {
+        SegmentDecision::DenyAlways {
+            scope: PermissionScope::Agent,
+            prefix: prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn allow_always_adds_prefix_and_removes_it_from_blocklist() {
+        let mut agent = fake_agent();
+        agent
+            .execution
+            .shell
+            .blocked_command_prefixes
+            .push("cargo".to_string());
+
+        let changed = apply_decisions_to_shell_policy(&mut agent, &[allow_always("cargo")]);
+
+        assert!(changed);
+        assert!(agent
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cargo".to_string()));
+        assert!(!agent
+            .execution
+            .shell
+            .blocked_command_prefixes
+            .contains(&"cargo".to_string()));
+    }
+
+    #[test]
+    fn deny_always_adds_to_blocklist_and_removes_from_allowlist() {
+        let mut agent = fake_agent();
+        agent
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .push("curl".to_string());
+
+        let changed = apply_decisions_to_shell_policy(&mut agent, &[deny_always("curl")]);
+
+        assert!(changed);
+        assert!(agent
+            .execution
+            .shell
+            .blocked_command_prefixes
+            .contains(&"curl".to_string()));
+        assert!(!agent
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"curl".to_string()));
+    }
+
+    #[test]
+    fn apply_decisions_is_idempotent_and_reports_no_change() {
+        let mut agent = fake_agent();
+        assert!(apply_decisions_to_shell_policy(
+            &mut agent,
+            &[allow_always("cargo")]
+        ));
+        // Applying the same decision again must not report a change or
+        // duplicate the prefix.
+        assert!(!apply_decisions_to_shell_policy(
+            &mut agent,
+            &[allow_always("cargo")]
+        ));
+        assert_eq!(
+            agent
+                .execution
+                .shell
+                .allowed_command_prefixes
+                .iter()
+                .filter(|p| *p == "cargo")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn once_decisions_and_blank_prefixes_change_nothing() {
+        let mut agent = fake_agent();
+        let before = agent.execution.shell.clone();
+
+        let changed = apply_decisions_to_shell_policy(
+            &mut agent,
+            &[
+                SegmentDecision::AllowOnce,
+                SegmentDecision::DenyOnce,
+                allow_always("   "),
+                deny_always(""),
+            ],
+        );
+
+        assert!(!changed);
+        assert_eq!(
+            agent.execution.shell.allowed_command_prefixes,
+            before.allowed_command_prefixes
+        );
+        assert_eq!(
+            agent.execution.shell.blocked_command_prefixes,
+            before.blocked_command_prefixes
+        );
+    }
+
+    #[test]
+    fn prefixes_are_trimmed_before_persisting() {
+        let mut agent = fake_agent();
+
+        assert!(apply_decisions_to_shell_policy(
+            &mut agent,
+            &[allow_always("  git status  ")]
+        ));
+
+        assert!(agent
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"git status".to_string()));
+    }
 
     fn fake_request(workspace_id: Option<&str>) -> PermissionRequest {
         PermissionRequest {
