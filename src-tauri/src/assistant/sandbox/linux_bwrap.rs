@@ -1246,7 +1246,6 @@ mod tests {
         assert!(found, "grant bind not emitted; rendered: {rendered:?}");
     }
 
-
     /// A path that is guaranteed absent: a tempdir created and immediately
     /// dropped (deleted). Safer than hardcoding a literal that could one day
     /// exist and silently un-pin the regression.
