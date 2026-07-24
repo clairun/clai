@@ -71,7 +71,9 @@ const AppUpdateNotifications = () => {
     ? install.error
     : install.progress ||
       (installable
-        ? `CLAI v${update.version} is ready to install.`
+        ? update.downloaded
+          ? `CLAI v${update.version} has been downloaded. Restart to apply it.`
+          : `CLAI v${update.version} is ready to install.`
         : `CLAI v${update.version} is available. This build updates outside CLAI — get it from GitHub Releases.`);
 
   return (
@@ -95,7 +97,11 @@ const AppUpdateNotifications = () => {
               onClick={startInstall}
               disabled={install.installing}
             >
-              {install.installing ? 'Installing...' : 'Install and restart'}
+              {install.installing
+                ? 'Installing...'
+                : update.downloaded
+                  ? 'Restart now'
+                  : 'Install and restart'}
             </button>
           ) : (
             <button type="button" className={styles.openButton} onClick={viewRelease}>

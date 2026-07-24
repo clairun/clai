@@ -8,7 +8,11 @@
 
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { AppUpdateCheckResult, AppUpdateStatus, AutoUpdateConfig } from '../../generated/bindings';
+import type {
+  AppUpdateCheckResult,
+  AppUpdateStatus,
+  AutoUpdateConfig,
+} from '../../generated/bindings';
 import {
   LATEST_RELEASE_URL,
   installAppUpdate,
@@ -69,10 +73,10 @@ const AboutSettings = () => {
     };
   }, []);
 
-  const persistAutoUpdate = (enabled: boolean) => {
+  const persistAutoUpdate = (autoDownload: boolean) => {
     if (!updateStatus || savingAutoUpdate) return;
     const previousSettings = updateStatus.settings;
-    const settings: AutoUpdateConfig = { enabled };
+    const settings: AutoUpdateConfig = { autoDownload };
     setSavingAutoUpdate(true);
     setUpdateError('');
     setUpdateStatus((current) => (current ? { ...current, settings } : current));
@@ -83,7 +87,7 @@ const AboutSettings = () => {
       .catch((err) => {
         setUpdateError(updateErrorText(err, 'Failed to save update settings.'));
         setUpdateStatus((current) =>
-          current ? { ...current, settings: previousSettings } : current,
+          current ? { ...current, settings: previousSettings } : current
         );
       })
       .finally(() => {
@@ -138,7 +142,9 @@ const AboutSettings = () => {
         ? 'Notify only'
         : 'Unavailable';
   const updateSummary = availableUpdate
-    ? `CLAI v${availableUpdate.version} is available.`
+    ? availableUpdate.downloaded
+      ? `CLAI v${availableUpdate.version} has been downloaded. Restart to apply it.`
+      : `CLAI v${availableUpdate.version} is available.`
     : lastCheck?.error || (lastCheck ? 'CLAI is up to date.' : 'Not checked yet.');
 
   return (
@@ -147,7 +153,9 @@ const AboutSettings = () => {
       <h2 className={styles.title}>CLAI</h2>
       {version && <span className={styles.version}>v{version}</span>}
 
-      <p className={styles.tagline}>Build, run, and supervise teams of AI agents on your desktop.</p>
+      <p className={styles.tagline}>
+        Build, run, and supervise teams of AI agents on your desktop.
+      </p>
       <p className={styles.subtitle}>
         Multi-agent orchestration, with MCP-native tools and a local execution sandbox.
       </p>
@@ -184,28 +192,35 @@ const AboutSettings = () => {
           </span>
         </div>
 
-        <label className={styles.toggleRow}>
-          <span className={styles.toggleCopy}>
-            <span className={styles.toggleTitle}>Automatically check for updates</span>
-            <span className={styles.toggleDesc}>Enabled by default for supported builds.</span>
-          </span>
-          <span
-            className={`${styles.toggle} ${
-              updateStatus?.settings.enabled ? styles.toggleOn : ''
-            }`}
-          >
-            <input
-              type="checkbox"
-              className={styles.toggleInput}
-              checked={updateStatus?.settings.enabled ?? true}
-              onChange={(event) => persistAutoUpdate(event.target.checked)}
-              disabled={!updateStatus || savingAutoUpdate}
-            />
-            <span className={styles.toggleTrack}>
-              <span className={styles.toggleThumb} />
+        {/* Checking for updates is always on; only the background download is
+            configurable, and only where this build can actually install
+            updates itself. Notify-only builds (e.g. Flatpak) get no toggle. */}
+        {supportsUpdates && (
+          <label className={styles.toggleRow}>
+            <span className={styles.toggleCopy}>
+              <span className={styles.toggleTitle}>Automatically download updates</span>
+              <span className={styles.toggleDesc}>
+                New versions download in the background. You choose when to restart.
+              </span>
             </span>
-          </span>
-        </label>
+            <span
+              className={`${styles.toggle} ${
+                updateStatus?.settings.autoDownload ? styles.toggleOn : ''
+              }`}
+            >
+              <input
+                type="checkbox"
+                className={styles.toggleInput}
+                checked={updateStatus?.settings.autoDownload ?? true}
+                onChange={(event) => persistAutoUpdate(event.target.checked)}
+                disabled={savingAutoUpdate}
+              />
+              <span className={styles.toggleTrack}>
+                <span className={styles.toggleThumb} />
+              </span>
+            </span>
+          </label>
+        )}
 
         <div className={styles.updateStatus}>
           <span>{installing ? installProgress : updateSummary}</span>
@@ -229,7 +244,11 @@ const AboutSettings = () => {
                 onClick={installUpdate}
                 disabled={installing}
               >
-                {installing ? 'Installing...' : 'Install and restart'}
+                {installing
+                  ? 'Installing...'
+                  : availableUpdate.downloaded
+                    ? 'Restart and update'
+                    : 'Install and restart'}
               </button>
             ) : (
               <button

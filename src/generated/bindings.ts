@@ -13,7 +13,12 @@ export type AppUpdateInfo = { currentVersion: string, version: string, date: str
  * package channel (e.g. download the new Flatpak bundle) instead of the
  * in-app installer.
  */
-installable: boolean, };
+installable: boolean, 
+/**
+ * The update package has already been downloaded in the background;
+ * installing it only needs a restart, not a download.
+ */
+downloaded: boolean, };
 
 export type AppUpdateInstallEvent = { "type": "started" } | { "type": "progress", downloaded: bigint, total: bigint | null, } | { "type": "downloadFinished" } | { "type": "installing" };
 
@@ -72,7 +77,13 @@ export type AttentionUpdate = { workspaceId: string | null, pendingCount: number
 
 export type AuthMode = "subscription_login" | "subscription_api_key" | "developer_api_key" | "workspace_token";
 
-export type AutoUpdateConfig = { enabled: boolean, };
+export type AutoUpdateConfig = { 
+/**
+ * Download new versions in the background on self-update-capable
+ * builds; the user still chooses when to restart and apply. Checking
+ * for updates is always on and not configurable.
+ */
+autoDownload: boolean, };
 
 export type CompactionStatus = "running" | "completed" | "failed";
 

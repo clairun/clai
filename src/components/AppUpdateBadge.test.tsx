@@ -24,10 +24,11 @@ const UPDATE = {
   date: null,
   body: null,
   installable: true,
+  downloaded: false,
 };
 
 const statusWith = (update: typeof UPDATE | null) => ({
-  settings: { enabled: true },
+  settings: { autoDownload: true },
   support: {
     supported: true,
     canCheck: true,
@@ -65,6 +66,31 @@ describe('AppUpdateBadge', () => {
     await waitFor(() => expect(listenHandlers[APP_UPDATE_AVAILABLE_EVENT]).toBeDefined());
     listenHandlers[APP_UPDATE_AVAILABLE_EVENT]?.({ payload: { update: UPDATE } });
     expect(await screen.findByText(/Update available · v26\.8\.1/)).toBeInTheDocument();
+  });
+
+  it('flips to "Update ready" once the package is downloaded', async () => {
+    mockInvoke.mockResolvedValue(statusWith(UPDATE));
+    render(<AppUpdateBadge />);
+    expect(await screen.findByText(/Update available · v26\.8\.1/)).toBeInTheDocument();
+    await waitFor(() => expect(listenHandlers[APP_UPDATE_AVAILABLE_EVENT]).toBeDefined());
+    listenHandlers[APP_UPDATE_AVAILABLE_EVENT]?.({
+      payload: { update: { ...UPDATE, downloaded: true } },
+    });
+    expect(await screen.findByText(/Update ready · v26\.8\.1/)).toBeInTheDocument();
+  });
+
+  it('does not downgrade "Update ready" when a stale event arrives late', async () => {
+    mockInvoke.mockResolvedValue(statusWith(null));
+    render(<AppUpdateBadge />);
+    await waitFor(() => expect(listenHandlers[APP_UPDATE_AVAILABLE_EVENT]).toBeDefined());
+    listenHandlers[APP_UPDATE_AVAILABLE_EVENT]?.({
+      payload: { update: { ...UPDATE, downloaded: true } },
+    });
+    expect(await screen.findByText(/Update ready · v26\.8\.1/)).toBeInTheDocument();
+    // A concurrent check that started before the download finished can emit
+    // downloaded: false after the fact — the badge must not regress.
+    listenHandlers[APP_UPDATE_AVAILABLE_EVENT]?.({ payload: { update: UPDATE } });
+    expect(await screen.findByText(/Update ready · v26\.8\.1/)).toBeInTheDocument();
   });
 
   it('opens global settings at the About tab on click', async () => {

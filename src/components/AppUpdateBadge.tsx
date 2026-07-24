@@ -24,14 +24,16 @@ const AppUpdateBadge = () => {
       className={styles.badge}
       onClick={() => openGlobalSettings({ tab: 'about' })}
       title={
-        update.installable
-          ? `CLAI v${update.version} is ready to install — click to update`
-          : `CLAI v${update.version} is available — click for details`
+        update.downloaded
+          ? `CLAI v${update.version} has been downloaded — restart to apply`
+          : update.installable
+            ? `CLAI v${update.version} is ready to install — click to update`
+            : `CLAI v${update.version} is available — click for details`
       }
       aria-label={`Update available: CLAI v${update.version}`}
     >
       <span className={styles.dot} aria-hidden="true" />
-      Update available · v{update.version}
+      {update.downloaded ? 'Update ready' : 'Update available'} · v{update.version}
     </button>
   );
 };

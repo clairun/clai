@@ -601,12 +601,17 @@ fn default_workspace_dirs() -> Vec<PathBuf> {
 #[serde(rename_all = "camelCase", default)]
 #[ts(export, export_to = "bindings.ts")]
 pub struct AutoUpdateConfig {
-    pub enabled: bool,
+    /// Download new versions in the background on self-update-capable
+    /// builds; the user still chooses when to restart and apply. Checking
+    /// for updates is always on and not configurable.
+    pub auto_download: bool,
 }
 
 impl Default for AutoUpdateConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            auto_download: true,
+        }
     }
 }
 
@@ -726,13 +731,13 @@ mod tests {
     }
 
     #[test]
-    fn app_config_defaults_auto_update_enabled() {
+    fn app_config_defaults_auto_download_enabled() {
         let config = ClaiConfig::default();
-        assert!(config.auto_update.enabled);
+        assert!(config.auto_update.auto_download);
     }
 
     #[test]
-    fn legacy_config_deserializes_with_auto_update_enabled() {
+    fn legacy_config_deserializes_with_auto_download_enabled() {
         let legacy = r#"{
             "version": 1,
             "workspaceDirs": ["~/.clai/workspaces"],
@@ -741,7 +746,7 @@ mod tests {
             "providerConnections": []
         }"#;
         let parsed: ClaiConfig = serde_json::from_str(legacy).unwrap();
-        assert!(parsed.auto_update.enabled);
+        assert!(parsed.auto_update.auto_download);
     }
 
     fn interval_kind(minutes: u32) -> crate::config::workspace_config::ScheduleKind {

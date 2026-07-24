@@ -38,9 +38,16 @@ export const useAvailableAppUpdate = (): AppUpdateInfo | null => {
       });
 
     const unlistenPromise = listen<AppUpdateAvailableEvent>(APP_UPDATE_AVAILABLE_EVENT, (event) => {
-      if (event.payload?.update) {
-        setUpdate(event.payload.update);
-      }
+      const next = event.payload?.update;
+      if (!next) return;
+      // Events can arrive out of order when a check and a background
+      // download finish close together: never downgrade an already
+      // "downloaded" version back to plain "available".
+      setUpdate((current) =>
+        current && current.version === next.version && current.downloaded && !next.downloaded
+          ? current
+          : next
+      );
     });
 
     return () => {

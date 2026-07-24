@@ -25,9 +25,18 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const LATEST_MANIFEST_URL: &str =
     "https://github.com/clairun/clai/releases/latest/download/latest.json";
 
+/// Update package downloaded in the background, waiting for the user to
+/// restart. Kept in memory: packages are tens of MB and the alternative
+/// (a temp file) would need cleanup and re-verification on install.
+struct DownloadedPackage {
+    version: String,
+    bytes: Vec<u8>,
+}
+
 #[derive(Clone, Default)]
 pub struct AppUpdateRuntime {
     last_check: Arc<Mutex<Option<AppUpdateLastCheck>>>,
+    downloaded: Arc<Mutex<Option<DownloadedPackage>>>,
     check_lock: Arc<tokio::sync::Mutex<()>>,
     install_lock: Arc<tokio::sync::Mutex<()>>,
 }
@@ -44,8 +53,56 @@ impl AppUpdateRuntime {
             .clone()
     }
 
-    fn record_check(&self, check: AppUpdateLastCheck) {
-        *self.last_check.lock().expect("app update state poisoned") = Some(check);
+    /// Records the latest check result. Re-derives the `downloaded` flag
+    /// from the byte cache at record time so a background download finishing
+    /// between a check's cache read and its recording cannot regress a
+    /// `downloaded: true` state back to `false`.
+    fn record_check(&self, mut check: AppUpdateLastCheck) -> AppUpdateLastCheck {
+        let downloaded_version = self.downloaded_version();
+        if let Some(update) = check.update.as_mut() {
+            if downloaded_version.as_deref() == Some(update.version.as_str()) {
+                update.downloaded = true;
+            }
+        }
+        *self.last_check.lock().expect("app update state poisoned") = Some(check.clone());
+        check
+    }
+
+    fn downloaded_version(&self) -> Option<String> {
+        self.downloaded
+            .lock()
+            .expect("app update state poisoned")
+            .as_ref()
+            .map(|package| package.version.clone())
+    }
+
+    fn store_downloaded(&self, version: &str, bytes: Vec<u8>) {
+        *self.downloaded.lock().expect("app update state poisoned") = Some(DownloadedPackage {
+            version: version.to_string(),
+            bytes,
+        });
+    }
+
+    /// Takes the cached package if it matches `version`; a mismatch (a newer
+    /// release appeared since the download) drops the stale cache instead.
+    fn take_downloaded(&self, version: &str) -> Option<Vec<u8>> {
+        let mut guard = self.downloaded.lock().expect("app update state poisoned");
+        match guard.take() {
+            Some(package) if package.version == version => Some(package.bytes),
+            _ => None,
+        }
+    }
+
+    /// Flags the recorded last check's update as downloaded (if it is still
+    /// the same version) and returns the refreshed info for re-emission.
+    fn mark_downloaded(&self, version: &str) -> Option<AppUpdateInfo> {
+        let mut guard = self.last_check.lock().expect("app update state poisoned");
+        let update = guard.as_mut()?.update.as_mut()?;
+        if update.version != version {
+            return None;
+        }
+        update.downloaded = true;
+        Some(update.clone())
     }
 }
 
@@ -78,6 +135,9 @@ pub struct AppUpdateInfo {
     /// package channel (e.g. download the new Flatpak bundle) instead of the
     /// in-app installer.
     pub installable: bool,
+    /// The update package has already been downloaded in the background;
+    /// installing it only needs a restart, not a download.
+    pub downloaded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -189,9 +249,17 @@ pub async fn check_for_app_update(
     if let Some(update) = result.last_check.update.clone() {
         if let Err(error) = app.emit(
             APP_UPDATE_AVAILABLE_EVENT,
-            AppUpdateAvailableEvent { update },
+            AppUpdateAvailableEvent {
+                update: update.clone(),
+            },
         ) {
             tracing::warn!(%error, "Failed to emit app update notification");
+        }
+        if update.installable && !update.downloaded {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                auto_download_if_enabled(&app).await;
+            });
         }
     }
     Ok(result)
@@ -222,25 +290,45 @@ pub async fn install_app_update(
         .ok_or_else(|| "No update is available.".to_string())?;
 
     let _ = on_event.send(AppUpdateInstallEvent::Started);
-    let mut downloaded: u64 = 0;
-    let bytes = tokio::time::timeout(
-        DOWNLOAD_TIMEOUT,
-        update.download(
-            |chunk_len, total| {
-                downloaded = downloaded.saturating_add(chunk_len as u64);
-                let _ = on_event.send(AppUpdateInstallEvent::Progress { downloaded, total });
-            },
-            || {
-                let _ = on_event.send(AppUpdateInstallEvent::DownloadFinished);
-            },
-        ),
-    )
-    .await
-    .map_err(|_| "Timed out downloading the update package.".to_string())?
-    .map_err(format_updater_error)?;
+    // Reuse a package the background auto-download already fetched (and the
+    // updater plugin signature-verified) when it matches the version we are
+    // about to install; otherwise download it now.
+    let (bytes, from_cache) = match state.app_updates.take_downloaded(&update.version) {
+        Some(bytes) => {
+            let _ = on_event.send(AppUpdateInstallEvent::DownloadFinished);
+            (bytes, true)
+        }
+        None => {
+            let mut downloaded: u64 = 0;
+            let bytes = tokio::time::timeout(
+                DOWNLOAD_TIMEOUT,
+                update.download(
+                    |chunk_len, total| {
+                        downloaded = downloaded.saturating_add(chunk_len as u64);
+                        let _ =
+                            on_event.send(AppUpdateInstallEvent::Progress { downloaded, total });
+                    },
+                    || {
+                        let _ = on_event.send(AppUpdateInstallEvent::DownloadFinished);
+                    },
+                ),
+            )
+            .await
+            .map_err(|_| "Timed out downloading the update package.".to_string())?
+            .map_err(format_updater_error)?;
+            (bytes, false)
+        }
+    };
 
     let _ = on_event.send(AppUpdateInstallEvent::Installing);
-    update.install(bytes).map_err(format_updater_error)?;
+    if let Err(error) = update.install(&bytes) {
+        // Put a cached package back so the "downloaded — restart to apply"
+        // state stays truthful and a retry does not silently re-download.
+        if from_cache {
+            state.app_updates.store_downloaded(&update.version, bytes);
+        }
+        return Err(format_updater_error(error));
+    }
     app.restart();
 }
 
@@ -250,25 +338,98 @@ pub fn spawn_startup_check(app: AppHandle) {
         let Some(state) = app.try_state::<AppState>() else {
             return;
         };
-        match auto_update_settings(state.inner()) {
-            Ok(settings) if settings.enabled => {}
-            Ok(_) => return,
-            Err(error) => {
-                tracing::warn!(error, "Skipping startup update check");
-                return;
-            }
-        }
 
+        // Checking is always on: it is a cheap, anonymous manifest fetch and
+        // the user must at least learn an update exists. Only the download
+        // is configurable (`AutoUpdateConfig::auto_download`).
         let result = check_for_update(&app, state.inner()).await;
-        if let Some(update) = result.last_check.update {
-            if let Err(error) = app.emit(
-                APP_UPDATE_AVAILABLE_EVENT,
-                AppUpdateAvailableEvent { update },
-            ) {
-                tracing::warn!(%error, "Failed to emit app update notification");
-            }
+        let Some(update) = result.last_check.update else {
+            return;
+        };
+        if let Err(error) = app.emit(
+            APP_UPDATE_AVAILABLE_EVENT,
+            AppUpdateAvailableEvent {
+                update: update.clone(),
+            },
+        ) {
+            tracing::warn!(%error, "Failed to emit app update notification");
+        }
+        if update.installable && !update.downloaded {
+            auto_download_if_enabled(&app).await;
         }
     });
+}
+
+/// Background download of an available update, gated on the
+/// `autoUpdate.autoDownload` setting. Re-checks the updater manifest to get
+/// a fresh signed package descriptor, downloads it, caches the bytes, and
+/// re-emits the availability event with `downloaded: true` so the badge and
+/// toast flip to \"restart to apply\".
+async fn auto_download_if_enabled(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    match auto_update_settings(state.inner()) {
+        Ok(settings) if settings.auto_download => {}
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(error, "Skipping update auto-download");
+            return;
+        }
+    }
+    if !detect_support_status().supported {
+        return;
+    }
+
+    // Serialize with manual installs; whichever runs first downloads.
+    let _install_guard = state.app_updates.install_lock.lock().await;
+
+    let update = match app
+        .updater_builder()
+        .timeout(CHECK_TIMEOUT)
+        .build()
+        .map_err(format_updater_error)
+    {
+        Ok(updater) => match updater.check().await {
+            Ok(Some(update)) => update,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(error = %format_updater_error(error), "Update auto-download check failed");
+                return;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error, "Update auto-download check failed");
+            return;
+        }
+    };
+    if state.app_updates.downloaded_version().as_deref() == Some(update.version.as_str()) {
+        return;
+    }
+
+    let bytes =
+        match tokio::time::timeout(DOWNLOAD_TIMEOUT, update.download(|_, _| {}, || {})).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(error)) => {
+                tracing::warn!(error = %format_updater_error(error), "Update auto-download failed");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!("Update auto-download timed out");
+                return;
+            }
+        };
+
+    state.app_updates.store_downloaded(&update.version, bytes);
+    tracing::info!(version = %update.version, "Update downloaded in the background");
+    if let Some(update) = state.app_updates.mark_downloaded(&update.version) {
+        if let Err(error) = app.emit(
+            APP_UPDATE_AVAILABLE_EVENT,
+            AppUpdateAvailableEvent { update },
+        ) {
+            tracing::warn!(%error, "Failed to emit app update notification");
+        }
+    }
 }
 
 fn auto_update_settings(state: &AppState) -> Result<AutoUpdateConfig, String> {
@@ -296,7 +457,9 @@ async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckRe
             Ok(updater) => match updater.check().await.map_err(format_updater_error) {
                 Ok(update) => AppUpdateLastCheck {
                     checked_at,
-                    update: update.as_ref().map(update_info),
+                    update: update
+                        .as_ref()
+                        .map(|update| update_info(update, state.app_updates.downloaded_version())),
                     error: None,
                 },
                 Err(error) => AppUpdateLastCheck {
@@ -336,7 +499,7 @@ async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckRe
         }
     };
 
-    state.app_updates.record_check(last_check.clone());
+    let last_check = state.app_updates.record_check(last_check);
     AppUpdateCheckResult {
         settings,
         support,
@@ -344,13 +507,14 @@ async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckRe
     }
 }
 
-fn update_info(update: &Update) -> AppUpdateInfo {
+fn update_info(update: &Update, downloaded_version: Option<String>) -> AppUpdateInfo {
     AppUpdateInfo {
         current_version: update.current_version.clone(),
         version: update.version.clone(),
         date: update.date.as_ref().map(ToString::to_string),
         body: update.body.clone(),
         installable: true,
+        downloaded: downloaded_version.as_deref() == Some(update.version.as_str()),
     }
 }
 
@@ -391,6 +555,7 @@ fn notify_update_from_manifest(
             .filter(|notes| !notes.is_empty())
             .map(str::to_string),
         installable: false,
+        downloaded: false,
     })
 }
 
@@ -733,5 +898,77 @@ mod tests {
 
         assert!(notify_update_from_manifest("26.7.12", &manifest).is_none());
         assert!(notify_update_from_manifest("26.8.1", &manifest).is_none());
+    }
+
+    fn sample_info(version: &str) -> AppUpdateInfo {
+        AppUpdateInfo {
+            current_version: "26.7.12".to_string(),
+            version: version.to_string(),
+            date: None,
+            body: None,
+            installable: true,
+            downloaded: false,
+        }
+    }
+
+    #[test]
+    fn take_downloaded_returns_bytes_for_matching_version() {
+        let runtime = AppUpdateRuntime::new();
+        runtime.store_downloaded("26.8.1", vec![1, 2, 3]);
+        assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.1"));
+        assert_eq!(runtime.take_downloaded("26.8.1"), Some(vec![1, 2, 3]));
+        // Taking consumes the cache.
+        assert_eq!(runtime.downloaded_version(), None);
+    }
+
+    #[test]
+    fn take_downloaded_drops_stale_cache_on_version_mismatch() {
+        let runtime = AppUpdateRuntime::new();
+        runtime.store_downloaded("26.8.1", vec![1, 2, 3]);
+        // A newer release appeared: the stale package must not be installed
+        // and must not linger in memory either.
+        assert_eq!(runtime.take_downloaded("26.8.2"), None);
+        assert_eq!(runtime.downloaded_version(), None);
+    }
+
+    #[test]
+    fn mark_downloaded_flags_recorded_check_and_returns_info() {
+        let runtime = AppUpdateRuntime::new();
+        runtime.record_check(AppUpdateLastCheck {
+            checked_at: "now".to_string(),
+            update: Some(sample_info("26.8.1")),
+            error: None,
+        });
+        let marked = runtime.mark_downloaded("26.8.1").expect("should mark");
+        assert!(marked.downloaded);
+        let recorded = runtime.last_check().unwrap().update.unwrap();
+        assert!(recorded.downloaded);
+    }
+
+    #[test]
+    fn record_check_rederives_downloaded_from_byte_cache() {
+        let runtime = AppUpdateRuntime::new();
+        // A background download finished between the check's cache read and
+        // its recording: recording must not regress `downloaded` to false.
+        runtime.store_downloaded("26.8.1", vec![1]);
+        let recorded = runtime.record_check(AppUpdateLastCheck {
+            checked_at: "now".to_string(),
+            update: Some(sample_info("26.8.1")),
+            error: None,
+        });
+        assert!(recorded.update.unwrap().downloaded);
+        assert!(runtime.last_check().unwrap().update.unwrap().downloaded);
+    }
+
+    #[test]
+    fn mark_downloaded_ignores_version_mismatch() {
+        let runtime = AppUpdateRuntime::new();
+        runtime.record_check(AppUpdateLastCheck {
+            checked_at: "now".to_string(),
+            update: Some(sample_info("26.8.2")),
+            error: None,
+        });
+        assert!(runtime.mark_downloaded("26.8.1").is_none());
+        assert!(!runtime.last_check().unwrap().update.unwrap().downloaded);
     }
 }

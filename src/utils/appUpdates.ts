@@ -35,7 +35,7 @@ export const installEventText = (event: AppUpdateInstallEvent): string => {
 };
 
 export const installAppUpdate = async (
-  onEvent: (event: AppUpdateInstallEvent) => void,
+  onEvent: (event: AppUpdateInstallEvent) => void
 ): Promise<void> => {
   const channel = new Channel<AppUpdateInstallEvent>();
   channel.onmessage = onEvent;
