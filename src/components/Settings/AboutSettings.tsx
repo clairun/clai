@@ -8,6 +8,17 @@
 
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import type {
+  AppUpdateCheckResult,
+  AppUpdateStatus,
+  AutoUpdateConfig,
+} from '../../generated/bindings';
+import {
+  LATEST_RELEASE_URL,
+  installAppUpdate,
+  installEventText,
+  updateErrorText,
+} from '../../utils/appUpdates';
 import { openExternal } from '../../utils/openExternal';
 import styles from './AboutSettings.module.css';
 
@@ -23,6 +34,12 @@ const GitHubIcon = () => (
 
 const AboutSettings = () => {
   const [version, setVersion] = useState('');
+  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [updateError, setUpdateError] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [savingAutoUpdate, setSavingAutoUpdate] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [installProgress, setInstallProgress] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -42,13 +59,111 @@ const AboutSettings = () => {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    invoke<AppUpdateStatus>('get_app_update_status')
+      .then((status) => {
+        if (!cancelled) setUpdateStatus(status);
+      })
+      .catch((err) => {
+        if (!cancelled) setUpdateError(updateErrorText(err, 'Failed to read update status.'));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const persistAutoUpdate = (autoDownload: boolean) => {
+    if (!updateStatus || savingAutoUpdate) return;
+    const previousSettings = updateStatus.settings;
+    const settings: AutoUpdateConfig = { autoDownload };
+    setSavingAutoUpdate(true);
+    setUpdateError('');
+    setUpdateStatus((current) => (current ? { ...current, settings } : current));
+    invoke<AutoUpdateConfig>('set_auto_update_settings', { settings })
+      .then((saved) => {
+        setUpdateStatus((current) => (current ? { ...current, settings: saved } : current));
+      })
+      .catch((err) => {
+        setUpdateError(updateErrorText(err, 'Failed to save update settings.'));
+        setUpdateStatus((current) =>
+          current ? { ...current, settings: previousSettings } : current
+        );
+      })
+      .finally(() => {
+        setSavingAutoUpdate(false);
+      });
+  };
+
+  const checkForUpdates = async () => {
+    setChecking(true);
+    setUpdateError('');
+    try {
+      const result = await invoke<AppUpdateCheckResult>('check_for_app_update');
+      setUpdateStatus({
+        settings: result.settings,
+        support: result.support,
+        lastCheck: result.lastCheck,
+      });
+    } catch (err) {
+      setUpdateError(updateErrorText(err, 'Failed to check for updates.'));
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setInstalling(true);
+    setInstallProgress('Starting download...');
+    setUpdateError('');
+    try {
+      await installAppUpdate((event) => {
+        setInstallProgress(installEventText(event));
+      });
+    } catch (err) {
+      setUpdateError(updateErrorText(err, 'Failed to install update.'));
+      setInstalling(false);
+    }
+  };
+
+  const support = updateStatus?.support;
+  const lastCheck = updateStatus?.lastCheck;
+  const availableUpdate = lastCheck?.update ?? null;
+  const supportsUpdates = support?.supported ?? false;
+  const canCheck = support?.canCheck ?? false;
+  const supportDescription = updateStatus
+    ? support?.reason || `${support?.platform ?? 'Desktop'} ${support?.bundleType ?? 'native'}`
+    : 'Checking update support...';
+  const supportBadge = !updateStatus
+    ? 'Checking'
+    : supportsUpdates
+      ? 'Available'
+      : canCheck
+        ? 'Notify only'
+        : 'Unavailable';
+  // Builds that can neither self-update nor check (dev builds,
+  // package-manager installs like AUR) render no Updates panel at all:
+  // updates arrive through the build/package channel, so there is nothing
+  // actionable to show. The panel also stays hidden while support is still
+  // loading — appearing once is fine, appearing and then vanishing is not.
+  // If the status read itself fails, the panel shows so the error is visible.
+  const updatesUnavailable = updateStatus !== null && !supportsUpdates && !canCheck;
+  const showUpdatePanel = updateError !== '' || (updateStatus !== null && !updatesUnavailable);
+  const updateSummary = availableUpdate
+    ? availableUpdate.downloaded
+      ? `CLAI v${availableUpdate.version} has been downloaded. Restart to apply it.`
+      : `CLAI v${availableUpdate.version} is available.`
+    : lastCheck?.error || (lastCheck ? 'CLAI is up to date.' : 'Not checked yet.');
+
   return (
     <div className={styles.hero}>
       <img src="/icon.svg" alt="CLAI logo" className={styles.logo} />
       <h2 className={styles.title}>CLAI</h2>
       {version && <span className={styles.version}>v{version}</span>}
 
-      <p className={styles.tagline}>Build, run, and supervise teams of AI agents on your desktop.</p>
+      <p className={styles.tagline}>
+        Build, run, and supervise teams of AI agents on your desktop.
+      </p>
       <p className={styles.subtitle}>
         Multi-agent orchestration, with MCP-native tools and a local execution sandbox.
       </p>
@@ -73,6 +188,95 @@ const AboutSettings = () => {
         <GitHubIcon />
         <span>View on GitHub</span>
       </button>
+
+      {showUpdatePanel && (
+        <div className={styles.updatePanel}>
+          <div className={styles.updateHeader}>
+            <div className={styles.updateTitleGroup}>
+              <span className={styles.updateTitle}>Updates</span>
+              <span className={styles.updateDesc}>{supportDescription}</span>
+            </div>
+            <span
+              className={`${styles.updateBadge} ${supportsUpdates ? styles.updateBadgeOk : ''}`}
+            >
+              {supportBadge}
+            </span>
+          </div>
+
+          {/* Checking for updates is always on; only the background download is
+            configurable, and only where this build can actually install
+            updates itself. Notify-only builds (e.g. Flatpak) get no toggle. */}
+          {supportsUpdates && (
+            <label className={styles.toggleRow}>
+              <span className={styles.toggleCopy}>
+                <span className={styles.toggleTitle}>Automatically download updates</span>
+                <span className={styles.toggleDesc}>
+                  New versions download in the background. You choose when to restart.
+                </span>
+              </span>
+              <span
+                className={`${styles.toggle} ${
+                  updateStatus?.settings.autoDownload ? styles.toggleOn : ''
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className={styles.toggleInput}
+                  checked={updateStatus?.settings.autoDownload ?? true}
+                  onChange={(event) => persistAutoUpdate(event.target.checked)}
+                  disabled={savingAutoUpdate}
+                />
+                <span className={styles.toggleTrack}>
+                  <span className={styles.toggleThumb} />
+                </span>
+              </span>
+            </label>
+          )}
+
+          <div className={styles.updateStatus}>
+            <span>{installing ? installProgress : updateSummary}</span>
+            {updateError && <span className={styles.updateError}>{updateError}</span>}
+          </div>
+
+          <div className={styles.updateActions}>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={checkForUpdates}
+              disabled={checking || !canCheck}
+            >
+              {checking ? 'Checking...' : 'Check for updates'}
+            </button>
+            {availableUpdate &&
+              (availableUpdate.installable ? (
+                <button
+                  type="button"
+                  className={styles.primaryButton}
+                  onClick={installUpdate}
+                  disabled={installing}
+                >
+                  {installing
+                    ? 'Installing...'
+                    : availableUpdate.downloaded
+                      ? 'Restart and update'
+                      : 'Install and restart'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={styles.primaryButton}
+                  onClick={() => {
+                    openExternal(LATEST_RELEASE_URL).catch((err) =>
+                      console.error('[AboutSettings] Failed to open release page:', err)
+                    );
+                  }}
+                >
+                  View release
+                </button>
+              ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

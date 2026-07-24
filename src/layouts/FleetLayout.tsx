@@ -15,6 +15,7 @@ import {
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
+import AppUpdateBadge from '../components/AppUpdateBadge';
 import { SettingsModal, TABS } from '../components/Settings';
 import { OPEN_GLOBAL_SETTINGS_EVENT, type OpenGlobalSettingsDetail } from '../utils/globalSettings';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -461,6 +462,7 @@ const FleetLayout = () => {
             <strong>{counters.attention}</strong> need attention
           </span>
         </div>
+        <AppUpdateBadge />
         <button
           type="button"
           className={styles.settingsButton}

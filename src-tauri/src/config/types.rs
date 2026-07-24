@@ -597,6 +597,24 @@ fn default_workspace_dirs() -> Vec<PathBuf> {
     vec![PathBuf::from("~/.clai/workspaces")]
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export, export_to = "bindings.ts")]
+pub struct AutoUpdateConfig {
+    /// Download new versions in the background on self-update-capable
+    /// builds; the user still chooses when to restart and apply. Checking
+    /// for updates is always on and not configurable.
+    pub auto_download: bool,
+}
+
+impl Default for AutoUpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_download: true,
+        }
+    }
+}
+
 /// Root app configuration persisted at `~/.clai/config.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -628,6 +646,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub system_apps: crate::system_apps::SystemAppsConfig,
 
+    /// App updater preferences. Enabled by default for native installer builds;
+    /// runtime support detection gates package-manager-managed installs.
+    #[serde(default)]
+    pub auto_update: AutoUpdateConfig,
+
     /// Global "pause all" overlay for the agent scheduler. When true, NO
     /// workspace's scheduled tick runs, regardless of its individual
     /// `schedule.paused` state — which is preserved underneath and restored
@@ -647,6 +670,7 @@ impl Default for AppConfig {
             skill_sources: Vec::new(),
             provider_connections: Vec::new(),
             system_apps: crate::system_apps::SystemAppsConfig::default(),
+            auto_update: AutoUpdateConfig::default(),
             scheduler_paused: false,
         }
     }
@@ -704,6 +728,25 @@ mod tests {
         }"#;
         let parsed: ClaiConfig = serde_json::from_str(legacy).unwrap();
         assert!(parsed.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn app_config_defaults_auto_download_enabled() {
+        let config = ClaiConfig::default();
+        assert!(config.auto_update.auto_download);
+    }
+
+    #[test]
+    fn legacy_config_deserializes_with_auto_download_enabled() {
+        let legacy = r#"{
+            "version": 1,
+            "workspaceDirs": ["~/.clai/workspaces"],
+            "mcpServers": [],
+            "skillSources": [],
+            "providerConnections": []
+        }"#;
+        let parsed: ClaiConfig = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.auto_update.auto_download);
     }
 
     fn interval_kind(minutes: u32) -> crate::config::workspace_config::ScheduleKind {
