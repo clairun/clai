@@ -141,12 +141,14 @@ const AboutSettings = () => {
       : canCheck
         ? 'Notify only'
         : 'Unavailable';
-  // Fully-unavailable builds (dev, package-manager installs): the header
-  // reason already says everything. Rendering the status line too would
-  // repeat the same sentence (the backend mirrors the reason into
-  // lastCheck.error), and the check button would be permanently disabled —
-  // so both are hidden.
+  // Builds that can neither self-update nor check (dev builds,
+  // package-manager installs like AUR) render no Updates panel at all:
+  // updates arrive through the build/package channel, so there is nothing
+  // actionable to show. The panel also stays hidden while support is still
+  // loading — appearing once is fine, appearing and then vanishing is not.
+  // If the status read itself fails, the panel shows so the error is visible.
   const updatesUnavailable = updateStatus !== null && !supportsUpdates && !canCheck;
+  const showUpdatePanel = updateError !== '' || (updateStatus !== null && !updatesUnavailable);
   const updateSummary = availableUpdate
     ? availableUpdate.downloaded
       ? `CLAI v${availableUpdate.version} has been downloaded. Restart to apply it.`
@@ -187,60 +189,55 @@ const AboutSettings = () => {
         <span>View on GitHub</span>
       </button>
 
-      <div className={styles.updatePanel}>
-        <div className={styles.updateHeader}>
-          <div className={styles.updateTitleGroup}>
-            <span className={styles.updateTitle}>Updates</span>
-            <span className={styles.updateDesc}>{supportDescription}</span>
+      {showUpdatePanel && (
+        <div className={styles.updatePanel}>
+          <div className={styles.updateHeader}>
+            <div className={styles.updateTitleGroup}>
+              <span className={styles.updateTitle}>Updates</span>
+              <span className={styles.updateDesc}>{supportDescription}</span>
+            </div>
+            <span
+              className={`${styles.updateBadge} ${supportsUpdates ? styles.updateBadgeOk : ''}`}
+            >
+              {supportBadge}
+            </span>
           </div>
-          <span className={`${styles.updateBadge} ${supportsUpdates ? styles.updateBadgeOk : ''}`}>
-            {supportBadge}
-          </span>
-        </div>
 
-        {/* Checking for updates is always on; only the background download is
+          {/* Checking for updates is always on; only the background download is
             configurable, and only where this build can actually install
             updates itself. Notify-only builds (e.g. Flatpak) get no toggle. */}
-        {supportsUpdates && (
-          <label className={styles.toggleRow}>
-            <span className={styles.toggleCopy}>
-              <span className={styles.toggleTitle}>Automatically download updates</span>
-              <span className={styles.toggleDesc}>
-                New versions download in the background. You choose when to restart.
+          {supportsUpdates && (
+            <label className={styles.toggleRow}>
+              <span className={styles.toggleCopy}>
+                <span className={styles.toggleTitle}>Automatically download updates</span>
+                <span className={styles.toggleDesc}>
+                  New versions download in the background. You choose when to restart.
+                </span>
               </span>
-            </span>
-            <span
-              className={`${styles.toggle} ${
-                updateStatus?.settings.autoDownload ? styles.toggleOn : ''
-              }`}
-            >
-              <input
-                type="checkbox"
-                className={styles.toggleInput}
-                checked={updateStatus?.settings.autoDownload ?? true}
-                onChange={(event) => persistAutoUpdate(event.target.checked)}
-                disabled={savingAutoUpdate}
-              />
-              <span className={styles.toggleTrack}>
-                <span className={styles.toggleThumb} />
+              <span
+                className={`${styles.toggle} ${
+                  updateStatus?.settings.autoDownload ? styles.toggleOn : ''
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className={styles.toggleInput}
+                  checked={updateStatus?.settings.autoDownload ?? true}
+                  onChange={(event) => persistAutoUpdate(event.target.checked)}
+                  disabled={savingAutoUpdate}
+                />
+                <span className={styles.toggleTrack}>
+                  <span className={styles.toggleThumb} />
+                </span>
               </span>
-            </span>
-          </label>
-        )}
+            </label>
+          )}
 
-        {!updatesUnavailable && (
           <div className={styles.updateStatus}>
             <span>{installing ? installProgress : updateSummary}</span>
             {updateError && <span className={styles.updateError}>{updateError}</span>}
           </div>
-        )}
-        {updatesUnavailable && updateError && (
-          <div className={styles.updateStatus}>
-            <span className={styles.updateError}>{updateError}</span>
-          </div>
-        )}
 
-        {!updatesUnavailable && (
           <div className={styles.updateActions}>
             <button
               type="button"
@@ -278,8 +275,8 @@ const AboutSettings = () => {
                 </button>
               ))}
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 };

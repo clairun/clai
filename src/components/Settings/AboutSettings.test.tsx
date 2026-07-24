@@ -51,12 +51,15 @@ describe('AboutSettings updates panel', () => {
     mockInvoke.mockReset();
   });
 
-  it('shows the unavailable reason exactly once and hides the check button', async () => {
+  it('renders no Updates panel at all when the build can neither update nor check', async () => {
     respond(unavailableStatus);
     render(<AboutSettings />);
-    await waitFor(() => expect(screen.getByText('Unavailable')).toBeTruthy());
+    // Wait until the status has loaded (version renders from the same pass).
+    await waitFor(() => expect(screen.getByText('v26.7.12-dev')).toBeTruthy());
 
-    expect(screen.getAllByText(REASON)).toHaveLength(1);
+    expect(screen.queryByText('Updates')).toBeNull();
+    expect(screen.queryByText('Unavailable')).toBeNull();
+    expect(screen.queryByText(REASON)).toBeNull();
     expect(screen.queryByRole('button', { name: /check for updates/i })).toBeNull();
   });
 
