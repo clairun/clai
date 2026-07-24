@@ -141,6 +141,12 @@ const AboutSettings = () => {
       : canCheck
         ? 'Notify only'
         : 'Unavailable';
+  // Fully-unavailable builds (dev, package-manager installs): the header
+  // reason already says everything. Rendering the status line too would
+  // repeat the same sentence (the backend mirrors the reason into
+  // lastCheck.error), and the check button would be permanently disabled —
+  // so both are hidden.
+  const updatesUnavailable = updateStatus !== null && !supportsUpdates && !canCheck;
   const updateSummary = availableUpdate
     ? availableUpdate.downloaded
       ? `CLAI v${availableUpdate.version} has been downloaded. Restart to apply it.`
@@ -222,48 +228,57 @@ const AboutSettings = () => {
           </label>
         )}
 
-        <div className={styles.updateStatus}>
-          <span>{installing ? installProgress : updateSummary}</span>
-          {updateError && <span className={styles.updateError}>{updateError}</span>}
-        </div>
+        {!updatesUnavailable && (
+          <div className={styles.updateStatus}>
+            <span>{installing ? installProgress : updateSummary}</span>
+            {updateError && <span className={styles.updateError}>{updateError}</span>}
+          </div>
+        )}
+        {updatesUnavailable && updateError && (
+          <div className={styles.updateStatus}>
+            <span className={styles.updateError}>{updateError}</span>
+          </div>
+        )}
 
-        <div className={styles.updateActions}>
-          <button
-            type="button"
-            className={styles.secondaryButton}
-            onClick={checkForUpdates}
-            disabled={checking || !canCheck}
-          >
-            {checking ? 'Checking...' : 'Check for updates'}
-          </button>
-          {availableUpdate &&
-            (availableUpdate.installable ? (
-              <button
-                type="button"
-                className={styles.primaryButton}
-                onClick={installUpdate}
-                disabled={installing}
-              >
-                {installing
-                  ? 'Installing...'
-                  : availableUpdate.downloaded
-                    ? 'Restart and update'
-                    : 'Install and restart'}
-              </button>
-            ) : (
-              <button
-                type="button"
-                className={styles.primaryButton}
-                onClick={() => {
-                  openExternal(LATEST_RELEASE_URL).catch((err) =>
-                    console.error('[AboutSettings] Failed to open release page:', err)
-                  );
-                }}
-              >
-                View release
-              </button>
-            ))}
-        </div>
+        {!updatesUnavailable && (
+          <div className={styles.updateActions}>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={checkForUpdates}
+              disabled={checking || !canCheck}
+            >
+              {checking ? 'Checking...' : 'Check for updates'}
+            </button>
+            {availableUpdate &&
+              (availableUpdate.installable ? (
+                <button
+                  type="button"
+                  className={styles.primaryButton}
+                  onClick={installUpdate}
+                  disabled={installing}
+                >
+                  {installing
+                    ? 'Installing...'
+                    : availableUpdate.downloaded
+                      ? 'Restart and update'
+                      : 'Install and restart'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={styles.primaryButton}
+                  onClick={() => {
+                    openExternal(LATEST_RELEASE_URL).catch((err) =>
+                      console.error('[AboutSettings] Failed to open release page:', err)
+                    );
+                  }}
+                >
+                  View release
+                </button>
+              ))}
+          </div>
+        )}
       </div>
     </div>
   );
