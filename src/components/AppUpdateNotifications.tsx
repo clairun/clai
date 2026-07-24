@@ -1,95 +1,60 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import type { AppUpdateAvailableEvent, AppUpdateInfo, AppUpdateStatus } from '../generated/bindings';
+import React, { useCallback, useState } from 'react';
 import {
-  APP_UPDATE_AVAILABLE_EVENT,
   LATEST_RELEASE_URL,
   installAppUpdate,
   installEventText,
   updateErrorText,
 } from '../utils/appUpdates';
+import { useAvailableAppUpdate } from '../hooks/useAvailableAppUpdate';
 import { openExternal } from '../utils/openExternal';
 import styles from './WorkspaceTaskNotifications.module.css';
 
-interface NotificationItem {
-  update: AppUpdateInfo;
+interface InstallState {
   error: string;
   progress: string;
   installing: boolean;
 }
 
+const IDLE_INSTALL: InstallState = { error: '', progress: '', installing: false };
+
+/**
+ * Dismissible toast shown when an update becomes available. Dismissal is
+ * keyed by version: dismissing v1 keeps the toast hidden for v1 but a later
+ * v2 re-surfaces it. The persistent top-bar badge (AppUpdateBadge) is the
+ * always-visible counterpart and is not affected by dismissal here.
+ */
 const AppUpdateNotifications = () => {
-  const [item, setItem] = useState<NotificationItem | null>(null);
+  const update = useAvailableAppUpdate();
+  const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
+  const [install, setInstall] = useState<InstallState>(IDLE_INSTALL);
 
-  const showUpdate = useCallback((update: AppUpdateInfo) => {
-    setItem({
-      update,
-      error: '',
-      progress: '',
-      installing: false,
-    });
-  }, []);
+  // A different version arriving should not inherit a stale error or
+  // progress line from a previous install attempt. Render-phase state
+  // adjustment (React's recommended pattern for derived resets).
+  const [seenVersion, setSeenVersion] = useState<string | null>(null);
+  const version = update?.version ?? null;
+  if (version !== seenVersion) {
+    setSeenVersion(version);
+    setInstall(IDLE_INSTALL);
+  }
 
-  useEffect(() => {
-    let cancelled = false;
-    invoke<AppUpdateStatus>('get_app_update_status')
-      .then((status) => {
-        const update = status.lastCheck?.update;
-        if (!cancelled && update) {
-          showUpdate(update);
-        }
-      })
-      .catch((error) => {
-        console.error('[AppUpdateNotifications] Failed to read update status:', error);
-      });
+  const dismiss = useCallback(() => {
+    setDismissedVersion(update?.version ?? null);
+    setInstall(IDLE_INSTALL);
+  }, [update?.version]);
 
-    const unlistenPromise = listen<AppUpdateAvailableEvent>(APP_UPDATE_AVAILABLE_EVENT, (event) => {
-      if (event.payload?.update) {
-        showUpdate(event.payload.update);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
-    };
-  }, [showUpdate]);
-
-  const dismiss = useCallback(() => setItem(null), []);
-
-  const install = useCallback(async () => {
-    setItem((current) =>
-      current
-        ? {
-            ...current,
-            error: '',
-            installing: true,
-            progress: 'Starting download...',
-          }
-        : current,
-    );
+  const startInstall = useCallback(async () => {
+    setInstall({ error: '', progress: 'Starting download...', installing: true });
     try {
       await installAppUpdate((event) => {
-        setItem((current) =>
-          current
-            ? {
-                ...current,
-                progress: installEventText(event),
-              }
-            : current,
-        );
+        setInstall((current) => ({ ...current, progress: installEventText(event) }));
       });
     } catch (error) {
-      setItem((current) =>
-        current
-          ? {
-              ...current,
-              error: updateErrorText(error, 'Failed to install update.'),
-              installing: false,
-            }
-          : current,
-      );
+      setInstall({
+        error: updateErrorText(error, 'Failed to install update.'),
+        progress: '',
+        installing: false,
+      });
     }
   }, []);
 
@@ -99,15 +64,15 @@ const AppUpdateNotifications = () => {
     });
   }, []);
 
-  if (!item) return null;
+  if (!update || update.version === dismissedVersion) return null;
 
-  const installable = item.update.installable;
-  const body = item.error
-    ? item.error
-    : item.progress ||
+  const installable = update.installable;
+  const body = install.error
+    ? install.error
+    : install.progress ||
       (installable
-        ? `CLAI v${item.update.version} is ready to install.`
-        : `CLAI v${item.update.version} is available. This build updates outside CLAI — get it from GitHub Releases.`);
+        ? `CLAI v${update.version} is ready to install.`
+        : `CLAI v${update.version} is available. This build updates outside CLAI — get it from GitHub Releases.`);
 
   return (
     <div
@@ -119,7 +84,7 @@ const AppUpdateNotifications = () => {
       <div className={styles.toast}>
         <div className={styles.toastHeader}>
           <span className={styles.title}>Update available</span>
-          <span className={styles.status}>v{item.update.version}</span>
+          <span className={styles.status}>v{update.version}</span>
         </div>
         <p className={styles.body}>{body}</p>
         <div className={styles.actions}>
@@ -127,10 +92,10 @@ const AppUpdateNotifications = () => {
             <button
               type="button"
               className={styles.openButton}
-              onClick={install}
-              disabled={item.installing}
+              onClick={startInstall}
+              disabled={install.installing}
             >
-              {item.installing ? 'Installing...' : 'Install and restart'}
+              {install.installing ? 'Installing...' : 'Install and restart'}
             </button>
           ) : (
             <button type="button" className={styles.openButton} onClick={viewRelease}>
@@ -142,7 +107,7 @@ const AppUpdateNotifications = () => {
             className={styles.dismissButton}
             onClick={dismiss}
             aria-label="Dismiss update notification"
-            disabled={item.installing}
+            disabled={install.installing}
           >
             Dismiss
           </button>

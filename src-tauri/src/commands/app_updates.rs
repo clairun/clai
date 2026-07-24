@@ -182,7 +182,19 @@ pub async fn check_for_app_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AppUpdateCheckResult, String> {
-    Ok(check_for_update(&app, state.inner()).await)
+    let result = check_for_update(&app, state.inner()).await;
+    // Manual checks surface updates the same way startup checks do, so the
+    // persistent top-bar badge (and toast) appear no matter who found the
+    // update first.
+    if let Some(update) = result.last_check.update.clone() {
+        if let Err(error) = app.emit(
+            APP_UPDATE_AVAILABLE_EVENT,
+            AppUpdateAvailableEvent { update },
+        ) {
+            tracing::warn!(%error, "Failed to emit app update notification");
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
