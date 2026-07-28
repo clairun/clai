@@ -64,6 +64,73 @@ jobs:
           tar xf data.tar.*
           ls -la usr/bin/
 
+      # The OSTree repo mirrored to R2 (served at
+      # https://download.clai.run/flatpak/repo) is only published when both
+      # the R2 mirror secrets and the repo signing key are configured.
+      # Without them this workflow degrades to the classic side-loadable
+      # bundle with no origin remote — exactly the pre-repo behavior — so a
+      # MISSING secret can never break the release train. A secret that is
+      # set but malformed fails the job loudly instead (import/signing
+      # errors must never silently ship an unsigned repo).
+      - name: Check repo publishing secrets
+        id: repocfg
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$FLATPAK_GPG_PRIVATE_KEY" ] && [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && [ -n "$R2_ACCOUNT_ID" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::FLATPAK_GPG_PRIVATE_KEY and/or R2 secrets not configured; building a side-load bundle without the OSTree repo (see flatpak/README.md)."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Repo commits and summaries are GPG-signed so clients can verify what
+      # they pull from R2. The private key exists ONLY as the
+      # FLATPAK_GPG_PRIVATE_KEY secret (armored, no passphrase); see
+      # flatpak/README.md for how it was generated and what its loss means.
+      - name: Import repo signing key
+        if: steps.repocfg.outputs.publish == 'true'
+        id: gpg
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/flatpak-gpg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+          KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
+          if [ -z "$KEY_ID" ]; then
+            echo "::error::FLATPAK_GPG_PRIVATE_KEY did not contain a usable secret key"
+            exit 1
+          fi
+          gpg --export "$KEY_ID" > "$RUNNER_TEMP/clai-flatpak.gpg"
+          echo "keyid=$KEY_ID" >> "$GITHUB_OUTPUT"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      # The repo keeps its commit history across releases: pull the previous
+      # state, let build-export append the new commit, push it back below.
+      # First release: the prefix doesn't exist yet and sync creates an
+      # empty dir, which build-export initializes. A workflow_dispatch
+      # rebuild of the LATEST release appends a second commit for the same
+      # version — clients then see one no-op update to identical content
+      # (objects are content-addressed, so the download is metadata-only).
+      - name: Pull existing OSTree repo from R2
+        if: steps.repocfg.outputs.publish == 'true'
+        env:
+          BUCKET: clai-releases
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          mkdir -p repo
+          aws s3 sync "s3://$BUCKET/flatpak/repo" repo --endpoint-url "$R2_ENDPOINT"
+
       - name: Install Flatpak tools
         run: |
           sudo apt-get update
@@ -72,6 +139,10 @@ jobs:
           sudo flatpak install -y flathub org.gnome.Platform//49 org.gnome.Sdk//49
 
       - name: Create Flatpak
+        env:
+          PUBLISH_REPO: ${{ steps.repocfg.outputs.publish }}
+          GPG_KEY_ID: ${{ steps.gpg.outputs.keyid }}
+          REPO_URL: https://download.clai.run/flatpak/repo
         run: |
           # Initialize flatpak build directory
           flatpak build-init flatpak-build run.clai.CLAI org.gnome.Sdk//49 org.gnome.Platform//49
@@ -116,9 +187,20 @@ jobs:
             --talk-name=org.freedesktop.secrets \
             --talk-name=org.freedesktop.Flatpak
 
-          # Export and bundle
-          flatpak build-export repo flatpak-build
-          flatpak build-bundle repo clai.flatpak run.clai.CLAI
+          # Export and bundle. With repo publishing configured, the commit
+          # and summary are GPG-signed and the bundle carries the origin
+          # remote URL + public key, so installing the bundle auto-attaches
+          # the remote and future releases arrive via `flatpak update` /
+          # GNOME Software. Without it: the classic unsigned side-load
+          # bundle (old installs keep the in-app notify-only fallback).
+          if [ "$PUBLISH_REPO" = "true" ]; then
+            flatpak build-export --gpg-sign="$GPG_KEY_ID" --gpg-homedir="$GNUPGHOME" repo flatpak-build
+            flatpak build-update-repo --gpg-sign="$GPG_KEY_ID" --gpg-homedir="$GNUPGHOME" --generate-static-deltas repo
+            flatpak build-bundle --repo-url="$REPO_URL" --gpg-keys="$RUNNER_TEMP/clai-flatpak.gpg" repo clai.flatpak run.clai.CLAI
+          else
+            flatpak build-export repo flatpak-build
+            flatpak build-bundle repo clai.flatpak run.clai.CLAI
+          fi
 
       - name: Upload to Release
         uses: actions/github-script@v7
@@ -214,4 +296,55 @@ jobs:
           esac
           aws s3 cp clai.flatpak "s3://$BUCKET/latest/clai.flatpak" \
             --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=300"
+
+      # Push the updated OSTree repo back to R2. Upload order matters for
+      # clients pulling mid-publish: content-addressed objects and static
+      # deltas first (immutable, cache forever), then the mutable metadata
+      # (config, refs, summary + signature) with a short edge cache so new
+      # releases become visible within minutes and refs never point at
+      # objects that have not been uploaded yet. summary and summary.sig
+      # are still two separate PUTs — a client fetching between them can
+      # hit a transient verify failure; that window is unavoidable on
+      # plain object storage and a retry resolves it.
+      - name: Publish OSTree repo to R2
+        if: steps.repocfg.outputs.publish == 'true'
+        env:
+          BUCKET: clai-releases
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          REPO_URL: https://download.clai.run/flatpak/repo
+        run: |
+          aws s3 sync repo/objects "s3://$BUCKET/flatpak/repo/objects" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable"
+          if [ -d repo/deltas ]; then
+            aws s3 sync repo/deltas "s3://$BUCKET/flatpak/repo/deltas" \
+              --endpoint-url "$R2_ENDPOINT" \
+              --cache-control "public, max-age=31536000, immutable"
+          fi
+          aws s3 sync repo "s3://$BUCKET/flatpak/repo" \
+            --exclude "objects/*" --exclude "deltas/*" \
+            --exclude "tmp/*" --exclude ".lock" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=300"
+
+          # The .flatpakrepo file users add with `flatpak remote-add`; it
+          # embeds the repo public key so the remote is added gpg-verified.
+          GPG_B64=$(base64 -w0 "$RUNNER_TEMP/clai-flatpak.gpg")
+          {
+            printf '%s\n' "[Flatpak Repo]"
+            printf '%s\n' "Title=CLAI"
+            printf '%s\n' "Url=$REPO_URL"
+            printf '%s\n' "Homepage=https://github.com/clairun/clai"
+            printf '%s\n' "Description=Desktop app for building, running, and supervising teams of AI agents"
+            printf '%s\n' "GPGKey=$GPG_B64"
+          } > clai.flatpakrepo
+          aws s3 cp clai.flatpakrepo "s3://$BUCKET/flatpak/clai.flatpakrepo" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type "text/plain" \
             --cache-control "public, max-age=300"

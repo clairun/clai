@@ -5,6 +5,87 @@ Release (`.github/workflows/flatpak.yml`). The job downloads the released
 `.deb`, extracts the `clai` binary, and wraps it with `flatpak build-init`
 / `build-finish` against the GNOME 49 runtime.
 
+When the publishing secrets are configured (see below), CI additionally
+maintains a **GPG-signed OSTree repo on R2**, served at
+`https://download.clai.run/flatpak/repo`. Installs that use the repo get
+normal `flatpak update` / GNOME Software update semantics.
+
+## Installing / updating
+
+Preferred — add the remote once, install from it, updates arrive like any
+other Flatpak:
+
+```bash
+flatpak remote-add --user clai https://download.clai.run/flatpak/clai.flatpakrepo
+flatpak install --user clai run.clai.CLAI
+flatpak update       # picks up new CLAI releases
+```
+
+Side-loading the `clai.flatpak` bundle from GitHub Releases also works.
+Bundles built after the repo went live embed `--repo-url` and the repo's
+public key, so installing one **auto-attaches the `clai` origin remote**
+(Chrome/VS Code style) and later releases arrive via `flatpak update` too.
+Bundles from before the repo (no origin remote) can't update themselves;
+the app falls back to its in-app notify-only update check for those.
+
+## How publishing works (CI)
+
+`flatpak.yml` degrades gracefully: everything in this section only runs
+when ALL of `FLATPAK_GPG_PRIVATE_KEY`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID` are set as repository secrets.
+Otherwise CI builds the plain unsigned side-load bundle exactly as before.
+
+Per release:
+
+1. Pull the previous OSTree repo from `s3://clai-releases/flatpak/repo`
+   (empty on the first run; `build-export` initializes it).
+2. `flatpak build-export --gpg-sign=…` appends the new release commit,
+   `build-update-repo --generate-static-deltas` signs the summary and
+   builds deltas for cheap updates.
+3. `flatpak build-bundle --repo-url=… --gpg-keys=…` produces the
+   side-load bundle that auto-attaches the remote.
+4. Push the repo back to R2 — content-addressed `objects/` and `deltas/`
+   first with immutable caching, then the mutable metadata (`summary`,
+   `refs/`, `config`) with a 5-minute edge cache, so a client pulling
+   mid-publish never sees refs pointing at missing objects. (`summary` /
+   `summary.sig` are two separate uploads, so a client fetching in that
+   brief window (extended at CDN edges by the 5-minute cache) can hit a
+   transient signature-verify failure —
+   retrying fixes it; fully atomic metadata swaps aren't possible on
+   plain object storage.) Runs are serialized by the `flatpak-build`
+   concurrency group, so pushes never race each other.
+5. Regenerate and upload `flatpak/clai.flatpakrepo` (embeds the public
+   key, so remotes added from it are GPG-verified).
+
+## Repo signing key (maintainer)
+
+Generate once, store ONLY as the `FLATPAK_GPG_PRIVATE_KEY` secret
+(ASCII-armored, no passphrase — CI must use it non-interactively):
+
+```bash
+export GNUPGHOME=$(mktemp -d)
+gpg --batch --pinentry-mode loopback --passphrase '' \
+  --quick-generate-key "CLAI Flatpak Repo <flatpak@clai.run>" rsa4096 sign never
+gpg --armor --export-secret-keys flatpak@clai.run   # -> FLATPAK_GPG_PRIVATE_KEY secret
+gpg --armor --export flatpak@clai.run > clai-flatpak-pub.asc   # keep a public copy in a safe place
+```
+
+(`--pinentry-mode loopback --passphrase ''` matters: without it gpg still
+routes a passphrase prompt through pinentry — headless it errors, on a
+desktop it pops a dialog — and a passphrase-protected key would import
+fine in CI but then fail at `build-export --gpg-sign`.)
+
+RSA-4096 for maximum compatibility with older host gnupg/ostree stacks.
+The public key never needs to be committed: CI derives it from the secret
+and embeds it in `clai.flatpakrepo` on every publish.
+
+**If the key leaks**, an attacker who can also write to the R2 bucket can
+serve malicious updates: rotate by generating a new key, replacing the
+secret, and re-running the workflow (clients that added the remote via
+the old `.flatpakrepo` must re-add it). **If the key is lost**, generate
+a new one the same way; existing remotes break until users re-add the
+remote from the fresh `.flatpakrepo`.
+
 ## How clai uses the host from inside the sandbox
 
 clai is unusual for a Flatpak: it deliberately reaches the **host** for
@@ -69,9 +150,14 @@ flatpak install --user clai.flatpak && flatpak run run.clai.CLAI
 
 ## Status / not-yet
 
-- Side-loadable, not Flathub-ready. Flathub forbids network during build,
+- Not Flathub-ready. Flathub forbids network during build,
   so cargo/npm deps would need vendored dependency manifests, and the
   binary should be built inside the SDK (not copied from a `.deb`, to
   avoid a host/runtime glibc mismatch).
 - The broad permissions above are intentional for the local-execution
   features and need review before any Flathub submission.
+- The OSTree repo grows with each release (history is kept; objects are
+  content-addressed so identical files dedupe). If size ever matters,
+  add `flatpak build-update-repo --prune --prune-depth=N` plus
+  `aws s3 sync --delete` — deliberately not done yet to keep publishes
+  append-only and mid-pull-safe.
