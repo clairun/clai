@@ -82,6 +82,8 @@ pub struct AppState {
     pub workspace_index: Arc<RwLock<WorkspaceIndex>>,
     /// Live integrated-terminal sessions (Phase 1 spike).
     pub terminals: commands::terminal::TerminalRegistry,
+    /// App update check/install runtime state.
+    pub app_updates: commands::app_updates::AppUpdateRuntime,
 }
 
 impl AppState {
@@ -105,6 +107,7 @@ impl AppState {
             pending_path_grants: commands::path_grants::PendingPathGrants::new(),
             workspace_index: Arc::new(RwLock::new(workspace_index)),
             terminals: commands::terminal::TerminalRegistry::new(),
+            app_updates: commands::app_updates::AppUpdateRuntime::new(),
         })
     }
 
@@ -268,6 +271,7 @@ pub fn run() {
         pending_path_grants: commands::path_grants::PendingPathGrants::new(),
         workspace_index: Arc::new(RwLock::new(workspace_index)),
         terminals: commands::terminal::TerminalRegistry::new(),
+        app_updates: commands::app_updates::AppUpdateRuntime::new(),
     };
 
     // Build and run the Tauri application
@@ -313,6 +317,10 @@ pub fn run() {
             // Start the agent runner background task
             let app_handle = app.handle().clone();
             agents::start_agent_runner(app_handle, runner_scheduler);
+
+            // Check for app updates after the frontend has had a chance to
+            // mount its global notification listener.
+            commands::app_updates::spawn_startup_check(app.handle().clone());
             Ok(())
         })
         // Register our custom commands
@@ -320,6 +328,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // App metadata
             commands::app_info::app_version_detail,
+            // App update commands
+            commands::app_updates::get_auto_update_settings,
+            commands::app_updates::set_auto_update_settings,
+            commands::app_updates::get_app_update_status,
+            commands::app_updates::check_for_app_update,
+            commands::app_updates::install_app_update,
             // Assistant runtime commands
             commands::assistant::assistant_create_session,
             commands::assistant::assistant_get_session,

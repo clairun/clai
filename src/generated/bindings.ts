@@ -3,6 +3,41 @@ import type { JsonValue } from "./serde_json/JsonValue";
 
 export type AddSkillSourceRequest = { name: string, kind: string | null, path: string | null, uri: string | null, reference: string | null, };
 
+export type AppUpdateAvailableEvent = { update: AppUpdateInfo, };
+
+export type AppUpdateCheckResult = { settings: AutoUpdateConfig, support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck, };
+
+export type AppUpdateInfo = { currentVersion: string, version: string, date: string | null, body: string | null, 
+/**
+ * False for notify-only channels: the user must update through their
+ * package channel (e.g. download the new Flatpak bundle) instead of the
+ * in-app installer.
+ */
+installable: boolean, 
+/**
+ * The update package has already been downloaded in the background;
+ * installing it only needs a restart, not a download.
+ */
+downloaded: boolean, };
+
+export type AppUpdateInstallEvent = { "type": "started" } | { "type": "progress", downloaded: bigint, total: bigint | null, } | { "type": "downloadFinished" } | { "type": "installing" };
+
+export type AppUpdateLastCheck = { checkedAt: string, update: AppUpdateInfo | null, error: string | null, };
+
+export type AppUpdateStatus = { settings: AutoUpdateConfig, support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck | null, };
+
+export type AppUpdateSupportStatus = { 
+/**
+ * The build can download and install updates itself.
+ */
+supported: boolean, 
+/**
+ * The build can at least check for newer releases (a superset of
+ * `supported`: notify-only channels like Flatpak can check but not
+ * install).
+ */
+canCheck: boolean, platform: string, arch: string, channel: string, bundleType: string | null, reason: string | null, };
+
 export type AskUserOption = { label: string, description: string | null, };
 
 export type AssistantCompaction = { id: string, sessionId: string, trigger: CompactionTrigger, strategy: CompactionStrategy, status: CompactionStatus, sourceFromMessageId: string | null, sourceToMessageId: string | null, summaryMessageId: string | null, createdRunId: string | null, protocolId: string, modelId: string, inputMessageCount: bigint, createdAt: bigint, completedAt: bigint | null, error: string | null, };
@@ -41,6 +76,14 @@ multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_
 export type AttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
 export type AuthMode = "subscription_login" | "subscription_api_key" | "developer_api_key" | "workspace_token";
+
+export type AutoUpdateConfig = { 
+/**
+ * Download new versions in the background on self-update-capable
+ * builds; the user still chooses when to restart and apply. Checking
+ * for updates is always on and not configurable.
+ */
+autoDownload: boolean, };
 
 export type CompactionStatus = "running" | "completed" | "failed";
 
