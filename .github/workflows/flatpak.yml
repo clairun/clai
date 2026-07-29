@@ -78,32 +78,32 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          LINUX_REPO_GPG_PRIVATE_KEY: ${{ secrets.LINUX_REPO_GPG_PRIVATE_KEY }}
         run: |
-          if [ -n "$FLATPAK_GPG_PRIVATE_KEY" ] && [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && [ -n "$R2_ACCOUNT_ID" ]; then
+          if [ -n "$LINUX_REPO_GPG_PRIVATE_KEY" ] && [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && [ -n "$R2_ACCOUNT_ID" ]; then
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::FLATPAK_GPG_PRIVATE_KEY and/or R2 secrets not configured; building a side-load bundle without the OSTree repo (see flatpak/README.md)."
+            echo "::notice::LINUX_REPO_GPG_PRIVATE_KEY and/or R2 secrets not configured; building a side-load bundle without the OSTree repo (see flatpak/README.md)."
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
       # Repo commits and summaries are GPG-signed so clients can verify what
       # they pull from R2. The private key exists ONLY as the
-      # FLATPAK_GPG_PRIVATE_KEY secret (armored, no passphrase); see
+      # LINUX_REPO_GPG_PRIVATE_KEY secret (armored, no passphrase); see
       # flatpak/README.md for how it was generated and what its loss means.
       - name: Import repo signing key
         if: steps.repocfg.outputs.publish == 'true'
         id: gpg
         env:
-          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+          LINUX_REPO_GPG_PRIVATE_KEY: ${{ secrets.LINUX_REPO_GPG_PRIVATE_KEY }}
         run: |
           export GNUPGHOME="$RUNNER_TEMP/flatpak-gpg"
           mkdir -p "$GNUPGHOME"
           chmod 700 "$GNUPGHOME"
-          printf '%s' "$FLATPAK_GPG_PRIVATE_KEY" | gpg --batch --import
+          printf '%s' "$LINUX_REPO_GPG_PRIVATE_KEY" | gpg --batch --import
           KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^sec/ {print $5; exit}')
           if [ -z "$KEY_ID" ]; then
-            echo "::error::FLATPAK_GPG_PRIVATE_KEY did not contain a usable secret key"
+            echo "::error::LINUX_REPO_GPG_PRIVATE_KEY did not contain a usable secret key"
             exit 1
           fi
           gpg --export "$KEY_ID" > "$RUNNER_TEMP/clai-flatpak.gpg"

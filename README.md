@@ -87,6 +87,20 @@ Download the latest build for your platform from the
 | Linux       | `.deb`, `.rpm`, or `.flatpak` |
 | Arch Linux  | AUR: [`clai-desktop-bin`](https://aur.archlinux.org/packages/clai-desktop-bin) |
 
+On Debian/Ubuntu you can install from the CLAI apt repository instead —
+updates then arrive through `apt upgrade` like any other package:
+
+```bash
+sudo curl -fsSLo /usr/share/keyrings/clai-archive-keyring.gpg \
+  https://download.clai.run/apt/clai-archive-keyring.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/clai-archive-keyring.gpg] https://download.clai.run/apt stable main" | \
+  sudo tee /etc/apt/sources.list.d/clai.list
+sudo apt update && sudo apt install clai
+```
+
+(Installing the `.deb` from the Releases page enrolls the same repository
+automatically; see `packaging/linux-repo/README.md`, including the opt-out.)
+
 ## Getting started
 
 1. **Add a provider** — In Settings, connect an API provider or point CLAI at

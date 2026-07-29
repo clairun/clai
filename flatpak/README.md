@@ -31,7 +31,7 @@ the app falls back to its in-app notify-only update check for those.
 ## How publishing works (CI)
 
 `flatpak.yml` degrades gracefully: everything in this section only runs
-when ALL of `FLATPAK_GPG_PRIVATE_KEY`, `R2_ACCESS_KEY_ID`,
+when ALL of `LINUX_REPO_GPG_PRIVATE_KEY`, `R2_ACCESS_KEY_ID`,
 `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID` are set as repository secrets.
 Otherwise CI builds the plain unsigned side-load bundle exactly as before.
 
@@ -59,32 +59,15 @@ Per release:
 
 ## Repo signing key (maintainer)
 
-Generate once, store ONLY as the `FLATPAK_GPG_PRIVATE_KEY` secret
-(ASCII-armored, no passphrase — CI must use it non-interactively):
+The OSTree repo is signed with the shared CLAI Linux-repos key
+(`CLAI Package Repo <packages@clai.run>`), stored ONLY as the
+`LINUX_REPO_GPG_PRIVATE_KEY` secret. The same key signs the apt repo —
+generation, rotation, and loss consequences are documented in
+[packaging/linux-repo/README.md](../packaging/linux-repo/README.md).
 
-```bash
-export GNUPGHOME=$(mktemp -d)
-gpg --batch --pinentry-mode loopback --passphrase '' \
-  --quick-generate-key "CLAI Flatpak Repo <flatpak@clai.run>" rsa4096 sign never
-gpg --armor --export-secret-keys flatpak@clai.run   # -> FLATPAK_GPG_PRIVATE_KEY secret
-gpg --armor --export flatpak@clai.run > clai-flatpak-pub.asc   # keep a public copy in a safe place
-```
-
-(`--pinentry-mode loopback --passphrase ''` matters: without it gpg still
-routes a passphrase prompt through pinentry — headless it errors, on a
-desktop it pops a dialog — and a passphrase-protected key would import
-fine in CI but then fail at `build-export --gpg-sign`.)
-
-RSA-4096 for maximum compatibility with older host gnupg/ostree stacks.
-The public key never needs to be committed: CI derives it from the secret
-and embeds it in `clai.flatpakrepo` on every publish.
-
-**If the key leaks**, an attacker who can also write to the R2 bucket can
-serve malicious updates: rotate by generating a new key, replacing the
-secret, and re-running the workflow (clients that added the remote via
-the old `.flatpakrepo` must re-add it). **If the key is lost**, generate
-a new one the same way; existing remotes break until users re-add the
-remote from the fresh `.flatpakrepo`.
+CI derives the public key from the secret and embeds it in
+`clai.flatpakrepo` on every publish, so Flatpak clients need nothing
+committed here.
 
 ## How clai uses the host from inside the sandbox
 

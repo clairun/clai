@@ -28,7 +28,12 @@
     "targets": ["app", "deb", "rpm", "dmg", "msi", "nsis"],
     "linux": {
       "deb": {
-        "depends": ["bubblewrap (>= 0.4.0)"]
+        "depends": ["bubblewrap (>= 0.4.0)"],
+        "files": {
+          "/usr/share/keyrings/clai-archive-keyring.gpg": "../packaging/linux-repo/clai-archive-keyring.gpg"
+        },
+        "postInstallScript": "../packaging/linux-repo/deb-postinst.sh",
+        "postRemoveScript": "../packaging/linux-repo/deb-postrm.sh"
       },
       "rpm": {
         "depends": ["bubblewrap"]
