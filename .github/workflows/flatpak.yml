@@ -130,6 +130,15 @@ jobs:
         run: |
           mkdir -p repo
           aws s3 sync "s3://$BUCKET/flatpak/repo" repo --endpoint-url "$R2_ENDPOINT"
+          # S3/R2 cannot store empty directories, so the sync drops the
+          # OSTree repo skeleton (refs/remotes, refs/mirrors, ...). ostree
+          # requires them: build-update-repo fails with "Listing refs:
+          # opendir(refs/remotes): No such file or directory". Restore them
+          # whenever the pull found an existing repo.
+          if [ -f repo/config ]; then
+            mkdir -p repo/objects repo/refs/heads repo/refs/mirrors \
+              repo/refs/remotes repo/state repo/tmp/cache repo/extensions
+          fi
 
       - name: Install Flatpak tools
         run: |
