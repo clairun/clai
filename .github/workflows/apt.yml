@@ -1,0 +1,221 @@
+name: Apt Repo
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
+  # Manual runs republish the repo for the LATEST release — the backfill
+  # path when this workflow (or a secret) was added after a release, or
+  # when the metadata needs regenerating without a new tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish apt repo
+    runs-on: ubuntu-latest
+    # Serialize runs from tags pushed in quick succession: a slower run for
+    # an older release must not finish after a newer one and overwrite the
+    # repo metadata with stale content.
+    concurrency:
+      group: apt-repo-publish
+      cancel-in-progress: false
+    # Manual dispatches only count from main: a branch dispatch would use
+    # that branch's committed public key for the fingerprint check.
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      # The whole job is secret-gated like the Flatpak repo publishing:
+      # without the signing key + R2 credentials it exits as a no-op, so a
+      # missing secret can never break the release train. A secret that is
+      # set but malformed fails the job loudly instead (import/signing
+      # errors must never silently ship an unsigned repo).
+      - name: Check publishing secrets
+        id: cfg
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          LINUX_REPO_GPG_PRIVATE_KEY: ${{ secrets.LINUX_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$LINUX_REPO_GPG_PRIVATE_KEY" ] && [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && [ -n "$R2_ACCOUNT_ID" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::LINUX_REPO_GPG_PRIVATE_KEY and/or R2 secrets not configured; skipping apt repo publishing (see packaging/linux-repo/README.md)."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.cfg.outputs.publish == 'true'
+        uses: actions/checkout@v4
+
+      - name: Get release info
+        if: steps.cfg.outputs.publish == 'true'
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getLatestRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            }).then(r => r.data);
+            const debAsset = release.assets.find(a => a.name.endsWith('_amd64.deb'));
+            return {
+              tag: release.tag_name,
+              deb_name: debAsset ? debAsset.name : null
+            };
+
+      - name: Download deb package
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Env indirection, not ${{ }} inline in the script: a quote in the
+          # API-provided JSON must never be able to alter shell source.
+          RELEASE_JSON: ${{ steps.release.outputs.result }}
+        run: |
+          RELEASE_TAG=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag')
+          DEB_NAME=$(printf '%s' "$RELEASE_JSON" | jq -r '.deb_name')
+          if [ "$DEB_NAME" = "null" ] || [ -z "$DEB_NAME" ]; then
+            echo "::error::Latest release $RELEASE_TAG has no *_amd64.deb asset"
+            exit 1
+          fi
+          # The asset name becomes a filesystem path and an R2 object key;
+          # refuse surprising shapes before anything touches it.
+          if ! printf '%s' "$DEB_NAME" | grep -Eq '^clai_[0-9][0-9A-Za-z.~+-]*_amd64\.deb$'; then
+            echo "::error::Unexpected deb asset name: $DEB_NAME"
+            exit 1
+          fi
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$DEB_NAME"
+          echo "DEB_NAME=$DEB_NAME" >> "$GITHUB_ENV"
+
+      # The private key exists ONLY as the LINUX_REPO_GPG_PRIVATE_KEY secret
+      # (armored, no passphrase). It MUST be the same key as the committed
+      # public half — packaging/linux-repo/clai-archive-keyring.gpg ships
+      # inside every .deb and is what installed clients verify against, so
+      # publishing metadata signed by any other key would break every
+      # enrolled machine's `apt update`.
+      - name: Import signing key and verify it matches the committed public key
+        if: steps.cfg.outputs.publish == 'true'
+        id: gpg
+        env:
+          LINUX_REPO_GPG_PRIVATE_KEY: ${{ secrets.LINUX_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/apt-gpg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$LINUX_REPO_GPG_PRIVATE_KEY" | gpg --batch --import
+          SECRET_FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+          if [ -z "$SECRET_FPR" ]; then
+            echo "::error::LINUX_REPO_GPG_PRIVATE_KEY did not contain a usable secret key"
+            exit 1
+          fi
+          COMMITTED_FPR=$(gpg --show-keys --with-colons packaging/linux-repo/clai-repo-pubkey.asc | awk -F: '/^fpr/ {print $10; exit}')
+          if [ "$SECRET_FPR" != "$COMMITTED_FPR" ]; then
+            echo "::error::Signing key fingerprint ($SECRET_FPR) does not match the committed public key ($COMMITTED_FPR); refusing to publish a repo clients cannot verify."
+            exit 1
+          fi
+          echo "keyid=$SECRET_FPR" >> "$GITHUB_OUTPUT"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      # The pool keeps recent history across releases: pull the previous
+      # state, add the new .deb, regenerate metadata over everything, push
+      # back. First release: the prefix doesn't exist yet and sync creates
+      # an empty dir. A workflow_dispatch republish of the LATEST release
+      # overwrites the same pool file with identical content — a no-op.
+      - name: Pull existing repo pool from R2
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          BUCKET: clai-releases
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          # R2 does not implement the newer S3 integrity checksums that recent
+          # AWS CLI versions send by default; "when_required" is Cloudflare's
+          # documented compatibility setting.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          mkdir -p apt-repo/pool/main/c/clai
+          aws s3 sync "s3://$BUCKET/apt/pool" apt-repo/pool --endpoint-url "$R2_ENDPOINT"
+
+      - name: Build and sign repo metadata
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          GPG_KEY_ID: ${{ steps.gpg.outputs.keyid }}
+        run: |
+          # apt-ftparchive lives in apt-utils, which is not guaranteed on
+          # the runner image.
+          if ! command -v apt-ftparchive >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y apt-utils
+          fi
+
+          cp "$DEB_NAME" apt-repo/pool/main/c/clai/
+
+          # Bounded retention: keep the 10 newest versions in the pool so
+          # the R2 prefix and this job's sync time don't grow forever.
+          # Older versions remain available as GitHub release assets.
+          cd apt-repo/pool/main/c/clai
+          ls clai_*_amd64.deb | sort -V | head -n -10 | xargs -r rm --
+          cd "$GITHUB_WORKSPACE"
+
+          cd apt-repo
+          mkdir -p dists/stable/main/binary-amd64
+          apt-ftparchive --arch amd64 packages pool > dists/stable/main/binary-amd64/Packages
+          gzip -9c dists/stable/main/binary-amd64/Packages > dists/stable/main/binary-amd64/Packages.gz
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=CLAI \
+            -o APT::FTPArchive::Release::Label=CLAI \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            -o APT::FTPArchive::Release::Components=main \
+            -o APT::FTPArchive::Release::Architectures=amd64 \
+            release dists/stable > Release.tmp
+          # Generated to a temp path first: apt-ftparchive's default file
+          # patterns include "Release" itself, so writing in place would
+          # bake a stale zero-byte self-entry into the checksum list.
+          mv Release.tmp dists/stable/Release
+
+          gpg --batch --yes --local-user "$GPG_KEY_ID" \
+            --clearsign -o dists/stable/InRelease dists/stable/Release
+          gpg --batch --yes --local-user "$GPG_KEY_ID" \
+            --armor --detach-sign -o dists/stable/Release.gpg dists/stable/Release
+
+          # Serve the keyring next to the repo for manual enrollment docs.
+          cp ../packaging/linux-repo/clai-archive-keyring.gpg .
+          cp ../packaging/linux-repo/clai-repo-pubkey.asc .
+
+      # Upload order matters for clients running `apt update` mid-publish:
+      # pool first (immutable, cache forever), then dists metadata (short
+      # edge cache) so Packages/InRelease never reference a .deb that has
+      # not been uploaded yet. --delete on the pool applies the retention
+      # pruning to R2 as well.
+      - name: Publish repo to R2
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          BUCKET: clai-releases
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          aws s3 sync apt-repo/pool "s3://$BUCKET/apt/pool" --delete \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 sync apt-repo/dists "s3://$BUCKET/apt/dists" --delete \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=300"
+          aws s3 cp apt-repo/clai-archive-keyring.gpg "s3://$BUCKET/apt/clai-archive-keyring.gpg" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type "application/octet-stream" \
+            --cache-control "public, max-age=300"
+          aws s3 cp apt-repo/clai-repo-pubkey.asc "s3://$BUCKET/apt/clai-repo-pubkey.asc" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type "text/plain" \
+            --cache-control "public, max-age=300"
