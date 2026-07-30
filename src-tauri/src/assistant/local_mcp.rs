@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::Duration;
 
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use axum::Router;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ErrorData as McpError, JsonObject, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool as RmcpTool, ToolAnnotations,
+    PaginatedRequestParams, ProgressNotificationParam, ProgressToken, ServerCapabilities,
+    ServerInfo, Tool as RmcpTool, ToolAnnotations,
 };
-use rmcp::service::{RequestContext, RoleServer};
+use rmcp::service::{Peer, RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, tower::StreamableHttpService,
 };
@@ -220,11 +222,13 @@ pub async fn ensure_started(app: &AppHandle) -> Result<Arc<LocalMcpRuntime>, Str
                 // 127.0.0.1 bind, port-agnostically.
                 let mut config = StreamableHttpServerConfig::default();
                 config.stateful_mode = true;
-                // Keep rmcp's default sse_keep_alive (15s pings). The
-                // response stream for an interactive tool call sits idle
-                // for as long as a human takes to answer, and an unpinged
-                // idle connection is exactly what rots into "transport
-                // dropped mid-call; response for tool <name> was lost".
+                // Keep rmcp's default sse_keep_alive (15s pings). SSE
+                // comments keep intermediaries from closing an idle
+                // response stream, but they are not visible to the MCP
+                // layer of the client. MCP clients with per-call
+                // watchdogs are fed by real MCP progress notifications,
+                // which `call_tool` sends periodically while a tool
+                // executes (see PROGRESS_KEEPALIVE_INTERVAL).
                 config.cancellation_token = cancellation_token.child_token();
                 config
             },
@@ -307,21 +311,55 @@ impl ServerHandler for ClaiMcpService {
                 .map(serde_json::Value::Object)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
 
-            match execute_bound_tool(
-                &self.runtime.app,
-                &bound.binding,
-                &bound.run_scope,
-                &tool_name,
-                params,
+            // Keep the CLI's per-call watchdogs fed while the tool runs.
+            // Long tool calls (a 30-minute `bash_exec` build, an
+            // unanswered `ask_user`) are silent at the MCP layer, so
+            // without this ticker they can die as
+            // "MCP server \"clai\" transport dropped mid-call" even
+            // though the tool is still running. Gated on the client
+            // having requested progress (MCP spec: only send progress
+            // for a token the client supplied).
+            let _progress_keepalive = context
+                .meta
+                .get_progress_token()
+                .map(|token| spawn_progress_keepalive(context.peer.clone(), token));
+
+            let result = run_until_mcp_request_cancelled(
+                &context.ct,
+                execute_bound_tool(
+                    &self.runtime.app,
+                    &bound.binding,
+                    &bound.run_scope,
+                    &tool_name,
+                    params,
+                ),
             )
-            .await
-            {
+            .await;
+
+            match result {
                 Ok(value) => Ok(CallToolResult::structured(value)),
                 Err(error) => Ok(CallToolResult::structured_error(serde_json::json!({
                     "error": error,
                 }))),
             }
         }
+    }
+}
+
+/// Race an MCP request handler's work against the request-level
+/// cancellation token rmcp gives us. When the client sends
+/// `notifications/cancelled`, the work future is dropped and any RAII
+/// guards it owns clean up immediately.
+async fn run_until_mcp_request_cancelled<F, T>(
+    request_scope: &CancellationToken,
+    work: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    tokio::select! {
+        _ = request_scope.cancelled() => Err("MCP request cancelled".to_string()),
+        result = work => result,
     }
 }
 
@@ -402,6 +440,77 @@ async fn execute_bound_tool(
         // removal, `resolved` UI events).
         _ = run_scope.cancelled() => Err("run ended before this tool call completed".to_string()),
         result = tools::execute_tool(&deps, &tool_context, tool_name, params) => result,
+    }
+}
+
+/// Interval between MCP progress notifications sent while a tool call is
+/// executing. Keep this comfortably below client MCP idle/watchdog
+/// thresholds while adding negligible traffic on the loopback transport.
+const PROGRESS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+
+/// RAII guard for the progress keep-alive task: aborts the ticker when the
+/// tool call resolves (or is dropped/cancelled), so no notification can be
+/// sent after the call's result.
+struct ProgressKeepaliveGuard {
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ProgressKeepaliveGuard {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Spawn a background task that sends `notifications/progress` for `token`
+/// every [`PROGRESS_KEEPALIVE_INTERVAL`] until the returned guard is
+/// dropped. The session layer routes these onto the originating request's
+/// own response stream, so they reach the client even without a standalone
+/// GET stream.
+fn spawn_progress_keepalive(
+    peer: Peer<RoleServer>,
+    token: ProgressToken,
+) -> ProgressKeepaliveGuard {
+    let handle = tokio::spawn(progress_keepalive_loop(
+        PROGRESS_KEEPALIVE_INTERVAL,
+        move |tick| {
+            let peer = peer.clone();
+            let token = token.clone();
+            async move {
+                peer.notify_progress(ProgressNotificationParam {
+                    progress_token: token,
+                    // Monotonically increasing, as the MCP spec requires
+                    // even when the total is unknown.
+                    progress: tick as f64,
+                    total: None,
+                    message: None,
+                })
+                .await
+                .is_ok()
+            }
+        },
+    ));
+    ProgressKeepaliveGuard { handle }
+}
+
+/// Send a keep-alive every `interval` until `send` reports failure (the
+/// peer is gone) or the future is dropped. The first tick fires after one
+/// full interval, so short tool calls send no progress at all.
+async fn progress_keepalive_loop<F, Fut>(interval: Duration, mut send: F)
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+    // If the runtime stalls past a tick, one immediate catch-up
+    // notification is enough — don't burst-send the backlog.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut tick: u64 = 0;
+    loop {
+        ticker.tick().await;
+        tick += 1;
+        if !send(tick).await {
+            break;
+        }
     }
 }
 
@@ -491,6 +600,138 @@ mod tests {
         assert!(
             !run_cancel.is_cancelled(),
             "reaping at run end must not look like a run cancellation"
+        );
+    }
+
+    /// The keep-alive loop must stay silent for short calls (first tick
+    /// only after one full interval), then send monotonically increasing
+    /// progress values every interval.
+    #[tokio::test(start_paused = true)]
+    async fn progress_keepalive_loop_ticks_at_interval() {
+        let sent: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = sent.clone();
+        let task = tokio::spawn(progress_keepalive_loop(
+            Duration::from_secs(20),
+            move |tick| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push(tick);
+                    true
+                }
+            },
+        ));
+
+        // Just under one interval: a fast tool call sends nothing.
+        tokio::time::sleep(Duration::from_secs(19)).await;
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "no progress before the first interval"
+        );
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![1],
+            "first tick after one interval"
+        );
+
+        tokio::time::sleep(Duration::from_secs(40)).await;
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![1, 2, 3],
+            "one monotonically increasing tick per interval"
+        );
+        task.abort();
+    }
+
+    /// When the peer send reports failure, the loop must stop instead of
+    /// spinning against a dead channel.
+    #[tokio::test(start_paused = true)]
+    async fn progress_keepalive_loop_stops_when_send_fails() {
+        let sent: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = sent.clone();
+        let task = tokio::spawn(progress_keepalive_loop(
+            Duration::from_secs(20),
+            move |tick| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push(tick);
+                    tick < 2 // second send reports failure
+                }
+            },
+        ));
+
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![1, 2],
+            "loop must terminate after the failed send"
+        );
+        assert!(task.is_finished(), "loop future must have returned");
+    }
+
+    /// Dropping the guard must abort the ticker so no progress can be sent
+    /// after the tool call has resolved.
+    #[tokio::test(start_paused = true)]
+    async fn progress_keepalive_guard_drop_aborts_ticker() {
+        let sent: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = sent.clone();
+        let handle = tokio::spawn(progress_keepalive_loop(
+            Duration::from_secs(20),
+            move |tick| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push(tick);
+                    true
+                }
+            },
+        ));
+        let guard = ProgressKeepaliveGuard { handle };
+
+        tokio::time::sleep(Duration::from_secs(21)).await;
+        assert_eq!(*sent.lock().unwrap(), vec![1]);
+
+        drop(guard);
+        // Give the abort a chance to land, then advance well past more ticks.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![1],
+            "no progress may be sent after the guard is dropped"
+        );
+    }
+
+    /// MCP request cancellation must drop the racing tool future, which
+    /// also drops the progress keepalive guard owned by `call_tool`.
+    #[tokio::test]
+    async fn mcp_request_cancel_drops_in_flight_future() {
+        struct DropFlag(Arc<Mutex<bool>>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                *self.0.lock().unwrap() = true;
+            }
+        }
+
+        let dropped = Arc::new(Mutex::new(false));
+        let flag = DropFlag(dropped.clone());
+        let request_scope = CancellationToken::new();
+        let scope = request_scope.clone();
+
+        let task = tokio::spawn(async move {
+            run_until_mcp_request_cancelled(&scope, async move {
+                let _flag = flag; // owned by the racing future, dropped with it
+                std::future::pending::<Result<(), String>>().await
+            })
+            .await
+        });
+
+        request_scope.cancel();
+        let result = task.await.expect("select task must not panic");
+        assert_eq!(result.unwrap_err(), "MCP request cancelled");
+        assert!(
+            *dropped.lock().unwrap(),
+            "the in-flight future must be dropped so its RAII cleanup guards fire"
         );
     }
 

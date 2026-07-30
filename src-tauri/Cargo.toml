@@ -149,5 +149,7 @@ windows-sys = { version = "0.61.2", features = [
 libc = "0.2"
 
 [dev-dependencies]
+# test-util enables tokio::test(start_paused) for virtual-time tests.
+tokio = { version = "1", features = ["test-util"] }
 # Temporary directories for testing
 tempfile = "3"
