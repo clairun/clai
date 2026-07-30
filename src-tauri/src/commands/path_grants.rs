@@ -11,7 +11,7 @@
 //!    agent id) so the frontend can't redirect persistence.
 //! 3. Emits [`PATH_GRANT_REQUEST_EVENT`] to the frontend and
 //!    [`PATH_GRANT_ATTENTION_EVENT`] with the new per-workspace count.
-//! 4. `.await`s the oneshot (24h bound, matching the command flow).
+//! 4. `.await`s the oneshot until the user decides or the run is cancelled.
 //! 5. When the frontend invokes [`submit_path_grant_decision`], the
 //!    decision is persisted *first* (if `AllowAlways`) by updating the
 //!    agent's `execution.filesystem.extra_paths` in the DB, *then*
@@ -29,7 +29,6 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -43,17 +42,11 @@ pub const PATH_GRANT_REQUEST_EVENT: &str = "path-grants://request";
 pub const PATH_GRANT_ATTENTION_EVENT: &str = "path-grants://attention";
 /// Emitted when a pending path-grant request is cleared *without* a user
 /// decision — the run was cancelled or ended (reaping a wait orphaned by
-/// a CLI transport drop), the wait timed out, or a re-asked grant
-/// superseded the stale request. The inline path-grant card removes the
-/// now-useless card on this. Normal submissions clear the card
-/// optimistically on the frontend, so they don't emit this.
+/// a CLI transport drop), or a re-asked grant superseded the stale request.
+/// The inline path-grant card removes the now-useless card on this. Normal
+/// submissions clear the card optimistically on the frontend, so they don't
+/// emit this.
 pub const PATH_GRANT_RESOLVED_EVENT: &str = "path-grants://resolved";
-
-/// Same bound as the command-approval flow: 24h is generous enough that
-/// it never fires under normal interactive use and acts as a hygiene cap
-/// for abandoned pending state. CLI-backed runs apply a shorter timeout
-/// below the CLI MCP client's own timeout so cleanup happens inside CLAI.
-pub const PATH_GRANT_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -349,7 +342,7 @@ pub async fn submit_path_grant_decision(
 ) -> Result<(), String> {
     let Some((entry, remaining)) = state.pending_path_grants.take(&request_id).await else {
         return Err(format!(
-            "No pending path-grant with request_id `{}` (already resolved or timed out)",
+            "No pending path-grant with request_id `{}` (already resolved or cleared)",
             request_id
         ));
     };

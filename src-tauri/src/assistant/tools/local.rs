@@ -1333,14 +1333,14 @@ impl Drop for AbandonedApprovalGuard {
 
 /// Runs the interactive approval round-trip for a command that needs
 /// user input. Registers the request in app state, emits the request
-/// and attention events, waits (with timeout) for the user's decisions,
-/// and resolves to `Ok(())` if every segment was allowed or `Err(_)` on
-/// any deny / timeout / channel close. A missing user decision also
-/// cancels the run via `AbandonedApprovalGuard`, so the model does not
-/// receive a generic tool timeout and continue. Persistence of "always"
-/// grants is performed by [`crate::commands::permissions::submit_permission_decision`]
-/// before the oneshot is fired, so the grant is durable across crashes
-/// between user click and command execution.
+/// and attention events, waits for the user's decisions, and resolves to
+/// `Ok(())` if every segment was allowed or `Err(_)` on any deny / channel
+/// close. If the wait is abandoned without a decision, `AbandonedApprovalGuard`
+/// cancels the run so the model does not continue around a missing human
+/// decision. Persistence of "always" grants is performed by
+/// [`crate::commands::permissions::submit_permission_decision`] before the
+/// oneshot is fired, so the grant is durable across crashes between user click
+/// and command execution.
 async fn await_user_permission(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
@@ -1349,7 +1349,7 @@ async fn await_user_permission(
 ) -> Result<(), String> {
     use crate::commands::permissions::{
         emit_attention, PendingApprovalOutcome, PermissionRequest, SegmentDecision,
-        APPROVAL_TIMEOUT, PERMISSION_REQUEST_EVENT,
+        PERMISSION_REQUEST_EVENT,
     };
     use tauri::{Emitter, Manager};
 
@@ -1407,15 +1407,14 @@ async fn await_user_permission(
         armed: true,
     };
 
-    let wait_timeout = context.interactive_wait_timeout(APPROVAL_TIMEOUT);
-    let decisions = match tokio::time::timeout(wait_timeout, rx).await {
-        Ok(Ok(PendingApprovalOutcome::Decision(d))) => {
+    let decisions = match rx.await {
+        Ok(PendingApprovalOutcome::Decision(d)) => {
             // The submit command already removed the registry entry and the
             // frontend cleared the card optimistically.
             abandon_guard.disarm();
             d
         }
-        Ok(Ok(PendingApprovalOutcome::Superseded)) => {
+        Ok(PendingApprovalOutcome::Superseded) => {
             // A fresh registration for the same run + command replaced
             // this orphaned wait after a transport drop. This stale future
             // is intentionally ignored: no notice, no warning, no cancel.
@@ -1424,11 +1423,8 @@ async fn await_user_permission(
                        for the same command before a decision was made";
             return Err(msg.to_string());
         }
-        Ok(Err(_)) if context.cancel_token.is_cancelled() => {
+        Err(_) if context.cancel_token.is_cancelled() => {
             return super::cancel_run_and_park(&context.cancel_token).await;
-        }
-        Ok(Err(_)) => {
-            return abandon_guard.expire_and_stop().await;
         }
         Err(_) => {
             return abandon_guard.expire_and_stop().await;
@@ -1699,7 +1695,7 @@ async fn await_path_grant_decision(
     request: crate::commands::path_grants::PathGrantRequest,
 ) -> Result<crate::commands::path_grants::PathGrantDecision, String> {
     use crate::commands::path_grants::{
-        emit_attention, PendingPathGrantOutcome, PATH_GRANT_REQUEST_EVENT, PATH_GRANT_TIMEOUT,
+        emit_attention, PendingPathGrantOutcome, PATH_GRANT_REQUEST_EVENT,
     };
     use tauri::{Emitter, Manager};
 
@@ -1744,13 +1740,12 @@ async fn await_path_grant_decision(
         armed: true,
     };
 
-    let wait_timeout = context.interactive_wait_timeout(PATH_GRANT_TIMEOUT);
-    match tokio::time::timeout(wait_timeout, rx).await {
-        Ok(Ok(PendingPathGrantOutcome::Decision(decision))) => {
+    match rx.await {
+        Ok(PendingPathGrantOutcome::Decision(decision)) => {
             abandon_guard.disarm();
             Ok(decision)
         }
-        Ok(Ok(PendingPathGrantOutcome::Superseded)) => {
+        Ok(PendingPathGrantOutcome::Superseded) => {
             // A fresh registration for the same run + path + access
             // replaced this orphaned wait after a transport drop. This
             // stale future is intentionally ignored.
@@ -1760,10 +1755,9 @@ async fn await_path_grant_decision(
                 .to_string();
             Err(msg)
         }
-        Ok(Err(_)) if context.cancel_token.is_cancelled() => {
+        Err(_) if context.cancel_token.is_cancelled() => {
             super::cancel_run_and_park(&context.cancel_token).await
         }
-        Ok(Err(_)) => abandon_guard.expire_and_stop().await,
         Err(_) => abandon_guard.expire_and_stop().await,
     }
 }

@@ -33,7 +33,6 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -43,8 +42,6 @@ use crate::assistant::engine::AssistantDeps;
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository;
 use crate::assistant::tools::ToolExecutionContext;
-
-const ASK_USER_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 // `deny_unknown_fields` keeps serde behavior aligned with the advertised
 // schema's `additionalProperties: false` (schemars derives the latter from
@@ -179,7 +176,7 @@ impl PendingGuard {
         self.armed = false;
     }
 
-    async fn expire_and_stop<T>(&mut self) -> T {
+    async fn abandon_and_stop<T>(&mut self) -> T {
         if let Ok(mut map) = pending_map().lock() {
             map.remove(&self.id);
         }
@@ -285,10 +282,9 @@ pub async fn execute(
         },
     );
 
-    let wait_timeout = context.interactive_wait_timeout(ASK_USER_TIMEOUT);
-    let answer = match tokio::time::timeout(wait_timeout, rx).await {
-        Ok(Ok(AskUserOutcome::Answer(answer))) => answer,
-        Ok(Ok(AskUserOutcome::Superseded)) => {
+    let answer = match rx.await {
+        Ok(AskUserOutcome::Answer(answer)) => answer,
+        Ok(AskUserOutcome::Superseded) => {
             // A fresh question for this session replaced this orphaned
             // wait after a transport drop. Ignore the stale future.
             guard.disarm();
@@ -296,14 +292,11 @@ pub async fn execute(
                 "ask_user was superseded by a newer question before an answer arrived".to_string(),
             );
         }
-        Ok(Err(_)) if context.cancel_token.is_cancelled() => {
+        Err(_) if context.cancel_token.is_cancelled() => {
             return super::cancel_run_and_park(&context.cancel_token).await;
         }
-        Ok(Err(_)) => {
-            return guard.expire_and_stop().await;
-        }
         Err(_) => {
-            return guard.expire_and_stop().await;
+            return guard.abandon_and_stop().await;
         }
     };
     guard.disarm();

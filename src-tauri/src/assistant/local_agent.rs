@@ -52,17 +52,17 @@ const APP_SERVER_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::f
 const MCP_STARTUP_TIMEOUT_MS: &str = "3600000";
 
 /// Env for the Claude Code host process. `idle_ms` is the per-tool MCP idle
-/// timeout rendered from [`CLI_MCP_CLIENT_TIMEOUT`] (single source of truth);
+/// backstop rendered from [`CLI_MCP_CLIENT_TIMEOUT`] (single source of truth);
 /// it is passed in rather than hardcoded so the value can't drift.
 ///
 /// - `MCP_TIMEOUT`: MCP server startup timeout (see [`MCP_STARTUP_TIMEOUT_MS`]).
 /// - `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`: idle timeout for *remote* (HTTP) MCP
 ///   tool calls — CLAI's tool server is registered as HTTP (see
 ///   `write_mcp_config`). Claude Code's 300s default aborts any tool call
-///   silent for 5 min: every interactive human wait (`ask_user` / approval /
-///   path grant) and any `bash_exec` over 5 min. Claude Code ignores MCP
-///   progress notifications for timeout purposes, so widening the idle window
-///   is the only reliable fix.
+///   silent for 5 min: unattended human waits (`ask_user` / approval / path
+///   grant) and any `bash_exec` over 5 min. Claude Code ignores MCP progress
+///   notifications for timeout purposes, so widening the idle window is the
+///   only reliable fix.
 /// - `ENABLE_TOOL_SEARCH=false`: CC 2.1.x can optimistically enable tool search
 ///   and withhold tool defs, but CLAI disallows the search tool (`--tools ""`),
 ///   leaving the model with no tools — pin it off (#63120).
@@ -5383,9 +5383,9 @@ mod tests {
     #[test]
     fn claude_code_env_carries_the_shared_idle_timeout() {
         // Claude Code aborts remote MCP tool calls silent for 300s by default —
-        // killing every interactive human wait (ask_user, approval, path grant)
-        // and any bash_exec > 5 min. Pin that the idle var is present, rendered
-        // from the shared CLI_MCP_CLIENT_TIMEOUT, and the startup knob is kept.
+        // killing unattended human waits (ask_user, approval, path grant) and
+        // any bash_exec > 5 min. Pin that the idle var is present, rendered from
+        // the shared CLI_MCP_CLIENT_TIMEOUT, and the startup knob is kept.
         let idle_ms = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT
             .as_millis()
             .to_string();
