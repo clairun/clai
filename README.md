@@ -98,8 +98,18 @@ echo "deb [arch=amd64 signed-by=/usr/share/keyrings/clai-archive-keyring.gpg] ht
 sudo apt update && sudo apt install clai
 ```
 
-(Installing the `.deb` from the Releases page enrolls the same repository
-automatically; see `packaging/linux-repo/README.md`, including the opt-out.)
+On Fedora/RHEL, the CLAI rpm repository does the same for `dnf upgrade`:
+
+```bash
+sudo curl -fsSLo /etc/yum.repos.d/clai.repo https://download.clai.run/rpm/clai.repo
+sudo dnf install clai
+```
+
+openSUSE: `sudo zypper ar -f https://download.clai.run/rpm clai && sudo zypper install clai`
+
+(Installing the `.deb`/`.rpm` from the Releases page enrolls the same
+repository automatically; see `packaging/linux-repo/README.md`, including
+the opt-outs.)
 
 ## Getting started
 

@@ -1,0 +1,253 @@
+name: Rpm Repo
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types:
+      - completed
+  # Manual runs republish the repo for the LATEST release — the backfill
+  # path when this workflow (or a secret) was added after a release, or
+  # when the metadata needs regenerating without a new tag.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish rpm repo
+    runs-on: ubuntu-latest
+    # Serialize runs from tags pushed in quick succession: a slower run for
+    # an older release must not finish after a newer one and overwrite the
+    # repo metadata with stale content.
+    concurrency:
+      group: rpm-repo-publish
+      cancel-in-progress: false
+    # Manual dispatches only count from main: a branch dispatch would use
+    # that branch's committed public key for the fingerprint check.
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+      # The whole job is secret-gated like the apt/Flatpak repo publishing:
+      # without the signing key + R2 credentials it exits as a no-op, so a
+      # missing secret can never break the release train. A secret that is
+      # set but malformed fails the job loudly instead (import/signing
+      # errors must never silently ship an unsigned repo).
+      - name: Check publishing secrets
+        id: cfg
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          LINUX_REPO_GPG_PRIVATE_KEY: ${{ secrets.LINUX_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "$LINUX_REPO_GPG_PRIVATE_KEY" ] && [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && [ -n "$R2_ACCOUNT_ID" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::LINUX_REPO_GPG_PRIVATE_KEY and/or R2 secrets not configured; skipping rpm repo publishing (see packaging/linux-repo/README.md)."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.cfg.outputs.publish == 'true'
+        uses: actions/checkout@v4
+
+      - name: Get release info
+        if: steps.cfg.outputs.publish == 'true'
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const release = await github.rest.repos.getLatestRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            }).then(r => r.data);
+            const rpmAsset = release.assets.find(a => a.name.endsWith('.x86_64.rpm'));
+            return {
+              tag: release.tag_name,
+              rpm_name: rpmAsset ? rpmAsset.name : null
+            };
+
+      - name: Download rpm package
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Env indirection, not ${{ }} inline in the script: a quote in the
+          # API-provided JSON must never be able to alter shell source.
+          RELEASE_JSON: ${{ steps.release.outputs.result }}
+        run: |
+          RELEASE_TAG=$(printf '%s' "$RELEASE_JSON" | jq -r '.tag')
+          RPM_NAME=$(printf '%s' "$RELEASE_JSON" | jq -r '.rpm_name')
+          if [ "$RPM_NAME" = "null" ] || [ -z "$RPM_NAME" ]; then
+            echo "::error::Latest release $RELEASE_TAG has no *.x86_64.rpm asset"
+            exit 1
+          fi
+          # The asset name becomes a filesystem path and an R2 object key;
+          # refuse surprising shapes before anything touches it.
+          if ! printf '%s' "$RPM_NAME" | grep -Eq '^clai-[0-9][0-9A-Za-z.~^+]*-[0-9]+\.x86_64\.rpm$'; then
+            echo "::error::Unexpected rpm asset name: $RPM_NAME"
+            exit 1
+          fi
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$RPM_NAME"
+          echo "RPM_NAME=$RPM_NAME" >> "$GITHUB_ENV"
+
+      # The private key exists ONLY as the LINUX_REPO_GPG_PRIVATE_KEY secret
+      # (armored, no passphrase). It MUST be the same key as the committed
+      # public half — packaging/linux-repo/clai-repo-pubkey.asc ships inside
+      # every .rpm (as /etc/pki/rpm-gpg/RPM-GPG-KEY-clai) and is what
+      # installed clients verify against, so publishing metadata signed by
+      # any other key would break every enrolled machine's `dnf upgrade`.
+      - name: Import signing key and verify it matches the committed public key
+        if: steps.cfg.outputs.publish == 'true'
+        id: gpg
+        env:
+          LINUX_REPO_GPG_PRIVATE_KEY: ${{ secrets.LINUX_REPO_GPG_PRIVATE_KEY }}
+        run: |
+          export GNUPGHOME="$RUNNER_TEMP/rpm-gpg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$LINUX_REPO_GPG_PRIVATE_KEY" | gpg --batch --import
+          SECRET_FPR=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ {print $10; exit}')
+          if [ -z "$SECRET_FPR" ]; then
+            echo "::error::LINUX_REPO_GPG_PRIVATE_KEY did not contain a usable secret key"
+            exit 1
+          fi
+          COMMITTED_FPR=$(gpg --show-keys --with-colons packaging/linux-repo/clai-repo-pubkey.asc | awk -F: '/^fpr/ {print $10; exit}')
+          if [ "$SECRET_FPR" != "$COMMITTED_FPR" ]; then
+            echo "::error::Signing key fingerprint ($SECRET_FPR) does not match the committed public key ($COMMITTED_FPR); refusing to publish a repo clients cannot verify."
+            exit 1
+          fi
+          echo "keyid=$SECRET_FPR" >> "$GITHUB_OUTPUT"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+
+      # The package dir keeps recent history across releases: pull the
+      # previous state, add the new .rpm, regenerate metadata over
+      # everything, push back. First release: the prefix doesn't exist yet
+      # and sync creates an empty dir. A workflow_dispatch republish of the
+      # LATEST release leaves the already-published package untouched (the
+      # copy/sign below are gated) and only regenerates metadata.
+      - name: Pull existing repo packages from R2
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          BUCKET: clai-releases
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          # R2 does not implement the newer S3 integrity checksums that recent
+          # AWS CLI versions send by default; "when_required" is Cloudflare's
+          # documented compatibility setting.
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          mkdir -p rpm-repo/packages
+          aws s3 sync "s3://$BUCKET/rpm/packages" rpm-repo/packages --endpoint-url "$R2_ENDPOINT"
+
+      - name: Sign package, build and sign repo metadata
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          GPG_KEY_ID: ${{ steps.gpg.outputs.keyid }}
+        run: |
+          # createrepo_c ships in createrepo-c; rpmsign in the rpm package.
+          # Neither is guaranteed on the runner image.
+          MISSING=""
+          command -v createrepo_c >/dev/null 2>&1 || MISSING="createrepo-c"
+          command -v rpmsign >/dev/null 2>&1 || MISSING="$MISSING rpm"
+          if [ -n "$MISSING" ]; then
+            sudo apt-get update
+            sudo apt-get install -y $MISSING
+          fi
+
+          # Only add the package if this version is not in the pool yet: a
+          # republish must not change published bytes, because package URLs
+          # are cached immutable and regenerated metadata checksums must
+          # keep matching what CDNs already serve.
+          if [ ! -f "rpm-repo/packages/$RPM_NAME" ]; then
+            cp "$RPM_NAME" rpm-repo/packages/
+          fi
+
+          # Bounded retention: keep the 10 newest versions so the R2 prefix
+          # and this job's sync time don't grow forever. Older versions
+          # remain available as GitHub release assets.
+          cd rpm-repo/packages
+          ls clai-*.x86_64.rpm | sort -V | head -n -10 | xargs -r rm --
+          cd "$GITHUB_WORKSPACE"
+
+          RPMDB="$RUNNER_TEMP/rpmdb-verify"
+          rpm --dbpath "$RPMDB" --initdb
+          rpm --dbpath "$RPMDB" --import packaging/linux-repo/clai-repo-pubkey.asc
+
+          # Embed a GPG signature in the .rpm itself (gpgcheck=1 on
+          # clients) — but only when the package does not already carry a
+          # valid one (same immutability reason as above; this also
+          # self-heals a previous run that died between copy and sign).
+          # Packages pulled from R2 were signed by the run that published
+          # them.
+          if ! rpm --dbpath "$RPMDB" -K "rpm-repo/packages/$RPM_NAME" | grep -q 'digests signatures OK'; then
+            rpmsign --define "_gpg_name $GPG_KEY_ID" \
+              --define "_gpg_path $GNUPGHOME" \
+              --addsign "rpm-repo/packages/$RPM_NAME"
+          fi
+
+          # Hard gate: verify the embedded signature against the COMMITTED
+          # public key in an isolated rpmdb before publishing anything.
+          if ! rpm --dbpath "$RPMDB" -K "rpm-repo/packages/$RPM_NAME" | grep -q 'digests signatures OK'; then
+            echo "::error::Signed rpm failed verification against the committed public key"
+            rpm --dbpath "$RPMDB" -K "rpm-repo/packages/$RPM_NAME" || true
+            exit 1
+          fi
+
+          cd rpm-repo
+          createrepo_c .
+          # repo_gpgcheck=1 clients (dnf) verify this detached signature;
+          # zypper additionally looks for repomd.xml.key next to it.
+          gpg --batch --yes --local-user "$GPG_KEY_ID" \
+            --armor --detach-sign -o repodata/repomd.xml.asc repodata/repomd.xml
+          cp ../packaging/linux-repo/clai-repo-pubkey.asc repodata/repomd.xml.key
+          cp ../packaging/linux-repo/clai-repo-pubkey.asc .
+
+          # The .repo file served for manual enrollment (dnf/zypper); the
+          # packaged %post writes the same stanza with a local file:// key.
+          cat > clai.repo <<'EOF'
+          [clai]
+          name=CLAI
+          baseurl=https://download.clai.run/rpm
+          enabled=1
+          type=rpm-md
+          gpgcheck=1
+          repo_gpgcheck=1
+          gpgkey=https://download.clai.run/rpm/clai-repo-pubkey.asc
+          metadata_expire=6h
+          EOF
+
+      # Upload order matters for clients running `dnf makecache` mid-publish:
+      # packages first (immutable, cache forever), then repodata (short edge
+      # cache) so repomd.xml never references an .rpm that has not been
+      # uploaded yet. --delete on packages applies the retention pruning to
+      # R2; --delete on repodata drops the uniquely-hashed stale metadata
+      # files from previous runs.
+      - name: Publish repo to R2
+        if: steps.cfg.outputs.publish == 'true'
+        env:
+          BUCKET: clai-releases
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          aws s3 sync rpm-repo/packages "s3://$BUCKET/rpm/packages" --delete \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 sync rpm-repo/repodata "s3://$BUCKET/rpm/repodata" --delete \
+            --endpoint-url "$R2_ENDPOINT" \
+            --cache-control "public, max-age=300"
+          aws s3 cp rpm-repo/clai.repo "s3://$BUCKET/rpm/clai.repo" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type "text/plain" \
+            --cache-control "public, max-age=300"
+          aws s3 cp rpm-repo/clai-repo-pubkey.asc "s3://$BUCKET/rpm/clai-repo-pubkey.asc" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type "text/plain" \
+            --cache-control "public, max-age=300"

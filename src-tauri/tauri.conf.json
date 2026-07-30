@@ -36,7 +36,12 @@
         "postRemoveScript": "../packaging/linux-repo/deb-postrm.sh"
       },
       "rpm": {
-        "depends": ["bubblewrap"]
+        "depends": ["bubblewrap"],
+        "files": {
+          "/etc/pki/rpm-gpg/RPM-GPG-KEY-clai": "../packaging/linux-repo/clai-repo-pubkey.asc"
+        },
+        "postInstallScript": "../packaging/linux-repo/rpm-postinst.sh",
+        "postRemoveScript": "../packaging/linux-repo/rpm-postrm.sh"
       }
     },
     "icon": [
