@@ -2,16 +2,19 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 
+use futures::StreamExt;
 use rmcp::{
+    handler::client::progress::ProgressDispatcher,
     model::{
-        CallToolRequestParams, CallToolResult, Content as McpContent, ResourceContents,
-        Tool as RmcpTool,
+        CallToolRequestParams, CallToolResult, ClientRequest, Content as McpContent,
+        ProgressNotificationParam, Request, ResourceContents, ServerResult, Tool as RmcpTool,
     },
-    service::{RoleClient, RunningService, ServiceExt},
+    service::{NotificationContext, PeerRequestOptions, RoleClient, RunningService, ServiceExt},
     transport::{
         auth::AuthClient, streamable_http_client::StreamableHttpClientTransportConfig,
         StreamableHttpClientTransport,
     },
+    ClientHandler,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -31,6 +34,23 @@ use crate::windows_console::HideConsoleWindow;
 /// Bound the network handshake and the tools/list so a misbehaving server
 /// degrades to "no tools from that server" instead.
 const MCP_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Debug, Default)]
+struct ClaiMcpClientHandler {
+    progress_dispatcher: ProgressDispatcher,
+}
+
+impl ClientHandler for ClaiMcpClientHandler {
+    async fn on_progress(
+        &self,
+        params: ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        self.progress_dispatcher.handle_notification(params).await;
+    }
+}
+
+type McpRunningService = RunningService<RoleClient, ClaiMcpClientHandler>;
 
 /// MCP tool discovered from an external server.
 ///
@@ -98,7 +118,7 @@ impl ExternalMcpToolDefinition {
 }
 
 struct StdioMcpServerConnection {
-    service: RunningService<RoleClient, ()>,
+    service: McpRunningService,
     #[allow(dead_code)]
     child: Child,
 }
@@ -108,12 +128,12 @@ struct StdioMcpServerConnection {
 // and they are not hot, so allow it rather than box the larger variant.
 #[allow(clippy::large_enum_variant)]
 enum ConnectedMcpServer {
-    Http(RunningService<RoleClient, ()>),
+    Http(McpRunningService),
     Stdio(StdioMcpServerConnection),
 }
 
 impl ConnectedMcpServer {
-    fn service(&self) -> &RunningService<RoleClient, ()> {
+    fn service(&self) -> &McpRunningService {
         match self {
             ConnectedMcpServer::Http(service) => service,
             ConnectedMcpServer::Stdio(connection) => &connection.service,
@@ -141,10 +161,47 @@ impl ConnectedMcpServer {
         let mut params = CallToolRequestParams::default();
         params.name = tool_name.to_string().into();
         params.arguments = arguments;
-        self.service()
-            .call_tool(params)
+
+        let request = ClientRequest::CallToolRequest(Request::new(params));
+        let handle = self
+            .service()
+            .send_cancellable_request(request, PeerRequestOptions::no_options())
             .await
-            .map_err(|error| format!("Failed to call MCP tool `{}`: {}", tool_name, error))
+            .map_err(|error| format!("Failed to call MCP tool `{}`: {}", tool_name, error))?;
+        let mut progress = self
+            .service()
+            .service()
+            .progress_dispatcher
+            .subscribe(handle.progress_token.clone())
+            .await;
+        let response = handle.await_response();
+        tokio::pin!(response);
+        let response = loop {
+            tokio::select! {
+                result = &mut response => break result,
+                maybe_progress = progress.next() => {
+                    if let Some(params) = maybe_progress {
+                        tracing::debug!(
+                            tool_name = %tool_name,
+                            progress_token = ?params.progress_token,
+                            progress = params.progress,
+                            total = ?params.total,
+                            message = params.message.as_deref().unwrap_or(""),
+                            "MCP tool call progress"
+                        );
+                    }
+                }
+            }
+        }
+        .map_err(|error| format!("Failed to call MCP tool `{}`: {}", tool_name, error));
+
+        match response? {
+            ServerResult::CallToolResult(result) => Ok(result),
+            _ => Err(format!(
+                "MCP server returned a non-tool response for `{}`",
+                tool_name
+            )),
+        }
     }
 }
 
@@ -506,16 +563,15 @@ impl McpClientManager {
                     transport_config = transport_config.custom_headers(custom_headers);
                 }
                 let service = match &config.auth {
-                    McpServerAuth::None => {
-                        ().serve(StreamableHttpClientTransport::from_config(transport_config))
-                            .await
-                            .map_err(|error| {
-                                format!(
-                                    "Failed to connect to HTTP MCP server `{}`: {}",
-                                    config.name, error
-                                )
-                            })?
-                    }
+                    McpServerAuth::None => ClaiMcpClientHandler::default()
+                        .serve(StreamableHttpClientTransport::from_config(transport_config))
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "Failed to connect to HTTP MCP server `{}`: {}",
+                                config.name, error
+                            )
+                        })?,
                     McpServerAuth::BearerToken { secret_ref } => {
                         let token = McpSecretStorage::get_secret(secret_ref)
                             .map_err(|e| format!("Failed to read MCP server credential: {}", e))?
@@ -523,7 +579,8 @@ impl McpClientManager {
                                 format!("Bearer token missing for MCP server `{}`", config.name)
                             })?;
                         transport_config = transport_config.auth_header(token);
-                        ().serve(StreamableHttpClientTransport::from_config(transport_config))
+                        ClaiMcpClientHandler::default()
+                            .serve(StreamableHttpClientTransport::from_config(transport_config))
                             .await
                             .map_err(|error| {
                                 format!(
@@ -541,17 +598,18 @@ impl McpClientManager {
                                 format!("Failed to build OAuth HTTP client: {}", error)
                             })?;
                         let auth_client = AuthClient::new(http_client, auth_manager);
-                        ().serve(StreamableHttpClientTransport::with_client(
-                            auth_client,
-                            transport_config,
-                        ))
-                        .await
-                        .map_err(|error| {
-                            format!(
-                                "Failed to connect to OAuth MCP server `{}`: {}",
-                                config.name, error
-                            )
-                        })?
+                        ClaiMcpClientHandler::default()
+                            .serve(StreamableHttpClientTransport::with_client(
+                                auth_client,
+                                transport_config,
+                            ))
+                            .await
+                            .map_err(|error| {
+                                format!(
+                                    "Failed to connect to OAuth MCP server `{}`: {}",
+                                    config.name, error
+                                )
+                            })?
                     }
                 };
 
@@ -592,12 +650,15 @@ impl McpClientManager {
                     format!("Failed to capture stdin for MCP server `{}`", config.name)
                 })?;
 
-                let service = ().serve((stdout, stdin)).await.map_err(|error| {
-                    format!(
-                        "Failed to initialize stdio MCP server `{}`: {}",
-                        config.name, error
-                    )
-                })?;
+                let service = ClaiMcpClientHandler::default()
+                    .serve((stdout, stdin))
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Failed to initialize stdio MCP server `{}`: {}",
+                            config.name, error
+                        )
+                    })?;
 
                 Ok(ConnectedMcpServer::Stdio(StdioMcpServerConnection {
                     service,
@@ -684,6 +745,15 @@ fn spawn_stderr_logger(server_id: String, stderr: ChildStderr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use futures::StreamExt;
+    use rmcp::{
+        model::{ClientRequest, Request},
+        service::{PeerRequestOptions, RequestContext, RoleServer},
+        ServerHandler,
+    };
+    use tokio::sync::Notify;
 
     fn tool(server_id: &str, tool_name: &str) -> ExternalMcpToolDefinition {
         ExternalMcpToolDefinition {
@@ -740,6 +810,148 @@ mod tests {
     fn parser_rejects_non_mcp_names() {
         assert!(parse_qualified_tool_name("fs_read").is_none());
         assert!(parse_qualified_tool_name("mcp__onlyserver").is_none());
+    }
+
+    #[derive(Clone)]
+    struct ProgressTokenServer {
+        request_seen: Arc<Notify>,
+        release_progress: Arc<Notify>,
+    }
+
+    impl ServerHandler for ProgressTokenServer {
+        async fn call_tool(
+            &self,
+            request: CallToolRequestParams,
+            context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResult, rmcp::ErrorData> {
+            assert_eq!(request.name.as_ref(), "progress_tool");
+            let progress_token = context
+                .meta
+                .get_progress_token()
+                .ok_or_else(|| rmcp::ErrorData::invalid_params("missing progress token", None))?;
+
+            self.request_seen.notify_waiters();
+            self.release_progress.notified().await;
+            context
+                .peer
+                .notify_progress(ProgressNotificationParam {
+                    progress_token,
+                    progress: 1.0,
+                    total: Some(2.0),
+                    message: Some("halfway".into()),
+                })
+                .await
+                .map_err(|error| {
+                    rmcp::ErrorData::internal_error(
+                        format!("failed to send progress notification: {error}"),
+                        None,
+                    )
+                })?;
+
+            Ok(CallToolResult::structured(
+                serde_json::json!({ "ok": true }),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_tool_calls_receive_server_progress_notifications() {
+        let request_seen = Arc::new(Notify::new());
+        let release_progress = Arc::new(Notify::new());
+        let server = ProgressTokenServer {
+            request_seen,
+            release_progress: release_progress.clone(),
+        };
+        let (transport_server, transport_client) = tokio::io::duplex(4096);
+
+        tokio::spawn(async move {
+            let service = server
+                .serve(transport_server)
+                .await
+                .expect("test MCP server starts");
+            let _ = service.waiting().await;
+        });
+
+        let handler = ClaiMcpClientHandler::default();
+        let client = handler
+            .clone()
+            .serve(transport_client)
+            .await
+            .expect("test MCP client starts");
+        let handle = client
+            .send_cancellable_request(
+                ClientRequest::CallToolRequest(Request::new(CallToolRequestParams::new(
+                    "progress_tool",
+                ))),
+                PeerRequestOptions::no_options(),
+            )
+            .await
+            .expect("tool call request is sent");
+        let mut progress = handler
+            .progress_dispatcher
+            .subscribe(handle.progress_token.clone())
+            .await;
+
+        release_progress.notify_one();
+
+        let notification = tokio::time::timeout(Duration::from_secs(1), progress.next())
+            .await
+            .expect("progress notification arrives")
+            .expect("progress subscriber remains open");
+        assert_eq!(notification.progress_token, handle.progress_token);
+        assert_eq!(notification.progress, 1.0);
+        assert_eq!(notification.total, Some(2.0));
+        assert_eq!(notification.message.as_deref(), Some("halfway"));
+
+        let rmcp::model::ServerResult::CallToolResult(response) =
+            handle.await_response().await.expect("tool call completes")
+        else {
+            panic!("expected CallToolResult response");
+        };
+        assert_eq!(
+            response.structured_content,
+            Some(serde_json::json!({ "ok": true }))
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_server_call_tool_drains_progress_notifications() {
+        let request_seen = Arc::new(Notify::new());
+        let release_progress = Arc::new(Notify::new());
+        let server = ProgressTokenServer {
+            request_seen: request_seen.clone(),
+            release_progress: release_progress.clone(),
+        };
+        let (transport_server, transport_client) = tokio::io::duplex(4096);
+
+        tokio::spawn(async move {
+            let service = server
+                .serve(transport_server)
+                .await
+                .expect("test MCP server starts");
+            let _ = service.waiting().await;
+        });
+
+        let client = ClaiMcpClientHandler::default()
+            .serve(transport_client)
+            .await
+            .expect("test MCP client starts");
+        let connection = ConnectedMcpServer::Http(client);
+        let call = tokio::spawn(async move { connection.call_tool("progress_tool", None).await });
+
+        request_seen.notified().await;
+        tokio::task::yield_now().await;
+        release_progress.notify_waiters();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), call)
+            .await
+            .expect("tool call returns")
+            .expect("tool call task joins")
+            .expect("tool call succeeds");
+        assert_eq!(
+            response.structured_content,
+            Some(serde_json::json!({ "ok": true }))
+        );
     }
 
     #[test]
