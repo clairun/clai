@@ -879,12 +879,14 @@ pub(crate) fn build_system_prompt(
         if !matches!(trigger, RunTrigger::WorkspaceTask) {
             prompt.push_str(
                 "### How tasks run\n\
-                 - `workspace_assignTask` is asynchronous: it returns a task id immediately and the task runs in its own separate session, in parallel with you. Keep working or reply to the user while it runs; poll `workspace_getTaskResult` when you need the outcome.\n\
+                 - `workspace_assignTask` is asynchronous: it returns a task id immediately and the task runs in its own separate session, in parallel with you. Keep working while it runs; poll `workspace_getTaskResult` for the outcome.\n\
+                 - Lifecycle invariant: after you assign any workspace task, you own that task until it reaches a terminal status (`completed`, `failed`, or `blocked`). NEVER send a final response or let the main agent end while a task you spawned is still `queued` or `running`.\n\
+                 - Before your final response, check every task id you assigned in this run. If any are still non-terminal, continue polling instead of ending. If progress is unclear, use the task's `sessionId`/`runId` from `workspace_getTaskResult` with `history_query` to inspect the subagent transcript/tool calls and decide whether it is progressing, stalled, hung, or blocked. If a task fails or blocks, integrate that terminal status into your final response.\n\
                  - Tasks run concurrently with no per-agent limit. Fan out independent subtasks freely — several tasks for the *same* agent at once is fine.\n\
-                 - Assigning a task to yourself is the supported way to push long or background work out of this conversation while you stay responsive.\n\
+                 - Assigning a task to yourself is the supported way to parallelize work while you stay responsive, but the same lifecycle invariant applies: do not finish the assigning run before the task finishes.\n\
                  - A task worker does NOT see this conversation. Write self-contained instructions: include the goal, the relevant file paths, and any context it needs.\n\
                  - All tasks share this workspace's directory. Partition parallel work so concurrent tasks don't write the same files.\n\
-                 - If you expect to collect a result in a later run (your run can end before the task finishes), record the task id in memory (e.g. `.clai/memory/state.md`) so a future run can poll it.\n\n",
+                 - Record task ids in memory (e.g. `.clai/memory/state.md`) only as crash/recovery insurance, not as permission to end the main run with tasks still in flight.\n\n",
             );
         }
     }
@@ -1691,14 +1693,20 @@ mod tests {
             other => panic!("expected text content, got {:?}", other),
         };
 
-        // Async + parallel semantics, fan-out, self-tasking, and the caveats
-        // (shared workspace dir, self-contained instructions, durable ids).
+        // Async + parallel semantics, fan-out, self-tasking, the manager
+        // lifecycle invariant, and the caveats (shared workspace dir,
+        // self-contained instructions, durable ids).
         assert!(text.contains("### How tasks run"));
         assert!(text.contains("no per-agent limit"));
         assert!(text.contains("Assigning a task to yourself"));
         assert!(text.contains("does NOT see this conversation"));
         assert!(text.contains("Partition parallel work"));
-        assert!(text.contains("record the task id in memory"));
+        assert!(text.contains("NEVER send a final response"));
+        assert!(text.contains("still `queued` or `running`"));
+        assert!(text.contains("history_query"));
+        assert!(text.contains("stalled, hung, or blocked"));
+        assert!(text.contains("Record task ids in memory"));
+        assert!(!text.contains("your run can end before the task finishes"));
     }
 
     #[test]
