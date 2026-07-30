@@ -204,7 +204,6 @@ struct SupportProbe<'a> {
     os_release: Option<&'a str>,
     has_dpkg: bool,
     has_rpm: bool,
-    appimage_env: bool,
 }
 
 #[tauri::command]
@@ -475,9 +474,9 @@ async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckRe
             },
         }
     } else if support.can_check {
-        // Notify-only channels (Flatpak): the build cannot install updates
-        // itself, but we still tell the user a newer release exists so they
-        // can fetch it through their package channel.
+        // Notify-only channels (Flatpak / linux_pkg): the build cannot
+        // install updates itself, but we still tell the user a newer
+        // release exists so they can fetch it through their package channel.
         let current_version = app.package_info().version.to_string();
         match fetch_update_manifest().await {
             Ok(manifest) => AppUpdateLastCheck {
@@ -592,7 +591,6 @@ fn detect_support_status() -> AppUpdateSupportStatus {
         os_release: os_release.as_deref(),
         has_dpkg: crate::providers::command_exists("dpkg"),
         has_rpm: crate::providers::command_exists("rpm"),
-        appimage_env: std::env::var_os("APPIMAGE").is_some(),
     })
 }
 
@@ -608,7 +606,7 @@ fn support_from_probe(probe: SupportProbe<'_>) -> AppUpdateSupportStatus {
         return unsupported(
             probe,
             "flatpak",
-            "This Flatpak build cannot update itself; download new releases from GitHub.",
+            "This Flatpak build updates through \"flatpak update\", not through CLAI itself.",
         );
     }
 
@@ -649,49 +647,51 @@ fn support_from_probe(probe: SupportProbe<'_>) -> AppUpdateSupportStatus {
 }
 
 fn linux_support_from_probe(probe: SupportProbe<'_>) -> AppUpdateSupportStatus {
+    // Linux deb/rpm bundles are always demoted to notify-only because
+    // self-updating would race with the package manager. AppImage and any
+    // future bundle type are not supported by CLAI self-updates today
+    // (see tauri.conf.json bundle targets), so a non-deb/rpm bundle is
+    // treated as silent — we have no installer to point the user at.
     match probe.bundle_type {
-        Some("deb") => {
-            if probe.has_dpkg && os_release_matches(probe.os_release, DEB_FAMILIES) {
-                supported(probe, "deb")
-            } else {
+        Some(bundle @ "deb") | Some(bundle @ "rpm") => {
+            let (has_tooling, on_family) = match bundle {
+                "deb" => (
+                    probe.has_dpkg,
+                    os_release_matches(probe.os_release, DEB_FAMILIES),
+                ),
+                "rpm" => (
+                    probe.has_rpm,
+                    os_release_matches(probe.os_release, RPM_FAMILIES),
+                ),
+                _ => unreachable!("outer or-pattern restricts to deb|rpm; got {:?}", bundle),
+            };
+            if has_tooling && on_family {
+                unsupported(
+                    probe,
+                    "linux_pkg",
+                    "This Linux install should be updated by its package manager.",
+                )
+            } else if on_family {
+                // Right distro, but the package-manager binary is missing.
                 unsupported(
                     probe,
                     "package_manager",
-                    "This Linux install should be updated by its package manager.",
+                    "This Linux install is missing its package-manager tooling.",
                 )
-            }
-        }
-        Some("rpm") => {
-            if probe.has_rpm && os_release_matches(probe.os_release, RPM_FAMILIES) {
-                supported(probe, "rpm")
             } else {
+                // Wrong distro family for this bundle type (e.g. deb on
+                // Arch, rpm on Ubuntu) — no package manager CLAI can name.
                 unsupported(
                     probe,
                     "package_manager",
-                    "This Linux install should be updated by its package manager.",
+                    "This Linux install does not match a known package-manager distro.",
                 )
             }
         }
-        Some("appimage") => {
-            if probe.appimage_env {
-                supported(probe, "appimage")
-            } else {
-                unsupported(
-                    probe,
-                    "appimage",
-                    "This AppImage build was not launched from an AppImage runtime.",
-                )
-            }
-        }
-        Some(_) => unsupported(
-            probe,
-            "unsupported",
-            "This Linux bundle type is not supported by CLAI self-updates.",
-        ),
-        None => unsupported(
+        Some(_) | None => unsupported(
             probe,
             "package_manager",
-            "This Linux install does not expose an updater-capable bundle type.",
+            "This Linux install is not managed by a CLAI self-updater bundle.",
         ),
     }
 }
@@ -711,11 +711,13 @@ fn supported(probe: SupportProbe<'_>, channel: &str) -> AppUpdateSupportStatus {
 fn unsupported(probe: SupportProbe<'_>, channel: &str, reason: &str) -> AppUpdateSupportStatus {
     AppUpdateSupportStatus {
         supported: false,
-        // Flatpak bundles are side-loaded (no origin remote), so Flatpak
-        // itself never updates them — notify-only is the only signal those
-        // users get. Package-manager installs (e.g. AUR) do receive updates
-        // through their repo, so they stay silent.
-        can_check: channel == "flatpak",
+        // Flatpak bundles are side-loaded (no origin remote) and Linux
+        // deb/rpm installs are steward-managed by the package manager:
+        // both can still check for newer versions and surface a "vX is
+        // available" badge, but neither can install in place. Other
+        // package-manager installs (e.g. AUR) stay silent because nothing
+        // in CLAI can act on the update.
+        can_check: matches!(channel, "flatpak" | "linux_pkg"),
         platform: probe.target_os.to_string(),
         arch: probe.arch.to_string(),
         channel: channel.to_string(),
@@ -788,7 +790,6 @@ mod tests {
             os_release: None,
             has_dpkg: false,
             has_rpm: false,
-            appimage_env: false,
         }
     }
 
@@ -805,40 +806,97 @@ mod tests {
     }
 
     #[test]
-    fn deb_support_requires_debian_family_and_dpkg() {
+    fn deb_on_debian_family_is_notify_only_under_linux_pkg_channel() {
+        // Native deb-on-debian-family installs cannot self-update — the
+        // package manager owns the binary. We still surface "vX is available"
+        // through the badge, so the build is notify-only with can_check: true.
         let mut probe = probe("linux", Some("deb"));
         probe.has_dpkg = true;
         probe.os_release = Some("ID=ubuntu\nID_LIKE=debian\n");
 
-        assert!(support_from_probe(probe).supported);
+        let status = support_from_probe(probe);
+        assert!(!status.supported);
+        assert!(status.can_check);
+        assert_eq!(status.channel, "linux_pkg");
+        assert_eq!(status.bundle_type.as_deref(), Some("deb"));
+        assert_eq!(status.platform, "linux");
+    }
 
+    #[test]
+    fn deb_on_non_debian_family_stays_silent() {
+        // A deb installed on, say, Arch has no package manager CLAI can
+        // point the user at — staying silent avoids misleading guidance.
+        let mut probe = probe("linux", Some("deb"));
+        probe.has_dpkg = true;
         probe.os_release = Some("ID=arch\n");
+
         let status = support_from_probe(probe);
         assert!(!status.supported);
         assert!(!status.can_check);
         assert_eq!(status.channel, "package_manager");
+        // The exact phrasing is what the toast would surface if it ever
+        // showed on Linux; pin it so a string tweak here is a deliberate
+        // copy change, not an accidental one.
+        assert!(
+            status
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("does not match a known package-manager distro"),
+            "reason drifted: {:?}",
+            status.reason,
+        );
     }
 
     #[test]
-    fn rpm_support_requires_rpm_family_and_rpm_binary() {
+    fn rpm_on_rpm_family_is_notify_only_under_linux_pkg_channel() {
         let mut probe = probe("linux", Some("rpm"));
         probe.has_rpm = true;
         probe.os_release = Some("ID=fedora\n");
 
-        assert!(support_from_probe(probe).supported);
-
-        probe.has_rpm = false;
-        assert!(!support_from_probe(probe).supported);
+        let status = support_from_probe(probe);
+        assert!(!status.supported);
+        assert!(status.can_check);
+        assert_eq!(status.channel, "linux_pkg");
+        assert_eq!(status.bundle_type.as_deref(), Some("rpm"));
     }
 
     #[test]
-    fn appimage_support_requires_appimage_runtime() {
-        let mut probe = probe("linux", Some("appimage"));
+    fn rpm_without_rpm_binary_stays_silent() {
+        // Same logic as deb-on-non-debian-family: if the package manager
+        // tooling isn't there, we can't give the user actionable advice.
+        let mut probe = probe("linux", Some("rpm"));
+        probe.has_rpm = false;
+        probe.os_release = Some("ID=fedora\n");
 
-        assert!(!support_from_probe(probe).supported);
+        let status = support_from_probe(probe);
+        assert!(!status.supported);
+        assert!(!status.can_check);
+        assert_eq!(status.channel, "package_manager");
+        assert!(
+            status
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("missing its package-manager tooling"),
+            "reason drifted: {:?}",
+            status.reason,
+        );
+    }
 
-        probe.appimage_env = true;
-        assert!(support_from_probe(probe).supported);
+    #[test]
+    fn appimage_bundle_falls_through_to_silent_package_manager() {
+        // Tripwire: AppImage is not a CLAI self-updater bundle. The probe
+        // must classify it as can_check:false with channel "package_manager"
+        // so the toast stays silent. If someone re-adds an AppImage target to
+        // tauri.conf.json bundle targets later, this test fails first —
+        // nudging them to think through whether notify-only is the desired
+        // UX for AppImage users rather than letting it silently change.
+        let status = support_from_probe(probe("linux", Some("appimage")));
+
+        assert!(!status.supported);
+        assert!(!status.can_check);
+        assert_eq!(status.channel, "package_manager");
     }
 
     #[test]

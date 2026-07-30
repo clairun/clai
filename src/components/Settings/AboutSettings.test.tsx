@@ -46,6 +46,57 @@ const notifyOnlyStatus = {
   lastCheck: { checkedAt: '2026-07-24T00:00:00Z', update: null, error: null },
 };
 
+/** Phase 6 status: Linux deb/rpm with a published update that's still
+ *  notify-only. The body copy and button label differ from the generic
+ *  non-installable branch — this fixture exercises the platform branch. */
+const linuxPkgStatus = {
+  settings: { autoDownload: true },
+  support: {
+    supported: false,
+    canCheck: true,
+    platform: 'linux',
+    arch: 'x86_64',
+    bundleType: 'deb',
+    channel: 'linux_pkg',
+    reason: 'This Linux install should be updated by its package manager.',
+  },
+  lastCheck: {
+    checkedAt: '2026-07-24T12:00:00Z',
+    error: null,
+    update: {
+      currentVersion: '26.7.12',
+      version: '26.8.1',
+      date: null,
+      body: null,
+      // The published version is reported by the feed but the build
+      // can't self-update — installs flow through the system package
+      // manager.
+      installable: false,
+      downloaded: false,
+    },
+  },
+};
+
+/** Flatpak is a Linux build too — also notify-only because updates flow
+ *  through `flatpak update`, which IS CLAI's package manager here. The
+ *  same body copy applies; only the `channel` and the support `reason`
+ *  differ. */
+const linuxFlatpakStatus = {
+  settings: { autoDownload: true },
+  support: {
+    supported: false,
+    canCheck: true,
+    platform: 'linux',
+    arch: 'x86_64',
+    bundleType: 'flatpak',
+    channel: 'flatpak',
+    reason: 'Flatpak updates are managed outside CLAI.',
+  },
+  lastCheck: {
+    ...linuxPkgStatus.lastCheck,
+  },
+};
+
 describe('AboutSettings updates panel', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -70,5 +121,49 @@ describe('AboutSettings updates panel', () => {
 
     expect(screen.getByRole('button', { name: /check for updates/i })).toBeTruthy();
     expect(screen.getByText('CLAI is up to date.')).toBeTruthy();
+  });
+
+  it('hides the auto-download toggle and uses the package-manager copy on Linux deb/rpm', async () => {
+    respond(linuxPkgStatus);
+    render(<AboutSettings />);
+    await waitFor(() => expect(screen.getByText('Notify only')).toBeTruthy());
+
+    // Toggle is reserved for self-installing builds. Linux deb/rpm goes
+    // through the system package manager and must not advertise
+    // background auto-downloads that won't actually happen.
+    expect(
+      screen.queryByRole('checkbox', { name: /automatically download updates/i })
+    ).toBeNull();
+
+    // Platform-aware body copy: points the user at their package
+    // manager instead of a generic "View release" hint.
+    expect(
+      screen.getByText(
+        'CLAI v26.8.1 is available. Use your package manager to install it.'
+      )
+    ).toBeTruthy();
+
+    // Button label adapts: opening the release-notes page is still
+    // useful on Linux deb/rpm (so users can read release notes) but
+    // the label drops the misleading "View release" wording.
+    expect(screen.getByRole('button', { name: /open release notes/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^view release$/i })).toBeNull();
+  });
+
+  it('uses the same package-manager copy on Flatpak (flatpak is the package manager)', async () => {
+    respond(linuxFlatpakStatus);
+    render(<AboutSettings />);
+    await waitFor(() => expect(screen.getByText('Notify only')).toBeTruthy());
+
+    // Same body copy as deb/rpm — Flatpak users invoke
+    // `flatpak update` (or the store) just as apt users invoke
+    // `apt upgrade`. Both are "package manager" updates from the
+    // user's perspective.
+    expect(
+      screen.getByText(
+        'CLAI v26.8.1 is available. Use your package manager to install it.'
+      )
+    ).toBeTruthy();
+    expect(screen.getByRole('button', { name: /open release notes/i })).toBeTruthy();
   });
 });

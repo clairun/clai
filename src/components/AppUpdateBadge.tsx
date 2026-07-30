@@ -14,7 +14,7 @@ import { openGlobalSettings } from '../utils/globalSettings';
 import styles from './AppUpdateBadge.module.css';
 
 const AppUpdateBadge = () => {
-  const update = useAvailableAppUpdate();
+  const { update } = useAvailableAppUpdate();
 
   if (!update) return null;
 
