@@ -9,8 +9,8 @@ import styles from './InlineApprovalCard.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
 // Backend cleared a pending request without a user decision (the run was
-// cancelled or ended, the wait timed out, or a re-asked command superseded
-// it). Drop the now-useless card. Payload: { requestId }.
+// cancelled or ended, or a re-asked command superseded it). Drop the
+// now-useless card. Payload: { requestId }.
 const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
 
 // Local UI alias matching the discriminator on SegmentDecision. Kept

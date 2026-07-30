@@ -10,7 +10,7 @@
 //! 3. Emits [`PERMISSION_REQUEST_EVENT`] to the frontend and emits
 //!    [`PERMISSION_ATTENTION_EVENT`] with the new per-workspace count so
 //!    the fleet card can render a badge.
-//! 4. `.await`s the oneshot (bounded by [`APPROVAL_TIMEOUT`]).
+//! 4. `.await`s the oneshot until the user decides or the run is cancelled.
 //! 5. When the frontend invokes [`submit_permission_decision`], the
 //!    backend looks up the sender, writes any `AllowAlways`/`DenyAlways`
 //!    entries to the workspace config for the request's agent *before*
@@ -26,7 +26,6 @@
 #![allow(dead_code)] // wired into local::execute_bash_exec; some helpers also called from tests
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
@@ -39,18 +38,11 @@ pub const PERMISSION_REQUEST_EVENT: &str = "permissions://request";
 pub const PERMISSION_ATTENTION_EVENT: &str = "permissions://attention";
 /// Emitted when a pending request is cleared *without* a user decision —
 /// the run was cancelled or ended (reaping a wait orphaned by a CLI
-/// transport drop), the wait timed out, or a re-asked command superseded
-/// the stale request. The inline approval card removes the now-useless
-/// card on this. Normal user submissions remove the card optimistically
-/// on the frontend, so they don't emit this.
+/// transport drop), or a re-asked command superseded the stale request.
+/// The inline approval card removes the now-useless card on this. Normal
+/// user submissions remove the card optimistically on the frontend, so
+/// they don't emit this.
 pub const PERMISSION_RESOLVED_EVENT: &str = "permissions://resolved";
-
-/// Maximum time the bash handler waits for a user response. Past this
-/// point the awaiting tool treats the missing decision as abandoned and
-/// stops the run. Direct-provider runs use this generous 24h hygiene
-/// bound; CLI-backed runs apply a shorter timeout below the CLI MCP
-/// client's own timeout so cleanup happens inside CLAI.
-pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -384,7 +376,7 @@ pub async fn submit_permission_decision(
 ) -> Result<(), String> {
     let Some((entry, remaining)) = state.pending_approvals.take(&request_id).await else {
         return Err(format!(
-            "No pending approval with request_id `{}` (already resolved or timed out)",
+            "No pending approval with request_id `{}` (already resolved or cleared)",
             request_id
         ));
     };
