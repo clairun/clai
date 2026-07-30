@@ -27,17 +27,33 @@ const UPDATE = {
   downloaded: false,
 };
 
-const statusWith = (update: typeof UPDATE | null) => ({
+const LINUX_DEB_STATUS = {
   settings: { autoDownload: true },
   support: {
-    supported: true,
+    supported: false,
     canCheck: true,
     platform: 'linux',
     arch: 'x86_64',
-    channel: 'deb',
+    channel: 'linux_pkg',
     bundleType: 'deb',
-    reason: null,
+    reason: 'Notify only: updated by your package manager.',
   },
+};
+
+const statusWith = (
+  update: typeof UPDATE | null,
+  support: Record<string, unknown> = {
+    supported: true,
+    canCheck: true,
+    platform: 'macos',
+    arch: 'arm64',
+    channel: 'macos',
+    bundleType: 'app',
+    reason: null,
+  }
+) => ({
+  settings: { autoDownload: true },
+  support,
   lastCheck: update ? { checkedAt: '2026-07-24T12:00:00Z', update, error: null } : null,
 });
 
@@ -56,6 +72,16 @@ describe('AppUpdateBadge', () => {
 
   it('shows the version from the seeded backend status', async () => {
     mockInvoke.mockResolvedValue(statusWith(UPDATE));
+    render(<AppUpdateBadge />);
+    expect(await screen.findByText(/Update available · v26\.8\.1/)).toBeInTheDocument();
+  });
+
+  it('still renders when the build is notify-only (Linux deb/rpm)', async () => {
+    // The badge shows the same "Update available" pill for notify-only
+    // builds as for self-updating ones — the only difference is that
+    // About shows the package-manager copy and there is no toast.
+    const notifyOnlyUpdate = { ...UPDATE, installable: false };
+    mockInvoke.mockResolvedValue(statusWith(notifyOnlyUpdate, LINUX_DEB_STATUS.support));
     render(<AppUpdateBadge />);
     expect(await screen.findByText(/Update available · v26\.8\.1/)).toBeInTheDocument();
   });

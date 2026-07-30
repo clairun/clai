@@ -131,6 +131,7 @@ const AboutSettings = () => {
   const availableUpdate = lastCheck?.update ?? null;
   const supportsUpdates = support?.supported ?? false;
   const canCheck = support?.canCheck ?? false;
+  const isLinux = support?.platform === 'linux';
   const supportDescription = updateStatus
     ? support?.reason || `${support?.platform ?? 'Desktop'} ${support?.bundleType ?? 'native'}`
     : 'Checking update support...';
@@ -149,11 +150,23 @@ const AboutSettings = () => {
   // If the status read itself fails, the panel shows so the error is visible.
   const updatesUnavailable = updateStatus !== null && !supportsUpdates && !canCheck;
   const showUpdatePanel = updateError !== '' || (updateStatus !== null && !updatesUnavailable);
-  const updateSummary = availableUpdate
-    ? availableUpdate.downloaded
-      ? `CLAI v${availableUpdate.version} has been downloaded. Restart to apply it.`
-      : `CLAI v${availableUpdate.version} is available.`
-    : lastCheck?.error || (lastCheck ? 'CLAI is up to date.' : 'Not checked yet.');
+
+  // When the new version isn't installable from within CLAI itself, the
+  // summary line needs platform-aware copy: macOS/Windows users fall back
+  // to the manual "Install and restart" / GitHub download, while Linux
+  // builds are steward-managed by the user's package manager or Flatpak
+  // (notify-only by design; see Phase 6).
+  const showPackageManagerHint =
+    availableUpdate !== null && !availableUpdate.installable && isLinux;
+  const updateSummary = installing
+    ? installProgress
+    : availableUpdate
+      ? availableUpdate.downloaded
+        ? `CLAI v${availableUpdate.version} has been downloaded. Restart to apply it.`
+        : showPackageManagerHint
+          ? `CLAI v${availableUpdate.version} is available. Use your package manager to install it.`
+          : `CLAI v${availableUpdate.version} is available.`
+      : lastCheck?.error || (lastCheck ? 'CLAI is up to date.' : 'Not checked yet.');
 
   return (
     <div className={styles.hero}>
@@ -205,7 +218,8 @@ const AboutSettings = () => {
 
           {/* Checking for updates is always on; only the background download is
             configurable, and only where this build can actually install
-            updates itself. Notify-only builds (e.g. Flatpak) get no toggle. */}
+            updates itself. Notify-only builds (Flatpak, Linux deb/rpm) get
+            no toggle — there is nothing to install from within CLAI. */}
           {supportsUpdates && (
             <label className={styles.toggleRow}>
               <span className={styles.toggleCopy}>
@@ -234,7 +248,7 @@ const AboutSettings = () => {
           )}
 
           <div className={styles.updateStatus}>
-            <span>{installing ? installProgress : updateSummary}</span>
+            <span>{updateSummary}</span>
             {updateError && <span className={styles.updateError}>{updateError}</span>}
           </div>
 
@@ -271,7 +285,7 @@ const AboutSettings = () => {
                     );
                   }}
                 >
-                  View release
+                  {showPackageManagerHint ? 'Open release notes' : 'View release'}
                 </button>
               ))}
           </div>

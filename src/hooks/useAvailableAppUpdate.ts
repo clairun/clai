@@ -6,6 +6,12 @@
  * `app-updates://available` event emitted by later checks. Used by both
  * the dismissible toast (AppUpdateNotifications) and the persistent
  * top-bar badge (AppUpdateBadge) so they can't drift apart.
+ *
+ * Also exposes the build's `support` profile so consumers can adapt to
+ * the host's update capability (e.g. suppress the toast on Linux,
+ * which is always notify-only). Support is a build/install-time
+ * property and is read once from the initial status; the live event
+ * does not carry it.
  */
 
 import { useEffect, useState } from 'react';
@@ -15,19 +21,28 @@ import type {
   AppUpdateAvailableEvent,
   AppUpdateInfo,
   AppUpdateStatus,
+  AppUpdateSupportStatus,
 } from '../generated/bindings';
 import { APP_UPDATE_AVAILABLE_EVENT } from '../utils/appUpdates';
 
-export const useAvailableAppUpdate = (): AppUpdateInfo | null => {
+export interface AvailableAppUpdate {
+  update: AppUpdateInfo | null;
+  support: AppUpdateSupportStatus | null;
+}
+
+export const useAvailableAppUpdate = (): AvailableAppUpdate => {
   const [update, setUpdate] = useState<AppUpdateInfo | null>(null);
+  const [support, setSupport] = useState<AppUpdateSupportStatus | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     invoke<AppUpdateStatus>('get_app_update_status')
       .then((status) => {
+        if (cancelled) return;
+        setSupport(status.support);
         const found = status.lastCheck?.update;
-        if (!cancelled && found) {
+        if (found) {
           // Seed only fills the initial gap: if the live event already
           // delivered an update, keep it (it is at least as fresh).
           setUpdate((current) => current ?? found);
@@ -56,5 +71,5 @@ export const useAvailableAppUpdate = (): AppUpdateInfo | null => {
     };
   }, []);
 
-  return update;
+  return { update, support };
 };

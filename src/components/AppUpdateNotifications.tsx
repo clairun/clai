@@ -1,12 +1,10 @@
 import React, { useCallback, useState } from 'react';
 import {
-  LATEST_RELEASE_URL,
   installAppUpdate,
   installEventText,
   updateErrorText,
 } from '../utils/appUpdates';
 import { useAvailableAppUpdate } from '../hooks/useAvailableAppUpdate';
-import { openExternal } from '../utils/openExternal';
 import styles from './WorkspaceTaskNotifications.module.css';
 
 interface InstallState {
@@ -24,7 +22,7 @@ const IDLE_INSTALL: InstallState = { error: '', progress: '', installing: false 
  * always-visible counterpart and is not affected by dismissal here.
  */
 const AppUpdateNotifications = () => {
-  const update = useAvailableAppUpdate();
+  const { update, support } = useAvailableAppUpdate();
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const [install, setInstall] = useState<InstallState>(IDLE_INSTALL);
 
@@ -58,23 +56,26 @@ const AppUpdateNotifications = () => {
     }
   }, []);
 
-  const viewRelease = useCallback(() => {
-    openExternal(LATEST_RELEASE_URL).catch((error) => {
-      console.error('[AppUpdateNotifications] Failed to open release page:', error);
-    });
-  }, []);
-
   if (!update || update.version === dismissedVersion) return null;
 
-  const installable = update.installable;
+  // Linux packages (deb/rpm/Flatpak) update through the OS package manager,
+  // not through CLAI itself — so we deliberately suppress the toast and any
+  // install CTA. `support` is `null` until the initial
+  // `get_app_update_status` resolve completes; treat that as "not Linux" so
+  // we don't flicker the toast on first render while support is still
+  // loading.
+  if (support === null || support.platform === 'linux') return null;
+
+  // installable is always true at this point: the early return at the top
+  // of this component filters Linux (which the backend marks
+  // installable:false), so we never need to render the "get it from
+  // GitHub Releases" branch or its View release button here.
   const body = install.error
     ? install.error
     : install.progress ||
-      (installable
-        ? update.downloaded
-          ? `CLAI v${update.version} has been downloaded. Restart to apply it.`
-          : `CLAI v${update.version} is ready to install.`
-        : `CLAI v${update.version} is available. This build updates outside CLAI — get it from GitHub Releases.`);
+      (update.downloaded
+        ? `CLAI v${update.version} has been downloaded. Restart to apply it.`
+        : `CLAI v${update.version} is ready to install.`);
 
   return (
     <div
@@ -90,24 +91,18 @@ const AppUpdateNotifications = () => {
         </div>
         <p className={styles.body}>{body}</p>
         <div className={styles.actions}>
-          {installable ? (
-            <button
-              type="button"
-              className={styles.openButton}
-              onClick={startInstall}
-              disabled={install.installing}
-            >
-              {install.installing
-                ? 'Installing...'
-                : update.downloaded
-                  ? 'Restart now'
-                  : 'Install and restart'}
-            </button>
-          ) : (
-            <button type="button" className={styles.openButton} onClick={viewRelease}>
-              View release
-            </button>
-          )}
+          <button
+            type="button"
+            className={styles.openButton}
+            onClick={startInstall}
+            disabled={install.installing}
+          >
+            {install.installing
+              ? 'Installing...'
+              : update.downloaded
+                ? 'Restart now'
+                : 'Install and restart'}
+          </button>
           <button
             type="button"
             className={styles.dismissButton}
