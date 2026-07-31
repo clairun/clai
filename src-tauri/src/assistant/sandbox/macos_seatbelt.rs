@@ -26,11 +26,22 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
     validate_profile_paths(&command)?;
     prune_missing_grants(&mut command);
 
-    let private_tmp = create_private_tmp_dir(&command.profile.workspace_root)?;
+    // Prefer the workspace's persistent scratch directory so files an agent
+    // leaves in its temp dir survive until its next command. Only the
+    // ephemeral fallback (used when scratch space is unavailable) is torn down
+    // per command; the persistent one is reset, and idle siblings reclaimed, on
+    // the workspace's first command of the app session (see `sandbox::scratch`).
+    let (private_tmp, ephemeral) = match command.profile.scratch_tmp.clone() {
+        Some(scratch) => (scratch, false),
+        None => (
+            create_private_tmp_dir(&command.profile.workspace_root)?,
+            true,
+        ),
+    };
     let profile = match seatbelt_profile(&command, &private_tmp) {
         Ok(profile) => profile,
         Err(error) => {
-            cleanup_private_tmp_dir(&private_tmp);
+            cleanup_ephemeral_tmp_dir(&private_tmp, ephemeral);
             return Err(error);
         }
     };
@@ -59,7 +70,7 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
     let child = match child_command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            cleanup_private_tmp_dir(&private_tmp);
+            cleanup_ephemeral_tmp_dir(&private_tmp, ephemeral);
             if error.kind() == std::io::ErrorKind::NotFound {
                 return Err(
                     "Sandboxed shell is unavailable: macOS sandbox-exec is not installed"
@@ -78,7 +89,7 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
         "Sandboxed shell command",
     )
     .await;
-    cleanup_private_tmp_dir(&private_tmp);
+    cleanup_ephemeral_tmp_dir(&private_tmp, ephemeral);
 
     let output = result?;
     if looks_like_sandbox_exec_setup_failure(&output) {
@@ -163,7 +174,14 @@ fn create_private_tmp_dir(workspace_root: &Path) -> Result<PathBuf, String> {
     ))
 }
 
-fn cleanup_private_tmp_dir(path: &Path) {
+/// Remove the per-command temp dir, but only when it is the ephemeral
+/// fallback. The persistent scratch directory must outlive the command — that
+/// persistence is the entire point — so tearing it down here would silently
+/// restore the per-command-wipe behaviour this replaced.
+fn cleanup_ephemeral_tmp_dir(path: &Path, ephemeral: bool) {
+    if !ephemeral {
+        return;
+    }
     if let Err(error) = fs::remove_dir_all(path) {
         tracing::warn!(
             "Failed to remove macOS sandbox temp directory {}: {}",
@@ -184,9 +202,16 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
     add_dir_filter(&mut read_filters, &mut metadata_filters, &workspace)?;
     add_dir_filter(&mut write_filters, &mut metadata_filters, &workspace)?;
 
-    let tmp = canonicalize_existing(private_tmp)?;
-    add_dir_filter(&mut read_filters, &mut metadata_filters, &tmp)?;
-    add_dir_filter(&mut write_filters, &mut metadata_filters, &tmp)?;
+    // Lenient, mirroring the Linux `--bind-try`: the temp dir is resolved when
+    // the profile is built, and a hard error here would abort the whole command
+    // if it disappeared in between (a second app instance resetting the same
+    // workspace, or the user clearing it). Losing scratch must never take the
+    // agent's shell down — the command simply runs without a usable temp dir,
+    // exactly as it would on a host where TMPDIR pointed somewhere missing.
+    if let Ok(tmp) = canonicalize_existing(private_tmp) {
+        add_dir_filter(&mut read_filters, &mut metadata_filters, &tmp)?;
+        add_dir_filter(&mut write_filters, &mut metadata_filters, &tmp)?;
+    }
 
     for grant in &command.profile.path_grants {
         add_grant_filters(
@@ -244,6 +269,30 @@ fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Resu
     let workspace = canonicalize_existing(&command.profile.workspace_root)?;
     read.push(path_literal(&workspace)?);
     write.push(path_literal(&workspace)?);
+
+    // The command's own PERSISTENT scratch dir. On Linux scratch is reached at
+    // /tmp — a separate mount point — so the container tmpfs never affects its
+    // owner. Seatbelt has no such indirection: TMPDIR points at the real host
+    // path (`<container>/.scratch/<id>`), which is inside the subpath just
+    // denied. Without this re-expose every macOS command would run with an
+    // unusable TMPDIR, and anything using it (git, npm, cargo, mktemp) would
+    // fail EPERM.
+    //
+    // Read from `scratch_tmp` rather than the temp dir the caller is using, so
+    // this covers exactly the persistent scratch case. The ephemeral fallback
+    // lives inside the workspace root and is already re-exposed by the
+    // workspace rule above; matching it here too would be redundant, and a
+    // looser test (such as "anything under the mask") would re-expose it by
+    // accident. Only this workspace's directory is named, so other workspaces'
+    // scratch stays denied.
+    if let Some(scratch) = command.profile.scratch_tmp.as_deref() {
+        if let Ok(scratch) = canonicalize_existing(scratch) {
+            if scratch.starts_with(&mask) {
+                read.push(path_literal(&scratch)?);
+                write.push(path_literal(&scratch)?);
+            }
+        }
+    }
     for grant in &command.profile.path_grants {
         let Ok(path) = canonicalize_existing(&grant.host_path) else {
             continue;
@@ -518,6 +567,7 @@ mod tests {
                     workspace,
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         }
     }
@@ -735,5 +785,129 @@ mod tests {
         assert!(!looks_like_sandbox_exec_setup_failure(
             &inner_command_output
         ));
+    }
+
+    /// Regression for the blocker this backend hit when scratch moved into the
+    /// workspace container: on macOS the scratch dir is handed over BY HOST
+    /// PATH (TMPDIR), not through a mount as on Linux, so the container deny
+    /// that hides other workspaces' scratch also covered the owner's own. Every
+    /// command then ran with an unusable TMPDIR. The own scratch dir must be
+    /// re-exposed AFTER the deny (seatbelt is last-match-wins).
+    #[test]
+    fn profile_reexposes_own_scratch_after_the_container_deny() {
+        let home = tempfile::tempdir().unwrap();
+        let container = home.path().join(".clai").join("workspaces");
+        let workspace = container.join("ws-abc");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let scratch = container.join(".scratch");
+        let mine = scratch.join("mine-0000000000000000");
+        let theirs = scratch.join("theirs-1111111111111111");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+
+        let mut command = sample_command(&workspace);
+        command.profile.workspace_root = workspace.clone();
+        command.cwd = workspace.clone();
+        command.profile.scratch_tmp = Some(mine.clone());
+        command.profile.env = SandboxEnv::filtered_from_iter(
+            [("PATH", "/usr/bin:/bin")],
+            home.path(),
+            SandboxSessionBusMode::Deny,
+        );
+        command.profile.path_grants = vec![SandboxPathGrant {
+            host_path: home.path().to_path_buf(),
+            access: SandboxPathAccess::ReadOnly,
+        }];
+
+        let profile = seatbelt_profile(&command, &mine).unwrap();
+
+        let container_c =
+            escape_sbpl_string(&fs::canonicalize(&container).unwrap().display().to_string());
+        let mine_c = escape_sbpl_string(&fs::canonicalize(&mine).unwrap().display().to_string());
+        let theirs_c =
+            escape_sbpl_string(&fs::canonicalize(&theirs).unwrap().display().to_string());
+
+        let deny_idx = profile
+            .find(&format!(
+                "(deny file-read* file-write*\n  (subpath \"{}\")",
+                container_c
+            ))
+            .unwrap_or_else(|| panic!("container should be denied; profile:\n{profile}"));
+
+        // The owner's scratch must win, i.e. appear after the deny.
+        let own_idx = profile
+            .rfind(&format!("(subpath \"{}\")", mine_c))
+            .unwrap_or_else(|| panic!("own scratch should be re-exposed; profile:\n{profile}"));
+        assert!(
+            own_idx > deny_idx,
+            "own scratch must be re-exposed after the deny; profile:\n{profile}"
+        );
+
+        // ...but only the owner's. Another workspace's scratch stays denied.
+        assert!(
+            !profile.contains(&format!("(subpath \"{}\")", theirs_c)),
+            "another workspace's scratch must not be re-exposed; profile:\n{profile}"
+        );
+    }
+
+    /// The ephemeral fallback lives inside the workspace root, so when a
+    /// container mask IS present it must not be re-exposed a second time by the
+    /// scratch branch — the `starts_with(mask)` guard is what keeps that branch
+    /// specific to real scratch dirs.
+    #[test]
+    fn profile_does_not_add_a_scratch_reexpose_for_the_ephemeral_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let container = home.path().join(".clai").join("workspaces");
+        let workspace = container.join("ws-abc");
+        std::fs::create_dir_all(&workspace).unwrap();
+        // Ephemeral fallback: inside the workspace, NOT under `.scratch`.
+        let private_tmp = tempfile::tempdir_in(&workspace).unwrap();
+
+        let mut command = sample_command(&workspace);
+        command.profile.workspace_root = workspace.clone();
+        command.cwd = workspace.clone();
+        command.profile.scratch_tmp = None;
+        command.profile.env = SandboxEnv::filtered_from_iter(
+            [("PATH", "/usr/bin:/bin")],
+            home.path(),
+            SandboxSessionBusMode::Deny,
+        );
+        command.profile.path_grants = vec![SandboxPathGrant {
+            host_path: home.path().to_path_buf(),
+            access: SandboxPathAccess::ReadOnly,
+        }];
+
+        let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
+
+        let container_c =
+            escape_sbpl_string(&fs::canonicalize(&container).unwrap().display().to_string());
+        let tmp_c = escape_sbpl_string(
+            &fs::canonicalize(private_tmp.path())
+                .unwrap()
+                .display()
+                .to_string(),
+        );
+        let workspace_c =
+            escape_sbpl_string(&fs::canonicalize(&workspace).unwrap().display().to_string());
+
+        // The mask really is in play here (otherwise this asserts nothing).
+        let deny_idx = profile
+            .find(&format!(
+                "(deny file-read* file-write*\n  (subpath \"{}\")",
+                container_c
+            ))
+            .unwrap_or_else(|| panic!("container should be denied; profile:\n{profile}"));
+
+        // The ephemeral dir gets no re-expose of its own — it is covered by the
+        // workspace re-expose, which must itself come after the deny.
+        assert!(
+            !profile[deny_idx..].contains(&format!("(subpath \"{}\")", tmp_c)),
+            "ephemeral temp dir must not be re-exposed separately; profile:\n{profile}"
+        );
+        assert!(
+            profile[deny_idx..].contains(&format!("(subpath \"{}\")", workspace_c)),
+            "workspace should be re-exposed after the deny; profile:\n{profile}"
+        );
     }
 }

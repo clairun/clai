@@ -35,6 +35,10 @@ pub struct SandboxProfile {
     pub network: SandboxNetworkMode,
     pub session_bus: SandboxSessionBusMode,
     pub env: SandboxEnv,
+    /// Host directory backing the sandbox's temp space, from
+    /// [`super::scratch`]. `None` means scratch space was unavailable and the
+    /// backend must fall back to an ephemeral per-command temp dir.
+    pub scratch_tmp: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +133,13 @@ impl SandboxEnv {
         self.vars.get("HOME").map(String::as_str)
     }
 }
+
+/// Name of the sandbox scratch container, a dot-prefixed sibling of the
+/// workspace roots inside the masked workspace container. Declared here rather
+/// than in [`super::scratch`] because that module is only compiled on platforms
+/// with a sandbox backend, while the `fs_*` tools and the workspace index must
+/// recognise the directory everywhere.
+pub const SCRATCH_DIR_NAME: &str = ".scratch";
 
 /// The directory that holds the agent's workspace — i.e. the workspace root's
 /// parent, which is the container for *all* workspaces (e.g.
