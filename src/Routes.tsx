@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router';
 import MainLayout from './layouts/MainLayout';
 import FleetLayout from './layouts/FleetLayout';
 import NotFound from './pages/NotFound';

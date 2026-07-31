@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import { listWorkspaces, createWorkspace } from '../workspace/client';
 import { errText, num } from '../fleet/workspaceStatus';
 import styles from './FleetIndex.module.css';

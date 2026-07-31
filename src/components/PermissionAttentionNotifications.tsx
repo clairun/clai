@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router';
 import type { PathGrantRequest, PermissionRequest } from '../generated/bindings';
 // Reuse the WorkspaceTaskNotifications stack styles so the global
 // notifications share visual language. The two surfaces are

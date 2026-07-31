@@ -8,7 +8,7 @@
  */
 
 import { useCallback } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router';
 import { useAssistantStore, assistantClient } from '../../assistant';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import {

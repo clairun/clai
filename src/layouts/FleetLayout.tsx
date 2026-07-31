@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Outlet, useMatch, useNavigate } from 'react-router-dom';
+import { Outlet, useMatch, useNavigate } from 'react-router';
 import {
   listWorkspaces,
   deleteWorkspace,

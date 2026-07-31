@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Outlet } from 'react-router-dom';
+import { Outlet } from 'react-router';
 import AppUpdateNotifications from '../components/AppUpdateNotifications';
 import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmulatorWrapper';
 import PermissionAttentionNotifications from '../components/PermissionAttentionNotifications';

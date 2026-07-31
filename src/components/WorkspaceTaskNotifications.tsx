@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import styles from './WorkspaceTaskNotifications.module.css';
 
 const WORKSPACE_TASK_ATTENTION_EVENT = 'workspace://task-attention';
