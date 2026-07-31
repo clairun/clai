@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "clai"
-version = "26.7.30"
+version = "26.7.31"
 dependencies = [
  "async-trait",
  "axum",
