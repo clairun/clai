@@ -22,6 +22,25 @@ import styles from './MarkdownMessage.module.css';
  *
  * When `isStreaming` becomes false the wrapper snaps to the full content
  * and stops animating.
+ *
+ * # Cost model
+ *
+ * Every committed frame re-renders this subtree, so the sanitize + parse
+ * work is paid once per commit for as long as a message streams. Two rules
+ * keep that bounded:
+ *
+ *   - The loop is **wake-on-data**: it stops as soon as the displayed text
+ *     has caught up, and the content effect restarts it when more text
+ *     lands. It must never re-arm itself while idle. An idle tick is cheap
+ *     on its own, but it keeps the compositor scheduling frames for as long
+ *     as `isStreaming` is true, and `isStreaming` deliberately stays true
+ *     across phases where no text arrives at all.
+ *   - Sanitizing and markdown-parsing touch the **unstable tail** only.
+ *     Text before the last blank line can no longer change shape, so it is
+ *     split into memoized blocks that are neither re-sanitized nor
+ *     re-parsed. The block *split* itself still scans the whole displayed
+ *     string once per commit; making that incremental would be a further
+ *     improvement and is not done here.
  */
 
 const TYPEWRITER_DEFAULT_FRAME_RATE = 60; // assume RAF ~60fps
@@ -41,91 +60,104 @@ const isLinuxRuntime = (): boolean => {
 const resolveTypewriterFrameRate = (): number =>
   isLinuxRuntime() ? TYPEWRITER_LINUX_FRAME_RATE : TYPEWRITER_DEFAULT_FRAME_RATE;
 
+const noop = (): void => {};
+
 const useTypewriterBuffer = (accumulated: string, isStreaming: boolean): string => {
-  const [displayed, setDisplayed] = useState(() => (isStreaming ? '' : accumulated || ''));
-  const accRef = useRef(accumulated || '');
+  const source = accumulated || '';
+  const [displayed, setDisplayed] = useState(() => (isStreaming ? '' : source));
+  const accRef = useRef(source);
   const lenRef = useRef(displayed.length);
   const streamingRef = useRef(isStreaming);
   const lastCommitAtRef = useRef(0);
+  // Handle of the frame currently scheduled, or null when the loop is idle.
+  // Doubles as the "is the loop running?" flag that keeps `wake` from
+  // scheduling a second frame on top of a live one.
+  const frameRef = useRef<number | null>(null);
+  // The running loop's "start if idle" entry point, published for the
+  // content effect below. Reset to a noop on unmount so a late wake can't
+  // resurrect the loop.
+  const wakeRef = useRef<() => void>(noop);
 
-  // Mirror the changing inputs into refs so the RAF `tick` callback always
-  // reads the latest values without being in the effect dep list (and
-  // re-creating the loop on every change). Writing `ref.current` directly
-  // during render trips the `react-hooks/refs` lint rule, so the mirror
-  // lives in effects keyed on the input values.
-  useEffect(() => {
-    accRef.current = accumulated || '';
-  }, [accumulated]);
+  // Mirror `isStreaming` into a ref so the RAF callback reads the current
+  // value without being re-created (see the mount-only effect below).
+  // Writing `ref.current` during render trips the `react-hooks/refs` lint
+  // rule, so the mirror lives in an effect keyed on the value.
   useEffect(() => {
     streamingRef.current = isStreaming;
   }, [isStreaming]);
 
+  // The animation loop. Created once per mount: restarting it whenever the
+  // content changes would cancel the pending frame on every delta, and when
+  // deltas arrive faster than frames that starves the loop and nothing ever
+  // renders. Instead the loop is long-lived and idles between bursts.
   useEffect(() => {
-    // If the consumer never asked for streaming, just mirror content
-    // immediately. This also covers the case where the message arrives
-    // already-complete (e.g., loaded from history).
-    if (!isStreaming && lenRef.current >= accRef.current.length) {
-      lenRef.current = accRef.current.length;
-      setDisplayed(accRef.current);
-      return undefined;
-    }
-
     let cancelled = false;
-    let frame: number | null = null;
+    // The platform cannot change while this component is mounted, so the
+    // frame-rate probe (a DOM read) is resolved once per loop rather than
+    // once per frame.
+    const frameRate = resolveTypewriterFrameRate();
+    const minFrameMs = 1000 / frameRate;
+    const minAdvance = Math.max(2, Math.ceil(TYPEWRITER_BASE_CPS / frameRate));
 
     const tick = (now: number) => {
+      frameRef.current = null;
       if (cancelled) return;
       const target = accRef.current.length;
       const cur = lenRef.current;
-      const frameRate = resolveTypewriterFrameRate();
-      const minFrameMs = 1000 / frameRate;
-      const elapsed = now - lastCommitAtRef.current;
 
       if (cur < target) {
-        if (lastCommitAtRef.current > 0 && elapsed < minFrameMs) {
-          frame = requestAnimationFrame(tick);
+        // Behind the source: advance a paced slice, capped to the frame rate.
+        if (lastCommitAtRef.current > 0 && now - lastCommitAtRef.current < minFrameMs) {
+          frameRef.current = requestAnimationFrame(tick);
           return;
         }
         const lag = target - cur;
         const fraction = streamingRef.current
           ? TYPEWRITER_CATCHUP_FRACTION
           : TYPEWRITER_DRAIN_FRACTION;
-        const minAdvance = Math.max(2, Math.ceil(TYPEWRITER_BASE_CPS / frameRate));
-        const advance = Math.min(
-          lag,
-          Math.max(minAdvance, Math.ceil(lag * fraction))
-        );
+        const advance = Math.min(lag, Math.max(minAdvance, Math.ceil(lag * fraction)));
         const newLen = cur + advance;
         lenRef.current = newLen;
         lastCommitAtRef.current = now;
         setDisplayed(accRef.current.slice(0, newLen));
-        frame = requestAnimationFrame(tick);
+        frameRef.current = requestAnimationFrame(tick);
         return;
       }
 
-      if (cur > target) {
-        // Defensive: accumulated shrank (shouldn't happen with append-only
-        // streams, but loading a different message into the same component
-        // could). Snap back to whatever the source says now.
-        lenRef.current = target;
-        setDisplayed(accRef.current);
-      }
-
-      if (streamingRef.current) {
-        // Caught up — keep polling for new deltas
-        frame = requestAnimationFrame(tick);
-      }
-      // Not streaming and caught up → stop. The next isStreaming flip or
-      // content append will re-arm us via the effect dep / ref read.
+      // Caught up. Snap to the source and go idle *without* re-arming: the
+      // content effect below restarts the loop when more text lands. The
+      // snap also covers the source shrinking or being swapped for a
+      // different string of the same length (a different message rendered
+      // into this same component instance); React bails out of the
+      // identical-string case on its own.
+      lenRef.current = target;
+      setDisplayed(accRef.current);
     };
 
-    frame = requestAnimationFrame(tick);
+    const wake = () => {
+      if (cancelled || frameRef.current != null) return;
+      frameRef.current = requestAnimationFrame(tick);
+    };
+
+    wakeRef.current = wake;
+    wake();
 
     return () => {
       cancelled = true;
-      if (frame) cancelAnimationFrame(frame);
+      wakeRef.current = noop;
+      if (frameRef.current != null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
     };
-  }, [isStreaming]);
+  }, []);
+
+  // New content — or an `isStreaming` flip, which changes both the pacing
+  // fraction and the post-stream drain — restarts the loop if it went idle.
+  // This is also the only thing that re-arms it, so a message that stops
+  // growing costs nothing until it grows again.
+  useEffect(() => {
+    accRef.current = source;
+    wakeRef.current();
+  }, [source, isStreaming]);
 
   return displayed;
 };
@@ -135,8 +167,30 @@ const useTypewriterBuffer = (accumulated: string, isStreaming: boolean): string 
  * keep the rendered DOM tree stable as new chars stream in — the same
  * block shouldn't appear, disappear, and reappear because closing
  * syntax was mid-arrival.
+ *
+ * Only ever applied to the **live tail** (see `splitStableMarkdownBlocks`).
+ * Every heuristic here is about syntax that is incomplete *because more
+ * text is still coming*, which by definition sits at the very end of the
+ * stream; running them over already-stable blocks re-scans the whole
+ * message on every commit for no benefit.
+ *
+ * Note that tail-only is not merely an optimization: applied to the whole
+ * message these heuristics actively corrupt stable text.
+ *
+ *   - Heuristic 3 slices the string at an unmatched `[`, so one stray
+ *     bracket used to drop every later block from the live view.
+ *   - The fence counter below and `splitStableMarkdownBlocks` disagree about
+ *     what counts as a fence. The counter matches every ``` occurrence
+ *     anywhere, including inline mid-line, and ignores `~~~` entirely;
+ *     `matchFence` accepts ``` or `~~~` with up to three leading spaces but
+ *     only at the start of a line. So a stable paragraph merely mentioning
+ *     ``` inline flipped whole-string parity odd and appended a closing
+ *     fence to the *end of the message* — a spurious empty code block glued
+ *     onto the live tail, while the completed blocks themselves were left
+ *     alone. (The `~~~` half of that asymmetry is pre-existing and untouched
+ *     here; it simply no longer sees stable text.)
  */
-const stabilizePartialMarkdown = (text: string): string => {
+export const stabilizePartialMarkdown = (text: string): string => {
   if (!text) return text;
   let out = text;
 
@@ -252,13 +306,17 @@ StableMarkdownBlock.displayName = 'StableMarkdownBlock';
 
 const StreamingMarkdownBlocks = memo(({ content, isStreaming }: { content: string; isStreaming: boolean }) => {
   const split = useMemo(() => splitStableMarkdownBlocks(content), [content]);
+  // Sanitize only the live tail. `split.tail` is a short, stable-identity
+  // string for as long as the tail doesn't change, so the memo also skips
+  // the work entirely on re-renders driven by anything else.
+  const safeTail = useMemo(() => stabilizePartialMarkdown(split.tail), [split.tail]);
 
   return (
     <div className={styles.markdownContainer}>
       {split.completed.map((block, index) => (
         <StableMarkdownBlock key={blockKey(block, index)} content={block} />
       ))}
-      {split.tail && <MarkdownBlock content={split.tail} isStreaming={isStreaming} />}
+      {safeTail && <MarkdownBlock content={safeTail} isStreaming={isStreaming} />}
     </div>
   );
 });
@@ -273,11 +331,10 @@ const StreamingMarkdown = memo(({ content, isStreaming = false }: StreamingMarkd
   // source so we stop running the sanitizer over completed content.
   const isCatchingUp = displayed.length < source.length;
   const useBuffered = isStreaming || isCatchingUp;
-  const safe = useBuffered ? stabilizePartialMarkdown(displayed) : source;
   if (!useBuffered) {
-    return <MarkdownMessage content={safe} isStreaming={false} />;
+    return <MarkdownMessage content={source} isStreaming={false} />;
   }
-  return <StreamingMarkdownBlocks content={safe} isStreaming={useBuffered} />;
+  return <StreamingMarkdownBlocks content={displayed} isStreaming={useBuffered} />;
 });
 
 StreamingMarkdown.displayName = 'StreamingMarkdown';
