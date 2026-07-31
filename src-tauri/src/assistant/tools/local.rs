@@ -553,6 +553,12 @@ fn glob_allowed_paths(
         require_literal_leading_dot: false,
     };
 
+    // Same container mask `resolve_allowed_path` applies, so the walk agrees
+    // with what `fs_read`/`fs_list` would actually allow.
+    let scratch_mask = grants.first().and_then(|ws| {
+        crate::assistant::sandbox::profile::workspace_mask(&ws.root, real_host_home().as_deref())
+    });
+
     let mut ctx = GlobWalkContext {
         matcher,
         options,
@@ -560,6 +566,7 @@ fn glob_allowed_paths(
         limit,
         seen: std::collections::HashSet::new(),
         matches: Vec::new(),
+        scratch_mask,
     };
 
     for grant in grants {
@@ -572,12 +579,27 @@ fn glob_allowed_paths(
 }
 
 struct GlobWalkContext {
+    /// Workspace container, used to locate the one `.scratch` dir to skip.
+    scratch_mask: Option<PathBuf>,
     matcher: Pattern,
     options: MatchOptions,
     absolute_pattern: bool,
     limit: usize,
     seen: std::collections::HashSet<PathBuf>,
     matches: Vec<FilesystemEntry>,
+}
+
+/// True only for THE sandbox scratch container — `<mask>/.scratch`, where
+/// `mask` is the workspace container from `sandbox::profile::workspace_mask`.
+///
+/// Deliberately an exact path test, not a basename match: a user directory that
+/// happens to be called `.scratch` is ordinary content, and silently pruning it
+/// from glob results would lose their data with no way to notice.
+fn is_sandbox_scratch_dir(path: &Path, mask: Option<&Path>) -> bool {
+    let Some(mask) = mask else {
+        return false;
+    };
+    path == mask.join(crate::assistant::sandbox::profile::SCRATCH_DIR_NAME)
 }
 
 fn collect_glob_matches(
@@ -617,6 +639,15 @@ fn collect_glob_matches(
             if ctx.matches.len() >= ctx.limit {
                 return Ok(true);
             }
+        }
+
+        // Never descend into the sandbox scratch tree. It holds other
+        // workspaces' temp files (which the mask denies to `fs_read`/`fs_list`,
+        // so enumerating their paths here would be inconsistent) and it holds
+        // persistent build caches, so walking it would make every glob pay for
+        // tens of thousands of irrelevant entries.
+        if file_type.is_dir() && is_sandbox_scratch_dir(&path, ctx.scratch_mask.as_deref()) {
+            continue;
         }
 
         if file_type.is_dir() && collect_glob_matches(root, &path, ctx)? {
@@ -715,12 +746,28 @@ fn sandbox_profile(
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root.clone());
 
+    // Persistent per-workspace temp space, reset on this workspace's first
+    // sandboxed command of the app session. `None` (the workspace container
+    // can't be masked, or the directory couldn't be created) degrades to the
+    // old ephemeral behaviour rather than failing the command — scratch is an
+    // optimisation. Only the sandboxed backends consume it; on platforms that
+    // run commands unsandboxed there is nothing to bind it into, so don't
+    // create a directory that could never be used.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let scratch_tmp = crate::assistant::sandbox::scratch::ensure_session_scratch(
+        &workspace_root,
+        Some(env_home.as_path()),
+    );
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let scratch_tmp = None;
+
     Ok(SandboxProfile {
         env: SandboxEnv::filtered_from_current(&env_home, session_bus),
         workspace_root,
         path_grants,
         network,
         session_bus,
+        scratch_tmp,
     })
 }
 
@@ -2949,6 +2996,96 @@ mod tests {
         let other = Path::new("/home/u/.clai/workspaces/other");
         let file = Path::new("/home/u/.clai/workspaces/other/shared.txt");
         assert!(!grant_masked_for_candidate(other, file, Some(mask)));
+    }
+
+    // Scratch space lives at `<container>/.scratch/<id>` precisely so the
+    // container mask that already hides sibling workspaces hides it too — on
+    // this in-process `fs_*` surface as well as in the sandbox. An earlier
+    // revision put scratch under the OS cache dir, where a broad $HOME grant
+    // let any agent read every workspace's temp files through fs_read/fs_list.
+    #[test]
+    fn home_grant_does_not_authorize_another_workspaces_scratch() {
+        let mask = Path::new("/home/u/.clai/workspaces");
+        let home = Path::new("/home/u");
+        let other_scratch =
+            Path::new("/home/u/.clai/workspaces/.scratch/other-1111111111111111/secret.txt");
+        assert!(grant_masked_for_candidate(home, other_scratch, Some(mask)));
+    }
+
+    // ...and not even its own: the agent reaches its scratch at /tmp inside the
+    // sandbox, never by host path, so the fs_* tools have no reason to expose
+    // it and the mask covers the whole `.scratch` subtree uniformly.
+    #[test]
+    fn home_grant_does_not_authorize_its_own_scratch_by_host_path() {
+        let mask = Path::new("/home/u/.clai/workspaces");
+        let home = Path::new("/home/u");
+        let own_scratch = Path::new("/home/u/.clai/workspaces/.scratch/own-0000000000000000/cache");
+        assert!(grant_masked_for_candidate(home, own_scratch, Some(mask)));
+    }
+
+    // With the DEFAULT grant set — own workspace plus a broad $HOME — no grant
+    // authorizes a scratch path: the workspace grant is rooted at a SIBLING of
+    // `.scratch` so the candidate filter drops it, and the $HOME grant is
+    // dropped by the container mask. Both halves must hold; either one alone
+    // would leave the path reachable.
+    #[test]
+    fn no_default_grant_authorizes_a_scratch_path() {
+        let mask = Path::new("/home/u/.clai/workspaces");
+        let home = Path::new("/home/u");
+        let own = Path::new("/home/u/.clai/workspaces/own");
+        let scratch = Path::new("/home/u/.clai/workspaces/.scratch/own-0000000000000000/cache");
+
+        // `resolve_allowed_path` only considers grants containing the
+        // candidate; the workspace grant does not.
+        assert!(!scratch.starts_with(own));
+        // ...and the one that does contain it is masked away.
+        assert!(scratch.starts_with(home));
+        assert!(grant_masked_for_candidate(home, scratch, Some(mask)));
+    }
+
+    // The glob walker skips exactly one directory: the sandbox scratch
+    // container. Both directions matter — skipping too little re-exposes other
+    // workspaces' temp files (which the mask denies to fs_read/fs_list, so
+    // enumerating their paths here would be inconsistent) and makes every glob
+    // walk persistent build caches; skipping too much silently drops a user's
+    // own directory from results.
+    #[test]
+    fn glob_skips_only_the_real_scratch_container() {
+        let mask = Path::new("/home/u/.clai/workspaces");
+
+        assert!(is_sandbox_scratch_dir(
+            Path::new("/home/u/.clai/workspaces/.scratch"),
+            Some(mask)
+        ));
+    }
+
+    #[test]
+    fn glob_does_not_skip_a_user_directory_named_scratch() {
+        let mask = Path::new("/home/u/.clai/workspaces");
+
+        // Ordinary user content that merely shares the name.
+        assert!(!is_sandbox_scratch_dir(
+            Path::new("/home/u/projects/.scratch"),
+            Some(mask)
+        ));
+        // Inside the agent's own workspace, not beside it.
+        assert!(!is_sandbox_scratch_dir(
+            Path::new("/home/u/.clai/workspaces/own/.scratch"),
+            Some(mask)
+        ));
+        // Nested deeper than the container's direct child.
+        assert!(!is_sandbox_scratch_dir(
+            Path::new("/home/u/.clai/workspaces/.scratch/ws-0/inner"),
+            Some(mask)
+        ));
+    }
+
+    #[test]
+    fn glob_skips_nothing_without_a_container_mask() {
+        assert!(!is_sandbox_scratch_dir(
+            Path::new("/home/u/.clai/workspaces/.scratch"),
+            None
+        ));
     }
 
     #[test]

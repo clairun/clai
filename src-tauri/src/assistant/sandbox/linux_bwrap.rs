@@ -124,8 +124,6 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
         os("/proc"),
         os("--dev"),
         os("/dev"),
-        os("--tmpfs"),
-        os("/tmp"),
         os("--ro-bind"),
         os("/usr"),
         os("/usr"),
@@ -168,6 +166,7 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
         os("/sys"),
     ]);
 
+    append_tmp_mount(&mut args, command);
     append_runtime_file_binds(&mut args, in_flatpak);
     append_workspace_and_grants(&mut args, command);
 
@@ -176,6 +175,8 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
         args.push(os(key));
         args.push(os(value));
     }
+
+    append_tmp_env(&mut args, command);
 
     // Emitted AFTER the profile env loop: inside Flatpak this overrides the
     // passed-through DBUS_SESSION_BUS_ADDRESS (which names the proxy socket we
@@ -189,6 +190,53 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     args.extend(command.argv.iter().cloned());
 
     Ok(args)
+}
+
+/// Mount the sandbox's `/tmp`.
+///
+/// With scratch space available this binds the workspace's persistent scratch
+/// directory, so files an agent leaves in `/tmp` survive until its next
+/// command instead of vanishing with a per-command tmpfs. Without it we keep
+/// the original empty tmpfs — a private `/tmp` either way, never the host's.
+///
+/// Emitted before the grant binds so an explicit user grant for `/tmp` still
+/// wins: bwrap mounts are last-writer-wins, and a path the user deliberately
+/// granted must override our default.
+fn append_tmp_mount(args: &mut Vec<OsString>, command: &SandboxCommand) {
+    // Always establish the tmpfs first: it is the guaranteed floor. If the
+    // scratch bind below is skipped because its source vanished, the sandbox
+    // still has a private, writable /tmp instead of none at all.
+    args.push(os("--tmpfs"));
+    args.push(os("/tmp"));
+
+    let Some(scratch) = command.profile.scratch_tmp.as_deref() else {
+        return;
+    };
+    // `--bind-try`, not `--bind`: the scratch dir is resolved when the profile
+    // is built, and a hard bind would abort the whole command if it disappeared
+    // before exec (a second app instance resetting the same workspace, or the
+    // user clearing the directory). Every grant bind is lenient for exactly
+    // this reason. Emitted after the tmpfs so it wins when present.
+    args.push(os("--bind-try"));
+    args.push(scratch.as_os_str().to_os_string());
+    args.push(os("/tmp"));
+}
+
+/// Point the standard temp-dir variables at the sandbox's `/tmp`.
+///
+/// The env allowlist strips the host's TMPDIR, so without this a tool that
+/// honours TMPDIR would fall back to its own default. Set only alongside the
+/// scratch bind; with a plain tmpfs the unset-TMPDIR default of `/tmp` is
+/// already correct.
+fn append_tmp_env(args: &mut Vec<OsString>, command: &SandboxCommand) {
+    if command.profile.scratch_tmp.is_none() {
+        return;
+    }
+    for key in ["TMPDIR", "TMP", "TEMP"] {
+        args.push(os("--setenv"));
+        args.push(os(key));
+        args.push(os("/tmp"));
+    }
 }
 
 fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
@@ -659,6 +707,7 @@ mod tests {
                     &workspace,
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         }
     }
@@ -1110,6 +1159,7 @@ mod tests {
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         };
 
@@ -1155,6 +1205,7 @@ mod tests {
                     &workspace,
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         };
 
@@ -1222,6 +1273,7 @@ mod tests {
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         };
 
@@ -1293,6 +1345,7 @@ mod tests {
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         };
 
@@ -1329,6 +1382,7 @@ mod tests {
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         };
 
@@ -1380,6 +1434,7 @@ mod tests {
                     &workspace,
                     SandboxSessionBusMode::Deny,
                 ),
+                scratch_tmp: None,
             },
         };
 
@@ -1452,5 +1507,347 @@ mod tests {
             false,
         );
         assert!(looks_like_bwrap_setup_failure(&out));
+    }
+
+    fn tmp_profile(workspace: &Path, scratch: Option<PathBuf>) -> SandboxCommand {
+        SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
+            cwd: workspace.to_path_buf(),
+            timeout_ms: 1_000,
+            max_output_chars: 1_000,
+            profile: SandboxProfile {
+                workspace_root: workspace.to_path_buf(),
+                path_grants: vec![],
+                network: SandboxNetworkMode::Disabled,
+                session_bus: SandboxSessionBusMode::Deny,
+                env: SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace,
+                    SandboxSessionBusMode::Deny,
+                ),
+                scratch_tmp: scratch,
+            },
+        }
+    }
+
+    fn rendered(args: &[OsString]) -> Vec<String> {
+        args.iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The persistence fix: with scratch space, `/tmp` is a bind of the
+    /// workspace's scratch dir, so files survive between commands. A tmpfs
+    /// here would silently restore the per-command wipe.
+    #[test]
+    fn tmp_is_bound_to_the_scratch_dir_when_available() {
+        let workspace = PathBuf::from("/home/me/.clai/workspaces/ws");
+        let scratch = PathBuf::from("/home/me/.cache/clai/sandbox-tmp/live/ws-0123456789abcdef");
+        let command = tmp_profile(&workspace, Some(scratch.clone()));
+
+        let mut args: Vec<OsString> = Vec::new();
+        append_tmp_mount(&mut args, &command);
+
+        // A tmpfs floor first so a vanished scratch dir degrades to an empty
+        // private /tmp instead of aborting the command, then the lenient bind
+        // on top (last-writer-wins).
+        assert_eq!(
+            rendered(&args),
+            vec![
+                "--tmpfs".to_string(),
+                "/tmp".to_string(),
+                "--bind-try".to_string(),
+                scratch.display().to_string(),
+                "/tmp".to_string()
+            ]
+        );
+    }
+
+    /// Without scratch space we must keep the original private tmpfs. Falling
+    /// back to the *host* /tmp would leak sibling workspaces' scratch files
+    /// and host IPC sockets into the sandbox.
+    #[test]
+    fn tmp_falls_back_to_a_private_tmpfs_without_scratch() {
+        let workspace = PathBuf::from("/home/me/.clai/workspaces/ws");
+        let command = tmp_profile(&workspace, None);
+
+        let mut args: Vec<OsString> = Vec::new();
+        append_tmp_mount(&mut args, &command);
+
+        assert_eq!(
+            rendered(&args),
+            vec!["--tmpfs".to_string(), "/tmp".to_string()]
+        );
+    }
+
+    #[test]
+    fn tmp_env_points_at_the_sandbox_tmp_when_scratch_is_bound() {
+        let workspace = PathBuf::from("/home/me/.clai/workspaces/ws");
+        let command = tmp_profile(
+            &workspace,
+            Some(PathBuf::from("/home/me/.cache/clai/sandbox-tmp/live/ws-0")),
+        );
+
+        let mut args: Vec<OsString> = Vec::new();
+        append_tmp_env(&mut args, &command);
+
+        let rendered = rendered(&args);
+        for key in ["TMPDIR", "TMP", "TEMP"] {
+            let idx = rendered
+                .iter()
+                .position(|arg| arg == key)
+                .unwrap_or_else(|| panic!("{key} not set"));
+            assert_eq!(rendered[idx - 1], "--setenv");
+            // The guest path, not the host scratch path: inside the sandbox
+            // the scratch dir *is* /tmp.
+            assert_eq!(rendered[idx + 1], "/tmp");
+        }
+    }
+
+    #[test]
+    fn tmp_env_is_not_set_without_scratch() {
+        let workspace = PathBuf::from("/home/me/.clai/workspaces/ws");
+        let command = tmp_profile(&workspace, None);
+
+        let mut args: Vec<OsString> = Vec::new();
+        append_tmp_env(&mut args, &command);
+
+        assert!(
+            args.is_empty(),
+            "unexpected env args: {:?}",
+            rendered(&args)
+        );
+    }
+
+    /// The scratch bind is a default, not a policy: bwrap mounts are
+    /// last-writer-wins, and grants are emitted after the base block, so a
+    /// user who explicitly grants `/tmp` still gets the host's.
+    #[test]
+    fn an_explicit_tmp_grant_is_emitted_after_the_scratch_bind() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut command = tmp_profile(
+            workspace.path(),
+            Some(PathBuf::from("/home/me/.cache/clai/sandbox-tmp/live/ws-0")),
+        );
+        command.profile.path_grants = vec![SandboxPathGrant {
+            host_path: PathBuf::from("/tmp"),
+            access: SandboxPathAccess::ReadWrite,
+        }];
+
+        let args = bwrap_args(&command).expect("args");
+        let rendered = rendered(&args);
+
+        let scratch_bind = rendered
+            .iter()
+            .position(|arg| arg.contains("sandbox-tmp/live/ws-0"))
+            .expect("scratch bind missing");
+        let grant_bind = rendered
+            .iter()
+            .enumerate()
+            .position(|(i, arg)| arg == "/tmp" && i > scratch_bind && rendered[i - 1] == "/tmp")
+            .expect("explicit /tmp grant bind missing");
+
+        assert!(
+            grant_bind > scratch_bind,
+            "explicit /tmp grant must override the scratch bind: {rendered:?}"
+        );
+    }
+
+    /// End-to-end proof of the user-visible fix: a file written to `/tmp` by
+    /// one sandboxed command is still there for the next one. This is the
+    /// behaviour the whole change exists to deliver (build caches surviving
+    /// between `bash_exec` calls), so it is pinned against a real bwrap run
+    /// rather than only against generated argv.
+    #[tokio::test]
+    async fn files_in_tmp_survive_between_commands_with_scratch() {
+        let workspace = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+
+        let write = tmp_e2e_command(
+            workspace.path(),
+            Some(scratch.path().to_path_buf()),
+            "echo persisted > /tmp/canary",
+        );
+        match run(write).await {
+            Ok(output) => assert!(output.success, "stderr: {}", output.stderr),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
+        }
+
+        let read = tmp_e2e_command(
+            workspace.path(),
+            Some(scratch.path().to_path_buf()),
+            "cat /tmp/canary",
+        );
+        let output = run(read).await.expect("second run");
+
+        assert!(output.success, "stderr: {}", output.stderr);
+        assert!(
+            output.stdout.contains("persisted"),
+            "/tmp did not persist between commands; stdout: {:?}",
+            output.stdout
+        );
+    }
+
+    /// Negative control for the test above: without scratch space `/tmp` is a
+    /// per-command tmpfs, so the canary must NOT survive. Guards against the
+    /// persistence test passing for the wrong reason (e.g. leaking the host's
+    /// real /tmp into the sandbox).
+    #[tokio::test]
+    async fn files_in_tmp_do_not_survive_without_scratch() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let write = tmp_e2e_command(workspace.path(), None, "echo persisted > /tmp/canary");
+        match run(write).await {
+            Ok(output) => assert!(output.success, "stderr: {}", output.stderr),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
+        }
+
+        let read = tmp_e2e_command(workspace.path(), None, "cat /tmp/canary 2>/dev/null; true");
+        let output = run(read).await.expect("second run");
+
+        assert!(
+            !output.stdout.contains("persisted"),
+            "a tmpfs /tmp unexpectedly persisted between commands; stdout: {:?}",
+            output.stdout
+        );
+    }
+
+    fn tmp_e2e_command(workspace: &Path, scratch: Option<PathBuf>, script: &str) -> SandboxCommand {
+        SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-lc"), os(script)],
+            cwd: workspace.to_path_buf(),
+            timeout_ms: 10_000,
+            max_output_chars: 1_000,
+            profile: SandboxProfile {
+                workspace_root: workspace.to_path_buf(),
+                path_grants: vec![],
+                network: SandboxNetworkMode::Disabled,
+                session_bus: SandboxSessionBusMode::Deny,
+                env: SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace,
+                    SandboxSessionBusMode::Deny,
+                ),
+                scratch_tmp: scratch,
+            },
+        }
+    }
+    /// Isolation regression. Scratch lives at `<container>/.scratch/<id>`,
+    /// inside the workspace container that `workspace_mask` already hides, so
+    /// a broad `$HOME` read-only grant must NOT expose another workspace's
+    /// scratch. An earlier revision placed scratch under the OS cache dir,
+    /// where the default `$HOME` grant re-exposed every workspace's temp files
+    /// at their real path; this pins that it cannot come back.
+    #[tokio::test]
+    async fn scratch_of_other_workspaces_is_not_readable_via_home_grant() {
+        let home = tempfile::tempdir().unwrap();
+        let container = home.path().join(".clai").join("workspaces");
+        let workspace = container.join("ws-mine");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let scratch = container.join(".scratch");
+        let mine = scratch.join("mine-0000000000000000");
+        let theirs = scratch.join("theirs-1111111111111111");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+        let secret = theirs.join("secret.txt");
+        std::fs::write(&secret, "OTHER-WORKSPACE-SECRET").unwrap();
+
+        let script = format!("cat '{}' 2>/dev/null || echo BLOCKED", secret.display());
+        let command = SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-lc"), os(script)],
+            cwd: workspace.clone(),
+            timeout_ms: 10_000,
+            max_output_chars: 1_000,
+            profile: SandboxProfile {
+                workspace_root: workspace.clone(),
+                path_grants: vec![SandboxPathGrant {
+                    host_path: home.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                network: SandboxNetworkMode::Disabled,
+                session_bus: SandboxSessionBusMode::Deny,
+                env: SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    home.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+                scratch_tmp: Some(mine.clone()),
+            },
+        };
+
+        let output = match run(command).await {
+            Ok(o) => o,
+            Err(e) if e.contains("Sandboxed shell is unavailable") => return,
+            Err(e) => panic!("sandbox command failed unexpectedly: {e}"),
+        };
+        assert!(
+            !output.stdout.contains("OTHER-WORKSPACE-SECRET"),
+            "another workspace's scratch was readable via the $HOME grant; stdout: {:?}",
+            output.stdout
+        );
+        assert!(
+            output.stdout.contains("BLOCKED"),
+            "expected the read to be denied; stdout: {:?}",
+            output.stdout
+        );
+    }
+
+    /// The mask must not cost the agent its OWN scratch: it is reached at
+    /// /tmp, a separate mount point, even though its host path sits inside the
+    /// hidden container.
+    #[tokio::test]
+    async fn own_scratch_is_still_usable_at_tmp_under_a_home_grant() {
+        let home = tempfile::tempdir().unwrap();
+        let container = home.path().join(".clai").join("workspaces");
+        let workspace = container.join("ws-mine");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mine = container.join(".scratch").join("mine-0000000000000000");
+        std::fs::create_dir_all(&mine).unwrap();
+
+        let command = SandboxCommand {
+            argv: vec![
+                os("/bin/sh"),
+                os("-lc"),
+                os("echo works > /tmp/canary && cat /tmp/canary"),
+            ],
+            cwd: workspace.clone(),
+            timeout_ms: 10_000,
+            max_output_chars: 1_000,
+            profile: SandboxProfile {
+                workspace_root: workspace.clone(),
+                path_grants: vec![SandboxPathGrant {
+                    host_path: home.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                network: SandboxNetworkMode::Disabled,
+                session_bus: SandboxSessionBusMode::Deny,
+                env: SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    home.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+                scratch_tmp: Some(mine.clone()),
+            },
+        };
+
+        let output = match run(command).await {
+            Ok(o) => o,
+            Err(e) if e.contains("Sandboxed shell is unavailable") => return,
+            Err(e) => panic!("sandbox command failed unexpectedly: {e}"),
+        };
+        assert!(output.success, "stderr: {}", output.stderr);
+        assert!(
+            output.stdout.contains("works"),
+            "stdout: {:?}",
+            output.stdout
+        );
+        // And it really landed in the workspace's own scratch dir on the host.
+        assert!(
+            mine.join("canary").exists(),
+            "write did not reach the host scratch dir"
+        );
     }
 }

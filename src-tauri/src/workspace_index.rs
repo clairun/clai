@@ -83,6 +83,13 @@ impl WorkspaceIndex {
                 else {
                     continue;
                 };
+                // Dot-prefixed siblings are the app's own bookkeeping, not
+                // malformed workspaces (e.g. `.scratch`, the per-workspace
+                // sandbox temp space). Recording them as load failures would be
+                // noise the user can neither act on nor remove.
+                if dir_name.starts_with('.') {
+                    continue;
+                }
                 if Uuid::parse_str(&dir_name).is_err() {
                     index.load_failures.push(WorkspaceLoadFailure {
                         path,
