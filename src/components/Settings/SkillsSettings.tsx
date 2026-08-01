@@ -30,6 +30,23 @@ const FolderIcon = () => (
   </svg>
 );
 
+const ChevronIcon = ({ open }: { open: boolean }) => (
+  <svg
+    className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}
+    width="12"
+    height="12"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <polyline points="9 18 15 12 9 6" />
+  </svg>
+);
+
 const sourcePath = (source: SkillSourceResponse | undefined): string => {
   if (!source?.source) return '';
   if (source.source.kind === 'local') return source.source.path || '';
@@ -65,23 +82,52 @@ const SkillsSettings = () => {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [refreshingId, setRefreshingId] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [query, setQuery] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   const skillsBySource = useMemo(() => {
-    const counts = new Map();
+    const grouped = new Map<string, SkillDefinition[]>();
     for (const skill of skills) {
-      counts.set(skill.sourceId, (counts.get(skill.sourceId) || 0) + 1);
+      const bucket = grouped.get(skill.sourceId);
+      if (bucket) bucket.push(skill);
+      else grouped.set(skill.sourceId, [skill]);
     }
-    return counts;
+    for (const bucket of grouped.values()) {
+      bucket.sort((left, right) => left.name.localeCompare(right.name));
+    }
+    return grouped;
   }, [skills]);
+
+  const trimmedQuery = query.trim().toLowerCase();
+
+  // A source stays visible if its own name matches, or if any of its skills
+  // do; in the latter case only the matching skills are listed.
+  const visibleSources = useMemo(() => {
+    return sources
+      .map((source) => {
+        const own = skillsBySource.get(source.id) || [];
+        if (!trimmedQuery) return { source, skills: own, total: own.length };
+        const sourceMatches = source.name.toLowerCase().includes(trimmedQuery);
+        const matching = own.filter(
+          (skill) =>
+            skill.name.toLowerCase().includes(trimmedQuery) ||
+            skill.description.toLowerCase().includes(trimmedQuery)
+        );
+        if (!sourceMatches && matching.length === 0) return null;
+        return { source, skills: sourceMatches ? own : matching, total: own.length };
+      })
+      .filter((entry): entry is { source: SkillSourceResponse; skills: SkillDefinition[]; total: number } => entry !== null);
+  }, [sources, skillsBySource, trimmedQuery]);
+
+  const matchingSkillCount = useMemo(
+    () => visibleSources.reduce((sum, entry) => sum + entry.skills.length, 0),
+    [visibleSources]
+  );
 
   const diagnosticsBySource = useMemo(
     () => new Map(diagnostics.map((diagnostic) => [diagnostic.sourceId, diagnostic])),
     [diagnostics]
-  );
-
-  const sourcesById = useMemo(
-    () => new Map(sources.map((source) => [source.id, source])),
-    [sources]
   );
 
   useEffect(() => {
@@ -156,6 +202,7 @@ const SkillsSettings = () => {
       setPath('');
       setUri('');
       setReference('');
+      setShowAddForm(false);
       await loadCatalog();
     } catch (saveError) {
       console.error('[SkillsSettings] Failed to add skill source:', saveError);
@@ -216,6 +263,15 @@ const SkillsSettings = () => {
     }
   };
 
+  const toggleCollapsed = (sourceId: string) => {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(sourceId)) next.delete(sourceId);
+      else next.add(sourceId);
+      return next;
+    });
+  };
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -225,10 +281,20 @@ const SkillsSettings = () => {
             Register skill repositories and assign discovered skills to agents.
           </p>
         </div>
+        <button
+          type="button"
+          className={styles.addButton}
+          onClick={() => setShowAddForm((current) => !current)}
+          aria-expanded={showAddForm}
+        >
+          <PlusIcon />
+          <span>{showAddForm ? 'Cancel' : 'Add source'}</span>
+        </button>
       </div>
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
+      {showAddForm && (
       <form className={styles.addSourceForm} onSubmit={handleAddSource}>
         <div className={styles.sourceTypeControl}>
           <button
@@ -322,24 +388,56 @@ const SkillsSettings = () => {
           <span>{saving ? 'Adding...' : 'Add Source'}</span>
         </button>
       </form>
+      )}
 
       {loading ? (
         <div className={styles.loadingState}>Loading skills...</div>
+      ) : sources.length === 0 ? (
+        <div className={styles.emptyState}>
+          No skill sources configured. Add one to discover SKILL.md files.
+        </div>
       ) : (
-        <>
-          <section className={styles.section}>
-            <div className={styles.sectionHeader}>
-              <h4 className={styles.sectionTitle}>Sources</h4>
-              <span className={styles.count}>{sources.length}</span>
-            </div>
-            {sources.length === 0 ? (
-              <div className={styles.emptyState}>No skill sources configured.</div>
-            ) : (
-              <div className={styles.sourceList}>
-                {sources.map((source) => (
+        <section className={styles.section}>
+          <div className={styles.sectionHeader}>
+            <h4 className={styles.sectionTitle}>Sources</h4>
+            <span className={styles.count}>{sources.length}</span>
+            <span className={styles.sectionMeta}>
+              {matchingSkillCount === skills.length
+                ? `${skills.length} skill${skills.length === 1 ? '' : 's'}`
+                : `${matchingSkillCount} of ${skills.length} skills`}
+            </span>
+            <input
+              type="search"
+              className={styles.searchInput}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search skills…"
+              aria-label="Search skills"
+            />
+          </div>
+
+          {visibleSources.length === 0 ? (
+            <div className={styles.emptyState}>No skills match “{query.trim()}”.</div>
+          ) : (
+            <div className={styles.sourceList}>
+              {visibleSources.map(({ source, skills: sourceSkills, total }) => {
+                // While searching, matching sources stay open — collapsing one
+                // the user just searched into would hide the answer.
+                const open = Boolean(trimmedQuery) || !collapsed.has(source.id);
+                const diagnostic = diagnosticsBySource.get(source.id);
+                const bodyId = `skill-source-${source.id}`;
+                return (
                   <div key={source.id} className={styles.sourceCard}>
-                    <div className={styles.sourceMain}>
-                      <div className={styles.sourceNameRow}>
+                    <div className={styles.sourceTopRow}>
+                      <button
+                        type="button"
+                        className={styles.sourceToggle}
+                        onClick={() => toggleCollapsed(source.id)}
+                        aria-expanded={open}
+                        aria-controls={bodyId}
+                        disabled={Boolean(trimmedQuery)}
+                      >
+                        <ChevronIcon open={open} />
                         <span className={styles.sourceName}>{source.name}</span>
                         <span className={`${styles.statusBadge} ${source.enabled ? styles.enabled : styles.disabled}`}>
                           {source.enabled ? 'Enabled' : 'Disabled'}
@@ -350,98 +448,84 @@ const SkillsSettings = () => {
                             {managedLabel(source)}
                           </span>
                         )}
-                      </div>
-                      <div className={styles.sourcePath}>{sourcePath(source)}</div>
-                      {isBundledSource(source) && (
-                        <div className={styles.sourceMeta}>Read-only. Refresh pulls updates from the CLAI skills repository.</div>
-                      )}
-                      {source.source?.kind === 'git' && source.source?.reference && (
-                        <div className={styles.sourceMeta}>Ref: {source.source.reference}</div>
-                      )}
-                      {source.source?.kind === 'git' && source.source?.local_path && (
-                        <div className={styles.sourceMeta}>Cache: {source.source.local_path}</div>
-                      )}
-                      <div className={styles.sourceMeta}>
-                        {skillsBySource.get(source.id) || 0} skill{(skillsBySource.get(source.id) || 0) === 1 ? '' : 's'}
-                      </div>
-                      {diagnosticsBySource.get(source.id)?.message && (
-                        <div className={`${styles.sourceDiagnostic} ${diagnosticsBySource.get(source.id)?.ok ? styles.sourceDiagnosticMuted : styles.sourceDiagnosticError}`}>
-                          {diagnosticsBySource.get(source.id)?.message}
-                        </div>
-                      )}
-                    </div>
-                    <div className={styles.sourceActions}>
-                      {source.source?.kind === 'git' && (
+                        <span className={styles.sourceCountText}>
+                          {sourceSkills.length === total
+                            ? `${total} skill${total === 1 ? '' : 's'}`
+                            : `${sourceSkills.length} of ${total} skills`}
+                        </span>
+                      </button>
+                      <div className={styles.sourceActions}>
+                        {source.source?.kind === 'git' && (
+                          <button
+                            type="button"
+                            className={styles.actionButton}
+                            onClick={() => handleRefreshSource(source.id)}
+                            disabled={refreshingId === source.id}
+                          >
+                            {refreshingId === source.id ? 'Refreshing...' : 'Refresh'}
+                          </button>
+                        )}
                         <button
                           type="button"
                           className={styles.actionButton}
-                          onClick={() => handleRefreshSource(source.id)}
-                          disabled={refreshingId === source.id}
+                          onClick={() => handleToggleSource(source)}
+                          disabled={togglingId === source.id}
                         >
-                          {refreshingId === source.id ? 'Refreshing...' : 'Refresh'}
+                          {source.enabled ? 'Disable' : 'Enable'}
                         </button>
-                      )}
-                      <button
-                        type="button"
-                        className={styles.actionButton}
-                        onClick={() => handleToggleSource(source)}
-                        disabled={togglingId === source.id}
-                      >
-                        {source.enabled ? 'Disable' : 'Enable'}
-                      </button>
-                      {!source.managedKind && (
-                        <button
-                          type="button"
-                          className={styles.deleteButton}
-                          onClick={() => handleDeleteSource(source.id)}
-                          disabled={deletingId === source.id}
-                        >
-                          {deletingId === source.id ? 'Deleting...' : 'Delete'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className={styles.section}>
-            <div className={styles.sectionHeader}>
-              <h4 className={styles.sectionTitle}>Discovered Skills</h4>
-              <span className={styles.count}>{skills.length}</span>
-            </div>
-            {skills.length === 0 ? (
-              <div className={styles.emptyState}>No SKILL.md files discovered.</div>
-            ) : (
-              <div className={styles.skillList}>
-                {skills.map((skill) => {
-                  const source = sourcesById.get(skill.sourceId);
-                  const bundled = isBundledSource(source);
-                  return (
-                    <div key={skill.id} className={styles.skillCard}>
-                      <div className={styles.skillHeader}>
-                        <span className={styles.skillName}>{skill.name}</span>
-                        <span className={styles.sourceBadge}>{skill.sourceName}</span>
-                        {managedLabel(source) && (
-                          <span className={bundled ? styles.bundledBadge : styles.personalBadge}>
-                            {managedLabel(source)}
-                          </span>
+                        {!source.managedKind && (
+                          <button
+                            type="button"
+                            className={styles.deleteButton}
+                            onClick={() => handleDeleteSource(source.id)}
+                            disabled={deletingId === source.id}
+                          >
+                            {deletingId === source.id ? 'Deleting...' : 'Delete'}
+                          </button>
                         )}
                       </div>
-                      {skill.description && (
-                        <p className={styles.skillDescription}>{skill.description}</p>
-                      )}
-                      <div className={styles.skillFooter}>
-                        <code className={styles.skillPath}>{skill.sourcePath}</code>
-                      </div>
                     </div>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        </>
+
+                    {diagnostic?.message && (
+                      <div className={`${styles.sourceDiagnostic} ${diagnostic.ok ? styles.sourceDiagnosticMuted : styles.sourceDiagnosticError}`}>
+                        {diagnostic.message}
+                      </div>
+                    )}
+
+                    {open && (
+                      <div id={bodyId} className={styles.sourceBody}>
+                        <div className={styles.sourcePath}>{sourcePath(source)}</div>
+                        {isBundledSource(source) && (
+                          <div className={styles.sourceMeta}>
+                            Read-only. Refresh pulls updates from the CLAI skills repository.
+                          </div>
+                        )}
+                        {source.source?.kind === 'git' && source.source?.reference && (
+                          <div className={styles.sourceMeta}>Ref: {source.source.reference}</div>
+                        )}
+                        {sourceSkills.length === 0 ? (
+                          <div className={styles.sourceMeta}>No SKILL.md files discovered.</div>
+                        ) : (
+                          <ul className={styles.skillList}>
+                            {sourceSkills.map((skill) => (
+                              <li key={skill.id} className={styles.skillRow}>
+                                <span className={styles.skillName}>{skill.name}</span>
+                                {skill.description && (
+                                  <p className={styles.skillDescription}>{skill.description}</p>
+                                )}
+                                <code className={styles.skillPath}>{skill.sourcePath}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
       )}
     </div>
   );

@@ -23,6 +23,7 @@ import {
 import { assistantClient } from '../../assistant';
 import { setWorkspaceTitle } from '../../workspace/client';
 import IntervalSelect from './IntervalSelect';
+import SkillPicker from './SkillPicker';
 import type { ProviderConnection, ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
 import styles from './WorkspaceSettingsModal.module.css';
 
@@ -73,6 +74,11 @@ interface NamedRef {
   name: string;
   description?: string | null;
 }
+// Skills carry their originating source so the picker can group by it.
+interface SkillRef extends NamedRef {
+  sourceId?: string | null;
+  sourceName?: string | null;
+}
 interface AgentTemplate {
   id: string;
   name: string;
@@ -95,7 +101,7 @@ interface AgentDetail {
 
 interface ModalDeps {
   mcpServers: NamedRef[];
-  skills: NamedRef[];
+  skills: SkillRef[];
   providerConnections: ProviderConnection[];
   agentTemplates: AgentTemplate[];
   defaultExecution: Partial<ExecutionConfig> | null | undefined;
@@ -1699,36 +1705,15 @@ const AgentSection = ({
 
       {/* Skills */}
       <div className={styles.field}>
-        <label className={styles.label}>Skills</label>
-        {(deps?.skills || []).length === 0 ? (
-          <span className={styles.hint}>No skills configured. Add skill sources in app settings.</span>
-        ) : (
-          <div className={styles.checkboxGroup}>
-            {(deps?.skills || []).map((skill) => {
-              const checked = selectedSkillIds.includes(skill.id);
-              return (
-                <label key={skill.id} className={styles.checkboxOption}>
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setSelectedSkillIds((s) => [...s, skill.id]);
-                      } else {
-                        setSelectedSkillIds((s) => s.filter((id) => id !== skill.id));
-                      }
-                    }}
-                    disabled={busy}
-                  />
-                  <span>
-                    <strong>{skill.name}</strong>
-                    {skill.description && <span className={styles.checkboxDescription}>{skill.description}</span>}
-                  </span>
-                </label>
-              );
-            })}
-          </div>
-        )}
+        <label className={styles.label} id="agent-skills-label">Skills</label>
+        <div role="group" aria-labelledby="agent-skills-label">
+          <SkillPicker
+            skills={deps?.skills || []}
+            selectedIds={selectedSkillIds}
+            onChange={setSelectedSkillIds}
+            disabled={busy}
+          />
+        </div>
       </div>
 
       {/* MCP Servers */}
