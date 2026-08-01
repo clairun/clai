@@ -69,23 +69,15 @@
   padding: 12px 4px;
 }
 
-/* Nothing in this footer animates. On GTK3 + webkit2gtk-4.1 every repaint is a
-   full-window cairo/pixman blit on the CPU, so an indicator costs whatever its
-   update rate is; a spinner here was asking for ~56 repaints/sec to animate one
-   small icon. The caret is static, the activity label changes only when a tool
-   actually starts or finishes, and the clock ticks once a second. */
-.runningCaret {
-  color: var(--color-primary);
-  font-size: 12px;
-  line-height: 1;
-}
-
-.runningActivity {
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* Deliberately static — no `animation` here, and none should be added. On
+   GTK3 + webkit2gtk-4.1 every repaint is a full-window cairo/pixman blit on
+   the CPU, so a CSS animation on this icon cost ~56 repaints/sec (~13% of a
+   core) to turn a 22px mark. The adjacent 1s clock carries the same meaning
+   for ~1 repaint/sec. */
+.runningIcon {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
 }
 
 /* Elapsed time + live token count next to the spinner. */

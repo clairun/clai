@@ -476,43 +476,38 @@ const formatElapsed = (ms: number): string => {
 };
 
 /**
- * RunningIndicator — the in-flight footer (left-aligned): what the run is
- * currently doing, plus an elapsed timer.
+ * RunningIndicator — the in-flight footer (left-aligned): the Clai mark plus
+ * an elapsed timer, so it's clear the run is progressing.
  *
- * There is deliberately nothing here that moves on a timer of its own. On this
- * stack (GTK3 + webkit2gtk-4.1) every repaint is a full-window cairo/pixman
- * blit on the CPU, so the cost of an indicator is simply how many times a
- * second it changes. A spinner is the only kind whose motion is unrelated to
- * anything real, and it was costing ~56 repaints/sec as a CSS animation.
+ * The mark does not spin, and nothing else here animates. On this stack (GTK3 +
+ * webkit2gtk-4.1) every repaint is a full-window cairo/pixman blit on the CPU,
+ * so an indicator costs whatever its update rate is — and as a CSS animation
+ * the spin alone was asking for ~56 repaints/sec to turn one 22px icon. The
+ * clock's 1s tick carries the same "still alive" meaning for ~1/56th of that,
+ * and carries it more honestly: a spinner keeps turning when the backend is
+ * wedged, whereas a clock that stops has actually told you something.
  *
- * So the motion here is derived from work that is already happening: the tool
- * label changes when a tool actually starts or finishes (repaints that occur
- * regardless), and the clock advances once a second. That also makes it more
- * honest than a spinner — a spinner keeps turning when the backend is wedged,
- * whereas a stalled label next to a still-advancing clock says exactly that.
+ * Naming the in-flight tool here was tried and reverted: whenever it had
+ * something to say, the transcript row directly above was already saying it,
+ * so the footer read as a duplicated stray line detached from the block.
  */
-const RunningIndicator = memo(
-  ({ runStartedAt, activity }: { runStartedAt?: number | null; activity: string | null }) => {
-    // Tick once a second to advance the elapsed readout. The footer only mounts
-    // while streaming, so the interval is short-lived.
-    const [now, setNow] = useState(() => Date.now());
-    useEffect(() => {
-      const id = window.setInterval(() => setNow(Date.now()), 1000);
-      return () => window.clearInterval(id);
-    }, []);
-    const elapsed = runStartedAt != null ? formatElapsed(now - runStartedAt) : null;
+const RunningIndicator = memo(({ runStartedAt }: { runStartedAt?: number | null }) => {
+  // Tick once a second to advance the elapsed readout. The footer only mounts
+  // while streaming, so the interval is short-lived.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const elapsed = runStartedAt != null ? formatElapsed(now - runStartedAt) : null;
 
-    return (
-      <div className={styles.runningIndicator}>
-        <span className={styles.runningCaret} aria-hidden="true">
-          ▸
-        </span>
-        <span className={styles.runningActivity}>{activity ?? 'Working…'}</span>
-        {elapsed && <span className={styles.runningMeta}>{elapsed}</span>}
-      </div>
-    );
-  }
-);
+  return (
+    <div className={styles.runningIndicator}>
+      <img src="/icon.svg" alt="Clai" className={styles.runningIcon} />
+      {elapsed && <span className={styles.runningMeta}>{elapsed}</span>}
+    </div>
+  );
+});
 RunningIndicator.displayName = 'RunningIndicator';
 
 /**
@@ -581,24 +576,6 @@ const ChatMessageList = ({
     return map;
   }, [toolCalls]);
 
-  // Label for the running footer: the tool currently in flight, described the
-  // same way its transcript row is. The last one wins when several overlap,
-  // since that is the most recently started work.
-  //
-  // This is what gives the footer its motion, and it costs nothing: it changes
-  // only when a tool starts or finishes, and those transitions already repaint
-  // the transcript. `null` (falling back to "Working…") is the honest state
-  // between tool calls — the model is thinking, not doing something nameable.
-  const activity = useMemo(() => {
-    let latest: ToolInvocation | null = null;
-    for (const tc of toolCalls) {
-      if (tc.status !== 'running' && tc.status !== 'pending') continue;
-      if (latest === null || tc.startedAt >= latest.startedAt) latest = tc;
-    }
-    if (latest === null) return null;
-    const { verb, arg } = summarizeToolCall(latest.toolName, latest.params);
-    return arg ? `${verb} ${arg}` : verb;
-  }, [toolCalls]);
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
   // conversation viewport). Folded into scrollToBottomSignal below with a wide
@@ -743,7 +720,7 @@ const ChatMessageList = ({
   // show the failure (if any) attached to the turn it belongs to. These are
   // mutually exclusive — a failed run is no longer streaming.
   const footer = isStreaming ? (
-    <RunningIndicator runStartedAt={runStartedAt} activity={activity} />
+    <RunningIndicator runStartedAt={runStartedAt} />
   ) : runError ? (
     <div className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner} role="alert">
       <span className={styles.runErrorIcon}>{runErrorIsLimit ? '⏳' : '⚠'}</span>
