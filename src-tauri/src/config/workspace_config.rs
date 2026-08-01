@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -300,7 +303,17 @@ pub fn data_path(root: &Path) -> PathBuf {
     root.join(".clai").join("data.sqlite")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Counts actual disk parses so tests can assert that [`load_cached`]
+    /// served a memo hit without depending on *how* the memo decides a hit is
+    /// valid. Thread-local because the test harness runs tests in parallel.
+    static PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
+    #[cfg(test)]
+    PARSE_COUNT.with(|count| count.set(count.get() + 1));
     let path = config_path(root);
     let contents = fs::read_to_string(&path).map_err(|source| WorkspaceConfigError::Io {
         operation: "read",
@@ -311,6 +324,154 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
         .map_err(|source| WorkspaceConfigError::Parse { path, source })?;
     prune_legacy_mcp_refs(&mut config);
     Ok(config)
+}
+
+/// A parsed config plus the file stamp it was parsed from.
+struct CachedConfig {
+    mtime: SystemTime,
+    len: u64,
+    config: Arc<WorkspaceConfig>,
+}
+
+/// One path's slot in the memo.
+///
+/// `generation` counts invalidations of this path and outlives the parse it
+/// guards, which is what lets [`load_cached`] tell "nothing happened while I
+/// was reading" from "a writer invalidated me mid-read". Slots are per path,
+/// so a write to one workspace never suppresses memoization for another.
+#[derive(Default)]
+struct CacheSlot {
+    generation: u64,
+    entry: Option<CachedConfig>,
+}
+
+/// Memo for [`load_cached`], keyed by `config.json` path.
+///
+/// Parsed configs are dropped by [`save`] and by [`forget`] (which workspace
+/// deletion calls); what survives a deletion is the path key and its
+/// generation counter, on the order of a hundred bytes per workspace that
+/// has existed in this process.
+static CONFIG_CACHE: OnceLock<Mutex<HashMap<PathBuf, CacheSlot>>> = OnceLock::new();
+
+fn config_cache() -> &'static Mutex<HashMap<PathBuf, CacheSlot>> {
+    CONFIG_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_config_cache() -> std::sync::MutexGuard<'static, HashMap<PathBuf, CacheSlot>> {
+    config_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// Read the slot's generation and, when the stamp still matches, its parse.
+/// Both under one lock so the generation belongs to the same observation as
+/// the hit.
+fn probe_cache(path: &Path, mtime: SystemTime, len: u64) -> (u64, Option<Arc<WorkspaceConfig>>) {
+    let cache = lock_config_cache();
+    match cache.get(path) {
+        Some(slot) => {
+            let hit = slot
+                .entry
+                .as_ref()
+                .filter(|entry| entry.mtime == mtime && entry.len == len)
+                .map(|entry| Arc::clone(&entry.config));
+            (slot.generation, hit)
+        }
+        None => (0, None),
+    }
+}
+
+/// Publish a parse under the stamp it was read at, unless this path was
+/// invalidated while the read was in flight.
+fn memoize_if_current(
+    path: PathBuf,
+    mtime: SystemTime,
+    len: u64,
+    config: Arc<WorkspaceConfig>,
+    generation: u64,
+) {
+    let mut cache = lock_config_cache();
+    let slot = cache.entry(path).or_default();
+    if slot.generation != generation {
+        return;
+    }
+    slot.entry = Some(CachedConfig { mtime, len, config });
+}
+
+fn invalidate_cached(path: &Path) {
+    let mut cache = lock_config_cache();
+    let slot = cache.entry(path.to_path_buf()).or_default();
+    slot.generation = slot.generation.wrapping_add(1);
+    slot.entry = None;
+}
+
+/// Drop the memo for a workspace root. Call this when the root goes away
+/// (workspace deletion); otherwise a path that is later recreated could be
+/// served from the previous workspace's parse.
+pub fn forget(root: &Path) {
+    invalidate_cached(&config_path(root));
+}
+
+/// Revalidating memo over [`load`] for read-only hot paths.
+///
+/// The Fleet list and the workspace snapshot are both polled every 5s by
+/// the UI, and each pass loads the *same* `config.json` several times over
+/// (`resolve_workspace_descriptor`, `workspace_default_agent_id`,
+/// `load_workspace_agent_rows`, the `created_at` lookup, ...). With N
+/// workspaces open that is O(5N) full `read_to_string` + `serde_json`
+/// parses of a multi-KB file every 5 seconds, forever, with the app
+/// otherwise idle — the dominant cost in an idle CPU profile.
+///
+/// This is a memo, not a snapshot: **every** call stats the file and only
+/// serves the cached parse when both mtime and length still match, so an
+/// edit made outside the process is picked up on the next call. A hit
+/// costs one `statx` plus a clone instead of a read plus a parse.
+///
+/// Writers go through [`save`], which drops the entry, so an in-process
+/// write is visible to the next reader even if the filesystem's mtime
+/// resolution is too coarse to notice it.
+///
+/// Read-modify-write cycles must still use [`update`] (which reads through
+/// [`load`], uncached, under the write lock). Never build a write on top of
+/// this function.
+pub fn load_cached(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
+    let path = config_path(root);
+    let Some((mtime, len)) = file_stamp(&path) else {
+        // Unreadable/missing: drop any entry so a deleted config can never
+        // be served from memory, and let `load` report the real IO error.
+        invalidate_cached(&path);
+        return load(root);
+    };
+
+    // Bound to a `let` so the cache lock is released before the deep copy:
+    // on edition 2021 a temporary in an `if let` scrutinee lives for the
+    // whole block.
+    let (generation, hit) = probe_cache(&path, mtime, len);
+    if let Some(hit) = hit {
+        return Ok((*hit).clone());
+    }
+
+    // Stamp is read *before* the parse on purpose. If the file is rewritten
+    // while we read it we store fresh content under the older stamp, and the
+    // next call's stat mismatches and re-reads. Stamping afterwards would
+    // instead risk pinning older content under the newer stamp, which would
+    // stay stale until the following write.
+    //
+    // The stamp alone is not enough, though: a writer whose new bytes have
+    // the same length and land inside the filesystem's mtime resolution
+    // produces an identical stamp. Such a write could complete (and drop the
+    // entry) between our stat and our insert, and we would then reinstate the
+    // pre-write parse under a stamp that still looks current — stale until
+    // the *next* write. `memoize_if_current` rejects that insert, because the
+    // writer moved this path's generation past the one we probed with.
+    let config = Arc::new(load(root)?);
+    memoize_if_current(path, mtime, len, Arc::clone(&config), generation);
+    Ok((*config).clone())
 }
 
 /// Drops MCP refs without a server id. Legacy configs referenced servers
@@ -354,9 +515,13 @@ pub fn save(root: &Path, config: &WorkspaceConfig) -> Result<(), WorkspaceConfig
     })?;
     fs::rename(&temp_path, &path).map_err(|source| WorkspaceConfigError::Io {
         operation: "rename",
-        path,
+        path: path.clone(),
         source,
     })?;
+    // The new bytes may land within the filesystem's mtime resolution of the
+    // old ones, so `load_cached`'s stamp check alone is not enough to
+    // guarantee a writer's own change is visible to the next reader.
+    invalidate_cached(&path);
     Ok(())
 }
 
@@ -778,5 +943,185 @@ mod attach_provider_tests {
         })
         .unwrap();
         assert_eq!(load(tmp.path()).unwrap().starred_at, 1234);
+    }
+}
+
+#[cfg(test)]
+mod load_cached_tests {
+    use super::*;
+
+    fn workspace() -> WorkspaceConfig {
+        WorkspaceConfig::new("ws".to_string(), "Title".to_string(), 1, "mgr".to_string())
+    }
+
+    fn stamp_of(path: &Path) -> (SystemTime, SystemTime) {
+        let meta = fs::metadata(path).unwrap();
+        (meta.accessed().unwrap(), meta.modified().unwrap())
+    }
+
+    fn restore_stamp(path: &Path, stamp: (SystemTime, SystemTime)) {
+        let file = fs::File::options().write(true).open(path).unwrap();
+        file.set_times(
+            fs::FileTimes::new()
+                .set_accessed(stamp.0)
+                .set_modified(stamp.1),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn first_read_matches_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+
+        assert_eq!(
+            load_cached(tmp.path()).unwrap().title,
+            load(tmp.path()).unwrap().title
+        );
+    }
+
+    /// Asserted on the parse counter rather than on observable staleness, so
+    /// the test keeps its meaning if the validation strategy changes.
+    #[test]
+    fn repeat_reads_come_from_the_memo() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+
+        let before = PARSE_COUNT.with(std::cell::Cell::get);
+        for _ in 0..5 {
+            assert_eq!(load_cached(tmp.path()).unwrap().title, "Title");
+        }
+        let parses = PARSE_COUNT.with(std::cell::Cell::get) - before;
+
+        assert_eq!(
+            parses, 1,
+            "5 cached reads cost {parses} parses; exactly one cold read is expected"
+        );
+    }
+
+    #[test]
+    fn an_external_write_invalidates_the_memo() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        assert_eq!(load_cached(tmp.path()).unwrap().title, "Title");
+
+        // A real edit changes the length, so the stamp check misses.
+        let mut config = workspace();
+        config.title = "Renamed by another process".to_string();
+        let path = config_path(tmp.path());
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        assert_eq!(
+            load_cached(tmp.path()).unwrap().title,
+            "Renamed by another process"
+        );
+    }
+
+    /// mtime resolution can be coarser than back-to-back writes, so `save`
+    /// drops the entry outright rather than relying on the stamp.
+    #[test]
+    fn save_invalidates_the_memo_even_with_an_unchanged_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        assert_eq!(load_cached(tmp.path()).unwrap().title, "Title");
+
+        let path = config_path(tmp.path());
+        let stamp = stamp_of(&path);
+        let mut config = workspace();
+        config.title = "Tit1e".to_string(); // same length as "Title"
+        save(tmp.path(), &config).unwrap();
+        restore_stamp(&path, stamp);
+
+        assert_eq!(load_cached(tmp.path()).unwrap().title, "Tit1e");
+    }
+
+    /// Same reasoning for the read-modify-write path, which reads through
+    /// `load` and writes through `save`.
+    #[test]
+    fn update_is_visible_to_the_next_cached_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        assert_eq!(load_cached(tmp.path()).unwrap().starred_at, 0);
+
+        update(tmp.path(), |config| {
+            config.starred_at = 1234;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(load_cached(tmp.path()).unwrap().starred_at, 1234);
+    }
+
+    /// The interleaving that the stamp check alone cannot see: a same-length
+    /// write completes, with the same mtime, while an earlier reader is still
+    /// parsing. Without the generation guard that reader would reinstate the
+    /// pre-write parse under a stamp that still matches, and every later read
+    /// would serve it.
+    #[test]
+    fn a_write_that_lands_during_a_read_is_not_memoized() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        let path = config_path(tmp.path());
+
+        // What the in-flight reader saw before the write.
+        let (mtime, len) = file_stamp(&path).unwrap();
+        let stamp = stamp_of(&path);
+        let (generation, _) = probe_cache(&path, mtime, len);
+        let stale = Arc::new(workspace());
+
+        // The writer completes: same length, and we force the same mtime.
+        let mut updated = workspace();
+        updated.title = "Tit1e".to_string();
+        save(tmp.path(), &updated).unwrap();
+        restore_stamp(&path, stamp);
+        assert_eq!(file_stamp(&path).unwrap(), (mtime, len));
+
+        // Now the slow reader tries to publish what it read.
+        memoize_if_current(path, mtime, len, stale, generation);
+
+        assert_eq!(load_cached(tmp.path()).unwrap().title, "Tit1e");
+    }
+
+    #[test]
+    fn forget_drops_the_memo_for_a_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        assert_eq!(load_cached(tmp.path()).unwrap().title, "Title");
+
+        forget(tmp.path());
+
+        // Nothing observable changes for a live workspace -- the point is the
+        // entry is gone, so a deleted root cannot leak its parse to whatever
+        // is created at the same path next.
+        assert!(lock_config_cache()
+            .get(&config_path(tmp.path()))
+            .is_none_or(|slot| slot.entry.is_none()));
+        assert_eq!(load_cached(tmp.path()).unwrap().title, "Title");
+    }
+
+    #[test]
+    fn a_deleted_config_is_never_served_from_the_memo() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        assert!(load_cached(tmp.path()).is_ok());
+
+        fs::remove_file(config_path(tmp.path())).unwrap();
+
+        assert!(load_cached(tmp.path()).is_err());
+        assert!(load(tmp.path()).is_err());
+    }
+
+    /// A config that never parsed must not poison the memo: fixing the file
+    /// has to be picked up without a restart.
+    #[test]
+    fn a_parse_failure_is_not_cached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = config_path(tmp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ not json").unwrap();
+        assert!(load_cached(tmp.path()).is_err());
+
+        save(tmp.path(), &workspace()).unwrap();
+        assert_eq!(load_cached(tmp.path()).unwrap().title, "Title");
     }
 }

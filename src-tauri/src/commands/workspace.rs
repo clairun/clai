@@ -398,6 +398,21 @@ fn app_config(state: &AppState) -> Result<AppConfig, String> {
         .get())
 }
 
+/// Read a workspace's `config.json`.
+///
+/// Reads go through `workspace_config::load_cached`, which re-stats the
+/// file on every call and only reuses the previous parse when the file's
+/// (mtime, length) are unchanged, so callers observe any external edit
+/// that moves either. In-process writes go through `save`, which drops
+/// the entry outright and so are visible even when the stamp is
+/// unchanged. A single
+/// Fleet/snapshot poll pass reaches this function ~5 times per workspace
+/// and the UI polls every 5s; parsing the same multi-KB file each time was
+/// the largest slice of the app's idle CPU.
+///
+/// Read-modify-write cycles must NOT build on this: use
+/// `update_workspace_config_for_id`, which reads uncached under the write
+/// lock.
 fn load_workspace_config_for_id(
     state: &AppState,
     workspace_id: &str,
@@ -405,7 +420,7 @@ fn load_workspace_config_for_id(
     let root = state
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
+    let config = workspace_config::load_cached(&root).map_err(|e| e.to_string())?;
     Ok((root, config))
 }
 
@@ -1551,7 +1566,7 @@ pub async fn workspace_get_snapshot(
     let enabled: Option<bool> = None;
     let workspace_config_for_schedule = state
         .workspace_root(&descriptor.workspace_id)
-        .and_then(|root| workspace_config::load(&root).ok());
+        .and_then(|root| workspace_config::load_cached(&root).ok());
     let (schedule_enabled, schedule_paused, schedule_kind) =
         match workspace_config_for_schedule.as_ref() {
             Some(cfg) if cfg.schedule.enabled => {
@@ -3420,6 +3435,10 @@ pub async fn workspace_delete(
             sched.remove_definition(id);
         }
     }
+
+    // Drop the cached parse of the config we just read: the root is about
+    // to disappear, and nothing should be able to serve it afterwards.
+    workspace_config::forget(&locator.root_path);
 
     // Now wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
