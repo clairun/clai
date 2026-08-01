@@ -488,7 +488,7 @@ export type WorkspaceFileContent = { path: string, viewer: string, content: stri
 
 export type WorkspaceFileEntry = { path: string, relativePath: string, name: string, viewer: string, size: bigint | null, updatedAt: bigint | null, preview: string | null, };
 
-export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, assignedAgentCount: number, defaultManagerName: string | null, runningTaskCount: bigint, blockedTaskCount: bigint, failedTaskCount: bigint, attentionTaskCount: bigint, latestAttentionTaskId: string | null, latestAttentionTaskTitle: string | null, latestAttentionTaskStatus: string | null, latestAttentionTaskSummary: string | null, latestAttentionTaskUpdatedAt: bigint | null, scheduleEnabled: boolean, schedulePaused: boolean, 
+export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, runningTaskCount: bigint, blockedTaskCount: bigint, failedTaskCount: bigint, attentionTaskCount: bigint, latestAttentionTaskId: string | null, latestAttentionTaskTitle: string | null, latestAttentionTaskStatus: string | null, latestAttentionTaskSummary: string | null, latestAttentionTaskUpdatedAt: bigint | null, scheduleEnabled: boolean, schedulePaused: boolean, 
 /**
  * Schedule mode (interval vs cron). Empty when the workspace is
  * not scheduled. The Fleet card reads this to render the cadence
@@ -505,7 +505,7 @@ unread: boolean,
  * User starred this workspace — the rail pins it in the "Starred"
  * section. Derived from `WorkspaceConfig::starred_at > 0`.
  */
-starred: boolean, createdAt: bigint, updatedAt: bigint, };
+starred: boolean, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 

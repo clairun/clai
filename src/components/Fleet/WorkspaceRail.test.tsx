@@ -19,8 +19,6 @@ const entry = (
   agentId: null,
   enabled: true,
   messageCount: 0n,
-  assignedAgentCount: 1,
-  defaultManagerName: null,
   runningTaskCount: 0n,
   blockedTaskCount: 0n,
   failedTaskCount: 0n,
@@ -36,7 +34,6 @@ const entry = (
   nextRunInSeconds: null,
   unread: false,
   starred: false,
-  createdAt: 1n,
   updatedAt: 1n,
   ...overrides,
 });
