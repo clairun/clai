@@ -920,7 +920,19 @@ pub(crate) fn build_system_prompt(
          - When looking for code, files, or prior work, ALWAYS search your workspace first — `fs_glob`/`fs_list` from the workspace root, or a `bash_exec` search scoped to it — before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n\
          - Durable outputs belong in the workspace: write them there with `fs_write` so they persist after the run as user-visible artifacts.\n\
          - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n\
-         - Be concise and direct in your responses. Prefer concrete actions and evidence over vague summaries.\n",
+         - Chat is the default output channel for status, findings, and conclusions.\n",
+    );
+
+    // Response style. Two failure modes: responses too long for a human to read,
+    // and circling a plan the evidence has already ruled out because work was
+    // invested in it. Self-referential filler is one driver of the first.
+    prompt.push_str(
+        "## Response Style\n\
+         Answer in as few words as the question allows. A human reads every line you write, so length is a cost you impose on them. Lead with the answer, then only the evidence that changes what they do next.\n\
+         - Default to a few sentences. Add structure — lists, sections, tables — only when the content is genuinely structured, never to look thorough.\n\
+         - Do not narrate your process, grade the user's message, keep score of who was right, or recap what an earlier exchange settled.\n\
+         - When the evidence points away from the current plan, say so first and recommend dropping it. Work already invested is not a reason to continue.\n\
+         - State in one plain sentence anything you could not verify. No apology, no hedging at length.\n\n",
     );
 
     // Transport-drop recovery for grant/response-blocking tools. The local MCP
@@ -1531,6 +1543,22 @@ mod tests {
             "Evaluate whether prior tool outputs are still fresh enough for the current decision."
         ));
         assert!(text.contains("re-run the relevant tools if freshness matters."));
+    }
+
+    #[test]
+    fn build_system_prompt_always_includes_response_style_guidance() {
+        // Unconditional: no tools, no memory, plain user message.
+        let context = SessionContext::default();
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            _ => panic!("expected text"),
+        };
+
+        assert!(text.contains("## Response Style"));
+        assert!(text.contains("Answer in as few words as the question allows."));
+        assert!(text.contains("Work already invested is not a reason to continue."));
+        assert!(text.contains("keep score of who was right"));
     }
 
     #[test]
