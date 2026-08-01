@@ -132,10 +132,15 @@ pub struct WorkspaceSnapshot {
     /// this instead of `artifacts.len()`.
     #[serde(default)]
     pub artifact_count: i64,
-    /// Latest mtime (unix ms) across the artifact tree — files and
-    /// non-skipped directories. Changes on any mutation, including
-    /// content-only edits and renames that leave the count unchanged;
-    /// the artifacts panel keys its tree refresh on this. 0 when empty.
+    /// Latest mtime (unix ms) across the artifact tree: files, non-skipped
+    /// directories, **and the workspace root itself**. The artifacts panel
+    /// keys its tree refresh on this, so it has to move for mutations the
+    /// count cannot see — a content-only edit, or a rename that keeps the
+    /// count identical. Folding the root's own mtime is what catches a
+    /// rename directly in the root; the price is that a bare `touch .` on
+    /// the root also reads as a change. Not `0` for an empty workspace any
+    /// more — an empty root still has an mtime. `0` only when the root
+    /// cannot be read at all.
     #[serde(default)]
     pub artifact_latest_modified_at: i64,
     /// Ids of user messages still pending in the queue (written while a
@@ -643,55 +648,117 @@ fn collect_files(
     Ok(())
 }
 
-/// Recursive stats for the artifact tree, applying the same skip-list as
-/// `workspace_list_dir` / the artifact `collect_files` walk so the header
-/// counter matches what the panel can actually surface (excludes `.clai`,
-/// `node_modules`, `target`, `.git`, …).
-///
-/// Returns `(file_count, latest_modified_at_ms)`. The mtime max includes
-/// directories, not just files: an in-place edit bumps the file's mtime,
-/// while a rename/move bumps the parent directory's — together they make
-/// the value change on any mutation, which is what the artifacts panel
-/// keys its refresh on (the count alone misses content-only changes).
 /// Recursive file count only — used for per-folder `childCount` in
-/// `workspace_list_dir`, where the mtime half of the stats isn't needed.
+/// `workspace_list_dir`, which throws the mtime away. Skipping it drops the
+/// per-entry `metadata()` call, which on the platforms where `file_type` is
+/// answered from the `readdir` record (see [`artifact_tree_stats`]) leaves no
+/// per-entry syscall at all.
 fn count_artifact_files(dir: &Path) -> i64 {
-    artifact_tree_stats(dir).0
+    walk_artifact_tree(dir, false).0
 }
 
+/// Modification time of `entry` in epoch-ms, or `0` when it can't be read.
+///
+/// `0` is a deliberate identity value: every caller folds this into a `max`,
+/// so an unreadable entry contributes nothing rather than poisoning the
+/// result. Do not "improve" it to a negative sentinel.
+///
+/// `DirEntry::metadata` does not traverse the entry when it is a symlink, so
+/// this reports the link's own mtime rather than its target's — consistent
+/// with the rest of this walk, which never resolves symlinks.
+fn entry_modified_at_ms(entry: &fs::DirEntry) -> i64 {
+    entry
+        .metadata()
+        .ok()
+        .and_then(|meta| file_updated_at(&meta))
+        .unwrap_or(0)
+}
+
+/// Recursive stats for the artifact tree, applying the same skip-list as
+/// `workspace_list_dir` so the header counter matches what the panel can
+/// actually surface (excludes `.clai`, `node_modules`, `target`, `.git`, …).
+///
+/// Returns `(file_count, latest_modified_at_ms)`. The mtime max spans files,
+/// directories, and `dir` itself: an in-place edit bumps the file's mtime,
+/// while a rename or move bumps the containing directory's. Folding `dir`'s
+/// own mtime is what covers a rename directly inside `dir` — that changes
+/// neither the count nor any descendant's mtime, so without it a root-level
+/// `mv a.txt b.txt` left the artifacts panel showing the old name until
+/// something else changed.
+///
+/// Classification comes from `DirEntry::file_type`, which never follows
+/// symlinks (and on Linux is answered from the `readdir` record, though std
+/// only guarantees that on Windows and *most* Unix platforms — elsewhere it
+/// costs an `lstat`). That matters twice:
+///
+/// * A symlink is neither counted nor descended into, matching
+///   `workspace_list_dir` and `workspace_search_artifacts`, which classify
+///   with `file_type` too and so emit no row for one. Resolving them here let
+///   the header counter disagree with the panel below it.
+///   (Note `collect_files` is *not* an example: it routes non-directories
+///   through `build_file_entry`, which calls the symlink-following
+///   `fs::metadata`, so it does surface symlinked files. It feeds the
+///   memories panel, not the artifact counter.)
+/// * A link pointing at one of its own ancestors can therefore not be walked
+///   in a circle. Following it terminated only when the kernel's symlink-
+///   resolution limit rejected the path, at ~40 hops — long enough to report
+///   a count many times the real one and re-walk the whole subtree every 5s.
+///
+/// Non-symlink directory cycles (e.g. a bind mount aliasing an ancestor) are
+/// not defended against explicitly: the path grows on every hop, so the walk
+/// still terminates when `read_dir` fails with `ENAMETOOLONG`. That bounds
+/// depth at `PATH_MAX`, which no reachable stack depth here can overflow.
 fn artifact_tree_stats(dir: &Path) -> (i64, i64) {
+    let (count, latest_modified_at) = walk_artifact_tree(dir, true);
+    // Only `dir`'s own mtime is missing from the walk: every *descendant*
+    // directory is folded in by the loop that yielded it.
+    let own_modified_at = fs::metadata(dir)
+        .ok()
+        .and_then(|meta| file_updated_at(&meta))
+        .unwrap_or(0);
+    (count, latest_modified_at.max(own_modified_at))
+}
+
+/// Shared body of [`artifact_tree_stats`] and [`count_artifact_files`].
+///
+/// `track_mtime` is what separates the two callers: the snapshot poll needs
+/// the mtime, `workspace_list_dir`'s per-folder `childCount` does not, and
+/// `entry.metadata()` is the only per-entry syscall this walk makes of its
+/// own accord. Passing `false` therefore reduces the count to the `readdir`
+/// traversal itself, modulo the `file_type` caveat in [`artifact_tree_stats`].
+///
+/// Note the mtime is still folded across the recursive call when
+/// `track_mtime` is false. That is dead rather than wrong: nothing below can
+/// produce a non-zero mtime while the flag is false all the way down.
+fn walk_artifact_tree(dir: &Path, track_mtime: bool) -> (i64, i64) {
     let mut count: i64 = 0;
     let mut latest_modified_at: i64 = 0;
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (count, latest_modified_at);
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
             let path = entry.path();
-            let is_dir = path.is_dir();
             // Skipped trees contribute nothing — not even the dir's own
             // mtime, or internal churn in e.g. `.git` would read as an
             // artifact change.
-            if is_dir && should_skip_artifact_dir(&path) {
+            if should_skip_artifact_dir(&path) {
                 continue;
             }
-            if let Some(mtime) = entry
-                .metadata()
-                .ok()
-                .and_then(|meta| meta.modified().ok())
-                .and_then(|modified| {
-                    modified
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|duration| duration.as_millis() as i64)
-                })
-            {
-                latest_modified_at = latest_modified_at.max(mtime);
+            if track_mtime {
+                latest_modified_at = latest_modified_at.max(entry_modified_at_ms(&entry));
             }
-            if is_dir {
-                let (child_count, child_latest) = artifact_tree_stats(&path);
-                count += child_count;
-                latest_modified_at = latest_modified_at.max(child_latest);
-            } else if path.is_file() {
-                count += 1;
+            let (child_count, child_latest) = walk_artifact_tree(&path, track_mtime);
+            count += child_count;
+            latest_modified_at = latest_modified_at.max(child_latest);
+        } else if file_type.is_file() {
+            if track_mtime {
+                latest_modified_at = latest_modified_at.max(entry_modified_at_ms(&entry));
             }
+            count += 1;
         }
     }
     (count, latest_modified_at)
@@ -4053,5 +4120,213 @@ mod tests {
         let refs = &back.agents[0].selected_mcp_servers;
         assert_eq!(workspace_config::enabled_mcp_ids(refs), vec!["srv-a"]);
         assert_eq!(workspace_config::disabled_mcp_ids(refs), vec!["srv-b"]);
+    }
+    // ---------------------------------------------------------------------
+    // artifact_tree_stats
+    // ---------------------------------------------------------------------
+
+    fn write_file(path: &Path, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn artifact_tree_stats_counts_files_recursively_and_skips_skiplist_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("nested/b.txt"), "b");
+        write_file(&root.join("nested/deeper/c.txt"), "c");
+        write_file(&root.join(".clai/data.sqlite"), "x");
+        write_file(&root.join("node_modules/pkg/index.js"), "x");
+        write_file(&root.join("target/debug/bin"), "x");
+        write_file(&root.join(".git/HEAD"), "x");
+
+        // Count only. The mtime half of the skip-list rule needs pinned
+        // timestamps to be worth asserting, which is unix-only here — see
+        // `artifact_tree_stats_ignores_mtimes_inside_skipped_dirs`.
+        assert_eq!(
+            artifact_tree_stats(root).0,
+            3,
+            "only the three real artifacts should count"
+        );
+    }
+
+    // A symlink is not an entry the artifacts panel can surface:
+    // `workspace_list_dir` classifies with `DirEntry::file_type`, so it emits
+    // neither a "file" nor a "directory" row for one. The header counter has
+    // to agree, or it reports files the panel cannot show.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_tree_stats_does_not_count_symlinked_files() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("real.txt"), "real");
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
+
+        assert_eq!(artifact_tree_stats(root).0, 1);
+    }
+
+    // Regression: classifying with `Path::is_dir` resolved symlinks, so a link
+    // pointing at one of its own ancestors was walked in a circle until the
+    // kernel's symlink-resolution limit rejected the path (~40 hops). The walk
+    // terminated, but it reported ~41x the real file count and re-walked the
+    // whole subtree on every 5s workspace poll.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_tree_stats_does_not_follow_symlink_loops() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("real/a.txt"), "a");
+        write_file(&root.join("real/sub/b.txt"), "b");
+        std::os::unix::fs::symlink(root.join("real"), root.join("real/loop")).unwrap();
+
+        assert_eq!(
+            artifact_tree_stats(root).0,
+            2,
+            "the ancestor symlink must not be descended into"
+        );
+    }
+
+    // A symlinked directory is skipped whole: not descended into, and not
+    // counted as a directory either. Same rule as the loop case, stated
+    // without the loop so a future change can't "fix" only the cyclic form.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_tree_stats_does_not_follow_symlinked_directories() {
+        let outside = tempfile::tempdir().unwrap();
+        write_file(&outside.path().join("b.txt"), "b");
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("real/a.txt"), "a");
+        std::os::unix::fs::symlink(outside.path(), root.join("real/link")).unwrap();
+
+        assert_eq!(
+            artifact_tree_stats(root).0,
+            1,
+            "a symlinked directory must not pull outside files into the count"
+        );
+    }
+
+    /// Sets `path`'s mtime to a fixed epoch-ms so mtime assertions do not
+    /// depend on wall-clock granularity or on a sleep.
+    ///
+    /// Unix-only, and so are its callers. The helper must work on
+    /// directories (this walk folds a directory's own mtime into its result),
+    /// and a read-only handle is enough for `futimens`. Windows would need
+    /// both `FILE_FLAG_BACKUP_SEMANTICS` — `CreateFileW` otherwise refuses to
+    /// open a directory — and `FILE_WRITE_ATTRIBUTES` access for
+    /// `SetFileTime`. The behaviour under test is platform-independent and
+    /// the Linux job covers it, so rather than carry a Windows code path that
+    /// cannot be exercised here, the mtime tests are gated.
+    #[cfg(unix)]
+    fn set_mtime_ms(path: &Path, epoch_ms: u64) {
+        let file = fs::File::open(path).unwrap();
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_millis(epoch_ms);
+        file.set_times(fs::FileTimes::new().set_modified(when))
+            .unwrap();
+    }
+
+    // The counter's doc comment promises a skip-listed tree contributes
+    // nothing "not even the dir's own mtime", because `.git` churns on every
+    // command and must not read as an artifact change. The count assertion
+    // alone cannot catch a regression on the mtime half, so pin both: the
+    // skip-listed file is deliberately the newest thing on disk.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_tree_stats_ignores_mtimes_inside_skipped_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join(".git/HEAD"), "ref");
+        set_mtime_ms(&root.join(".git/HEAD"), 2_000_000_000_000);
+        set_mtime_ms(&root.join("a.txt"), 1_000_000_000_000);
+        // Pinned last: creating `.git` bumped the root directory's mtime, and
+        // `artifact_tree_stats` folds that in.
+        set_mtime_ms(root, 500_000_000_000);
+
+        let (count, latest) = artifact_tree_stats(root);
+        assert_eq!(count, 1);
+        assert_eq!(
+            latest, 1_000_000_000_000,
+            "churn inside a skip-listed tree must not move the artifact mtime"
+        );
+    }
+
+    // A file's mtime reaches the top of a nested walk, so an in-place edit
+    // deep in the tree still marks the workspace as changed. The pinned value
+    // is far in the future on purpose: the walk also folds in directory
+    // mtimes, which are "now" for a freshly built fixture.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_tree_stats_reports_newest_mtime_from_a_nested_file() {
+        const FUTURE_MS: u64 = 4_000_000_000_000; // year 2096
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("nested/deeper/b.txt"), "b");
+        set_mtime_ms(&root.join("nested/deeper/b.txt"), FUTURE_MS);
+
+        assert_eq!(artifact_tree_stats(root).1, FUTURE_MS as i64);
+    }
+
+    // A rename directly inside the walked directory changes neither the file
+    // count nor any file's mtime — only the containing directory's. Folding
+    // `dir`'s own mtime is the only thing that makes the artifacts panel
+    // notice an agent renaming a root-level file.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_tree_stats_reflects_a_rename_in_the_walked_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        set_mtime_ms(&root.join("a.txt"), 1_000_000_000_000);
+        set_mtime_ms(root, 1_000_000_000_000);
+        let before = artifact_tree_stats(root);
+
+        // `rename` preserves the file's own mtime and bumps only the
+        // directory's, which is precisely the case the fold exists for.
+        fs::rename(root.join("a.txt"), root.join("b.txt")).unwrap();
+        let after = artifact_tree_stats(root);
+
+        assert_eq!(after.0, before.0, "a rename does not change the count");
+        assert!(
+            after.1 > before.1,
+            "a rename must still move the mtime signal (before={}, after={})",
+            before.1,
+            after.1
+        );
+    }
+
+    // `count_artifact_files` takes the `track_mtime = false` path through the
+    // shared walker; its count must not diverge from the tracked one.
+    #[test]
+    fn count_artifact_files_matches_artifact_tree_stats_count() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("nested/b.txt"), "b");
+        write_file(&root.join("nested/deeper/c.txt"), "c");
+        write_file(&root.join("node_modules/pkg/index.js"), "x");
+
+        assert_eq!(count_artifact_files(root), artifact_tree_stats(root).0);
+        assert_eq!(count_artifact_files(root), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn count_artifact_files_does_not_follow_symlink_loops() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("real/a.txt"), "a");
+        std::os::unix::fs::symlink(root.join("real"), root.join("real/loop")).unwrap();
+
+        assert_eq!(count_artifact_files(root), 1);
+    }
+
+    #[test]
+    fn artifact_tree_stats_on_missing_dir_is_zero() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(artifact_tree_stats(&root.path().join("nope")), (0, 0));
     }
 }

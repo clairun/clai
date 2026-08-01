@@ -525,10 +525,15 @@ disabledMcpServerIds: Array<string>, session: AssistantSession | null, messages:
  */
 artifactCount: bigint, 
 /**
- * Latest mtime (unix ms) across the artifact tree — files and
- * non-skipped directories. Changes on any mutation, including
- * content-only edits and renames that leave the count unchanged;
- * the artifacts panel keys its tree refresh on this. 0 when empty.
+ * Latest mtime (unix ms) across the artifact tree: files, non-skipped
+ * directories, **and the workspace root itself**. The artifacts panel
+ * keys its tree refresh on this, so it has to move for mutations the
+ * count cannot see — a content-only edit, or a rename that keeps the
+ * count identical. Folding the root's own mtime is what catches a
+ * rename directly in the root; the price is that a bare `touch .` on
+ * the root also reads as a change. Not `0` for an empty workspace any
+ * more — an empty root still has an mtime. `0` only when the root
+ * cannot be read at all.
  */
 artifactLatestModifiedAt: bigint, 
 /**
