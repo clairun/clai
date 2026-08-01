@@ -2846,9 +2846,6 @@ pub struct WorkspaceListEntry {
     pub agent_id: Option<String>,
     pub enabled: bool,
     pub message_count: i64,
-    pub assigned_agent_count: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_manager_name: Option<String>,
     pub running_task_count: i64,
     pub blocked_task_count: i64,
     pub failed_task_count: i64,
@@ -2864,8 +2861,10 @@ pub struct WorkspaceListEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_attention_task_updated_at: Option<i64>,
     // Periodic-workspace surface — copied from the workspace's default
-    // manager agent. Lets the Fleet UI sort scheduled workspaces ahead of
-    // ad-hoc ones without each card needing a separate snapshot fetch.
+    // manager agent so a card can render its cadence pill without a
+    // separate snapshot fetch. NOT a sort key: the rail orders purely by
+    // `updated_at` (see `WorkspaceRail.tsx`, and the test asserting that
+    // scheduled workspaces do not jump the queue).
     pub schedule_enabled: bool,
     pub schedule_paused: bool,
     /// Schedule mode (interval vs cron). Empty when the workspace is
@@ -2886,7 +2885,6 @@ pub struct WorkspaceListEntry {
     /// User starred this workspace — the rail pins it in the "Starred"
     /// section. Derived from `WorkspaceConfig::starred_at > 0`.
     pub starred: bool,
-    pub created_at: i64,
     pub updated_at: i64,
 }
 
@@ -2906,25 +2904,6 @@ impl WorkspaceTaskAttentionSummary {
     fn attention_task_count(&self) -> i64 {
         self.blocked_task_count + self.failed_task_count
     }
-}
-
-async fn workspace_team_summary(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<(usize, Option<String>), String> {
-    let agents = workspace_agent_summaries(state, workspace_id).await?;
-    let default_manager_name = agents
-        .iter()
-        .find(|agent| agent.is_default)
-        .or_else(|| agents.iter().find(|agent| agent.role == "manager"))
-        .map(|agent| agent.display_name.clone());
-
-    // Count every agent. The workspace's default "main" agent is now a
-    // first-class entry in the agents list (rendered as "Main" in the UI),
-    // so it counts toward the workspace's headline agent total.
-    let agent_count = agents.len();
-
-    Ok((agent_count, default_manager_name))
 }
 
 /// Create a new general workspace with a UUID and filesystem root.
@@ -3114,12 +3093,12 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
     for locator in locators {
         let id = locator.id.clone();
         let workspace_pool = state.workspace_db(&id).await?;
-        let message_count = count_session_messages(&workspace_pool, state.inner(), &id).await;
+        // No `config.json` access in this loop: everything a rail card needs
+        // is already on the in-memory locator. Reaching for the config here
+        // cost five full read+parse cycles per workspace on every 5s poll.
+        let message_count =
+            count_session_messages(&workspace_pool, &id, &locator.default_agent_id).await;
         let task_attention = workspace_task_attention_summary(&workspace_pool, &id).await?;
-        let (assigned_agent_count, default_manager_name) =
-            workspace_team_summary(state.inner(), &id).await?;
-
-        let manager_id = Some(locator.default_agent_id.clone());
         let schedule_enabled = locator.schedule_enabled;
         let schedule_paused = locator.schedule_paused;
         let schedule_kind = locator.schedule_kind.clone();
@@ -3129,9 +3108,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         // (so resume picks up from where they left off), but the FE would
         // mis-render a countdown that won't actually advance until resume.
         let next_run_in_seconds = if schedule_enabled && !schedule_paused {
-            manager_id
-                .as_deref()
-                .and_then(|mid| scheduler_seconds.get(mid).copied())
+            scheduler_seconds.get(&locator.default_agent_id).copied()
         } else {
             None
         };
@@ -3143,8 +3120,6 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             agent_id: None,
             enabled: true,
             message_count,
-            assigned_agent_count,
-            default_manager_name,
             running_task_count: task_attention.running_task_count,
             blocked_task_count: task_attention.blocked_task_count,
             failed_task_count: task_attention.failed_task_count,
@@ -3161,9 +3136,6 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             unread: locator.last_run_completed_at > 0
                 && locator.last_run_completed_at > locator.last_opened_at,
             starred: locator.starred_at > 0,
-            created_at: load_workspace_config_for_id(state.inner(), &locator.id)
-                .map(|(_, config)| config.created_at)
-                .unwrap_or_default(),
             updated_at: locator.updated_at,
         });
     }
@@ -3601,25 +3573,26 @@ async fn workspace_task_attention_summary(
 /// the `kind == Interactive` filter, so a self-task `BackgroundJob` session
 /// could inflate the card count while the chat view showed the real
 /// Interactive conversation.)
-async fn count_session_messages(pool: &DbPool, state: &AppState, workspace_id: &str) -> i64 {
-    let Ok(descriptor) = resolve_workspace_descriptor(state, Some(workspace_id.to_string())) else {
-        return 0;
-    };
-    let Some(manager_id) =
-        workspace_default_agent_id(state, &descriptor.workspace_id).unwrap_or(None)
-    else {
-        return 0;
-    };
-
+///
+/// Takes `manager_id` from the caller rather than re-deriving it. The only
+/// caller, `workspace_list`, already holds it on the in-memory
+/// `WorkspaceLocator`; resolving it here read and parsed `config.json` twice
+/// per workspace on every 5s rail poll (once via `resolve_workspace_descriptor`
+/// and once via `workspace_default_agent_id`) to recover a value the caller had
+/// in a local variable.
+///
+/// `select_workspace_session`'s `agent_id` argument is passed as `None`
+/// because it only ever received `WorkspaceDescriptor::agent_id`, which
+/// `resolve_workspace_descriptor` hardcodes to `None`. That argument exists for
+/// agent-workspace assets, which `workspace_list` does not enumerate — it emits
+/// `kind: "general"` entries only. If it ever does, this call needs the real
+/// agent id back or the count will miss sessions matched by
+/// `agent_workspace_id` / `automation_id`.
+async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &str) -> i64 {
     let sessions = repository::list_non_task_sessions(pool)
         .await
         .unwrap_or_default();
-    let Some(session) = select_workspace_session(
-        sessions,
-        &manager_id,
-        &descriptor.workspace_id,
-        descriptor.agent_id.as_deref(),
-    ) else {
+    let Some(session) = select_workspace_session(sessions, manager_id, workspace_id, None) else {
         return 0;
     };
 
