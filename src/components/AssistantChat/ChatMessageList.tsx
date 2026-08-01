@@ -10,6 +10,7 @@ import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
 import VirtualizedList from '../common/VirtualizedList';
+import { useSpinnerFrame, spinnerRotation } from '../../hooks/useSpinnerFrame';
 import type {
   AssistantMessage,
   ContentPart,
@@ -476,11 +477,27 @@ const formatElapsed = (ms: number): string => {
 };
 
 /**
- * RunningIndicator — the in-flight footer (left-aligned): the Clai mark on a
- * steady constant-speed spin, plus an elapsed timer so it's clear the run is
- * progressing. The timer always advances (even before any output) so it never
- * looks frozen.
+ * The small ring spinner shown on in-flight tool rows.
+ *
+ * A component rather than a bare `<span>` so it can subscribe to the shared
+ * ticker — the tool renderers below are plain functions, not components, and
+ * cannot call hooks themselves.
  */
+const Spinner = memo(() => {
+  const frame = useSpinnerFrame();
+  return <span className={styles.spinner} style={{ transform: spinnerRotation(frame) }} />;
+});
+Spinner.displayName = 'Spinner';
+
+/**
+ * RunningIndicator — the in-flight footer (left-aligned): the Clai mark on a
+ * steady spin, plus an elapsed timer so it's clear the run is progressing. The
+ * timer always advances (even before any output) so it never looks frozen.
+ *
+ * The spin is stepped from `useSpinnerFrame`, not a CSS animation — see that
+ * module for why a CSS animation is expensive on this stack.
+ */
+
 const RunningIndicator = memo(({ runStartedAt }: { runStartedAt?: number | null }) => {
   // Tick once a second to advance the elapsed readout. The footer only mounts
   // while streaming, so the interval is short-lived.
@@ -490,10 +507,16 @@ const RunningIndicator = memo(({ runStartedAt }: { runStartedAt?: number | null 
     return () => window.clearInterval(id);
   }, []);
   const elapsed = runStartedAt != null ? formatElapsed(now - runStartedAt) : null;
+  const frame = useSpinnerFrame();
 
   return (
     <div className={styles.runningIndicator}>
-      <img src="/icon.svg" alt="Clai" className={styles.runningIcon} />
+      <img
+        src="/icon.svg"
+        alt="Clai"
+        className={styles.runningIcon}
+        style={{ transform: spinnerRotation(frame) }}
+      />
       {elapsed && <span className={styles.runningMeta}>{elapsed}</span>}
     </div>
   );
@@ -1027,7 +1050,7 @@ const renderToolOutput = (
   if (isRunning && result == null && !error) {
     return (
       <div className={styles.loadingState}>
-        <span className={styles.spinner} />
+        <Spinner />
         <span>Executing…</span>
       </div>
     );
@@ -1234,7 +1257,7 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
         <span className={styles.toolRowRight}>
           {isRunning ? (
             <span className={styles.toolRowRunning}>
-              <span className={styles.spinner} />
+              <Spinner />
               running…
             </span>
           ) : resultSummary ? (
