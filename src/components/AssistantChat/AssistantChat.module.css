@@ -415,6 +415,15 @@
   animation: spin 0.8s linear infinite;
 }
 
+/* `.spinner` referenced `spin` without defining it. CSS Modules scopes
+   `animation-name` per file, so the reference compiled to a hashed name
+   with no matching `@keyframes` block and the ring never rotated. */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* Error Message */
 .errorMessage {
   display: flex;
