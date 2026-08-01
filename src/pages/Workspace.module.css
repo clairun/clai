@@ -106,7 +106,6 @@
 
 .status_running {
   background: var(--color-primary);
-  animation: pulse 1.5s ease-in-out infinite;
 }
 
 .status_queued {
