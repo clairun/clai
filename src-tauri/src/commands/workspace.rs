@@ -2293,7 +2293,7 @@ fn ensure_move_destination_allowed(
 /// Copy `source` (file or dir) into `dest_dir` under a collision-free name
 /// (`foo` → `foo (1)` → …). Files reuse the exclusive-create import helper;
 /// dirs are created exclusively then filled by [`copy_dir_recursive`].
-fn copy_artifact_to_unique_destination(
+pub(crate) fn copy_artifact_to_unique_destination(
     source: &Path,
     dest_dir: &Path,
     name: &str,

@@ -103,15 +103,28 @@ pub fn workspace_import_files(
     let mut copied = Vec::new();
     for source in &source_paths {
         let source = Path::new(source);
-        if !source.is_file() {
-            return Err(format!("`{}` is not a regular file.", source.display()));
+        // Accept a regular file OR a directory (imported recursively). Anything
+        // else (missing path, socket, fifo, …) is rejected. Symlinked dirs the
+        // user explicitly picks are followed; symlinks *inside* a copied tree
+        // are skipped by the recursive copy (avoids loops / escaping the source).
+        let is_dir = source.is_dir();
+        if !is_dir && !source.is_file() {
+            return Err(format!(
+                "`{}` is not a regular file or directory.",
+                source.display()
+            ));
         }
         let name = source
             .file_name()
             .ok_or_else(|| format!("`{}` has no file name.", source.display()))?
             .to_string_lossy()
             .to_string();
-        let dest = copy_to_unique_destination(source, &dest_dir, &name)?;
+        // Reuse the hardened recursive copy from `commands::workspace` (folder
+        // copy skips symlinks + protected/heavy dirs like `.git`/`target`, and
+        // is collision-safe via the shared naming helper).
+        let dest = crate::commands::workspace::copy_artifact_to_unique_destination(
+            source, &dest_dir, &name, is_dir,
+        )?;
         copied.push(
             dest.file_name()
                 .map(|n| n.to_string_lossy().to_string())
