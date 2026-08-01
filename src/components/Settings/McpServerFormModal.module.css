@@ -592,7 +592,7 @@
 
 /* Spinner Animation */
 .spinner {
-  animation: spin 1s linear infinite;
+  animation: spin 1s steps(18) infinite;
   will-change: transform;
 }
 

@@ -10,7 +10,10 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
-    include: ['src/**/*.{test,spec}.{js,jsx,ts,tsx}'],
+    // `scripts/` is outside tsconfig's include and eslint's scope, which is
+    // why the CSS animation lint lives there; its pure grammar helpers are
+    // still unit-tested here.
+    include: ['src/**/*.{test,spec}.{js,jsx,ts,tsx}', 'scripts/**/*.{test,spec}.mjs'],
     css: false,
     coverage: {
       provider: 'v8',

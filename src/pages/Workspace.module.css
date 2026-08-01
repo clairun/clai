@@ -106,7 +106,7 @@
 
 .status_running {
   background: var(--color-primary);
-  animation: pulse 1.5s ease-in-out infinite;
+  animation: pulse 1.5s steps(12) infinite;
 }
 
 .status_queued {
@@ -1167,7 +1167,7 @@
   height: 8px;
   border-radius: 50%;
   background: var(--color-primary);
-  animation: pulse 1.5s ease-in-out infinite;
+  animation: pulse 1.5s steps(12) infinite;
 }
 
 .chatFirstLoadingText {

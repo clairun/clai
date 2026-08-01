@@ -536,7 +536,7 @@ td {
   outline: 3px solid var(--color-primary) !important;
   outline-offset: -3px;
   box-shadow: inset 0 0 0 1000px rgba(99, 102, 241, 0.08) !important;
-  animation: dashboardHighlightPulse 1s ease-in-out infinite;
+  animation: dashboardHighlightPulse 1s steps(9) infinite;
 }
 
 @keyframes dashboardHighlightPulse {

@@ -30,7 +30,7 @@
   border-radius: 50%;
   border: 2.5px solid var(--color-border-medium);
   border-top-color: var(--color-primary);
-  animation: spin 0.7s linear infinite;
+  animation: spin 0.7s steps(12) infinite;
 }
 
 .text {

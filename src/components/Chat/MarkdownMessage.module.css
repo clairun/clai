@@ -271,7 +271,7 @@
   display: inline-block;
   margin-left: 2px;
   color: var(--color-primary);
-  animation: blink 1s infinite;
+  animation: blink 1s steps(1) infinite;
   font-weight: 400;
 }
 
