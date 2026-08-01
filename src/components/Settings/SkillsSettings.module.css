@@ -365,13 +365,6 @@
   justify-content: flex-end;
 }
 
-.sourceNameRow,
-.skillHeader {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
 
 .sourceName {
   font-size: 14px;
@@ -413,7 +406,6 @@
 
 .statusBadge,
 .kindBadge,
-.sourceBadge,
 .bundledBadge,
 .personalBadge {
   display: inline-flex;
@@ -436,8 +428,7 @@
   color: var(--color-text-secondary);
 }
 
-.kindBadge,
-.sourceBadge {
+.kindBadge {
   background: var(--color-bg-secondary);
   color: var(--color-text-secondary);
 }

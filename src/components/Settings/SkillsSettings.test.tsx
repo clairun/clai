@@ -66,6 +66,19 @@ describe('SkillsSettings', () => {
     expect(screen.queryByText('Bundled')).toBeNull();
   });
 
+  it('counts what the search actually shows, not the whole catalog', async () => {
+    const user = userEvent.setup();
+    render(<SkillsSettings />);
+    await screen.findByText('Bundled');
+    expect(screen.getByText('3 skills')).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('Search skills'), 'ledger');
+    // Header tally and the source's own tally both narrow to the match.
+    expect(screen.getByText('1 of 3 skills')).toBeInTheDocument();
+    expect(screen.getByText('1 of 2 skills')).toBeInTheDocument();
+    expect(screen.queryByText('2 skills')).toBeNull();
+  });
+
   it('collapses a source', async () => {
     const user = userEvent.setup();
     render(<SkillsSettings />);

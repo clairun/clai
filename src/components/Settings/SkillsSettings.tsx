@@ -120,6 +120,11 @@ const SkillsSettings = () => {
       .filter((entry): entry is { source: SkillSourceResponse; skills: SkillDefinition[]; total: number } => entry !== null);
   }, [sources, skillsBySource, trimmedQuery]);
 
+  const matchingSkillCount = useMemo(
+    () => visibleSources.reduce((sum, entry) => sum + entry.skills.length, 0),
+    [visibleSources]
+  );
+
   const diagnosticsBySource = useMemo(
     () => new Map(diagnostics.map((diagnostic) => [diagnostic.sourceId, diagnostic])),
     [diagnostics]
@@ -397,7 +402,9 @@ const SkillsSettings = () => {
             <h4 className={styles.sectionTitle}>Sources</h4>
             <span className={styles.count}>{sources.length}</span>
             <span className={styles.sectionMeta}>
-              {skills.length} skill{skills.length === 1 ? '' : 's'}
+              {matchingSkillCount === skills.length
+                ? `${skills.length} skill${skills.length === 1 ? '' : 's'}`
+                : `${matchingSkillCount} of ${skills.length} skills`}
             </span>
             <input
               type="search"
@@ -442,7 +449,9 @@ const SkillsSettings = () => {
                           </span>
                         )}
                         <span className={styles.sourceCountText}>
-                          {total} skill{total === 1 ? '' : 's'}
+                          {sourceSkills.length === total
+                            ? `${total} skill${total === 1 ? '' : 's'}`
+                            : `${sourceSkills.length} of ${total} skills`}
                         </span>
                       </button>
                       <div className={styles.sourceActions}>
