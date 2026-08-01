@@ -267,20 +267,3 @@
 }
 
 /* Streaming cursor */
-.streamingCursor {
-  display: inline-block;
-  margin-left: 2px;
-  color: var(--color-primary);
-  animation: blink 1s infinite;
-  font-weight: 400;
-}
-
-@keyframes blink {
-  0%, 49% {
-    opacity: 1;
-  }
-  50%, 100% {
-    opacity: 0;
-  }
-}
-

@@ -69,15 +69,23 @@
   padding: 12px 4px;
 }
 
-/* Rotation is applied as an inline `transform`, stepped from JS by
-   `useSpinnerFrame`, NOT by a CSS animation. A registered animation — even a
-   transform-only one — keeps WebKit's compositor frame loop at vblank, and on
-   GTK3 every one of those frames is a full-window cairo/pixman repaint on the
-   CPU. See src/hooks/useSpinnerFrame.ts for the measurements. */
-.runningIcon {
-  width: 22px;
-  height: 22px;
-  object-fit: contain;
+/* Nothing in this footer animates. On GTK3 + webkit2gtk-4.1 every repaint is a
+   full-window cairo/pixman blit on the CPU, so an indicator costs whatever its
+   update rate is; a spinner here was asking for ~56 repaints/sec to animate one
+   small icon. The caret is static, the activity label changes only when a tool
+   actually starts or finishes, and the clock ticks once a second. */
+.runningCaret {
+  color: var(--color-primary);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.runningActivity {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Elapsed time + live token count next to the spinner. */
@@ -403,15 +411,6 @@
   font-size: 13px;
 }
 
-/* Stepped from JS via `useSpinnerFrame`, same as `.runningIcon` above — no
-   CSS animation, so the compositor frame loop is free to go idle. */
-.spinner {
-  width: 16px;
-  height: 16px;
-  border: 2px solid var(--color-primary-alpha-20);
-  border-top-color: var(--color-primary);
-  border-radius: 50%;
-}
 
 /* Error Message */
 .errorMessage {

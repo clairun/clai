@@ -10,7 +10,6 @@ import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
 import VirtualizedList from '../common/VirtualizedList';
-import { useSpinnerFrame, spinnerRotation } from '../../hooks/useSpinnerFrame';
 import type {
   AssistantMessage,
   ContentPart,
@@ -477,50 +476,43 @@ const formatElapsed = (ms: number): string => {
 };
 
 /**
- * The small ring spinner shown on in-flight tool rows.
+ * RunningIndicator — the in-flight footer (left-aligned): what the run is
+ * currently doing, plus an elapsed timer.
  *
- * A component rather than a bare `<span>` so it can subscribe to the shared
- * ticker — the tool renderers below are plain functions, not components, and
- * cannot call hooks themselves.
- */
-const Spinner = memo(() => {
-  const frame = useSpinnerFrame();
-  return <span className={styles.spinner} style={{ transform: spinnerRotation(frame) }} />;
-});
-Spinner.displayName = 'Spinner';
-
-/**
- * RunningIndicator — the in-flight footer (left-aligned): the Clai mark on a
- * steady spin, plus an elapsed timer so it's clear the run is progressing. The
- * timer always advances (even before any output) so it never looks frozen.
+ * There is deliberately nothing here that moves on a timer of its own. On this
+ * stack (GTK3 + webkit2gtk-4.1) every repaint is a full-window cairo/pixman
+ * blit on the CPU, so the cost of an indicator is simply how many times a
+ * second it changes. A spinner is the only kind whose motion is unrelated to
+ * anything real, and it was costing ~56 repaints/sec as a CSS animation.
  *
- * The spin is stepped from `useSpinnerFrame`, not a CSS animation — see that
- * module for why a CSS animation is expensive on this stack.
+ * So the motion here is derived from work that is already happening: the tool
+ * label changes when a tool actually starts or finishes (repaints that occur
+ * regardless), and the clock advances once a second. That also makes it more
+ * honest than a spinner — a spinner keeps turning when the backend is wedged,
+ * whereas a stalled label next to a still-advancing clock says exactly that.
  */
+const RunningIndicator = memo(
+  ({ runStartedAt, activity }: { runStartedAt?: number | null; activity: string | null }) => {
+    // Tick once a second to advance the elapsed readout. The footer only mounts
+    // while streaming, so the interval is short-lived.
+    const [now, setNow] = useState(() => Date.now());
+    useEffect(() => {
+      const id = window.setInterval(() => setNow(Date.now()), 1000);
+      return () => window.clearInterval(id);
+    }, []);
+    const elapsed = runStartedAt != null ? formatElapsed(now - runStartedAt) : null;
 
-const RunningIndicator = memo(({ runStartedAt }: { runStartedAt?: number | null }) => {
-  // Tick once a second to advance the elapsed readout. The footer only mounts
-  // while streaming, so the interval is short-lived.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-  const elapsed = runStartedAt != null ? formatElapsed(now - runStartedAt) : null;
-  const frame = useSpinnerFrame();
-
-  return (
-    <div className={styles.runningIndicator}>
-      <img
-        src="/icon.svg"
-        alt="Clai"
-        className={styles.runningIcon}
-        style={{ transform: spinnerRotation(frame) }}
-      />
-      {elapsed && <span className={styles.runningMeta}>{elapsed}</span>}
-    </div>
-  );
-});
+    return (
+      <div className={styles.runningIndicator}>
+        <span className={styles.runningCaret} aria-hidden="true">
+          ▸
+        </span>
+        <span className={styles.runningActivity}>{activity ?? 'Working…'}</span>
+        {elapsed && <span className={styles.runningMeta}>{elapsed}</span>}
+      </div>
+    );
+  }
+);
 RunningIndicator.displayName = 'RunningIndicator';
 
 /**
@@ -587,6 +579,25 @@ const ChatMessageList = ({
     const map = new Map<string, ToolInvocation>();
     for (const tc of toolCalls) map.set(tc.id, tc);
     return map;
+  }, [toolCalls]);
+
+  // Label for the running footer: the tool currently in flight, described the
+  // same way its transcript row is. The last one wins when several overlap,
+  // since that is the most recently started work.
+  //
+  // This is what gives the footer its motion, and it costs nothing: it changes
+  // only when a tool starts or finishes, and those transitions already repaint
+  // the transcript. `null` (falling back to "Working…") is the honest state
+  // between tool calls — the model is thinking, not doing something nameable.
+  const activity = useMemo(() => {
+    let latest: ToolInvocation | null = null;
+    for (const tc of toolCalls) {
+      if (tc.status !== 'running' && tc.status !== 'pending') continue;
+      if (latest === null || tc.startedAt >= latest.startedAt) latest = tc;
+    }
+    if (latest === null) return null;
+    const { verb, arg } = summarizeToolCall(latest.toolName, latest.params);
+    return arg ? `${verb} ${arg}` : verb;
   }, [toolCalls]);
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
@@ -732,7 +743,7 @@ const ChatMessageList = ({
   // show the failure (if any) attached to the turn it belongs to. These are
   // mutually exclusive — a failed run is no longer streaming.
   const footer = isStreaming ? (
-    <RunningIndicator runStartedAt={runStartedAt} />
+    <RunningIndicator runStartedAt={runStartedAt} activity={activity} />
   ) : runError ? (
     <div className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner} role="alert">
       <span className={styles.runErrorIcon}>{runErrorIsLimit ? '⏳' : '⚠'}</span>
@@ -1050,7 +1061,6 @@ const renderToolOutput = (
   if (isRunning && result == null && !error) {
     return (
       <div className={styles.loadingState}>
-        <Spinner />
         <span>Executing…</span>
       </div>
     );
@@ -1257,7 +1267,6 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
         <span className={styles.toolRowRight}>
           {isRunning ? (
             <span className={styles.toolRowRunning}>
-              <Spinner />
               running…
             </span>
           ) : resultSummary ? (
