@@ -67,6 +67,35 @@ const SKIPPED_ARTIFACT_DIRS: &[&str] = &[
 ///   is exact and costs one `readdir` per open folder regardless of tree size.
 const MAX_ARTIFACT_COUNT: i64 = 25_000;
 
+/// Ceiling on a single folder's `child_count`, in entries.
+///
+/// [`MAX_ARTIFACT_COUNT`] bounds one walk; it does not bound how many walks a
+/// refresh performs. `workspace_list_dir` sizes every child directory and the
+/// panel re-lists every expanded folder on a timer, so before this cap a
+/// refresh was `child_dirs * folder_size` of `readdir` work on a repeating
+/// schedule, with neither factor bounded.
+///
+/// This caps the second factor only. A refresh still costs
+/// `child_dirs * (MAX_CHILD_COUNT + SKIPPED_ARTIFACT_DIRS.len())` dirents and
+/// is therefore still linear in the number of child directories — it is a
+/// large constant-factor reduction, not a bound. Bounding the other factor
+/// would mean not sizing every child on a timer, which would cost the live
+/// counts the panel exists to show.
+///
+/// The number is rendered in a narrow column beside a folder name, where
+/// precision past a few hundred tells the reader nothing, so saturating is
+/// close to free. A saturated value renders as "1,000+", never as an exact
+/// figure. The specific value is a judgement call, not a measurement: low
+/// enough that a folder with a couple of dozen children stays comparable to
+/// the header walk this file already performs, high enough to be exact for
+/// any folder a person would scroll.
+///
+/// This governs *sizing* the children of a listed directory. It does not
+/// bound listing the directory itself: `workspace_list_dir` still reads its
+/// target in full and calls `fs::metadata` per file, so opening one enormous
+/// folder is still proportional to that folder.
+const MAX_CHILD_COUNT: i64 = 1_000;
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -85,8 +114,9 @@ pub struct WorkspaceFileEntry {
 
 /// One entry in a single directory level of the artifact tree, returned by
 /// `workspace_list_dir`. Unlike `WorkspaceFileEntry` (always a file), this can
-/// be either a file or a directory; directories carry a recursive
-/// `child_count` so the UI can show "N files" without descending.
+/// be either a file or a directory; directories carry a shallow `child_count`
+/// so the UI can show how many entries a folder holds without descending
+/// into it.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -101,7 +131,16 @@ pub struct WorkspaceDirEntry {
     pub size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<i64>,
-    /// Recursive file count for directories; `None` for files.
+    /// Number of entries directly inside the directory; `None` for files.
+    ///
+    /// Not recursive, and saturates at 1,000 — a value of exactly 1,000 means
+    /// "at least this many", so render it as "1,000+" rather than as a
+    /// measurement.
+    ///
+    /// It counts directory entries, not the rows `workspace_list_dir` would
+    /// return for the same directory. Entries that get no row (symlinks, for
+    /// instance) are still counted, so this can exceed the number of children
+    /// the panel lists. Do not use it to predict or validate a listing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_count: Option<i64>,
 }
@@ -669,13 +708,55 @@ fn collect_files(
     Ok(())
 }
 
-/// Recursive file count only — used for per-folder `childCount` in
-/// `workspace_list_dir`, which throws the mtime away. Skipping it drops the
-/// per-entry `metadata()` call, which on the platforms where `file_type` is
-/// answered from the `readdir` record (see [`artifact_tree_stats`]) leaves no
-/// per-entry syscall at all.
-fn count_artifact_files(dir: &Path) -> i64 {
-    walk_artifact_tree(dir, false).0
+/// Number of entries directly inside `dir`, saturating at
+/// [`MAX_CHILD_COUNT`].
+///
+/// This is deliberately **not** recursive. `workspace_list_dir` calls it once
+/// per child directory, and the panel re-lists every expanded folder on a
+/// timer, so anything recursive here is multiplied by the number of child
+/// directories *and* repeated every few seconds. A recursive count made an
+/// idle refresh cost `child_dirs * MAX_ARTIFACT_COUNT`.
+///
+/// It counts directory entries, not rendered rows. The one exception is a
+/// skipped directory ([`should_skip_artifact_dir`]), which is excluded so a
+/// folder holding nothing but `node_modules` reads as empty rather than
+/// advertising content the panel refuses to show.
+///
+/// That exception is the one thing that could break the cap, and it is safe
+/// only because it is keyed on names. `take` sits after the filter, so
+/// rejected entries do not spend budget; a filter that could reject
+/// unboundedly many entries — symlinks, say — would let a directory full of
+/// rejects be read to exhaustion on every refresh despite the cap. A
+/// directory can hold at most one entry per name in
+/// [`SKIPPED_ARTIFACT_DIRS`], so at most that many rejects exist and the
+/// dirents actually read are bounded by
+/// `cap + SKIPPED_ARTIFACT_DIRS.len()`. Do not add a filter here without
+/// that property.
+///
+/// A symlink is consequently counted even though `workspace_list_dir` renders
+/// no row for it, so a folder holding symlinks can report more than it lists.
+/// That is the accepted price of the bound.
+fn count_direct_children(dir: &Path) -> i64 {
+    count_direct_children_to_cap(dir, MAX_CHILD_COUNT)
+}
+
+/// [`count_direct_children`] with an explicit ceiling, so tests can exercise
+/// the cap without materialising [`MAX_CHILD_COUNT`] files on disk. Mirrors
+/// the [`walk_artifact_tree_to_cap`] seam.
+fn count_direct_children_to_cap(dir: &Path, cap: i64) -> i64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => !should_skip_artifact_dir(&entry.path()),
+            _ => true,
+        })
+        // `take` short-circuits the iterator, so this stops reading the
+        // directory rather than reading all of it and reporting less.
+        .take(cap.max(0) as usize)
+        .count() as i64
 }
 
 /// Modification time of `entry` in epoch-ms, or `0` when it can't be read.
@@ -730,7 +811,7 @@ fn entry_modified_at_ms(entry: &fs::DirEntry) -> i64 {
 /// still terminates when `read_dir` fails with `ENAMETOOLONG`. That bounds
 /// depth at `PATH_MAX`, which no reachable stack depth here can overflow.
 fn artifact_tree_stats(dir: &Path) -> (i64, i64) {
-    let (count, latest_modified_at) = walk_artifact_tree(dir, true);
+    let (count, latest_modified_at) = walk_artifact_tree(dir);
     // Only `dir`'s own mtime is missing from the walk: every *descendant*
     // directory is folded in by the loop that yielded it.
     let own_modified_at = fs::metadata(dir)
@@ -740,27 +821,17 @@ fn artifact_tree_stats(dir: &Path) -> (i64, i64) {
     (count, latest_modified_at.max(own_modified_at))
 }
 
-/// Shared body of [`artifact_tree_stats`] and [`count_artifact_files`].
-///
-/// `track_mtime` is what separates the two callers: the snapshot poll needs
-/// the mtime, `workspace_list_dir`'s per-folder `childCount` does not, and
-/// `entry.metadata()` is the only per-entry syscall this walk makes of its
-/// own accord. Passing `false` therefore reduces the count to the `readdir`
-/// traversal itself, modulo the `file_type` caveat in [`artifact_tree_stats`].
-///
-/// Note the mtime is still folded across the recursive call when
-/// `track_mtime` is false. That is dead rather than wrong: nothing below can
-/// produce a non-zero mtime while the flag is false all the way down.
-fn walk_artifact_tree(dir: &Path, track_mtime: bool) -> (i64, i64) {
-    walk_artifact_tree_to_cap(dir, track_mtime, MAX_ARTIFACT_COUNT)
+/// Shared body of [`artifact_tree_stats`].
+fn walk_artifact_tree(dir: &Path) -> (i64, i64) {
+    walk_artifact_tree_to_cap(dir, MAX_ARTIFACT_COUNT)
 }
 
 /// [`walk_artifact_tree`] with an explicit ceiling, so tests can exercise the
 /// cap without materialising [`MAX_ARTIFACT_COUNT`] files on disk.
-fn walk_artifact_tree_to_cap(dir: &Path, track_mtime: bool, cap: i64) -> (i64, i64) {
+fn walk_artifact_tree_to_cap(dir: &Path, cap: i64) -> (i64, i64) {
     let mut count: i64 = 0;
     let mut latest_modified_at: i64 = 0;
-    walk_artifact_tree_capped(dir, track_mtime, cap, &mut count, &mut latest_modified_at);
+    walk_artifact_tree_capped(dir, cap, &mut count, &mut latest_modified_at);
     (count, latest_modified_at)
 }
 
@@ -772,13 +843,7 @@ fn walk_artifact_tree_to_cap(dir: &Path, track_mtime: bool, cap: i64) -> (i64, i
 /// `read_dir` yields, so *which* files land under the cap is unspecified —
 /// that is fine for a count, and the mtime it collects is correspondingly
 /// partial (see [`MAX_ARTIFACT_COUNT`]).
-fn walk_artifact_tree_capped(
-    dir: &Path,
-    track_mtime: bool,
-    cap: i64,
-    count: &mut i64,
-    latest_modified_at: &mut i64,
-) {
+fn walk_artifact_tree_capped(dir: &Path, cap: i64, count: &mut i64, latest_modified_at: &mut i64) {
     if *count >= cap {
         return;
     }
@@ -800,14 +865,10 @@ fn walk_artifact_tree_capped(
             if should_skip_artifact_dir(&path) {
                 continue;
             }
-            if track_mtime {
-                *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
-            }
-            walk_artifact_tree_capped(&path, track_mtime, cap, count, latest_modified_at);
+            *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
+            walk_artifact_tree_capped(&path, cap, count, latest_modified_at);
         } else if file_type.is_file() {
-            if track_mtime {
-                *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
-            }
+            *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
             *count += 1;
         }
     }
@@ -1788,7 +1849,7 @@ pub async fn workspace_list_dir(
                 viewer: None,
                 size: None,
                 updated_at: None,
-                child_count: Some(count_artifact_files(&path)),
+                child_count: Some(count_direct_children(&path)),
             });
         } else if file_type.is_file() {
             let metadata = fs::metadata(&path).ok();
@@ -4358,8 +4419,7 @@ mod tests {
             write_file(&root.join(format!("f{i}.txt")), "x");
         }
 
-        assert_eq!(walk_artifact_tree_to_cap(root, true, 5).0, 5);
-        assert_eq!(walk_artifact_tree_to_cap(root, false, 5).0, 5);
+        assert_eq!(walk_artifact_tree_to_cap(root, 5).0, 5);
     }
 
     #[test]
@@ -4376,7 +4436,7 @@ mod tests {
             dir = dir.join(format!("level{depth}"));
         }
 
-        assert_eq!(walk_artifact_tree_to_cap(root, true, 4).0, 4);
+        assert_eq!(walk_artifact_tree_to_cap(root, 4).0, 4);
     }
 
     // Below the cap the walk must be untouched — the cap is a ceiling, not a
@@ -4389,34 +4449,124 @@ mod tests {
         write_file(&root.join("nested/b.txt"), "b");
         write_file(&root.join("nested/deeper/c.txt"), "c");
 
-        assert_eq!(walk_artifact_tree_to_cap(root, true, 25_000).0, 3);
+        assert_eq!(walk_artifact_tree_to_cap(root, 25_000).0, 3);
         assert_eq!(artifact_tree_stats(root).0, 3);
     }
 
-    // `count_artifact_files` takes the `track_mtime = false` path through the
-    // shared walker; its count must not diverge from the tracked one.
+    // The per-folder `childCount` counts the folder's own entries.
     #[test]
-    fn count_artifact_files_matches_artifact_tree_stats_count() {
+    fn count_direct_children_counts_only_the_top_level() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         write_file(&root.join("a.txt"), "a");
-        write_file(&root.join("nested/b.txt"), "b");
-        write_file(&root.join("nested/deeper/c.txt"), "c");
-        write_file(&root.join("node_modules/pkg/index.js"), "x");
+        write_file(&root.join("b.txt"), "b");
+        write_file(&root.join("nested/c.txt"), "c");
 
-        assert_eq!(count_artifact_files(root), artifact_tree_stats(root).0);
-        assert_eq!(count_artifact_files(root), 3);
+        // `a.txt`, `b.txt`, `nested/` — the file inside `nested` is not ours.
+        assert_eq!(count_direct_children(root), 3);
     }
 
+    // Skipped trees are hidden by `workspace_list_dir`, so counting them would
+    // advertise content the panel refuses to show.
+    #[test]
+    fn count_direct_children_skips_skip_listed_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("node_modules/pkg/index.js"), "x");
+
+        assert_eq!(count_direct_children(root), 1);
+    }
+
+    // The whole point of the shallow count: the result must not scale with the
+    // subtree. A deep branch and a shallow one report the same number, so a
+    // folder full of huge subtrees costs one `readdir`, not one walk each.
+    #[test]
+    fn count_direct_children_does_not_descend() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("deep/1/2/3/4/5/a.txt"), "a");
+        write_file(&root.join("deep/1/2/3/4/5/b.txt"), "b");
+        write_file(&root.join("deep/1/2/3/4/5/c.txt"), "c");
+        write_file(&root.join("shallow/only.txt"), "x");
+
+        assert_eq!(count_direct_children(root), 2);
+        assert_eq!(count_direct_children(&root.join("deep")), 1);
+        assert_eq!(count_direct_children(&root.join("shallow")), 1);
+        // ...while the recursive stat still sees every file.
+        assert_eq!(artifact_tree_stats(root).0, 4);
+    }
+
+    // A symlink counts as an entry even though the panel renders no row for
+    // it. Excluding it would make the filter's reject set unbounded, which is
+    // what lets the cap bound the read — see `count_direct_children`. A link
+    // pointing back at its own parent is still not descended into.
     #[cfg(unix)]
     #[test]
-    fn count_artifact_files_does_not_follow_symlink_loops() {
+    fn count_direct_children_counts_symlinks_without_following_them() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         write_file(&root.join("real/a.txt"), "a");
         std::os::unix::fs::symlink(root.join("real"), root.join("real/loop")).unwrap();
 
-        assert_eq!(count_artifact_files(root), 1);
+        // `a.txt` and `loop`; `loop` is not followed back into `real`.
+        assert_eq!(count_direct_children(&root.join("real")), 2);
+    }
+
+    #[test]
+    fn count_direct_children_on_missing_dir_is_zero() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(count_direct_children(&root.path().join("nope")), 0);
+    }
+
+    // Saturation is reported as exactly the cap, so the UI can recognise it
+    // and render "N+" rather than presenting a bound as a measurement.
+    #[test]
+    fn count_direct_children_saturates_at_the_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for index in 0..8 {
+            write_file(&root.join(format!("f{index}.txt")), "x");
+        }
+
+        assert_eq!(count_direct_children_to_cap(root, 5), 5);
+        assert_eq!(count_direct_children_to_cap(root, 8), 8);
+        // One below the boundary stays exact.
+        assert_eq!(count_direct_children_to_cap(root, 9), 8);
+    }
+
+    // `take` sits after the filter, so a reject costs a dirent read without
+    // spending budget. That is safe only because the reject set is bounded:
+    // rejects are skip-listed *names*, and a directory holds at most one
+    // entry per name. This pins the consequence — a skipped directory does
+    // not eat into the cap — so a filter that could reject unboundedly many
+    // entries would have to change this test to land.
+    #[test]
+    fn count_direct_children_cap_is_not_consumed_by_skipped_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("node_modules/pkg/index.js"), "x");
+        for index in 0..4 {
+            write_file(&root.join(format!("f{index}.txt")), "x");
+        }
+
+        // Five entries on disk, one skipped. All four real files fit under a
+        // cap of four, so the skipped directory spent none of it.
+        assert_eq!(count_direct_children_to_cap(root, 4), 4);
+        assert_eq!(count_direct_children_to_cap(root, 9), 4);
+    }
+
+    // No caller passes a non-positive cap; the clamp exists so that if one
+    // ever does it reads nothing rather than panicking on the `as usize`
+    // conversion. The negative case is what the clamp is actually for.
+    #[test]
+    fn count_direct_children_with_a_non_positive_cap_is_zero() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+
+        assert_eq!(count_direct_children_to_cap(root, 0), 0);
+        assert_eq!(count_direct_children_to_cap(root, -1), 0);
     }
 
     #[test]

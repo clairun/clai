@@ -463,8 +463,9 @@ export type WorkspaceAgentSummary = { id: string, agentDefinitionId: string, dis
 /**
  * One entry in a single directory level of the artifact tree, returned by
  * `workspace_list_dir`. Unlike `WorkspaceFileEntry` (always a file), this can
- * be either a file or a directory; directories carry a recursive
- * `child_count` so the UI can show "N files" without descending.
+ * be either a file or a directory; directories carry a shallow `child_count`
+ * so the UI can show how many entries a folder holds without descending
+ * into it.
  */
 export type WorkspaceDirEntry = { path: string, name: string, 
 /**
@@ -472,7 +473,16 @@ export type WorkspaceDirEntry = { path: string, name: string,
  */
 kind: string, viewer: string | null, size: bigint | null, updatedAt: bigint | null, 
 /**
- * Recursive file count for directories; `None` for files.
+ * Number of entries directly inside the directory; `None` for files.
+ *
+ * Not recursive, and saturates at 1,000 — a value of exactly 1,000 means
+ * "at least this many", so render it as "1,000+" rather than as a
+ * measurement.
+ *
+ * It counts directory entries, not the rows `workspace_list_dir` would
+ * return for the same directory. Entries that get no row (symlinks, for
+ * instance) are still counted, so this can exceed the number of children
+ * the panel lists. Do not use it to predict or validate a listing.
  */
 childCount: bigint | null, };
 

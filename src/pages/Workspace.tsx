@@ -735,7 +735,9 @@ const ArtifactTreeRow = ({
         <span className={styles.fileTreeName}>{entry.name}</span>
         <span className={styles.fileTreeMeta}>
           {isFolder
-            ? Number(entry.childCount ?? 0)
+            ? // Direct entries, not a recursive file count, and saturating —
+              // see `count_direct_children` in `commands/workspace.rs`.
+              formatCappedCount(Number(entry.childCount ?? 0), MAX_CHILD_COUNT)
             : entry.updatedAt
               ? formatTimestamp(entry.updatedAt)
               : ''}
@@ -761,7 +763,10 @@ const ArtifactTreeRow = ({
           title={
             deleteArmed
               ? isFolder
-                ? `Click again to delete \u201c${entry.name}\u201d and its ${Number(entry.childCount ?? 0)} file${Number(entry.childCount ?? 0) === 1 ? '' : 's'}`
+                ? // Deliberately not a count: `childCount` is the folder's
+                  // direct entries, so quoting it here would understate what
+                  // a recursive delete is about to remove.
+                  `Click again to delete \u201c${entry.name}\u201d and everything inside it`
                 : `Click again to delete \u201c${entry.name}\u201d`
               : `Delete ${entry.name}`
           }
@@ -790,15 +795,29 @@ interface ArtifactsListProps {
 
 const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
 
-// How often the open artifact folders are re-read. Matches the snapshot poll
-// so the panel feels equally live, but the work is O(expanded folders) rather
-// than O(tree).
-const ARTIFACT_REFRESH_MS = 5000;
+// How often the open artifact folders are re-read. Deliberately the same
+// cadence as the snapshot poll so the panel feels equally live.
+//
+// Each pass costs one `readdir` per expanded folder, plus one more per child
+// directory to size it (capped at MAX_CHILD_COUNT entries each). That is
+// linear in the folders on screen and their immediate children, rather than
+// in the size of the tree. Keep it that way: anything recursive on this path
+// is multiplied by the number of visible folders and repeated every few
+// seconds.
+const ARTIFACT_REFRESH_MS = REFRESH_INTERVAL_MS;
 
-// Mirrors `MAX_ARTIFACT_COUNT` in src-tauri/src/commands/workspace.rs. The
-// backend walk stops there, so a count that reaches the cap means "at least
-// this many" — render it as such instead of claiming an exact figure.
+// Mirror `MAX_ARTIFACT_COUNT` / `MAX_CHILD_COUNT` in
+// src-tauri/src/commands/workspace.rs. Both backend counts stop at their cap,
+// so a value that reaches it means "at least this many" — render it as such
+// instead of claiming an exact figure the backend never computed.
 const MAX_ARTIFACT_COUNT = 25_000;
+const MAX_CHILD_COUNT = 1_000;
+
+// A saturated count is a lower bound, not a measurement. Every place that
+// shows one of these numbers goes through here, so no display can silently
+// present a capped value as exact.
+const formatCappedCount = (value: number, cap: number): string =>
+  value >= cap ? `${cap.toLocaleString()}+` : String(value);
 
 // Lazy directory-tree browser. Loads the root level on open and each folder's
 // children on first expand, caching them by path. The 5s snapshot poll surfaces
@@ -1164,7 +1183,7 @@ const ArtifactsList = ({
           className={styles.searchInput}
           value={query}
           onChange={(event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
-          placeholder={`Search artifacts (${totalCount})`}
+          placeholder={`Search artifacts (${formatCappedCount(totalCount, MAX_ARTIFACT_COUNT)})`}
           aria-label="Search artifacts"
         />
       )}
@@ -1537,9 +1556,7 @@ const WorkspaceHeader = ({
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter(
           'artifacts',
-          artifactCount >= MAX_ARTIFACT_COUNT
-            ? `${MAX_ARTIFACT_COUNT.toLocaleString()}+`
-            : artifactCount,
+          formatCappedCount(artifactCount, MAX_ARTIFACT_COUNT),
           'artifacts'
         )}
       </div>
