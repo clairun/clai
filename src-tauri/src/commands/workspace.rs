@@ -46,6 +46,27 @@ const SKIPPED_ARTIFACT_DIRS: &[&str] = &[
     "venv",
 ];
 
+/// Ceiling on the recursive artifact walk, in files.
+///
+/// The walk is O(tree) and runs on every 5s snapshot poll, but its output
+/// feeds only a header count chip and a change-tick for the artifacts panel.
+/// Measured on a workspace holding cloned repos: 28.4k files (after the skip
+/// list) cost ~70ms per walk, i.e. ~1.4% of a core sustained. Workspaces here
+/// reach 500k+ files, where the same walk is ~1.2s every 5 seconds — roughly a
+/// quarter of a core per open workspace, plus every inode dragged through the
+/// page cache.
+///
+/// Stopping at the cap bounds the poll to about what a 25k-file workspace
+/// already paid, whatever the real size. Two consequences, both deliberate:
+///
+/// * The count saturates. The UI renders a capped value as "25,000+" rather
+///   than claiming a precise figure it did not compute.
+/// * The mtime collected alongside it is partial, so a change beyond the cap
+///   may not bump it. The artifacts panel does not rely on that: it re-reads
+///   the directories the user has actually expanded on its own cadence, which
+///   is exact and costs one `readdir` per open folder regardless of tree size.
+const MAX_ARTIFACT_COUNT: i64 = 25_000;
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -731,12 +752,43 @@ fn artifact_tree_stats(dir: &Path) -> (i64, i64) {
 /// `track_mtime` is false. That is dead rather than wrong: nothing below can
 /// produce a non-zero mtime while the flag is false all the way down.
 fn walk_artifact_tree(dir: &Path, track_mtime: bool) -> (i64, i64) {
+    walk_artifact_tree_to_cap(dir, track_mtime, MAX_ARTIFACT_COUNT)
+}
+
+/// [`walk_artifact_tree`] with an explicit ceiling, so tests can exercise the
+/// cap without materialising [`MAX_ARTIFACT_COUNT`] files on disk.
+fn walk_artifact_tree_to_cap(dir: &Path, track_mtime: bool, cap: i64) -> (i64, i64) {
     let mut count: i64 = 0;
     let mut latest_modified_at: i64 = 0;
+    walk_artifact_tree_capped(dir, track_mtime, cap, &mut count, &mut latest_modified_at);
+    (count, latest_modified_at)
+}
+
+/// Body of [`walk_artifact_tree`], carrying the running totals so the
+/// [`MAX_ARTIFACT_COUNT`] budget is shared across the whole recursion rather
+/// than being re-applied per directory.
+///
+/// Returns as soon as the budget is spent. The traversal order is whatever
+/// `read_dir` yields, so *which* files land under the cap is unspecified —
+/// that is fine for a count, and the mtime it collects is correspondingly
+/// partial (see [`MAX_ARTIFACT_COUNT`]).
+fn walk_artifact_tree_capped(
+    dir: &Path,
+    track_mtime: bool,
+    cap: i64,
+    count: &mut i64,
+    latest_modified_at: &mut i64,
+) {
+    if *count >= cap {
+        return;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
-        return (count, latest_modified_at);
+        return;
     };
     for entry in entries.flatten() {
+        if *count >= cap {
+            return;
+        }
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -749,19 +801,16 @@ fn walk_artifact_tree(dir: &Path, track_mtime: bool) -> (i64, i64) {
                 continue;
             }
             if track_mtime {
-                latest_modified_at = latest_modified_at.max(entry_modified_at_ms(&entry));
+                *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
             }
-            let (child_count, child_latest) = walk_artifact_tree(&path, track_mtime);
-            count += child_count;
-            latest_modified_at = latest_modified_at.max(child_latest);
+            walk_artifact_tree_capped(&path, track_mtime, cap, count, latest_modified_at);
         } else if file_type.is_file() {
             if track_mtime {
-                latest_modified_at = latest_modified_at.max(entry_modified_at_ms(&entry));
+                *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
             }
-            count += 1;
+            *count += 1;
         }
     }
-    (count, latest_modified_at)
 }
 
 fn ensure_agent_workspace_root(root: &Path) -> Result<(), String> {
@@ -4296,6 +4345,52 @@ mod tests {
             before.1,
             after.1
         );
+    }
+
+    // The cap is what bounds the poll on 500k-file workspaces, so it has to
+    // hold across the *whole* recursion — a per-directory budget would let a
+    // wide tree blow straight through it.
+    #[test]
+    fn walk_artifact_tree_stops_at_the_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for i in 0..20 {
+            write_file(&root.join(format!("f{i}.txt")), "x");
+        }
+
+        assert_eq!(walk_artifact_tree_to_cap(root, true, 5).0, 5);
+        assert_eq!(walk_artifact_tree_to_cap(root, false, 5).0, 5);
+    }
+
+    #[test]
+    fn walk_artifact_tree_cap_is_shared_across_nested_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        // Three files per level over four levels: any per-directory budget
+        // would return more than the global cap.
+        let mut dir = root.to_path_buf();
+        for depth in 0..4 {
+            for i in 0..3 {
+                write_file(&dir.join(format!("d{depth}f{i}.txt")), "x");
+            }
+            dir = dir.join(format!("level{depth}"));
+        }
+
+        assert_eq!(walk_artifact_tree_to_cap(root, true, 4).0, 4);
+    }
+
+    // Below the cap the walk must be untouched — the cap is a ceiling, not a
+    // change in what a normal-sized workspace reports.
+    #[test]
+    fn walk_artifact_tree_is_exact_below_the_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("nested/b.txt"), "b");
+        write_file(&root.join("nested/deeper/c.txt"), "c");
+
+        assert_eq!(walk_artifact_tree_to_cap(root, true, 25_000).0, 3);
+        assert_eq!(artifact_tree_stats(root).0, 3);
     }
 
     // `count_artifact_files` takes the `track_mtime = false` path through the

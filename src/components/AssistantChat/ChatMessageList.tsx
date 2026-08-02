@@ -476,10 +476,20 @@ const formatElapsed = (ms: number): string => {
 };
 
 /**
- * RunningIndicator — the in-flight footer (left-aligned): the Clai mark on a
- * steady constant-speed spin, plus an elapsed timer so it's clear the run is
- * progressing. The timer always advances (even before any output) so it never
- * looks frozen.
+ * RunningIndicator — the in-flight footer (left-aligned): the Clai mark plus
+ * an elapsed timer, so it's clear the run is progressing.
+ *
+ * The mark does not spin, and nothing else here animates. On this stack (GTK3 +
+ * webkit2gtk-4.1) every repaint is a full-window cairo/pixman blit on the CPU,
+ * so an indicator costs whatever its update rate is — and as a CSS animation
+ * the spin alone was asking for ~56 repaints/sec to turn one 22px icon. The
+ * clock's 1s tick carries the same "still alive" meaning for ~1/56th of that,
+ * and carries it more honestly: a spinner keeps turning when the backend is
+ * wedged, whereas a clock that stops has actually told you something.
+ *
+ * Naming the in-flight tool here was tried and reverted: whenever it had
+ * something to say, the transcript row directly above was already saying it,
+ * so the footer read as a duplicated stray line detached from the block.
  */
 const RunningIndicator = memo(({ runStartedAt }: { runStartedAt?: number | null }) => {
   // Tick once a second to advance the elapsed readout. The footer only mounts
@@ -565,6 +575,7 @@ const ChatMessageList = ({
     for (const tc of toolCalls) map.set(tc.id, tc);
     return map;
   }, [toolCalls]);
+
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
   // conversation viewport). Folded into scrollToBottomSignal below with a wide
@@ -1027,7 +1038,6 @@ const renderToolOutput = (
   if (isRunning && result == null && !error) {
     return (
       <div className={styles.loadingState}>
-        <span className={styles.spinner} />
         <span>Executing…</span>
       </div>
     );
@@ -1234,7 +1244,6 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
         <span className={styles.toolRowRight}>
           {isRunning ? (
             <span className={styles.toolRowRunning}>
-              <span className={styles.spinner} />
               running…
             </span>
           ) : resultSummary ? (

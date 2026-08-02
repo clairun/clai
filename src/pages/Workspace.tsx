@@ -790,6 +790,16 @@ interface ArtifactsListProps {
 
 const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
 
+// How often the open artifact folders are re-read. Matches the snapshot poll
+// so the panel feels equally live, but the work is O(expanded folders) rather
+// than O(tree).
+const ARTIFACT_REFRESH_MS = 5000;
+
+// Mirrors `MAX_ARTIFACT_COUNT` in src-tauri/src/commands/workspace.rs. The
+// backend walk stops there, so a count that reaches the cap means "at least
+// this many" — render it as such instead of claiming an exact figure.
+const MAX_ARTIFACT_COUNT = 25_000;
+
 // Lazy directory-tree browser. Loads the root level on open and each folder's
 // children on first expand, caching them by path. The 5s snapshot poll surfaces
 // new artifacts by bumping `totalCount`, which we use to silently refresh the
@@ -897,6 +907,22 @@ const ArtifactsList = ({
       void loadDir(path, true);
     }
   }, [totalCount, latestModifiedAt, loadDir]);
+
+  // Safety net for large workspaces. Both signals above saturate: the backend
+  // walk stops at MAX_ARTIFACT_COUNT, so past the cap neither the count nor
+  // the tree mtime is guaranteed to move when a file changes. What this panel
+  // actually shows is only the folders the user has expanded, so re-read
+  // exactly those on the same cadence — one `readdir` per open folder, which
+  // is independent of how big the workspace is. This effect runs only while
+  // the artifacts panel is mounted (i.e. open).
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      for (const path of childrenByPathRef.current.keys()) {
+        void loadDir(path, true);
+      }
+    }, ARTIFACT_REFRESH_MS);
+    return () => window.clearInterval(id);
+  }, [loadDir]);
 
   // Auto-expand a sole top-level folder once, so repo-rooted artifacts like
   // `work/<repo>/...` reveal their first level without an extra click.
@@ -1328,7 +1354,9 @@ const WorkspaceHeader = ({
 
   const renderCounter = (
     panel: ActivePanel,
-    count: number,
+    // A string when the figure is a bound rather than an exact count (see the
+    // artifacts chip, which saturates at MAX_ARTIFACT_COUNT).
+    count: number | string,
     label: string,
     clickable = true,
     activeCount = 0
@@ -1507,7 +1535,13 @@ const WorkspaceHeader = ({
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter('memories', memories.length, 'memories')}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter('artifacts', artifactCount, 'artifacts')}
+        {renderCounter(
+          'artifacts',
+          artifactCount >= MAX_ARTIFACT_COUNT
+            ? `${MAX_ARTIFACT_COUNT.toLocaleString()}+`
+            : artifactCount,
+          'artifacts'
+        )}
       </div>
     </div>
   );
