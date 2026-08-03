@@ -1,0 +1,8 @@
+# Shell scripts must keep LF endings in the working tree. The release job runs
+# scripts/assert-pristine-tree.sh through `bash` on windows-latest, and Git for
+# Windows checks text files out with CRLF by default. `bash <file>` ignores the
+# shebang but reads `\r` as part of every command, so the script dies on its
+# first real one (`set: pipefail\r: invalid option name`) and takes the release
+# step with it. Every tracked `.sh` blob is already LF, so this constrains
+# checkout only and renormalises nothing.
+*.sh text eol=lf
