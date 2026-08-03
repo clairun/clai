@@ -61,7 +61,12 @@ interface PathGrant {
 interface ExecutionConfig {
   sandbox: { network: string; sessionBus: string };
   filesystem: { extraPaths: PathGrant[] };
-  shell: { mode: string; allowedCommandPrefixes: string[]; blockedCommandPrefixes: string[] };
+  shell: {
+    mode: string;
+    allowedCommandPrefixes: string[];
+    disabledDefaultCommandPrefixes: string[];
+    blockedCommandPrefixes: string[];
+  };
   web: { enabled: boolean };
 }
 
@@ -118,6 +123,7 @@ const defaultExecution = (): ExecutionConfig => ({
   shell: {
     mode: 'off',
     allowedCommandPrefixes: [],
+    disabledDefaultCommandPrefixes: [],
     blockedCommandPrefixes: [
       'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
     ],
@@ -125,8 +131,45 @@ const defaultExecution = (): ExecutionConfig => ({
   web: { enabled: false },
 });
 
+// Mirrors `standard_restricted_shell_allowlist` in src-tauri/src/config/types.rs.
+// Keep the UI grouping in sync with backend policy until this metadata is
+// exposed through typed execution bindings.
+const STANDARD_RESTRICTED_COMMAND_GROUPS = [
+  {
+    label: 'Workspace inspection',
+    prefixes: ['pwd', 'cd', 'ls', 'rg', 'grep', 'head', 'tail', 'wc', 'file', 'stat'],
+  },
+  {
+    label: 'System inspection',
+    prefixes: ['du', 'df', 'date', 'whoami', 'uname', 'which'],
+  },
+  {
+    label: 'Git inspection',
+    prefixes: [
+      'git status',
+      'git diff',
+      'git log',
+      'git show',
+      'git rev-parse',
+      'git ls-files',
+      'git grep',
+      'git blame',
+      'git branch --show-current',
+      'git remote -v',
+    ],
+  },
+];
+
+const STANDARD_RESTRICTED_COMMAND_PREFIXES = STANDARD_RESTRICTED_COMMAND_GROUPS.flatMap(
+  (group) => group.prefixes
+);
+const STANDARD_RESTRICTED_COMMAND_SET = new Set(STANDARD_RESTRICTED_COMMAND_PREFIXES);
+
 const normalizeItems = (items: string[] = []): string[] =>
   items.map((item) => item.trim()).filter(Boolean);
+
+const normalizeCustomAllowedCommands = (items: string[] = []): string[] =>
+  normalizeItems(items).filter((item) => !STANDARD_RESTRICTED_COMMAND_SET.has(item));
 
 const addUniqueItem = (items: string[], value: string): string[] => {
   const trimmed = value.trim();
@@ -171,7 +214,12 @@ const normalizeExecution = (execution: Partial<ExecutionConfig> = {}): Execution
     },
     shell: {
       mode: execution.shell?.mode || d.shell.mode,
-      allowedCommandPrefixes: normalizeItems(execution.shell?.allowedCommandPrefixes || d.shell.allowedCommandPrefixes),
+      allowedCommandPrefixes: normalizeCustomAllowedCommands(
+        execution.shell?.allowedCommandPrefixes || d.shell.allowedCommandPrefixes
+      ),
+      disabledDefaultCommandPrefixes: normalizeItems(
+        execution.shell?.disabledDefaultCommandPrefixes || d.shell.disabledDefaultCommandPrefixes
+      ).filter((item) => STANDARD_RESTRICTED_COMMAND_SET.has(item)),
       blockedCommandPrefixes: normalizeItems(execution.shell?.blockedCommandPrefixes || d.shell.blockedCommandPrefixes),
     },
     web: { enabled: execution.web?.enabled || false },
@@ -192,6 +240,7 @@ interface AgentPayloadInput {
   extraPathGrants?: PathGrant[];
   shellMode?: string;
   allowedCommands?: string[];
+  disabledDefaultCommands?: string[];
   blockedCommands?: string[];
   webEnabled?: boolean;
   enabled?: boolean;
@@ -207,6 +256,7 @@ const serializeAgentPayload = ({
   extraPathGrants,
   shellMode,
   allowedCommands,
+  disabledDefaultCommands,
   blockedCommands,
   webEnabled,
   enabled,
@@ -222,6 +272,7 @@ const serializeAgentPayload = ({
     shell: {
       mode: shellMode,
       allowedCommandPrefixes: allowedCommands || [],
+      disabledDefaultCommandPrefixes: disabledDefaultCommands || [],
       blockedCommandPrefixes: blockedCommands || [],
     },
     web: { enabled: !!webEnabled },
@@ -1332,6 +1383,7 @@ const AgentSection = ({
   const [sessionBusAllowed, setSessionBusAllowed] = useState(true);
   const [shellMode, setShellMode] = useState('off');
   const [allowedCommands, setAllowedCommands] = useState<string[]>([]);
+  const [disabledDefaultCommands, setDisabledDefaultCommands] = useState<string[]>([]);
   const [blockedCommands, setBlockedCommands] = useState(defaultExecution().shell.blockedCommandPrefixes);
   const [allowedCommandDraft, setAllowedCommandDraft] = useState('');
   const [blockedCommandDraft, setBlockedCommandDraft] = useState('');
@@ -1405,6 +1457,7 @@ const AgentSection = ({
     setSessionBusAllowed(execution.sandbox.sessionBus === 'allow');
     setShellMode(execution.shell.mode);
     setAllowedCommands(execution.shell.allowedCommandPrefixes);
+    setDisabledDefaultCommands(execution.shell.disabledDefaultCommandPrefixes);
     setBlockedCommands(execution.shell.blockedCommandPrefixes);
     setAllowedCommandDraft('');
     setBlockedCommandDraft('');
@@ -1425,6 +1478,7 @@ const AgentSection = ({
       extraPathGrants: execution.filesystem.extraPaths,
       shellMode: execution.shell.mode,
       allowedCommands: execution.shell.allowedCommandPrefixes,
+      disabledDefaultCommands: execution.shell.disabledDefaultCommandPrefixes,
       blockedCommands: execution.shell.blockedCommandPrefixes,
       webEnabled: execution.web.enabled,
       enabled: agent.enabled !== false,
@@ -1464,13 +1518,14 @@ const AgentSection = ({
       extraPathGrants,
       shellMode,
       allowedCommands,
+      disabledDefaultCommands,
       blockedCommands,
       webEnabled,
       enabled,
     }),
     [
       name, description, selectedSkillIds, selectedMcpServerIds, providerConnectionIds,
-      sessionBusAllowed, extraPathGrants, shellMode, allowedCommands, blockedCommands,
+      sessionBusAllowed, extraPathGrants, shellMode, allowedCommands, disabledDefaultCommands, blockedCommands,
       webEnabled, enabled,
     ]
   );
@@ -1499,9 +1554,36 @@ const AgentSection = ({
     setSessionBusAllowed(execution.sandbox.sessionBus === 'allow');
     setShellMode(execution.shell.mode);
     setAllowedCommands(execution.shell.allowedCommandPrefixes);
+    setDisabledDefaultCommands(execution.shell.disabledDefaultCommandPrefixes);
     setBlockedCommands(execution.shell.blockedCommandPrefixes);
     setWebEnabled(execution.web.enabled);
   }, [selectedTemplate]);
+
+  const handleSetDefaultCommandEnabled = (prefix: string, enabledDefault: boolean) => {
+    setDisabledDefaultCommands((current) => {
+      if (enabledDefault) return current.filter((item) => item !== prefix);
+      return addUniqueItem(current, prefix);
+    });
+  };
+
+  const handleAddAllowedCommand = () => {
+    const prefix = allowedCommandDraft.trim();
+    if (!prefix) return;
+    if (STANDARD_RESTRICTED_COMMAND_SET.has(prefix)) {
+      handleSetDefaultCommandEnabled(prefix, true);
+    } else {
+      setAllowedCommands((s) => addUniqueItem(s, prefix));
+    }
+    setAllowedCommandDraft('');
+  };
+
+  const disabledDefaultCommandSet = useMemo(
+    () => new Set(disabledDefaultCommands),
+    [disabledDefaultCommands]
+  );
+  const enabledDefaultCommandCount = STANDARD_RESTRICTED_COMMAND_PREFIXES.filter(
+    (cmd) => !disabledDefaultCommandSet.has(cmd)
+  ).length;
 
   const handleAddPathGrant = () => {
     const path = extraPathDraft.trim();
@@ -1564,6 +1646,7 @@ const AgentSection = ({
         shell: {
           mode: shellMode,
           allowedCommandPrefixes: allowedCommands,
+          disabledDefaultCommandPrefixes: disabledDefaultCommands,
           blockedCommandPrefixes: blockedCommands,
         },
         web: { enabled: webEnabled },
@@ -1878,7 +1961,54 @@ const AgentSection = ({
       {shellMode === 'restricted' && (
         <>
           <div className={styles.field}>
-            <label className={styles.label}>Allowed command prefixes</label>
+            <div className={styles.permissionHeader}>
+              <label className={styles.label}>CLAI standard inspection commands</label>
+              <span className={styles.permissionCount}>
+                {enabledDefaultCommandCount}/{STANDARD_RESTRICTED_COMMAND_PREFIXES.length} enabled
+              </span>
+            </div>
+            <div className={styles.commandGroupList}>
+              {STANDARD_RESTRICTED_COMMAND_GROUPS.map((group) => {
+                const enabledInGroup = group.prefixes.filter(
+                  (cmd) => !disabledDefaultCommandSet.has(cmd)
+                ).length;
+                return (
+                  <details key={group.label} className={styles.commandGroup}>
+                    <summary className={styles.commandGroupSummary}>
+                      <span>{group.label}</span>
+                      <span>{enabledInGroup}/{group.prefixes.length}</span>
+                    </summary>
+                    <div className={styles.defaultCommandGrid}>
+                      {group.prefixes.map((cmd) => (
+                        <label key={cmd} className={styles.defaultCommandOption}>
+                          <input
+                            type="checkbox"
+                            checked={!disabledDefaultCommandSet.has(cmd)}
+                            onChange={(e) => handleSetDefaultCommandEnabled(cmd, e.target.checked)}
+                            disabled={busy}
+                          />
+                          <code>{cmd}</code>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+            </div>
+            {disabledDefaultCommands.length > 0 && (
+              <button
+                type="button"
+                className={styles.inlineButton}
+                onClick={() => setDisabledDefaultCommands([])}
+                disabled={busy}
+              >
+                Restore standard commands
+              </button>
+            )}
+          </div>
+
+          <div className={styles.field}>
+            <label className={styles.label}>Custom allowed command prefixes</label>
             {allowedCommands.length > 0 && (
               <div className={styles.chipList}>
                 {allowedCommands.map((cmd) => (
@@ -1908,19 +2038,15 @@ const AgentSection = ({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
-                    setAllowedCommands((s) => addUniqueItem(s, allowedCommandDraft));
-                    setAllowedCommandDraft('');
+                    handleAddAllowedCommand();
                   }
                 }}
               />
               <button
                 type="button"
                 className={styles.addButton}
-                onClick={() => {
-                  setAllowedCommands((s) => addUniqueItem(s, allowedCommandDraft));
-                  setAllowedCommandDraft('');
-                }}
-                disabled={!allowedCommandDraft.trim() || saving}
+                onClick={handleAddAllowedCommand}
+                disabled={!allowedCommandDraft.trim() || busy}
               >
                 Add
               </button>
@@ -1970,7 +2096,7 @@ const AgentSection = ({
                   setBlockedCommands((s) => addUniqueItem(s, blockedCommandDraft));
                   setBlockedCommandDraft('');
                 }}
-                disabled={!blockedCommandDraft.trim() || saving}
+                disabled={!blockedCommandDraft.trim() || busy}
               >
                 Add
               </button>

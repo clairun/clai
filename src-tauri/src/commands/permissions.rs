@@ -471,19 +471,40 @@ fn apply_decisions_to_shell_policy(
                     .blocked_command_prefixes
                     .retain(|p| p != prefix);
                 changed |= agent.execution.shell.blocked_command_prefixes.len() != before;
-                if !agent
-                    .execution
-                    .shell
-                    .allowed_command_prefixes
-                    .iter()
-                    .any(|p| p == prefix)
-                {
+                if crate::config::types::ShellCapabilityConfig::is_standard_restricted_prefix(
+                    prefix,
+                ) {
+                    let before = agent
+                        .execution
+                        .shell
+                        .disabled_default_command_prefixes
+                        .len();
                     agent
                         .execution
                         .shell
+                        .disabled_default_command_prefixes
+                        .retain(|p| p != prefix);
+                    changed |= agent
+                        .execution
+                        .shell
+                        .disabled_default_command_prefixes
+                        .len()
+                        != before;
+                } else {
+                    if !agent
+                        .execution
+                        .shell
                         .allowed_command_prefixes
-                        .push(prefix.to_string());
-                    changed = true;
+                        .iter()
+                        .any(|p| p == prefix)
+                    {
+                        agent
+                            .execution
+                            .shell
+                            .allowed_command_prefixes
+                            .push(prefix.to_string());
+                        changed = true;
+                    }
                 }
             }
             SegmentDecision::DenyAlways { prefix, .. } => {
@@ -670,14 +691,38 @@ mod tests {
 
         assert!(apply_decisions_to_shell_policy(
             &mut agent,
-            &[allow_always("  git status  ")]
+            &[allow_always("  cargo check  ")]
         ));
 
         assert!(agent
             .execution
             .shell
             .allowed_command_prefixes
-            .contains(&"git status".to_string()));
+            .contains(&"cargo check".to_string()));
+    }
+
+    #[test]
+    fn allow_always_for_standard_prefix_reenables_default_without_custom_chip() {
+        let mut agent = fake_agent();
+        agent
+            .execution
+            .shell
+            .disabled_default_command_prefixes
+            .push("rg".to_string());
+
+        let changed = apply_decisions_to_shell_policy(&mut agent, &[allow_always("rg")]);
+
+        assert!(changed);
+        assert!(!agent
+            .execution
+            .shell
+            .disabled_default_command_prefixes
+            .contains(&"rg".to_string()));
+        assert!(!agent
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"rg".to_string()));
     }
 
     fn fake_request(workspace_id: Option<&str>) -> PermissionRequest {

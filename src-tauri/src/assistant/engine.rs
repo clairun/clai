@@ -1115,17 +1115,19 @@ pub(crate) fn build_system_prompt(
             ));
         }
 
-        if context.execution.shell.allowed_command_prefixes.is_empty() {
-            let hint = match context.execution.shell.mode {
-                crate::config::ShellAccessMode::Restricted => "none (no commands allowed)",
-                _ => "any command not blocked",
-            };
-            prompt.push_str(&format!("- Allowed command prefixes: {}\n", hint));
-        } else {
-            prompt.push_str(&format!(
-                "- Allowed command prefixes: {}\n",
-                context.execution.shell.allowed_command_prefixes.join(", ")
-            ));
+        match context.execution.shell.mode {
+            crate::config::ShellAccessMode::Restricted => {
+                let allowed = context.execution.shell.effective_allowed_command_prefixes();
+                let allowed_text = if allowed.is_empty() {
+                    "none (all restricted defaults disabled and no custom prefixes)".to_string()
+                } else {
+                    allowed.join(", ")
+                };
+                prompt.push_str(&format!("- Allowed command prefixes: {}\n", allowed_text));
+            }
+            _ => {
+                prompt.push_str("- Allowed command prefixes: any command not blocked\n");
+            }
         }
 
         if context.execution.web.enabled {
@@ -1475,7 +1477,7 @@ mod tests {
     fn build_system_prompt_describes_shell_mode_alongside_memory_guidance() {
         let mut execution = ExecutionCapabilityConfig::default();
         execution.shell.mode = ShellAccessMode::Restricted;
-        execution.shell.allowed_command_prefixes = vec!["rg".to_string(), "git status".to_string()];
+        execution.shell.allowed_command_prefixes = vec!["cargo check".to_string()];
 
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
@@ -1490,7 +1492,9 @@ mod tests {
         };
 
         assert!(text.contains("- Shell mode: restricted"));
-        assert!(text.contains("- Allowed command prefixes: rg, git status"));
+        assert!(text.contains("- Allowed command prefixes: pwd, cd, ls, rg"));
+        assert!(text.contains("git status"));
+        assert!(text.contains("cargo check"));
         assert!(text.contains("## Agent Memory"));
     }
 

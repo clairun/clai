@@ -29,6 +29,40 @@ fn default_restricted_shell_blocklist() -> Vec<String> {
     ]
 }
 
+/// Built-in command prefixes for Restricted shell mode. These are inspection
+/// defaults, not a guarantee that every flag combination is non-mutating; the
+/// filesystem sandbox and blocklist still define the hard safety boundary.
+pub fn standard_restricted_shell_allowlist() -> Vec<String> {
+    vec![
+        "pwd".to_string(),
+        "cd".to_string(),
+        "ls".to_string(),
+        "rg".to_string(),
+        "grep".to_string(),
+        "head".to_string(),
+        "tail".to_string(),
+        "wc".to_string(),
+        "file".to_string(),
+        "stat".to_string(),
+        "du".to_string(),
+        "df".to_string(),
+        "date".to_string(),
+        "whoami".to_string(),
+        "uname".to_string(),
+        "which".to_string(),
+        "git status".to_string(),
+        "git diff".to_string(),
+        "git log".to_string(),
+        "git show".to_string(),
+        "git rev-parse".to_string(),
+        "git ls-files".to_string(),
+        "git grep".to_string(),
+        "git blame".to_string(),
+        "git branch --show-current".to_string(),
+        "git remote -v".to_string(),
+    ]
+}
+
 // =============================================================================
 // AI Provider
 // =============================================================================
@@ -285,6 +319,8 @@ pub struct ShellCapabilityConfig {
     pub mode: ShellAccessMode,
     #[serde(default)]
     pub allowed_command_prefixes: Vec<String>,
+    #[serde(default)]
+    pub disabled_default_command_prefixes: Vec<String>,
     #[serde(default = "default_restricted_shell_blocklist")]
     pub blocked_command_prefixes: Vec<String>,
 }
@@ -294,8 +330,45 @@ impl Default for ShellCapabilityConfig {
         Self {
             mode: ShellAccessMode::Off,
             allowed_command_prefixes: Vec::new(),
+            disabled_default_command_prefixes: Vec::new(),
             blocked_command_prefixes: default_restricted_shell_blocklist(),
         }
+    }
+}
+
+impl ShellCapabilityConfig {
+    pub fn effective_allowed_command_prefixes(&self) -> Vec<String> {
+        let mut allowed = Vec::new();
+        for prefix in standard_restricted_shell_allowlist() {
+            if !self
+                .disabled_default_command_prefixes
+                .iter()
+                .any(|disabled| disabled.trim() == prefix)
+            {
+                push_unique_prefix(&mut allowed, prefix);
+            }
+        }
+        for prefix in &self.allowed_command_prefixes {
+            let prefix = prefix.trim();
+            if !prefix.is_empty() {
+                push_unique_prefix(&mut allowed, prefix.to_string());
+            }
+        }
+        allowed
+    }
+
+    pub fn is_standard_restricted_prefix(prefix: &str) -> bool {
+        let prefix = prefix.trim();
+        !prefix.is_empty()
+            && standard_restricted_shell_allowlist()
+                .iter()
+                .any(|default_prefix| default_prefix == prefix)
+    }
+}
+
+fn push_unique_prefix(prefixes: &mut Vec<String>, prefix: String) {
+    if !prefixes.iter().any(|existing| existing == &prefix) {
+        prefixes.push(prefix);
     }
 }
 

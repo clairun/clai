@@ -519,6 +519,108 @@
   opacity: 1;
 }
 
+.permissionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.permissionHeader .label {
+  margin-bottom: 0;
+}
+
+.permissionCount {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.commandGroupList {
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--color-bg-primary);
+}
+
+.commandGroup + .commandGroup {
+  border-top: 1px solid var(--color-border-light);
+}
+
+.commandGroupSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.commandGroupSummary:hover {
+  background: var(--color-bg-hover);
+}
+
+.commandGroupSummary span:last-child {
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+
+.defaultCommandGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 4px 8px;
+  padding: 0 10px 10px 10px;
+}
+
+.defaultCommandOption {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.defaultCommandOption input {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.defaultCommandOption code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: var(--color-text-primary);
+}
+
+.inlineButton {
+  appearance: none;
+  margin-top: 8px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.inlineButton:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.inlineButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .listInputRow {
   display: flex;
   gap: 8px;
