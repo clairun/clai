@@ -96,6 +96,10 @@ const MAX_ARTIFACT_COUNT: i64 = 25_000;
 /// folder is still proportional to that folder.
 const MAX_CHILD_COUNT: i64 = 1_000;
 
+// ===============================================================================
+// DTO types — request/response shapes for workspace commands
+// ===============================================================================
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -431,6 +435,10 @@ struct WorkspaceAgentRow {
     updated_at: i64,
 }
 
+// ===============================================================================
+// Small utilities — time, config loaders, path normalization
+// ===============================================================================
+
 fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -512,6 +520,10 @@ fn normalize_path(path: PathBuf) -> PathBuf {
     }
     normalized
 }
+
+// ===============================================================================
+// Artifact tree — directory walking, MIME inference, viewer routing
+// ===============================================================================
 
 fn viewer_for_path(path: &Path) -> String {
     let file_name = path
@@ -1043,6 +1055,10 @@ pub(crate) fn resolve_workspace_descriptor(
         automation_name: manager.map(|agent| agent.name.clone()),
     })
 }
+
+// ===============================================================================
+// Agent resolution helpers — provider selection, agent rows, agent responses
+// ===============================================================================
 
 fn resolve_workspace_provider_selection(
     state: &AppState,
@@ -1654,6 +1670,10 @@ fn resolve_workspace_file_target(root: &Path, relative_path: &str) -> Result<Pat
     Ok(candidate)
 }
 
+// ===============================================================================
+// Snapshot aggregation — workspace_get_snapshot
+// ===============================================================================
+
 #[tauri::command]
 pub async fn workspace_get_snapshot(
     workspace_id: Option<String>,
@@ -1788,6 +1808,10 @@ pub struct WorkspaceListDirRequest {
     #[serde(default)]
     pub path: Option<String>,
 }
+
+// ===============================================================================
+// List & search — workspace_list_dir, workspace_search_artifacts
+// ===============================================================================
 
 /// List a single directory level of the artifact tree. The artifacts panel
 /// calls this lazily — once for the root, then again per folder as the user
@@ -2034,6 +2058,10 @@ pub async fn workspace_get_or_create_session(
         provider_connection_id,
     })
 }
+
+// ===============================================================================
+// Read & write — read, read-base64, download, write, delete
+// ===============================================================================
 
 #[tauri::command]
 pub async fn workspace_read_file(
@@ -2672,6 +2700,10 @@ pub struct WorkspaceStoreImageRequest {
     pub filename: Option<String>,
 }
 
+// ===============================================================================
+// Image attachment — store image, pick-and-store image
+// ===============================================================================
+
 /// Persist a pasted/attached image under the workspace's image store and
 /// return a ready-to-attach [`ContentPart::Image`] reference.
 ///
@@ -2825,6 +2857,10 @@ fn sanitize_mcp_selection(request: &WorkspaceUpdateMcpRequest) -> (Vec<String>, 
     (enabled, disabled)
 }
 
+// ===============================================================================
+// MCP & provider selection — session MCP toggles, default provider
+// ===============================================================================
+
 /// Update the MCP server IDs for a workspace session.
 ///
 /// For the general workspace, this is the only way to configure MCP servers
@@ -2953,6 +2989,10 @@ pub async fn workspace_set_provider(
 
     Ok(())
 }
+
+// ===============================================================================
+// Agent & task helpers — list agents, set default, acknowledge task
+// ===============================================================================
 
 #[tauri::command]
 pub async fn workspace_list_agents(
@@ -3125,6 +3165,10 @@ pub async fn workspace_create(
 
     Ok(id)
 }
+
+// ===============================================================================
+// Fork — agent re-id, schedule reset, durable copy
+// ===============================================================================
 
 /// Fork a workspace into a brand-new workspace.
 ///
@@ -3618,6 +3662,10 @@ pub async fn workspace_delete(
     Ok(())
 }
 
+// ===============================================================================
+// Metadata — title, starred, opened, attention summary
+// ===============================================================================
+
 /// Rename a workspace.
 #[tauri::command]
 pub async fn workspace_set_title(
@@ -3780,6 +3828,10 @@ async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &
         .map(|n| n as i64)
         .unwrap_or(0)
 }
+
+// ===============================================================================
+// Tests
+// ===============================================================================
 
 #[cfg(test)]
 mod tests {
