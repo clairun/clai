@@ -996,7 +996,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "This workspace has assigned agents. The default manager agent receives user messages and is responsible for routing work inside this workspace.\n\
              Use this roster as workspace-local context. Do not assume agents outside this list are available for collaboration.\n\
-             When task delegation tools are available, assign bounded tasks only to assigned workspace agents. Tasks run asynchronously and in parallel, each in its own session. Use `ask_user` when work is blocked on user feedback, approval, or missing information. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
+             When task delegation tools are available, assign bounded tasks only to assigned workspace agents. Tasks run asynchronously and in parallel, each in its own session. Use `ask_user` when work is blocked on a short answer only the user can give — approval, a missing fact, a choice between ready-made options. If the decision needs deliberation, write the analysis in your reply and end your turn instead of forcing it into a modal. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
         );
         prompt.push_str("Assigned workspace agents:\n");
         for agent in &context.workspace_agents {
