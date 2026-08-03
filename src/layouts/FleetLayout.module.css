@@ -23,11 +23,12 @@
   display: block;
 }
 
-/* The flexible middle of the bar: it absorbs the slack, and on a narrow
-   window it is what gives way. `min-width: 0` lets it actually shrink (a
-   flex item's default floor is its content), and clipping the counts is a
-   better outcome than pushing the update action or the settings button
-   off-screen. */
+/* The flexible middle of the bar, and the part that gives way first when the
+   window is narrow: `flex: 1` expands to a `0%` basis, so it only ever
+   occupies leftover space, `min-width: 0` removes the automatic content floor
+   so it really can drop to nothing, and `overflow: hidden` then clips the
+   counts instead of letting them spill across the update action and the
+   settings button. */
 .counters {
   flex: 1;
   min-width: 0;

@@ -1,11 +1,12 @@
+/* Shrinkable (`min-width: 0`) so the pill, not the action button, is what
+   gives way when the top bar runs out of room. `text-overflow` clips a block
+   container's own inline content, and this is a flex container whose text
+   would become an anonymous flex item instead, hence the `.label` span. */
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
   padding: 4px 10px;
   border: 1px solid var(--color-primary);
   border-radius: 999px;
@@ -23,7 +24,17 @@
   color: var(--color-bg-primary);
 }
 
+/* Truncating a version string would show a plausible-looking wrong version
+   ("v26.8." for 26.8.12), so the ellipsis has to be real. */
+.label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .dot {
+  flex-shrink: 0;
   width: 7px;
   height: 7px;
   border-radius: 50%;

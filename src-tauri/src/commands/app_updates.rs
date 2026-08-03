@@ -30,9 +30,10 @@ const LATEST_MANIFEST_URL: &str =
 ///
 /// `installer` is the updater handle that produced `bytes`, kept alongside
 /// them. It is what makes "Restart to install" a restart rather than a
-/// download: applying the package needs no network, so the click cannot be
-/// derailed by an offline machine, by a slow manifest fetch, or by a newer
-/// release appearing between the download and the click.
+/// download: applying the package needs no network at all, so an offline
+/// machine, a slow manifest fetch or an unreachable release host cannot stop
+/// a click. A newer release appearing in the meantime does stop it — the
+/// package is then stale; see `take_downloaded_if_current`.
 struct DownloadedPackage<I> {
     version: String,
     installer: I,
@@ -122,16 +123,24 @@ impl<I> AppUpdateRuntime<I> {
         });
     }
 
-    /// Takes the downloaded package, whatever version it is. Installing
-    /// exactly what was downloaded is the point: it is the version the badge
-    /// offered to install, and it needs no network to apply. A newer release
-    /// is picked up by the next check, which replaces the cache.
-    fn take_downloaded(&self) -> Option<DownloadedPackage<I>> {
+    /// Takes the downloaded package, but only if it is the version the last
+    /// recorded check reports — the version every UI surface is offering.
+    ///
+    /// They can disagree: a later check can find a newer release whose own
+    /// download has not finished yet, or failed. Installing the older cached
+    /// package then would apply a version the user was never shown, so it is
+    /// dropped here and the install path fetches the offered one instead.
+    ///
+    /// Reads the two locks in sequence, never nested, so it cannot deadlock
+    /// against `record_check` (which reads them in the opposite order).
+    fn take_downloaded_if_current(&self) -> Option<DownloadedPackage<I>> {
+        let offered_version = self.last_check()?.update?.version;
         self.downloaded
             .lock()
             .expect("app update state poisoned")
             .package
             .take()
+            .filter(|package| package.version == offered_version)
     }
 
     /// Flags the recorded last check's update as downloaded (if it is still
@@ -295,6 +304,10 @@ pub async fn install_app_update(
     state: State<'_, AppState>,
     on_event: Channel<AppUpdateInstallEvent>,
 ) -> Result<(), String> {
+    // Serialized against the background download: if one is in flight this
+    // waits for it instead of fetching the same package twice. The badge's
+    // action cannot land in that wait (it only appears once the download has
+    // finished), but Settings > About can, and shows its own progress line.
     let _install_guard = state.app_updates.install_lock.lock().await;
     let support = detect_support_status();
     if !support.supported {
@@ -309,7 +322,7 @@ pub async fn install_app_update(
     // cached with it. So there is nothing left to fetch — no manifest check,
     // no network at all — which is what lets the badge promise a restart
     // rather than a wait, offline included.
-    let package = match state.app_updates.take_downloaded() {
+    let package = match state.app_updates.take_downloaded_if_current() {
         Some(package) => {
             let _ = on_event.send(AppUpdateInstallEvent::DownloadFinished);
             package
@@ -1060,29 +1073,72 @@ mod tests {
     }
 
     #[test]
-    fn take_downloaded_returns_the_stored_package() {
+    fn take_downloaded_if_current_returns_the_offered_package() {
         let runtime = runtime();
+        runtime.record_check(AppUpdateLastCheck {
+            checked_at: "now".to_string(),
+            update: Some(sample_info("26.8.1")),
+            error: None,
+        });
         runtime.store_downloaded("26.8.1", (), vec![1, 2, 3]);
-        assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.1"));
 
-        let package = runtime.take_downloaded().expect("package expected");
+        assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.1"));
+        let package = runtime
+            .take_downloaded_if_current()
+            .expect("the offered version is cached");
         assert_eq!(package.version, "26.8.1");
         assert_eq!(package.bytes, vec![1, 2, 3]);
-        // Taking consumes the cache.
+        // Taking consumes the cache: one install, one package.
         assert_eq!(runtime.downloaded_version(), None);
-        assert!(runtime.take_downloaded().is_none());
+        assert!(runtime.take_downloaded_if_current().is_none());
+    }
+
+    #[test]
+    fn take_downloaded_if_current_drops_a_superseded_package() {
+        let runtime = runtime();
+        // 26.8.1 was downloaded, then a later check found 26.8.2 whose own
+        // download has not landed. Installing 26.8.1 now would apply a
+        // version no surface ever offered, so the stale package is dropped
+        // and the install path is left to fetch 26.8.2.
+        runtime.store_downloaded("26.8.1", (), vec![1]);
+        runtime.record_check(AppUpdateLastCheck {
+            checked_at: "now".to_string(),
+            update: Some(sample_info("26.8.2")),
+            error: None,
+        });
+
+        assert!(runtime.take_downloaded_if_current().is_none());
+        assert_eq!(runtime.downloaded_version(), None, "must not linger");
+    }
+
+    #[test]
+    fn take_downloaded_if_current_keeps_the_package_when_no_check_is_recorded() {
+        // No check recorded means no version is being offered, so there is
+        // nothing to install: the package stays cached for a real offer.
+        let runtime = runtime();
+        runtime.store_downloaded("26.8.1", (), vec![1]);
+
+        assert!(runtime.take_downloaded_if_current().is_none());
+        assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.1"));
     }
 
     #[test]
     fn store_downloaded_replaces_a_superseded_package() {
         let runtime = runtime();
+        runtime.record_check(AppUpdateLastCheck {
+            checked_at: "now".to_string(),
+            update: Some(sample_info("26.8.2")),
+            error: None,
+        });
         runtime.store_downloaded("26.8.1", (), vec![1]);
         // A newer release was found and downloaded: only one package is ever
         // held, so the older one must not survive to be installed later.
         runtime.store_downloaded("26.8.2", (), vec![2]);
 
         assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.2"));
-        let package = runtime.take_downloaded().expect("package expected");
+        let package = runtime
+            .take_downloaded_if_current()
+            .expect("package expected");
         assert_eq!(package.version, "26.8.2");
         assert_eq!(package.bytes, vec![2]);
     }

@@ -72,7 +72,7 @@ const AppUpdateBadge = () => {
         aria-label={`Update available: CLAI v${update.version}`}
       >
         <span className={styles.dot} aria-hidden="true" />
-        Update available · v{update.version}
+        <span className={styles.label}>Update available · v{update.version}</span>
       </button>
       {update.downloaded && (
         <button
