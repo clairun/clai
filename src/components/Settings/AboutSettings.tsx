@@ -124,7 +124,7 @@ const AboutSettings = () => {
   // summary line needs platform-aware copy: macOS/Windows users fall back
   // to the manual "Install and restart" / GitHub download, while Linux
   // builds are steward-managed by the user's package manager or Flatpak
-  // (notify-only by design; see Phase 6).
+  // (notify-only by design).
   const showPackageManagerHint =
     availableUpdate !== null && !availableUpdate.installable && isLinux;
   const updateSummary = installing

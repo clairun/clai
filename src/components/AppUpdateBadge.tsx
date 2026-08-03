@@ -12,9 +12,10 @@
  *
  * Once the package has finished downloading in the background, a "Restart to
  * install" button appears beside the pill. That click is the ONLY thing that
- * installs an update; the package is already on disk, so it is a restart, not
- * a download wait. Ignoring it costs the user nothing — the app keeps running
- * the current version and picks the download up again on the next launch.
+ * installs an update, and it needs no network: the backend applies the
+ * package it already downloaded and verified. Ignoring it costs the user
+ * nothing — the app keeps running the current version and picks the download
+ * up again on the next launch.
  */
 
 import React, { useCallback, useState } from 'react';
@@ -43,9 +44,10 @@ const AppUpdateBadge = () => {
     setRestarting(true);
     setError('');
     try {
-      // The backend installs the cached package and restarts the app, so a
-      // resolved promise is not the success path — the process is gone by
-      // then. Only the rejection matters here.
+      // Progress events are ignored on purpose: the package is already
+      // downloaded, so this is an extract-and-relaunch, not a transfer. The
+      // backend restarts the app on success, so a resolved promise is not
+      // the success path either — only the rejection matters here.
       await installAppUpdate(() => {});
       setRestarting(false);
     } catch (err) {
@@ -78,12 +80,16 @@ const AppUpdateBadge = () => {
           className={styles.action}
           onClick={restartToInstall}
           disabled={restarting}
+          // The reason lives in the tooltip and in the live region below:
+          // spelling it out inline would grow the top bar by an arbitrary
+          // amount of text and squeeze the workspace counters out.
+          title={error || undefined}
         >
-          {restarting ? 'Restarting...' : 'Restart to install'}
+          {restarting ? 'Restarting...' : error ? 'Install failed - retry' : 'Restart to install'}
         </button>
       )}
       {error && (
-        <span className={styles.error} role="alert" title={error}>
+        <span className="sr-only" role="alert">
           {error}
         </span>
       )}

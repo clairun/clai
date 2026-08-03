@@ -23,8 +23,15 @@
   display: block;
 }
 
+/* The flexible middle of the bar: it absorbs the slack, and on a narrow
+   window it is what gives way. `min-width: 0` lets it actually shrink (a
+   flex item's default floor is its content), and clipping the counts is a
+   better outcome than pushing the update action or the settings button
+   off-screen. */
 .counters {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 8px;

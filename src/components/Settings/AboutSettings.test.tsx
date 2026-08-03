@@ -44,9 +44,9 @@ const notifyOnlyStatus = {
   lastCheck: { checkedAt: '2026-07-24T00:00:00Z', update: null, error: null },
 };
 
-/** Phase 6 status: Linux deb/rpm with a published update that's still
- *  notify-only. The body copy and button label differ from the generic
- *  non-installable branch — this fixture exercises the platform branch. */
+/** Linux deb/rpm with a published update that is still notify-only. The body
+ *  copy and button label differ from the generic non-installable branch —
+ *  this fixture exercises the platform branch. */
 const linuxPkgStatus = {
   support: {
     supported: false,

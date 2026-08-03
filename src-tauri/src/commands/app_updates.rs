@@ -27,20 +27,55 @@ const LATEST_MANIFEST_URL: &str =
 /// Update package downloaded in the background, waiting for the user to
 /// restart. Kept in memory: packages are tens of MB and the alternative
 /// (a temp file) would need cleanup and re-verification on install.
-struct DownloadedPackage {
+///
+/// `installer` is the updater handle that produced `bytes`, kept alongside
+/// them. It is what makes "Restart to install" a restart rather than a
+/// download: applying the package needs no network, so the click cannot be
+/// derailed by an offline machine, by a slow manifest fetch, or by a newer
+/// release appearing between the download and the click.
+struct DownloadedPackage<I> {
     version: String,
+    installer: I,
     bytes: Vec<u8>,
 }
 
-#[derive(Clone, Default)]
-pub struct AppUpdateRuntime {
+/// The one downloaded package we hold, if any. A newer download replaces an
+/// older one: the badge only ever advertises a single version.
+struct PackageCache<I> {
+    package: Option<DownloadedPackage<I>>,
+}
+
+impl<I> Default for PackageCache<I> {
+    fn default() -> Self {
+        Self { package: None }
+    }
+}
+
+/// In-memory update state for the running app.
+///
+/// Generic over the installer type purely as a test seam: production always
+/// uses `Update`, which cannot be constructed outside the updater plugin, so
+/// tests instantiate `AppUpdateRuntime<()>` to exercise the bookkeeping.
+#[derive(Clone)]
+pub struct AppUpdateRuntime<I = Update> {
     last_check: Arc<Mutex<Option<AppUpdateLastCheck>>>,
-    downloaded: Arc<Mutex<Option<DownloadedPackage>>>,
+    downloaded: Arc<Mutex<PackageCache<I>>>,
     check_lock: Arc<tokio::sync::Mutex<()>>,
     install_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-impl AppUpdateRuntime {
+impl<I> Default for AppUpdateRuntime<I> {
+    fn default() -> Self {
+        Self {
+            last_check: Arc::default(),
+            downloaded: Arc::default(),
+            check_lock: Arc::default(),
+            install_lock: Arc::default(),
+        }
+    }
+}
+
+impl<I> AppUpdateRuntime<I> {
     pub fn new() -> Self {
         Self::default()
     }
@@ -71,25 +106,32 @@ impl AppUpdateRuntime {
         self.downloaded
             .lock()
             .expect("app update state poisoned")
+            .package
             .as_ref()
             .map(|package| package.version.clone())
     }
 
-    fn store_downloaded(&self, version: &str, bytes: Vec<u8>) {
-        *self.downloaded.lock().expect("app update state poisoned") = Some(DownloadedPackage {
+    fn store_downloaded(&self, version: &str, installer: I, bytes: Vec<u8>) {
+        self.downloaded
+            .lock()
+            .expect("app update state poisoned")
+            .package = Some(DownloadedPackage {
             version: version.to_string(),
+            installer,
             bytes,
         });
     }
 
-    /// Takes the cached package if it matches `version`; a mismatch (a newer
-    /// release appeared since the download) drops the stale cache instead.
-    fn take_downloaded(&self, version: &str) -> Option<Vec<u8>> {
-        let mut guard = self.downloaded.lock().expect("app update state poisoned");
-        match guard.take() {
-            Some(package) if package.version == version => Some(package.bytes),
-            _ => None,
-        }
+    /// Takes the downloaded package, whatever version it is. Installing
+    /// exactly what was downloaded is the point: it is the version the badge
+    /// offered to install, and it needs no network to apply. A newer release
+    /// is picked up by the next check, which replaces the cache.
+    fn take_downloaded(&self) -> Option<DownloadedPackage<I>> {
+        self.downloaded
+            .lock()
+            .expect("app update state poisoned")
+            .package
+            .take()
     }
 
     /// Flags the recorded last check's update as downloaded (if it is still
@@ -203,6 +245,15 @@ struct SupportProbe<'a> {
     has_rpm: bool,
 }
 
+/// Whether an available update should be downloaded in the background.
+///
+/// Mandatory by design — no user setting gates this — but only where the
+/// build can install what it downloads: notify-only channels (Flatpak, Linux
+/// deb/rpm) would burn bandwidth on a package they can never apply.
+fn should_download_in_background(support: &AppUpdateSupportStatus, update: &AppUpdateInfo) -> bool {
+    support.supported && update.installable && !update.downloaded
+}
+
 #[tauri::command]
 pub fn get_app_update_status(state: State<'_, AppState>) -> AppUpdateStatus {
     AppUpdateStatus {
@@ -228,7 +279,7 @@ pub async fn check_for_app_update(
         ) {
             tracing::warn!(%error, "Failed to emit app update notification");
         }
-        if update.installable && !update.downloaded {
+        if should_download_in_background(&result.support, &update) {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 download_update_in_background(&app).await;
@@ -252,26 +303,30 @@ pub async fn install_app_update(
             .unwrap_or_else(|| "This CLAI build cannot update itself.".to_string()));
     }
 
-    let update = app
-        .updater_builder()
-        .timeout(INSTALL_TIMEOUT)
-        .build()
-        .map_err(format_updater_error)?
-        .check()
-        .await
-        .map_err(format_updater_error)?
-        .ok_or_else(|| "No update is available.".to_string())?;
-
     let _ = on_event.send(AppUpdateInstallEvent::Started);
-    // Reuse a package the background auto-download already fetched (and the
-    // updater plugin signature-verified) when it matches the version we are
-    // about to install; otherwise download it now.
-    let (bytes, from_cache) = match state.app_updates.take_downloaded(&update.version) {
-        Some(bytes) => {
+    // Fast path: the background download already fetched this package and the
+    // updater plugin verified its signature, and the handle it came from is
+    // cached with it. So there is nothing left to fetch — no manifest check,
+    // no network at all — which is what lets the badge promise a restart
+    // rather than a wait, offline included.
+    let package = match state.app_updates.take_downloaded() {
+        Some(package) => {
             let _ = on_event.send(AppUpdateInstallEvent::DownloadFinished);
-            (bytes, true)
+            package
         }
+        // Nothing cached: the background download is still running, failed,
+        // or never started (Settings > About can ask for an install the
+        // moment a check reports one). Fetch it now, reporting progress.
         None => {
+            let update = app
+                .updater_builder()
+                .timeout(INSTALL_TIMEOUT)
+                .build()
+                .map_err(format_updater_error)?
+                .check()
+                .await
+                .map_err(format_updater_error)?
+                .ok_or_else(|| "No update is available.".to_string())?;
             let mut downloaded: u64 = 0;
             let bytes = tokio::time::timeout(
                 DOWNLOAD_TIMEOUT,
@@ -289,17 +344,19 @@ pub async fn install_app_update(
             .await
             .map_err(|_| "Timed out downloading the update package.".to_string())?
             .map_err(format_updater_error)?;
-            (bytes, false)
+            DownloadedPackage {
+                version: update.version.clone(),
+                installer: update,
+                bytes,
+            }
         }
     };
 
     let _ = on_event.send(AppUpdateInstallEvent::Installing);
-    if let Err(error) = update.install(&bytes) {
-        // Put a cached package back so the "downloaded — restart to apply"
-        // state stays truthful and a retry does not silently re-download.
-        if from_cache {
-            state.app_updates.store_downloaded(&update.version, bytes);
-        }
+    if let Err(error) = package.installer.install(&package.bytes) {
+        // Keep the verified package: the retry is then a restart instead of
+        // another download, and the badge's "downloaded" state stays true.
+        cache_downloaded_package(&app, state.inner(), package);
         return Err(format_updater_error(error));
     }
     app.restart();
@@ -326,7 +383,7 @@ pub fn spawn_startup_check(app: AppHandle) {
         ) {
             tracing::warn!(%error, "Failed to emit app update notification");
         }
-        if update.installable && !update.downloaded {
+        if should_download_in_background(&result.support, &update) {
             download_update_in_background(&app).await;
         }
     });
@@ -345,9 +402,6 @@ async fn download_update_in_background(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    if !detect_support_status().supported {
-        return;
-    }
 
     // Serialize with manual installs; whichever runs first downloads.
     let _install_guard = state.app_updates.install_lock.lock().await;
@@ -388,9 +442,29 @@ async fn download_update_in_background(app: &AppHandle) {
             }
         };
 
-    state.app_updates.store_downloaded(&update.version, bytes);
     tracing::info!(version = %update.version, "Update downloaded in the background");
-    if let Some(update) = state.app_updates.mark_downloaded(&update.version) {
+    cache_downloaded_package(
+        app,
+        state.inner(),
+        DownloadedPackage {
+            version: update.version.clone(),
+            installer: update,
+            bytes,
+        },
+    );
+}
+
+/// Holds a verified package and tells the UI it can offer "Restart to
+/// install". Shared by the background download and by a failed install
+/// putting its package back, so both leave the same state behind.
+fn cache_downloaded_package(app: &AppHandle, state: &AppState, package: DownloadedPackage<Update>) {
+    let version = package.version.clone();
+    state
+        .app_updates
+        .store_downloaded(&version, package.installer, package.bytes);
+    // Only emits when the recorded check still names this version; a check
+    // that has already moved on owns the badge's state instead.
+    if let Some(update) = state.app_updates.mark_downloaded(&version) {
         if let Err(error) = app.emit(
             APP_UPDATE_AVAILABLE_EVENT,
             AppUpdateAvailableEvent { update },
@@ -927,29 +1001,95 @@ mod tests {
         }
     }
 
-    #[test]
-    fn take_downloaded_returns_bytes_for_matching_version() {
-        let runtime = AppUpdateRuntime::new();
-        runtime.store_downloaded("26.8.1", vec![1, 2, 3]);
-        assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.1"));
-        assert_eq!(runtime.take_downloaded("26.8.1"), Some(vec![1, 2, 3]));
-        // Taking consumes the cache.
-        assert_eq!(runtime.downloaded_version(), None);
+    /// A real `Update` cannot be built outside the updater plugin, so the
+    /// bookkeeping is exercised with `()` standing in for the installer.
+    fn runtime() -> AppUpdateRuntime<()> {
+        AppUpdateRuntime::new()
+    }
+
+    fn supported() -> AppUpdateSupportStatus {
+        super::supported(probe("macos", Some("app")), "native")
     }
 
     #[test]
-    fn take_downloaded_drops_stale_cache_on_version_mismatch() {
-        let runtime = AppUpdateRuntime::new();
-        runtime.store_downloaded("26.8.1", vec![1, 2, 3]);
-        // A newer release appeared: the stale package must not be installed
-        // and must not linger in memory either.
-        assert_eq!(runtime.take_downloaded("26.8.2"), None);
+    fn background_download_is_mandatory_on_self_updating_builds() {
+        // The download used to be opt-out via `autoUpdate.autoDownload`.
+        // Nothing gates it now except the build's own capability, and this
+        // is the test that fails if a setting is ever wired back in.
+        assert!(should_download_in_background(
+            &supported(),
+            &sample_info("26.8.1")
+        ));
+    }
+
+    #[test]
+    fn background_download_skips_builds_that_cannot_install() {
+        // Notify-only channels (Flatpak, Linux deb/rpm) can see the new
+        // version but never apply it, so downloading is pure waste.
+        let mut probe = probe("linux", Some("deb"));
+        probe.has_dpkg = true;
+        probe.os_release = Some("ID=ubuntu\n");
+        let notify_only = support_from_probe(probe);
+        assert!(notify_only.can_check, "fixture should still be notify-only");
+
+        assert!(!should_download_in_background(
+            &notify_only,
+            &sample_info("26.8.1")
+        ));
+        // Belt and braces: the per-update flag says the same thing.
+        let not_installable = AppUpdateInfo {
+            installable: false,
+            ..sample_info("26.8.1")
+        };
+        assert!(!should_download_in_background(
+            &supported(),
+            &not_installable
+        ));
+    }
+
+    #[test]
+    fn background_download_does_not_repeat_a_finished_download() {
+        let already_downloaded = AppUpdateInfo {
+            downloaded: true,
+            ..sample_info("26.8.1")
+        };
+        assert!(!should_download_in_background(
+            &supported(),
+            &already_downloaded
+        ));
+    }
+
+    #[test]
+    fn take_downloaded_returns_the_stored_package() {
+        let runtime = runtime();
+        runtime.store_downloaded("26.8.1", (), vec![1, 2, 3]);
+        assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.1"));
+
+        let package = runtime.take_downloaded().expect("package expected");
+        assert_eq!(package.version, "26.8.1");
+        assert_eq!(package.bytes, vec![1, 2, 3]);
+        // Taking consumes the cache.
         assert_eq!(runtime.downloaded_version(), None);
+        assert!(runtime.take_downloaded().is_none());
+    }
+
+    #[test]
+    fn store_downloaded_replaces_a_superseded_package() {
+        let runtime = runtime();
+        runtime.store_downloaded("26.8.1", (), vec![1]);
+        // A newer release was found and downloaded: only one package is ever
+        // held, so the older one must not survive to be installed later.
+        runtime.store_downloaded("26.8.2", (), vec![2]);
+
+        assert_eq!(runtime.downloaded_version().as_deref(), Some("26.8.2"));
+        let package = runtime.take_downloaded().expect("package expected");
+        assert_eq!(package.version, "26.8.2");
+        assert_eq!(package.bytes, vec![2]);
     }
 
     #[test]
     fn mark_downloaded_flags_recorded_check_and_returns_info() {
-        let runtime = AppUpdateRuntime::new();
+        let runtime = runtime();
         runtime.record_check(AppUpdateLastCheck {
             checked_at: "now".to_string(),
             update: Some(sample_info("26.8.1")),
@@ -963,10 +1103,10 @@ mod tests {
 
     #[test]
     fn record_check_rederives_downloaded_from_byte_cache() {
-        let runtime = AppUpdateRuntime::new();
+        let runtime = runtime();
         // A background download finished between the check's cache read and
         // its recording: recording must not regress `downloaded` to false.
-        runtime.store_downloaded("26.8.1", vec![1]);
+        runtime.store_downloaded("26.8.1", (), vec![1]);
         let recorded = runtime.record_check(AppUpdateLastCheck {
             checked_at: "now".to_string(),
             update: Some(sample_info("26.8.1")),
@@ -978,7 +1118,7 @@ mod tests {
 
     #[test]
     fn mark_downloaded_ignores_version_mismatch() {
-        let runtime = AppUpdateRuntime::new();
+        let runtime = runtime();
         runtime.record_check(AppUpdateLastCheck {
             checked_at: "now".to_string(),
             update: Some(sample_info("26.8.2")),

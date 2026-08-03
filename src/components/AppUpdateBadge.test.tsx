@@ -150,9 +150,13 @@ describe('AppUpdateBadge', () => {
     render(<AppUpdateBadge />);
     await userEvent.click(await screen.findByRole('button', { name: /Restart to install/ }));
 
+    // The full reason goes to a live region (and the tooltip) rather than
+    // inline text, which would stretch the top bar by an arbitrary amount.
     expect(await screen.findByRole('alert')).toHaveTextContent('Permission denied');
     // Re-enabled: a failed install must be retryable.
-    expect(screen.getByRole('button', { name: /Restart to install/ })).toBeEnabled();
+    const retry = screen.getByRole('button', { name: /Install failed/ });
+    expect(retry).toBeEnabled();
+    expect(retry).toHaveAttribute('title', 'Permission denied');
   });
 
   it('clears a failed install when a newer version arrives', async () => {
@@ -168,6 +172,7 @@ describe('AppUpdateBadge', () => {
 
     expect(await screen.findByText(/Update available · v26\.8\.2/)).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Restart to install/ })).toBeInTheDocument();
   });
 
   it('does not downgrade a downloaded update when a stale event arrives late', async () => {

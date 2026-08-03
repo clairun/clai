@@ -760,21 +760,31 @@ mod tests {
     }
 
     #[test]
-    fn config_written_before_updates_became_mandatory_still_loads() {
+    fn config_written_before_updates_became_mandatory_keeps_its_settings() {
         // `autoUpdate.autoDownload` was a user setting until background
-        // downloads became mandatory on self-updating builds. Configs on
-        // disk still carry the key; loading must ignore it rather than
-        // failing and resetting the user's whole config to defaults.
+        // downloads became mandatory on self-updating builds. Configs on disk
+        // still carry the key, so the removed field must be ignored, NOT
+        // rejected: a parse error here would silently reset every real
+        // setting in the file to its default. Both asserted values are
+        // deliberately non-default so the test can fail.
         let legacy = r#"{
             "version": 1,
-            "workspaceDirs": ["~/.clai/workspaces"],
+            "workspaceDirs": ["/tmp/clai-test-workspaces"],
             "mcpServers": [],
             "skillSources": [],
             "providerConnections": [],
+            "schedulerPaused": true,
             "autoUpdate": { "autoDownload": false }
         }"#;
-        let parsed: ClaiConfig = serde_json::from_str(legacy).unwrap();
-        assert_eq!(parsed.workspace_dirs, default_workspace_dirs());
+        let parsed: ClaiConfig = serde_json::from_str(legacy)
+            .expect("a config carrying the removed autoUpdate key must still load");
+
+        assert_eq!(
+            parsed.workspace_dirs,
+            vec![PathBuf::from("/tmp/clai-test-workspaces")],
+        );
+        assert_ne!(parsed.workspace_dirs, default_workspace_dirs());
+        assert!(parsed.scheduler_paused);
     }
 
     fn interval_kind(minutes: u32) -> crate::config::workspace_config::ScheduleKind {
