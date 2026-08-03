@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::config::types::standard_restricted_shell_allowlist;
 use crate::config::{bundled, AppConfig, SkillSourceKind};
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
@@ -265,6 +266,7 @@ pub fn default_agent_execution() -> ExecutionCapabilityConfig {
             origin: None,
         });
     }
+    execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
     execution
 }
 
@@ -569,6 +571,11 @@ mod attach_provider_tests {
         let manager = WorkspaceAgent::new_manager("mgr".to_string(), 1);
         assert_eq!(manager.execution.shell.mode, ShellAccessMode::Restricted);
         assert!(manager.execution.web.enabled);
+        assert!(manager
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"rg".to_string()));
     }
 
     // -------------------------------------------------------------------

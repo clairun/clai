@@ -3102,22 +3102,10 @@ mod tests {
         allowed: &[&str],
         blocked: &[&str],
     ) -> ExecutionCapabilityConfig {
-        restricted_execution_config_with_disabled_defaults(allowed, blocked, &[])
-    }
-
-    fn restricted_execution_config_with_disabled_defaults(
-        allowed: &[&str],
-        blocked: &[&str],
-        disabled_defaults: &[&str],
-    ) -> ExecutionCapabilityConfig {
         ExecutionCapabilityConfig {
             shell: ShellCapabilityConfig {
                 mode: ShellAccessMode::Restricted,
                 allowed_command_prefixes: allowed.iter().map(|s| s.to_string()).collect(),
-                disabled_default_command_prefixes: disabled_defaults
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
                 blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
             },
             ..Default::default()
@@ -3147,14 +3135,14 @@ mod tests {
     }
 
     #[test]
-    fn policy_allows_standard_restricted_prefix_without_custom_allowlist() {
-        let exec = restricted_execution_config(&[], &[]);
+    fn policy_allows_seeded_restricted_prefix_from_allowlist() {
+        let exec = restricted_execution_config(&["rg"], &[]);
         assert!(enforce_command_policy(&exec, None, "rg --files").is_ok());
     }
 
     #[test]
-    fn policy_disabled_standard_restricted_prefix_needs_approval() {
-        let exec = restricted_execution_config_with_disabled_defaults(&[], &[], &["rg"]);
+    fn policy_restricted_prefix_removed_from_allowlist_needs_approval() {
+        let exec = restricted_execution_config(&[], &[]);
         let err = enforce_command_policy(&exec, None, "rg --files").unwrap_err();
         assert!(matches!(err, CommandDenial::NotInAllowList(_)));
     }
@@ -3239,7 +3227,6 @@ mod tests {
             shell: ShellCapabilityConfig {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
-                disabled_default_command_prefixes: vec![],
                 blocked_command_prefixes: vec![],
             },
             ..Default::default()

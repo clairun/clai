@@ -1119,7 +1119,7 @@ pub(crate) fn build_system_prompt(
             crate::config::ShellAccessMode::Restricted => {
                 let allowed = context.execution.shell.effective_allowed_command_prefixes();
                 let allowed_text = if allowed.is_empty() {
-                    "none (all restricted defaults disabled and no custom prefixes)".to_string()
+                    "none".to_string()
                 } else {
                     allowed.join(", ")
                 };
@@ -1492,8 +1492,7 @@ mod tests {
         };
 
         assert!(text.contains("- Shell mode: restricted"));
-        assert!(text.contains("- Allowed command prefixes: pwd, cd, ls, rg"));
-        assert!(text.contains("git status"));
+        assert!(text.contains("- Allowed command prefixes: cargo check"));
         assert!(text.contains("cargo check"));
         assert!(text.contains("## Agent Memory"));
     }

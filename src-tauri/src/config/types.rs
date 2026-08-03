@@ -319,8 +319,6 @@ pub struct ShellCapabilityConfig {
     pub mode: ShellAccessMode,
     #[serde(default)]
     pub allowed_command_prefixes: Vec<String>,
-    #[serde(default)]
-    pub disabled_default_command_prefixes: Vec<String>,
     #[serde(default = "default_restricted_shell_blocklist")]
     pub blocked_command_prefixes: Vec<String>,
 }
@@ -330,7 +328,6 @@ impl Default for ShellCapabilityConfig {
         Self {
             mode: ShellAccessMode::Off,
             allowed_command_prefixes: Vec::new(),
-            disabled_default_command_prefixes: Vec::new(),
             blocked_command_prefixes: default_restricted_shell_blocklist(),
         }
     }
@@ -339,15 +336,6 @@ impl Default for ShellCapabilityConfig {
 impl ShellCapabilityConfig {
     pub fn effective_allowed_command_prefixes(&self) -> Vec<String> {
         let mut allowed = Vec::new();
-        for prefix in standard_restricted_shell_allowlist() {
-            if !self
-                .disabled_default_command_prefixes
-                .iter()
-                .any(|disabled| disabled.trim() == prefix)
-            {
-                push_unique_prefix(&mut allowed, prefix);
-            }
-        }
         for prefix in &self.allowed_command_prefixes {
             let prefix = prefix.trim();
             if !prefix.is_empty() {
@@ -355,14 +343,6 @@ impl ShellCapabilityConfig {
             }
         }
         allowed
-    }
-
-    pub fn is_standard_restricted_prefix(prefix: &str) -> bool {
-        let prefix = prefix.trim();
-        !prefix.is_empty()
-            && standard_restricted_shell_allowlist()
-                .iter()
-                .any(|default_prefix| default_prefix == prefix)
     }
 }
 
