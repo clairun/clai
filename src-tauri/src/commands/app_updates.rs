@@ -9,7 +9,6 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::{Error as UpdaterError, Update, UpdaterExt};
 
-use crate::config::AutoUpdateConfig;
 use crate::AppState;
 
 pub const APP_UPDATE_AVAILABLE_EVENT: &str = "app-updates://available";
@@ -153,7 +152,6 @@ pub struct AppUpdateLastCheck {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct AppUpdateStatus {
-    pub settings: AutoUpdateConfig,
     pub support: AppUpdateSupportStatus,
     pub last_check: Option<AppUpdateLastCheck>,
 }
@@ -162,7 +160,6 @@ pub struct AppUpdateStatus {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct AppUpdateCheckResult {
-    pub settings: AutoUpdateConfig,
     pub support: AppUpdateSupportStatus,
     pub last_check: AppUpdateLastCheck,
 }
@@ -207,33 +204,11 @@ struct SupportProbe<'a> {
 }
 
 #[tauri::command]
-pub fn get_auto_update_settings(state: State<'_, AppState>) -> Result<AutoUpdateConfig, String> {
-    auto_update_settings(state.inner())
-}
-
-#[tauri::command]
-pub fn set_auto_update_settings(
-    settings: AutoUpdateConfig,
-    state: State<'_, AppState>,
-) -> Result<AutoUpdateConfig, String> {
-    state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Config lock error: {e}"))?
-        .update(|config| {
-            config.auto_update = settings.clone();
-        })
-        .map_err(|e| format!("Failed to save update settings: {e}"))?;
-    Ok(settings)
-}
-
-#[tauri::command]
-pub fn get_app_update_status(state: State<'_, AppState>) -> Result<AppUpdateStatus, String> {
-    Ok(AppUpdateStatus {
-        settings: auto_update_settings(state.inner())?,
+pub fn get_app_update_status(state: State<'_, AppState>) -> AppUpdateStatus {
+    AppUpdateStatus {
         support: detect_support_status(),
         last_check: state.app_updates.last_check(),
-    })
+    }
 }
 
 #[tauri::command]
@@ -243,8 +218,7 @@ pub async fn check_for_app_update(
 ) -> Result<AppUpdateCheckResult, String> {
     let result = check_for_update(&app, state.inner()).await;
     // Manual checks surface updates the same way startup checks do, so the
-    // persistent top-bar badge (and toast) appear no matter who found the
-    // update first.
+    // persistent top-bar badge appears no matter who found the update first.
     if let Some(update) = result.last_check.update.clone() {
         if let Err(error) = app.emit(
             APP_UPDATE_AVAILABLE_EVENT,
@@ -257,7 +231,7 @@ pub async fn check_for_app_update(
         if update.installable && !update.downloaded {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                auto_download_if_enabled(&app).await;
+                download_update_in_background(&app).await;
             });
         }
     }
@@ -339,8 +313,7 @@ pub fn spawn_startup_check(app: AppHandle) {
         };
 
         // Checking is always on: it is a cheap, anonymous manifest fetch and
-        // the user must at least learn an update exists. Only the download
-        // is configurable (`AutoUpdateConfig::auto_download`).
+        // the user must at least learn an update exists.
         let result = check_for_update(&app, state.inner()).await;
         let Some(update) = result.last_check.update else {
             return;
@@ -354,28 +327,24 @@ pub fn spawn_startup_check(app: AppHandle) {
             tracing::warn!(%error, "Failed to emit app update notification");
         }
         if update.installable && !update.downloaded {
-            auto_download_if_enabled(&app).await;
+            download_update_in_background(&app).await;
         }
     });
 }
 
-/// Background download of an available update, gated on the
-/// `autoUpdate.autoDownload` setting. Re-checks the updater manifest to get
-/// a fresh signed package descriptor, downloads it, caches the bytes, and
-/// re-emits the availability event with `downloaded: true` so the badge and
-/// toast flip to \"restart to apply\".
-async fn auto_download_if_enabled(app: &AppHandle) {
+/// Background download of an available update. Unconditional on builds that
+/// can install updates themselves: having the package ready is what lets the
+/// UI offer a one-click "Restart to install" instead of a download wait, and
+/// it costs the user nothing to decide later (or never). Installing is still
+/// entirely the user's call — nothing here restarts the app.
+///
+/// Re-checks the updater manifest to get a fresh signed package descriptor,
+/// downloads it, caches the bytes, and re-emits the availability event with
+/// `downloaded: true` so the badge grows its "Restart to install" action.
+async fn download_update_in_background(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    match auto_update_settings(state.inner()) {
-        Ok(settings) if settings.auto_download => {}
-        Ok(_) => return,
-        Err(error) => {
-            tracing::warn!(error, "Skipping update auto-download");
-            return;
-        }
-    }
     if !detect_support_status().supported {
         return;
     }
@@ -431,18 +400,8 @@ async fn auto_download_if_enabled(app: &AppHandle) {
     }
 }
 
-fn auto_update_settings(state: &AppState) -> Result<AutoUpdateConfig, String> {
-    Ok(state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Config lock error: {e}"))?
-        .get()
-        .auto_update)
-}
-
 async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckResult {
     let _check_guard = state.app_updates.check_lock.lock().await;
-    let settings = auto_update_settings(state).unwrap_or_default();
     let support = detect_support_status();
     let checked_at = chrono::Utc::now().to_rfc3339();
 
@@ -500,7 +459,6 @@ async fn check_for_update(app: &AppHandle, state: &AppState) -> AppUpdateCheckRe
 
     let last_check = state.app_updates.record_check(last_check);
     AppUpdateCheckResult {
-        settings,
         support,
         last_check,
     }

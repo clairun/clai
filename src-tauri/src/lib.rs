@@ -329,8 +329,6 @@ pub fn run() {
             // App metadata
             commands::app_info::app_version_detail,
             // App update commands
-            commands::app_updates::get_auto_update_settings,
-            commands::app_updates::set_auto_update_settings,
             commands::app_updates::get_app_update_status,
             commands::app_updates::check_for_app_update,
             commands::app_updates::install_app_update,

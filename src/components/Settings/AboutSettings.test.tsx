@@ -19,7 +19,6 @@ const respond = (status: unknown) => {
 };
 
 const unavailableStatus = {
-  settings: { autoDownload: true },
   support: {
     supported: false,
     canCheck: false,
@@ -34,7 +33,6 @@ const unavailableStatus = {
 };
 
 const notifyOnlyStatus = {
-  settings: { autoDownload: true },
   support: {
     supported: false,
     canCheck: true,
@@ -50,7 +48,6 @@ const notifyOnlyStatus = {
  *  notify-only. The body copy and button label differ from the generic
  *  non-installable branch — this fixture exercises the platform branch. */
 const linuxPkgStatus = {
-  settings: { autoDownload: true },
   support: {
     supported: false,
     canCheck: true,
@@ -82,7 +79,6 @@ const linuxPkgStatus = {
  *  same body copy applies; only the `channel` and the support `reason`
  *  differ. */
 const linuxFlatpakStatus = {
-  settings: { autoDownload: true },
   support: {
     supported: false,
     canCheck: true,
@@ -95,6 +91,21 @@ const linuxFlatpakStatus = {
   lastCheck: {
     ...linuxPkgStatus.lastCheck,
   },
+};
+
+/** A build that CAN install updates itself (macOS .app / Windows NSIS):
+ *  the only channel where a background download happens at all. */
+const supportedStatus = {
+  support: {
+    supported: true,
+    canCheck: true,
+    platform: 'macos',
+    arch: 'arm64',
+    bundleType: 'app',
+    channel: 'native',
+    reason: null,
+  },
+  lastCheck: { checkedAt: '2026-07-24T00:00:00Z', update: null, error: null },
 };
 
 describe('AboutSettings updates panel', () => {
@@ -114,6 +125,20 @@ describe('AboutSettings updates panel', () => {
     expect(screen.queryByRole('button', { name: /check for updates/i })).toBeNull();
   });
 
+  it('offers no update preferences even on self-updating builds', async () => {
+    // Background downloads are mandatory wherever the build can install
+    // updates itself, so About is purely informational plus the manual
+    // check/install actions. A stray toggle here would be a re-introduced
+    // setting, not a cosmetic slip.
+    respond(supportedStatus);
+    render(<AboutSettings />);
+    await waitFor(() => expect(screen.getByText('Available')).toBeTruthy());
+
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.queryByText(/automatically download/i)).toBeNull();
+    expect(mockInvoke).not.toHaveBeenCalledWith('set_auto_update_settings', expect.anything());
+  });
+
   it('keeps the check button and status line for notify-only builds', async () => {
     respond(notifyOnlyStatus);
     render(<AboutSettings />);
@@ -123,17 +148,10 @@ describe('AboutSettings updates panel', () => {
     expect(screen.getByText('CLAI is up to date.')).toBeTruthy();
   });
 
-  it('hides the auto-download toggle and uses the package-manager copy on Linux deb/rpm', async () => {
+  it('uses the package-manager copy on Linux deb/rpm', async () => {
     respond(linuxPkgStatus);
     render(<AboutSettings />);
     await waitFor(() => expect(screen.getByText('Notify only')).toBeTruthy());
-
-    // Toggle is reserved for self-installing builds. Linux deb/rpm goes
-    // through the system package manager and must not advertise
-    // background auto-downloads that won't actually happen.
-    expect(
-      screen.queryByRole('checkbox', { name: /automatically download updates/i })
-    ).toBeNull();
 
     // Platform-aware body copy: points the user at their package
     // manager instead of a generic "View release" hint.

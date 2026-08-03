@@ -8,11 +8,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type {
-  AppUpdateCheckResult,
-  AppUpdateStatus,
-  AutoUpdateConfig,
-} from '../../generated/bindings';
+import type { AppUpdateCheckResult, AppUpdateStatus } from '../../generated/bindings';
 import {
   LATEST_RELEASE_URL,
   installAppUpdate,
@@ -37,7 +33,6 @@ const AboutSettings = () => {
   const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
   const [updateError, setUpdateError] = useState('');
   const [checking, setChecking] = useState(false);
-  const [savingAutoUpdate, setSavingAutoUpdate] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [installProgress, setInstallProgress] = useState('');
 
@@ -73,38 +68,12 @@ const AboutSettings = () => {
     };
   }, []);
 
-  const persistAutoUpdate = (autoDownload: boolean) => {
-    if (!updateStatus || savingAutoUpdate) return;
-    const previousSettings = updateStatus.settings;
-    const settings: AutoUpdateConfig = { autoDownload };
-    setSavingAutoUpdate(true);
-    setUpdateError('');
-    setUpdateStatus((current) => (current ? { ...current, settings } : current));
-    invoke<AutoUpdateConfig>('set_auto_update_settings', { settings })
-      .then((saved) => {
-        setUpdateStatus((current) => (current ? { ...current, settings: saved } : current));
-      })
-      .catch((err) => {
-        setUpdateError(updateErrorText(err, 'Failed to save update settings.'));
-        setUpdateStatus((current) =>
-          current ? { ...current, settings: previousSettings } : current
-        );
-      })
-      .finally(() => {
-        setSavingAutoUpdate(false);
-      });
-  };
-
   const checkForUpdates = async () => {
     setChecking(true);
     setUpdateError('');
     try {
       const result = await invoke<AppUpdateCheckResult>('check_for_app_update');
-      setUpdateStatus({
-        settings: result.settings,
-        support: result.support,
-        lastCheck: result.lastCheck,
-      });
+      setUpdateStatus({ support: result.support, lastCheck: result.lastCheck });
     } catch (err) {
       setUpdateError(updateErrorText(err, 'Failed to check for updates.'));
     } finally {
@@ -162,7 +131,7 @@ const AboutSettings = () => {
     ? installProgress
     : availableUpdate
       ? availableUpdate.downloaded
-        ? `CLAI v${availableUpdate.version} has been downloaded. Restart to apply it.`
+        ? `CLAI v${availableUpdate.version} is downloaded and ready to install.`
         : showPackageManagerHint
           ? `CLAI v${availableUpdate.version} is available. Use your package manager to install it.`
           : `CLAI v${availableUpdate.version} is available.`
@@ -215,37 +184,6 @@ const AboutSettings = () => {
               {supportBadge}
             </span>
           </div>
-
-          {/* Checking for updates is always on; only the background download is
-            configurable, and only where this build can actually install
-            updates itself. Notify-only builds (Flatpak, Linux deb/rpm) get
-            no toggle — there is nothing to install from within CLAI. */}
-          {supportsUpdates && (
-            <label className={styles.toggleRow}>
-              <span className={styles.toggleCopy}>
-                <span className={styles.toggleTitle}>Automatically download updates</span>
-                <span className={styles.toggleDesc}>
-                  New versions download in the background. You choose when to restart.
-                </span>
-              </span>
-              <span
-                className={`${styles.toggle} ${
-                  updateStatus?.settings.autoDownload ? styles.toggleOn : ''
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  className={styles.toggleInput}
-                  checked={updateStatus?.settings.autoDownload ?? true}
-                  onChange={(event) => persistAutoUpdate(event.target.checked)}
-                  disabled={savingAutoUpdate}
-                />
-                <span className={styles.toggleTrack}>
-                  <span className={styles.toggleThumb} />
-                </span>
-              </span>
-            </label>
-          )}
 
           <div className={styles.updateStatus}>
             <span>{updateSummary}</span>

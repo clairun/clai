@@ -26,3 +26,48 @@
   border-radius: 50%;
   background: currentColor;
 }
+
+.group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* Filled, unlike the outlined pill: the pill is information, this is the one
+   action that applies an update. */
+.action {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--color-primary);
+  border-radius: 999px;
+  background: var(--color-primary);
+  color: var(--color-bg-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: opacity var(--transition-fast);
+}
+
+.action:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* A failed install must not be silent — the click produced no restart, so say
+   why. Truncated to protect the top-bar layout; the full text is the title. */
+.error {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-error);
+  font-size: 12px;
+  line-height: 1;
+}
