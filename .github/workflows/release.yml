@@ -77,6 +77,14 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # The version baked into the binary is `git describe --dirty`, so a
+      # modified checkout ships as `<version>-dirty` — the v26.8.1 Windows
+      # installer did. Fail before spending a build on an artifact we could not
+      # map back to the tag. See scripts/assert-pristine-tree.sh.
+      - name: Verify pristine checkout
+        shell: bash
+        run: bash scripts/assert-pristine-tree.sh "after npm ci, before build"
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -86,6 +94,15 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
+
+      # `build.rs` reads git state *during* the step above, so the check before
+      # it only proves the tree was clean beforehand. Repeat it afterwards: this
+      # is the run that can honestly say the uploaded assets match the tag.
+      # Failing here fails the `build` job, which `publish` needs, so the
+      # release stays a draft even though tauri-action already attached assets.
+      - name: Verify the build changed no tracked files
+        shell: bash
+        run: bash scripts/assert-pristine-tree.sh "after build"
 
   publish:
     name: Publish Release
