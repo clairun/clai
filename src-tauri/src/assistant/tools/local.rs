@@ -1130,6 +1130,11 @@ pub(crate) fn evaluate_command_policy(
     }
 
     let mut approvals: Vec<SegmentApproval> = Vec::new();
+    let durable_allowed_prefixes = if matches!(execution.shell.mode, ShellAccessMode::Restricted) {
+        execution.shell.effective_allowed_command_prefixes()
+    } else {
+        Vec::new()
+    };
 
     for segment in &segments {
         let text = segment.text();
@@ -1184,8 +1189,7 @@ pub(crate) fn evaluate_command_policy(
                 // surfaces an "Always allow" button for Opaque rows the
                 // same way it does for Simple ones. The user opts into
                 // the broader trust explicitly.
-                let durable_match =
-                    find_matching_prefix(&execution.shell.allowed_command_prefixes, text);
+                let durable_match = find_matching_prefix(&durable_allowed_prefixes, text);
                 if durable_match.is_some() || run_match.is_some() {
                     continue;
                 }
@@ -1196,8 +1200,7 @@ pub(crate) fn evaluate_command_policy(
                 });
             }
             Segment::Simple(_) => {
-                let durable_match =
-                    find_matching_prefix(&execution.shell.allowed_command_prefixes, text);
+                let durable_match = find_matching_prefix(&durable_allowed_prefixes, text);
                 if durable_match.is_none() && run_match.is_none() {
                     approvals.push(SegmentApproval {
                         text: text.to_string(),
@@ -3132,10 +3135,23 @@ mod tests {
     }
 
     #[test]
-    fn policy_restricted_with_no_allow_anywhere_denies() {
+    fn policy_allows_seeded_restricted_prefix_from_allowlist() {
+        let exec = restricted_execution_config(&["rg"], &[]);
+        assert!(enforce_command_policy(&exec, None, "rg --files").is_ok());
+    }
+
+    #[test]
+    fn policy_restricted_prefix_removed_from_allowlist_needs_approval() {
+        let exec = restricted_execution_config(&[], &[]);
+        let err = enforce_command_policy(&exec, None, "rg --files").unwrap_err();
+        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
+    }
+
+    #[test]
+    fn policy_restricted_with_no_matching_allowed_prefix_denies() {
         let temp = tempdir().unwrap();
         let exec = restricted_execution_config(&[], &[]);
-        let err = enforce_command_policy(&exec, Some(temp.path()), "git status").unwrap_err();
+        let err = enforce_command_policy(&exec, Some(temp.path()), "obscure-tool").unwrap_err();
         assert!(matches!(err, CommandDenial::NotInAllowList(_)));
     }
 
@@ -3294,7 +3310,7 @@ mod tests {
         let exec = restricted_execution_config(&[], &[]);
         let run_allowed = vec!["git status".to_string()];
         assert!(matches!(
-            evaluate_command_policy(&exec, "git log", &run_allowed, &[]),
+            evaluate_command_policy(&exec, "git add -A", &run_allowed, &[]),
             PolicyResult::NeedsApproval(_),
         ));
     }
@@ -3402,16 +3418,21 @@ mod tests {
 
     #[test]
     fn policy_dedups_repeated_prefix_into_one_approval() {
-        // The motivating bug: `cd /a && cd /b && cd /c` derives the same
-        // `cd` prefix three times. The user should be asked to grant `cd`
+        // The motivating bug: repeated segments can derive the same
+        // smart prefix multiple times. The user should be asked once,
         // exactly once, not once per occurrence.
         let exec = restricted_execution_config(&[], &[]);
-        let result = evaluate_command_policy(&exec, "cd /a && cd /b && cd /c", &[], &[]);
+        let result =
+            evaluate_command_policy(&exec, "git add a && git add b && git add c", &[], &[]);
         let PolicyResult::NeedsApproval(approvals) = result else {
             panic!("expected NeedsApproval, got {:?}", policy_label(&result));
         };
-        assert_eq!(approvals.len(), 1, "repeated `cd` prefix should collapse");
-        assert_eq!(approvals[0].suggested_prefix, "cd");
+        assert_eq!(
+            approvals.len(),
+            1,
+            "repeated `git add` prefix should collapse"
+        );
+        assert_eq!(approvals[0].suggested_prefix, "git add");
     }
 
     #[test]

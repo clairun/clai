@@ -464,13 +464,6 @@ fn apply_decisions_to_shell_policy(
                 if prefix.is_empty() {
                     continue;
                 }
-                let before = agent.execution.shell.blocked_command_prefixes.len();
-                agent
-                    .execution
-                    .shell
-                    .blocked_command_prefixes
-                    .retain(|p| p != prefix);
-                changed |= agent.execution.shell.blocked_command_prefixes.len() != before;
                 if !agent
                     .execution
                     .shell
@@ -491,13 +484,6 @@ fn apply_decisions_to_shell_policy(
                 if prefix.is_empty() {
                     continue;
                 }
-                let before = agent.execution.shell.allowed_command_prefixes.len();
-                agent
-                    .execution
-                    .shell
-                    .allowed_command_prefixes
-                    .retain(|p| p != prefix);
-                changed |= agent.execution.shell.allowed_command_prefixes.len() != before;
                 if !agent
                     .execution
                     .shell
@@ -566,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn allow_always_adds_prefix_and_removes_it_from_blocklist() {
+    fn allow_always_adds_prefix_without_rewriting_blocklist() {
         let mut agent = fake_agent();
         agent
             .execution
@@ -582,7 +568,7 @@ mod tests {
             .shell
             .allowed_command_prefixes
             .contains(&"cargo".to_string()));
-        assert!(!agent
+        assert!(agent
             .execution
             .shell
             .blocked_command_prefixes
@@ -590,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn deny_always_adds_to_blocklist_and_removes_from_allowlist() {
+    fn deny_always_adds_to_blocklist_without_rewriting_allowlist() {
         let mut agent = fake_agent();
         agent
             .execution
@@ -606,7 +592,7 @@ mod tests {
             .shell
             .blocked_command_prefixes
             .contains(&"curl".to_string()));
-        assert!(!agent
+        assert!(agent
             .execution
             .shell
             .allowed_command_prefixes
@@ -670,14 +656,14 @@ mod tests {
 
         assert!(apply_decisions_to_shell_policy(
             &mut agent,
-            &[allow_always("  git status  ")]
+            &[allow_always("  cargo check  ")]
         ));
 
         assert!(agent
             .execution
             .shell
             .allowed_command_prefixes
-            .contains(&"git status".to_string()));
+            .contains(&"cargo check".to_string()));
     }
 
     fn fake_request(workspace_id: Option<&str>) -> PermissionRequest {

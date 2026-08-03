@@ -61,7 +61,11 @@ interface PathGrant {
 interface ExecutionConfig {
   sandbox: { network: string; sessionBus: string };
   filesystem: { extraPaths: PathGrant[] };
-  shell: { mode: string; allowedCommandPrefixes: string[]; blockedCommandPrefixes: string[] };
+  shell: {
+    mode: string;
+    allowedCommandPrefixes: string[];
+    blockedCommandPrefixes: string[];
+  };
   web: { enabled: boolean };
 }
 
@@ -171,7 +175,9 @@ const normalizeExecution = (execution: Partial<ExecutionConfig> = {}): Execution
     },
     shell: {
       mode: execution.shell?.mode || d.shell.mode,
-      allowedCommandPrefixes: normalizeItems(execution.shell?.allowedCommandPrefixes || d.shell.allowedCommandPrefixes),
+      allowedCommandPrefixes: normalizeItems(
+        execution.shell?.allowedCommandPrefixes || d.shell.allowedCommandPrefixes
+      ),
       blockedCommandPrefixes: normalizeItems(execution.shell?.blockedCommandPrefixes || d.shell.blockedCommandPrefixes),
     },
     web: { enabled: execution.web?.enabled || false },
@@ -1494,14 +1500,30 @@ const AgentSection = ({
     setName(selectedTemplate.name || '');
     setDescription(selectedTemplate.description || '');
     setSelectedSkillIds(selectedTemplate.defaultSkillIds || []);
-    const execution = normalizeExecution(selectedTemplate.defaultExecution || defaultExecution());
+    const execution = normalizeExecution(
+      selectedTemplate.defaultExecution || deps?.defaultExecution || defaultExecution()
+    );
     setExtraPathGrants(execution.filesystem.extraPaths);
     setSessionBusAllowed(execution.sandbox.sessionBus === 'allow');
     setShellMode(execution.shell.mode);
     setAllowedCommands(execution.shell.allowedCommandPrefixes);
     setBlockedCommands(execution.shell.blockedCommandPrefixes);
     setWebEnabled(execution.web.enabled);
-  }, [selectedTemplate]);
+  }, [selectedTemplate, deps?.defaultExecution]);
+
+  const handleAddAllowedCommand = () => {
+    const prefix = allowedCommandDraft.trim();
+    if (!prefix) return;
+    setAllowedCommands((s) => addUniqueItem(s, prefix));
+    setAllowedCommandDraft('');
+  };
+
+  const handleAddBlockedCommand = () => {
+    const prefix = blockedCommandDraft.trim();
+    if (!prefix) return;
+    setBlockedCommands((s) => addUniqueItem(s, prefix));
+    setBlockedCommandDraft('');
+  };
 
   const handleAddPathGrant = () => {
     const path = extraPathDraft.trim();
@@ -1880,10 +1902,10 @@ const AgentSection = ({
           <div className={styles.field}>
             <label className={styles.label}>Allowed command prefixes</label>
             {allowedCommands.length > 0 && (
-              <div className={styles.chipList}>
+              <div className={styles.commandList}>
                 {allowedCommands.map((cmd) => (
-                  <span key={cmd} className={styles.chip}>
-                    {cmd}
+                  <div key={cmd} className={styles.commandItem}>
+                    <code className={styles.commandPrefix}>{cmd}</code>
                     <button
                       type="button"
                       className={styles.chipRemove}
@@ -1893,9 +1915,12 @@ const AgentSection = ({
                     >
                       ×
                     </button>
-                  </span>
+                  </div>
                 ))}
               </div>
+            )}
+            {allowedCommands.length === 0 && (
+              <span className={styles.hint}>No allowed prefixes configured.</span>
             )}
             <div className={styles.listInputRow}>
               <input
@@ -1908,19 +1933,15 @@ const AgentSection = ({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
-                    setAllowedCommands((s) => addUniqueItem(s, allowedCommandDraft));
-                    setAllowedCommandDraft('');
+                    handleAddAllowedCommand();
                   }
                 }}
               />
               <button
                 type="button"
                 className={styles.addButton}
-                onClick={() => {
-                  setAllowedCommands((s) => addUniqueItem(s, allowedCommandDraft));
-                  setAllowedCommandDraft('');
-                }}
-                disabled={!allowedCommandDraft.trim() || saving}
+                onClick={handleAddAllowedCommand}
+                disabled={!allowedCommandDraft.trim() || busy}
               >
                 Add
               </button>
@@ -1930,10 +1951,10 @@ const AgentSection = ({
           <div className={styles.field}>
             <label className={styles.label}>Blocked command prefixes</label>
             {blockedCommands.length > 0 && (
-              <div className={styles.chipList}>
+              <div className={styles.commandList}>
                 {blockedCommands.map((cmd) => (
-                  <span key={cmd} className={styles.chip}>
-                    {cmd}
+                  <div key={cmd} className={styles.commandItem}>
+                    <code className={styles.commandPrefix}>{cmd}</code>
                     <button
                       type="button"
                       className={styles.chipRemove}
@@ -1943,7 +1964,7 @@ const AgentSection = ({
                     >
                       ×
                     </button>
-                  </span>
+                  </div>
                 ))}
               </div>
             )}
@@ -1958,19 +1979,15 @@ const AgentSection = ({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
-                    setBlockedCommands((s) => addUniqueItem(s, blockedCommandDraft));
-                    setBlockedCommandDraft('');
+                    handleAddBlockedCommand();
                   }
                 }}
               />
               <button
                 type="button"
                 className={styles.addButton}
-                onClick={() => {
-                  setBlockedCommands((s) => addUniqueItem(s, blockedCommandDraft));
-                  setBlockedCommandDraft('');
-                }}
-                disabled={!blockedCommandDraft.trim() || saving}
+                onClick={handleAddBlockedCommand}
+                disabled={!blockedCommandDraft.trim() || busy}
               >
                 Add
               </button>
