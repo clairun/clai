@@ -4626,4 +4626,261 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(artifact_tree_stats(&root.path().join("nope")), (0, 0));
     }
+
+    // =====================================================================
+    // R1.5 — coverage for the pure helpers that have no test today.
+    // Each test exercises one decision in the production function and pins
+    // the contract; none touch the filesystem except where the function
+    // itself does, in which case they use the existing `write_file` helper.
+    // =====================================================================
+
+    #[test]
+    fn viewer_for_path_distinguishes_named_routes() {
+        // `.canvas` wins on extension alone.
+        assert_eq!(viewer_for_path(Path::new("/w/x.canvas")), "canvas");
+        // `*.dashboard.json` is matched on the full file name, not the
+        // extension — `.json` alone would have routed to "json".
+        assert_eq!(
+            viewer_for_path(Path::new("/w/x.dashboard.json")),
+            "dashboard",
+        );
+        assert_eq!(viewer_for_path(Path::new("/w/x.json")), "json");
+        assert_eq!(viewer_for_path(Path::new("/w/x.md")), "markdown");
+        assert_eq!(viewer_for_path(Path::new("/w/x.markdown")), "markdown");
+        assert_eq!(viewer_for_path(Path::new("/w/x.html")), "html");
+        assert_eq!(viewer_for_path(Path::new("/w/x.htm")), "html");
+    }
+
+    #[test]
+    fn viewer_for_path_extension_is_case_insensitive() {
+        // Extension lookup lowercases, so `.MD` still routes to markdown.
+        assert_eq!(viewer_for_path(Path::new("/w/x.MD")), "markdown");
+        // `.PDF` is in the "external" set; same path through the lowercase.
+        assert_eq!(viewer_for_path(Path::new("/w/x.PDF")), "external");
+    }
+
+    #[test]
+    fn viewer_for_path_falls_back_to_text_for_unknown() {
+        // Anything not in the named routes or the external list reads as
+        // text — the in-app preview expects UTF-8 and handles errors there.
+        assert_eq!(viewer_for_path(Path::new("/w/x.txt")), "text");
+        assert_eq!(viewer_for_path(Path::new("/w/x.unknown-ext")), "text");
+        assert_eq!(viewer_for_path(Path::new("/w/no-extension")), "text");
+    }
+
+    #[test]
+    fn viewer_for_path_routes_known_external_extensions() {
+        // Spot-check one entry per named group in `is_external_viewer_ext`
+        // so renaming any of those bins cannot silently reclassify.
+        for (file, expected) in [
+            ("/w/x.pdf", "external"),
+            ("/w/x.docx", "external"),
+            ("/w/x.mp3", "external"),
+            ("/w/x.mp4", "external"),
+            ("/w/x.zip", "external"),
+            ("/w/x.exe", "external"),
+            ("/w/x.woff2", "external"),
+            ("/w/x.sqlite", "external"),
+        ] {
+            assert_eq!(viewer_for_path(Path::new(file)), expected, "{file}");
+        }
+    }
+
+    #[test]
+    fn mime_for_path_maps_known_extensions() {
+        // Spot-check one per branch family; the match is exhaustive enough
+        // that a regression here would mean a real loss of preview support.
+        assert_eq!(mime_for_path(Path::new("/w/x.css")), "text/css");
+        assert_eq!(mime_for_path(Path::new("/w/x.mjs")), "text/javascript");
+        assert_eq!(mime_for_path(Path::new("/w/x.json")), "application/json");
+        assert_eq!(mime_for_path(Path::new("/w/x.svg")), "image/svg+xml");
+        assert_eq!(mime_for_path(Path::new("/w/x.png")), "image/png");
+        assert_eq!(mime_for_path(Path::new("/w/x.jpg")), "image/jpeg");
+        assert_eq!(mime_for_path(Path::new("/w/x.WEBP")), "image/webp");
+        assert_eq!(mime_for_path(Path::new("/w/x.mp4")), "video/mp4");
+        assert_eq!(mime_for_path(Path::new("/w/x.mp3")), "audio/mpeg");
+        assert_eq!(mime_for_path(Path::new("/w/x.txt")), "text/plain");
+    }
+
+    #[test]
+    fn mime_for_path_falls_back_to_octet_stream_for_unknown() {
+        // The default arms both genuinely-unknown extensions and paths
+        // without one — neither should crash, both get the generic MIME.
+        assert_eq!(
+            mime_for_path(Path::new("/w/x.weird-thing")),
+            "application/octet-stream",
+        );
+        assert_eq!(
+            mime_for_path(Path::new("/w/no-extension")),
+            "application/octet-stream",
+        );
+    }
+
+    #[test]
+    fn collect_files_walks_recursively_and_records_relative_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("nested/b.txt"), "b");
+        write_file(&root.join("nested/deep/c.txt"), "c");
+
+        let mut entries = Vec::new();
+        collect_files(root, root, &mut entries, false).unwrap();
+
+        // Three files, one per depth. Names are unique and ordered the way
+        // they were written; the production caller sorts separately, so
+        // this list is not expected to be sorted.
+        let mut names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
+
+        // Each entry's relative path is rooted at the workspace root, not
+        // absolute. This is what lets the frontend render without knowing
+        // the workspace's on-disk path.
+        for entry in &entries {
+            assert!(
+                entry.relative_path.starts_with("nested") || entry.relative_path == "a.txt",
+                "unexpected relative_path: {}",
+                entry.relative_path,
+            );
+        }
+    }
+
+    #[test]
+    fn collect_files_skip_clai_excludes_protected_directories_at_any_depth() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("keep.txt"), "keep");
+        write_file(&root.join(".clai/secret.bin"), "secret");
+        write_file(
+            &root.join("nested/.clai/nested-secret.bin"),
+            "nested-secret",
+        );
+        write_file(&root.join("nested/also-keep.txt"), "also-keep");
+
+        let mut entries = Vec::new();
+        collect_files(root, root, &mut entries, /* skip_clai */ true).unwrap();
+
+        let mut names: Vec<_> = entries.iter().map(|e| e.name.clone()).collect();
+        names.sort();
+        // `.clai` is matched at any depth; nested `.clai/nested-secret.bin`
+        // must also be excluded. read_dir order is platform-dependent,
+        // so sort before comparing.
+        assert_eq!(names, vec!["also-keep.txt", "keep.txt"]);
+    }
+
+    #[test]
+    fn collect_files_returns_an_error_for_unreadable_path() {
+        // A path under a non-existent parent surfaces as `Err`, not as a
+        // silent empty walk. The frontend surfaces the error string to the
+        // user, so a silent zero would hide "I couldn't read this".
+        let root = tempfile::tempdir().unwrap();
+        let mut entries = Vec::new();
+        let bogus = root.path().join("does/not/exist");
+        assert!(collect_files(&bogus, &bogus, &mut entries, false).is_err());
+    }
+
+    #[test]
+    fn artifact_tree_stats_counts_all_files_for_the_public_form() {
+        // The pub form delegates to the cap variant with `MAX_ARTIFACT_COUNT`,
+        // which is well above what we materialise here, so the tree counts
+        // exactly as written.
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("nested/b.txt"), "b");
+        write_file(&root.join("nested/deep/c.txt"), "c");
+
+        let (count, _latest) = artifact_tree_stats(root);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn resolve_copy_source_rejects_empty_relative_path() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            resolve_copy_source(root.path(), "").unwrap_err(),
+            "Cannot copy the workspace root.",
+        );
+        assert!(resolve_copy_source(root.path(), "   ").is_err());
+    }
+
+    #[test]
+    fn resolve_copy_source_rejects_parent_traversal() {
+        let root = tempfile::tempdir().unwrap();
+        // `..` is refused before any fs call — the path may not exist on
+        // disk and the rejection should still hold.
+        let err = resolve_copy_source(root.path(), "../escape").unwrap_err();
+        assert!(err.contains("outside the workspace root"), "{err}");
+    }
+
+    #[test]
+    fn resolve_copy_source_rejects_protected_directory_components() {
+        let root = tempfile::tempdir().unwrap();
+        // `.clai` and the artifact-skip list are protected names; passing
+        // one as a path component must produce a clear refusal.
+        let err = resolve_copy_source(root.path(), ".clai/images").unwrap_err();
+        assert!(err.contains("Refusing to copy a protected path"), "{err}");
+    }
+
+    #[test]
+    fn resolve_copy_source_resolves_a_normal_relative_file() {
+        let root = tempfile::tempdir().unwrap();
+        // Canonicalize the root before passing it: on Windows, canonicalize()
+        // prepends the `\\?\` UNC prefix to absolute paths, while a raw
+        // tempdir().path() does not. resolve_copy_source canonicalizes its
+        // return value too, so passing a canonicalized root lets callers
+        // (and this test) compare paths against it consistently.
+        let root = root
+            .path()
+            .canonicalize()
+            .expect("canonicalize tempdir root");
+        write_file(&root.join("docs/note.md"), "hello");
+
+        let (resolved, is_dir, name) =
+            resolve_copy_source(&root, "docs/note.md").expect("relative file should resolve");
+        assert!(
+            resolved.starts_with(&root),
+            "resolved={:?} root={:?}",
+            resolved,
+            root
+        );
+        // A file, not a directory.
+        assert!(!is_dir, "file should not be reported as a directory");
+        assert_eq!(name, "note.md");
+    }
+
+    #[test]
+    fn image_media_type_from_extension_recognises_supported_image_extensions() {
+        // The native picker returns whatever path the user chose; this is
+        // the gate that decides whether the bytes can be stored at all.
+        for (file, expected) in [
+            ("/w/x.png", Some("image/png")),
+            ("/w/x.PNG", Some("image/png")),
+            ("/w/x.jpg", Some("image/jpeg")),
+            ("/w/x.jpeg", Some("image/jpeg")),
+            ("/w/x.JPEG", Some("image/jpeg")),
+            ("/w/x.gif", Some("image/gif")),
+            ("/w/x.webp", Some("image/webp")),
+        ] {
+            assert_eq!(
+                image_media_type_from_extension(Path::new(file)),
+                expected,
+                "{file}",
+            );
+        }
+    }
+
+    #[test]
+    fn image_media_type_from_extension_rejects_anything_beyond_the_allowlist() {
+        // Everything else returns `None`; the store surfaces a clear error
+        // to the caller. Spot-check across text, archive, and no-extension.
+        assert_eq!(image_media_type_from_extension(Path::new("/w/x.svg")), None);
+        assert_eq!(image_media_type_from_extension(Path::new("/w/x.txt")), None);
+        assert_eq!(image_media_type_from_extension(Path::new("/w/x.zip")), None);
+        assert_eq!(
+            image_media_type_from_extension(Path::new("/w/no-ext")),
+            None
+        );
+    }
 }
