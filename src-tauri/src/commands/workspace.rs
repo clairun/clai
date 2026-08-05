@@ -2704,6 +2704,46 @@ pub struct WorkspaceStoreImageRequest {
 // Image attachment — store image, pick-and-store image
 // ===============================================================================
 
+/// Resolve the agent-workspace root path used for image storage.
+///
+/// Both image-attach commands need to: resolve a workspace descriptor, ensure
+/// the descriptor exposes a filesystem root, and refuse non-agent workspaces.
+/// Centralising that preamble keeps the call sites focused on their specific
+/// inputs (base64 clipboard bytes vs. an OS-picked file).
+fn resolve_agent_workspace_root(state: &AppState, workspace_id: &str) -> Result<PathBuf, String> {
+    let descriptor = resolve_workspace_descriptor(state, Some(workspace_id.to_string()))?;
+    let root_path = descriptor
+        .root_path
+        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
+    ensure_agent_workspace_root(&root_path)?;
+    Ok(root_path)
+}
+
+/// Persist `bytes` under the workspace's image store and return a
+/// ready-to-attach [`ContentPart::Image`] reference (the bytes live on disk;
+/// the part carries only a relative path so it stays small in `content_json`
+/// and gives CLI transports a real file to read at send time).
+///
+/// Both image-attach commands reduce to: acquire bytes + media type + filename,
+/// then call this. Centralising the disk write and the `ContentPart::Image`
+/// literal keeps `width: None` / `height: None` in sync between paths.
+async fn store_workspace_image(
+    root: &Path,
+    bytes: &[u8],
+    media_type: &str,
+    filename: Option<String>,
+) -> Result<ContentPart, String> {
+    let stored = crate::assistant::image_store::store_image(root, bytes, media_type, filename)?;
+    Ok(ContentPart::Image {
+        id: stored.id,
+        path: stored.path,
+        media_type: stored.media_type,
+        filename: stored.filename,
+        width: None,
+        height: None,
+    })
+}
+
 /// Persist a pasted/attached image under the workspace's image store and
 /// return a ready-to-attach [`ContentPart::Image`] reference.
 ///
@@ -2715,35 +2755,20 @@ pub async fn workspace_store_image(
     request: WorkspaceStoreImageRequest,
     state: State<'_, AppState>,
 ) -> Result<ContentPart, String> {
+    let root_path = resolve_agent_workspace_root(state.inner(), &request.workspace_id)?;
+
     use base64::Engine as _;
-
-    let descriptor =
-        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
-    let root_path = descriptor
-        .root_path
-        .as_ref()
-        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
-    ensure_agent_workspace_root(root_path)?;
-
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(request.data_base64.trim())
         .map_err(|error| format!("Invalid base64 image data: {}", error))?;
 
-    let stored = crate::assistant::image_store::store_image(
-        root_path,
+    store_workspace_image(
+        root_path.as_path(),
         &bytes,
         &request.media_type,
         request.filename,
-    )?;
-
-    Ok(ContentPart::Image {
-        id: stored.id,
-        path: stored.path,
-        media_type: stored.media_type,
-        filename: stored.filename,
-        width: None,
-        height: None,
-    })
+    )
+    .await
 }
 
 /// Guess an image MIME type from a file extension.
@@ -2782,12 +2807,7 @@ pub async fn workspace_pick_and_store_image(
 ) -> Result<Option<ContentPart>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let descriptor = resolve_workspace_descriptor(state.inner(), Some(workspace_id.clone()))?;
-    let root_path = descriptor
-        .root_path
-        .as_ref()
-        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
-    ensure_agent_workspace_root(root_path)?;
+    let root_path = resolve_agent_workspace_root(state.inner(), &workspace_id)?;
 
     // The dialog runs in the backend, so the chosen path comes from a genuine
     // OS user selection — never a renderer-supplied string. A compromised
@@ -2819,17 +2839,9 @@ pub async fn workspace_pick_and_store_image(
         .await
         .map_err(|error| format!("Could not read image file: {}", error))?;
 
-    let stored =
-        crate::assistant::image_store::store_image(root_path, &bytes, media_type, filename)?;
-
-    Ok(Some(ContentPart::Image {
-        id: stored.id,
-        path: stored.path,
-        media_type: stored.media_type,
-        filename: stored.filename,
-        width: None,
-        height: None,
-    }))
+    Ok(Some(
+        store_workspace_image(root_path.as_path(), &bytes, media_type, filename).await?,
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize)]
