@@ -5,7 +5,7 @@ export type AddSkillSourceRequest = { name: string, kind: string | null, path: s
 
 export type AppUpdateAvailableEvent = { update: AppUpdateInfo, };
 
-export type AppUpdateCheckResult = { settings: AutoUpdateConfig, support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck, };
+export type AppUpdateCheckResult = { support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck, };
 
 export type AppUpdateInfo = { currentVersion: string, version: string, date: string | null, body: string | null, 
 /**
@@ -24,7 +24,7 @@ export type AppUpdateInstallEvent = { "type": "started" } | { "type": "progress"
 
 export type AppUpdateLastCheck = { checkedAt: string, update: AppUpdateInfo | null, error: string | null, };
 
-export type AppUpdateStatus = { settings: AutoUpdateConfig, support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck | null, };
+export type AppUpdateStatus = { support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck | null, };
 
 export type AppUpdateSupportStatus = { 
 /**
@@ -76,14 +76,6 @@ multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_
 export type AttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
 export type AuthMode = "subscription_login" | "subscription_api_key" | "developer_api_key" | "workspace_token";
-
-export type AutoUpdateConfig = { 
-/**
- * Download new versions in the background on self-update-capable
- * builds; the user still chooses when to restart and apply. Checking
- * for updates is always on and not configurable.
- */
-autoDownload: boolean, };
 
 export type CompactionStatus = "running" | "completed" | "failed";
 

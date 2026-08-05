@@ -1,6 +1,5 @@
 import React, { useEffect } from 'react';
 import { Outlet } from 'react-router';
-import AppUpdateNotifications from '../components/AppUpdateNotifications';
 import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmulatorWrapper';
 import PermissionAttentionNotifications from '../components/PermissionAttentionNotifications';
 import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
@@ -25,7 +24,6 @@ const MainLayout = () => {
       <div className={styles.mainLayout}>
         <WorkspaceTaskNotifications />
         <PermissionAttentionNotifications />
-        <AppUpdateNotifications />
         <TerminalEmulatorWrapper />
         <div className={styles.contentArea}>
           <Outlet />

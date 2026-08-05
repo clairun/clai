@@ -3,15 +3,13 @@
  *
  * Seeds from the backend's last check result (so a UI mounted after the
  * startup check still sees the update) and then follows the
- * `app-updates://available` event emitted by later checks. Used by both
- * the dismissible toast (AppUpdateNotifications) and the persistent
- * top-bar badge (AppUpdateBadge) so they can't drift apart.
+ * `app-updates://available` event emitted by later checks. Consumed by the
+ * persistent top-bar badge (AppUpdateBadge) and by Settings > About.
  *
- * Also exposes the build's `support` profile so consumers can adapt to
- * the host's update capability (e.g. suppress the toast on Linux,
- * which is always notify-only). Support is a build/install-time
- * property and is read once from the initial status; the live event
- * does not carry it.
+ * Also exposes the build's `support` profile so consumers can adapt to the
+ * host's update capability (e.g. Linux, which is always notify-only).
+ * Support is a build/install-time property and is read once from the initial
+ * status; the live event does not carry it.
  */
 
 import { useEffect, useState } from 'react';
