@@ -319,6 +319,10 @@ fn select_compaction_window(
         return None;
     }
 
+    // The positional boundary above can land in the middle of an
+    // assistant->tool group. Nudge it off before committing to the window.
+    let compact_count = group_aware_boundary(&compactable, compact_count, min_messages)?;
+
     let messages = compactable[..compact_count].to_vec();
     let source_from_message_id = messages.first().map(|message| message.id.clone());
     let source_to_message_id = messages.last().map(|message| message.id.clone());
@@ -328,6 +332,70 @@ fn select_compaction_window(
         source_from_message_id,
         source_to_message_id,
     })
+}
+
+/// Move a compaction boundary off the middle of an assistant->tool group.
+///
+/// `boundary` is the index of the first message that stays in the retained
+/// tail, so `messages[..boundary]` is what gets summarised away. A
+/// `MessageRole::Tool` message sitting exactly at `boundary` is the failure
+/// case: its results are retained while the assistant message that issued the
+/// corresponding `ToolUse` calls is summarised away. `normalize_history_for_provider`
+/// then finds no assistant claiming those `tool_call_id`s and drops the results
+/// as orphans -- on *every* subsequent turn, because the compaction record is
+/// persistent. The model silently never sees that tool output again.
+///
+/// Preference order:
+/// 1. Walk the boundary **back** to the owning assistant, so the whole group is
+///    retained. This is the cheap, information-preserving option.
+/// 2. If that would shrink the window below `min_messages`, walk **forward**
+///    instead and compact the group whole. The results are then summarised
+///    rather than lost.
+/// 3. If swallowing the group forward would leave no tail at all, decline to
+///    compact this round (`None`). Waiting is always safe; the next turn will
+///    have more messages to work with.
+fn group_aware_boundary(
+    messages: &[AssistantMessage],
+    boundary: usize,
+    min_messages: usize,
+) -> Option<usize> {
+    if !matches!(
+        messages.get(boundary).map(|message| &message.role),
+        Some(MessageRole::Tool)
+    ) {
+        return Some(boundary);
+    }
+
+    // Walk back over the group's sibling results to the assistant that owns them.
+    let mut retained = boundary;
+    while retained > 0 && matches!(messages[retained].role, MessageRole::Tool) {
+        retained -= 1;
+    }
+
+    if matches!(messages[retained].role, MessageRole::Tool) {
+        // Ran off the front of the view without finding an owner, so the
+        // owning assistant was already outside it. Nothing here to protect.
+        return Some(boundary);
+    }
+
+    if retained >= min_messages {
+        return Some(retained);
+    }
+
+    // Retaining the whole group leaves too little behind to be worth
+    // summarising. Compact the group instead of splitting it.
+    let mut swallowed = boundary;
+    while swallowed < messages.len() && matches!(messages[swallowed].role, MessageRole::Tool) {
+        swallowed += 1;
+    }
+
+    if swallowed >= messages.len() {
+        // The entire remainder is one tool group; compacting it would leave an
+        // empty tail. Skip this round rather than produce a degenerate window.
+        return None;
+    }
+
+    Some(swallowed)
 }
 
 async fn summarize_window(
@@ -770,6 +838,182 @@ mod tests {
         ContentPart::Text {
             text: t.to_string(),
         }
+    }
+
+    fn tool_use_msg(id: &str, call_ids: &[&str]) -> AssistantMessage {
+        msg(
+            id,
+            MessageRole::Assistant,
+            call_ids
+                .iter()
+                .map(|call_id| ContentPart::ToolUse {
+                    tool_call_id: (*call_id).to_string(),
+                    tool_name: "probe".to_string(),
+                    arguments: serde_json::Value::Null,
+                })
+                .collect(),
+        )
+    }
+
+    fn tool_result_msg(id: &str, call_id: &str) -> AssistantMessage {
+        msg(
+            id,
+            MessageRole::Tool,
+            vec![ContentPart::ToolResult {
+                tool_call_id: call_id.to_string(),
+                payload: serde_json::Value::Null,
+                started_at: None,
+                completed_at: None,
+            }],
+        )
+    }
+
+    /// `n` alternating user/assistant text messages, none of them tool-related.
+    fn filler(prefix: &str, n: usize) -> Vec<AssistantMessage> {
+        (0..n)
+            .map(|i| {
+                let role = if i % 2 == 0 {
+                    MessageRole::User
+                } else {
+                    MessageRole::Assistant
+                };
+                msg(&format!("{prefix}{i}"), role, vec![text("filler")])
+            })
+            .collect()
+    }
+
+    /// An assistant issuing `n` parallel calls, followed by all `n` results.
+    fn tool_group(prefix: &str, n: usize) -> Vec<AssistantMessage> {
+        let call_ids: Vec<String> = (0..n).map(|i| format!("{prefix}call{i}")).collect();
+        let refs: Vec<&str> = call_ids.iter().map(|s| s.as_str()).collect();
+        let mut out = vec![tool_use_msg(&format!("{prefix}asst"), &refs)];
+        out.extend(
+            call_ids
+                .iter()
+                .enumerate()
+                .map(|(i, call_id)| tool_result_msg(&format!("{prefix}res{i}"), call_id)),
+        );
+        out
+    }
+
+    /// The invariant the compaction boundary must preserve: every tool result
+    /// left in the retained tail still has the assistant that issued it in the
+    /// tail. A violation is invisible at compaction time and only shows up as a
+    /// dropped orphan inside `normalize_history_for_provider`, on every later turn.
+    ///
+    /// Assumes `view` contains no `System` messages, so window indices line up
+    /// with `view` indices.
+    fn assert_no_split_tool_group(view: &[AssistantMessage], window: &CompactionWindow) {
+        let retained = &view[window.messages.len()..];
+        for message in retained.iter().filter(|m| m.role == MessageRole::Tool) {
+            for part in &message.content {
+                let ContentPart::ToolResult { tool_call_id, .. } = part else {
+                    continue;
+                };
+                let owned = retained.iter().any(|candidate| {
+                    candidate.content.iter().any(|p| {
+                        matches!(p, ContentPart::ToolUse { tool_call_id: id, .. } if id == tool_call_id)
+                    })
+                });
+                assert!(
+                    owned,
+                    "tool result {tool_call_id} was retained but its owning assistant was compacted away"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_boundary_is_untouched_when_it_falls_between_turns() {
+        let view = filler("f", 45);
+
+        let window = select_compaction_window(&view, false).expect("window");
+
+        // 45 - RECENT_TAIL_MESSAGES(16) = 29, taken as-is: nothing to protect.
+        assert_eq!(window.messages.len(), 29);
+        assert_eq!(window.source_from_message_id.as_deref(), Some("f0"));
+        assert_eq!(window.source_to_message_id.as_deref(), Some("f28"));
+        assert_no_split_tool_group(&view, &window);
+    }
+
+    #[test]
+    fn compaction_boundary_retreats_rather_than_splitting_a_tool_group() {
+        // Shaped like the case observed live: a 16-way parallel tool batch whose
+        // size exactly equals RECENT_TAIL_MESSAGES, so the positional boundary
+        // lands on the batch's first result and orphans all 16 of them.
+        let mut view = filler("f", 28);
+        view.extend(tool_group("g", 16));
+        assert_eq!(view.len(), 45);
+        assert_eq!(view[29].role, MessageRole::Tool, "boundary lands mid-group");
+
+        let window = select_compaction_window(&view, false).expect("window");
+
+        // Boundary pulled back from 29 to 28 so the whole group stays together.
+        assert_eq!(window.messages.len(), 28);
+        assert_eq!(window.source_to_message_id.as_deref(), Some("f27"));
+        assert!(
+            !window.messages.iter().any(|m| m.id == "gasst"),
+            "the assistant owning the batch must not be compacted"
+        );
+        assert_no_split_tool_group(&view, &window);
+    }
+
+    #[test]
+    fn compaction_boundary_swallows_a_group_too_early_to_retain() {
+        // The group starts before MIN_AUTOMATIC_COMPACT_MESSAGES, so retreating
+        // would leave too little to summarise. It must be compacted whole instead.
+        let mut view = filler("a", 22);
+        view.extend(tool_group("g", 5));
+        view.extend(filler("b", 12));
+        assert_eq!(view.len(), 40);
+        assert_eq!(view[24].role, MessageRole::Tool, "boundary lands mid-group");
+
+        let window = select_compaction_window(&view, false).expect("window");
+
+        // Boundary advanced from 24 past the last result at 27.
+        assert_eq!(window.messages.len(), 28);
+        assert!(
+            window.messages.iter().any(|m| m.id == "gasst"),
+            "the whole group belongs in the window"
+        );
+        assert_eq!(
+            window
+                .messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Tool)
+                .count(),
+            5,
+            "all five results compacted with their assistant"
+        );
+        assert_no_split_tool_group(&view, &window);
+    }
+
+    #[test]
+    fn compaction_declines_when_the_tail_is_one_giant_tool_group() {
+        // Retreating drops below the minimum and advancing would consume the
+        // entire tail, so the only safe answer is to wait for more messages.
+        let mut view = filler("f", 23);
+        view.extend(tool_group("g", 16));
+        assert_eq!(view.len(), 40);
+        assert_eq!(view[24].role, MessageRole::Tool, "boundary lands mid-group");
+
+        assert!(select_compaction_window(&view, false).is_none());
+    }
+
+    #[test]
+    fn compaction_boundary_tolerates_results_whose_assistant_is_already_gone() {
+        // A view that opens mid-group (the owner was compacted in an earlier
+        // round). There is nothing left to protect, so the boundary stands and
+        // the pre-existing orphan is not made worse.
+        let mut view: Vec<AssistantMessage> = (0..30)
+            .map(|i| tool_result_msg(&format!("orphan{i}"), &format!("lost{i}")))
+            .collect();
+        view.extend(filler("f", 15));
+        assert_eq!(view.len(), 45);
+
+        let window = select_compaction_window(&view, false).expect("window");
+
+        assert_eq!(window.messages.len(), 29);
     }
 
     #[test]

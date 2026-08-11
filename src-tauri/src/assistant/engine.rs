@@ -2834,6 +2834,7 @@ fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<Provider
 
                 let Some(idx) = owning_assistant_idx else {
                     tracing::warn!(
+                        session_id = %msg.session_id,
                         message_id = %msg.id,
                         tool_call_id = %target_tool_call_id,
                         "Dropping orphan tool message (no assistant in history claims this tool_call_id)"
