@@ -527,6 +527,14 @@ disabledMcpServerIds: Array<string>, session: AssistantSession | null, messages:
  */
 artifactCount: bigint, 
 /**
+ * Set when the walk stopped on its entry budget, so `artifact_count` is a
+ * lower bound and `artifact_latest_modified_at` is partial. The header
+ * chip cannot infer this from the count alone: the budget is spent on
+ * directory entries while the count tallies only files, so a file-sparse
+ * workspace saturates well below the ceiling.
+ */
+artifactCountCapped: boolean, 
+/**
  * Latest mtime (unix ms) across the artifact tree: files, non-skipped
  * directories, **and the workspace root itself**. The artifacts panel
  * keys its tree refresh on this, so it has to move for mutations the

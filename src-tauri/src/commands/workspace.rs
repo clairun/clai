@@ -46,7 +46,7 @@ const SKIPPED_ARTIFACT_DIRS: &[&str] = &[
     "venv",
 ];
 
-/// Ceiling on the recursive artifact walk, in files.
+/// Ceiling on the recursive artifact walk, in **directory entries examined**.
 ///
 /// The walk is O(tree) and runs on every 5s snapshot poll, but its output
 /// feeds only a header count chip and a change-tick for the artifacts panel.
@@ -56,21 +56,38 @@ const SKIPPED_ARTIFACT_DIRS: &[&str] = &[
 /// quarter of a core per open workspace, plus every inode dragged through the
 /// page cache.
 ///
-/// Stopping at the cap bounds the poll to about what a 25k-file workspace
-/// already paid, whatever the real size. Two consequences, both deliberate:
+/// The budget is spent per entry the walk looks at, not per file it counts.
+/// A file-only budget bounded nothing on a file-sparse tree: directories were
+/// free, so a wide-and-deep tree of empty (or symlink-only) directories was
+/// still walked to exhaustion on every poll, which is the cost this ceiling
+/// exists to bound. Charging every entry also bounds the number of `read_dir`
+/// calls, since descending into a directory spends an entry first.
 ///
-/// * The count saturates. The UI renders a capped value as "25,000+" rather
-///   than claiming a precise figure it did not compute.
+/// One exemption survives: a skip-listed directory is not charged, so the
+/// dirents *examined* are `budget * (1 + SKIPPED_ARTIFACT_DIRS.len())` in the
+/// worst case rather than `budget` — a directory can hold at most one entry
+/// per skip-listed name, and the number of directories visited is itself
+/// charged. Each reject costs one `readdir` record and a name comparison, no
+/// syscall. Add one classification per frame still on the stack when the
+/// budget runs out, per [`ArtifactWalk::walk`].
+///
+/// Two consequences, both deliberate:
+///
+/// * The file count saturates and becomes a *lower bound*. It can saturate
+///   below this number, because directories spend budget without adding to
+///   it, so the UI cannot infer saturation by comparing against the ceiling —
+///   [`ArtifactTreeStats::capped`] says so explicitly and the UI renders such
+///   a value as "12,000+" rather than as an exact figure.
 /// * The mtime collected alongside it is partial, so a change beyond the cap
 ///   may not bump it. The artifacts panel does not rely on that: it re-reads
 ///   the directories the user has actually expanded on its own cadence, which
 ///   is exact and costs one `readdir` per open folder regardless of tree size.
-const MAX_ARTIFACT_COUNT: i64 = 25_000;
+const MAX_ARTIFACT_WALK_ENTRIES: i64 = 25_000;
 
 /// Ceiling on a single folder's `child_count`, in entries.
 ///
-/// [`MAX_ARTIFACT_COUNT`] bounds one walk; it does not bound how many walks a
-/// refresh performs. `workspace_list_dir` sizes every child directory and the
+/// [`MAX_ARTIFACT_WALK_ENTRIES`] bounds one walk; it does not bound how many
+/// walks a refresh performs. `workspace_list_dir` sizes every child directory and the
 /// panel re-lists every expanded folder on a timer, so before this cap a
 /// refresh was `child_dirs * folder_size` of `readdir` work on a repeating
 /// schedule, with neither factor bounded.
@@ -196,6 +213,13 @@ pub struct WorkspaceSnapshot {
     /// this instead of `artifacts.len()`.
     #[serde(default)]
     pub artifact_count: i64,
+    /// Set when the walk stopped on its entry budget, so `artifact_count` is a
+    /// lower bound and `artifact_latest_modified_at` is partial. The header
+    /// chip cannot infer this from the count alone: the budget is spent on
+    /// directory entries while the count tallies only files, so a file-sparse
+    /// workspace saturates well below the ceiling.
+    #[serde(default)]
+    pub artifact_count_capped: bool,
     /// Latest mtime (unix ms) across the artifact tree: files, non-skipped
     /// directories, **and the workspace root itself**. The artifacts panel
     /// keys its tree refresh on this, so it has to move for mutations the
@@ -727,7 +751,7 @@ fn collect_files(
 /// per child directory, and the panel re-lists every expanded folder on a
 /// timer, so anything recursive here is multiplied by the number of child
 /// directories *and* repeated every few seconds. A recursive count made an
-/// idle refresh cost `child_dirs * MAX_ARTIFACT_COUNT`.
+/// idle refresh cost `child_dirs * MAX_ARTIFACT_WALK_ENTRIES`.
 ///
 /// It counts directory entries, not rendered rows. The one exception is a
 /// skipped directory ([`should_skip_artifact_dir`]), which is excluded so a
@@ -754,7 +778,7 @@ fn count_direct_children(dir: &Path) -> i64 {
 
 /// [`count_direct_children`] with an explicit ceiling, so tests can exercise
 /// the cap without materialising [`MAX_CHILD_COUNT`] files on disk. Mirrors
-/// the [`walk_artifact_tree_to_cap`] seam.
+/// the [`artifact_tree_stats_to_budget`] seam.
 fn count_direct_children_to_cap(dir: &Path, cap: i64) -> i64 {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -788,17 +812,176 @@ fn entry_modified_at_ms(entry: &fs::DirEntry) -> i64 {
         .unwrap_or(0)
 }
 
+/// What one artifact walk found.
+///
+/// Named rather than a tuple because the two numbers are only meaningful
+/// alongside `capped`: a caller that reads `file_count` without it cannot tell
+/// a measurement from a lower bound.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ArtifactTreeStats {
+    /// Files under the walked root, excluding skip-listed trees and symlinks.
+    /// A lower bound when `capped`.
+    file_count: i64,
+    /// Newest mtime (unix ms) seen; partial when `capped`. `0` only when
+    /// nothing at all could be read.
+    latest_modified_at: i64,
+    /// The walk spent its entry budget, so both numbers above are partial.
+    ///
+    /// Conservatively true when the tree happens to hold exactly `budget`
+    /// entries and the walk therefore finished on its last one: reporting
+    /// "N+" for exactly N is honest, whereas reporting an exact figure for a
+    /// truncated walk is not.
+    capped: bool,
+}
+
+/// One directory entry, classified by [`ArtifactWalk::classify`].
+///
+/// Every variant is charged to the budget. The uncharged case is `None` from
+/// `classify`, which has no variant here on purpose: an exemption should be
+/// impossible to confuse with an entry the walk looked at.
+enum ArtifactEntry {
+    /// A directory to descend into, folding its mtime. Carries the path
+    /// [`ArtifactWalk::classify`] already built to test it against the skip
+    /// list, so the walk does not allocate it twice.
+    Directory { entry: fs::DirEntry, path: PathBuf },
+    /// A file to count, folding its mtime.
+    File(fs::DirEntry),
+    /// Charged, but neither counted nor allowed to move the mtime.
+    Ignored,
+}
+
+/// Running state of one artifact walk, carrying the budget so it is shared
+/// across the whole recursion rather than re-applied per directory.
+struct ArtifactWalk {
+    /// Entries this walk may still examine — see
+    /// [`MAX_ARTIFACT_WALK_ENTRIES`] for why the budget is in entries and not
+    /// in files.
+    budget: i64,
+    entries_seen: i64,
+    file_count: i64,
+    latest_modified_at: i64,
+}
+
+impl ArtifactWalk {
+    fn new(budget: i64) -> Self {
+        Self {
+            budget,
+            entries_seen: 0,
+            file_count: 0,
+            latest_modified_at: 0,
+        }
+    }
+
+    fn exhausted(&self) -> bool {
+        self.entries_seen >= self.budget
+    }
+
+    fn fold_mtime(&mut self, entry: &fs::DirEntry) {
+        self.latest_modified_at = self.latest_modified_at.max(entry_modified_at_ms(entry));
+    }
+
+    /// Classifies one `read_dir` item, charging nothing.
+    ///
+    /// `None` is the single exemption from the budget: a skip-listed
+    /// directory. Deciding that here, ahead of the charge, is what keeps the
+    /// exemption from looking like an entry the walk merely forgot to charge —
+    /// which is the bug the entry budget exists to prevent.
+    ///
+    /// The exemption stays bounded because a directory holds at most one entry
+    /// per name in [`SKIPPED_ARTIFACT_DIRS`], so at most that many free
+    /// rejects exist per directory — the same property `count_direct_children`
+    /// relies on. Do not widen it without that: a rule that can reject
+    /// unboundedly many entries would let one directory be read to exhaustion
+    /// on every poll despite the budget.
+    fn classify(entry: Result<fs::DirEntry, std::io::Error>) -> Option<ArtifactEntry> {
+        // An entry we cannot read, or cannot classify, is still an entry: it
+        // cost the same `readdir` record, so it is charged and ignored rather
+        // than exempted.
+        let Ok(entry) = entry else {
+            return Some(ArtifactEntry::Ignored);
+        };
+        let Ok(file_type) = entry.file_type() else {
+            return Some(ArtifactEntry::Ignored);
+        };
+        if file_type.is_dir() {
+            // Skipped trees contribute nothing — not even the dir's own mtime,
+            // or internal churn in e.g. `.git` would read as an artifact
+            // change.
+            let path = entry.path();
+            if should_skip_artifact_dir(&path) {
+                return None;
+            }
+            return Some(ArtifactEntry::Directory { entry, path });
+        }
+        if file_type.is_file() {
+            return Some(ArtifactEntry::File(entry));
+        }
+        // A symlink, socket or fifo: not an entry the artifacts panel renders
+        // a row for, so it neither counts nor moves the mtime.
+        Some(ArtifactEntry::Ignored)
+    }
+
+    /// Walks `dir` depth-first until the budget is spent.
+    ///
+    /// The traversal order is whatever `read_dir` yields, so *which* entries
+    /// land under the budget is unspecified — that is fine for a count, and
+    /// the mtime it collects is correspondingly partial.
+    ///
+    /// The budget check sits after the classification, so once the budget runs
+    /// out each active frame still classifies one entry before returning: one
+    /// `file_type`, plus a `path` for a directory. Nothing beyond that — no
+    /// `metadata`, no mtime, no recursion.
+    fn walk(&mut self, dir: &Path) {
+        if self.exhausted() {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let Some(entry) = Self::classify(entry) else {
+                continue;
+            };
+            if self.exhausted() {
+                return;
+            }
+            // The one charge point. Everything past it may decline to *count*
+            // an entry, but nothing may decline to charge for having looked at
+            // one.
+            self.entries_seen += 1;
+            match entry {
+                ArtifactEntry::Directory { entry, path } => {
+                    self.fold_mtime(&entry);
+                    self.walk(&path);
+                }
+                ArtifactEntry::File(entry) => {
+                    self.fold_mtime(&entry);
+                    self.file_count += 1;
+                }
+                ArtifactEntry::Ignored => {}
+            }
+        }
+    }
+
+    fn finish(self) -> ArtifactTreeStats {
+        ArtifactTreeStats {
+            file_count: self.file_count,
+            latest_modified_at: self.latest_modified_at,
+            capped: self.exhausted(),
+        }
+    }
+}
+
 /// Recursive stats for the artifact tree, applying the same skip-list as
 /// `workspace_list_dir` so the header counter matches what the panel can
 /// actually surface (excludes `.clai`, `node_modules`, `target`, `.git`, …).
 ///
-/// Returns `(file_count, latest_modified_at_ms)`. The mtime max spans files,
-/// directories, and `dir` itself: an in-place edit bumps the file's mtime,
-/// while a rename or move bumps the containing directory's. Folding `dir`'s
-/// own mtime is what covers a rename directly inside `dir` — that changes
-/// neither the count nor any descendant's mtime, so without it a root-level
-/// `mv a.txt b.txt` left the artifacts panel showing the old name until
-/// something else changed.
+/// The mtime max spans files, directories, and `dir` itself: an in-place edit
+/// bumps the file's mtime, while a rename or move bumps the containing
+/// directory's. Folding `dir`'s own mtime is what covers a rename directly
+/// inside `dir` — that changes neither the count nor any descendant's mtime,
+/// so without it a root-level `mv a.txt b.txt` left the artifacts panel
+/// showing the old name until something else changed.
 ///
 /// Classification comes from `DirEntry::file_type`, which never follows
 /// symlinks (and on Linux is answered from the `readdir` record, though std
@@ -822,68 +1005,25 @@ fn entry_modified_at_ms(entry: &fs::DirEntry) -> i64 {
 /// not defended against explicitly: the path grows on every hop, so the walk
 /// still terminates when `read_dir` fails with `ENAMETOOLONG`. That bounds
 /// depth at `PATH_MAX`, which no reachable stack depth here can overflow.
-fn artifact_tree_stats(dir: &Path) -> (i64, i64) {
-    let (count, latest_modified_at) = walk_artifact_tree(dir);
+fn artifact_tree_stats(dir: &Path) -> ArtifactTreeStats {
+    artifact_tree_stats_to_budget(dir, MAX_ARTIFACT_WALK_ENTRIES)
+}
+
+/// [`artifact_tree_stats`] with an explicit entry budget, so tests can
+/// exercise the cap without materialising [`MAX_ARTIFACT_WALK_ENTRIES`]
+/// entries on disk. Mirrors the [`count_direct_children_to_cap`] seam.
+fn artifact_tree_stats_to_budget(dir: &Path, budget: i64) -> ArtifactTreeStats {
+    let mut walk = ArtifactWalk::new(budget);
+    walk.walk(dir);
+    let mut stats = walk.finish();
     // Only `dir`'s own mtime is missing from the walk: every *descendant*
     // directory is folded in by the loop that yielded it.
     let own_modified_at = fs::metadata(dir)
         .ok()
         .and_then(|meta| file_updated_at(&meta))
         .unwrap_or(0);
-    (count, latest_modified_at.max(own_modified_at))
-}
-
-/// Shared body of [`artifact_tree_stats`].
-fn walk_artifact_tree(dir: &Path) -> (i64, i64) {
-    walk_artifact_tree_to_cap(dir, MAX_ARTIFACT_COUNT)
-}
-
-/// [`walk_artifact_tree`] with an explicit ceiling, so tests can exercise the
-/// cap without materialising [`MAX_ARTIFACT_COUNT`] files on disk.
-fn walk_artifact_tree_to_cap(dir: &Path, cap: i64) -> (i64, i64) {
-    let mut count: i64 = 0;
-    let mut latest_modified_at: i64 = 0;
-    walk_artifact_tree_capped(dir, cap, &mut count, &mut latest_modified_at);
-    (count, latest_modified_at)
-}
-
-/// Body of [`walk_artifact_tree`], carrying the running totals so the
-/// [`MAX_ARTIFACT_COUNT`] budget is shared across the whole recursion rather
-/// than being re-applied per directory.
-///
-/// Returns as soon as the budget is spent. The traversal order is whatever
-/// `read_dir` yields, so *which* files land under the cap is unspecified —
-/// that is fine for a count, and the mtime it collects is correspondingly
-/// partial (see [`MAX_ARTIFACT_COUNT`]).
-fn walk_artifact_tree_capped(dir: &Path, cap: i64, count: &mut i64, latest_modified_at: &mut i64) {
-    if *count >= cap {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if *count >= cap {
-            return;
-        }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if file_type.is_dir() {
-            let path = entry.path();
-            // Skipped trees contribute nothing — not even the dir's own
-            // mtime, or internal churn in e.g. `.git` would read as an
-            // artifact change.
-            if should_skip_artifact_dir(&path) {
-                continue;
-            }
-            *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
-            walk_artifact_tree_capped(&path, cap, count, latest_modified_at);
-        } else if file_type.is_file() {
-            *latest_modified_at = (*latest_modified_at).max(entry_modified_at_ms(&entry));
-            *count += 1;
-        }
-    }
+    stats.latest_modified_at = stats.latest_modified_at.max(own_modified_at);
+    stats
 }
 
 fn ensure_agent_workspace_root(root: &Path) -> Result<(), String> {
@@ -1718,7 +1858,7 @@ pub async fn workspace_get_snapshot(
     // for the header counter. This also keeps the periodic 5s poll bounded:
     // counting is cheaper than building + serializing every entry, and there is
     // no longer a 500-entry cap silently truncating large workspaces.
-    let (memories, artifact_count, artifact_latest_modified_at) = if options.include_files() {
+    let (memories, artifact_stats) = if options.include_files() {
         if let Some(root_path) = &descriptor.root_path {
             let memory_root = root_path.join(".clai").join("memory");
             let mut memories = Vec::new();
@@ -1727,13 +1867,12 @@ pub async fn workspace_get_snapshot(
             }
             sort_workspace_entries(&mut memories);
 
-            let (artifact_count, artifact_latest_modified_at) = artifact_tree_stats(root_path);
-            (memories, artifact_count, artifact_latest_modified_at)
+            (memories, artifact_tree_stats(root_path))
         } else {
-            (Vec::new(), 0, 0)
+            (Vec::new(), ArtifactTreeStats::default())
         }
     } else {
-        (Vec::new(), 0, 0)
+        (Vec::new(), ArtifactTreeStats::default())
     };
     let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
 
@@ -1789,8 +1928,9 @@ pub async fn workspace_get_snapshot(
         tool_calls,
         memories,
         artifacts,
-        artifact_count,
-        artifact_latest_modified_at,
+        artifact_count: artifact_stats.file_count,
+        artifact_count_capped: artifact_stats.capped,
+        artifact_latest_modified_at: artifact_stats.latest_modified_at,
         queued_message_ids,
         enabled,
         schedule_enabled,
@@ -4320,7 +4460,7 @@ mod tests {
         // timestamps to be worth asserting, which is unix-only here — see
         // `artifact_tree_stats_ignores_mtimes_inside_skipped_dirs`.
         assert_eq!(
-            artifact_tree_stats(root).0,
+            artifact_tree_stats(root).file_count,
             3,
             "only the three real artifacts should count"
         );
@@ -4338,7 +4478,7 @@ mod tests {
         write_file(&root.join("real.txt"), "real");
         std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
 
-        assert_eq!(artifact_tree_stats(root).0, 1);
+        assert_eq!(artifact_tree_stats(root).file_count, 1);
     }
 
     // Regression: classifying with `Path::is_dir` resolved symlinks, so a link
@@ -4356,7 +4496,7 @@ mod tests {
         std::os::unix::fs::symlink(root.join("real"), root.join("real/loop")).unwrap();
 
         assert_eq!(
-            artifact_tree_stats(root).0,
+            artifact_tree_stats(root).file_count,
             2,
             "the ancestor symlink must not be descended into"
         );
@@ -4376,7 +4516,7 @@ mod tests {
         std::os::unix::fs::symlink(outside.path(), root.join("real/link")).unwrap();
 
         assert_eq!(
-            artifact_tree_stats(root).0,
+            artifact_tree_stats(root).file_count,
             1,
             "a symlinked directory must not pull outside files into the count"
         );
@@ -4419,10 +4559,10 @@ mod tests {
         // `artifact_tree_stats` folds that in.
         set_mtime_ms(root, 500_000_000_000);
 
-        let (count, latest) = artifact_tree_stats(root);
-        assert_eq!(count, 1);
+        let stats = artifact_tree_stats(root);
+        assert_eq!(stats.file_count, 1);
         assert_eq!(
-            latest, 1_000_000_000_000,
+            stats.latest_modified_at, 1_000_000_000_000,
             "churn inside a skip-listed tree must not move the artifact mtime"
         );
     }
@@ -4441,7 +4581,10 @@ mod tests {
         write_file(&root.join("nested/deeper/b.txt"), "b");
         set_mtime_ms(&root.join("nested/deeper/b.txt"), FUTURE_MS);
 
-        assert_eq!(artifact_tree_stats(root).1, FUTURE_MS as i64);
+        assert_eq!(
+            artifact_tree_stats(root).latest_modified_at,
+            FUTURE_MS as i64
+        );
     }
 
     // A rename directly inside the walked directory changes neither the file
@@ -4463,35 +4606,40 @@ mod tests {
         fs::rename(root.join("a.txt"), root.join("b.txt")).unwrap();
         let after = artifact_tree_stats(root);
 
-        assert_eq!(after.0, before.0, "a rename does not change the count");
+        assert_eq!(
+            after.file_count, before.file_count,
+            "a rename does not change the count"
+        );
         assert!(
-            after.1 > before.1,
+            after.latest_modified_at > before.latest_modified_at,
             "a rename must still move the mtime signal (before={}, after={})",
-            before.1,
-            after.1
+            before.latest_modified_at,
+            after.latest_modified_at
         );
     }
 
-    // The cap is what bounds the poll on 500k-file workspaces, so it has to
-    // hold across the *whole* recursion — a per-directory budget would let a
-    // wide tree blow straight through it.
+    // The budget is what bounds the poll on 500k-entry workspaces, so it has
+    // to hold across the *whole* recursion — a per-directory budget would let
+    // a wide tree blow straight through it.
     #[test]
-    fn walk_artifact_tree_stops_at_the_cap() {
+    fn artifact_walk_stops_at_the_budget() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         for i in 0..20 {
             write_file(&root.join(format!("f{i}.txt")), "x");
         }
 
-        assert_eq!(walk_artifact_tree_to_cap(root, 5).0, 5);
+        let stats = artifact_tree_stats_to_budget(root, 5);
+        assert_eq!(stats.file_count, 5);
+        assert!(stats.capped, "a truncated walk must report itself capped");
     }
 
     #[test]
-    fn walk_artifact_tree_cap_is_shared_across_nested_directories() {
+    fn artifact_walk_budget_is_shared_across_nested_directories() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         // Three files per level over four levels: any per-directory budget
-        // would return more than the global cap.
+        // would walk more entries than the global one allows.
         let mut dir = root.to_path_buf();
         for depth in 0..4 {
             for i in 0..3 {
@@ -4500,21 +4648,177 @@ mod tests {
             dir = dir.join(format!("level{depth}"));
         }
 
-        assert_eq!(walk_artifact_tree_to_cap(root, 4).0, 4);
+        // The root holds only three files, so a fourth would have to come from
+        // a deeper level — which costs a directory charge first, leaving at
+        // most three files inside a budget of four however `read_dir` orders
+        // them.
+        let stats = artifact_tree_stats_to_budget(root, 4);
+        assert!(
+            stats.file_count <= 3,
+            "the budget must bound the whole recursion, got {}",
+            stats.file_count
+        );
+        assert!(stats.capped);
     }
 
-    // Below the cap the walk must be untouched — the cap is a ceiling, not a
+    // Regression: the budget used to be charged for files only, so directories
+    // were free and a file-sparse tree was walked to exhaustion however large
+    // it was — exactly the 5s-poll cost the ceiling exists to bound.
+    //
+    // One directory per level, deeper than the budget allows, with the only
+    // file at the bottom: a file-only budget descends the whole chain and
+    // reports that file as an exact count. A single chain also keeps the
+    // assertion independent of `read_dir` order.
+    #[test]
+    fn artifact_walk_budget_bounds_directory_recursion() {
+        const BUDGET: i64 = 4;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut dir = root.to_path_buf();
+        for depth in 0..(BUDGET + 4) {
+            dir = dir.join(format!("level{depth}"));
+        }
+        write_file(&dir.join("deep.txt"), "x");
+
+        let stats = artifact_tree_stats_to_budget(root, BUDGET);
+        assert_eq!(
+            stats.file_count, 0,
+            "the walk must run out of budget before reaching the bottom"
+        );
+        assert!(
+            stats.capped,
+            "directories must spend the budget, or a dir-heavy tree is unbounded"
+        );
+    }
+
+    // The budget is spent, so the walk cannot know whether anything follows —
+    // `capped` is true even though this tree happens to end on the last
+    // charged entry. Reporting "N+" for exactly N is honest; reporting an
+    // exact figure for a walk that stopped early would not be.
+    #[test]
+    fn artifact_walk_at_exactly_the_budget_reports_capped() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("b.txt"), "b");
+
+        let stats = artifact_tree_stats_to_budget(root, 2);
+        assert_eq!(stats.file_count, 2, "both files are still counted");
+        assert!(stats.capped);
+    }
+
+    // Mirrors `count_direct_children_with_a_non_positive_cap_is_zero`:
+    // a non-positive budget must walk nothing rather than underflow into a
+    // full traversal.
+    #[test]
+    fn artifact_walk_with_a_non_positive_budget_walks_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        write_file(&root.join("nested/b.txt"), "b");
+
+        for budget in [0, -1] {
+            let stats = artifact_tree_stats_to_budget(root, budget);
+            assert_eq!(stats.file_count, 0, "budget {budget}");
+            assert!(stats.capped, "budget {budget}");
+        }
+    }
+
+    // A truncated walk still reports an mtime: the artifacts panel keys its
+    // refresh on it, so returning `0` for a large workspace would freeze the
+    // tree until the count changed.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_walk_reports_an_mtime_when_truncated() {
+        const FUTURE_MS: u64 = 4_000_000_000_000; // year 2096
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("a.txt"), "a");
+        set_mtime_ms(&root.join("a.txt"), FUTURE_MS);
+
+        let stats = artifact_tree_stats_to_budget(root, 1);
+        assert!(stats.capped);
+        assert_eq!(
+            stats.latest_modified_at, FUTURE_MS as i64,
+            "the entries that were walked must still contribute their mtime"
+        );
+    }
+
+    // The same tree, walked with room to spare, still reaches the bottom —
+    // charging directories must not make a normal deep tree unreachable.
+    #[test]
+    fn artifact_walk_reaches_deep_files_within_the_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let mut dir = root.to_path_buf();
+        for depth in 0..8 {
+            dir = dir.join(format!("level{depth}"));
+        }
+        write_file(&dir.join("deep.txt"), "x");
+
+        let stats = artifact_tree_stats_to_budget(root, 25_000);
+        assert_eq!(stats.file_count, 1);
+        assert!(!stats.capped);
+    }
+
+    // The one thing the budget does not charge for. Mirrors
+    // `count_direct_children_cap_is_not_consumed_by_skipped_dirs`: a budget of
+    // one must still reach the single real file, however many skip-listed
+    // trees `read_dir` yields first.
+    #[test]
+    fn artifact_walk_budget_is_not_consumed_by_skipped_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        for skipped in [".git", "node_modules", "target", "dist", "build"] {
+            write_file(&root.join(skipped).join("inside.txt"), "x");
+        }
+        write_file(&root.join("a.txt"), "a");
+
+        assert_eq!(
+            artifact_tree_stats_to_budget(root, 1).file_count,
+            1,
+            "skip-listed directories must not spend the budget"
+        );
+    }
+
+    // A symlink is not counted, but reading it costs the same dirent as any
+    // other entry, so it must still spend budget: otherwise a directory full
+    // of symlinks is read to exhaustion for free.
+    #[cfg(unix)]
+    #[test]
+    fn artifact_walk_budget_bounds_uncounted_entries() {
+        // The link target lives outside the walked root, so the fixture holds
+        // nothing countable and the assertions do not depend on `read_dir`
+        // order.
+        let outside = tempfile::tempdir().unwrap();
+        write_file(&outside.path().join("real.txt"), "real");
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        const BUDGET: i64 = 4;
+        for i in 0..(BUDGET + 4) {
+            std::os::unix::fs::symlink(outside.path().join("real.txt"), root.join(format!("l{i}")))
+                .unwrap();
+        }
+
+        let stats = artifact_tree_stats_to_budget(root, BUDGET);
+        assert_eq!(stats.file_count, 0, "symlinks are still not counted");
+        assert!(stats.capped, "but they are still charged");
+    }
+
+    // Below the budget the walk must be untouched — it is a ceiling, not a
     // change in what a normal-sized workspace reports.
     #[test]
-    fn walk_artifact_tree_is_exact_below_the_cap() {
+    fn artifact_walk_is_exact_below_the_budget() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         write_file(&root.join("a.txt"), "a");
         write_file(&root.join("nested/b.txt"), "b");
         write_file(&root.join("nested/deeper/c.txt"), "c");
 
-        assert_eq!(walk_artifact_tree_to_cap(root, 25_000).0, 3);
-        assert_eq!(artifact_tree_stats(root).0, 3);
+        let stats = artifact_tree_stats_to_budget(root, 25_000);
+        assert_eq!(stats.file_count, 3);
+        assert!(!stats.capped, "a complete walk is not a lower bound");
+        assert_eq!(artifact_tree_stats(root).file_count, 3);
     }
 
     // The per-folder `childCount` counts the folder's own entries.
@@ -4558,7 +4862,7 @@ mod tests {
         assert_eq!(count_direct_children(&root.join("deep")), 1);
         assert_eq!(count_direct_children(&root.join("shallow")), 1);
         // ...while the recursive stat still sees every file.
-        assert_eq!(artifact_tree_stats(root).0, 4);
+        assert_eq!(artifact_tree_stats(root).file_count, 4);
     }
 
     // A symlink counts as an entry even though the panel renders no row for
@@ -4636,7 +4940,10 @@ mod tests {
     #[test]
     fn artifact_tree_stats_on_missing_dir_is_zero() {
         let root = tempfile::tempdir().unwrap();
-        assert_eq!(artifact_tree_stats(&root.path().join("nope")), (0, 0));
+        assert_eq!(
+            artifact_tree_stats(&root.path().join("nope")),
+            ArtifactTreeStats::default()
+        );
     }
 
     // =====================================================================
@@ -4794,7 +5101,8 @@ mod tests {
 
     #[test]
     fn artifact_tree_stats_counts_all_files_for_the_public_form() {
-        // The pub form delegates to the cap variant with `MAX_ARTIFACT_COUNT`,
+        // The pub form delegates to the budget variant with
+        // `MAX_ARTIFACT_WALK_ENTRIES`,
         // which is well above what we materialise here, so the tree counts
         // exactly as written.
         let root = tempfile::tempdir().unwrap();
@@ -4803,8 +5111,7 @@ mod tests {
         write_file(&root.join("nested/b.txt"), "b");
         write_file(&root.join("nested/deep/c.txt"), "c");
 
-        let (count, _latest) = artifact_tree_stats(root);
-        assert_eq!(count, 3);
+        assert_eq!(artifact_tree_stats(root).file_count, 3);
     }
 
     #[test]
