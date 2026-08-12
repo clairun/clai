@@ -472,9 +472,7 @@ pub async fn run_session_turn(
                 continue;
             }
 
-            if !retried_after_context_compaction
-                && should_recover_cli_context_limit(provider_runtime, message)
-            {
+            if !retried_after_context_compaction && should_recover_cli_context_limit(message) {
                 tracing::info!(
                     target: "clai::cli_session",
                     provider = provider_runtime.metadata_source(),
@@ -559,7 +557,7 @@ pub async fn run_session_turn(
             cancel_run(deps, &session, &run_id, usage.as_ref()).await
         }
         Err(LocalAgentRunError::Failed { message, usage }) => {
-            let message = if should_recover_cli_context_limit(provider_runtime, &message) {
+            let message = if should_recover_cli_context_limit(&message) {
                 cli_context_limit_failure_message(provider_runtime, &message)
             } else {
                 message
@@ -644,7 +642,7 @@ fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) ->
     }
 }
 
-fn should_recover_cli_context_limit(_provider_runtime: CliProviderRuntime, message: &str) -> bool {
+fn should_recover_cli_context_limit(message: &str) -> bool {
     compaction::is_context_limit_error(message)
 }
 
@@ -5790,19 +5788,15 @@ mod tests {
     #[test]
     fn cli_context_limit_errors_are_recoverable() {
         assert!(should_recover_cli_context_limit(
-            CliProviderRuntime::Codex,
             "provider error: provider request failed: Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
         ));
         assert!(should_recover_cli_context_limit(
-            CliProviderRuntime::Codex,
             "Codex exited with status exit status: 2\n--- stderr ---\nError: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)"
         ));
         assert!(should_recover_cli_context_limit(
-            CliProviderRuntime::ClaudeCode,
             "prompt is too long for the model context window"
         ));
         assert!(should_recover_cli_context_limit(
-            CliProviderRuntime::OpenCode,
             "input tokens exceed context"
         ));
     }
@@ -5811,10 +5805,7 @@ mod tests {
     fn codex_preflight_input_limit_message_is_recoverable_and_actionable() {
         let message = codex_input_too_large_message(CODEX_TURN_INPUT_MAX_CHARS + 1);
 
-        assert!(should_recover_cli_context_limit(
-            CliProviderRuntime::Codex,
-            &message
-        ));
+        assert!(should_recover_cli_context_limit(&message));
         assert!(message.contains("input_too_large"));
         assert!(message.contains("/compact"));
     }
@@ -5822,15 +5813,12 @@ mod tests {
     #[test]
     fn cli_non_context_errors_are_not_context_recoverable() {
         assert!(!should_recover_cli_context_limit(
-            CliProviderRuntime::Codex,
             "Codex exited with status exit status: 2"
         ));
         assert!(!should_recover_cli_context_limit(
-            CliProviderRuntime::Codex,
             "You've hit your usage limit. Try again at 9:47 PM."
         ));
         assert!(!should_recover_cli_context_limit(
-            CliProviderRuntime::ClaudeCode,
             "No conversation found with session ID abc"
         ));
     }

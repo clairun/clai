@@ -704,6 +704,41 @@ mod tests {
         out
     }
 
+    #[test]
+    fn automatic_compaction_requires_the_minimum_message_count() {
+        let mut view = filler(
+            "f",
+            MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES - 1,
+        );
+        view[0].content = vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))];
+
+        assert!(!should_auto_compact(&view, &[]));
+    }
+
+    #[test]
+    fn automatic_compaction_requires_the_estimated_size_threshold() {
+        let mut view = filler("f", MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES);
+
+        assert!(!should_auto_compact(&view, &[]));
+
+        view[0].content = vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))];
+
+        assert!(should_auto_compact(&view, &[]));
+    }
+
+    #[test]
+    fn forced_compaction_accepts_manual_minimum_history() {
+        let view = filler("m", MIN_MANUAL_COMPACT_MESSAGES);
+
+        assert!(select_compaction_window(&view, false).is_none());
+
+        let window = select_compaction_window(&view, true).expect("manual window");
+
+        assert_eq!(window.messages.len(), MIN_MANUAL_COMPACT_MESSAGES);
+        assert_eq!(window.source_from_message_id.as_deref(), Some("m0"));
+        assert_eq!(window.source_to_message_id.as_deref(), Some("m1"));
+    }
+
     /// The invariant the compaction boundary must preserve: every tool result
     /// left in the retained tail still has the assistant that issued it in the
     /// tail. A violation is invisible at compaction time and only shows up as a
