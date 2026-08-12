@@ -608,6 +608,10 @@ fn parsed_text_or_error(
     final_result: Option<String>,
     error: Option<String>,
 ) -> Result<String, ProviderError> {
+    if let Some(error) = error {
+        return Err(ProviderError::RequestFailed(error));
+    }
+
     let summary = if text.trim().is_empty() {
         final_result.unwrap_or_default()
     } else {
@@ -716,6 +720,41 @@ pub fn models_for_provider(provider_id: &str) -> Option<Vec<ModelInfo>> {
 mod tests {
     use super::*;
 
+    fn cli_connection(provider_id: &str) -> ProviderConnection {
+        ProviderConnection {
+            id: "connection".to_string(),
+            name: "CLI".to_string(),
+            protocol_id: provider_id.to_string(),
+            provider_id: provider_id.to_string(),
+            auth_mode: AuthMode::SubscriptionLogin,
+            base_url: None,
+            secret_ref: String::new(),
+            model_id: "default".to_string(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn summary_request() -> CompletionRequest {
+        CompletionRequest {
+            run_id: "r".to_string(),
+            session_id: "s".to_string(),
+            model_id: "default".to_string(),
+            messages: vec![ProviderInputMessage {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "summarize this".to_string(),
+                }],
+            }],
+            tools: Vec::new(),
+            temperature: None,
+            max_output_tokens: Some(128),
+            images: Default::default(),
+        }
+    }
+
     #[test]
     fn image_capability_gated_per_provider() {
         // Codex CLI ingests images via `codex exec --image <FILE>`; Claude Code
@@ -768,6 +807,44 @@ mod tests {
         assert!(!prompt.contains("system message"));
     }
 
+    #[tokio::test]
+    async fn sessionless_cli_summary_rejects_tool_requests() {
+        let adapter = CliAdapter::new(CODEX_PROVIDER_ID).expect("adapter");
+        let connection = cli_connection(CODEX_PROVIDER_ID);
+        let mut request = summary_request();
+        request.tools.push(crate::assistant::types::ToolDefinition {
+            name: "probe".to_string(),
+            description: "not allowed in summarizer".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        });
+
+        let result = adapter
+            .stream_sessionless_completion(&connection, request, None)
+            .await;
+
+        assert!(matches!(result, Err(ProviderError::NotImplemented)));
+    }
+
+    #[tokio::test]
+    async fn sessionless_cli_summary_rejects_image_requests() {
+        let adapter = CliAdapter::new(CLAUDE_CODE_PROVIDER_ID).expect("adapter");
+        let connection = cli_connection(CLAUDE_CODE_PROVIDER_ID);
+        let mut request = summary_request();
+        request.images.insert(
+            "img".to_string(),
+            crate::assistant::types::ResolvedImage {
+                media_type: "image/png".to_string(),
+                data_base64: "AA==".to_string(),
+            },
+        );
+
+        let result = adapter
+            .stream_sessionless_completion(&connection, request, None)
+            .await;
+
+        assert!(matches!(result, Err(ProviderError::NotImplemented)));
+    }
+
     #[test]
     fn parse_claude_summary_prefers_streamed_text_over_final_result() {
         let stdout = r#"
@@ -797,5 +874,41 @@ mod tests {
 "#;
 
         assert_eq!(parse_opencode_summary(stdout).unwrap(), "final summary");
+    }
+
+    #[test]
+    fn parse_claude_summary_errors_even_with_partial_text() {
+        let stdout = r#"
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}}
+{"type":"result","is_error":true,"error":"context limit"}
+"#;
+
+        let err = parse_claude_summary(stdout).unwrap_err().to_string();
+
+        assert!(err.contains("context limit"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_codex_summary_errors_even_after_agent_message() {
+        let stdout = r#"
+{"type":"item.completed","item":{"type":"agent_message","text":"partial summary"}}
+{"type":"turn.failed","error":{"message":"input too large"}}
+"#;
+
+        let err = parse_codex_summary(stdout).unwrap_err().to_string();
+
+        assert!(err.contains("input too large"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_opencode_summary_errors_even_after_text() {
+        let stdout = r#"
+{"type":"text","part":{"text":"partial summary"}}
+{"type":"error","message":"provider failed"}
+"#;
+
+        let err = parse_opencode_summary(stdout).unwrap_err().to_string();
+
+        assert!(err.contains("provider failed"), "got: {err}");
     }
 }
