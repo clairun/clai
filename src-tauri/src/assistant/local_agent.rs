@@ -3084,28 +3084,115 @@ fn fresh_cli_session_context_prompt(
     out
 }
 
+/// The `tool_call_id`s an assistant message issues.
+fn cli_context_tool_use_ids(message: &AssistantMessage) -> HashSet<&str> {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ToolUse { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `tool_call_id`s a tool message answers.
+fn cli_context_tool_result_ids(message: &AssistantMessage) -> Vec<&str> {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Partition messages into groups that must be kept or dropped together: an
+/// assistant message and the tool messages answering the calls it issued.
+/// Everything else is its own group. Results always follow their call, so every
+/// group is a contiguous range.
+fn cli_context_groups(messages: &[AssistantMessage]) -> Vec<std::ops::Range<usize>> {
+    let mut groups = Vec::new();
+    let mut start = 0usize;
+    while start < messages.len() {
+        let mut end = start + 1;
+        let issued = cli_context_tool_use_ids(&messages[start]);
+        if !issued.is_empty() {
+            while end < messages.len() && messages[end].role == MessageRole::Tool {
+                let answered = cli_context_tool_result_ids(&messages[end]);
+                if answered.is_empty() || !answered.iter().all(|id| issued.contains(id)) {
+                    break;
+                }
+                end += 1;
+            }
+        }
+        groups.push(start..end);
+        start = end;
+    }
+    groups
+}
+
+/// Render the tail of the conversation as the seed for a fresh CLI session.
+///
+/// Selection is by *group*, not by message: a tool result rendered without the
+/// call that produced it reads as free-standing output nothing asked for, and
+/// selecting the last N messages breaks the pairing constantly — one assistant
+/// message issuing a wide parallel batch becomes N tool messages that fill the
+/// whole window and evict the very message explaining them. Measured on this
+/// app's own history, 34 of 39 rotation seeds were **100% orphaned tool results
+/// with zero assistant text**: the model resumed knowing what came back but
+/// never what was asked or why.
+///
+/// `CLI_FRESH_CONTEXT_MAX_MESSAGES` is therefore a target rather than a cap — a
+/// group may overshoot it to stay whole. The byte budget stays the hard bound,
+/// and per #154's lesson the "selection is empty" branch is not an unbounded
+/// escape hatch: an oversized group is admitted head-first and clamped, so it
+/// keeps attribution without exceeding the budget.
 fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
-    let mut selected = Vec::new();
+    let mut selected: Vec<String> = Vec::new();
+    let mut count = 0usize;
     let mut total = 0usize;
 
-    for message in messages.iter().rev() {
-        if selected.len() >= CLI_FRESH_CONTEXT_MAX_MESSAGES {
+    for group in cli_context_groups(messages).into_iter().rev() {
+        if count >= CLI_FRESH_CONTEXT_MAX_MESSAGES {
             break;
         }
-        let Some(mut rendered) = render_cli_context_message(message) else {
+
+        let rendered: Vec<String> = messages[group]
+            .iter()
+            .filter_map(render_cli_context_message)
+            .map(|text| truncate_cli_context_text(&text, CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS))
+            .collect();
+        if rendered.is_empty() {
             continue;
-        };
-        rendered = truncate_cli_context_text(&rendered, CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS);
-        let next_len = rendered.len() + 2;
-        if total + next_len > CLI_FRESH_CONTEXT_MAX_CHARS && !selected.is_empty() {
+        }
+
+        let cost: usize = rendered.iter().map(|text| text.len() + 2).sum();
+        if total + cost > CLI_FRESH_CONTEXT_MAX_CHARS {
+            if !selected.is_empty() {
+                break;
+            }
+            // Admit an oversized group head-first so the call that explains the
+            // results is never the part that gets dropped.
+            for text in rendered {
+                let remaining = CLI_FRESH_CONTEXT_MAX_CHARS.saturating_sub(total);
+                if remaining == 0 {
+                    break;
+                }
+                let text = truncate_cli_context_text(&text, remaining);
+                total += text.len() + 2;
+                count += 1;
+                selected.push(text);
+            }
             break;
         }
-        if total + next_len > CLI_FRESH_CONTEXT_MAX_CHARS {
-            let remaining = CLI_FRESH_CONTEXT_MAX_CHARS.saturating_sub(total);
-            rendered = truncate_cli_context_text(&rendered, remaining);
-        }
-        total += rendered.len() + 2;
-        selected.push(rendered);
+
+        total += cost;
+        count += rendered.len();
+        // Groups are walked newest-first; push reversed so one final reverse
+        // restores conversation order.
+        selected.extend(rendered.into_iter().rev());
     }
 
     selected.reverse();
@@ -5380,6 +5467,125 @@ mod tests {
             "rendered recent context too large: {}",
             rendered.len()
         );
+    }
+
+    /// Helper: one assistant message issuing `n` parallel calls, followed by
+    /// the `n` tool messages answering them — the shape a wide parallel batch
+    /// actually takes in storage.
+    fn parallel_batch(n: usize) -> Vec<AssistantMessage> {
+        let calls = (0..n)
+            .map(|i| ContentPart::ToolUse {
+                tool_call_id: format!("call-{i}"),
+                tool_name: "bash_exec".to_string(),
+                arguments: serde_json::json!({ "command": format!("echo {i}") }),
+            })
+            .collect::<Vec<_>>();
+        let mut out = vec![test_message("asst", MessageRole::Assistant, calls)];
+        for i in 0..n {
+            out.push(test_message(
+                &format!("res-{i}"),
+                MessageRole::Tool,
+                vec![ContentPart::ToolResult {
+                    tool_call_id: format!("call-{i}"),
+                    payload: serde_json::json!({ "stdout": format!("out {i}") }),
+                    started_at: None,
+                    completed_at: None,
+                }],
+            ));
+        }
+        out
+    }
+
+    #[test]
+    fn fresh_cli_seed_keeps_the_call_that_explains_a_wide_parallel_batch() {
+        // A batch as wide as the message target is the pathological case: it
+        // fills every slot with results and evicts the assistant message.
+        let messages = parallel_batch(CLI_FRESH_CONTEXT_MAX_MESSAGES);
+
+        let rendered = render_cli_fresh_context(&messages);
+
+        assert!(
+            rendered.contains("[tool call: bash_exec"),
+            "seed has no tool call at all: {rendered}"
+        );
+        let calls = rendered.matches("[tool call: bash_exec").count();
+        let results = rendered.matches("[tool result:").count();
+        assert_eq!(
+            calls, results,
+            "every result must have its call: {calls} calls vs {results} results"
+        );
+        assert!(rendered.len() <= CLI_FRESH_CONTEXT_MAX_CHARS + 200);
+    }
+
+    #[test]
+    fn fresh_cli_seed_never_starts_with_an_unexplained_tool_result() {
+        // Plenty of earlier history, so the selection has somewhere to stop.
+        let mut messages = Vec::new();
+        for i in 0..40 {
+            messages.push(test_message(
+                &format!("chat-{i}"),
+                MessageRole::User,
+                vec![ContentPart::Text {
+                    text: format!("turn {i}"),
+                }],
+            ));
+        }
+        // Exactly wide enough to fill the message target with results alone.
+        messages.extend(parallel_batch(CLI_FRESH_CONTEXT_MAX_MESSAGES));
+
+        let rendered = render_cli_fresh_context(&messages);
+        let first = rendered
+            .split("\n\n")
+            .next()
+            .expect("seed should not be empty");
+
+        assert!(
+            !first.starts_with("tool message:"),
+            "seed opens on an orphaned tool result: {first}"
+        );
+    }
+
+    #[test]
+    fn fresh_cli_seed_group_may_overshoot_the_message_target_but_not_the_budget() {
+        let messages = parallel_batch(CLI_FRESH_CONTEXT_MAX_MESSAGES * 2);
+
+        let rendered = render_cli_fresh_context(&messages);
+
+        assert!(
+            rendered.len() <= CLI_FRESH_CONTEXT_MAX_CHARS + 200,
+            "byte budget is the hard bound, got {}",
+            rendered.len()
+        );
+        assert!(
+            rendered.contains("[tool call: bash_exec"),
+            "an oversized group must still be admitted head-first: {rendered}"
+        );
+    }
+
+    #[test]
+    fn fresh_cli_seed_leaves_plain_conversation_untouched() {
+        let messages = vec![
+            test_message(
+                "u",
+                MessageRole::User,
+                vec![ContentPart::Text {
+                    text: "question".to_string(),
+                }],
+            ),
+            test_message(
+                "a",
+                MessageRole::Assistant,
+                vec![ContentPart::Text {
+                    text: "answer".to_string(),
+                }],
+            ),
+        ];
+
+        let rendered = render_cli_fresh_context(&messages);
+
+        assert!(rendered.contains("question"));
+        assert!(rendered.contains("answer"));
+        assert!(rendered.find("question") < rendered.find("answer"));
     }
 
     #[test]
