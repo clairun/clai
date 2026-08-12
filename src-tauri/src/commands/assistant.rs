@@ -684,10 +684,16 @@ pub async fn assistant_compact_session(
         return Err("Wait for the current assistant run to finish before compacting.".to_string());
     }
 
+    let summary_working_dir = session
+        .context
+        .workspace_id
+        .as_deref()
+        .and_then(|workspace_id| state.workspace_root(workspace_id));
     let outcome = compaction::compact_session_history(
         &target_pool,
         &session,
         &connection,
+        summary_working_dir.as_deref(),
         CompactionTrigger::Manual,
         None,
         true,
