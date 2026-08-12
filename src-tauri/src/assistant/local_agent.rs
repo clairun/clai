@@ -3174,7 +3174,8 @@ fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
                 break;
             }
             // Admit an oversized group head-first so the call that explains the
-            // results is never the part that gets dropped.
+            // results is never the part that gets dropped. This is the last
+            // group considered either way, so `count` is not updated again.
             for text in rendered {
                 let remaining = CLI_FRESH_CONTEXT_MAX_CHARS.saturating_sub(total);
                 if remaining == 0 {
@@ -3182,7 +3183,6 @@ fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
                 }
                 let text = truncate_cli_context_text(&text, remaining);
                 total += text.len() + 2;
-                count += 1;
                 selected.push(text);
             }
             break;
