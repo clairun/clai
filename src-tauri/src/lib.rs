@@ -26,11 +26,16 @@
 //! ```
 
 // Declare our modules
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
+
 mod agents;
 mod assistant;
 mod commands;
 mod config;
 mod db;
+mod logging;
 mod mcp;
 mod paths;
 mod providers;
@@ -163,6 +168,39 @@ impl AppState {
     }
 }
 
+/// Installs the tracing subscriber: stdout, plus a daily-rotating file when one
+/// can be opened.
+///
+/// Returns the log directory on success and `None` when only stdout is active.
+/// Any failure to set up the file sink degrades to stdout-only instead of
+/// aborting startup — an unwritable home directory must not stop the app from
+/// running.
+fn init_tracing() -> Option<std::path::PathBuf> {
+    // `EnvFilter` is not `Clone`, so each layer gets its own built from the same
+    // source.
+    fn env_filter() -> tracing_subscriber::EnvFilter {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    }
+
+    let dir = paths::clai_logs_root();
+    let sink = logging::DailyFile::new(dir.clone(), logging::LOG_RETENTION_DAYS).ok();
+    let installed = sink.is_some();
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(env_filter()))
+        .with(sink.map(|sink| {
+            tracing_subscriber::fmt::layer()
+                // No ANSI in a file: escape codes make `grep` output unreadable.
+                .with_ansi(false)
+                .with_writer(sink)
+                .with_filter(env_filter())
+        }))
+        .init();
+
+    installed.then_some(dir)
+}
+
 /// Entry point for the Tauri application.
 ///
 /// # Rust Learning: Conditional Compilation
@@ -172,17 +210,22 @@ impl AppState {
 /// This is how Rust handles platform-specific code.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize tracing (structured logging)
-    // In development, this outputs to stderr with colors
-    // RUST_LOG env var can control log levels (e.g., RUST_LOG=debug)
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize tracing (structured logging) to stdout and a rolling daily file.
+    // RUST_LOG env var can control log levels (e.g., RUST_LOG=debug).
+    let log_dir = init_tracing();
 
     tracing::info!("CLAI starting up...");
+    match &log_dir {
+        Some(dir) => tracing::info!(
+            log_dir = %dir.display(),
+            retention_days = logging::LOG_RETENTION_DAYS,
+            "Logging to rolling daily file"
+        ),
+        None => tracing::warn!(
+            "Could not open a log file; logging to stdout only, which is lost when \
+             the launching terminal closes"
+        ),
+    }
 
     // Install the process-wide rustls CryptoProvider before any TLS handshake.
     // rmcp's HTTP MCP transport builds a reqwest 0.13 (rustls 0.23) client, and

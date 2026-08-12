@@ -49,6 +49,15 @@ pub fn clai_cache_skill_sources_root() -> PathBuf {
     clai_cache_root().join("skill-sources")
 }
 
+/// Directory holding the rolling application log files.
+///
+/// Lives under `clai_home()` rather than the OS log directory so it honours
+/// `CLAI_HOME` and the Flatpak real-home resolution above, and so it sits next
+/// to the workspaces a user already knows how to find.
+pub fn clai_logs_root() -> PathBuf {
+    clai_home().join("logs")
+}
+
 pub fn expand_tilde(path: &Path) -> PathBuf {
     let value = path.to_string_lossy();
     if value == "~" {
@@ -65,6 +74,13 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clai_logs_root_sits_under_clai_home() {
+        // Pins the layout the log sink and any log-collection tooling rely on.
+        assert_eq!(clai_logs_root(), clai_home().join("logs"));
+        assert!(clai_logs_root().starts_with(clai_home()));
+    }
 
     #[test]
     fn expand_tilde_passes_absolute_and_relative_through() {
