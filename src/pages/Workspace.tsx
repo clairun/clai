@@ -737,7 +737,7 @@ const ArtifactTreeRow = ({
           {isFolder
             ? // Direct entries, not a recursive file count, and saturating —
               // see `count_direct_children` in `commands/workspace.rs`.
-              formatCappedCount(Number(entry.childCount ?? 0), MAX_CHILD_COUNT)
+              formatChildCount(Number(entry.childCount ?? 0))
             : entry.updatedAt
               ? formatTimestamp(entry.updatedAt)
               : ''}
@@ -782,6 +782,9 @@ const ArtifactTreeRow = ({
 interface ArtifactsListProps {
   workspaceId: string;
   totalCount: number;
+  /** `totalCount` is a lower bound — the backend walk stopped on its entry
+   *  budget, so it is rendered as "N+". */
+  totalCountCapped: boolean;
   /** Latest mtime (unix ms) across the artifact tree — changes on
    *  content-only edits and renames, which leave `totalCount` unchanged. */
   latestModifiedAt: number;
@@ -806,18 +809,27 @@ const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
 // seconds.
 const ARTIFACT_REFRESH_MS = REFRESH_INTERVAL_MS;
 
-// Mirror `MAX_ARTIFACT_COUNT` / `MAX_CHILD_COUNT` in
-// src-tauri/src/commands/workspace.rs. Both backend counts stop at their cap,
-// so a value that reaches it means "at least this many" — render it as such
-// instead of claiming an exact figure the backend never computed.
-const MAX_ARTIFACT_COUNT = 25_000;
+// Mirror `MAX_CHILD_COUNT` in src-tauri/src/commands/workspace.rs: a folder's
+// `childCount` stops at that cap, so a value reaching it means "at least this
+// many".
+//
+// The recursive artifact count has no mirrored constant on purpose. Its walk
+// spends a budget of directory *entries* while the count tallies only files,
+// so it can stop early with a count far below the ceiling — comparing against
+// a number here would report a truncated walk as exact. The backend says so
+// itself, via `artifactCountCapped`.
 const MAX_CHILD_COUNT = 1_000;
 
 // A saturated count is a lower bound, not a measurement. Every place that
-// shows one of these numbers goes through here, so no display can silently
-// present a capped value as exact.
-const formatCappedCount = (value: number, cap: number): string =>
-  value >= cap ? `${cap.toLocaleString()}+` : String(value);
+// shows one of these numbers goes through one of these, so no display can
+// silently present a capped value as exact. `capped` is a caller's decision
+// because the two counts learn it differently: a folder's `childCount` stops
+// exactly at its cap, while the recursive walk reports its own truncation.
+const formatCappedCount = (value: number, capped: boolean): string =>
+  capped ? `${value.toLocaleString()}+` : String(value);
+
+const formatChildCount = (childCount: number): string =>
+  formatCappedCount(childCount, childCount >= MAX_CHILD_COUNT);
 
 // Lazy directory-tree browser. Loads the root level on open and each folder's
 // children on first expand, caching them by path. The 5s snapshot poll surfaces
@@ -826,6 +838,7 @@ const formatCappedCount = (value: number, cap: number): string =>
 const ArtifactsList = ({
   workspaceId,
   totalCount,
+  totalCountCapped,
   latestModifiedAt,
   onSelect,
   onDeleted,
@@ -928,7 +941,7 @@ const ArtifactsList = ({
   }, [totalCount, latestModifiedAt, loadDir]);
 
   // Safety net for large workspaces. Both signals above saturate: the backend
-  // walk stops at MAX_ARTIFACT_COUNT, so past the cap neither the count nor
+  // walk stops on its entry budget, so past that neither the count nor
   // the tree mtime is guaranteed to move when a file changes. What this panel
   // actually shows is only the folders the user has expanded, so re-read
   // exactly those on the same cadence — one `readdir` per open folder, which
@@ -1177,13 +1190,13 @@ const ArtifactsList = ({
 
   return (
     <div className={styles.searchableList}>
-      {totalCount > 0 && (
+      {(totalCount > 0 || totalCountCapped) && (
         <input
           type="text"
           className={styles.searchInput}
           value={query}
           onChange={(event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
-          placeholder={`Search artifacts (${formatCappedCount(totalCount, MAX_ARTIFACT_COUNT)})`}
+          placeholder={`Search artifacts (${formatCappedCount(totalCount, totalCountCapped)})`}
           aria-label="Search artifacts"
         />
       )}
@@ -1197,7 +1210,11 @@ const ArtifactsList = ({
             onSelect={onSelect}
           />
         )
-      ) : totalCount === 0 ? (
+      ) : totalCount === 0 && !totalCountCapped ? (
+        // A capped zero is not an empty workspace: the walk can spend its
+        // whole entry budget on directories without reaching a file, so the
+        // tree below is the only thing that knows. Claiming "no artifacts"
+        // there contradicts the header's own "0+" chip.
         <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
       ) : visibleRows.length === 0 ? (
         <div className={styles.drawerEmpty}>Loading…</div>
@@ -1253,6 +1270,7 @@ const WorkspaceHeader = ({
   messageCount,
   memories,
   artifactCount,
+  artifactCountCapped,
   activePanel,
   setActivePanel,
   onRunNow,
@@ -1273,6 +1291,8 @@ const WorkspaceHeader = ({
   messageCount: number;
   memories: WorkspaceFileEntry[];
   artifactCount: number;
+  // The count is a lower bound: the walk stopped on its entry budget.
+  artifactCountCapped: boolean;
   activePanel: ActivePanel;
   setActivePanel: React.Dispatch<React.SetStateAction<ActivePanel>>;
   onTitleSaved: (title: string) => void;
@@ -1374,7 +1394,7 @@ const WorkspaceHeader = ({
   const renderCounter = (
     panel: ActivePanel,
     // A string when the figure is a bound rather than an exact count (see the
-    // artifacts chip, which saturates at MAX_ARTIFACT_COUNT).
+    // artifacts chip, which saturates once its walk spends its entry budget).
     count: number | string,
     label: string,
     clickable = true,
@@ -1556,7 +1576,7 @@ const WorkspaceHeader = ({
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter(
           'artifacts',
-          formatCappedCount(artifactCount, MAX_ARTIFACT_COUNT),
+          formatCappedCount(artifactCount, artifactCountCapped),
           'artifacts'
         )}
       </div>
@@ -2118,6 +2138,7 @@ const Workspace = () => {
   // can still resolve a clicked sibling against any entries it has seen.
   const artifacts = useMemo(() => snapshot?.artifacts || [], [snapshot?.artifacts]);
   const artifactCount = Number(snapshot?.artifactCount ?? 0);
+  const artifactCountCapped = snapshot?.artifactCountCapped ?? false;
 
   // Open another workspace file in the preview — used when a link inside a
   // previewed file points at a sibling (an index page linking to a report, a
@@ -2386,6 +2407,7 @@ const Workspace = () => {
         messageCount={totalMessageCount}
         memories={memories}
         artifactCount={artifactCount}
+        artifactCountCapped={artifactCountCapped}
         activePanel={activePanel}
         setActivePanel={setActivePanel}
         onTitleSaved={handleTitleSaved}
@@ -2604,6 +2626,7 @@ const Workspace = () => {
                 <ArtifactsList
                   workspaceId={workspaceId}
                   totalCount={artifactCount}
+                  totalCountCapped={artifactCountCapped}
                   latestModifiedAt={Number(snapshot?.artifactLatestModifiedAt ?? 0)}
                   onSelect={handleSelectArtifact}
                   onDeleted={handleArtifactDeleted}
