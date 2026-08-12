@@ -239,6 +239,7 @@ pub async fn run_session_turn(
                 &deps.pool,
                 &session,
                 &connection,
+                None,
                 CompactionTrigger::Automatic,
                 Some(&run_id),
                 false,
@@ -326,6 +327,7 @@ pub async fn run_session_turn(
                         &deps.pool,
                         &session,
                         &connection,
+                        None,
                         &run_id,
                     )
                     .await

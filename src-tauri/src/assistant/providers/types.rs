@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::path::Path;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -41,6 +42,18 @@ pub trait ProviderAdapter: Send + Sync {
         ProviderError,
     > {
         Err(ProviderError::NotImplemented)
+    }
+
+    async fn stream_sessionless_completion(
+        &self,
+        connection: &ProviderConnection,
+        request: CompletionRequest,
+        _working_dir: Option<&Path>,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>,
+        ProviderError,
+    > {
+        self.stream_completion(connection, request).await
     }
 
     async fn cancel(&self, _provider_run_id: &str) -> Result<(), ProviderError> {

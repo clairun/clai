@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use std::path::Path;
 
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
@@ -18,15 +19,6 @@ const MIN_MANUAL_COMPACT_MESSAGES: usize = 2;
 const AUTO_COMPACTION_MESSAGE_CHARS: usize = 120_000;
 const SUMMARY_TRANSCRIPT_MAX_CHARS: usize = 96_000;
 const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 4096;
-// Per-tool-payload caps when rendering a transcript. The deterministic digest
-// (the seed for a rotated CLI session) keeps tool payloads tiny: a digest only
-// needs to know *which* tool ran and roughly what it returned. Keeping full
-// tool JSON crowds the actual conversation (goals, decisions) out of the char
-// budget and was the main reason past digests were unusable seeds. The
-// model-summary path keeps richer caps since the model reads the transcript
-// once and distills it.
-const DIGEST_TOOL_CALL_MAX_CHARS: usize = 200;
-const DIGEST_TOOL_RESULT_MAX_CHARS: usize = 400;
 const SUMMARY_TOOL_CALL_MAX_CHARS: usize = 4_000;
 const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 8_000;
 
@@ -131,6 +123,7 @@ pub async fn compact_session_history(
     pool: &DbPool,
     session: &AssistantSession,
     connection: &ProviderConnection,
+    summary_working_dir: Option<&Path>,
     trigger: CompactionTrigger,
     run_id: Option<&str>,
     force: bool,
@@ -148,6 +141,15 @@ pub async fn compact_session_history(
         CompactionStrategy::LocalSummary
     };
 
+    let summary = summarize_window(
+        session,
+        connection,
+        summary_working_dir,
+        run_id,
+        &window.messages,
+    )
+    .await?;
+
     let compaction = repository::create_compaction(
         pool,
         CreateCompactionParams {
@@ -163,28 +165,6 @@ pub async fn compact_session_history(
         },
     )
     .await?;
-
-    let summary_result = summarize_window(
-        session,
-        connection,
-        &compaction.id,
-        &strategy,
-        &window.messages,
-    )
-    .await;
-
-    let summary = match summary_result {
-        Ok(summary) => summary,
-        Err(error) => {
-            tracing::warn!(
-                session_id = %session.id,
-                compaction_id = %compaction.id,
-                error = %error,
-                "Model-generated compaction summary failed; using deterministic fallback"
-            );
-            fallback_summary(&window.messages)
-        }
-    };
 
     let summary_message = repository::create_message(
         pool,
@@ -220,12 +200,14 @@ pub async fn compact_for_context_limit_recovery(
     pool: &DbPool,
     session: &AssistantSession,
     connection: &ProviderConnection,
+    summary_working_dir: Option<&Path>,
     run_id: &str,
 ) -> Result<Option<CompactionOutcome>, String> {
     compact_session_history(
         pool,
         session,
         connection,
+        summary_working_dir,
         CompactionTrigger::ErrorRecovery,
         Some(run_id),
         true,
@@ -401,18 +383,14 @@ fn group_aware_boundary(
 async fn summarize_window(
     session: &AssistantSession,
     connection: &ProviderConnection,
-    compaction_id: &str,
-    strategy: &CompactionStrategy,
+    summary_working_dir: Option<&Path>,
+    source_run_id: Option<&str>,
     messages: &[AssistantMessage],
 ) -> Result<String, String> {
-    if matches!(strategy, CompactionStrategy::SessionRotationSummary) {
-        return Ok(fallback_summary(messages));
-    }
-
     let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| e.to_string())?;
     let transcript = transcript_for_summary(messages);
     let request = CompletionRequest {
-        run_id: format!("compaction-{}", compaction_id),
+        run_id: compaction_summary_run_id(session, source_run_id),
         session_id: session.id.clone(),
         model_id: connection.model_id.clone(),
         messages: vec![
@@ -434,7 +412,7 @@ async fn summarize_window(
     };
 
     let mut stream = adapter
-        .stream_completion(connection, request)
+        .stream_sessionless_completion(connection, request, summary_working_dir)
         .await
         .map_err(provider_error_message)?;
     let mut summary = String::new();
@@ -459,6 +437,17 @@ async fn summarize_window(
     Ok(summary)
 }
 
+fn compaction_summary_run_id(session: &AssistantSession, source_run_id: Option<&str>) -> String {
+    match source_run_id {
+        Some(run_id) => format!("compaction-{run_id}"),
+        None => format!(
+            "compaction-{}-{}",
+            session.id,
+            chrono::Utc::now().timestamp_millis()
+        ),
+    }
+}
+
 const SUMMARY_SYSTEM_PROMPT: &str = r#"Summarize the previous conversation so another assistant can continue it with minimal context.
 
 Preserve:
@@ -480,72 +469,8 @@ const SUMMARY_MESSAGE_PREAMBLE: &str =
      result) is in `.clai/data.sqlite` — query it with the read-only \
      `history_query` tool (no approval needed) to recover specifics.";
 
-/// Preamble that opens a deterministic (non-model) digest body.
-const FALLBACK_DIGEST_PREAMBLE: &str =
-    "Deterministic compaction summary: the previous conversation was \
-     compacted without a model-generated summary. Below is a noise-reduced \
-     transcript digest — tool payloads are truncated, and when the history \
-     is too long the opening exchanges (the original goal) and the most \
-     recent exchanges are kept while the middle is dropped. Continue from \
-     it, and recover anything that was elided from `.clai/memory/` or by \
-     querying the full history with the read-only `history_query` tool \
-     (it reads `.clai/data.sqlite` and needs no approval).";
-
 fn summary_message_text(summary: &str) -> String {
     format!("{}\n\n{}", SUMMARY_MESSAGE_PREAMBLE, summary.trim())
-}
-
-/// A chained compaction feeds the previous summary message back through the
-/// renderer. Its preambles are pure boilerplate that the *new* summary message
-/// re-adds anyway, so carrying them forward stacks one more copy per rotation
-/// while telling the model nothing it isn't already told at the top.
-///
-/// Preambles are removed wherever they occur, not only at the front. A digest
-/// built from an earlier digest carries nested copies *inside* its body,
-/// behind the `[role message id]` header of the summary message it embedded;
-/// those are plain text by the time they reach us, so prefix-only stripping
-/// leaves them in place permanently. Any transcript already carrying such a
-/// stack keeps re-seeding it into every later rotation until it is removed
-/// here.
-fn strip_compaction_preambles(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let next = [SUMMARY_MESSAGE_PREAMBLE, FALLBACK_DIGEST_PREAMBLE]
-            .into_iter()
-            .filter_map(|preamble| rest.find(preamble).map(|at| (at, preamble.len())))
-            .min_by_key(|(at, _)| *at);
-        match next {
-            Some((at, len)) => {
-                out.push_str(&rest[..at]);
-                rest = &rest[at + len..];
-            }
-            None => {
-                out.push_str(rest);
-                break;
-            }
-        }
-    }
-    collapse_blank_runs(out.trim())
-}
-
-/// Removing a preamble leaves the blank line that followed it, so a stack of
-/// them collapses into a run of empty lines. Keep at most one blank line.
-fn collapse_blank_runs(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut newlines = 0usize;
-    for ch in text.chars() {
-        if ch == '\n' {
-            newlines += 1;
-            if newlines > 2 {
-                continue;
-            }
-        } else if !ch.is_whitespace() {
-            newlines = 0;
-        }
-        out.push(ch);
-    }
-    out
 }
 
 fn transcript_for_summary(messages: &[AssistantMessage]) -> String {
@@ -562,118 +487,6 @@ fn transcript_for_summary(messages: &[AssistantMessage]) -> String {
         "Transcript to summarize. The middle was omitted because it exceeded the summarizer budget; preserve all concrete information visible here.\n\n{}\n\n[... middle omitted during compaction ...]\n\n{}",
         head, tail
     )
-}
-
-fn fallback_summary(messages: &[AssistantMessage]) -> String {
-    let rendered = render_messages(
-        messages,
-        DIGEST_TOOL_CALL_MAX_CHARS,
-        DIGEST_TOOL_RESULT_MAX_CHARS,
-    );
-    let body = select_head_and_tail(&rendered, SUMMARY_TRANSCRIPT_MAX_CHARS);
-    format!("{}\n\n{}", FALLBACK_DIGEST_PREAMBLE, body)
-}
-
-/// Join rendered messages within `budget`, always at whole-message boundaries.
-/// When they don't all fit, keep a head slice (so the opening user goal — or,
-/// in a chained compaction, the prior summary — survives) and a tail slice (so
-/// the most recent exchanges survive), dropping the middle. Never cuts inside a
-/// message, so the seed never opens mid-sentence in a stale tool payload.
-fn select_head_and_tail(rendered: &[String], budget: usize) -> String {
-    const SEP_LEN: usize = 2; // "\n\n"
-    let total: usize = rendered.iter().map(|s| s.len() + SEP_LEN).sum();
-    if total <= budget {
-        return rendered.join("\n\n");
-    }
-
-    let head_budget = budget / 3;
-    let tail_budget = budget - head_budget;
-
-    // Head: take whole messages from the front until the head budget is hit
-    // (always at least one, so the original goal is never fully dropped).
-    let mut head_end = 0;
-    let mut acc = 0;
-    while head_end < rendered.len() {
-        let next = acc + rendered[head_end].len() + SEP_LEN;
-        if next > head_budget && head_end > 0 {
-            break;
-        }
-        acc = next;
-        head_end += 1;
-    }
-
-    // Tail: take whole messages from the back until the tail budget is hit,
-    // never crossing into the head region.
-    let mut tail_start = rendered.len();
-    acc = 0;
-    while tail_start > head_end {
-        let candidate = tail_start - 1;
-        let next = acc + rendered[candidate].len() + SEP_LEN;
-        if next > tail_budget && tail_start < rendered.len() {
-            break;
-        }
-        acc = next;
-        tail_start -= 1;
-    }
-
-    let head = clamp_slice(&rendered[..head_end], head_budget, Keep::Start);
-    let tail = clamp_slice(&rendered[tail_start..], tail_budget, Keep::End);
-
-    // Head and tail meet (everything fits across the two slices): no omission.
-    if tail_start <= head_end {
-        return [head, tail]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-    }
-
-    let omitted = tail_start - head_end;
-    let suffix = if omitted == 1 { "" } else { "s" };
-    format!(
-        "{}\n\n[... {} middle message{} omitted during compaction; recover the \
-         full verbatim history with the read-only `history_query` tool \
-         (`.clai/data.sqlite`) ...]\n\n{}",
-        head, omitted, suffix, tail
-    )
-}
-
-const MESSAGE_TRUNCATION_NOTE: &str =
-    "\n\n[... this message was truncated during compaction; recover its full \
-     text with the read-only `history_query` tool (`.clai/data.sqlite`) ...]\n\n";
-
-/// Join a selected slice, capping any single message at the slice budget.
-///
-/// The "keep at least one message" rules above accept one oversized message per
-/// slice, which is how a chained compaction used to grow without bound: message
-/// 0 of a rotation window is the *previous* digest, so an uncapped head copied
-/// the whole predecessor into every successor. Truncate rather than drop — the
-/// opening message still has to survive, just not at any size.
-fn clamp_slice(messages: &[String], budget: usize, keep: Keep) -> String {
-    messages
-        .iter()
-        .map(|message| clamp_message(message, budget, keep))
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-/// Which end of an oversized message to keep: the head slice exists to preserve
-/// the opening goal, the tail slice to preserve the most recent exchange.
-#[derive(Clone, Copy)]
-enum Keep {
-    Start,
-    End,
-}
-
-fn clamp_message(message: &str, budget: usize, keep: Keep) -> String {
-    if message.len() <= budget {
-        return message.to_string();
-    }
-    let room = budget.saturating_sub(MESSAGE_TRUNCATION_NOTE.len());
-    match keep {
-        Keep::Start => format!("{}{}", safe_prefix(message, room), MESSAGE_TRUNCATION_NOTE),
-        Keep::End => format!("{}{}", MESSAGE_TRUNCATION_NOTE, safe_suffix(message, room)),
-    }
 }
 
 fn render_transcript(messages: &[AssistantMessage]) -> String {
@@ -703,11 +516,6 @@ fn render_messages(
                 MessageRole::Tool => "tool",
             };
             let body = render_content_parts(&message.content, tool_call_max, tool_result_max);
-            let body = if is_compaction_summary_message(message) {
-                strip_compaction_preambles(&body)
-            } else {
-                body
-            };
             format!("[{} message {}]\n{}", role, message.id, body)
         })
         .collect()
@@ -1021,236 +829,6 @@ mod tests {
         assert!(is_context_limit_error(
             "Error: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)"
         ));
-    }
-
-    #[test]
-    fn select_head_and_tail_keeps_everything_within_budget() {
-        let rendered = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let out = select_head_and_tail(&rendered, 10_000);
-        assert_eq!(out, "a\n\nb\n\nc");
-        assert!(!out.contains("omitted during compaction"));
-    }
-
-    #[test]
-    fn select_head_and_tail_preserves_head_and_tail_drops_middle() {
-        // Each entry ~30 chars; a small budget forces an omission.
-        let rendered: Vec<String> = (0..20)
-            .map(|i| format!("MESSAGE-{i:02}-xxxxxxxxxxxxxxxxx"))
-            .collect();
-        let out = select_head_and_tail(&rendered, 120);
-        // Opening goal (first message) survives.
-        assert!(out.contains("MESSAGE-00"), "head dropped: {out}");
-        // Most recent message survives.
-        assert!(out.contains("MESSAGE-19"), "tail dropped: {out}");
-        // The middle is dropped with a pointer to the verbatim history.
-        assert!(out.contains("omitted during compaction"), "{out}");
-        assert!(out.contains(".clai/data.sqlite"), "{out}");
-    }
-
-    #[test]
-    fn fallback_summary_truncates_tool_payloads() {
-        let huge = "X".repeat(50_000);
-        let messages = vec![
-            msg(
-                "m1",
-                MessageRole::User,
-                vec![text("Original goal: fix the routing bug")],
-            ),
-            msg(
-                "m2",
-                MessageRole::Tool,
-                vec![ContentPart::ToolResult {
-                    tool_call_id: "t1".to_string(),
-                    payload: serde_json::json!({ "stdout": huge }),
-                    started_at: None,
-                    completed_at: None,
-                }],
-            ),
-        ];
-        let out = fallback_summary(&messages);
-        // The opening goal is kept verbatim...
-        assert!(out.contains("Original goal: fix the routing bug"), "{out}");
-        // ...but the 50k tool payload is truncated far below its original size.
-        assert!(out.contains("[truncated]"), "tool payload not truncated");
-        assert!(
-            out.len() < 5_000,
-            "digest unexpectedly large: {} chars",
-            out.len()
-        );
-    }
-
-    #[test]
-    fn fallback_summary_points_at_recovery_sources() {
-        let messages = vec![msg("m1", MessageRole::User, vec![text("hello")])];
-        let out = fallback_summary(&messages);
-        assert!(out.contains(".clai/memory/"));
-        assert!(out.contains(".clai/data.sqlite"));
-        assert!(out.contains("history_query"));
-    }
-
-    fn summary_msg(id: &str, body: &str) -> AssistantMessage {
-        AssistantMessage {
-            provider_metadata: Some(serde_json::json!({ "source": COMPACTION_METADATA_SOURCE })),
-            ..msg(
-                id,
-                MessageRole::System,
-                vec![text(&summary_message_text(body))],
-            )
-        }
-    }
-
-    #[test]
-    fn select_head_and_tail_never_exceeds_budget_on_one_huge_message() {
-        // Message 0 of a rotation window is the previous digest: it can be far
-        // larger than the whole budget on its own. It must be truncated, not
-        // copied through, or every digest inherits its predecessor's size.
-        let budget = 4_000;
-        let rendered = vec![
-            "H".repeat(500_000),
-            "middle".to_string(),
-            "T".repeat(500_000),
-        ];
-        let out = select_head_and_tail(&rendered, budget);
-        assert!(
-            out.len() <= budget + 400,
-            "digest blew the budget: {} chars for a {budget}-char budget",
-            out.len()
-        );
-        assert!(out.starts_with('H'), "head dropped entirely");
-        assert!(out.trim_end().ends_with('T'), "tail dropped entirely");
-        assert!(out.contains("truncated during compaction"), "{out}");
-    }
-
-    #[test]
-    fn select_head_and_tail_bounds_output_when_head_and_tail_meet() {
-        // Two messages, both oversized: head and tail meet, so the omission
-        // branch never runs — the clamp still has to hold.
-        let budget = 2_000;
-        let rendered = vec!["H".repeat(80_000), "T".repeat(80_000)];
-        let out = select_head_and_tail(&rendered, budget);
-        assert!(
-            out.len() <= budget + 400,
-            "digest blew the budget: {} chars",
-            out.len()
-        );
-    }
-
-    #[test]
-    fn chained_digests_do_not_grow_without_bound() {
-        // Simulate repeated session rotations: each digest becomes message 0 of
-        // the next window. Before the fix this grew by roughly the size of the
-        // previous digest every round (measured: 56 KB -> 960 KB over 20
-        // rotations against a 96 KB budget).
-        let mut carried = fallback_summary(&[msg(
-            "seed",
-            MessageRole::User,
-            vec![text(&"the original goal ".repeat(2_000))],
-        )]);
-        let mut sizes = Vec::new();
-        for round in 0..12 {
-            let mut window = vec![summary_msg(&format!("digest-{round}"), &carried)];
-            for i in 0..30 {
-                window.push(msg(
-                    &format!("m-{round}-{i}"),
-                    MessageRole::Assistant,
-                    vec![text(&format!("turn {i} of round {round} ").repeat(200))],
-                ));
-            }
-            carried = fallback_summary(&window);
-            sizes.push(carried.len());
-        }
-        let last = *sizes.last().unwrap();
-        assert!(
-            last <= SUMMARY_TRANSCRIPT_MAX_CHARS + 2_000,
-            "digest exceeded its budget after chaining: {last} chars, sizes {sizes:?}"
-        );
-        // And it is not creeping upward round over round.
-        assert!(
-            last <= sizes[1] + 2_000,
-            "digest grew across rotations: {sizes:?}"
-        );
-    }
-
-    #[test]
-    fn chained_digests_do_not_stack_preambles() {
-        // One boilerplate preamble per digest, no matter how many rotations.
-        let mut carried = fallback_summary(&[msg("seed", MessageRole::User, vec![text("goal")])]);
-        for round in 0..6 {
-            let window = vec![
-                summary_msg(&format!("digest-{round}"), &carried),
-                msg("u", MessageRole::User, vec![text("next")]),
-            ];
-            carried = fallback_summary(&window);
-        }
-        let stored = summary_message_text(&carried);
-        assert_eq!(
-            stored
-                .matches("Conversation summary generated by CLAI")
-                .count(),
-            1,
-            "summary preamble stacked: {stored}"
-        );
-        assert_eq!(
-            stored.matches("Deterministic compaction summary").count(),
-            1,
-            "digest preamble stacked: {stored}"
-        );
-    }
-
-    #[test]
-    fn strip_compaction_preambles_removes_nested_copies() {
-        // Shape of a digest that was itself built from earlier digests: the
-        // nested preambles sit behind rendered message headers, not at the
-        // front, so a prefix-only strip never reaches them.
-        let legacy = format!(
-            "{SUMMARY_MESSAGE_PREAMBLE}\n\n{FALLBACK_DIGEST_PREAMBLE}\n\n\
-             [system message aaaa]\n{SUMMARY_MESSAGE_PREAMBLE}\n\n\
-             [system message bbbb]\n{FALLBACK_DIGEST_PREAMBLE}\n\n\
-             the original goal"
-        );
-        let stripped = strip_compaction_preambles(&legacy);
-        assert!(
-            !stripped.contains("Conversation summary generated by CLAI"),
-            "nested summary preamble survived: {stripped}"
-        );
-        assert!(
-            !stripped.contains("Deterministic compaction summary"),
-            "nested digest preamble survived: {stripped}"
-        );
-        assert!(stripped.contains("the original goal"));
-        assert!(stripped.contains("[system message aaaa]"));
-        assert!(stripped.contains("[system message bbbb]"));
-        assert!(
-            !stripped.contains("\n\n\n"),
-            "left a run of blank lines behind: {stripped:?}"
-        );
-    }
-
-    #[test]
-    fn strip_compaction_preambles_moves_real_content_to_the_front() {
-        // The head of the digest is the budget slot reserved for the original
-        // goal, so what matters is how far in the real content starts.
-        let mut body = String::new();
-        for i in 0..20 {
-            body.push_str(&format!(
-                "[system message {i}]\n{SUMMARY_MESSAGE_PREAMBLE}\n\n{FALLBACK_DIGEST_PREAMBLE}\n\n"
-            ));
-        }
-        body.push_str("# Continuation Summary");
-        let before = body.find("# Continuation Summary").unwrap();
-        let after = strip_compaction_preambles(&body);
-        let offset = after.find("# Continuation Summary").unwrap();
-        assert!(
-            offset * 20 < before,
-            "content still buried: {before} -> {offset}"
-        );
-    }
-
-    #[test]
-    fn strip_compaction_preambles_leaves_ordinary_text_alone() {
-        assert_eq!(strip_compaction_preambles("plain body"), "plain body");
-        let wrapped = summary_message_text("real content here");
-        assert_eq!(strip_compaction_preambles(&wrapped), "real content here");
     }
 
     #[test]

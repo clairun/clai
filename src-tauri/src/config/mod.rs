@@ -1004,8 +1004,10 @@ mod tests {
             "old providerId lands in brand field"
         );
 
-        let mut config = ClaiConfig::default();
-        config.provider_connections = vec![conn];
+        let mut config = ClaiConfig {
+            provider_connections: vec![conn],
+            ..Default::default()
+        };
         let changed = normalize_provider_connections(&mut config);
         assert!(changed, "migration should report a change");
         let migrated = &config.provider_connections[0];
@@ -1016,21 +1018,23 @@ mod tests {
     #[test]
     fn normalize_provider_connections_is_noop_for_current_shape() {
         use crate::assistant::types::{AuthMode, ProviderConnection};
-        let mut config = ClaiConfig::default();
-        config.provider_connections = vec![ProviderConnection {
-            id: "x".into(),
-            name: "Groq".into(),
-            protocol_id: "openai".into(),
-            provider_id: "groq".into(),
-            auth_mode: AuthMode::DeveloperApiKey,
-            base_url: Some("https://api.groq.com/openai/v1".into()),
-            secret_ref: "provider-connection::x".into(),
-            model_id: "llama-3.3-70b".into(),
-            account_label: None,
-            enabled: true,
-            created_at: 0,
-            updated_at: 0,
-        }];
+        let mut config = ClaiConfig {
+            provider_connections: vec![ProviderConnection {
+                id: "x".into(),
+                name: "Groq".into(),
+                protocol_id: "openai".into(),
+                provider_id: "groq".into(),
+                auth_mode: AuthMode::DeveloperApiKey,
+                base_url: Some("https://api.groq.com/openai/v1".into()),
+                secret_ref: "provider-connection::x".into(),
+                model_id: "llama-3.3-70b".into(),
+                account_label: None,
+                enabled: true,
+                created_at: 0,
+                updated_at: 0,
+            }],
+            ..Default::default()
+        };
         assert!(
             !normalize_provider_connections(&mut config),
             "current shape untouched"

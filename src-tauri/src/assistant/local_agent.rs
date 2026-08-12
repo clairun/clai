@@ -307,10 +307,12 @@ pub async fn run_session_turn(
     let provider_history =
         compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
     if compaction::should_auto_compact(&provider_history, &[]) {
+        let summary_working_dir = workspace_root_for_session(deps, &session);
         match compaction::compact_session_history(
             &deps.pool,
             &session,
             &connection,
+            summary_working_dir.as_deref(),
             CompactionTrigger::Automatic,
             Some(&run_id),
             false,
@@ -480,10 +482,12 @@ pub async fn run_session_turn(
                     "{} reported a context limit; compacting local history and restarting with a fresh session",
                     provider_runtime.display_name()
                 );
+                let summary_working_dir = workspace_root_for_session(deps, &session);
                 match compaction::compact_for_context_limit_recovery(
                     &deps.pool,
                     &session,
                     &connection,
+                    summary_working_dir.as_deref(),
                     &run_id,
                 )
                 .await
