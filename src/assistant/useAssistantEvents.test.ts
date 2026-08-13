@@ -109,6 +109,54 @@ describe('useAssistantEvents — run lifecycle', () => {
     expect(s.isStreaming).toBe(false);
   });
 
+  // R3.2 regression, at the level the user actually experiences it. Pressing
+  // Stop mid-answer used to leave the assistant row as the empty placeholder
+  // it was created with, so the visible text lived only in `streamingText` —
+  // and `run_cancelled` wipes that accumulator wholesale. The answer vanished
+  // the instant the run went terminal. The backend now persists whatever was
+  // streamed and emits `assistant_message_completed` *before* `run_cancelled`;
+  // this pins that the text survives that pair, in that order.
+  it('keeps the partial answer when a run is cancelled mid-stream', async () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    mount();
+    await Promise.resolve();
+
+    fire({
+      type: 'message_created',
+      payload: {
+        message: { id: 'msg-1', role: 'assistant', content: [{ type: 'text', text: '' }] },
+      },
+    });
+    fire({ type: 'assistant_delta', payload: { message_id: 'msg-1', text: 'Half a th' } });
+    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe('Half a th');
+
+    // The backend finalizes the row from what it streamed, then marks the run
+    // cancelled. Order matters: the second event clears the accumulator.
+    fire({
+      type: 'assistant_message_completed',
+      payload: {
+        message: {
+          id: 'msg-1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Half a th' }],
+        },
+      },
+    });
+    fire({
+      type: 'run_cancelled',
+      payload: { run: { id: 'run-1', status: 'cancelled' } },
+    });
+
+    const s = useAssistantStore.getState().sessions[SESSION.id]!;
+    expect(s.messages).toHaveLength(1);
+    expect(s.messages[0]!.content).toEqual([{ type: 'text', text: 'Half a th' }]);
+    expect(s.isStreaming).toBe(false);
+    // The accumulator is gone, so the surviving text comes from the persisted
+    // message and nothing renders twice.
+    expect(useAssistantStore.getState().streamingText[SESSION.id]).toBeUndefined();
+  });
+
   it('assistant_delta accumulates streaming text under message_id', async () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
