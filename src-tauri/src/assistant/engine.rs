@@ -142,7 +142,7 @@ pub async fn run_session_turn(
     );
 
     if input.cancel_token.is_cancelled() {
-        cancel_run(deps, &session, &run_id, usage_none(), None).await?;
+        cancel_run(deps, &session, &run_id, usage_none()).await?;
         return Ok(());
     }
 
@@ -221,7 +221,7 @@ pub async fn run_session_turn(
     let mut retried_after_context_compaction = false;
     loop {
         if input.cancel_token.is_cancelled() {
-            cancel_run(deps, &session, &run_id, usage.as_ref(), None).await?;
+            cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
             return Ok(());
         }
 
@@ -433,21 +433,13 @@ pub async fn run_session_turn(
         // provider request bills its own prompt and completion.
         let mut turn_usage: Option<RunUsage> = None;
 
-        loop {
+        let stream_exit = loop {
             match tokio::select! {
                 _ = input.cancel_token.cancelled() => None,
                 next = stream.next() => next,
             } {
                 None if input.cancel_token.is_cancelled() => {
-                    cancel_run(
-                        deps,
-                        &session,
-                        &run_id,
-                        usage.as_ref(),
-                        Some(&assistant_message.id),
-                    )
-                    .await?;
-                    return Ok(());
+                    break StreamExit::Cancelled;
                 }
                 Some(Ok(event)) => match event {
                     ProviderEvent::MessageStart => {}
@@ -521,44 +513,17 @@ pub async fn run_session_turn(
                         // when the provider hangs up before sending [DONE].
                     }
                     ProviderEvent::ProviderError { message } => {
-                        fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
-                        // Mid-stream failure before anything came back (some
-                        // providers report limits this way): the user got no
-                        // answer at all, so drop their message and the empty
-                        // assistant placeholder created above.
-                        if iteration == 0 && run_produced_no_content(&content_parts) {
-                            discard_unanswered_run_input(
-                                deps,
-                                &session,
-                                &run_id,
-                                input.trigger_message_id.as_deref(),
-                                Some(&assistant_message.id),
-                            )
-                            .await;
-                        }
-                        return Ok(());
+                        break StreamExit::ProviderReported { message };
                     }
                 },
                 Some(Err(e)) => {
-                    let error_msg = e.to_string();
-                    fail_run(deps, &session, &run_id, usage.as_ref(), &error_msg).await?;
-                    if iteration == 0 && run_produced_no_content(&content_parts) {
-                        discard_unanswered_run_input(
-                            deps,
-                            &session,
-                            &run_id,
-                            input.trigger_message_id.as_deref(),
-                            Some(&assistant_message.id),
-                        )
-                        .await;
-                    }
-                    return Err(AssistantEngineError::Provider(
-                        ProviderError::RequestFailed(error_msg),
-                    ));
+                    break StreamExit::StreamFailed {
+                        message: e.to_string(),
+                    };
                 }
-                None => break,
+                None => break StreamExit::Completed,
             }
-        }
+        };
 
         // This turn is over: fold its final report into the completed-turn
         // total so the next turn accumulates on top of it. Before this the run
@@ -572,33 +537,87 @@ pub async fn run_session_turn(
             usage = completed_usage.clone();
         }
 
-        // Finalize the assistant message from whatever we accumulated, even if
-        // the provider never emitted MessageComplete. This prevents the orphan-
-        // tool case: tool_calls captured via `finish_reason: tool_calls` but
-        // [DONE] never arriving, leaving the assistant row with empty content
-        // while tool result rows get persisted just below.
+        // Finalize the assistant message from whatever we accumulated, on
+        // *every* way out of the stream loop — normal end, Stop, or a
+        // mid-stream provider error — and before the run is marked terminal.
+        // Two bugs live here if this is skipped:
         //
-        // `content_parts` is already in arrival order. Guarantee non-empty so
-        // the assistant row never persists with zero content.
-        let mut final_content = content_parts;
-        if final_content.is_empty() {
-            final_content.push(ContentPart::Text {
-                text: String::new(),
-            });
+        //  - the orphan-tool case: tool_calls captured via
+        //    `finish_reason: tool_calls` but [DONE] never arriving, leaving the
+        //    assistant row empty while tool result rows get persisted below;
+        //  - the cancel case: everything already streamed to the screen lives
+        //    only in `content_parts`, so returning early wrote nothing back to
+        //    the row and the text the user watched arrive vanished on reload.
+        //    Every CLI driver in `local_agent.rs` already finalizes on cancel
+        //    (`finalize_assistant_message` in its own cancel arm); the API path
+        //    did not.
+        //
+        // No arm of the loop above returns on its own any more: it breaks with
+        // a `StreamExit` and *this* is the only exit, which is what keeps the
+        // two cases above from drifting apart again.
+        let produced_no_content = run_produced_no_content(&content_parts);
+        if exit_keeps_streamed_message(&stream_exit, produced_no_content) {
+            // `content_parts` is already in arrival order. Guarantee non-empty
+            // so the assistant row never persists with zero content.
+            let final_content = final_content_parts(content_parts);
+
+            let updated_message = repository::update_message_content(
+                &deps.pool,
+                &assistant_message.id,
+                &final_content,
+            )
+            .await?;
+
+            let _ = emit_event(
+                &deps.app,
+                &session,
+                Some(&run_id),
+                AssistantUiEvent::AssistantMessageCompleted {
+                    message: updated_message,
+                },
+            );
         }
 
-        let updated_message =
-            repository::update_message_content(&deps.pool, &assistant_message.id, &final_content)
-                .await?;
-
-        let _ = emit_event(
-            &deps.app,
-            &session,
-            Some(&run_id),
-            AssistantUiEvent::AssistantMessageCompleted {
-                message: updated_message,
-            },
-        );
+        match stream_exit {
+            StreamExit::Completed => {}
+            StreamExit::Cancelled => {
+                cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
+                return Ok(());
+            }
+            // Mid-stream failure before anything came back (some providers
+            // report limits this way): the user got no answer at all, so drop
+            // their message and the empty assistant placeholder created above.
+            StreamExit::ProviderReported { message } => {
+                fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
+                if iteration == 0 && produced_no_content {
+                    discard_unanswered_run_input(
+                        deps,
+                        &session,
+                        &run_id,
+                        input.trigger_message_id.as_deref(),
+                        Some(&assistant_message.id),
+                    )
+                    .await;
+                }
+                return Ok(());
+            }
+            StreamExit::StreamFailed { message } => {
+                fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
+                if iteration == 0 && produced_no_content {
+                    discard_unanswered_run_input(
+                        deps,
+                        &session,
+                        &run_id,
+                        input.trigger_message_id.as_deref(),
+                        Some(&assistant_message.id),
+                    )
+                    .await;
+                }
+                return Err(AssistantEngineError::Provider(
+                    ProviderError::RequestFailed(message),
+                ));
+            }
+        }
 
         // If no tool calls, we're done
         if tool_calls.is_empty() {
@@ -614,7 +633,7 @@ pub async fn run_session_turn(
         // Execute each tool call
         for tc in &tool_calls {
             if input.cancel_token.is_cancelled() {
-                cancel_run(deps, &session, &run_id, usage.as_ref(), None).await?;
+                cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
                 return Ok(());
             }
 
@@ -664,7 +683,7 @@ pub async fn run_session_turn(
             };
             let tool_result = tokio::select! {
                 _ = input.cancel_token.cancelled() => {
-                    cancel_run(deps, &session, &run_id, usage.as_ref(), None).await?;
+                    cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
                     return Ok(());
                 }
                 result = tools::execute_tool(
@@ -1309,6 +1328,95 @@ mod tests {
     use crate::assistant::types::SessionKind;
     use crate::assistant::types::WorkspaceAgentSummary;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
+
+    fn text(t: &str) -> ContentPart {
+        ContentPart::Text {
+            text: t.to_string(),
+        }
+    }
+
+    /// R3.2. Pressing Stop mid-answer used to return straight out of the
+    /// stream loop, so everything already streamed was never written back to
+    /// the assistant row and the answer the user watched arrive disappeared on
+    /// the next load. A cancelled turn that produced content must be persisted.
+    #[test]
+    fn cancelled_turn_with_streamed_content_is_still_persisted() {
+        assert!(exit_keeps_streamed_message(
+            &StreamExit::Cancelled,
+            /* produced_no_content */ false
+        ));
+    }
+
+    /// Same rule for a mid-stream provider error: whatever was already on
+    /// screen is real output and belongs in the row.
+    #[test]
+    fn failed_turn_with_streamed_content_is_still_persisted() {
+        assert!(exit_keeps_streamed_message(
+            &StreamExit::ProviderReported {
+                message: "overloaded".to_string(),
+            },
+            false
+        ));
+        assert!(exit_keeps_streamed_message(
+            &StreamExit::StreamFailed {
+                message: "connection reset".to_string(),
+            },
+            false
+        ));
+    }
+
+    /// The one case that is not finalized: nothing was streamed, so writing
+    /// back would persist the same empty `Text` the row already holds and
+    /// emit a completion event with nothing in it.
+    #[test]
+    fn contentless_cancel_or_failure_does_not_finalize_the_placeholder() {
+        for exit in [
+            StreamExit::Cancelled,
+            StreamExit::ProviderReported {
+                message: "boom".to_string(),
+            },
+            StreamExit::StreamFailed {
+                message: "boom".to_string(),
+            },
+        ] {
+            assert!(
+                !exit_keeps_streamed_message(&exit, /* produced_no_content */ true),
+                "{exit:?} produced nothing, so its placeholder must stay untouched"
+            );
+        }
+    }
+
+    /// A normal end is always finalized, even with no content: the row must
+    /// hold exactly one (possibly empty) part, and tool-only turns land here.
+    #[test]
+    fn completed_turn_is_always_finalized() {
+        assert!(exit_keeps_streamed_message(&StreamExit::Completed, true));
+        assert!(exit_keeps_streamed_message(&StreamExit::Completed, false));
+    }
+
+    #[test]
+    fn final_content_parts_guarantees_one_part_when_nothing_streamed() {
+        let parts = final_content_parts(Vec::new());
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], ContentPart::Text { text } if text.is_empty()));
+    }
+
+    /// Arrival order is the model's real text↔thinking↔tool interleaving and
+    /// must survive verbatim — including a half-streamed sentence, which is
+    /// exactly what a cancelled turn persists.
+    #[test]
+    fn final_content_parts_preserves_arrival_order_and_partial_text() {
+        let parts = final_content_parts(vec![
+            ContentPart::Thinking {
+                text: "let me check".to_string(),
+                signature: None,
+            },
+            text("Here is the half-writ"),
+        ]);
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], ContentPart::Thinking { .. }));
+        assert!(matches!(&parts[1], ContentPart::Text { text } if text == "Here is the half-writ"));
+    }
 
     #[test]
     fn message_contains_image_detects_image_parts() {
@@ -3076,6 +3184,58 @@ fn message_contains_image(parts: &[ContentPart]) -> bool {
         .any(|part| matches!(part, ContentPart::Image { .. }))
 }
 
+/// How the provider stream ended. Every arm of the stream loop breaks with one
+/// of these instead of returning, so message finalization has exactly one call
+/// site and cannot be skipped by a new early return (R3.2).
+#[derive(Debug)]
+enum StreamExit {
+    /// The stream ended normally, or the provider hung up after emitting
+    /// content. The turn continues into tool execution.
+    Completed,
+    /// The user pressed Stop.
+    Cancelled,
+    /// The provider reported an error inside the stream (`ProviderError`).
+    ProviderReported { message: String },
+    /// The stream itself yielded a transport error.
+    StreamFailed { message: String },
+}
+
+/// Whether the assistant row should be written back from what was streamed.
+///
+/// Keep it whenever anything was streamed — a cancelled or failed turn still
+/// showed the user real text, and that text is only in memory until this
+/// returns true. The exception is a turn that produced nothing at all: the row
+/// already holds the single empty `Text` that `final_content_parts` would
+/// write, so finalizing it persists nothing and the
+/// `AssistantMessageCompleted` is pure noise. (Some of those rows are then
+/// deleted outright by `discard_unanswered_run_input`, but only on the failure
+/// exits and only on the first iteration; the rest stay as empty placeholders,
+/// which the chat list already hides.) `local_agent.rs` finalizes even this
+/// case — harmless there, and the difference is invisible either way.
+///
+/// A normally-completed turn is always finalized, empty or not, because the
+/// schema expects exactly one content part and a tool-only turn legitimately
+/// has no text.
+fn exit_keeps_streamed_message(exit: &StreamExit, produced_no_content: bool) -> bool {
+    match exit {
+        StreamExit::Completed => true,
+        StreamExit::Cancelled
+        | StreamExit::ProviderReported { .. }
+        | StreamExit::StreamFailed { .. } => !produced_no_content,
+    }
+}
+
+/// Content to persist for the assistant message, in arrival order, guaranteed
+/// non-empty so the row never holds zero parts.
+fn final_content_parts(parts: Vec<ContentPart>) -> Vec<ContentPart> {
+    if parts.is_empty() {
+        return vec![ContentPart::Text {
+            text: String::new(),
+        }];
+    }
+    parts
+}
+
 pub(crate) fn run_produced_no_content(parts: &[ContentPart]) -> bool {
     parts
         .iter()
@@ -3203,12 +3363,15 @@ async fn fail_run(
     Ok(())
 }
 
+/// Mark a run cancelled. The assistant message is *not* touched here: every
+/// caller finalizes it first, so cancelling never has to guess what was
+/// streamed. (This used to take a `_message_id` it ignored, which is exactly
+/// the shape a silent data-loss bug takes.)
 async fn cancel_run(
     deps: &AssistantDeps,
     session: &crate::assistant::types::AssistantSession,
     run_id: &str,
     usage: Option<&RunUsage>,
-    _message_id: Option<&str>,
 ) -> Result<(), AssistantEngineError> {
     for tool_call in
         repository::fail_running_tool_calls_for_run(&deps.pool, run_id, "Run cancelled").await?
