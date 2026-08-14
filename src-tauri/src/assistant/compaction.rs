@@ -473,7 +473,7 @@ Preserve:
 - tool results that are still relevant
 - any instructions that remain binding
 
-When preserving past tool activity, describe it as already-completed history in prose. Do not copy literal invocation/result transcript syntax, XML-like invocation wrappers, JSON tool-call wrappers, or standalone result blocks into the summary.
+The compacted message is only a prose summary. It must never contain anything that looks like a tool invocation or a tool result: no transcript markers, no XML-like wrappers, no JSON tool-call objects, and no raw result blocks. If past tool activity matters, explain in ordinary words what was learned or changed. If exact historical tool payloads might be needed later, cite only the transcript's message ids or assistant_tool_calls row ids and say they can be recovered with `history_query`; do not copy the payload.
 
 Do not include filler, greetings, or obsolete intermediate details. Do not invent facts. Write a compact but complete continuation summary."#;
 
@@ -485,7 +485,9 @@ const SUMMARY_MESSAGE_PREAMBLE: &str =
      than asking the user to repeat anything: your durable state is in \
      `.clai/memory/` and the full verbatim history (every message and tool \
      result) is in `.clai/data.sqlite` — query it with the read-only \
-     `history_query` tool (no approval needed) to recover specifics.";
+     `history_query` tool (no approval needed) to recover specifics. If this \
+     summary mentions message ids or assistant_tool_calls row ids, use those \
+     as lookup breadcrumbs for exact historical payloads.";
 
 fn summary_message_text(summary: &str) -> String {
     format!("{}\n\n{}", SUMMARY_MESSAGE_PREAMBLE, summary.trim())
@@ -533,13 +535,19 @@ fn render_messages(
                 MessageRole::Assistant => "assistant",
                 MessageRole::Tool => "tool",
             };
-            let body = render_content_parts(&message.content, tool_call_max, tool_result_max);
+            let body = render_content_parts(
+                &message.id,
+                &message.content,
+                tool_call_max,
+                tool_result_max,
+            );
             format!("[{} message {}]\n{}", role, message.id, body)
         })
         .collect()
 }
 
 fn render_content_parts(
+    message_id: &str,
     content: &[ContentPart],
     tool_call_max: usize,
     tool_result_max: usize,
@@ -550,17 +558,25 @@ fn render_content_parts(
             ContentPart::Text { text } => Some(neutralize_archived_tool_syntax(text)),
             ContentPart::Thinking { .. } => None,
             ContentPart::ToolUse {
+                tool_call_id,
                 tool_name,
                 arguments,
                 ..
-            } => Some(format!(
-                "Archived tool request (already completed; do not copy as a current action): `{}` arguments {}",
+            } => Some(previous_tool_activity_for_prompt(
                 tool_name,
-                truncate_json(arguments, tool_call_max)
+                Some(tool_call_id),
+                arguments,
+                tool_call_max,
             )),
-            ContentPart::ToolResult { payload, .. } => Some(format!(
-                "Archived tool result (already completed): {}",
-                truncate_json(payload, tool_result_max)
+            ContentPart::ToolResult {
+                tool_call_id,
+                payload,
+                ..
+            } => Some(previous_tool_output_for_prompt(
+                Some(tool_call_id),
+                Some(message_id),
+                payload,
+                tool_result_max,
             )),
             // The summariser doesn't need pixels — a placeholder keeps the
             // turn structure without shipping image bytes (and the summary
@@ -582,41 +598,215 @@ pub(crate) fn neutralize_archived_tool_syntax(text: &str) -> String {
         || text.contains("<parameter")
         || text.contains("</parameter>")
         || text.contains("{\"name\":\"")
-        || text.contains("{\"name\": \"");
+        || text.contains("{\"name\": \"")
+        || text.contains("\"exitCode\"")
+        || text.contains("\"stdout\"")
+        || text.contains("\"success\"")
+        || text.contains("\"rowCount\"")
+        || text.contains("\"bytesWritten\"")
+        || text.contains("\nResult:")
+        || text.contains("\r\nResult:")
+        || text.contains("<br>Result:");
     if !looks_relevant {
         return text.to_string();
     }
 
-    let looked_like_wrapper = text.contains("<invoke")
-        || text.contains("</invoke>")
-        || text.contains("{\"name\":\"")
-        || text.contains("{\"name\": \"");
+    let mut out = text
+        .lines()
+        .map(neutralize_archived_tool_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+pub(crate) fn previous_tool_activity_for_prompt(
+    tool_name: &str,
+    tool_call_id: Option<&str>,
+    arguments: &serde_json::Value,
+    max_chars: usize,
+) -> String {
+    format!(
+        "Previous tool activity, already completed and included only as context.{} Tool name: `{}`. Input summary: {}.",
+        lookup_reference(tool_call_id, None),
+        tool_name,
+        summarize_json_for_prose(arguments, max_chars)
+    )
+}
+
+pub(crate) fn previous_tool_output_for_prompt(
+    tool_call_id: Option<&str>,
+    message_id: Option<&str>,
+    payload: &serde_json::Value,
+    max_chars: usize,
+) -> String {
+    format!(
+        "Previous tool output, already completed and included only as context.{} Output summary: {}.",
+        lookup_reference(tool_call_id, message_id),
+        summarize_json_for_prose(payload, max_chars)
+    )
+}
+
+fn lookup_reference(tool_call_id: Option<&str>, message_id: Option<&str>) -> String {
+    let mut refs = Vec::new();
+    if let Some(id) = tool_call_id.map(str::trim).filter(|id| !id.is_empty()) {
+        refs.push(format!("assistant_tool_calls.id `{id}`"));
+    }
+    if let Some(id) = message_id.map(str::trim).filter(|id| !id.is_empty()) {
+        refs.push(format!("assistant_messages.id `{id}`"));
+    }
+    if refs.is_empty() {
+        String::new()
+    } else {
+        format!(" Lookup reference: {}.", refs.join("; "))
+    }
+}
+
+fn neutralize_archived_tool_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+
+    for marker in ["[tool call:", "[tool_call:"] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            let rest = rest.trim().trim_end_matches(']').trim();
+            return format!(
+                "{indent}Previous tool activity, already completed and included only as context: {}.",
+                neutralize_inline_archived_tool_syntax(rest)
+            );
+        }
+    }
+    for marker in ["[tool result:", "[tool_result:"] {
+        if let Some(rest) = trimmed.strip_prefix(marker) {
+            let rest = rest.trim().trim_end_matches(']').trim();
+            return format!(
+                "{indent}Previous tool output, already completed and included only as context: {}.",
+                neutralize_inline_archived_tool_syntax(rest)
+            );
+        }
+    }
+
+    if trimmed.starts_with("<invoke") || trimmed.starts_with("</invoke") {
+        return format!(
+            "{indent}Previous tool invocation syntax from the archived transcript was omitted."
+        );
+    }
+    if trimmed.starts_with("<parameter") || trimmed.starts_with("</parameter") {
+        return format!(
+            "{indent}Previous tool parameter syntax from the archived transcript was omitted."
+        );
+    }
+    if trimmed == "Result:" || trimmed == "<br>Result:" {
+        return format!("{indent}Previous tool output, already completed:");
+    }
+    if let Some(summary) = legacy_json_tool_call_summary(trimmed) {
+        return format!("{indent}{summary}");
+    }
+    if looks_like_result_payload_json(trimmed) {
+        let summary = serde_json::from_str::<serde_json::Value>(trimmed)
+            .map(|value| {
+                previous_tool_output_for_prompt(None, None, &value, SUMMARY_TOOL_RESULT_MAX_CHARS)
+            })
+            .unwrap_or_else(|_| {
+                "Previous tool output, already completed, was recorded here as structured data."
+                    .to_string()
+            });
+        return format!("{indent}{summary}");
+    }
+
+    let neutralized = neutralize_inline_archived_tool_syntax(trimmed);
+    if neutralized == trimmed {
+        line.to_string()
+    } else {
+        format!("{indent}{neutralized}")
+    }
+}
+
+fn legacy_json_tool_call_summary(trimmed: &str) -> Option<String> {
+    if !trimmed.starts_with('{') || !trimmed.contains("\"name\"") || !trimmed.contains("\"input\"")
+    {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let name = value.get("name").and_then(serde_json::Value::as_str)?;
+    let input = value.get("input")?;
+    Some(previous_tool_activity_for_prompt(
+        name,
+        None,
+        input,
+        SUMMARY_TOOL_CALL_MAX_CHARS,
+    ))
+}
+
+fn looks_like_result_payload_json(trimmed: &str) -> bool {
+    trimmed.starts_with('{')
+        && [
+            "\"exitCode\"",
+            "\"stdout\"",
+            "\"success\"",
+            "\"rowCount\"",
+            "\"bytesWritten\"",
+        ]
+        .iter()
+        .any(|needle| trimmed.contains(needle))
+}
+
+fn neutralize_inline_archived_tool_syntax(text: &str) -> String {
     let mut out = text.to_string();
     for (from, to) in [
-        ("[tool call:", "[archived tool request:"),
-        ("[tool_call:", "[archived tool request:"),
-        ("[tool result:", "[archived tool result:"),
-        ("[tool_result:", "[archived tool result:"),
-        ("<invoke", "archived-invoke"),
-        ("</invoke>", "/archived-invoke"),
-        ("<parameter", "archived-parameter"),
-        ("</parameter>", "/archived-parameter"),
-        ("{\"name\":\"", "{archived_tool_name:\""),
-        ("{\"name\": \"", "{archived_tool_name: \""),
+        ("[tool call:", "previous tool activity:"),
+        ("[tool_call:", "previous tool activity:"),
+        ("[tool result:", "previous tool output:"),
+        ("[tool_result:", "previous tool output:"),
+        ("<invoke", "tool invocation syntax"),
+        ("</invoke>", "end of tool invocation syntax"),
+        ("<parameter", "tool parameter syntax"),
+        ("</parameter>", "end of tool parameter syntax"),
+        ("{\"name\":\"", "legacy tool JSON wrapper with name \""),
+        ("{\"name\": \"", "legacy tool JSON wrapper with name \""),
     ] {
         out = out.replace(from, to);
     }
-    if looked_like_wrapper {
-        for (from, to) in [
-            ("\nResult:", "\nArchived result:"),
-            ("\r\nResult:", "\r\nArchived result:"),
-            ("<br>\nResult:", "<br>\nArchived result:"),
-            ("<br>Result:", "<br>Archived result:"),
-        ] {
-            out = out.replace(from, to);
-        }
-    }
     out
+}
+
+fn summarize_json_for_prose(value: &serde_json::Value, max_chars: usize) -> String {
+    let rendered = match value {
+        serde_json::Value::Object(map) if !map.is_empty() => map
+            .iter()
+            .take(12)
+            .map(|(key, value)| format!("{}={}", key, json_value_for_prose(value)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => json_value_for_prose(value),
+    };
+    truncate_prose_text(&rendered, max_chars)
+}
+
+fn json_value_for_prose(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => format!("`{}`", truncate_prose_text(text, 1_200)),
+        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
+            value.to_string()
+        }
+        serde_json::Value::Array(items) => format!("{} item array", items.len()),
+        serde_json::Value::Object(fields) => format!("{} field object", fields.len()),
+    }
+}
+
+fn truncate_prose_text(value: &str, max_chars: usize) -> String {
+    if value.len() <= max_chars {
+        return value.to_string();
+    }
+
+    const SUFFIX: &str = "...[truncated]";
+    if max_chars <= SUFFIX.len() {
+        return "[truncated]".to_string();
+    }
+
+    let prefix_len = max_chars - SUFFIX.len();
+    format!("{}{}", safe_prefix(value, prefix_len), SUFFIX)
 }
 
 fn content_text(content: &[ContentPart]) -> String {
@@ -636,6 +826,7 @@ fn estimate_history_chars(messages: &[AssistantMessage], tools: &[ToolDefinition
         .filter(|message| !is_compaction_summary_message(message))
         .map(|message| {
             render_content_parts(
+                &message.id,
                 &message.content,
                 SUMMARY_TOOL_CALL_MAX_CHARS,
                 SUMMARY_TOOL_RESULT_MAX_CHARS,
@@ -655,15 +846,6 @@ fn estimate_history_chars(messages: &[AssistantMessage], tools: &[ToolDefinition
         })
         .sum();
     message_chars + tool_chars
-}
-
-fn truncate_json(value: &serde_json::Value, max_chars: usize) -> String {
-    let rendered = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
-    if rendered.len() <= max_chars {
-        rendered
-    } else {
-        format!("{}...[truncated]", safe_prefix(&rendered, max_chars))
-    }
 }
 
 fn safe_prefix(value: &str, max_bytes: usize) -> &str {
@@ -843,9 +1025,11 @@ Result:
         for forbidden in [
             "[tool call:",
             "[tool result:",
+            "[archived tool",
             "<invoke",
             "</invoke>",
             "{\"name\":\"bash_exec\"",
+            "\"exitCode\"",
             "\nResult:",
         ] {
             assert!(
@@ -853,9 +1037,11 @@ Result:
                 "summary transcript preserved {forbidden}: {transcript}"
             );
         }
-        assert!(transcript.contains("Archived tool request"));
-        assert!(transcript.contains("Archived tool result"));
-        assert!(transcript.contains("Archived result:"));
+        assert!(transcript.contains("Previous tool activity"));
+        assert!(transcript.contains("Previous tool output"));
+        assert!(transcript.contains("already completed"));
+        assert!(transcript.contains("assistant_tool_calls.id `call-1`"));
+        assert!(transcript.contains("assistant_messages.id `result`"));
         assert!(transcript.contains("bash_exec"));
         assert!(transcript.contains("date"));
     }
@@ -901,12 +1087,14 @@ Result:
         let rendered = content_text(&provider[0].content);
 
         assert_eq!(provider.len(), 2);
-        assert!(rendered.contains("archived tool request"));
-        assert!(rendered.contains("Archived result:"));
+        assert!(rendered.contains("Previous tool activity"));
+        assert!(rendered.contains("Previous tool output"));
         for forbidden in [
             "[tool call:",
+            "[archived tool",
             "<invoke",
             "{\"name\":\"bash_exec\"",
+            "\"exitCode\"",
             "\nResult:",
         ] {
             assert!(
@@ -1050,5 +1238,6 @@ Result:
         assert!(out.contains(".clai/memory/"));
         assert!(out.contains(".clai/data.sqlite"));
         assert!(out.contains("history_query"));
+        assert!(out.contains("assistant_tool_calls row ids"));
     }
 }
