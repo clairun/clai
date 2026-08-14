@@ -450,12 +450,16 @@ fn compaction_summary_run_id(session: &AssistantSession, source_run_id: Option<&
 
 const SUMMARY_SYSTEM_PROMPT: &str = r#"Summarize the previous conversation so another assistant can continue it with minimal context.
 
+Write only prose conclusions and durable state.
+
 Preserve:
 - user goals and constraints
-- concrete decisions and assumptions
-- files, commands, code changes, test results, errors, and unresolved tasks
-- tool results that are still relevant
+- concrete decisions, assumptions, unresolved tasks, and current status
+- files touched, code changes, test outcomes, errors, and blockers at a plain-language level
+- stable evidence references when exact details may matter, using opaque ids from the transcript such as `source message <id>` or `assistant_tool_calls row <id>`
 - any instructions that remain binding
+
+Do not copy command arguments, invocation syntax, raw JSON, transcript markers, XML-like wrappers, or tool-result payloads. If prior tool activity matters, summarize the outcome in ordinary words and cite a source id for later lookup with `history_query`.
 
 Do not include filler, greetings, or obsolete intermediate details. Do not invent facts. Write a compact but complete continuation summary."#;
 
