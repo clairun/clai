@@ -26,6 +26,8 @@ pub struct ListWorkspaceAgentsParams {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignWorkspaceTaskParams {
+    /// The target agent's workspace agent id, exactly as shown in the roster.
+    /// A display name is rejected.
     pub workspace_agent_id: String,
     pub title: String,
     pub instructions: String,
@@ -149,11 +151,7 @@ async fn list_agents(
         .map(|row| {
             // Phase 1.4: every field below comes from the workspace_agents row
             // itself; no join with the global ClaiConfig.agents catalog.
-            let display_name = row
-                .display_name
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| row.name.clone());
+            let display_name = agent_label(&row);
             serde_json::json!({
                 "id": row.id,
                 "workspaceId": row.workspace_id,
@@ -190,19 +188,17 @@ async fn assign_task(
     }
 
     let app_state = deps.app.state::<AppState>();
-    let target =
-        load_workspace_agent_row(app_state.inner(), &workspace_id, &params.workspace_agent_id)?
-            .ok_or_else(|| {
-                format!(
-                    "Workspace agent assignment not found in this workspace: {}",
-                    params.workspace_agent_id
-                )
-            })?;
+    let rows = load_workspace_agent_rows(app_state.inner(), &workspace_id)?;
+    let target = rows
+        .iter()
+        .find(|row| row.id == params.workspace_agent_id)
+        .cloned()
+        .ok_or_else(|| unknown_workspace_agent_error(&params.workspace_agent_id, &rows))?;
 
     if !target.enabled {
-        return Err(format!(
-            "Workspace agent assignment is disabled: {}",
-            params.workspace_agent_id
+        return Err(disabled_workspace_agent_error(
+            &params.workspace_agent_id,
+            &rows,
         ));
     }
 
@@ -570,14 +566,70 @@ fn load_workspace_agent_rows(
     Ok(rows)
 }
 
-fn load_workspace_agent_row(
-    state: &AppState,
-    workspace_id: &str,
-    workspace_agent_id: &str,
-) -> Result<Option<WorkspaceAgentRow>, String> {
-    Ok(load_workspace_agent_rows(state, workspace_id)?
-        .into_iter()
-        .find(|row| row.id == workspace_agent_id))
+/// Message for an unknown `workspaceAgentId`.
+///
+/// The common failure is a caller passing an agent's *display name*, which the
+/// system-prompt roster used to be the only thing it showed. The message names
+/// that mistake and lists the ids that would have worked, so a caller can
+/// recover on the next call instead of guessing or falling back to
+/// `workspace_listAgents`.
+fn unknown_workspace_agent_error(requested: &str, rows: &[WorkspaceAgentRow]) -> String {
+    if rows.is_empty() {
+        return format!(
+            "Workspace agent assignment not found in this workspace: {requested}. This workspace has no assigned agents."
+        );
+    }
+    let known = rows
+        .iter()
+        .map(|row| {
+            if row.enabled {
+                format!("{} ({})", row.id, agent_label(row))
+            } else {
+                format!("{} ({}, disabled)", row.id, agent_label(row))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Workspace agent assignment not found in this workspace: {requested}. \
+         `workspaceAgentId` must be one of the workspace agent ids, not a display name. \
+         Known ids: {known}"
+    )
+}
+
+/// Message for an id that exists but is disabled.
+///
+/// The bare "is disabled" is a dead end: it names no next step. Offer the
+/// enabled ids so the caller can redirect the task in the same turn.
+fn disabled_workspace_agent_error(requested: &str, rows: &[WorkspaceAgentRow]) -> String {
+    let enabled = rows
+        .iter()
+        .filter(|row| row.enabled)
+        .map(|row| format!("{} ({})", row.id, agent_label(row)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if enabled.is_empty() {
+        return format!(
+            "Workspace agent assignment is disabled: {requested}. No other workspace agent is enabled — enable one in the workspace's agent settings."
+        );
+    }
+    format!(
+        "Workspace agent assignment is disabled: {requested}. \
+         Enable it in the workspace's agent settings, or assign to one of: {enabled}"
+    )
+}
+
+/// The name a caller has seen for an agent: the display-name override when it
+/// is set, the agent's own name otherwise — the same fallback `list_agents`
+/// and the prompt roster use, so an error can be matched against what the
+/// caller was shown.
+fn agent_label(row: &WorkspaceAgentRow) -> String {
+    row.display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(row.name.as_str())
+        .to_string()
 }
 
 fn find_workspace_agent_for_definition(
@@ -847,6 +899,103 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------
+    // unknown_workspace_agent_error
+    // -----------------------------------------------------------------
+
+    fn agent_row(id: &str, name: &str) -> WorkspaceAgentRow {
+        WorkspaceAgentRow {
+            id: id.to_string(),
+            workspace_id: "workspace-1".to_string(),
+            agent_definition_id: id.to_string(),
+            display_name: None,
+            role: "member".to_string(),
+            enabled: true,
+            name: name.to_string(),
+            description: String::new(),
+            selected_skill_ids: Vec::new(),
+            selected_mcp_server_ids: Vec::new(),
+            provider_connection_ids: Vec::new(),
+            execution: Default::default(),
+        }
+    }
+
+    #[test]
+    fn unknown_workspace_agent_error_lists_the_ids_that_would_have_worked() {
+        let rows = vec![
+            agent_row("agent-1", "Manager"),
+            agent_row("agent-2", "Code Reviewer"),
+        ];
+
+        let message = unknown_workspace_agent_error("Reviewer #2", &rows);
+
+        // The rejected value is echoed so the caller can see what it sent,
+        // the display-name mistake is named, and every known id is offered.
+        assert!(message.contains("not found in this workspace: Reviewer #2"));
+        assert!(message.contains("not a display name"));
+        assert!(message.contains("agent-1 (Manager)"));
+        assert!(message.contains("agent-2 (Code Reviewer)"));
+    }
+
+    #[test]
+    fn unknown_workspace_agent_error_marks_disabled_agents() {
+        let mut disabled = agent_row("agent-2", "Code Reviewer");
+        disabled.enabled = false;
+        let rows = vec![agent_row("agent-1", "Manager"), disabled];
+
+        let message = unknown_workspace_agent_error("agent-9", &rows);
+
+        // A disabled agent's id is listed — it is the right id to ask about —
+        // but assigning to it fails, so the hint must not call it available.
+        assert!(message.contains("agent-2 (Code Reviewer, disabled)"));
+        assert!(message.contains("agent-1 (Manager)"));
+    }
+
+    #[test]
+    fn unknown_workspace_agent_error_without_agents_says_so() {
+        let message = unknown_workspace_agent_error("agent-1", &[]);
+
+        assert!(message.contains("no assigned agents"));
+        assert!(!message.contains("Known ids:"));
+    }
+
+    #[test]
+    fn unknown_workspace_agent_error_uses_the_name_the_caller_was_shown() {
+        let mut renamed = agent_row("agent-2", "Code Reviewer");
+        renamed.display_name = Some("Reviewer #2".to_string());
+
+        let message = unknown_workspace_agent_error("Reviewer #2", &[renamed]);
+
+        // The roster and `workspace_listAgents` both prefer the display-name
+        // override, so the hint has to use it too — naming the agent something
+        // the caller has never seen breaks the mapping the hint exists for.
+        assert!(message.contains("agent-2 (Reviewer #2)"));
+    }
+
+    #[test]
+    fn disabled_workspace_agent_error_offers_the_enabled_agents() {
+        let mut disabled = agent_row("agent-2", "Code Reviewer");
+        disabled.enabled = false;
+        let rows = vec![agent_row("agent-1", "Manager"), disabled];
+
+        let message = disabled_workspace_agent_error("agent-2", &rows);
+
+        assert!(message.contains("is disabled: agent-2"));
+        assert!(message.contains("agent-1 (Manager)"));
+        assert!(!message.contains("agent-2 (Code Reviewer)"));
+    }
+
+    #[test]
+    fn disabled_workspace_agent_error_without_any_enabled_agent_says_so() {
+        let mut only = agent_row("agent-1", "Manager");
+        only.enabled = false;
+
+        let message = disabled_workspace_agent_error("agent-1", &[only]);
+
+        assert!(message.contains("No other workspace agent is enabled"));
+        assert!(!message.contains("assign to one of"));
+    }
 
     // -----------------------------------------------------------------
     // concise_agent_description

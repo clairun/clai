@@ -892,22 +892,23 @@ pub(crate) fn build_system_prompt(
     // agents available") despite the team being listed lower down in
     // the prompt. Placing role identity first keeps the model from
     // framing itself as a solo assistant.
-    let is_manager_session = context
+    let own_agent = context
         .workspace_agents
         .iter()
-        .any(|a| a.is_default && Some(a.id.as_str()) == context.automation_id.as_deref());
+        .find(|a| a.is_default && Some(a.id.as_str()) == context.automation_id.as_deref());
     let member_agents: Vec<&crate::assistant::types::WorkspaceAgentSummary> = context
         .workspace_agents
         .iter()
         .filter(|a| !a.is_default)
         .collect();
-    if is_manager_session {
+    if let Some(own_agent) = own_agent {
         if !member_agents.is_empty() {
             prompt.push_str(
                 "## Your Role\n\
                  You are the **manager** of this workspace. The user talks to you; you decide how the work gets done. \
                  You have member agents available for delegation via `workspace_assignTask` — prefer delegating specialized work to them over doing it yourself, then poll `workspace_getTaskResult` for the outcome. \
-                 The roster below is your team; you do not need to call `workspace_listAgents` to confirm it.\n\n\
+                 The roster below is your team; you do not need to call `workspace_listAgents` to confirm it. \
+                 Each entry carries the `workspaceAgentId` that `workspace_assignTask` expects: it matches on that id, never on the display name.\n\n\
                  Member agents you can delegate to:\n",
             );
             for agent in &member_agents {
@@ -917,17 +918,38 @@ pub(crate) fn build_system_prompt(
                     .filter(|d| !d.trim().is_empty())
                     .unwrap_or("(no description)");
                 prompt.push_str(&format!(
-                    "- **{}** ({}): {}\n",
-                    agent.display_name, agent.role, summary
+                    "- **{}** ({}) — `workspaceAgentId`: `{}` — {}\n",
+                    agent.display_name, agent.role, agent.id, summary
+                ));
+            }
+            // Self-tasking is offered below as the way to parallelize work, so
+            // the manager needs its own id here too — not left to be inferred
+            // from the roster further down the prompt. Suppressed in a worker
+            // session for the same reason the fan-out mechanics are: a worker
+            // must not be handed the argument for spawning task chains.
+            if !matches!(trigger, RunTrigger::WorkspaceTask) {
+                prompt.push_str(&format!(
+                    "\nYour own `workspaceAgentId` is `{}` — use it to assign a task to yourself.\n",
+                    own_agent.id
                 ));
             }
             prompt.push('\n');
         } else {
             prompt.push_str(
                 "## Your Role\n\
-                 You are the **manager** (and only agent) of this workspace. The user talks to you; you decide how the work gets done. \
-                 There are no member agents to delegate to, but the task tools still work: you can assign a task to *yourself* — your own workspace agent id, visible via `workspace_listAgents` — to run another instance of you in the background.\n\n",
+                 You are the **manager** (and only agent) of this workspace. The user talks to you; you decide how the work gets done.\n",
             );
+            // Self-tasking — the offer and the id it needs — is withheld from
+            // a worker session, which the Task Worker Context below forbids
+            // from spawning chains.
+            if !matches!(trigger, RunTrigger::WorkspaceTask) {
+                prompt.push_str(&format!(
+                    "There are no member agents to delegate to, but the task tools still work: you can assign a task to *yourself* to run another instance of you in the background. \
+                     Your own `workspaceAgentId` is `{}` — pass it verbatim; `workspace_assignTask` matches on the id, never on a display name.\n",
+                    own_agent.id
+                ));
+            }
+            prompt.push('\n');
         }
 
         // Delegation mechanics — skipped when this manager session *is* a
@@ -1054,7 +1076,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "This workspace has assigned agents. The default manager agent receives user messages and is responsible for routing work inside this workspace.\n\
              Use this roster as workspace-local context. Do not assume agents outside this list are available for collaboration.\n\
-             When task delegation tools are available, assign bounded tasks only to assigned workspace agents. Tasks run asynchronously and in parallel, each in its own session. Use `ask_user` when work is blocked on a short answer only the user can give — approval, a missing fact, a choice between ready-made options. If the decision needs deliberation, write the analysis in your reply and end your turn instead of forcing it into a modal. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
+             When task delegation tools are available, assign bounded tasks only to assigned workspace agents, addressed by the `workspaceAgentId` shown in the roster (a display name is not accepted). Tasks run asynchronously and in parallel, each in its own session. Use `ask_user` when work is blocked on a short answer only the user can give — approval, a missing fact, a choice between ready-made options. If the decision needs deliberation, write the analysis in your reply and end your turn instead of forcing it into a modal. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
         );
         prompt.push_str("Assigned workspace agents:\n");
         for agent in &context.workspace_agents {
@@ -1069,11 +1091,14 @@ pub(crate) fn build_system_prompt(
                 .filter(|value| !value.is_empty())
             {
                 prompt.push_str(&format!(
-                    "- {} ({}) — {}\n",
-                    agent.display_name, role, description
+                    "- {} ({}) — `workspaceAgentId`: `{}` — {}\n",
+                    agent.display_name, role, agent.id, description
                 ));
             } else {
-                prompt.push_str(&format!("- {} ({})\n", agent.display_name, role));
+                prompt.push_str(&format!(
+                    "- {} ({}) — `workspaceAgentId`: `{}`\n",
+                    agent.display_name, role, agent.id
+                ));
             }
         }
     }
@@ -1833,12 +1858,40 @@ mod tests {
         assert!(text.contains("- Manager (manager)"));
         assert!(text.contains("- Code Reviewer (member)"));
         assert!(text.contains("Reviews source changes."));
+        // `workspace_assignTask` matches on the workspace agent id, so the
+        // roster has to carry it: a display name is not addressable.
+        assert!(text.contains("`workspaceAgentId`: `workspace-agent-manager`"));
+        assert!(text.contains("`workspaceAgentId`: `workspace-agent-reviewer`"));
+    }
+
+    #[test]
+    fn build_system_prompt_roster_renders_the_id_for_a_descriptionless_agent() {
+        let context = SessionContext {
+            workspace_agents: vec![WorkspaceAgentSummary {
+                description: None,
+                ..manager_summary()
+            }],
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(
+            text.contains("- Manager (manager) — `workspaceAgentId`: `workspace-agent-manager`")
+        );
     }
 
     fn manager_summary() -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             id: "workspace-agent-manager".to_string(),
-            agent_definition_id: "workspace-agent-manager".to_string(),
+            // Deliberately different from `id`: the roster must render the
+            // workspace agent id (what `workspace_assignTask` matches on),
+            // and identical fixtures would hide a swap between the two.
+            agent_definition_id: "manager-definition".to_string(),
             display_name: "Manager".to_string(),
             role: "manager".to_string(),
             is_default: true,
@@ -1849,7 +1902,7 @@ mod tests {
     fn member_summary() -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             id: "workspace-agent-reviewer".to_string(),
-            agent_definition_id: "workspace-agent-reviewer".to_string(),
+            agent_definition_id: "reviewer-definition".to_string(),
             display_name: "Code Reviewer".to_string(),
             role: "member".to_string(),
             is_default: false,
@@ -1874,6 +1927,15 @@ mod tests {
         // Async + parallel semantics, fan-out, self-tasking, the manager
         // lifecycle invariant, and the caveats (shared workspace dir,
         // self-contained instructions, durable ids).
+        // The member roster is what the manager delegates from, so it must
+        // carry the id `workspace_assignTask` matches on.
+        assert!(text.contains(
+            "- **Code Reviewer** (member) — `workspaceAgentId`: `workspace-agent-reviewer`"
+        ));
+        assert!(text.contains("never on the display name"));
+        // Self-tasking needs the manager's own id, not an inference from the
+        // roster block further down the prompt.
+        assert!(text.contains("Your own `workspaceAgentId` is `workspace-agent-manager`"));
         assert!(text.contains("### How tasks run"));
         assert!(text.contains("no per-agent limit"));
         assert!(text.contains("Assigning a task to yourself"));
@@ -1905,6 +1967,10 @@ mod tests {
         // self-tasking as the background-work mechanism.
         assert!(text.contains("(and only agent)"));
         assert!(text.contains("assign a task to *yourself*"));
+        assert!(text.contains("There are no member agents to delegate to"));
+        // A solo manager self-assigns by id too, so hand it its own id
+        // rather than pointing it at `workspace_listAgents`.
+        assert!(text.contains("Your own `workspaceAgentId` is `workspace-agent-manager`"));
         assert!(text.contains("### How tasks run"));
     }
 
@@ -1926,8 +1992,34 @@ mod tests {
         assert!(text.contains("result summary"));
         assert!(text.contains("never create task chains"));
         // A worker (even a self-tasked manager instance) must not be invited
-        // to fan out further tasks.
+        // to fan out further tasks — neither the offer to self-assign nor the
+        // id such a chain would need.
         assert!(!text.contains("### How tasks run"));
+        assert!(!text.contains("Your own `workspaceAgentId`"));
+        assert!(!text.contains("assign a task to *yourself*"));
+    }
+
+    #[test]
+    fn build_system_prompt_withholds_own_id_from_a_manager_worker_with_members() {
+        let context = SessionContext {
+            automation_id: Some("workspace-agent-manager".to_string()),
+            workspace_agents: vec![manager_summary(), member_summary()],
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::WorkspaceTask);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        // A self-assigned manager task still renders the member roster — it
+        // may need to know who exists — but must not be told to assign a task
+        // to itself, which is what a task chain would need.
+        assert!(text.contains("`workspaceAgentId`: `workspace-agent-reviewer`"));
+        assert!(!text.contains("Your own `workspaceAgentId`"));
+        assert!(!text.contains("### How tasks run"));
+        assert!(text.contains("never create task chains"));
     }
 
     #[test]
