@@ -6,3 +6,15 @@
 # step with it. Every tracked `.sh` blob is already LF, so this constrains
 # checkout only and renormalises nothing.
 *.sh text eol=lf
+
+# `tauri build` rewrites this manifest to inject features into the `tauri`
+# dependency (tauri's `tooling/cli/src/interface/rust/manifest.rs`) and
+# serialises it with `toml_edit`, which writes LF. GitHub's Windows runners
+# check out with `core.autocrlf=true`, so the file arrives CRLF and comes back
+# LF: the tree is modified, `git describe --dirty` says so, and the release job
+# stamps the Windows binary `<version>-dirty` — v26.8.1 shipped that way and
+# v26.8.14 was stopped by scripts/assert-pristine-tree.sh. Checking it out LF
+# makes tauri's rewrite a byte-for-byte no-op. Upstream: tauri-apps/tauri#8711.
+# The blob is already LF, so this constrains checkout only and renormalises
+# nothing.
+src-tauri/Cargo.toml text eol=lf
