@@ -374,8 +374,9 @@ pub async fn run_session_turn(
                         }
                     }
                 }
+                let provider_message = e.to_string();
                 let failure =
-                    failure_message_with_compaction_context(&e.to_string(), &compaction_attempt);
+                    failure_message_with_compaction_context(&provider_message, &compaction_attempt);
                 fail_run(deps, &session, &run_id, usage.as_ref(), &failure).await?;
                 // First iteration: the provider rejected the request outright
                 // (connection/auth/limit), so the user's message never reached
@@ -390,7 +391,9 @@ pub async fn run_session_turn(
                     )
                     .await;
                 }
-                return Err(e.into());
+                return Err(
+                    provider_error_with_compaction_context(e, &provider_message, failure).into(),
+                );
             }
         };
 
@@ -2787,6 +2790,38 @@ mod tests {
         assert!(text.contains("summariser died"), "{text}");
         assert!(text.contains("prompt is too long"), "{text}");
     }
+
+    #[test]
+    fn returned_provider_error_uses_rewritten_context_limit_message() {
+        let attempt = compaction::CompactionAttempt::Failed("summariser died".to_string());
+        let provider_message = "provider request failed: prompt is too long".to_string();
+        let failure = failure_message_with_compaction_context(&provider_message, &attempt);
+
+        let error = provider_error_with_compaction_context(
+            ProviderError::RequestFailed("prompt is too long".to_string()),
+            &provider_message,
+            failure,
+        );
+
+        let text = error.to_string();
+        assert!(text.contains("summariser died"), "{text}");
+        assert!(text.contains("prompt is too long"), "{text}");
+    }
+
+    #[test]
+    fn returned_provider_error_preserves_unrewritten_errors() {
+        let attempt = compaction::CompactionAttempt::Failed("summariser died".to_string());
+        let provider_message = "provider request failed: 401 Unauthorized".to_string();
+        let failure = failure_message_with_compaction_context(&provider_message, &attempt);
+
+        let error = provider_error_with_compaction_context(
+            ProviderError::RequestFailed("401 Unauthorized".to_string()),
+            &provider_message,
+            failure,
+        );
+
+        assert_eq!(error.to_string(), provider_message);
+    }
 }
 
 /// Normalize persisted history into a provider-safe message sequence.
@@ -3382,6 +3417,18 @@ fn failure_message_with_compaction_context(
         compaction::context_limit_failure_message("The request", provider_message, attempt)
     } else {
         provider_message.to_string()
+    }
+}
+
+fn provider_error_with_compaction_context(
+    error: ProviderError,
+    provider_message: &str,
+    failure_message: String,
+) -> ProviderError {
+    if failure_message == provider_message {
+        error
+    } else {
+        ProviderError::RequestFailed(failure_message)
     }
 }
 
