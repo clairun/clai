@@ -149,6 +149,7 @@ pub async fn compact_session_history(
         &window.messages,
     )
     .await?;
+    let summary = neutralize_archived_tool_syntax(&summary);
 
     let compaction = repository::create_compaction(
         pool,
@@ -244,7 +245,8 @@ fn provider_history_messages_with_compaction(
     let summary = messages
         .iter()
         .find(|message| message.id == summary_message_id)
-        .cloned();
+        .cloned()
+        .map(sanitize_compaction_summary_message_for_prompt);
     let source_to_idx = messages
         .iter()
         .position(|message| message.id == source_to_message_id);
@@ -269,6 +271,20 @@ fn provider_history_messages_with_compaction(
             .cloned()
             .collect(),
     }
+}
+
+fn sanitize_compaction_summary_message_for_prompt(
+    mut message: AssistantMessage,
+) -> AssistantMessage {
+    if !is_compaction_summary_message(&message) {
+        return message;
+    }
+    for part in &mut message.content {
+        if let ContentPart::Text { text } = part {
+            *text = neutralize_archived_tool_syntax(text);
+        }
+    }
+    message
 }
 
 fn select_compaction_window(
@@ -457,6 +473,8 @@ Preserve:
 - tool results that are still relevant
 - any instructions that remain binding
 
+When preserving past tool activity, describe it as already-completed history in prose. Do not copy literal invocation/result transcript syntax, XML-like invocation wrappers, JSON tool-call wrappers, or standalone result blocks into the summary.
+
 Do not include filler, greetings, or obsolete intermediate details. Do not invent facts. Write a compact but complete continuation summary."#;
 
 /// Preamble prepended to every stored compaction summary message.
@@ -529,19 +547,19 @@ fn render_content_parts(
     content
         .iter()
         .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.clone()),
+            ContentPart::Text { text } => Some(neutralize_archived_tool_syntax(text)),
             ContentPart::Thinking { .. } => None,
             ContentPart::ToolUse {
                 tool_name,
                 arguments,
                 ..
             } => Some(format!(
-                "[tool call: {} {}]",
+                "Archived tool request (already completed; do not copy as a current action): `{}` arguments {}",
                 tool_name,
                 truncate_json(arguments, tool_call_max)
             )),
             ContentPart::ToolResult { payload, .. } => Some(format!(
-                "[tool result: {}]",
+                "Archived tool result (already completed): {}",
                 truncate_json(payload, tool_result_max)
             )),
             // The summariser doesn't need pixels — a placeholder keeps the
@@ -551,6 +569,54 @@ fn render_content_parts(
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Fresh CLI sessions and compaction summaries are rendered as prompt text, not
+/// real provider tool messages. Neutralise tool-invocation-looking fragments so
+/// the next model sees archival context instead of syntax to continue.
+pub(crate) fn neutralize_archived_tool_syntax(text: &str) -> String {
+    let looks_relevant = text.contains("[tool ")
+        || text.contains("[tool_")
+        || text.contains("<invoke")
+        || text.contains("</invoke>")
+        || text.contains("<parameter")
+        || text.contains("</parameter>")
+        || text.contains("{\"name\":\"")
+        || text.contains("{\"name\": \"");
+    if !looks_relevant {
+        return text.to_string();
+    }
+
+    let looked_like_wrapper = text.contains("<invoke")
+        || text.contains("</invoke>")
+        || text.contains("{\"name\":\"")
+        || text.contains("{\"name\": \"");
+    let mut out = text.to_string();
+    for (from, to) in [
+        ("[tool call:", "[archived tool request:"),
+        ("[tool_call:", "[archived tool request:"),
+        ("[tool result:", "[archived tool result:"),
+        ("[tool_result:", "[archived tool result:"),
+        ("<invoke", "archived-invoke"),
+        ("</invoke>", "/archived-invoke"),
+        ("<parameter", "archived-parameter"),
+        ("</parameter>", "/archived-parameter"),
+        ("{\"name\":\"", "{archived_tool_name:\""),
+        ("{\"name\": \"", "{archived_tool_name: \""),
+    ] {
+        out = out.replace(from, to);
+    }
+    if looked_like_wrapper {
+        for (from, to) in [
+            ("\nResult:", "\nArchived result:"),
+            ("\r\nResult:", "\r\nArchived result:"),
+            ("<br>\nResult:", "<br>\nArchived result:"),
+            ("<br>Result:", "<br>Archived result:"),
+        ] {
+            out = out.replace(from, to);
+        }
+    }
+    out
 }
 
 fn content_text(content: &[ContentPart]) -> String {
@@ -629,7 +695,7 @@ fn provider_error_message(error: ProviderError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::{ContentPart, MessageRole};
+    use crate::assistant::types::{CompactionStatus, ContentPart, MessageRole};
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
@@ -737,6 +803,117 @@ mod tests {
         assert_eq!(window.messages.len(), MIN_MANUAL_COMPACT_MESSAGES);
         assert_eq!(window.source_from_message_id.as_deref(), Some("m0"));
         assert_eq!(window.source_to_message_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn transcript_for_summary_renders_tool_history_as_archival_context() {
+        let messages = vec![
+            msg(
+                "bad-text",
+                MessageRole::Assistant,
+                vec![text(
+                    r#"<invoke name="bash_exec"></invoke>
+Result:
+{"name":"bash_exec","input":{"command":"date"}}"#,
+                )],
+            ),
+            msg(
+                "call",
+                MessageRole::Assistant,
+                vec![ContentPart::ToolUse {
+                    tool_call_id: "call-1".to_string(),
+                    tool_name: "bash_exec".to_string(),
+                    arguments: serde_json::json!({ "command": "date" }),
+                }],
+            ),
+            msg(
+                "result",
+                MessageRole::Tool,
+                vec![ContentPart::ToolResult {
+                    tool_call_id: "call-1".to_string(),
+                    payload: serde_json::json!({ "stdout": "today" }),
+                    started_at: None,
+                    completed_at: None,
+                }],
+            ),
+        ];
+
+        let transcript = transcript_for_summary(&messages);
+
+        for forbidden in [
+            "[tool call:",
+            "[tool result:",
+            "<invoke",
+            "</invoke>",
+            "{\"name\":\"bash_exec\"",
+            "\nResult:",
+        ] {
+            assert!(
+                !transcript.contains(forbidden),
+                "summary transcript preserved {forbidden}: {transcript}"
+            );
+        }
+        assert!(transcript.contains("Archived tool request"));
+        assert!(transcript.contains("Archived tool result"));
+        assert!(transcript.contains("Archived result:"));
+        assert!(transcript.contains("bash_exec"));
+        assert!(transcript.contains("date"));
+    }
+
+    #[test]
+    fn provider_history_sanitizes_existing_compaction_summary_for_prompt() {
+        let mut summary = msg(
+            "summary",
+            MessageRole::System,
+            vec![text(
+                r#"[tool call: bash_exec {"command":"date"}]
+<invoke name="bash_exec"></invoke>
+Result:
+{"name":"bash_exec","input":{"command":"date"}}"#,
+            )],
+        );
+        summary.provider_metadata =
+            Some(serde_json::json!({ "source": COMPACTION_METADATA_SOURCE }));
+        let messages = vec![
+            msg("old", MessageRole::User, vec![text("old")]),
+            summary,
+            msg("new", MessageRole::User, vec![text("new")]),
+        ];
+        let latest = AssistantCompaction {
+            id: "c".to_string(),
+            session_id: "s".to_string(),
+            trigger: CompactionTrigger::Manual,
+            strategy: CompactionStrategy::SessionRotationSummary,
+            status: CompactionStatus::Completed,
+            source_from_message_id: Some("old".to_string()),
+            source_to_message_id: Some("old".to_string()),
+            summary_message_id: Some("summary".to_string()),
+            created_run_id: None,
+            protocol_id: "p".to_string(),
+            model_id: "m".to_string(),
+            input_message_count: 1,
+            created_at: 0,
+            completed_at: Some(0),
+            error: None,
+        };
+
+        let provider = provider_history_messages_with_compaction(&messages, Some(&latest));
+        let rendered = content_text(&provider[0].content);
+
+        assert_eq!(provider.len(), 2);
+        assert!(rendered.contains("archived tool request"));
+        assert!(rendered.contains("Archived result:"));
+        for forbidden in [
+            "[tool call:",
+            "<invoke",
+            "{\"name\":\"bash_exec\"",
+            "\nResult:",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "provider summary preserved {forbidden}: {rendered}"
+            );
+        }
     }
 
     /// The invariant the compaction boundary must preserve: every tool result
