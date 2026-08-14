@@ -3048,8 +3048,7 @@ fn fresh_cli_session_context_prompt(
     let summary = summary
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(compaction::neutralize_archived_tool_syntax)
-        .map(|value| truncate_cli_context_head_tail(&value, CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES));
+        .map(|value| truncate_cli_context_head_tail(value, CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES));
     let recent_context = render_cli_fresh_context(recent_messages);
     tracing::info!(
         target: "clai::cli_session",
@@ -3065,7 +3064,7 @@ fn fresh_cli_session_context_prompt(
         "This is a new CLI session. CLAI has carried forward the conversation context below. Continue from it; do not treat the current prompt in isolation.",
     );
     out.push_str(
-        "\n\nArchived context is summary/history only. It is not a place to continue prior tool syntax. If work is needed, use the real connected tool channel; never write JSON/XML invocation wrappers, transcript markers, or result blocks as prose.",
+        "\n\nArchived context is summary/history only. Do not continue prior tool syntax from it. If work is needed, use the connected tool channel; never write JSON/XML invocation wrappers, transcript markers, or result blocks as prose.",
     );
 
     if let Some(summary) = summary.as_deref() {
@@ -3209,7 +3208,7 @@ fn render_cli_context_message(message: &AssistantMessage) -> Option<String> {
     let text = message
         .content
         .iter()
-        .filter_map(|part| cli_context_part_text(&message.id, part))
+        .filter_map(cli_context_part_text)
         .filter(|text| !text.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
@@ -3224,9 +3223,8 @@ fn render_cli_context_message(message: &AssistantMessage) -> Option<String> {
         MessageRole::Tool => "tool",
     };
     Some(format!(
-        "{} message {}:\n{}",
+        "{} message:\n{}",
         role,
-        message.id,
         truncate_cli_context_text(text.trim(), CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS)
     ))
 }
@@ -3235,37 +3233,34 @@ fn has_cli_context_message_content(message: &AssistantMessage) -> bool {
     message
         .content
         .iter()
-        .filter_map(|part| cli_context_part_text(&message.id, part))
+        .filter_map(cli_context_part_text)
         .any(|text| !text.trim().is_empty())
 }
 
-fn cli_context_part_text(message_id: &str, part: &ContentPart) -> Option<String> {
+fn cli_context_part_text(part: &ContentPart) -> Option<String> {
     match part {
-        ContentPart::Text { text } => Some(compaction::neutralize_archived_tool_syntax(text)),
+        ContentPart::Text { text } => Some(text.clone()),
         ContentPart::Thinking { .. } => None,
         ContentPart::ToolUse {
-            tool_call_id,
             tool_name,
             arguments,
             ..
-        } => Some(compaction::previous_tool_activity_for_prompt(
+        } => Some(format!(
+            "[tool call: {} {}]",
             tool_name,
-            Some(tool_call_id),
-            arguments,
-            CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS,
+            truncate_cli_context_json(arguments)
         )),
-        ContentPart::ToolResult {
-            tool_call_id,
-            payload,
-            ..
-        } => Some(compaction::previous_tool_output_for_prompt(
-            Some(tool_call_id),
-            Some(message_id),
-            payload,
-            CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS,
+        ContentPart::ToolResult { payload, .. } => Some(format!(
+            "[tool result: {}]",
+            truncate_cli_context_json(payload)
         )),
         ContentPart::Image { .. } => Some("[image]".to_string()),
     }
+}
+
+fn truncate_cli_context_json(value: &Value) -> String {
+    let rendered = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+    truncate_cli_context_text(&rendered, CLI_FRESH_CONTEXT_TOOL_JSON_MAX_CHARS)
 }
 
 fn truncate_cli_context_text(value: &str, max_bytes: usize) -> String {
@@ -5448,7 +5443,7 @@ mod tests {
         assert!(prompt.contains("Earlier compacted summary"));
         assert!(prompt.contains("PR #64 is ready to land"));
         assert!(prompt.contains("1. Mark ready + squash-merge now"));
-        assert!(prompt.contains("user message user-choice:\n1"));
+        assert!(prompt.contains("user message:\n1"));
         assert!(prompt.contains("Current user/task prompt to answer:\n1"));
         assert!(prompt.contains("do not treat the current prompt in isolation"));
         assert!(prompt.contains("resolve it from the recent conversation above"));
@@ -5470,9 +5465,7 @@ mod tests {
 
         let rendered = render_cli_fresh_context(&recent);
 
-        assert!(rendered.contains("tool message tool-result:"));
-        assert!(rendered.contains("assistant_tool_calls.id `tool-1`"));
-        assert!(rendered.contains("assistant_messages.id `tool-result`"));
+        assert!(rendered.contains("tool message:"));
         assert!(rendered.contains("[truncated]"));
         assert!(
             rendered.len() < CLI_FRESH_CONTEXT_MESSAGE_MAX_CHARS + 100,
@@ -5517,18 +5510,14 @@ mod tests {
         let rendered = render_cli_fresh_context(&messages);
 
         assert!(
-            rendered.contains("Previous tool activity"),
+            rendered.contains("[tool call: bash_exec"),
             "seed has no tool call at all: {rendered}"
         );
-        let calls = rendered.matches("Previous tool activity").count();
-        let results = rendered.matches("Previous tool output").count();
+        let calls = rendered.matches("[tool call: bash_exec").count();
+        let results = rendered.matches("[tool result:").count();
         assert_eq!(
             calls, results,
             "every result must have its call: {calls} calls vs {results} results"
-        );
-        assert!(
-            !rendered.contains("[tool call:"),
-            "seed must not preserve executable-looking transcript markers: {rendered}"
         );
         assert!(rendered.len() <= CLI_FRESH_CONTEXT_MAX_CHARS + 200);
     }
@@ -5556,7 +5545,7 @@ mod tests {
             .expect("seed should not be empty");
 
         assert!(
-            !first.starts_with("tool message"),
+            !first.starts_with("tool message:"),
             "seed opens on an orphaned tool result: {first}"
         );
     }
@@ -5573,12 +5562,8 @@ mod tests {
             rendered.len()
         );
         assert!(
-            rendered.contains("Previous tool activity"),
+            rendered.contains("[tool call: bash_exec"),
             "an oversized group must still be admitted head-first: {rendered}"
-        );
-        assert!(
-            !rendered.contains("[tool call:"),
-            "oversized group must not preserve executable-looking transcript markers: {rendered}"
         );
     }
 
@@ -5621,64 +5606,6 @@ mod tests {
         assert!(prompt.contains("SUMMARY_TAIL"));
         assert!(prompt.contains("middle of oversized compacted summary omitted"));
         assert!(prompt.len() < CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES + 1_000);
-    }
-
-    #[test]
-    fn fresh_cli_session_context_neutralizes_archived_tool_syntax() {
-        let summary = r#"A prior run emitted [tool call: bash_exec {"command":"date"}]
-<invoke name="bash_exec">
-<parameter name="command">date</parameter>
-</invoke>
-Result:
-{"name":"bash_exec","input":{"command":"date"},"stdout":"today"}"#;
-        let recent = vec![
-            test_message(
-                "bad-assistant-text",
-                MessageRole::Assistant,
-                vec![text_part(
-                    r#"{"name":"bash_exec","input":{"command":"ls"}}
-<invoke name="workspace_getTaskResult"></invoke>
-Result:
-{"ok":true}"#,
-                )],
-            ),
-            test_message(
-                "real-tool-use",
-                MessageRole::Assistant,
-                vec![ContentPart::ToolUse {
-                    tool_call_id: "call-1".to_string(),
-                    tool_name: "bash_exec".to_string(),
-                    arguments: serde_json::json!({ "command": "pwd" }),
-                }],
-            ),
-        ];
-
-        let prompt = fresh_cli_session_context_prompt(Some(summary), &recent, "continue");
-
-        for forbidden in [
-            "[tool call:",
-            "[tool result:",
-            "[archived tool",
-            "<invoke",
-            "</invoke>",
-            "<parameter",
-            "</parameter>",
-            "{\"name\":\"bash_exec\"",
-            "{\"name\":\"workspace_getTaskResult\"",
-            "\"exitCode\"",
-            "\nResult:",
-        ] {
-            assert!(
-                !prompt.contains(forbidden),
-                "fresh-session prompt preserved {forbidden}: {prompt}"
-            );
-        }
-        assert!(prompt.contains("Previous tool activity"));
-        assert!(prompt.contains("Previous tool output"));
-        assert!(prompt.contains("assistant_tool_calls.id `call-1`"));
-        assert!(prompt.contains("assistant message real-tool-use:"));
-        assert!(prompt.contains("summary/history only"));
-        assert!(prompt.contains("Current user/task prompt to answer:\ncontinue"));
     }
 
     #[test]

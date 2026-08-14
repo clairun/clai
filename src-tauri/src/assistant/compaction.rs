@@ -149,7 +149,6 @@ pub async fn compact_session_history(
         &window.messages,
     )
     .await?;
-    let summary = neutralize_archived_tool_syntax(&summary);
 
     let compaction = repository::create_compaction(
         pool,
@@ -245,8 +244,7 @@ fn provider_history_messages_with_compaction(
     let summary = messages
         .iter()
         .find(|message| message.id == summary_message_id)
-        .cloned()
-        .map(sanitize_compaction_summary_message_for_prompt);
+        .cloned();
     let source_to_idx = messages
         .iter()
         .position(|message| message.id == source_to_message_id);
@@ -271,20 +269,6 @@ fn provider_history_messages_with_compaction(
             .cloned()
             .collect(),
     }
-}
-
-fn sanitize_compaction_summary_message_for_prompt(
-    mut message: AssistantMessage,
-) -> AssistantMessage {
-    if !is_compaction_summary_message(&message) {
-        return message;
-    }
-    for part in &mut message.content {
-        if let ContentPart::Text { text } = part {
-            *text = neutralize_archived_tool_syntax(text);
-        }
-    }
-    message
 }
 
 fn select_compaction_window(
@@ -466,14 +450,16 @@ fn compaction_summary_run_id(session: &AssistantSession, source_run_id: Option<&
 
 const SUMMARY_SYSTEM_PROMPT: &str = r#"Summarize the previous conversation so another assistant can continue it with minimal context.
 
+Write only prose conclusions and durable state.
+
 Preserve:
 - user goals and constraints
-- concrete decisions and assumptions
-- files, commands, code changes, test results, errors, and unresolved tasks
-- tool results that are still relevant
+- concrete decisions, assumptions, unresolved tasks, and current status
+- files touched, code changes, test outcomes, errors, and blockers at a plain-language level
+- stable evidence references when exact details may matter, using opaque ids from the transcript such as `source message <id>` or `assistant_tool_calls row <id>`
 - any instructions that remain binding
 
-The compacted message is only a prose summary. It must never contain anything that looks like a tool invocation or a tool result: no transcript markers, no XML-like wrappers, no JSON tool-call objects, and no raw result blocks. If past tool activity matters, explain in ordinary words what was learned or changed. If exact historical tool payloads might be needed later, cite only the transcript's message ids or assistant_tool_calls row ids and say they can be recovered with `history_query`; do not copy the payload.
+Do not copy command arguments, invocation syntax, raw JSON, transcript markers, XML-like wrappers, or tool-result payloads. If prior tool activity matters, summarize the outcome in ordinary words and cite a source id for later lookup with `history_query`.
 
 Do not include filler, greetings, or obsolete intermediate details. Do not invent facts. Write a compact but complete continuation summary."#;
 
@@ -485,9 +471,9 @@ const SUMMARY_MESSAGE_PREAMBLE: &str =
      than asking the user to repeat anything: your durable state is in \
      `.clai/memory/` and the full verbatim history (every message and tool \
      result) is in `.clai/data.sqlite` — query it with the read-only \
-     `history_query` tool (no approval needed) to recover specifics. If this \
-     summary mentions message ids or assistant_tool_calls row ids, use those \
-     as lookup breadcrumbs for exact historical payloads.";
+     `history_query` tool (no approval needed) to recover specifics. When \
+     opaque source ids are present, use them as lookup breadcrumbs for exact \
+     historical payloads.";
 
 fn summary_message_text(summary: &str) -> String {
     format!("{}\n\n{}", SUMMARY_MESSAGE_PREAMBLE, summary.trim())
@@ -535,19 +521,13 @@ fn render_messages(
                 MessageRole::Assistant => "assistant",
                 MessageRole::Tool => "tool",
             };
-            let body = render_content_parts(
-                &message.id,
-                &message.content,
-                tool_call_max,
-                tool_result_max,
-            );
+            let body = render_content_parts(&message.content, tool_call_max, tool_result_max);
             format!("[{} message {}]\n{}", role, message.id, body)
         })
         .collect()
 }
 
 fn render_content_parts(
-    message_id: &str,
     content: &[ContentPart],
     tool_call_max: usize,
     tool_result_max: usize,
@@ -555,28 +535,20 @@ fn render_content_parts(
     content
         .iter()
         .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(neutralize_archived_tool_syntax(text)),
+            ContentPart::Text { text } => Some(text.clone()),
             ContentPart::Thinking { .. } => None,
             ContentPart::ToolUse {
-                tool_call_id,
                 tool_name,
                 arguments,
                 ..
-            } => Some(previous_tool_activity_for_prompt(
+            } => Some(format!(
+                "[tool call: {} {}]",
                 tool_name,
-                Some(tool_call_id),
-                arguments,
-                tool_call_max,
+                truncate_json(arguments, tool_call_max)
             )),
-            ContentPart::ToolResult {
-                tool_call_id,
-                payload,
-                ..
-            } => Some(previous_tool_output_for_prompt(
-                Some(tool_call_id),
-                Some(message_id),
-                payload,
-                tool_result_max,
+            ContentPart::ToolResult { payload, .. } => Some(format!(
+                "[tool result: {}]",
+                truncate_json(payload, tool_result_max)
             )),
             // The summariser doesn't need pixels — a placeholder keeps the
             // turn structure without shipping image bytes (and the summary
@@ -585,228 +557,6 @@ fn render_content_parts(
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Fresh CLI sessions and compaction summaries are rendered as prompt text, not
-/// real provider tool messages. Neutralise tool-invocation-looking fragments so
-/// the next model sees archival context instead of syntax to continue.
-pub(crate) fn neutralize_archived_tool_syntax(text: &str) -> String {
-    let looks_relevant = text.contains("[tool ")
-        || text.contains("[tool_")
-        || text.contains("<invoke")
-        || text.contains("</invoke>")
-        || text.contains("<parameter")
-        || text.contains("</parameter>")
-        || text.contains("{\"name\":\"")
-        || text.contains("{\"name\": \"")
-        || text.contains("\"exitCode\"")
-        || text.contains("\"stdout\"")
-        || text.contains("\"success\"")
-        || text.contains("\"rowCount\"")
-        || text.contains("\"bytesWritten\"")
-        || text.contains("\nResult:")
-        || text.contains("\r\nResult:")
-        || text.contains("<br>Result:");
-    if !looks_relevant {
-        return text.to_string();
-    }
-
-    let mut out = text
-        .lines()
-        .map(neutralize_archived_tool_line)
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-pub(crate) fn previous_tool_activity_for_prompt(
-    tool_name: &str,
-    tool_call_id: Option<&str>,
-    arguments: &serde_json::Value,
-    max_chars: usize,
-) -> String {
-    format!(
-        "Previous tool activity, already completed and included only as context.{} Tool name: `{}`. Input summary: {}.",
-        lookup_reference(tool_call_id, None),
-        tool_name,
-        summarize_json_for_prose(arguments, max_chars)
-    )
-}
-
-pub(crate) fn previous_tool_output_for_prompt(
-    tool_call_id: Option<&str>,
-    message_id: Option<&str>,
-    payload: &serde_json::Value,
-    max_chars: usize,
-) -> String {
-    format!(
-        "Previous tool output, already completed and included only as context.{} Output summary: {}.",
-        lookup_reference(tool_call_id, message_id),
-        summarize_json_for_prose(payload, max_chars)
-    )
-}
-
-fn lookup_reference(tool_call_id: Option<&str>, message_id: Option<&str>) -> String {
-    let mut refs = Vec::new();
-    if let Some(id) = tool_call_id.map(str::trim).filter(|id| !id.is_empty()) {
-        refs.push(format!("assistant_tool_calls.id `{id}`"));
-    }
-    if let Some(id) = message_id.map(str::trim).filter(|id| !id.is_empty()) {
-        refs.push(format!("assistant_messages.id `{id}`"));
-    }
-    if refs.is_empty() {
-        String::new()
-    } else {
-        format!(" Lookup reference: {}.", refs.join("; "))
-    }
-}
-
-fn neutralize_archived_tool_line(line: &str) -> String {
-    let trimmed = line.trim_start();
-    let indent = &line[..line.len() - trimmed.len()];
-
-    for marker in ["[tool call:", "[tool_call:"] {
-        if let Some(rest) = trimmed.strip_prefix(marker) {
-            let rest = rest.trim().trim_end_matches(']').trim();
-            return format!(
-                "{indent}Previous tool activity, already completed and included only as context: {}.",
-                neutralize_inline_archived_tool_syntax(rest)
-            );
-        }
-    }
-    for marker in ["[tool result:", "[tool_result:"] {
-        if let Some(rest) = trimmed.strip_prefix(marker) {
-            let rest = rest.trim().trim_end_matches(']').trim();
-            return format!(
-                "{indent}Previous tool output, already completed and included only as context: {}.",
-                neutralize_inline_archived_tool_syntax(rest)
-            );
-        }
-    }
-
-    if trimmed.starts_with("<invoke") || trimmed.starts_with("</invoke") {
-        return format!(
-            "{indent}Previous tool invocation syntax from the archived transcript was omitted."
-        );
-    }
-    if trimmed.starts_with("<parameter") || trimmed.starts_with("</parameter") {
-        return format!(
-            "{indent}Previous tool parameter syntax from the archived transcript was omitted."
-        );
-    }
-    if trimmed == "Result:" || trimmed == "<br>Result:" {
-        return format!("{indent}Previous tool output, already completed:");
-    }
-    if let Some(summary) = legacy_json_tool_call_summary(trimmed) {
-        return format!("{indent}{summary}");
-    }
-    if looks_like_result_payload_json(trimmed) {
-        let summary = serde_json::from_str::<serde_json::Value>(trimmed)
-            .map(|value| {
-                previous_tool_output_for_prompt(None, None, &value, SUMMARY_TOOL_RESULT_MAX_CHARS)
-            })
-            .unwrap_or_else(|_| {
-                "Previous tool output, already completed, was recorded here as structured data."
-                    .to_string()
-            });
-        return format!("{indent}{summary}");
-    }
-
-    let neutralized = neutralize_inline_archived_tool_syntax(trimmed);
-    if neutralized == trimmed {
-        line.to_string()
-    } else {
-        format!("{indent}{neutralized}")
-    }
-}
-
-fn legacy_json_tool_call_summary(trimmed: &str) -> Option<String> {
-    if !trimmed.starts_with('{') || !trimmed.contains("\"name\"") || !trimmed.contains("\"input\"")
-    {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let name = value.get("name").and_then(serde_json::Value::as_str)?;
-    let input = value.get("input")?;
-    Some(previous_tool_activity_for_prompt(
-        name,
-        None,
-        input,
-        SUMMARY_TOOL_CALL_MAX_CHARS,
-    ))
-}
-
-fn looks_like_result_payload_json(trimmed: &str) -> bool {
-    trimmed.starts_with('{')
-        && [
-            "\"exitCode\"",
-            "\"stdout\"",
-            "\"success\"",
-            "\"rowCount\"",
-            "\"bytesWritten\"",
-        ]
-        .iter()
-        .any(|needle| trimmed.contains(needle))
-}
-
-fn neutralize_inline_archived_tool_syntax(text: &str) -> String {
-    let mut out = text.to_string();
-    for (from, to) in [
-        ("[tool call:", "previous tool activity:"),
-        ("[tool_call:", "previous tool activity:"),
-        ("[tool result:", "previous tool output:"),
-        ("[tool_result:", "previous tool output:"),
-        ("<invoke", "tool invocation syntax"),
-        ("</invoke>", "end of tool invocation syntax"),
-        ("<parameter", "tool parameter syntax"),
-        ("</parameter>", "end of tool parameter syntax"),
-        ("{\"name\":\"", "legacy tool JSON wrapper with name \""),
-        ("{\"name\": \"", "legacy tool JSON wrapper with name \""),
-    ] {
-        out = out.replace(from, to);
-    }
-    out
-}
-
-fn summarize_json_for_prose(value: &serde_json::Value, max_chars: usize) -> String {
-    let rendered = match value {
-        serde_json::Value::Object(map) if !map.is_empty() => map
-            .iter()
-            .take(12)
-            .map(|(key, value)| format!("{}={}", key, json_value_for_prose(value)))
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => json_value_for_prose(value),
-    };
-    truncate_prose_text(&rendered, max_chars)
-}
-
-fn json_value_for_prose(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => format!("`{}`", truncate_prose_text(text, 1_200)),
-        serde_json::Value::Number(_) | serde_json::Value::Bool(_) | serde_json::Value::Null => {
-            value.to_string()
-        }
-        serde_json::Value::Array(items) => format!("{} item array", items.len()),
-        serde_json::Value::Object(fields) => format!("{} field object", fields.len()),
-    }
-}
-
-fn truncate_prose_text(value: &str, max_chars: usize) -> String {
-    if value.len() <= max_chars {
-        return value.to_string();
-    }
-
-    const SUFFIX: &str = "...[truncated]";
-    if max_chars <= SUFFIX.len() {
-        return "[truncated]".to_string();
-    }
-
-    let prefix_len = max_chars - SUFFIX.len();
-    format!("{}{}", safe_prefix(value, prefix_len), SUFFIX)
 }
 
 fn content_text(content: &[ContentPart]) -> String {
@@ -826,7 +576,6 @@ fn estimate_history_chars(messages: &[AssistantMessage], tools: &[ToolDefinition
         .filter(|message| !is_compaction_summary_message(message))
         .map(|message| {
             render_content_parts(
-                &message.id,
                 &message.content,
                 SUMMARY_TOOL_CALL_MAX_CHARS,
                 SUMMARY_TOOL_RESULT_MAX_CHARS,
@@ -846,6 +595,15 @@ fn estimate_history_chars(messages: &[AssistantMessage], tools: &[ToolDefinition
         })
         .sum();
     message_chars + tool_chars
+}
+
+fn truncate_json(value: &serde_json::Value, max_chars: usize) -> String {
+    let rendered = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+    if rendered.len() <= max_chars {
+        rendered
+    } else {
+        format!("{}...[truncated]", safe_prefix(&rendered, max_chars))
+    }
 }
 
 fn safe_prefix(value: &str, max_bytes: usize) -> &str {
@@ -877,7 +635,7 @@ fn provider_error_message(error: ProviderError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::{CompactionStatus, ContentPart, MessageRole};
+    use crate::assistant::types::{ContentPart, MessageRole};
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
@@ -985,123 +743,6 @@ mod tests {
         assert_eq!(window.messages.len(), MIN_MANUAL_COMPACT_MESSAGES);
         assert_eq!(window.source_from_message_id.as_deref(), Some("m0"));
         assert_eq!(window.source_to_message_id.as_deref(), Some("m1"));
-    }
-
-    #[test]
-    fn transcript_for_summary_renders_tool_history_as_archival_context() {
-        let messages = vec![
-            msg(
-                "bad-text",
-                MessageRole::Assistant,
-                vec![text(
-                    r#"<invoke name="bash_exec"></invoke>
-Result:
-{"name":"bash_exec","input":{"command":"date"}}"#,
-                )],
-            ),
-            msg(
-                "call",
-                MessageRole::Assistant,
-                vec![ContentPart::ToolUse {
-                    tool_call_id: "call-1".to_string(),
-                    tool_name: "bash_exec".to_string(),
-                    arguments: serde_json::json!({ "command": "date" }),
-                }],
-            ),
-            msg(
-                "result",
-                MessageRole::Tool,
-                vec![ContentPart::ToolResult {
-                    tool_call_id: "call-1".to_string(),
-                    payload: serde_json::json!({ "stdout": "today" }),
-                    started_at: None,
-                    completed_at: None,
-                }],
-            ),
-        ];
-
-        let transcript = transcript_for_summary(&messages);
-
-        for forbidden in [
-            "[tool call:",
-            "[tool result:",
-            "[archived tool",
-            "<invoke",
-            "</invoke>",
-            "{\"name\":\"bash_exec\"",
-            "\"exitCode\"",
-            "\nResult:",
-        ] {
-            assert!(
-                !transcript.contains(forbidden),
-                "summary transcript preserved {forbidden}: {transcript}"
-            );
-        }
-        assert!(transcript.contains("Previous tool activity"));
-        assert!(transcript.contains("Previous tool output"));
-        assert!(transcript.contains("already completed"));
-        assert!(transcript.contains("assistant_tool_calls.id `call-1`"));
-        assert!(transcript.contains("assistant_messages.id `result`"));
-        assert!(transcript.contains("bash_exec"));
-        assert!(transcript.contains("date"));
-    }
-
-    #[test]
-    fn provider_history_sanitizes_existing_compaction_summary_for_prompt() {
-        let mut summary = msg(
-            "summary",
-            MessageRole::System,
-            vec![text(
-                r#"[tool call: bash_exec {"command":"date"}]
-<invoke name="bash_exec"></invoke>
-Result:
-{"name":"bash_exec","input":{"command":"date"}}"#,
-            )],
-        );
-        summary.provider_metadata =
-            Some(serde_json::json!({ "source": COMPACTION_METADATA_SOURCE }));
-        let messages = vec![
-            msg("old", MessageRole::User, vec![text("old")]),
-            summary,
-            msg("new", MessageRole::User, vec![text("new")]),
-        ];
-        let latest = AssistantCompaction {
-            id: "c".to_string(),
-            session_id: "s".to_string(),
-            trigger: CompactionTrigger::Manual,
-            strategy: CompactionStrategy::SessionRotationSummary,
-            status: CompactionStatus::Completed,
-            source_from_message_id: Some("old".to_string()),
-            source_to_message_id: Some("old".to_string()),
-            summary_message_id: Some("summary".to_string()),
-            created_run_id: None,
-            protocol_id: "p".to_string(),
-            model_id: "m".to_string(),
-            input_message_count: 1,
-            created_at: 0,
-            completed_at: Some(0),
-            error: None,
-        };
-
-        let provider = provider_history_messages_with_compaction(&messages, Some(&latest));
-        let rendered = content_text(&provider[0].content);
-
-        assert_eq!(provider.len(), 2);
-        assert!(rendered.contains("Previous tool activity"));
-        assert!(rendered.contains("Previous tool output"));
-        for forbidden in [
-            "[tool call:",
-            "[archived tool",
-            "<invoke",
-            "{\"name\":\"bash_exec\"",
-            "\"exitCode\"",
-            "\nResult:",
-        ] {
-            assert!(
-                !rendered.contains(forbidden),
-                "provider summary preserved {forbidden}: {rendered}"
-            );
-        }
     }
 
     /// The invariant the compaction boundary must preserve: every tool result
@@ -1238,6 +879,5 @@ Result:
         assert!(out.contains(".clai/memory/"));
         assert!(out.contains(".clai/data.sqlite"));
         assert!(out.contains("history_query"));
-        assert!(out.contains("assistant_tool_calls row ids"));
     }
 }
