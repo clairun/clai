@@ -303,6 +303,10 @@ pub async fn run_session_turn(
         clear_cli_session_id(deps, &mut session).await?;
     }
 
+    // What compaction managed to do this run, so a context-limit failure can
+    // name compaction as the reason instead of leaving the user with the CLI's
+    // bare context-limit error.
+    let mut compaction_attempt = compaction::CompactionAttempt::NotAttempted;
     let messages = repository::list_messages(&deps.pool, &session.id).await?;
     let provider_history =
         compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
@@ -320,6 +324,7 @@ pub async fn run_session_turn(
         .await
         {
             Ok(Some(outcome)) => {
+                compaction_attempt.record_success();
                 compaction::reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
                 let _ = emit_event(
                     &deps.app,
@@ -331,13 +336,18 @@ pub async fn run_session_turn(
                     },
                 );
             }
+            // `force = false`: the *automatic* window selector declined, which
+            // says nothing about what a manual `/compact` could do.
             Ok(None) => {}
-            Err(error) => tracing::warn!(
-                session_id = %session.id,
-                run_id = %run_id,
-                error = %error,
-                "Automatic CLI session compaction failed"
-            ),
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    run_id = %run_id,
+                    error = %error,
+                    "Automatic CLI session compaction failed"
+                );
+                compaction_attempt.record_failure(&error);
+            }
         }
     }
 
@@ -491,6 +501,7 @@ pub async fn run_session_turn(
                 .await
                 {
                     Ok(Some(outcome)) => {
+                        compaction_attempt.record_success();
                         compaction::reset_cli_session_for_rotation(&deps.pool, &mut session)
                             .await?;
                         let _ = emit_event(
@@ -505,17 +516,23 @@ pub async fn run_session_turn(
                         retried_after_context_compaction = true;
                         continue;
                     }
-                    Ok(None) => tracing::warn!(
-                        session_id = %session.id,
-                        run_id = %run_id,
-                        "Context-limit CLI recovery requested compaction but no compaction was produced"
-                    ),
-                    Err(error) => tracing::warn!(
-                        session_id = %session.id,
-                        run_id = %run_id,
-                        error = %error,
-                        "Context-limit CLI recovery compaction failed"
-                    ),
+                    Ok(None) => {
+                        tracing::warn!(
+                            session_id = %session.id,
+                            run_id = %run_id,
+                            "Context-limit CLI recovery requested compaction but no compaction was produced"
+                        );
+                        compaction_attempt.record_nothing_to_compact();
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %session.id,
+                            run_id = %run_id,
+                            error = %error,
+                            "Context-limit CLI recovery compaction failed"
+                        );
+                        compaction_attempt.record_failure(&error);
+                    }
                 }
             }
         }
@@ -558,7 +575,11 @@ pub async fn run_session_turn(
         }
         Err(LocalAgentRunError::Failed { message, usage }) => {
             let message = if should_recover_cli_context_limit(&message) {
-                cli_context_limit_failure_message(provider_runtime, &message)
+                compaction::context_limit_failure_message(
+                    provider_runtime.display_name(),
+                    &message,
+                    &compaction_attempt,
+                )
             } else {
                 message
             };
@@ -2453,21 +2474,6 @@ fn codex_input_too_large_message(actual_chars: usize) -> String {
     format!(
         "Codex turn input exceeds the maximum length of {} characters (input_too_large, actual_chars={}). CLAI can recover by compacting the conversation and retrying; if this error repeats, run `/compact` or start a new thread before retrying.",
         CODEX_TURN_INPUT_MAX_CHARS, actual_chars
-    )
-}
-
-fn cli_context_limit_failure_message(
-    provider_runtime: CliProviderRuntime,
-    provider_message: &str,
-) -> String {
-    if provider_message.contains("run `/compact`") {
-        return provider_message.to_string();
-    }
-
-    format!(
-        "{} could not start because the conversation context is too large for the provider's current turn limit. CLAI tried automatic compaction when possible. Run `/compact` or start a new thread, then retry.\n\nProvider error: {}",
-        provider_runtime.display_name(),
-        provider_message
     )
 }
 
