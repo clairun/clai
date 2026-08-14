@@ -29,6 +29,7 @@ beforeEach(() => {
   useAssistantStore.setState({
     sessions: {},
     streamingText: {},
+    deliveredQueuedMessageIds: {},
     activeSessionByTab: {},
     recoverablePrompts: {},
   });
@@ -172,6 +173,106 @@ describe('queuedMessageIds — live events win over snapshot hydrations', () => 
     store.markMessageQueued(SESSION.id, 'm-q');
     store.loadSessionData(SESSION.id, SESSION, [msg('m-q')], [], []);
     expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual(['m-q']);
+  });
+
+  it('records a delivery that lands before the session is hydrated', () => {
+    // The event listener is app-global and fires whether or not the session
+    // has been loaded yet. Before tombstones this delivery was dropped, and
+    // the snapshot fetched two IPC round trips earlier then seeded the chip
+    // it should have cleared.
+    const store = useAssistantStore.getState();
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-q']);
+    store.loadSessionData(SESSION.id, SESSION, [msg('m-q')], [], [], ['m-q']);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual([]);
+  });
+
+  it('still seeds ids the delivery did not cover', () => {
+    const store = useAssistantStore.getState();
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-delivered']);
+    store.loadSessionData(
+      SESSION.id, SESSION, [msg('m-delivered'), msg('m-waiting')], [], [],
+      ['m-delivered', 'm-waiting'],
+    );
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual([
+      'm-waiting',
+    ]);
+  });
+
+  it('ignores a queue mark for a message already delivered', () => {
+    // The send round trip resolves after the command returns, which has been
+    // measured landing *after* the run picked the message up. Marking then
+    // produced a chip with no event left to clear it.
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-q']);
+    store.markMessageQueued(SESSION.id, 'm-q');
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual([]);
+  });
+
+  it('still marks a message that has not been delivered', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-other']);
+    store.markMessageQueued(SESSION.id, 'm-q');
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual(['m-q']);
+  });
+
+  it('scopes tombstones to their session', () => {
+    const store = useAssistantStore.getState();
+    store.initSession({ ...SESSION, id: 'sess-2' });
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-q']);
+    store.markMessageQueued('sess-2', 'm-q');
+    expect(useAssistantStore.getState().sessions['sess-2']!.queuedMessageIds).toEqual(['m-q']);
+  });
+
+  it('accumulates tombstones across events without duplicating ids', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.markMessageQueued(SESSION.id, 'm-2');
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-1']);
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-1', 'm-2']);
+    expect(useAssistantStore.getState().deliveredQueuedMessageIds[SESSION.id]).toEqual([
+      'm-1',
+      'm-2',
+    ]);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual([]);
+  });
+
+  it('bounds the tombstone list across deliveries, oldest first', () => {
+    const store = useAssistantStore.getState();
+    store.markQueuedMessagesDelivered(
+      SESSION.id,
+      Array.from({ length: 150 }, (_, i) => `a-${i}`),
+    );
+    store.markQueuedMessagesDelivered(
+      SESSION.id,
+      Array.from({ length: 150 }, (_, i) => `b-${i}`),
+    );
+    const tombstones = useAssistantStore.getState().deliveredQueuedMessageIds[SESSION.id]!;
+    expect(tombstones).toHaveLength(200);
+    expect(tombstones[0]).toBe('a-100');
+    expect(tombstones.at(-1)).toBe('b-149');
+  });
+
+  it('never trims the delivery it is recording', () => {
+    // The backend delivers a session's whole pending queue in one event and
+    // does not cap it. Trimming to the standing limit here would drop the
+    // oldest ids of that very batch, and a snapshot fetched before the
+    // delivery would then re-seed them as chips nothing can clear.
+    const store = useAssistantStore.getState();
+    const ids = Array.from({ length: 250 }, (_, i) => `m-${i}`);
+    store.markQueuedMessagesDelivered(SESSION.id, ids);
+    store.loadSessionData(SESSION.id, SESSION, ids.map(msg), [], [], ids);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.queuedMessageIds).toEqual([]);
+  });
+
+  it('drops tombstones with the session they belong to', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.markQueuedMessagesDelivered(SESSION.id, ['m-q']);
+    expect(useAssistantStore.getState().deliveredQueuedMessageIds[SESSION.id]).toEqual(['m-q']);
+    store.removeSession(SESSION.id);
+    expect(useAssistantStore.getState().deliveredQueuedMessageIds[SESSION.id]).toBeUndefined();
   });
 });
 

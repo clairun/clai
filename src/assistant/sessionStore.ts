@@ -44,7 +44,9 @@ export interface SessionState {
   pendingAskUser: PendingAskUser | null;
   /** Ids of user messages still waiting in the queue (written while a run
    *  was active, not yet picked up). Rendered with a "Queued" chip; cleared
-   *  by `queued_messages_delivered` / `message_deleted` events. */
+   *  by `queued_messages_delivered` / `message_deleted` events, and gated on
+   *  the session-scoped `deliveredQueuedMessageIds` tombstones so a delivery
+   *  that raced hydration or the send round trip cannot be undone. */
   queuedMessageIds: string[];
   /** Cursor for loading older messages. Can point at an ancestor session. */
   olderMessageCursor: AssistantMessageCursor | null;
@@ -75,6 +77,26 @@ export interface AssistantStoreState {
    * message present".
    */
   streamingText: Record<string, Record<string, string>>;
+  /**
+   * Ids of queued messages the backend has confirmed delivered, keyed by
+   * session. Tombstones, not live state: a chip whose id is in here must
+   * never come back.
+   *
+   * Kept OUTSIDE `SessionState` because the two races it closes both happen
+   * when the session entry is absent or about to be replaced:
+   * `queued_messages_delivered` can land before the session is hydrated
+   * (the action would otherwise return early and lose the delivery), and
+   * `markMessageQueued` runs after the send round trip, which can resolve
+   * *after* the run already picked the message up. Tombstones are
+   * authoritative over both the snapshot seed and a late queue mark.
+   *
+   * They do not make the store self-healing in general: a delivery event
+   * dropped while the session IS hydrated still strands a chip, because
+   * `loadSessionData` keeps the live set over the backend snapshot. Fixing
+   * that would mean letting the snapshot win, which trades a stuck chip for
+   * a chip that disappears while its message is still queued.
+   */
+  deliveredQueuedMessageIds: Record<string, string[]>;
   activeSessionByTab: Record<string, string>;
 
   setActiveSessionForTab: (tabId: string, sessionId: string) => void;
@@ -136,6 +158,11 @@ const createInitialSessionState = (session: AssistantSession): SessionState => (
   totalMessageCount: null,
 });
 
+/** Per-session cap on delivered-queue tombstones. Only ids that were queued
+ *  while a run was active ever land here, so a few hundred covers any
+ *  realistic session while keeping the map bounded for long-lived tabs. */
+const DELIVERED_QUEUE_TOMBSTONE_LIMIT = 200;
+
 const TERMINAL_STATUSES = ['completed', 'completed_with_warnings', 'failed', 'cancelled'] as const;
 const ACTIVE_STATUSES = ['queued', 'running', 'waiting_for_tool'] as const;
 
@@ -144,6 +171,7 @@ const useAssistantStore = create<AssistantStoreState>()(
     immer((set, get) => ({
       sessions: {},
       streamingText: {},
+      deliveredQueuedMessageIds: {},
       activeSessionByTab: {},
       recoverablePrompts: {},
 
@@ -222,6 +250,12 @@ const useAssistantStore = create<AssistantStoreState>()(
         set((state) => {
           const s = state.sessions[sessionId];
           if (!s) return;
+          // The caller marks the chip only after the send command's round
+          // trip returns, and delivery has been measured landing 116ms after
+          // the queue write — so the clearing event can already be spent by
+          // the time we get here. Marking anyway would show a chip nothing
+          // will ever clear.
+          if (state.deliveredQueuedMessageIds[sessionId]?.includes(messageId)) return;
           if (!s.queuedMessageIds.includes(messageId)) {
             s.queuedMessageIds.push(messageId);
           }
@@ -229,6 +263,29 @@ const useAssistantStore = create<AssistantStoreState>()(
 
       markQueuedMessagesDelivered: (sessionId, messageIds) =>
         set((state) => {
+          if (messageIds.length === 0) return;
+          // Record the tombstones first, and unconditionally: the event is
+          // one-shot and app-global, so it can arrive while the session is
+          // still being hydrated. Returning early there is what let the
+          // subsequent snapshot seed put the chip back for good.
+          const tombstones = state.deliveredQueuedMessageIds[sessionId] ?? [];
+          const known = new Set(tombstones);
+          for (const id of messageIds) {
+            if (known.has(id)) continue;
+            known.add(id);
+            tombstones.push(id);
+          }
+          // Trim oldest-first, but never below the batch just recorded: the
+          // backend delivers every pending message of a session in one event
+          // and does not cap that list, so a queue deeper than the limit
+          // would otherwise lose the tombstones for its own oldest ids —
+          // exactly the ones a stale snapshot is about to re-seed.
+          const keep = Math.max(DELIVERED_QUEUE_TOMBSTONE_LIMIT, messageIds.length);
+          if (tombstones.length > keep) {
+            tombstones.splice(0, tombstones.length - keep);
+          }
+          state.deliveredQueuedMessageIds[sessionId] = tombstones;
+
           const s = state.sessions[sessionId];
           if (!s) return;
           const delivered = new Set(messageIds);
@@ -402,10 +459,15 @@ const useAssistantStore = create<AssistantStoreState>()(
             // run, with no later event to clear it. Events are strictly
             // ordered and the listener is app-global, so an existing entry
             // is never behind; snapshot ids only seed the first hydration
-            // (app start / evicted session).
+            // (app start / evicted session), minus anything already known
+            // delivered — that first hydration is itself a race the
+            // tombstones settle, since a delivery event that arrived before
+            // the session existed had no chip to clear.
             queuedMessageIds: existing
               ? existing.queuedMessageIds
-              : queuedMessageIds ?? [],
+              : (queuedMessageIds ?? []).filter(
+                  (id) => !state.deliveredQueuedMessageIds[sessionId]?.includes(id),
+                ),
             olderMessageCursor:
               olderMessageCursor !== undefined
                 ? olderMessageCursor
@@ -443,6 +505,10 @@ const useAssistantStore = create<AssistantStoreState>()(
         set((state) => {
           delete state.sessions[sessionId];
           delete state.streamingText[sessionId];
+          // Callers remove a session that was deleted or superseded by a
+          // config change; neither re-seeds queue ids from a snapshot, so the
+          // tombstones have no one left to protect.
+          delete state.deliveredQueuedMessageIds[sessionId];
           for (const [tabId, sid] of Object.entries(state.activeSessionByTab)) {
             if (sid === sessionId) {
               delete state.activeSessionByTab[tabId];
