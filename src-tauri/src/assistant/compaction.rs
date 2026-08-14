@@ -105,6 +105,90 @@ pub fn is_context_limit_error(message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// What automatic compaction achieved during a run.
+///
+/// Compaction failures used to be `tracing::warn!`-and-drop: the run then died
+/// on the provider's raw "prompt is too long", so the user had no way to tell
+/// that compaction is what failed, let alone whether the summariser broke
+/// (retryable) or the history simply cannot shrink further (not retryable).
+/// Runs thread their attempt to the failure site instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CompactionAttempt {
+    /// Compaction never ran during this run.
+    #[default]
+    NotAttempted,
+    /// Compaction ran but had nothing it could summarize; history is unchanged.
+    NothingToCompact,
+    /// Compaction ran and failed; history is unchanged.
+    Failed(String),
+}
+
+impl CompactionAttempt {
+    /// Record a compaction error, keeping the *first* failure of the run: a
+    /// later attempt is usually the same fault, and the earliest one is what
+    /// let the context grow past the limit.
+    pub fn record_failure(&mut self, error: impl std::fmt::Display) {
+        if matches!(self, Self::Failed(_)) {
+            return;
+        }
+        *self = Self::Failed(error.to_string());
+    }
+
+    /// Compaction succeeded, so an earlier failure no longer describes this
+    /// run: the history *did* shrink, and telling the user that compaction is
+    /// broken would send them away from the one remedy that works.
+    pub fn record_success(&mut self) {
+        *self = Self::NotAttempted;
+    }
+
+    /// Record that compaction ran but produced nothing. Never downgrades a
+    /// recorded failure.
+    pub fn record_nothing_to_compact(&mut self) {
+        if matches!(self, Self::NotAttempted) {
+            *self = Self::NothingToCompact;
+        }
+    }
+}
+
+/// User-facing text for a run that hit the provider's context limit.
+///
+/// Detection stays with the caller (`is_context_limit_error`); `subject` names
+/// what failed, e.g. "Claude Code" or "The request". When nothing is known
+/// about compaction and the provider already told the user to run `/compact`,
+/// the provider message is passed through unchanged — there is nothing to add.
+pub fn context_limit_failure_message(
+    subject: &str,
+    provider_message: &str,
+    attempt: &CompactionAttempt,
+) -> String {
+    if matches!(attempt, CompactionAttempt::NotAttempted)
+        && provider_message.contains("run `/compact`")
+    {
+        return provider_message.to_string();
+    }
+
+    let (diagnosis, remedy) = match attempt {
+        CompactionAttempt::NotAttempted => (
+            "CLAI tried automatic compaction when possible.".to_string(),
+            "Run `/compact` or start a new thread, then retry.",
+        ),
+        CompactionAttempt::NothingToCompact => (
+            "Automatic compaction ran but found nothing it could summarize, so the history is unchanged."
+                .to_string(),
+            "Compacting again will not help; start a new thread to continue.",
+        ),
+        CompactionAttempt::Failed(error) => (
+            format!("Automatic compaction failed, so the history is unchanged: {error}"),
+            "Compacting manually will most likely fail the same way; start a new thread to continue.",
+        ),
+    };
+
+    format!(
+        "{subject} could not complete because the conversation context is too large for the \
+         provider's current turn limit. {diagnosis} {remedy}\n\nProvider error: {provider_message}"
+    )
+}
+
 pub async fn reset_cli_session_for_rotation(
     pool: &DbPool,
     session: &mut AssistantSession,
@@ -877,5 +961,115 @@ mod tests {
         assert!(out.contains(".clai/memory/"));
         assert!(out.contains(".clai/data.sqlite"));
         assert!(out.contains("history_query"));
+    }
+
+    // --- R-comp.6: context-limit failure text ---------------------------------
+
+    const CTX_ERROR: &str = "input length and `max_tokens` exceed context limit";
+
+    #[test]
+    fn context_limit_message_passes_through_when_the_provider_already_advises_compacting() {
+        let provider = "Context low · run `/compact` to compact & continue";
+        assert_eq!(
+            context_limit_failure_message(
+                "Claude Code",
+                provider,
+                &CompactionAttempt::NotAttempted
+            ),
+            provider,
+            "nothing is known about compaction and the provider already said what to do"
+        );
+    }
+
+    #[test]
+    fn context_limit_message_without_an_attempt_keeps_the_provider_error() {
+        let text =
+            context_limit_failure_message("Codex", CTX_ERROR, &CompactionAttempt::NotAttempted);
+        assert!(text.starts_with("Codex could not complete"), "{text}");
+        assert!(text.contains(CTX_ERROR), "{text}");
+        assert!(
+            text.contains("Run `/compact` or start a new thread"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn context_limit_message_reports_a_history_that_cannot_shrink() {
+        let text = context_limit_failure_message(
+            "The request",
+            CTX_ERROR,
+            &CompactionAttempt::NothingToCompact,
+        );
+        assert!(text.contains("found nothing it could summarize"), "{text}");
+        assert!(text.contains("start a new thread"), "{text}");
+        assert!(
+            !text.contains("Run `/compact` or"),
+            "compacting again cannot help, so it must not be the advice: {text}"
+        );
+        assert!(text.contains(CTX_ERROR), "{text}");
+    }
+
+    #[test]
+    fn context_limit_message_surfaces_the_compaction_error_verbatim() {
+        // The point of R-comp.6: before this, the summariser error was
+        // `warn!`-and-dropped and the user only ever saw CTX_ERROR.
+        let text = context_limit_failure_message(
+            "The request",
+            CTX_ERROR,
+            &CompactionAttempt::Failed("summary request failed: 401 Unauthorized".to_string()),
+        );
+        assert!(text.contains("Automatic compaction failed"), "{text}");
+        assert!(
+            text.contains("summary request failed: 401 Unauthorized"),
+            "{text}"
+        );
+        assert!(
+            text.contains(CTX_ERROR),
+            "provider error must survive: {text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_compaction_overrides_the_providers_compact_advice() {
+        // `/compact` runs the same summariser that just failed, so passing the
+        // provider's advice through unchanged would send the user in a circle.
+        let text = context_limit_failure_message(
+            "Claude Code",
+            "Context low · run `/compact` to compact & continue",
+            &CompactionAttempt::Failed("claude exited with status 1".to_string()),
+        );
+        assert!(text.contains("claude exited with status 1"), "{text}");
+        assert!(text.contains("start a new thread"), "{text}");
+    }
+
+    #[test]
+    fn a_successful_compaction_clears_an_earlier_failure() {
+        // A transient summariser error followed by a compaction that worked:
+        // the history did shrink, so blaming compaction would be misdirection.
+        let mut attempt = CompactionAttempt::NotAttempted;
+        attempt.record_failure("summary request failed: 429");
+        attempt.record_success();
+        let text = context_limit_failure_message("The request", CTX_ERROR, &attempt);
+        assert!(!text.contains("429"), "compaction later succeeded: {text}");
+        assert!(
+            text.contains("Run `/compact` or start a new thread"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn attempt_keeps_the_first_failure_and_never_downgrades_it() {
+        let mut attempt = CompactionAttempt::NotAttempted;
+        attempt.record_nothing_to_compact();
+        assert_eq!(attempt, CompactionAttempt::NothingToCompact);
+
+        attempt.record_failure("first");
+        attempt.record_failure("second");
+        attempt.record_nothing_to_compact();
+        assert_eq!(
+            attempt,
+            CompactionAttempt::Failed("first".to_string()),
+            "the earliest failure is the one that let the context grow"
+        );
     }
 }

@@ -219,6 +219,10 @@ pub async fn run_session_turn(
     // exit via fail_run; this loop itself imposes no ceiling.
     let mut iteration: usize = 0;
     let mut retried_after_context_compaction = false;
+    // What compaction managed to do this run, so a context-limit failure can
+    // name compaction as the reason instead of leaving the user with the
+    // provider's bare "prompt is too long".
+    let mut compaction_attempt = compaction::CompactionAttempt::NotAttempted;
     loop {
         if input.cancel_token.is_cancelled() {
             cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
@@ -247,6 +251,7 @@ pub async fn run_session_turn(
             .await
             {
                 Ok(Some(outcome)) => {
+                    compaction_attempt.record_success();
                     let _ = emit_event(
                         &deps.app,
                         &session,
@@ -258,13 +263,18 @@ pub async fn run_session_turn(
                     );
                     messages = repository::list_messages(&deps.pool, &session.id).await?;
                 }
+                // `force = false`: the *automatic* window selector declined,
+                // which says nothing about what a manual `/compact` could do.
                 Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    session_id = %session.id,
-                    run_id = %run_id,
-                    error = %error,
-                    "Automatic assistant history compaction failed"
-                ),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session.id,
+                        run_id = %run_id,
+                        error = %error,
+                        "Automatic assistant history compaction failed"
+                    );
+                    compaction_attempt.record_failure(&error);
+                }
             }
         }
         let message_ids_in_snapshot: HashSet<&str> =
@@ -333,6 +343,7 @@ pub async fn run_session_turn(
                     .await
                     {
                         Ok(Some(outcome)) => {
+                            compaction_attempt.record_success();
                             let _ = emit_event(
                                 &deps.app,
                                 &session,
@@ -344,20 +355,28 @@ pub async fn run_session_turn(
                             );
                             continue;
                         }
-                        Ok(None) => tracing::warn!(
-                            session_id = %session.id,
-                            run_id = %run_id,
-                            "Context-limit recovery found no compactable assistant history"
-                        ),
-                        Err(error) => tracing::warn!(
-                            session_id = %session.id,
-                            run_id = %run_id,
-                            error = %error,
-                            "Context-limit recovery compaction failed"
-                        ),
+                        Ok(None) => {
+                            tracing::warn!(
+                                session_id = %session.id,
+                                run_id = %run_id,
+                                "Context-limit recovery found no compactable assistant history"
+                            );
+                            compaction_attempt.record_nothing_to_compact();
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                session_id = %session.id,
+                                run_id = %run_id,
+                                error = %error,
+                                "Context-limit recovery compaction failed"
+                            );
+                            compaction_attempt.record_failure(&error);
+                        }
                     }
                 }
-                fail_run(deps, &session, &run_id, usage.as_ref(), &e.to_string()).await?;
+                let failure =
+                    failure_message_with_compaction_context(&e.to_string(), &compaction_attempt);
+                fail_run(deps, &session, &run_id, usage.as_ref(), &failure).await?;
                 // First iteration: the provider rejected the request outright
                 // (connection/auth/limit), so the user's message never reached
                 // the LLM — drop it. Later iterations already produced content.
@@ -588,6 +607,8 @@ pub async fn run_session_turn(
             // report limits this way): the user got no answer at all, so drop
             // their message and the empty assistant placeholder created above.
             StreamExit::ProviderReported { message } => {
+                let message =
+                    failure_message_with_compaction_context(&message, &compaction_attempt);
                 fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
                 if iteration == 0 && produced_no_content {
                     discard_unanswered_run_input(
@@ -602,6 +623,8 @@ pub async fn run_session_turn(
                 return Ok(());
             }
             StreamExit::StreamFailed { message } => {
+                let message =
+                    failure_message_with_compaction_context(&message, &compaction_attempt);
                 fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
                 if iteration == 0 && produced_no_content {
                     discard_unanswered_run_input(
@@ -2744,6 +2767,26 @@ mod tests {
             );
         }
     }
+    // --- R-comp.6: only context-limit failures get the compaction preamble ----
+
+    #[test]
+    fn non_context_limit_failures_are_not_rewritten() {
+        let attempt = compaction::CompactionAttempt::Failed("summariser died".to_string());
+        let message = "401 Unauthorized: invalid API key";
+        assert_eq!(
+            failure_message_with_compaction_context(message, &attempt),
+            message,
+            "an auth failure has nothing to do with compaction"
+        );
+    }
+
+    #[test]
+    fn context_limit_failures_name_the_compaction_error() {
+        let attempt = compaction::CompactionAttempt::Failed("summariser died".to_string());
+        let text = failure_message_with_compaction_context("prompt is too long", &attempt);
+        assert!(text.contains("summariser died"), "{text}");
+        assert!(text.contains("prompt is too long"), "{text}");
+    }
 }
 
 /// Normalize persisted history into a provider-safe message sequence.
@@ -3325,6 +3368,20 @@ pub(crate) async fn discard_unanswered_run_input(
                 "Failed to delete unanswered run input message"
             ),
         }
+    }
+}
+
+/// The user-facing failure text for a run that died on the provider's context
+/// limit: name compaction as the reason the turn was not rescued. Any other
+/// provider error passes through untouched.
+fn failure_message_with_compaction_context(
+    provider_message: &str,
+    attempt: &compaction::CompactionAttempt,
+) -> String {
+    if compaction::is_context_limit_error(provider_message) {
+        compaction::context_limit_failure_message("The request", provider_message, attempt)
+    } else {
+        provider_message.to_string()
     }
 }
 
