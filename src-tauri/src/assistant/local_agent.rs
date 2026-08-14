@@ -3063,9 +3063,6 @@ fn fresh_cli_session_context_prompt(
     let mut out = String::from(
         "This is a new CLI session. CLAI has carried forward the conversation context below. Continue from it; do not treat the current prompt in isolation.",
     );
-    out.push_str(
-        "\n\nArchived context is summary/history only. Do not continue prior tool syntax from it. If work is needed, use the connected tool channel; never write JSON/XML invocation wrappers, transcript markers, or result blocks as prose.",
-    );
 
     if let Some(summary) = summary.as_deref() {
         out.push_str("\n\nEarlier compacted summary:\n");

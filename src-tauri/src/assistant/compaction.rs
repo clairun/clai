@@ -471,9 +471,7 @@ const SUMMARY_MESSAGE_PREAMBLE: &str =
      than asking the user to repeat anything: your durable state is in \
      `.clai/memory/` and the full verbatim history (every message and tool \
      result) is in `.clai/data.sqlite` — query it with the read-only \
-     `history_query` tool (no approval needed) to recover specifics. When \
-     opaque source ids are present, use them as lookup breadcrumbs for exact \
-     historical payloads.";
+     `history_query` tool (no approval needed) to recover specifics.";
 
 fn summary_message_text(summary: &str) -> String {
     format!("{}\n\n{}", SUMMARY_MESSAGE_PREAMBLE, summary.trim())
