@@ -21,6 +21,24 @@ const SUMMARY_TRANSCRIPT_MAX_CHARS: usize = 96_000;
 const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 4096;
 const SUMMARY_TOOL_CALL_MAX_CHARS: usize = 4_000;
 const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 8_000;
+/// Hard budget for the summary body we store back into the conversation.
+/// `SUMMARY_MAX_OUTPUT_TOKENS` is only a *request*: on the CLI path it is
+/// advisory prose in the prompt (`providers/cli.rs`), so nothing enforces it.
+/// An oversized summary is not self-limiting -- it is replayed on every
+/// following turn and re-injected into every fresh CLI session until the next
+/// compaction folds it away -- so it is clamped here, at the single point where
+/// a summary becomes durable.
+///
+/// The number is pinned by two neighbours, not by taste:
+/// * it must stay above a *conforming* summary (~4 chars per token against a
+///   4096-token ask, ~16_400 chars) so a well-behaved model is never clamped;
+/// * with the preamble it must stay under `SUMMARY_TRANSCRIPT_MAX_CHARS / 3`,
+///   the head slice of `transcript_for_summary`, or the *next* compaction pass
+///   drops this summary's own tail into its omitted middle.
+///
+/// It is also well under `CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES` (64_000), so the
+/// CLI fresh-session clamp never has to re-cut a summary we produced.
+const SUMMARY_MESSAGE_MAX_CHARS: usize = 24_000;
 
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
@@ -557,8 +575,40 @@ const SUMMARY_MESSAGE_PREAMBLE: &str =
      result) is in `.clai/data.sqlite` — query it with the read-only \
      `history_query` tool (no approval needed) to recover specifics.";
 
+/// Inserted where an over-budget summary was cut, so the next summarizer pass
+/// (and any human reading the thread) can tell the gap from a model omission.
+const SUMMARY_BODY_OMISSION_MARKER: &str =
+    "\n\n[... middle of this summary omitted: it exceeded the stored-summary budget ...]\n\n";
+
 fn summary_message_text(summary: &str) -> String {
-    format!("{}\n\n{}", SUMMARY_MESSAGE_PREAMBLE, summary.trim())
+    format!(
+        "{}\n\n{}",
+        SUMMARY_MESSAGE_PREAMBLE,
+        clamp_summary_body(summary)
+    )
+}
+
+/// Keep the head and the tail of an oversized summary rather than only the
+/// head. `SUMMARY_SYSTEM_PROMPT` constrains what a summary contains, not the
+/// order it says it in, so we cannot know which end carries the "what to do
+/// next" part: keeping both ends is the hedge, keeping one is a bet.
+fn clamp_summary_body(summary: &str) -> String {
+    let trimmed = summary.trim();
+    if trimmed.len() <= SUMMARY_MESSAGE_MAX_CHARS {
+        return trimmed.to_string();
+    }
+
+    // The marker is part of what we store, so it comes out of the budget: the
+    // result never exceeds SUMMARY_MESSAGE_MAX_CHARS.
+    let content_budget = SUMMARY_MESSAGE_MAX_CHARS - SUMMARY_BODY_OMISSION_MARKER.len();
+    let head_len = content_budget / 2;
+    let tail_len = content_budget - head_len;
+    format!(
+        "{}{}{}",
+        safe_prefix(trimmed, head_len),
+        SUMMARY_BODY_OMISSION_MARKER,
+        safe_suffix(trimmed, tail_len)
+    )
 }
 
 fn transcript_for_summary(messages: &[AssistantMessage]) -> String {
@@ -952,6 +1002,64 @@ mod tests {
         assert!(is_context_limit_error(
             "Error: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)"
         ));
+    }
+
+    // --- R-comp.7: the stored summary is bounded --------------------------------
+
+    #[test]
+    fn a_summary_exactly_at_the_budget_is_stored_verbatim() {
+        let body = "a".repeat(SUMMARY_MESSAGE_MAX_CHARS);
+        let out = summary_message_text(&body);
+
+        assert!(out.ends_with(&body), "the body must not be touched");
+        assert!(!out.contains(SUMMARY_BODY_OMISSION_MARKER));
+    }
+
+    #[test]
+    fn an_oversized_summary_is_clamped_and_keeps_both_ends() {
+        let body = format!(
+            "{}{}{}",
+            "HEAD-MARKER",
+            "x".repeat(SUMMARY_MESSAGE_MAX_CHARS * 4),
+            "TAIL-MARKER"
+        );
+
+        let clamped = clamp_summary_body(&body);
+
+        assert!(
+            clamped.len() <= SUMMARY_MESSAGE_MAX_CHARS,
+            "clamped to {} bytes, budget is {}",
+            clamped.len(),
+            SUMMARY_MESSAGE_MAX_CHARS
+        );
+        assert!(clamped.starts_with("HEAD-MARKER"), "head was dropped");
+        assert!(clamped.ends_with("TAIL-MARKER"), "tail was dropped");
+        assert!(
+            clamped.contains(SUMMARY_BODY_OMISSION_MARKER),
+            "cut is silent"
+        );
+    }
+
+    #[test]
+    fn clamping_an_oversized_summary_keeps_the_recovery_preamble() {
+        let out = summary_message_text(&"y".repeat(SUMMARY_MESSAGE_MAX_CHARS * 3));
+
+        assert!(out.starts_with(SUMMARY_MESSAGE_PREAMBLE));
+        assert!(out.contains("history_query"));
+    }
+
+    #[test]
+    fn clamping_does_not_split_a_multi_byte_character() {
+        // '€' is 3 bytes, so both cut points land mid-character.
+        let body = "\u{20ac}".repeat(SUMMARY_MESSAGE_MAX_CHARS);
+
+        let clamped = clamp_summary_body(&body);
+
+        let without_marker = clamped.replace(SUMMARY_BODY_OMISSION_MARKER, "");
+        assert!(
+            without_marker.chars().all(|c| c == '\u{20ac}'),
+            "a cut landed inside a character"
+        );
     }
 
     #[test]
