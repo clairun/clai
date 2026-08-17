@@ -1,11 +1,12 @@
 //! Tauri commands for "open in app" actions and the Settings →
 //! Applications section. See `crate::system_apps` for the mechanics.
 
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tauri::State;
+use serde::Deserialize;
+use tauri::{AppHandle, State};
 
 use crate::commands::workspace::resolve_workspace_descriptor;
 use crate::system_apps::{self, resolve_contained_path, SystemAppsConfig, SystemAppsStatus};
@@ -83,42 +84,134 @@ pub fn open_workspace_path(
     }
 }
 
-/// Copy user-picked files into the workspace (the "+ Add files" action).
-/// Sources come from the native file dialog; destination is the
-/// workspace root (or `dest_rel_path` inside it). Name collisions get a
-/// ` (n)` suffix rather than overwriting. Returns the copied file names.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspaceImportKind {
+    Files,
+    Folders,
+}
+
+/// Pick files/folders in the backend and copy them into the workspace (the "+ Add" action).
+/// Destination is the workspace root (or `dest_rel_path` inside it). Name collisions
+/// get a ` (n)` suffix rather than overwriting. Returns the copied entry names, or
+/// an empty list when the user cancels the native picker.
 #[tauri::command]
-pub fn workspace_import_files(
+pub async fn workspace_import_files(
     workspace_id: Option<String>,
-    source_paths: Vec<String>,
+    import_kind: WorkspaceImportKind,
     dest_rel_path: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
     let root = workspace_root(state.inner(), workspace_id)?;
     let dest_dir = resolve_contained_path(&root, dest_rel_path.as_deref())?;
     if !dest_dir.is_dir() {
         return Err("Destination is not a directory.".to_string());
     }
 
+    // The dialog runs in the backend, so a renderer can choose only the picker
+    // mode, not arbitrary host paths to recursively read into the workspace.
+    let picked = match import_kind {
+        WorkspaceImportKind::Files => app
+            .dialog()
+            .file()
+            .set_title("Add files to workspace")
+            .blocking_pick_files(),
+        WorkspaceImportKind::Folders => app
+            .dialog()
+            .file()
+            .set_title("Add folders to workspace")
+            .blocking_pick_folders(),
+    };
+
+    let Some(source_paths) = picked else {
+        return Ok(Vec::new());
+    };
+    let source_paths = source_paths
+        .into_iter()
+        .map(|path| {
+            path.into_path()
+                .map_err(|error| format!("Invalid import path: {}", error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    tokio::task::spawn_blocking(move || import_picked_paths(source_paths, dest_dir))
+        .await
+        .map_err(|error| format!("Import task did not complete: {}", error))?
+}
+
+fn import_picked_paths(
+    source_paths: Vec<PathBuf>,
+    dest_dir: PathBuf,
+) -> Result<Vec<String>, String> {
     let mut copied = Vec::new();
     for source in &source_paths {
-        let source = Path::new(source);
-        if !source.is_file() {
-            return Err(format!("`{}` is not a regular file.", source.display()));
-        }
-        let name = source
-            .file_name()
-            .ok_or_else(|| format!("`{}` has no file name.", source.display()))?
-            .to_string_lossy()
-            .to_string();
-        let dest = copy_to_unique_destination(source, &dest_dir, &name)?;
+        let dest = copy_picked_source_to_unique_destination(source, &dest_dir)?;
         copied.push(
             dest.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or(name),
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| format!("Copied path `{}` has no file name.", dest.display()))?
+                .to_string(),
         );
     }
     Ok(copied)
+}
+
+fn copy_picked_source_to_unique_destination(
+    source: &Path,
+    dest_dir: &Path,
+) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(source)
+        .map_err(|e| format!("Failed to stat `{}`: {}", source.display(), e))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Refusing to import a symlink: {}",
+            source.display()
+        ));
+    }
+    let is_dir = metadata.is_dir();
+    if !metadata.is_file() && !is_dir {
+        return Err(format!(
+            "`{}` is not a regular file or directory.",
+            source.display()
+        ));
+    }
+
+    let name = source
+        .file_name()
+        .ok_or_else(|| format!("`{}` has no file name.", source.display()))?
+        .to_string_lossy()
+        .to_string();
+
+    if is_dir && crate::commands::workspace::is_skipped_artifact_dir_name(&name) {
+        return Err(format!(
+            "Refusing to import a protected folder: {}",
+            source.display()
+        ));
+    }
+
+    if is_dir {
+        let canon_source = source
+            .canonicalize()
+            .map_err(|error| format!("Failed to resolve `{}`: {}", source.display(), error))?;
+        let canon_dest = dest_dir.canonicalize().map_err(|error| {
+            format!(
+                "Failed to resolve destination `{}`: {}",
+                dest_dir.display(),
+                error
+            )
+        })?;
+        if canon_dest.starts_with(&canon_source) {
+            return Err(format!(
+                "Cannot import `{}` into itself or one of its subfolders.",
+                source.display()
+            ));
+        }
+    }
+
+    crate::commands::workspace::copy_artifact_to_unique_destination(source, dest_dir, &name, is_dir)
 }
 
 /// `report.md` → `report (1).md` → `report (2).md` … until free.
@@ -242,5 +335,109 @@ mod tests {
 
         assert_eq!(copied, dest_dir.path().join("Makefile (1)"));
         assert_eq!(std::fs::read_to_string(copied).unwrap(), "new");
+    }
+
+    #[test]
+    fn copy_picked_source_accepts_files_and_directories() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let file = source_dir.path().join("note.md");
+        std::fs::write(&file, "file").unwrap();
+        let copied_file = copy_picked_source_to_unique_destination(&file, dest_dir.path()).unwrap();
+        assert_eq!(copied_file.file_name().unwrap(), "note.md");
+        assert_eq!(std::fs::read_to_string(copied_file).unwrap(), "file");
+
+        let tree = source_dir.path().join("project");
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        std::fs::create_dir_all(tree.join(".git")).unwrap();
+        std::fs::write(tree.join("README.md"), "readme").unwrap();
+        std::fs::write(tree.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(tree.join(".git/config"), "ignored").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/etc/hostname", tree.join("host")).unwrap();
+        #[cfg(unix)]
+        let _socket = std::os::unix::net::UnixListener::bind(tree.join("app.sock")).unwrap();
+
+        let copied_dir = copy_picked_source_to_unique_destination(&tree, dest_dir.path()).unwrap();
+        assert_eq!(copied_dir.file_name().unwrap(), "project");
+        assert_eq!(
+            std::fs::read_to_string(copied_dir.join("README.md")).unwrap(),
+            "readme"
+        );
+        assert_eq!(
+            std::fs::read_to_string(copied_dir.join("src/main.rs")).unwrap(),
+            "fn main() {}"
+        );
+        assert!(!copied_dir.join(".git").exists());
+        #[cfg(unix)]
+        assert!(!copied_dir.join("host").exists());
+        #[cfg(unix)]
+        assert!(!copied_dir.join("app.sock").exists());
+
+        let copied_collision =
+            copy_picked_source_to_unique_destination(&tree, dest_dir.path()).unwrap();
+        assert_eq!(copied_collision.file_name().unwrap(), "project (1)");
+    }
+
+    #[test]
+    fn copy_picked_source_rejects_folder_containing_destination() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = source_dir.path().join("workspace");
+        std::fs::create_dir(&dest_dir).unwrap();
+
+        let err =
+            copy_picked_source_to_unique_destination(source_dir.path(), &dest_dir).unwrap_err();
+
+        assert!(err.contains("Cannot import"));
+    }
+
+    #[test]
+    fn copy_picked_source_multi_import_keeps_prior_copy_on_later_failure() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let file = source_dir.path().join("note.md");
+        std::fs::write(&file, "copied").unwrap();
+        let missing = source_dir.path().join("missing.md");
+
+        let err = import_picked_paths(
+            vec![file.clone(), missing.clone()],
+            dest_dir.path().to_path_buf(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Failed to stat"));
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.path().join("note.md")).unwrap(),
+            "copied"
+        );
+    }
+
+    #[test]
+    fn copy_picked_source_rejects_protected_folder_as_root() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let protected = source_dir.path().join("node_modules");
+        std::fs::create_dir(&protected).unwrap();
+
+        let err =
+            copy_picked_source_to_unique_destination(&protected, dest_dir.path()).unwrap_err();
+
+        assert!(err.contains("protected folder"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_picked_source_rejects_top_level_symlink() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        let target = source_dir.path().join("target.txt");
+        let link = source_dir.path().join("link.txt");
+        std::fs::write(&target, "target").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = copy_picked_source_to_unique_destination(&link, dest_dir.path()).unwrap_err();
+
+        assert!(err.contains("symlink"));
     }
 }
