@@ -176,13 +176,14 @@ export async function openWorkspacePath(
   return invoke('open_workspace_path', { workspaceId, relPath, target });
 }
 
-/** Copy user-picked files (absolute host paths from the native dialog)
- *  into the workspace root. Returns the created file names. */
+export type WorkspaceImportKind = 'files' | 'folders';
+
+/** Open a backend-owned native picker and copy selected files/folders into the workspace root. */
 export async function importWorkspaceFiles(
   workspaceId: string,
-  sourcePaths: string[]
+  importKind: WorkspaceImportKind
 ): Promise<string[]> {
-  return invoke('workspace_import_files', { workspaceId, sourcePaths, destRelPath: null });
+  return invoke('workspace_import_files', { workspaceId, importKind, destRelPath: null });
 }
 
 /** Persist the workspace's MCP selection.

@@ -46,6 +46,10 @@ const SKIPPED_ARTIFACT_DIRS: &[&str] = &[
     "venv",
 ];
 
+pub(crate) fn is_skipped_artifact_dir_name(name: &str) -> bool {
+    SKIPPED_ARTIFACT_DIRS.contains(&name)
+}
+
 /// Ceiling on the recursive artifact walk, in **directory entries examined**.
 ///
 /// The walk is O(tree) and runs on every 5s snapshot poll, but its output
@@ -697,7 +701,7 @@ fn build_file_entry(root: &Path, path: &Path) -> Option<WorkspaceFileEntry> {
 fn should_skip_artifact_dir(path: &Path) -> bool {
     path.file_name()
         .and_then(|value| value.to_str())
-        .map(|name| SKIPPED_ARTIFACT_DIRS.contains(&name))
+        .map(is_skipped_artifact_dir_name)
         .unwrap_or(false)
 }
 
@@ -2638,7 +2642,7 @@ fn ensure_move_destination_allowed(
 /// Copy `source` (file or dir) into `dest_dir` under a collision-free name
 /// (`foo` → `foo (1)` → …). Files reuse the exclusive-create import helper;
 /// dirs are created exclusively then filled by [`copy_dir_recursive`].
-fn copy_artifact_to_unique_destination(
+pub(crate) fn copy_artifact_to_unique_destination(
     source: &Path,
     dest_dir: &Path,
     name: &str,
@@ -2820,9 +2824,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
             fs::create_dir(&to)
                 .map_err(|e| format!("Failed to create `{}`: {}", to.display(), e))?;
             copy_dir_recursive(&from, &to)?;
-        } else {
+        } else if file_type.is_file() {
             fs::copy(&from, &to)
                 .map_err(|e| format!("Failed to copy `{}`: {}", from.display(), e))?;
+        } else {
+            continue;
         }
     }
     Ok(())

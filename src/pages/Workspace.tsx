@@ -27,7 +27,6 @@ import {
   setWorkspaceSchedulePaused,
   setWorkspaceTitle,
 } from '../workspace/client';
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import type {
   AssistantMessage,
   AssistantRun,
@@ -58,6 +57,7 @@ const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
 type NumericTimestamp = number | bigint | null | undefined;
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry };
+type ArtifactImportKind = 'files' | 'folders';
 // The per-workspace "view state": which drawer chip is open plus its
 // contextual slide-out (open artifact/memory preview, or task transcript).
 // Kept per workspaceId so switching workspaces neither leaks the previous
@@ -1210,15 +1210,7 @@ const ArtifactsList = ({
             onSelect={onSelect}
           />
         )
-      ) : totalCount === 0 && !totalCountCapped ? (
-        // A capped zero is not an empty workspace: the walk can spend its
-        // whole entry budget on directories without reaching a file, so the
-        // tree below is the only thing that knows. Claiming "no artifacts"
-        // there contradicts the header's own "0+" chip.
-        <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
-      ) : visibleRows.length === 0 ? (
-        <div className={styles.drawerEmpty}>Loading…</div>
-      ) : (
+      ) : visibleRows.length > 0 ? (
         <WorkspaceVirtualizedList
           items={visibleRows}
           itemKey={itemKey}
@@ -1228,6 +1220,14 @@ const ArtifactsList = ({
           overscan={400}
           gap={0}
         />
+      ) : totalCount === 0 && !totalCountCapped ? (
+        // A capped zero is not an empty workspace: the walk can spend its
+        // whole entry budget on directories without reaching a file, so the
+        // tree below is the only thing that knows. Claiming "no artifacts"
+        // there contradicts the header's own "0+" chip.
+        <div className={styles.drawerEmpty}>No artifacts in this workspace yet.</div>
+      ) : (
+        <div className={styles.drawerEmpty}>Loading…</div>
       )}
     </div>
   );
@@ -1866,6 +1866,14 @@ const Workspace = () => {
   });
   const [agentBusy, setAgentBusy] = useState('');
   const [agentError, setAgentError] = useState('');
+  const [artifactAddMenuOpen, setArtifactAddMenuOpen] = useState(false);
+  const [artifactImportBusy, setArtifactImportBusy] = useState(false);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Closes a transient header menu when its owning drawer is no longer visible.
+    if (activePanel !== 'artifacts') setArtifactAddMenuOpen(false);
+  }, [activePanel]);
+
   // The Workspace instance is REUSED across workspace→workspace navigation, so
   // after the URL changes `snapshot` briefly still holds the PREVIOUS workspace's
   // data until the new snapshot round-trip resolves. Gate all conversation-derived
@@ -2384,19 +2392,41 @@ const Workspace = () => {
     [workspaceId, openPreviewEntry]
   );
 
-  const handleAddFiles = useCallback(async () => {
-    try {
-      const picked = await openFileDialog({ multiple: true, title: 'Add files to workspace' });
-      const paths = (Array.isArray(picked) ? picked : picked ? [picked] : []).filter(
-        (p): p is string => typeof p === 'string'
-      );
-      if (paths.length === 0) return;
-      await importWorkspaceFiles(workspaceId, paths);
-      await loadSnapshot(false);
-    } catch (err) {
-      setError(errorMessage(err, 'Failed to add files.'));
-    }
-  }, [workspaceId, loadSnapshot]);
+  const handleAddArtifacts = useCallback(
+    async (kind: ArtifactImportKind) => {
+      if (artifactImportBusy) return;
+      setArtifactAddMenuOpen(false);
+      setArtifactImportBusy(true);
+      let shouldRefresh = false;
+      let importErrorMessage: string | null = null;
+      try {
+        shouldRefresh = true;
+        const imported = await importWorkspaceFiles(workspaceId, kind);
+        if (imported.length === 0) {
+          shouldRefresh = false;
+          return;
+        }
+        setError('');
+      } catch (err) {
+        importErrorMessage = errorMessage(
+          err,
+          kind === 'folders' ? 'Failed to add folders.' : 'Failed to add files.'
+        );
+        setError(importErrorMessage);
+      } finally {
+        if (shouldRefresh) {
+          try {
+            await loadSnapshot(false);
+          } catch (err) {
+            if (!importErrorMessage) setError(errorMessage(err, 'Failed to refresh workspace.'));
+          }
+          if (importErrorMessage) setError(importErrorMessage);
+        }
+        setArtifactImportBusy(false);
+      }
+    },
+    [artifactImportBusy, workspaceId, loadSnapshot]
+  );
 
   return (
     <div className={styles.workspacePage}>
@@ -2478,30 +2508,68 @@ const Workspace = () => {
               <div className={styles.workspaceDrawerActions}>
                 {activePanel === 'artifacts' && (
                   <>
-                    <button
-                      type="button"
-                      className={styles.workspaceDrawerIconAction}
-                      onClick={handleAddFiles}
-                      title="Add files to the workspace"
-                      aria-label="Add files to the workspace"
-                    >
-                      <svg
-                        width="15"
-                        height="15"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
+                    <span className={styles.artifactAddMenuAnchor}>
+                      <button
+                        type="button"
+                        className={styles.workspaceDrawerIconAction}
+                        onClick={() => setArtifactAddMenuOpen((open) => !open)}
+                        disabled={artifactImportBusy}
+                        title={
+                          artifactImportBusy ? 'Adding…' : 'Add files or folders to the workspace'
+                        }
+                        aria-label="Add files or folders to the workspace"
+                        aria-haspopup="menu"
+                        aria-expanded={artifactAddMenuOpen}
                       >
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                        <polyline points="14 2 14 8 20 8" />
-                        <line x1="12" y1="12" x2="12" y2="18" />
-                        <line x1="9" y1="15" x2="15" y2="15" />
-                      </svg>
-                    </button>
+                        <svg
+                          width="15"
+                          height="15"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <polyline points="14 2 14 8 20 8" />
+                          <line x1="12" y1="12" x2="12" y2="18" />
+                          <line x1="9" y1="15" x2="15" y2="15" />
+                        </svg>
+                      </button>
+                      {artifactAddMenuOpen && (
+                        <>
+                          <button
+                            type="button"
+                            className={styles.artifactAddBackdrop}
+                            aria-hidden="true"
+                            tabIndex={-1}
+                            onClick={() => setArtifactAddMenuOpen(false)}
+                          />
+                          <div className={styles.artifactAddMenu} role="menu">
+                            <button
+                              type="button"
+                              className={styles.artifactAddMenuItem}
+                              role="menuitem"
+                              disabled={artifactImportBusy}
+                              onClick={() => handleAddArtifacts('files')}
+                            >
+                              Files…
+                            </button>
+                            <button
+                              type="button"
+                              className={styles.artifactAddMenuItem}
+                              role="menuitem"
+                              disabled={artifactImportBusy}
+                              onClick={() => handleAddArtifacts('folders')}
+                            >
+                              Folders…
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </span>
                     <button
                       type="button"
                       className={styles.workspaceDrawerIconAction}
