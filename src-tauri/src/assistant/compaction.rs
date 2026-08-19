@@ -702,10 +702,29 @@ fn content_text(content: &[ContentPart]) -> String {
         .join("\n")
 }
 
+/// Approximate the size of the prompt we are about to send, in characters.
+///
+/// Every message in `messages` is counted, *including* the compaction summary:
+/// the provider view produced by `provider_history_messages_with_compaction`
+/// starts with that summary, so it is part of the prompt this estimate is
+/// deciding about. Excluding it under-counted by the whole stored summary --
+/// `SUMMARY_MESSAGE_MAX_CHARS` plus `SUMMARY_MESSAGE_PREAMBLE`, a fifth of the
+/// trigger -- which delays auto-compaction past the point it exists to protect.
+///
+/// Counting it cannot make compaction chase its own summary: `should_auto_compact`
+/// gates on `MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES` *non-summary*
+/// messages, so a summary can never satisfy that gate however large it is. (A pass
+/// normally leaves `RECENT_TAIL_MESSAGES` behind; `group_aware_boundary` can retain
+/// a straddled tool group and leave more, in which case a second pass may follow
+/// immediately -- that pass swallows the group and converges.)
+///
+/// This remains an under-estimate of the real prompt: tool payloads are counted at
+/// the summariser's caps rather than their true size, thinking parts and image bytes
+/// are not counted, and the system prompt is outside `messages` entirely. It is a
+/// trigger heuristic, not an accounting of the request.
 fn estimate_history_chars(messages: &[AssistantMessage], tools: &[ToolDefinition]) -> usize {
     let message_chars: usize = messages
         .iter()
-        .filter(|message| !is_compaction_summary_message(message))
         .map(|message| {
             render_content_parts(
                 &message.content,
@@ -862,6 +881,124 @@ mod tests {
         view[0].content = vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))];
 
         assert!(should_auto_compact(&view, &[]));
+    }
+
+    /// The compaction summary is the first message of the provider view, so it
+    /// is part of the prompt `should_auto_compact` is sizing. The scenario is a
+    /// session that has compacted once and whose *new* history is still under
+    /// budget: with the summary uncounted it read as under budget, while the
+    /// prompt actually being sent was over it.
+    ///
+    /// The summary here is exactly `SUMMARY_MESSAGE_MAX_CHARS`, the cap a stored
+    /// summary is clamped to, so this is a state production can really reach.
+    #[test]
+    fn estimated_size_counts_the_compaction_summary() {
+        let message_count = MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES;
+        // Sized so the history alone sits below the trigger while history plus a
+        // full-size summary sits above it, with margin on both sides.
+        let chars_per_message =
+            (AUTO_COMPACTION_MESSAGE_CHARS - SUMMARY_MESSAGE_MAX_CHARS / 2) / message_count;
+        let mut view: Vec<AssistantMessage> = (0..message_count)
+            .map(|i| {
+                msg(
+                    &format!("f{i}"),
+                    MessageRole::User,
+                    vec![text(&"y".repeat(chars_per_message))],
+                )
+            })
+            .collect();
+        assert!(
+            !should_auto_compact(&view, &[]),
+            "the history on its own is under budget"
+        );
+
+        let mut summary = msg(
+            "summary",
+            MessageRole::System,
+            vec![text(&summary_message_text(
+                &"x".repeat(SUMMARY_MESSAGE_MAX_CHARS),
+            ))],
+        );
+        summary.provider_metadata = Some(serde_json::json!({
+            "source": COMPACTION_METADATA_SOURCE,
+        }));
+        view.insert(0, summary);
+
+        assert!(
+            should_auto_compact(&view, &[]),
+            "the summary is sent to the provider too, so it has to be counted"
+        );
+    }
+
+    /// ...but it must not count toward the *message* gate, or a single large
+    /// summary would let a nearly empty history compact itself again.
+    #[test]
+    fn the_compaction_summary_does_not_count_toward_the_message_gate() {
+        let mut view = filler(
+            "f",
+            MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES - 1,
+        );
+        let mut summary = msg(
+            "summary",
+            MessageRole::System,
+            vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))],
+        );
+        summary.provider_metadata = Some(serde_json::json!({
+            "source": COMPACTION_METADATA_SOURCE,
+        }));
+        view.insert(0, summary);
+
+        assert!(!should_auto_compact(&view, &[]));
+    }
+
+    /// The summariser input is budgeted: an oversized transcript is cut to a
+    /// head and a tail rather than sent whole. Two deleted tests used to guard
+    /// this budget; it had no coverage since. The only slack over the budget is
+    /// the fixed framing the function adds around the transcript.
+    #[test]
+    fn the_summary_transcript_stays_within_its_budget() {
+        // The cut branch adds two fixed string literals around the transcript
+        // (the instruction line and the omission marker) and nothing else, so
+        // the overhead is exact, not approximate.
+        let framing_chars = 186;
+        let view: Vec<AssistantMessage> = (0..40)
+            .map(|i| {
+                msg(
+                    &format!("m{i}"),
+                    MessageRole::User,
+                    vec![text(
+                        &format!("{i}").repeat(SUMMARY_TRANSCRIPT_MAX_CHARS / 8),
+                    )],
+                )
+            })
+            .collect();
+        let rendered = render_transcript(&view);
+        assert!(rendered.len() > SUMMARY_TRANSCRIPT_MAX_CHARS);
+
+        let transcript = transcript_for_summary(&view);
+
+        assert_eq!(
+            transcript.len(),
+            SUMMARY_TRANSCRIPT_MAX_CHARS + framing_chars,
+            "the cut transcript is the budget plus fixed framing, nothing else"
+        );
+        // Both ends survive: the cut takes the middle, not the tail.
+        assert!(transcript.contains("[user message m0]"));
+        assert!(transcript.contains("[user message m39]"));
+    }
+
+    /// A transcript that fits is passed through untouched, so the budget test
+    /// above cannot pass by clamping everything.
+    #[test]
+    fn a_small_summary_transcript_is_not_cut() {
+        let view = filler("f", 4);
+
+        let transcript = transcript_for_summary(&view);
+
+        assert!(transcript.starts_with("Transcript to summarize:\n\n"));
+        assert!(!transcript.contains("middle omitted"));
+        assert!(transcript.contains("[user message f0]"));
+        assert!(transcript.contains("[assistant message f3]"));
     }
 
     #[test]
