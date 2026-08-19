@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::assistant::codex_app_server;
 use crate::assistant::compaction;
 use crate::assistant::engine::{
-    build_system_prompt, build_trigger_message, AssistantDeps, AssistantEngineError, RunTurnInput,
+    build_trigger_message, AssistantDeps, AssistantEngineError, RunTurnInput,
 };
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::local_mcp::{self, ToolBinding};
@@ -25,6 +25,7 @@ use crate::assistant::providers::cli::{
 use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
+use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
@@ -3329,7 +3330,7 @@ async fn system_prompt_text(
     trigger: &crate::assistant::types::RunTrigger,
 ) -> String {
     let tool_defs = crate::assistant::tools::available_tools(&session.context, &[]);
-    let description = crate::assistant::engine::live_agent_description(app, &session.context);
+    let description = live_agent_description(app, &session.context);
     provider_message_text(&build_system_prompt(
         &session.context,
         description.as_deref(),

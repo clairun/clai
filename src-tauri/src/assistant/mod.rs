@@ -15,6 +15,7 @@ pub mod providers;
 pub mod repository;
 pub mod runtime;
 pub mod sandbox;
+pub mod system_prompt;
 pub mod tools;
 pub mod types;
 
