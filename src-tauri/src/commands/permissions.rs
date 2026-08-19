@@ -401,11 +401,12 @@ pub async fn submit_permission_decision(
 /// Writes always-allow / always-deny decisions into the workspace config's
 /// per-agent execution policy.
 ///
-/// The read-modify-write runs inside [`workspace_config::update`] (which
-/// serializes writers behind a process-wide lock), so a concurrent config
-/// write — starring a workspace, re-anchoring a schedule — can no longer be
-/// clobbered by this save. A bare load→mutate→save here previously lost
-/// such updates and refreshed the workspace index from the stale snapshot.
+/// The read-modify-write runs inside [`AppState::update_workspace_config`]
+/// (which serializes writers behind a process-wide lock), so a concurrent
+/// config write — starring a workspace, re-anchoring a schedule — can no
+/// longer be clobbered by this save. A bare load→mutate→save here previously
+/// lost such updates and refreshed the workspace index from the stale
+/// snapshot.
 pub fn persist_decisions_to_agent(
     state: &AppState,
     workspace_id: &str,
@@ -426,10 +427,7 @@ pub fn persist_decisions_to_agent(
         return Ok(());
     }
 
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let ((), config) = workspace_config::update(&root, |config| {
+    state.update_workspace_config(workspace_id, |config| {
         let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
             return Err(format!("Workspace agent not found: {}", agent_id));
         };
@@ -440,11 +438,6 @@ pub fn persist_decisions_to_agent(
         }
         Ok(())
     })?;
-    state
-        .workspace_index
-        .write()
-        .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .insert_config(root, &config);
     Ok(())
 }
 

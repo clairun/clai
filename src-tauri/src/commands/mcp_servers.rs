@@ -19,35 +19,28 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .locators_sorted();
     for locator in locators {
-        // Atomic RMW (see workspace_config::update); unchanged configs are
-        // rewritten with identical content, which the atomic save makes
-        // harmless — sweeps only run on rare rename/delete actions.
-        let (changed, config) =
-            crate::config::workspace_config::update(&locator.root_path, |config| {
-                let mut changed = false;
-                let now = chrono::Utc::now().timestamp_millis();
-                for agent in &mut config.agents {
-                    let before = agent.selected_mcp_servers.len();
-                    agent
-                        .selected_mcp_servers
-                        .retain(|mcp_ref| mcp_ref.id != server_id);
-                    if agent.selected_mcp_servers.len() != before {
-                        agent.updated_at = now;
-                        changed = true;
-                    }
+        // Atomic RMW + index refresh (see `AppState::update_workspace_config_at`);
+        // unchanged configs are rewritten with identical content, which the
+        // atomic save makes harmless — sweeps only run on rare rename/delete
+        // actions.
+        state.update_workspace_config_at(&locator.root_path, |config| {
+            let mut changed = false;
+            let now = chrono::Utc::now().timestamp_millis();
+            for agent in &mut config.agents {
+                let before = agent.selected_mcp_servers.len();
+                agent
+                    .selected_mcp_servers
+                    .retain(|mcp_ref| mcp_ref.id != server_id);
+                if agent.selected_mcp_servers.len() != before {
+                    agent.updated_at = now;
+                    changed = true;
                 }
-                if changed {
-                    config.updated_at = now;
-                }
-                Ok(changed)
-            })?;
-        if changed {
-            state
-                .workspace_index
-                .write()
-                .map_err(|e| format!("Workspace index lock error: {}", e))?
-                .insert_config(locator.root_path, &config);
-        }
+            }
+            if changed {
+                config.updated_at = now;
+            }
+            Ok(())
+        })?;
     }
 
     Ok(())
@@ -1050,6 +1043,102 @@ mod tests {
             transport_secret_refs(&t),
             vec!["mcp-server::s::env::SECRET"]
         );
+    }
+
+    /// The sweep is the only writer that walks every workspace, so it is also
+    /// the only one that can leave the index describing a config it no longer
+    /// matches. It must strip the server from every agent that referenced it,
+    /// leave untouched agents alone, and publish the result to the index.
+    #[test]
+    fn sweep_removes_the_server_from_every_workspace_and_refreshes_the_index() {
+        use crate::config::workspace_config::{self, McpRef, WorkspaceConfig};
+        use crate::{AppConfig, ConfigManager, WorkspaceIndex};
+
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("workspaces");
+        let mut index = WorkspaceIndex::default();
+        let mut roots = Vec::new();
+
+        // The third workspace never referenced the server: the sweep must
+        // walk past it untouched instead of stopping at the last match.
+        for (n, id) in [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let root = parent.join(id);
+            let agent_id = format!("agent-{}", n);
+            let mut config =
+                WorkspaceConfig::new(id.to_string(), format!("W{}", n), 1_000, agent_id);
+            let agent = config.agents.first_mut().unwrap();
+            agent.selected_mcp_servers = if n == 2 {
+                vec![McpRef {
+                    id: "keeper".to_string(),
+                    disabled: false,
+                }]
+            } else {
+                vec![
+                    McpRef {
+                        id: "doomed".to_string(),
+                        disabled: n == 1, // disabled refs must be swept too
+                    },
+                    McpRef {
+                        id: "keeper".to_string(),
+                        disabled: false,
+                    },
+                ]
+            };
+            workspace_config::save(&root, &config).unwrap();
+            index.insert_config(root.clone(), &config);
+            roots.push(root);
+        }
+
+        let config_manager = ConfigManager::new_for_tests(
+            AppConfig {
+                workspace_dirs: vec![parent],
+                ..AppConfig::default()
+            },
+            temp.path().join("config.json"),
+        );
+        let state = AppState::new_for_tests(config_manager, index).unwrap();
+
+        sweep_workspace_agent_mcp_ids(&state, "doomed").unwrap();
+
+        for (n, root) in roots.iter().enumerate() {
+            let swept = workspace_config::load(root).unwrap();
+            let refs = &swept.agents.first().unwrap().selected_mcp_servers;
+            assert_eq!(
+                refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+                vec!["keeper"],
+                "only the swept server is removed (workspace {})",
+                n
+            );
+            let indexed = state
+                .workspace_index
+                .read()
+                .unwrap()
+                .locator(&swept.id)
+                .expect("locator survives the sweep");
+            assert_eq!(
+                indexed.updated_at, swept.updated_at,
+                "the index carries the config the sweep just saved (workspace {})",
+                n
+            );
+            if n == 2 {
+                assert_eq!(
+                    swept.updated_at, 1_000,
+                    "a workspace with nothing to sweep keeps its timestamp"
+                );
+            } else {
+                assert!(
+                    swept.updated_at > 1_000,
+                    "the sweep bumped updated_at, so this is not the seed value"
+                );
+            }
+        }
     }
 
     #[test]
