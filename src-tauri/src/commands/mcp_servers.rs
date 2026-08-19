@@ -1059,9 +1059,12 @@ mod tests {
         let mut index = WorkspaceIndex::default();
         let mut roots = Vec::new();
 
+        // The third workspace never referenced the server: the sweep must
+        // walk past it untouched instead of stopping at the last match.
         for (n, id) in [
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
+            "33333333-3333-4333-8333-333333333333",
         ]
         .iter()
         .enumerate()
@@ -1071,16 +1074,23 @@ mod tests {
             let mut config =
                 WorkspaceConfig::new(id.to_string(), format!("W{}", n), 1_000, agent_id);
             let agent = config.agents.first_mut().unwrap();
-            agent.selected_mcp_servers = vec![
-                McpRef {
-                    id: "doomed".to_string(),
-                    disabled: n == 1, // disabled refs must be swept too
-                },
-                McpRef {
+            agent.selected_mcp_servers = if n == 2 {
+                vec![McpRef {
                     id: "keeper".to_string(),
                     disabled: false,
-                },
-            ];
+                }]
+            } else {
+                vec![
+                    McpRef {
+                        id: "doomed".to_string(),
+                        disabled: n == 1, // disabled refs must be swept too
+                    },
+                    McpRef {
+                        id: "keeper".to_string(),
+                        disabled: false,
+                    },
+                ]
+            };
             workspace_config::save(&root, &config).unwrap();
             index.insert_config(root.clone(), &config);
             roots.push(root);
@@ -1097,13 +1107,14 @@ mod tests {
 
         sweep_workspace_agent_mcp_ids(&state, "doomed").unwrap();
 
-        for root in &roots {
+        for (n, root) in roots.iter().enumerate() {
             let swept = workspace_config::load(root).unwrap();
             let refs = &swept.agents.first().unwrap().selected_mcp_servers;
             assert_eq!(
                 refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
                 vec!["keeper"],
-                "only the swept server is removed"
+                "only the swept server is removed (workspace {})",
+                n
             );
             let indexed = state
                 .workspace_index
@@ -1113,12 +1124,20 @@ mod tests {
                 .expect("locator survives the sweep");
             assert_eq!(
                 indexed.updated_at, swept.updated_at,
-                "the index carries the config the sweep just saved"
+                "the index carries the config the sweep just saved (workspace {})",
+                n
             );
-            assert!(
-                indexed.updated_at > 1_000,
-                "the sweep bumped updated_at, so this is not the seed value"
-            );
+            if n == 2 {
+                assert_eq!(
+                    swept.updated_at, 1_000,
+                    "a workspace with nothing to sweep keeps its timestamp"
+                );
+            } else {
+                assert!(
+                    swept.updated_at > 1_000,
+                    "the sweep bumped updated_at, so this is not the seed value"
+                );
+            }
         }
     }
 

@@ -121,13 +121,18 @@ impl AppState {
     /// Every writer whose result depends on the config it just read MUST go
     /// through this (or [`Self::update_workspace_config_at`]) rather than a
     /// bare `load` → mutate → `save` pair: those race each other as lost
-    /// updates (see [`workspace_config::update`]). The index refresh happens
+    /// updates (see `workspace_config::update`). The index refresh happens
     /// inside the config update lock, so the index can never end up holding
     /// an older snapshot than the file.
     ///
     /// Returns the closure's value plus the config as saved. Must not be
     /// called while holding a `workspace_index` guard: both entry points take
     /// the index lock underneath the config update lock.
+    ///
+    /// One caveat inherited from the code this replaced: an `Err` does NOT
+    /// always mean nothing was written. A failure to refresh the index (only
+    /// possible on a poisoned lock, i.e. after a panic) surfaces after the
+    /// file is already saved.
     pub fn update_workspace_config<R>(
         &self,
         workspace_id: &str,
