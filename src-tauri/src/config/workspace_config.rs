@@ -388,10 +388,10 @@ static UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// the index one revision behind disk. Keep `on_saved` short and never
 /// re-enter this function from it — the lock is not reentrant.
 ///
-/// Callers with an [`crate::AppState`] should not use this directly:
-/// `AppState::update_workspace_config` / `update_workspace_config_at`
-/// wire the index refresh in for them.
-pub fn update<R>(
+/// Crate-internal on purpose: `AppState::update_workspace_config` and
+/// `update_workspace_config_at` are the only intended callers — they wire
+/// the index refresh in as `on_saved`.
+pub(crate) fn update<R>(
     root: &Path,
     mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
     on_saved: impl FnOnce(&WorkspaceConfig) -> Result<(), String>,
@@ -860,6 +860,68 @@ mod attach_provider_tests {
 
         assert_eq!(result.unwrap_err(), "nope");
         assert!(!hook_ran, "no save, no hook");
+    }
+
+    /// The whole point of the hook: it runs BEFORE the update lock is
+    /// released, so whatever it publishes (the in-memory workspace index)
+    /// cannot be overtaken by a later writer's publish. Verified by holding
+    /// the hook open and checking that a second writer cannot get through.
+    #[test]
+    fn on_saved_runs_before_the_update_lock_is_released() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let at_the_door = Arc::new(Barrier::new(2));
+        let contender_finished = Arc::new(AtomicBool::new(false));
+
+        let contender = {
+            let root = root.clone();
+            let at_the_door = Arc::clone(&at_the_door);
+            let finished = Arc::clone(&contender_finished);
+            std::thread::spawn(move || {
+                at_the_door.wait();
+                update(
+                    &root,
+                    |config| {
+                        config.last_opened_at = 777;
+                        Ok(())
+                    },
+                    |_| Ok(()),
+                )
+                .unwrap();
+                finished.store(true, Ordering::SeqCst);
+            })
+        };
+
+        update(
+            tmp.path(),
+            |config| {
+                config.starred_at = 42;
+                Ok(())
+            },
+            |_| {
+                // Release the contender, then give it far longer than a config
+                // save takes to complete. It must still be blocked.
+                at_the_door.wait();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                assert!(
+                    !contender_finished.load(Ordering::SeqCst),
+                    "a second update completed while on_saved was running: \
+                     the hook no longer runs under the update lock"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        contender.join().unwrap();
+        let on_disk = load(&root).unwrap();
+        assert_eq!(on_disk.starred_at, 42, "the first writer's field survives");
+        assert_eq!(on_disk.last_opened_at, 777, "so does the contender's");
     }
 
     /// A failing hook surfaces as an error even though the config is already

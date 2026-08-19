@@ -125,7 +125,9 @@ impl AppState {
     /// inside the config update lock, so the index can never end up holding
     /// an older snapshot than the file.
     ///
-    /// Returns the closure's value plus the config as saved.
+    /// Returns the closure's value plus the config as saved. Must not be
+    /// called while holding a `workspace_index` guard: both entry points take
+    /// the index lock underneath the config update lock.
     pub fn update_workspace_config<R>(
         &self,
         workspace_id: &str,
@@ -138,10 +140,8 @@ impl AppState {
     }
 
     /// Same as [`Self::update_workspace_config`] for callers that already
-    /// hold the workspace root (sweeps iterating the index, the runner).
-    ///
-    /// Must not be called while holding a `workspace_index` guard: this takes
-    /// the config update lock first and the index lock second.
+    /// hold the workspace root — the MCP and skill sweeps, which walk
+    /// locators straight out of the index. Same locking rule applies.
     pub fn update_workspace_config_at<R>(
         &self,
         root: &Path,

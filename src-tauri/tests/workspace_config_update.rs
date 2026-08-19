@@ -3,7 +3,6 @@
 //! index refresh that must stay in step with it.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Barrier;
 
 use clai_lib::{
@@ -151,16 +150,14 @@ fn an_aborted_mutation_touches_neither_disk_nor_index() {
     assert_eq!(fixture.indexed_title(), "Original title");
 }
 
-/// Concurrent writers must neither lose an update on disk nor leave the index
-/// reporting an older snapshot than one already saved.
+/// Concurrent writers must not lose an update, and taking the index write
+/// lock underneath the config update lock from several threads at once must
+/// not deadlock.
 ///
-/// The `updated_at >= newest saved` assertion inside the loop is the property
-/// that the in-lock index refresh guarantees structurally; a scheduler is not
-/// obliged to produce the interleaving that violates it, so treat this as a
-/// regression net rather than a proof. What it does check on every run: the
-/// read-modify-write really is serialized (no lost counter increments), and
-/// taking the index write lock underneath the config update lock in four
-/// threads at once does not deadlock.
+/// This does not attempt to prove the ordering guarantee — the interleaving
+/// that exposes a stale index is not something a scheduler owes us. That half
+/// is covered deterministically by
+/// `workspace_config::tests::on_saved_runs_before_the_update_lock_is_released`.
 #[test]
 fn concurrent_updates_keep_disk_and_index_in_step() {
     const THREADS: usize = 4;
@@ -168,16 +165,13 @@ fn concurrent_updates_keep_disk_and_index_in_step() {
 
     let fixture = Fixture::new();
     let barrier = Barrier::new(THREADS);
-    // Newest `updated_at` that has been saved AND published to the index by
-    // any thread. Monotonic, so the index may never report less than this.
-    let published = AtomicI64::new(0);
 
     std::thread::scope(|scope| {
         for _ in 0..THREADS {
             scope.spawn(|| {
                 barrier.wait();
                 for _ in 0..UPDATES_PER_THREAD {
-                    let ((), saved) = fixture
+                    fixture
                         .state
                         .update_workspace_config(WORKSPACE_ID, |config| {
                             // Read-modify-write: a lost update shows up as a
@@ -186,13 +180,6 @@ fn concurrent_updates_keep_disk_and_index_in_step() {
                             Ok(())
                         })
                         .expect("concurrent update");
-                    published.fetch_max(saved.updated_at, Ordering::SeqCst);
-                    let floor = published.load(Ordering::SeqCst);
-                    let indexed = fixture.indexed_updated_at();
-                    assert!(
-                        indexed >= floor,
-                        "index reports {indexed}, older than the already-saved {floor}"
-                    );
                 }
             });
         }
@@ -207,6 +194,6 @@ fn concurrent_updates_keep_disk_and_index_in_step() {
     assert_eq!(
         fixture.indexed_updated_at(),
         expected,
-        "the index must not lag behind the saved config"
+        "the index must match the saved config"
     );
 }

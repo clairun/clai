@@ -1045,6 +1045,83 @@ mod tests {
         );
     }
 
+    /// The sweep is the only writer that walks every workspace, so it is also
+    /// the only one that can leave the index describing a config it no longer
+    /// matches. It must strip the server from every agent that referenced it,
+    /// leave untouched agents alone, and publish the result to the index.
+    #[test]
+    fn sweep_removes_the_server_from_every_workspace_and_refreshes_the_index() {
+        use crate::config::workspace_config::{self, McpRef, WorkspaceConfig};
+        use crate::{AppConfig, ConfigManager, WorkspaceIndex};
+
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("workspaces");
+        let mut index = WorkspaceIndex::default();
+        let mut roots = Vec::new();
+
+        for (n, id) in [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let root = parent.join(id);
+            let agent_id = format!("agent-{}", n);
+            let mut config =
+                WorkspaceConfig::new(id.to_string(), format!("W{}", n), 1_000, agent_id);
+            let agent = config.agents.first_mut().unwrap();
+            agent.selected_mcp_servers = vec![
+                McpRef {
+                    id: "doomed".to_string(),
+                    disabled: n == 1, // disabled refs must be swept too
+                },
+                McpRef {
+                    id: "keeper".to_string(),
+                    disabled: false,
+                },
+            ];
+            workspace_config::save(&root, &config).unwrap();
+            index.insert_config(root.clone(), &config);
+            roots.push(root);
+        }
+
+        let config_manager = ConfigManager::new_for_tests(
+            AppConfig {
+                workspace_dirs: vec![parent],
+                ..AppConfig::default()
+            },
+            temp.path().join("config.json"),
+        );
+        let state = AppState::new_for_tests(config_manager, index).unwrap();
+
+        sweep_workspace_agent_mcp_ids(&state, "doomed").unwrap();
+
+        for root in &roots {
+            let swept = workspace_config::load(root).unwrap();
+            let refs = &swept.agents.first().unwrap().selected_mcp_servers;
+            assert_eq!(
+                refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+                vec!["keeper"],
+                "only the swept server is removed"
+            );
+            let indexed = state
+                .workspace_index
+                .read()
+                .unwrap()
+                .locator(&swept.id)
+                .expect("locator survives the sweep");
+            assert_eq!(
+                indexed.updated_at, swept.updated_at,
+                "the index carries the config the sweep just saved"
+            );
+            assert!(
+                indexed.updated_at > 1_000,
+                "the sweep bumped updated_at, so this is not the seed value"
+            );
+        }
+    }
+
     #[test]
     fn stdio_binary_warning_flags_missing_command() {
         let t = McpServerTransport::Stdio {

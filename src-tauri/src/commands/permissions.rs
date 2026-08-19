@@ -401,11 +401,12 @@ pub async fn submit_permission_decision(
 /// Writes always-allow / always-deny decisions into the workspace config's
 /// per-agent execution policy.
 ///
-/// The read-modify-write runs inside [`workspace_config::update`] (which
-/// serializes writers behind a process-wide lock), so a concurrent config
-/// write — starring a workspace, re-anchoring a schedule — can no longer be
-/// clobbered by this save. A bare load→mutate→save here previously lost
-/// such updates and refreshed the workspace index from the stale snapshot.
+/// The read-modify-write runs inside [`AppState::update_workspace_config`]
+/// (which serializes writers behind a process-wide lock), so a concurrent
+/// config write — starring a workspace, re-anchoring a schedule — can no
+/// longer be clobbered by this save. A bare load→mutate→save here previously
+/// lost such updates and refreshed the workspace index from the stale
+/// snapshot.
 pub fn persist_decisions_to_agent(
     state: &AppState,
     workspace_id: &str,

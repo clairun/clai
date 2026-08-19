@@ -427,8 +427,8 @@ fn persist_grant_to_agent(
     access: FilesystemPathAccess,
     reason: &str,
 ) -> Result<(), String> {
-    // Atomic RMW (see workspace_config::update): grant approvals can land
-    // while the runner persists a run completion to the same file.
+    // Atomic RMW (see `AppState::update_workspace_config`): grant approvals
+    // can land while the runner persists a run completion to the same file.
     state.update_workspace_config(workspace_id, |config| {
         let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
             return Err(format!(
