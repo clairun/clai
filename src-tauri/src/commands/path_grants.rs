@@ -35,7 +35,7 @@ use tauri::{Emitter, State};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
 use crate::commands::permissions::PermissionScope;
-use crate::config::{workspace_config, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin};
+use crate::config::{FilesystemPathAccess, FilesystemPathGrant, GrantOrigin};
 use crate::AppState;
 
 pub const PATH_GRANT_REQUEST_EVENT: &str = "path-grants://request";
@@ -427,12 +427,9 @@ fn persist_grant_to_agent(
     access: FilesystemPathAccess,
     reason: &str,
 ) -> Result<(), String> {
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
     // Atomic RMW (see workspace_config::update): grant approvals can land
     // while the runner persists a run completion to the same file.
-    let ((), config) = workspace_config::update(&root, |config| {
+    state.update_workspace_config(workspace_id, |config| {
         let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
             return Err(format!(
                 "Cannot persist path grant: workspace agent not found for id `{}`",
@@ -475,11 +472,6 @@ fn persist_grant_to_agent(
         config.updated_at = agent.updated_at;
         Ok(())
     })?;
-    state
-        .workspace_index
-        .write()
-        .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .insert_config(root, &config);
     Ok(())
 }
 

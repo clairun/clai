@@ -139,7 +139,7 @@ pub async fn workspace_create_agent(
         created_at: now,
         updated_at: now,
     };
-    let ((), config) = update_workspace_config(state.inner(), &request.workspace_id, |config| {
+    let ((), config) = state.update_workspace_config(&request.workspace_id, |config| {
         if config.agents.iter().any(|agent| agent.id == id) {
             return Err(format!("Workspace agent already exists: {}", id));
         }
@@ -165,7 +165,7 @@ pub async fn workspace_update_agent(
     let now = now_millis();
     let agent_id = request.agent_id.clone();
     let workspace_id = request.workspace_id.clone();
-    let ((), config) = update_workspace_config(state.inner(), &workspace_id, |config| {
+    let ((), config) = state.update_workspace_config(&workspace_id, |config| {
         let Some(agent) = config
             .agents
             .iter_mut()
@@ -206,7 +206,7 @@ pub async fn workspace_delete_agent(
     agent_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    update_workspace_config(state.inner(), &workspace_id, |config| {
+    state.update_workspace_config(&workspace_id, |config| {
         if config.default_agent_id == agent_id {
             return Err(
                 "Cannot delete the workspace's manager agent. Designate a different manager first."
@@ -233,7 +233,7 @@ pub async fn workspace_set_agent_enabled(
 ) -> Result<WorkspaceAgentDetail, String> {
     let app_config = app_config(state.inner())?;
     let now = now_millis();
-    let ((), config) = update_workspace_config(state.inner(), &request.workspace_id, |config| {
+    let ((), config) = state.update_workspace_config(&request.workspace_id, |config| {
         let Some(agent) = config
             .agents
             .iter_mut()
@@ -269,26 +269,6 @@ fn load_workspace_config(
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
     let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
     Ok((root, config))
-}
-
-/// Atomic read-modify-write + index refresh — all config writers must use
-/// this instead of a bare load→save pair, which races the runner's
-/// run-completion persist (see `workspace_config::update`).
-fn update_workspace_config<R>(
-    state: &AppState,
-    workspace_id: &str,
-    mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
-) -> Result<(R, WorkspaceConfig), String> {
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let (value, config) = workspace_config::update(&root, mutate)?;
-    state
-        .workspace_index
-        .write()
-        .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .insert_config(root, &config);
-    Ok((value, config))
 }
 
 fn app_config(state: &AppState) -> Result<AppConfig, String> {

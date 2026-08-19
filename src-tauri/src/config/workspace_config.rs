@@ -380,12 +380,21 @@ static UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// won. The reverted (past) anchor then re-fired the schedule on every
 /// app restart.
 ///
-/// The closure may return `Err` to abort; nothing is written then. On
-/// success the freshly-saved config is returned so callers can update
-/// the in-memory workspace index to match disk.
+/// The `mutate` closure may return `Err` to abort; nothing is written
+/// then. `on_saved` runs after the successful save while the update lock
+/// is STILL HELD, so derived state (the in-memory workspace index) is
+/// refreshed in the same critical section as the file: two racing
+/// updaters can no longer publish their snapshots out of order and leave
+/// the index one revision behind disk. Keep `on_saved` short and never
+/// re-enter this function from it — the lock is not reentrant.
+///
+/// Callers with an [`crate::AppState`] should not use this directly:
+/// `AppState::update_workspace_config` / `update_workspace_config_at`
+/// wire the index refresh in for them.
 pub fn update<R>(
     root: &Path,
     mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
+    on_saved: impl FnOnce(&WorkspaceConfig) -> Result<(), String>,
 ) -> Result<(R, WorkspaceConfig), String> {
     let _guard = UPDATE_LOCK
         .lock()
@@ -393,6 +402,7 @@ pub fn update<R>(
     let mut config = load(root).map_err(|e| e.to_string())?;
     let value = mutate(&mut config)?;
     save(root, &config).map_err(|e| e.to_string())?;
+    on_saved(&config)?;
     Ok((value, config))
 }
 
@@ -701,10 +711,14 @@ mod attach_provider_tests {
         let tmp = tempfile::tempdir().unwrap();
         save(tmp.path(), &workspace()).unwrap();
 
-        let (value, config) = update(tmp.path(), |config| {
-            config.schedule.next_run_at_unix_ms = Some(123);
-            Ok("done")
-        })
+        let (value, config) = update(
+            tmp.path(),
+            |config| {
+                config.schedule.next_run_at_unix_ms = Some(123);
+                Ok("done")
+            },
+            |_| Ok(()),
+        )
         .unwrap();
 
         assert_eq!(value, "done");
@@ -718,10 +732,14 @@ mod attach_provider_tests {
         let tmp = tempfile::tempdir().unwrap();
         save(tmp.path(), &workspace()).unwrap();
 
-        let result = update(tmp.path(), |config| {
-            config.title = "clobbered".to_string();
-            Err::<(), _>("validation failed".to_string())
-        });
+        let result = update(
+            tmp.path(),
+            |config| {
+                config.title = "clobbered".to_string();
+                Err::<(), _>("validation failed".to_string())
+            },
+            |_| Ok(()),
+        );
 
         assert_eq!(result.unwrap_err(), "validation failed");
         assert_eq!(load(tmp.path()).unwrap().title, "Title");
@@ -741,20 +759,28 @@ mod attach_provider_tests {
         let runner = {
             let root = root.clone();
             std::thread::spawn(move || {
-                update(&root, |config| {
-                    config.schedule.next_run_at_unix_ms = Some(999);
-                    Ok(())
-                })
+                update(
+                    &root,
+                    |config| {
+                        config.schedule.next_run_at_unix_ms = Some(999);
+                        Ok(())
+                    },
+                    |_| Ok(()),
+                )
                 .unwrap();
             })
         };
         let opener = {
             let root = root.clone();
             std::thread::spawn(move || {
-                update(&root, |config| {
-                    config.last_opened_at = 555;
-                    Ok(())
-                })
+                update(
+                    &root,
+                    |config| {
+                        config.last_opened_at = 555;
+                        Ok(())
+                    },
+                    |_| Ok(()),
+                )
                 .unwrap();
             })
         };
@@ -779,11 +805,80 @@ mod attach_provider_tests {
         // Set-then-load roundtrip through the atomic updater.
         let tmp = tempfile::tempdir().unwrap();
         save(tmp.path(), &workspace()).unwrap();
-        update(tmp.path(), |config| {
-            config.starred_at = 1234;
-            Ok(())
-        })
+        update(
+            tmp.path(),
+            |config| {
+                config.starred_at = 1234;
+                Ok(())
+            },
+            |_| Ok(()),
+        )
         .unwrap();
         assert_eq!(load(tmp.path()).unwrap().starred_at, 1234);
+    }
+
+    /// `on_saved` is the index-refresh hook: it must observe exactly what was
+    /// written, and it must run only after a successful save.
+    #[test]
+    fn on_saved_observes_the_written_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+
+        let mut observed = None;
+        update(
+            tmp.path(),
+            |config| {
+                config.title = "Renamed".to_string();
+                Ok(())
+            },
+            |config| {
+                observed = Some(config.title.clone());
+                // The save is already durable when the hook runs.
+                assert_eq!(load(tmp.path()).unwrap().title, "Renamed");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(observed.as_deref(), Some("Renamed"));
+    }
+
+    #[test]
+    fn on_saved_is_skipped_when_the_mutation_aborts() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+
+        let mut hook_ran = false;
+        let result = update(
+            tmp.path(),
+            |_| Err::<(), _>("nope".to_string()),
+            |_| {
+                hook_ran = true;
+                Ok(())
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "nope");
+        assert!(!hook_ran, "no save, no hook");
+    }
+
+    /// A failing hook surfaces as an error even though the config is already
+    /// on disk — callers must not read the failure as "nothing was written".
+    #[test]
+    fn on_saved_error_propagates_after_a_successful_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        save(tmp.path(), &workspace()).unwrap();
+
+        let result = update(
+            tmp.path(),
+            |config| {
+                config.title = "Renamed".to_string();
+                Ok(())
+            },
+            |_| Err("index lock poisoned".to_string()),
+        );
+
+        assert_eq!(result.unwrap_err(), "index lock poisoned");
+        assert_eq!(load(tmp.path()).unwrap().title, "Renamed");
     }
 }

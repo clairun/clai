@@ -426,10 +426,7 @@ pub fn persist_decisions_to_agent(
         return Ok(());
     }
 
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let ((), config) = workspace_config::update(&root, |config| {
+    state.update_workspace_config(workspace_id, |config| {
         let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
             return Err(format!("Workspace agent not found: {}", agent_id));
         };
@@ -440,11 +437,6 @@ pub fn persist_decisions_to_agent(
         }
         Ok(())
     })?;
-    state
-        .workspace_index
-        .write()
-        .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .insert_config(root, &config);
     Ok(())
 }
 

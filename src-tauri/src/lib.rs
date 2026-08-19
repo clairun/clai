@@ -115,6 +115,47 @@ impl AppState {
         self.workspace_index.read().ok()?.root(workspace_id)
     }
 
+    /// Atomic read-modify-write of a workspace's `config.json`, with the
+    /// in-memory workspace index refreshed from the same snapshot.
+    ///
+    /// Every writer whose result depends on the config it just read MUST go
+    /// through this (or [`Self::update_workspace_config_at`]) rather than a
+    /// bare `load` → mutate → `save` pair: those race each other as lost
+    /// updates (see [`workspace_config::update`]). The index refresh happens
+    /// inside the config update lock, so the index can never end up holding
+    /// an older snapshot than the file.
+    ///
+    /// Returns the closure's value plus the config as saved.
+    pub fn update_workspace_config<R>(
+        &self,
+        workspace_id: &str,
+        mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
+    ) -> Result<(R, WorkspaceConfig), String> {
+        let root = self
+            .workspace_root(workspace_id)
+            .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+        self.update_workspace_config_at(&root, mutate)
+    }
+
+    /// Same as [`Self::update_workspace_config`] for callers that already
+    /// hold the workspace root (sweeps iterating the index, the runner).
+    ///
+    /// Must not be called while holding a `workspace_index` guard: this takes
+    /// the config update lock first and the index lock second.
+    pub fn update_workspace_config_at<R>(
+        &self,
+        root: &Path,
+        mutate: impl FnOnce(&mut WorkspaceConfig) -> Result<R, String>,
+    ) -> Result<(R, WorkspaceConfig), String> {
+        workspace_config::update(root, mutate, |config| {
+            self.workspace_index
+                .write()
+                .map_err(|e| format!("Workspace index lock error: {}", e))?
+                .insert_config(root.to_path_buf(), config);
+            Ok(())
+        })
+    }
+
     pub fn workspace_create_target(&self, requested: Option<&Path>) -> Result<PathBuf, String> {
         let config = self
             .config_manager

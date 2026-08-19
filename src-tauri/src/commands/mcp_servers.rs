@@ -19,35 +19,28 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .locators_sorted();
     for locator in locators {
-        // Atomic RMW (see workspace_config::update); unchanged configs are
-        // rewritten with identical content, which the atomic save makes
-        // harmless — sweeps only run on rare rename/delete actions.
-        let (changed, config) =
-            crate::config::workspace_config::update(&locator.root_path, |config| {
-                let mut changed = false;
-                let now = chrono::Utc::now().timestamp_millis();
-                for agent in &mut config.agents {
-                    let before = agent.selected_mcp_servers.len();
-                    agent
-                        .selected_mcp_servers
-                        .retain(|mcp_ref| mcp_ref.id != server_id);
-                    if agent.selected_mcp_servers.len() != before {
-                        agent.updated_at = now;
-                        changed = true;
-                    }
+        // Atomic RMW + index refresh (see `AppState::update_workspace_config_at`);
+        // unchanged configs are rewritten with identical content, which the
+        // atomic save makes harmless — sweeps only run on rare rename/delete
+        // actions.
+        state.update_workspace_config_at(&locator.root_path, |config| {
+            let mut changed = false;
+            let now = chrono::Utc::now().timestamp_millis();
+            for agent in &mut config.agents {
+                let before = agent.selected_mcp_servers.len();
+                agent
+                    .selected_mcp_servers
+                    .retain(|mcp_ref| mcp_ref.id != server_id);
+                if agent.selected_mcp_servers.len() != before {
+                    agent.updated_at = now;
+                    changed = true;
                 }
-                if changed {
-                    config.updated_at = now;
-                }
-                Ok(changed)
-            })?;
-        if changed {
-            state
-                .workspace_index
-                .write()
-                .map_err(|e| format!("Workspace index lock error: {}", e))?
-                .insert_config(locator.root_path, &config);
-        }
+            }
+            if changed {
+                config.updated_at = now;
+            }
+            Ok(())
+        })?;
     }
 
     Ok(())
