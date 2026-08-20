@@ -22,8 +22,9 @@ use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::{
     CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
 };
-use crate::assistant::repository::{
-    self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
+use crate::assistant::repository::{self, CreateMessageParams, CreateToolCallParams};
+use crate::assistant::run_lifecycle::{
+    cancel_run, complete_run_with_notices, fail_run, resolve_run_id,
 };
 use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
@@ -549,27 +550,7 @@ pub async fn run_session_turn(
                 .lock()
                 .map(|mut n| std::mem::take(&mut *n))
                 .unwrap_or_default();
-            let final_status = if notices.is_empty() {
-                RunStatus::Completed
-            } else {
-                RunStatus::CompletedWithWarnings
-            };
-            let run = repository::complete_run(
-                &deps.pool,
-                &run_id,
-                final_status,
-                usage.as_ref(),
-                None,
-                &notices,
-            )
-            .await?;
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&run_id),
-                AssistantUiEvent::RunCompleted { run },
-            );
-            Ok(())
+            complete_run_with_notices(deps, &session, &run_id, usage.as_ref(), &notices).await
         }
         Err(LocalAgentRunError::Cancelled { usage }) => {
             cancel_run(deps, &session, &run_id, usage.as_ref()).await
@@ -716,42 +697,6 @@ async fn set_cli_session_id(
         .await
         .map_err(LocalAgentRunError::failed)?;
     Ok(())
-}
-
-async fn resolve_run_id(
-    deps: &AssistantDeps,
-    session: &AssistantSession,
-    connection: &ProviderConnection,
-    input: &RunTurnInput,
-) -> Result<String, AssistantEngineError> {
-    match &input.run_id {
-        Some(id) => {
-            let existing_run = repository::get_run(&deps.pool, id).await?.ok_or_else(|| {
-                AssistantEngineError::Persistence(format!("run not found: {}", id))
-            })?;
-            if existing_run.connection_id != input.connection_id {
-                return Err(AssistantEngineError::RunConnectionMismatch(id.clone()));
-            }
-            Ok(id.clone())
-        }
-        None => {
-            let run = repository::create_run(
-                &deps.pool,
-                CreateRunParams {
-                    session_id: session.id.clone(),
-                    status: RunStatus::Queued,
-                    trigger: input.trigger.clone(),
-                    connection_id: connection.id.clone(),
-                    protocol_id: connection.protocol_id.clone(),
-                    model_id: connection.model_id.clone(),
-                    usage: None,
-                    error: None,
-                },
-            )
-            .await?;
-            Ok(run.id)
-        }
-    }
 }
 
 async fn ensure_cli_session_id(
@@ -5147,68 +5092,6 @@ fn spawn_stderr_logger(
             }
         }
     });
-}
-
-async fn fail_run(
-    deps: &AssistantDeps,
-    session: &AssistantSession,
-    run_id: &str,
-    usage: Option<&RunUsage>,
-    error_msg: &str,
-) -> Result<(), AssistantEngineError> {
-    for tool_call in
-        repository::fail_running_tool_calls_for_run(&deps.pool, run_id, error_msg).await?
-    {
-        let _ = emit_event(
-            &deps.app,
-            session,
-            Some(run_id),
-            AssistantUiEvent::ToolCallFailed { tool_call },
-        );
-    }
-    let run = repository::complete_run(
-        &deps.pool,
-        run_id,
-        RunStatus::Failed,
-        usage,
-        Some(error_msg),
-        &[],
-    )
-    .await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunFailed { run },
-    );
-    Ok(())
-}
-
-async fn cancel_run(
-    deps: &AssistantDeps,
-    session: &AssistantSession,
-    run_id: &str,
-    usage: Option<&RunUsage>,
-) -> Result<(), AssistantEngineError> {
-    for tool_call in
-        repository::fail_running_tool_calls_for_run(&deps.pool, run_id, "Run cancelled").await?
-    {
-        let _ = emit_event(
-            &deps.app,
-            session,
-            Some(run_id),
-            AssistantUiEvent::ToolCallFailed { tool_call },
-        );
-    }
-    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, usage, None, &[])
-        .await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunCancelled { run },
-    );
-    Ok(())
 }
 
 enum LocalAgentRunError {

@@ -9,7 +9,10 @@ use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
 use crate::assistant::repository;
-use crate::assistant::repository::{CreateMessageParams, CreateRunParams, CreateToolCallParams};
+use crate::assistant::repository::{CreateMessageParams, CreateToolCallParams};
+use crate::assistant::run_lifecycle::{
+    cancel_run, complete_run_with_notices, fail_run, resolve_run_id,
+};
 use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
@@ -104,34 +107,7 @@ pub async fn run_session_turn(
     }
 
     // Get or create the run
-    let run_id = match &input.run_id {
-        Some(id) => {
-            let existing_run = repository::get_run(&deps.pool, id).await?.ok_or_else(|| {
-                AssistantEngineError::Persistence(format!("run not found: {}", id))
-            })?;
-            if existing_run.connection_id != input.connection_id {
-                return Err(AssistantEngineError::RunConnectionMismatch(id.clone()));
-            }
-            id.clone()
-        }
-        None => {
-            let run = repository::create_run(
-                &deps.pool,
-                CreateRunParams {
-                    session_id: session.id.clone(),
-                    status: RunStatus::Queued,
-                    trigger: input.trigger.clone(),
-                    connection_id: connection.id.clone(),
-                    protocol_id: connection.protocol_id.clone(),
-                    model_id: connection.model_id.clone(),
-                    usage: None,
-                    error: None,
-                },
-            )
-            .await?;
-            run.id
-        }
-    };
+    let run_id = resolve_run_id(deps, &session, &connection, &input).await?;
 
     // Transition run to Running
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
@@ -833,26 +809,7 @@ pub async fn run_session_turn(
         session_blocked_command_prefixes,
     };
     let notices = tool_context.take_notices();
-    let final_status = if notices.is_empty() {
-        RunStatus::Completed
-    } else {
-        RunStatus::CompletedWithWarnings
-    };
-    let run = repository::complete_run(
-        &deps.pool,
-        &run_id,
-        final_status,
-        usage.as_ref(),
-        None,
-        &notices,
-    )
-    .await?;
-    let _ = emit_event(
-        &deps.app,
-        &session,
-        Some(&run_id),
-        AssistantUiEvent::RunCompleted { run },
-    );
+    complete_run_with_notices(deps, &session, &run_id, usage.as_ref(), &notices).await?;
 
     Ok(())
 }
@@ -2436,70 +2393,4 @@ fn provider_error_with_compaction_context(
     } else {
         ProviderError::RequestFailed(failure_message)
     }
-}
-
-async fn fail_run(
-    deps: &AssistantDeps,
-    session: &crate::assistant::types::AssistantSession,
-    run_id: &str,
-    usage: Option<&RunUsage>,
-    error_msg: &str,
-) -> Result<(), AssistantEngineError> {
-    for tool_call in
-        repository::fail_running_tool_calls_for_run(&deps.pool, run_id, error_msg).await?
-    {
-        let _ = emit_event(
-            &deps.app,
-            session,
-            Some(run_id),
-            AssistantUiEvent::ToolCallFailed { tool_call },
-        );
-    }
-    let run = repository::complete_run(
-        &deps.pool,
-        run_id,
-        RunStatus::Failed,
-        usage,
-        Some(error_msg),
-        &[],
-    )
-    .await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunFailed { run },
-    );
-    Ok(())
-}
-
-/// Mark a run cancelled. The assistant message is *not* touched here: every
-/// caller finalizes it first, so cancelling never has to guess what was
-/// streamed. (This used to take a `_message_id` it ignored, which is exactly
-/// the shape a silent data-loss bug takes.)
-async fn cancel_run(
-    deps: &AssistantDeps,
-    session: &crate::assistant::types::AssistantSession,
-    run_id: &str,
-    usage: Option<&RunUsage>,
-) -> Result<(), AssistantEngineError> {
-    for tool_call in
-        repository::fail_running_tool_calls_for_run(&deps.pool, run_id, "Run cancelled").await?
-    {
-        let _ = emit_event(
-            &deps.app,
-            session,
-            Some(run_id),
-            AssistantUiEvent::ToolCallFailed { tool_call },
-        );
-    }
-    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, usage, None, &[])
-        .await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunCancelled { run },
-    );
-    Ok(())
 }
