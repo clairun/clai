@@ -95,9 +95,15 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
 /// window strands it. There is no dispatcher that picks `queued` rows back up
 /// after a restart, so failing them is the only honest outcome.
 ///
-/// Safe to run at every workspace-DB open because pools are cached in the
-/// workspace index (`AppState::workspace_db`): a workspace is opened at most
-/// once per process, so this never races a live task of the current process.
+/// Runs on every workspace-DB open, and a workspace is USUALLY opened once per
+/// process (pools are cached in the workspace index), but that is not
+/// guaranteed: `AppState::workspace_db` inits outside the index lock, so during
+/// the startup window the eager fan-out and a lazy open can both open the same
+/// workspace and both sweep. A task created in between would be failed while
+/// live. The exposure is the same one `recover_stale_runs` (called on the next
+/// line, and strictly wider — it fails `assistant_runs` too) already carries, so
+/// do not build on an at-most-once assumption here; fix the double open if it
+/// ever matters.
 ///
 /// `assistant_runs` and `assistant_tool_calls` are NOT touched here —
 /// `crate::assistant::repository::recover_stale_runs` already handles those
@@ -330,6 +336,52 @@ mod tests {
             rows[2].3.is_none(),
             "a blocked task awaiting the user must not be completed by the sweep"
         );
+    }
+
+    /// A reason the task already recorded wins over the sweep's generic one,
+    /// on the `queued` arm as well as the `running` one: COALESCE is evaluated
+    /// before the CASE arm it guards.
+    #[tokio::test]
+    async fn sweep_preserves_an_existing_error_on_queued_rows_too() {
+        let (_tmp, pool) = create_workspace_test_pool().await;
+        insert_sweep_task(&pool, "t1", "queued", Some("no active provider connection")).await;
+
+        sweep_orphaned_task_state(&pool).await.unwrap();
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error FROM workspace_tasks WHERE id = 't1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.1.as_deref(), Some("no active provider connection"));
+    }
+
+    /// The sweep is idempotent: the rows it already failed are terminal, so a
+    /// second pass must not re-stamp `updated_at`/`completed_at` or overwrite
+    /// the reason it wrote the first time.
+    #[tokio::test]
+    async fn a_second_sweep_matches_nothing() {
+        let (_tmp, pool) = create_workspace_test_pool().await;
+        insert_sweep_task(&pool, "t1", "queued", None).await;
+        sweep_orphaned_task_state(&pool).await.unwrap();
+
+        let before: (String, Option<String>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT status, error, completed_at, updated_at FROM workspace_tasks WHERE id = 't1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        sweep_orphaned_task_state(&pool).await.unwrap();
+
+        let after: (String, Option<String>, Option<i64>, i64) = sqlx::query_as(
+            "SELECT status, error, completed_at, updated_at FROM workspace_tasks WHERE id = 't1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
     }
 
     /// `init_workspace_db` must run the sweep itself: the eager startup fan-out
