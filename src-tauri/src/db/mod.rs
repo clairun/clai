@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_leaves_terminal_rows_untouched() {
+    async fn sweep_leaves_completed_failed_and_blocked_rows_untouched() {
         let (_tmp, pool) = create_workspace_test_pool().await;
         insert_sweep_task(&pool, "done", "completed", None).await;
         insert_sweep_task(&pool, "fail", "failed", Some("original error")).await;
@@ -357,11 +357,11 @@ mod tests {
         assert_eq!(row.1.as_deref(), Some("no active provider connection"));
     }
 
-    /// The sweep is idempotent: the rows it already failed are terminal, so a
-    /// second pass must not re-stamp `updated_at`/`completed_at` or overwrite
-    /// the reason it wrote the first time.
+    /// The sweep is idempotent: a row it already failed no longer matches the
+    /// WHERE clause, so a second pass must not re-stamp
+    /// `updated_at`/`completed_at` or overwrite the reason it wrote.
     #[tokio::test]
-    async fn a_second_sweep_matches_nothing() {
+    async fn a_second_sweep_changes_nothing() {
         let (_tmp, pool) = create_workspace_test_pool().await;
         insert_sweep_task(&pool, "t1", "queued", None).await;
         sweep_orphaned_task_state(&pool).await.unwrap();
