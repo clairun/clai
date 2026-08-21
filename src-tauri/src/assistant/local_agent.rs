@@ -2369,28 +2369,24 @@ fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
     let input_tokens = get("inputTokens");
     let output_tokens = get("outputTokens");
     let reasoning_tokens = get("reasoningOutputTokens");
-    let total_tokens =
-        get("totalTokens").or(match (input_tokens, output_tokens, reasoning_tokens) {
-            (None, None, None) => None,
-            _ => Some(
-                input_tokens.unwrap_or(0)
-                    + output_tokens.unwrap_or(0)
-                    + reasoning_tokens.unwrap_or(0),
-            ),
-        });
+    let reported_total = get("totalTokens");
     if input_tokens.is_none()
         && output_tokens.is_none()
         && reasoning_tokens.is_none()
-        && total_tokens.is_none()
+        && reported_total.is_none()
     {
         return None;
     }
-    Some(RunUsage {
+    let mut usage = RunUsage {
         input_tokens,
         output_tokens,
         reasoning_tokens,
-        total_tokens,
-    })
+        total_tokens: reported_total,
+    };
+    // `ensure_total` is a no-op when the provider sent its own total, which the
+    // app server does; the derivation below is only the fallback.
+    usage.ensure_total();
+    Some(usage)
 }
 
 fn codex_developer_instructions(system_prompt: &str) -> String {
@@ -3495,7 +3491,7 @@ async fn handle_opencode_event(
         }
         Some("step_finish") => {
             if let Some(parsed) = opencode_usage_from_part(value.get("part")) {
-                merge_run_usage(usage, parsed);
+                accumulate_turn_usage(usage, parsed);
             }
         }
         Some("error") => {
@@ -3703,26 +3699,35 @@ fn opencode_tool_result_payload(part: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// OpenCode is the **exception**: its reasoning count is disjoint from its
+/// output count, so its total is additive.
+///
+/// `Session.getUsage` (`packages/opencode/src/session/session.ts`, unchanged
+/// from `v1.15.0` through HEAD) writes `output: safe(outputTokens -
+/// reasoningTokens)` and charges reasoning separately at the output rate, so
+/// deriving `input + output` here would silently drop every reasoning token.
+/// When OpenCode forwards the provider's own `total` we prefer it, exactly as
+/// the Codex app-server path does.
 fn opencode_usage_from_part(part: Option<&Value>) -> Option<RunUsage> {
     let tokens = part?.get("tokens")?;
-    let input_tokens = tokens
-        .get("input")
-        .and_then(Value::as_i64)
-        .and_then(|v| u64::try_from(v).ok());
-    let output_tokens = tokens
-        .get("output")
-        .and_then(Value::as_i64)
-        .and_then(|v| u64::try_from(v).ok());
-    let reasoning_tokens = tokens
-        .get("reasoning")
-        .and_then(Value::as_i64)
-        .and_then(|v| u64::try_from(v).ok());
-    let total_tokens = match (input_tokens, output_tokens, reasoning_tokens) {
+    let field = |key: &str| {
+        tokens
+            .get(key)
+            .and_then(Value::as_i64)
+            .and_then(|v| u64::try_from(v).ok())
+    };
+    let input_tokens = field("input");
+    let output_tokens = field("output");
+    let reasoning_tokens = field("reasoning");
+    let total_tokens = field("total").or(match (input_tokens, output_tokens, reasoning_tokens) {
         (None, None, None) => None,
         _ => Some(
-            input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0) + reasoning_tokens.unwrap_or(0),
+            input_tokens
+                .unwrap_or(0)
+                .saturating_add(output_tokens.unwrap_or(0))
+                .saturating_add(reasoning_tokens.unwrap_or(0)),
         ),
-    };
+    });
     Some(RunUsage {
         input_tokens,
         output_tokens,
@@ -3731,21 +3736,48 @@ fn opencode_usage_from_part(part: Option<&Value>) -> Option<RunUsage> {
     })
 }
 
-fn merge_run_usage(total: &mut Option<RunUsage>, next: RunUsage) {
-    let Some(existing) = total.as_mut() else {
-        *total = Some(next);
-        return;
+/// Build a usage report whose `total_tokens` is derived the way the API path
+/// derives it: **input + output, with reasoning excluded**.
+///
+/// Codex (both transports) and Claude Code bill reasoning *inside* their output
+/// count, so adding it again overstates the run. Verified against the payloads
+/// on this machine: across 56_314 usage snapshots in 557 Codex rollouts,
+/// `total_tokens == input_tokens + output_tokens` holds 55_987 times, no
+/// snapshot anywhere satisfies `total == input + output + reasoning` with
+/// non-zero reasoning (0 of 50_356), and `reasoning_output_tokens` never
+/// exceeds `output_tokens`. Claude Code reports no `reasoning_tokens` field at
+/// all — its thinking tokens ride in `output_tokens_details.thinking_tokens`,
+/// a breakdown *of* the output count — so this is a no-op there today and a
+/// guard against drift tomorrow. `RunUsage::ensure_total` states the same rule
+/// for the API path; this is the CLI side of the one rule.
+///
+/// **OpenCode does not use this** — see `opencode_usage_from_part`.
+fn derived_total(
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+) -> RunUsage {
+    let mut usage = RunUsage {
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        total_tokens: None,
     };
-    existing.input_tokens = add_optional_u64(existing.input_tokens, next.input_tokens);
-    existing.output_tokens = add_optional_u64(existing.output_tokens, next.output_tokens);
-    existing.reasoning_tokens = add_optional_u64(existing.reasoning_tokens, next.reasoning_tokens);
-    existing.total_tokens = add_optional_u64(existing.total_tokens, next.total_tokens);
+    usage.ensure_total();
+    usage
 }
 
-fn add_optional_u64(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        _ => Some(left.unwrap_or(0) + right.unwrap_or(0)),
+/// Fold one finished CLI turn into the run total.
+///
+/// A single CLI process can serve several turns (mid-run user input on Claude
+/// Code, one `step_finish` per step on OpenCode), and each turn bills its own
+/// prompt and completion, so the run total is the sum over turns — the same
+/// rule as `RunUsage::add_turn`, which this now delegates to instead of
+/// repeating the optional-field arithmetic.
+fn accumulate_turn_usage(total: &mut Option<RunUsage>, next: RunUsage) {
+    match total.as_mut() {
+        Some(existing) => existing.add_turn(&next),
+        None => *total = Some(next),
     }
 }
 
@@ -4195,18 +4227,7 @@ fn codex_usage_from_value(value: Option<&Value>) -> Option<RunUsage> {
         .get("reasoning_output_tokens")
         .and_then(Value::as_i64)
         .and_then(|v| u64::try_from(v).ok());
-    let total_tokens = match (input_tokens, output_tokens, reasoning_tokens) {
-        (None, None, None) => None,
-        _ => Some(
-            input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0) + reasoning_tokens.unwrap_or(0),
-        ),
-    };
-    Some(RunUsage {
-        input_tokens,
-        output_tokens,
-        reasoning_tokens,
-        total_tokens,
-    })
+    Some(derived_total(input_tokens, output_tokens, reasoning_tokens))
 }
 
 async fn flush_codex_assistant_message_content(
@@ -4313,7 +4334,7 @@ async fn handle_claude_event(
             if let Some(parsed) = usage_from_value(value.get("usage")) {
                 // Sum across turns: with mid-run input one process can run
                 // several turns, each reporting its own usage in its result.
-                merge_run_usage(usage, parsed);
+                accumulate_turn_usage(usage, parsed);
             }
             if value
                 .get("is_error")
@@ -5021,18 +5042,7 @@ fn usage_from_value(value: Option<&Value>) -> Option<RunUsage> {
     let input_tokens = value.get("input_tokens").and_then(Value::as_u64);
     let output_tokens = value.get("output_tokens").and_then(Value::as_u64);
     let reasoning_tokens = value.get("reasoning_tokens").and_then(Value::as_u64);
-    let total_tokens = match (input_tokens, output_tokens, reasoning_tokens) {
-        (None, None, None) => None,
-        _ => Some(
-            input_tokens.unwrap_or(0) + output_tokens.unwrap_or(0) + reasoning_tokens.unwrap_or(0),
-        ),
-    };
-    Some(RunUsage {
-        input_tokens,
-        output_tokens,
-        reasoning_tokens,
-        total_tokens,
-    })
+    Some(derived_total(input_tokens, output_tokens, reasoning_tokens))
 }
 
 fn write_mcp_config(url: &str, token: &str) -> Result<PathBuf, LocalAgentRunError> {
@@ -5725,7 +5735,11 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(10));
         assert_eq!(usage.output_tokens, Some(7));
         assert_eq!(usage.reasoning_tokens, Some(3));
-        assert_eq!(usage.total_tokens, Some(20));
+        // Reasoning is a subset of the output count, so the total is 10 + 7 and
+        // not 10 + 7 + 3. Real Codex rollouts satisfy
+        // `total_tokens == input_tokens + output_tokens` on every snapshot while
+        // `reasoning_output_tokens` is non-zero.
+        assert_eq!(usage.total_tokens, Some(17));
     }
 
     #[test]
@@ -5758,18 +5772,38 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(11));
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.reasoning_tokens, Some(2));
+        // 11 + 5 + 2. OpenCode subtracts reasoning out of `tokens.output`
+        // before it writes the part (`output: safe(outputTokens -
+        // reasoningTokens)`), so unlike every other CLI its reasoning count is
+        // disjoint and the total is additive. `tokens.cache` is a separate
+        // bucket this parser still ignores.
         assert_eq!(usage.total_tokens, Some(18));
     }
 
+    /// When OpenCode forwards the provider's own total, it wins — the value
+    /// here is deliberately not the additive sum, so a derivation can't fake it.
     #[test]
-    fn opencode_usage_merges_multiple_steps() {
+    fn opencode_reported_total_is_preferred_over_the_derivation() {
+        let usage = opencode_usage_from_part(Some(&serde_json::json!({
+            "tokens": {
+                "input": 11, "output": 5, "reasoning": 2, "total": 99,
+                "cache": {"read": 100, "write": 0}
+            }
+        })))
+        .expect("usage");
+
+        assert_eq!(usage.total_tokens, Some(99));
+    }
+
+    #[test]
+    fn turn_usage_accumulates_across_steps() {
         let mut usage = Some(RunUsage {
             input_tokens: Some(10),
             output_tokens: Some(2),
             reasoning_tokens: None,
             total_tokens: Some(12),
         });
-        merge_run_usage(
+        accumulate_turn_usage(
             &mut usage,
             RunUsage {
                 input_tokens: Some(7),
@@ -5784,6 +5818,26 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.reasoning_tokens, Some(1));
         assert_eq!(usage.total_tokens, Some(23));
+    }
+
+    /// The first turn *installs* the run total; nothing else does. Without this
+    /// the `None` arm is untested and a run could report no usage at all.
+    #[test]
+    fn the_first_turn_seeds_the_run_total() {
+        let mut usage = None;
+        accumulate_turn_usage(
+            &mut usage,
+            RunUsage {
+                input_tokens: Some(9),
+                output_tokens: Some(4),
+                reasoning_tokens: Some(1),
+                total_tokens: Some(13),
+            },
+        );
+
+        let usage = usage.expect("first turn installs the total");
+        assert_eq!(usage.input_tokens, Some(9));
+        assert_eq!(usage.total_tokens, Some(13));
     }
 
     #[test]
@@ -5913,6 +5967,80 @@ mod tests {
         // No usage at all -> None (don't clobber a prior value with zeros).
         assert!(run_usage_from_app_server(None).is_none());
         assert!(run_usage_from_app_server(Some(&serde_json::json!({}))).is_none());
+
+        // A breakdown carrying *only* reasoning is still a report, so it is
+        // kept — but it yields no total, because a total made of reasoning
+        // tokens alone would be meaningless.
+        let reasoning_only = run_usage_from_app_server(Some(&serde_json::json!({
+            "total": {"reasoningOutputTokens": 7}
+        })))
+        .expect("a reasoning-only breakdown is still usage");
+        assert_eq!(reasoning_only.reasoning_tokens, Some(7));
+        assert_eq!(reasoning_only.total_tokens, None);
+    }
+
+    /// The app server sends its own `totalTokens`, and a provider-reported
+    /// total always wins over anything we would derive. Its value here (150)
+    /// is deliberately *not* input + output, so a derivation could not fake it.
+    #[test]
+    fn app_server_reported_total_is_preferred_over_the_derivation() {
+        let usage = run_usage_from_app_server(Some(&serde_json::json!({
+            "total": {
+                "inputTokens": 100, "outputTokens": 40,
+                "reasoningOutputTokens": 10, "totalTokens": 150
+            }
+        })))
+        .unwrap();
+        assert_eq!(usage.total_tokens, Some(150));
+    }
+
+    /// ...and when it omits the total, the fallback is input + output only.
+    #[test]
+    fn app_server_derived_total_excludes_reasoning() {
+        let usage = run_usage_from_app_server(Some(&serde_json::json!({
+            "total": {
+                "inputTokens": 100, "outputTokens": 40, "reasoningOutputTokens": 10
+            }
+        })))
+        .unwrap();
+        assert_eq!(usage.reasoning_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(140));
+    }
+
+    /// Claude Code reports no reasoning field at all, so its total is the plain
+    /// sum — this pins that the shared derivation did not change that path.
+    #[test]
+    fn claude_result_usage_totals_input_plus_output() {
+        let usage = usage_from_value(Some(&serde_json::json!({
+            "input_tokens": 1200,
+            "output_tokens": 340,
+            "cache_read_input_tokens": 41312
+        })))
+        .expect("usage");
+        assert_eq!(usage.input_tokens, Some(1200));
+        assert_eq!(usage.output_tokens, Some(340));
+        assert_eq!(usage.reasoning_tokens, None);
+        assert_eq!(usage.total_tokens, Some(1540));
+    }
+
+    /// Reasoning tokens never inflate the total on the paths that bill them
+    /// inside output. (OpenCode is the exception and has its own tests.)
+    #[test]
+    fn codex_and_claude_exclude_reasoning_from_the_total() {
+        let codex = codex_usage_from_value(Some(&serde_json::json!({
+            "input_tokens": 3_721_144,
+            "output_tokens": 15_660,
+            "reasoning_output_tokens": 9_930
+        })))
+        .expect("codex usage");
+        // The arithmetic of a real rollout snapshot.
+        assert_eq!(codex.total_tokens, Some(3_736_804));
+
+        let claude = usage_from_value(Some(&serde_json::json!({
+            "input_tokens": 10, "output_tokens": 5, "reasoning_tokens": 4
+        })))
+        .expect("claude usage");
+        assert_eq!(claude.total_tokens, Some(15));
     }
 
     // -----------------------------------------------------------------
