@@ -209,13 +209,17 @@ const WorkspaceRail = ({
   const menuRef = useRef<HTMLDivElement | null>(null);
   const openMenuId = openMenu?.id ?? null;
 
-  // Opening the menu takes focus off the row, so every close the user drove
-  // hands it back to the ⋯ trigger — otherwise focus is stranded on <body>
-  // and the next Tab restarts from the top of the document. Focus first,
-  // then close: while the menu is open the row keeps its actions laid out,
-  // so the trigger is still focusable at this point.
-  const closeMenu = useCallback((restoreFocus: boolean) => {
-    if (restoreFocus) menuTriggerRef.current?.focus();
+  // Opening the menu takes focus into it, so closing it hands focus back to
+  // the ⋯ trigger — otherwise the focused element just disappears, focus
+  // lands on <body> and the next Tab restarts from the top of the document.
+  // Only when focus is actually inside the menu, so a close triggered while
+  // the user is somewhere else never steals it. Focus first, then close:
+  // while the menu is open its row keeps the actions laid out, so the
+  // trigger is still focusable at this point.
+  const closeMenu = useCallback(() => {
+    if (menuRef.current?.contains(document.activeElement)) {
+      menuTriggerRef.current?.focus();
+    }
     setOpenMenu(null);
   }, []);
   const [query, setQuery] = useState('');
@@ -236,10 +240,10 @@ const WorkspaceRail = ({
   // Escape, which the click-away backdrop cannot cover for keyboard users.
   useEffect(() => {
     if (!openMenuId) return;
-    const close = () => closeMenu(false);
+    const close = () => closeMenu();
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      closeMenu(true);
+      closeMenu();
     };
     // Capture, because scroll does not bubble — but only scrollers that
     // actually carry the trigger count. The app scrolls other panes
@@ -509,9 +513,13 @@ const WorkspaceRail = ({
                     className={styles.menuBackdrop}
                     aria-hidden="true"
                     tabIndex={-1}
+                    // Clicking the backdrop must not pull focus out of the
+                    // menu first — `closeMenu` only hands focus back to the
+                    // trigger when it still holds it.
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={(e) => {
                       e.stopPropagation();
-                      closeMenu(true);
+                      closeMenu();
                     }}
                   />
                   <div
@@ -538,7 +546,7 @@ const WorkspaceRail = ({
                       const leaving = e.shiftKey ? at <= 0 : at < 0 || at >= items.length - 1;
                       if (!leaving) return;
                       e.preventDefault();
-                      closeMenu(true);
+                      closeMenu();
                     }}
                   >
                     <button
@@ -547,7 +555,7 @@ const WorkspaceRail = ({
                       role="menuitem"
                       onClick={(e) => {
                         e.stopPropagation();
-                        closeMenu(true);
+                        closeMenu();
                         onToggleStar(ws.id, isStarred);
                       }}
                     >
@@ -559,7 +567,7 @@ const WorkspaceRail = ({
                       role="menuitem"
                       onClick={(e) => {
                         e.stopPropagation();
-                        closeMenu(true);
+                        closeMenu();
                         onSettings(ws.id);
                       }}
                     >
@@ -572,7 +580,7 @@ const WorkspaceRail = ({
                       disabled={forkBusyId === ws.id}
                       onClick={(e) => {
                         e.stopPropagation();
-                        closeMenu(true);
+                        closeMenu();
                         onFork(ws.id);
                       }}
                     >
@@ -584,7 +592,7 @@ const WorkspaceRail = ({
                       role="menuitem"
                       onClick={(e) => {
                         e.stopPropagation();
-                        closeMenu(true);
+                        closeMenu();
                         onDelete(ws.id, ws.title);
                       }}
                     >

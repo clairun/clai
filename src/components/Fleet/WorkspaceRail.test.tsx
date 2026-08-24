@@ -293,6 +293,7 @@ describe('WorkspaceRail sections', () => {
       renderRail([entry('a', 'Alpha')]);
       const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
       await userEvent.click(within(menu).getByRole('menuitem', { name: 'Star workspace' }));
+      expect(screen.queryByRole('menu')).toBeNull();
       expect(document.activeElement).toBe(
         screen.getByRole('button', { name: 'More actions' }),
       );
@@ -334,6 +335,11 @@ describe('WorkspaceRail sections', () => {
         window.dispatchEvent(new Event('resize'));
       });
       expect(screen.queryByRole('menu')).toBeNull();
+      // Focus was inside the menu, so it comes back rather than falling to
+      // <body> and restarting the next Tab from the top of the document.
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'More actions' }),
+      );
     });
 
     it('closes on Escape and hands focus back to the trigger', async () => {
@@ -364,6 +370,7 @@ describe('WorkspaceRail sections', () => {
       await userEvent.click(within(menu).getByRole('menuitem', { name: 'Delete' }));
       expect(onDelete).toHaveBeenCalledWith('a', 'Alpha');
       expect(onSelect).not.toHaveBeenCalled();
+      expect(screen.queryByRole('menu')).toBeNull();
     });
 
     it('closes on a backdrop click without selecting the workspace', async () => {
