@@ -520,12 +520,23 @@ const WorkspaceRail = ({
                     ref={menuRef}
                     style={openMenu.style}
                     onKeyDown={(e) => {
-                      // Tab out of a body-level portal would land nowhere
-                      // useful and leave the menu open behind its
-                      // click-swallowing backdrop. Dismiss instead, per the
-                      // ARIA menu-button pattern, and put focus back on the
-                      // trigger so the next Tab continues from the row.
+                      // Tab walks the items, as it did when the menu lived
+                      // in the row. Only a Tab that would leave the menu is
+                      // intercepted: the portal is the last thing in
+                      // <body>, so letting focus out would land nowhere
+                      // useful and strand the menu behind its
+                      // click-swallowing backdrop. Dismiss and hand focus
+                      // back to the trigger instead, so the next Tab
+                      // continues from the row.
                       if (e.key !== 'Tab') return;
+                      const items = Array.from(
+                        e.currentTarget.querySelectorAll<HTMLElement>(
+                          '[role="menuitem"]:not([disabled])',
+                        ),
+                      );
+                      const at = items.indexOf(document.activeElement as HTMLElement);
+                      const leaving = e.shiftKey ? at <= 0 : at < 0 || at >= items.length - 1;
+                      if (!leaving) return;
                       e.preventDefault();
                       closeMenu(true);
                     }}

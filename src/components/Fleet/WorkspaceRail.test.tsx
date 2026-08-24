@@ -298,23 +298,33 @@ describe('WorkspaceRail sections', () => {
       );
     });
 
-    it('closes on Tab out of the menu, in either direction', async () => {
+    it('lets Tab walk every item, then dismisses at either end', async () => {
       renderRail([entry('a', 'Alpha')]);
-      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
-      // The portal is the last thing in <body>, so tabbing through it walks
-      // out of the app and strands the menu behind its click-swallowing
-      // backdrop. Dismiss and hand focus back to the row instead.
-      within(menu).getByRole('menuitem', { name: 'Delete' }).focus();
+      const trigger = screen.getByRole('button', { name: 'More actions' });
+      stubTriggerRect(trigger, { top: 100, bottom: 116, right: 240 });
+      trigger.focus();
+      await userEvent.keyboard('{Enter}');
+      const menu = screen.getByRole('menu');
+      // Reaching Delete is the whole point of the menu, and Tab is the only
+      // way in without arrow keys — so Tab must move inside the menu and
+      // only dismiss when it would leave it.
+      for (const name of ['Settings', 'Fork workspace', 'Delete']) {
+        await userEvent.tab();
+        expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name }));
+      }
+      // The portal is the last thing in <body>, so letting focus out here
+      // would strand the menu behind its click-swallowing backdrop.
       await userEvent.tab();
       expect(screen.queryByRole('menu')).toBeNull();
-      expect(document.activeElement).toBe(
-        screen.getByRole('button', { name: 'More actions' }),
-      );
+      expect(document.activeElement).toBe(trigger);
 
       const reopened = await openMenuAt({ top: 100, bottom: 116, right: 240 });
-      within(reopened).getByRole('menuitem', { name: 'Star workspace' }).focus();
+      expect(document.activeElement).toBe(
+        within(reopened).getByRole('menuitem', { name: 'Star workspace' }),
+      );
       await userEvent.tab({ shift: true });
       expect(screen.queryByRole('menu')).toBeNull();
+      expect(document.activeElement).toBe(trigger);
     });
 
     it('closes on a window resize', async () => {
