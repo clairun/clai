@@ -150,14 +150,15 @@ describe('WorkspaceRail sections', () => {
   describe('overflow menu placement', () => {
     const stubTriggerRect = (
       trigger: HTMLElement,
-      rect: { top: number; bottom: number; right: number },
+      rect: { top: number; bottom: number; right: number; width?: number },
     ) => {
+      const width = rect.width ?? 24;
       vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
         ...rect,
-        left: rect.right - 24,
-        width: 24,
+        left: rect.right - width,
+        width,
         height: rect.bottom - rect.top,
-        x: rect.right - 24,
+        x: rect.right - width,
         y: rect.top,
         toJSON: () => ({}),
       } as DOMRect);
@@ -241,6 +242,35 @@ describe('WorkspaceRail sections', () => {
       expect(screen.queryByRole('menu')).toBeNull();
     });
 
+    it('keeps the row actions laid out while the menu is open', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const trigger = screen.getByRole('button', { name: 'More actions' });
+      // The row only shows its actions on hover/focus-within, and opening
+      // the menu moves focus out of the row into the portal — so the row
+      // needs an explicit "menu open" class or the ⋯ trigger the menu is
+      // positioned from collapses to a zero box. (CSS is off in jsdom, so
+      // this asserts the class, not the computed display.)
+      expect(trigger.parentElement?.className).not.toMatch(/rowActionsMenuOpen/);
+      stubTriggerRect(trigger, { top: 100, bottom: 116, right: 240 });
+      await userEvent.click(trigger);
+      expect(trigger.parentElement?.className).toMatch(/rowActionsMenuOpen/);
+    });
+
+    it('holds its position when the trigger cannot be measured', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const trigger = screen.getByRole('button', { name: 'More actions' });
+      stubTriggerRect(trigger, { top: 100, bottom: 116, right: 240 });
+      await userEvent.click(trigger);
+      // A hidden trigger measures zero; re-anchoring to that would fling the
+      // menu into the viewport corner.
+      stubTriggerRect(trigger, { top: 0, bottom: 0, right: 0, width: 0 });
+      await userEvent.type(
+        screen.getByRole('textbox', { name: 'Filter workspaces by name' }),
+        'al',
+      );
+      expect(screen.getByRole('menu').style.top).toBe('120px');
+    });
+
     it('closes on a window resize', async () => {
       renderRail([entry('a', 'Alpha')]);
       await openMenuAt({ top: 100, bottom: 116, right: 240 });
@@ -268,7 +298,7 @@ describe('WorkspaceRail sections', () => {
       );
     });
 
-    it('does not select the workspace when the menu or backdrop is clicked', async () => {
+    it('does not select the workspace when a menu item is clicked', async () => {
       const onSelect = vi.fn();
       const onDelete = vi.fn();
       renderRail([entry('a', 'Alpha')], { onSelect, onDelete });
@@ -277,6 +307,18 @@ describe('WorkspaceRail sections', () => {
       // onClick is one stopPropagation away from firing on every menu click.
       await userEvent.click(within(menu).getByRole('menuitem', { name: 'Delete' }));
       expect(onDelete).toHaveBeenCalledWith('a', 'Alpha');
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('closes on a backdrop click without selecting the workspace', async () => {
+      const onSelect = vi.fn();
+      renderRail([entry('a', 'Alpha')], { onSelect });
+      await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      // The backdrop is aria-hidden by design, so there is no role to query.
+      const backdrop = document.querySelector<HTMLElement>('[class*="menuBackdrop"]');
+      expect(backdrop).not.toBeNull();
+      await userEvent.click(backdrop!);
+      expect(screen.queryByRole('menu')).toBeNull();
       expect(onSelect).not.toHaveBeenCalled();
     });
 

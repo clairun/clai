@@ -429,6 +429,15 @@
   display: inline-flex;
 }
 
+/* An open menu keeps its row's actions laid out. Opening the menu moves
+   focus into it, and it is portaled to <body>, so the row loses
+   `:focus-within` (and `:hover` as soon as the pointer moves onto the
+   menu) — which would collapse the ⋯ trigger the menu is positioned from
+   and leave nothing for Escape to return focus to. */
+.rowActionsMenuOpen {
+  display: inline-flex;
+}
+
 .iconButton {
   display: inline-flex;
   align-items: center;

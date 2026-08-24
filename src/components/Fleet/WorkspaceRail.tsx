@@ -296,6 +296,10 @@ const WorkspaceRail = ({
       setOpenMenu(null);
       return;
     }
+    // An unmeasurable trigger (zero box) would re-anchor the menu to the
+    // viewport corner. Keep the last good position instead.
+    const rect = trigger.getBoundingClientRect();
+    if (!rect.width && !rect.height) return;
     const style = rowMenuStyle(trigger);
     if (!sameMenuStyle(style, openMenu.style)) {
       setOpenMenu({ id: openMenu.id, style });
@@ -405,7 +409,11 @@ const WorkspaceRail = ({
               />
             )}
 
-            <span className={styles.rowActions}>
+            <span
+              className={`${styles.rowActions}${
+                openMenu?.id === ws.id ? ` ${styles.rowActionsMenuOpen}` : ''
+              }`}
+            >
               <button
                 type="button"
                 className={`${styles.iconButton} ${isStarred ? styles.starButtonActive : ''}`}
