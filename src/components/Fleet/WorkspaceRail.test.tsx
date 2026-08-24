@@ -184,6 +184,7 @@ describe('WorkspaceRail sections', () => {
       // window.innerHeight is 768 in jsdom: 652px of room below is plenty.
       expect(menu.style.top).toBe('120px');
       expect(menu.style.bottom).toBe('');
+      expect(menu.style.maxHeight).toBe('640px');
       // Right-aligned with the trigger (innerWidth 1024 − right edge 240).
       expect(menu.style.right).toBe('784px');
     });
@@ -194,13 +195,103 @@ describe('WorkspaceRail sections', () => {
       // Only 8px below the trigger, so the menu hangs off its top edge.
       expect(menu.style.bottom).toBe('28px');
       expect(menu.style.top).toBe('');
+      expect(menu.style.maxHeight).toBe('732px');
     });
 
-    it('closes on Escape', async () => {
+    it('caps its height to the space left in a window too short for it', async () => {
+      const realHeight = window.innerHeight;
+      window.innerHeight = 200;
+      try {
+        renderRail([entry('a', 'Alpha')]);
+        // 94px below, 90px above: neither side fits the menu, and below is
+        // the roomier one, so it stays below and scrolls internally.
+        const menu = await openMenuAt({ top: 90, bottom: 106, right: 240 });
+        expect(menu.style.top).toBe('110px');
+        expect(menu.style.maxHeight).toBe('82px');
+      } finally {
+        window.innerHeight = realHeight;
+      }
+    });
+
+    it('re-anchors to its row when the list re-renders under it', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const trigger = screen.getByRole('button', { name: 'More actions' });
+      stubTriggerRect(trigger, { top: 100, bottom: 116, right: 240 });
+      await userEvent.click(trigger);
+      expect(screen.getByRole('menu').style.top).toBe('120px');
+      // Sections reorder from props while the menu is open; here typing in
+      // the filter stands in for any re-render that moves the row.
+      stubTriggerRect(trigger, { top: 300, bottom: 316, right: 240 });
+      await userEvent.type(
+        screen.getByRole('textbox', { name: 'Filter workspaces by name' }),
+        'al',
+      );
+      expect(screen.getByRole('menu').style.top).toBe('320px');
+    });
+
+    it('forgets a menu whose row leaves the list', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      const filter = screen.getByRole('textbox', { name: 'Filter workspaces by name' });
+      await userEvent.type(filter, 'zzz');
+      expect(screen.queryByRole('menu')).toBeNull();
+      // Reappearing rows must not bring a stale menu back with them.
+      await userEvent.clear(filter);
+      expect(screen.getByText('Alpha')).toBeTruthy();
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('closes on a window resize', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      await act(async () => {
+        window.dispatchEvent(new Event('resize'));
+      });
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('closes on Escape and hands focus back to the trigger', async () => {
       renderRail([entry('a', 'Alpha')]);
       await openMenuAt({ top: 100, bottom: 116, right: 240 });
       await userEvent.keyboard('{Escape}');
       expect(screen.queryByRole('menu')).toBeNull();
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'More actions' }),
+      );
+    });
+
+    it('moves focus into the menu on open, since it sits outside the tab order', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      expect(document.activeElement).toBe(
+        within(menu).getByRole('menuitem', { name: 'Star workspace' }),
+      );
+    });
+
+    it('does not select the workspace when the menu or backdrop is clicked', async () => {
+      const onSelect = vi.fn();
+      const onDelete = vi.fn();
+      renderRail([entry('a', 'Alpha')], { onSelect, onDelete });
+      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      // Portaled children still bubble through the React tree, so the row's
+      // onClick is one stopPropagation away from firing on every menu click.
+      await userEvent.click(within(menu).getByRole('menuitem', { name: 'Delete' }));
+      expect(onDelete).toHaveBeenCalledWith('a', 'Alpha');
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('ignores scrolling elsewhere in the app', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      // Other panes scroll themselves programmatically while a run streams
+      // (VirtualizedList pins to the bottom); that must not close the menu.
+      const otherPane = document.createElement('div');
+      document.body.appendChild(otherPane);
+      await act(async () => {
+        otherPane.dispatchEvent(new Event('scroll', { bubbles: false }));
+      });
+      expect(screen.queryByRole('menu')).not.toBeNull();
+      otherPane.remove();
     });
 
     it('closes when the rail list scrolls out from under it', async () => {

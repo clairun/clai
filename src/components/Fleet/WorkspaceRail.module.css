@@ -466,10 +466,12 @@
 
 /* Portaled to document.body and positioned from JS (see `rowMenuStyle` in
    WorkspaceRail.tsx): the rail list scrolls, so an in-row absolute menu was
-   clipped on the bottom rows. Only the offsets come from the inline style. */
+   clipped on the bottom rows. The offsets and the max-height (the space left
+   on the side it landed on) come from the inline style. */
 .menu {
   position: fixed;
   z-index: 41;
+  overflow-y: auto;
   min-width: 140px;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-medium);
