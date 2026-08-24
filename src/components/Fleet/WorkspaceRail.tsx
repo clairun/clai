@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import ReactDOM from 'react-dom';
 import type { WorkspaceListEntry } from '../../generated/bindings';
 import {
   CARD_STATUS_LABEL,
@@ -88,6 +89,47 @@ const StarIcon = ({ filled }: { filled: boolean }) => (
   </svg>
 );
 
+/** Height reserved for the per-row ⋯ menu when deciding whether it fits
+ *  below the trigger: four items (~30px each) plus the 4px padding at each
+ *  end. Overestimating only costs an upward flip that also fits. */
+const ROW_MENU_HEIGHT = 136;
+const ROW_MENU_GAP = 4;
+/** Minimum margin kept between the menu and the viewport edges. */
+const ROW_MENU_MARGIN = 8;
+/** Mirrors `min-width` on `.menu` — used to clamp the right offset. */
+const ROW_MENU_MIN_WIDTH = 140;
+
+/**
+ * Viewport-fixed position for a row's ⋯ menu, anchored to its trigger.
+ *
+ * The menu is portaled to `document.body` instead of being absolutely
+ * positioned inside the row, because the row lives in `.railList`, which
+ * scrolls (`overflow-y: auto`): on the last rows an in-row menu was clipped
+ * out of sight, and since it still extended the list's scrollable area it
+ * produced a scrollbar that could not be used — dragging it hit the
+ * click-away backdrop, which closed the menu. The collapsed rail clipped it
+ * horizontally too (`.rail` is `overflow: hidden`).
+ *
+ * Right-aligned with the trigger; below it when there is room, flipped
+ * above when there is not.
+ */
+const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
+  const rect = trigger.getBoundingClientRect();
+  const spaceBelow = window.innerHeight - rect.bottom;
+  const flipUp = spaceBelow < ROW_MENU_HEIGHT && rect.top > spaceBelow;
+  const right = Math.min(
+    Math.max(window.innerWidth - rect.right, ROW_MENU_MARGIN),
+    Math.max(window.innerWidth - ROW_MENU_MIN_WIDTH - ROW_MENU_MARGIN, ROW_MENU_MARGIN),
+  );
+  return {
+    position: 'fixed',
+    right,
+    ...(flipUp
+      ? { bottom: window.innerHeight - rect.top + ROW_MENU_GAP }
+      : { top: rect.bottom + ROW_MENU_GAP }),
+  };
+};
+
 /**
  * Persistent left navigator for the unified Fleet/Workspace view. Lists
  * every workspace grouped into explicit, labeled sections (Claude-style)
@@ -131,9 +173,35 @@ const WorkspaceRail = ({
   pauseBusyId,
   onArtifactDrop,
 }: WorkspaceRailProps) => {
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  // Which row's ⋯ menu is open, together with the fixed position it was
+  // anchored to when it opened. The position is a snapshot: the menu closes
+  // on scroll/resize instead of following its trigger.
+  const [openMenu, setOpenMenu] = useState<{
+    id: string;
+    style: React.CSSProperties;
+  } | null>(null);
   const [query, setQuery] = useState('');
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+
+  // A viewport-fixed menu would drift away from its row on scroll and away
+  // from its edge on resize, so both dismiss it — as does Escape, which the
+  // click-away backdrop alone cannot cover for keyboard users.
+  useEffect(() => {
+    if (!openMenu) return;
+    const close = () => setOpenMenu(null);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', close);
+    // Capture: the rail list scrolls, and scroll does not bubble.
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [openMenu]);
 
   // Pure recency sort — grouping happens per-section below.
   const sorted = useMemo(
@@ -325,82 +393,85 @@ const WorkspaceRail = ({
                 className={styles.iconButton}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setOpenMenuId((cur) => (cur === ws.id ? null : ws.id));
+                  const style = rowMenuStyle(e.currentTarget);
+                  setOpenMenu((cur) => (cur?.id === ws.id ? null : { id: ws.id, style }));
                 }}
                 title="More actions"
                 aria-label="More actions"
                 aria-haspopup="menu"
-                aria-expanded={openMenuId === ws.id}
+                aria-expanded={openMenu?.id === ws.id}
               >
                 ⋯
               </button>
             </span>
 
-            {openMenuId === ws.id && (
-              <>
-                <button
-                  type="button"
-                  className={styles.menuBackdrop}
-                  aria-hidden="true"
-                  tabIndex={-1}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setOpenMenuId(null);
-                  }}
-                />
-                <div className={styles.menu} role="menu">
+            {openMenu?.id === ws.id &&
+              ReactDOM.createPortal(
+                <>
                   <button
                     type="button"
-                    className={styles.menuItem}
-                    role="menuitem"
+                    className={styles.menuBackdrop}
+                    aria-hidden="true"
+                    tabIndex={-1}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setOpenMenuId(null);
-                      onToggleStar(ws.id, isStarred);
+                      setOpenMenu(null);
                     }}
-                  >
-                    {isStarred ? 'Unstar workspace' : 'Star workspace'}
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.menuItem}
-                    role="menuitem"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setOpenMenuId(null);
-                      onSettings(ws.id);
-                    }}
-                  >
-                    Settings
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.menuItem}
-                    role="menuitem"
-                    disabled={forkBusyId === ws.id}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setOpenMenuId(null);
-                      onFork(ws.id);
-                    }}
-                  >
-                    {forkBusyId === ws.id ? 'Forking…' : 'Fork workspace'}
-                  </button>
-                  <button
-                    type="button"
-                    className={`${styles.menuItem} ${styles.menuItemDanger}`}
-                    role="menuitem"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setOpenMenuId(null);
-                      onDelete(ws.id, ws.title);
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-              </>
-            )}
+                  />
+                  <div className={styles.menu} role="menu" style={openMenu.style}>
+                    <button
+                      type="button"
+                      className={styles.menuItem}
+                      role="menuitem"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenu(null);
+                        onToggleStar(ws.id, isStarred);
+                      }}
+                    >
+                      {isStarred ? 'Unstar workspace' : 'Star workspace'}
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.menuItem}
+                      role="menuitem"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenu(null);
+                        onSettings(ws.id);
+                      }}
+                    >
+                      Settings
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.menuItem}
+                      role="menuitem"
+                      disabled={forkBusyId === ws.id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenu(null);
+                        onFork(ws.id);
+                      }}
+                    >
+                      {forkBusyId === ws.id ? 'Forking…' : 'Fork workspace'}
+                    </button>
+                    <button
+                      type="button"
+                      className={`${styles.menuItem} ${styles.menuItemDanger}`}
+                      role="menuitem"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenu(null);
+                        onDelete(ws.id, ws.title);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </>,
+                document.body,
+              )}
           </>
         )}
       </div>

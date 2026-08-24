@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import WorkspaceRail from './WorkspaceRail';
@@ -141,6 +141,80 @@ describe('WorkspaceRail sections', () => {
     const menu = screen.getByRole('menu');
     await userEvent.click(within(menu).getByRole('menuitem', { name: 'Star workspace' }));
     expect(onToggleStar).toHaveBeenCalledWith('a', false);
+  });
+
+  // The row menu used to be positioned inside the row, which lives in the
+  // rail's scrolling list — on the bottom rows it was clipped out of view,
+  // so the workspace could not be deleted at all. These tests pin the
+  // portal and the upward flip that fixed it.
+  describe('overflow menu placement', () => {
+    const stubTriggerRect = (
+      trigger: HTMLElement,
+      rect: { top: number; bottom: number; right: number },
+    ) => {
+      vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+        ...rect,
+        left: rect.right - 24,
+        width: 24,
+        height: rect.bottom - rect.top,
+        x: rect.right - 24,
+        y: rect.top,
+        toJSON: () => ({}),
+      } as DOMRect);
+    };
+
+    const openMenuAt = async (rect: { top: number; bottom: number; right: number }) => {
+      const trigger = screen.getByRole('button', { name: 'More actions' });
+      stubTriggerRect(trigger, rect);
+      await userEvent.click(trigger);
+      return screen.getByRole('menu');
+    };
+
+    it('renders outside the rail so the scrolling list cannot clip it', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      const rail = screen.getByRole('navigation', { name: 'Workspaces' });
+      expect(rail.contains(menu)).toBe(false);
+      expect(document.body.contains(menu)).toBe(true);
+    });
+
+    it('drops below the trigger when there is room', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      // window.innerHeight is 768 in jsdom: 652px of room below is plenty.
+      expect(menu.style.top).toBe('120px');
+      expect(menu.style.bottom).toBe('');
+      // Right-aligned with the trigger (innerWidth 1024 − right edge 240).
+      expect(menu.style.right).toBe('784px');
+    });
+
+    it('flips above the trigger for a row near the bottom of the window', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const menu = await openMenuAt({ top: 744, bottom: 760, right: 240 });
+      // Only 8px below the trigger, so the menu hangs off its top edge.
+      expect(menu.style.bottom).toBe('28px');
+      expect(menu.style.top).toBe('');
+    });
+
+    it('closes on Escape', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('closes when the rail list scrolls out from under it', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      // A fixed menu cannot follow its row, so scrolling dismisses it.
+      // Scroll does not bubble, hence the capture-phase listener.
+      await act(async () => {
+        screen
+          .getByRole('navigation', { name: 'Workspaces' })
+          .dispatchEvent(new Event('scroll', { bubbles: false }));
+      });
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
   });
 
   it('filter searches across sections and hides emptied ones', async () => {

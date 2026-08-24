@@ -464,10 +464,11 @@
   cursor: default;
 }
 
+/* Portaled to document.body and positioned from JS (see `rowMenuStyle` in
+   WorkspaceRail.tsx): the rail list scrolls, so an in-row absolute menu was
+   clipped on the bottom rows. Only the offsets come from the inline style. */
 .menu {
-  position: absolute;
-  top: calc(100% - 4px);
-  right: 8px;
+  position: fixed;
   z-index: 41;
   min-width: 140px;
   background: var(--color-bg-elevated);
