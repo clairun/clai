@@ -298,11 +298,21 @@ describe('WorkspaceRail sections', () => {
       );
     });
 
-    it('closes when focus leaves the menu', async () => {
+    it('closes on Tab out of the menu, in either direction', async () => {
       renderRail([entry('a', 'Alpha')]);
-      await openMenuAt({ top: 100, bottom: 116, right: 240 });
-      // Tabbing out of a body-level portal would otherwise strand the menu
-      // behind its click-swallowing backdrop.
+      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      // The portal is the last thing in <body>, so tabbing through it walks
+      // out of the app and strands the menu behind its click-swallowing
+      // backdrop. Dismiss and hand focus back to the row instead.
+      within(menu).getByRole('menuitem', { name: 'Delete' }).focus();
+      await userEvent.tab();
+      expect(screen.queryByRole('menu')).toBeNull();
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'More actions' }),
+      );
+
+      const reopened = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      within(reopened).getByRole('menuitem', { name: 'Star workspace' }).focus();
       await userEvent.tab({ shift: true });
       expect(screen.queryByRole('menu')).toBeNull();
     });
@@ -356,6 +366,11 @@ describe('WorkspaceRail sections', () => {
       await userEvent.click(backdrop!);
       expect(screen.queryByRole('menu')).toBeNull();
       expect(onSelect).not.toHaveBeenCalled();
+      // The backdrop is a close path the user drove, so focus comes back
+      // rather than being stranded on <body>.
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'More actions' }),
+      );
     });
 
     it('ignores scrolling elsewhere in the app', async () => {

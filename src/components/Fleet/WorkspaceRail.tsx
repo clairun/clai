@@ -519,16 +519,15 @@ const WorkspaceRail = ({
                     role="menu"
                     ref={menuRef}
                     style={openMenu.style}
-                    onBlur={(e) => {
-                      // Tabbing out would otherwise leave the menu open
-                      // behind a full-viewport backdrop that swallows the
-                      // next click. A null `relatedTarget` (window blur, or
-                      // a click on something unfocusable) is not a Tab-out
-                      // and must not pre-empt a menu item's own click.
-                      const next = e.relatedTarget as Node | null;
-                      if (next && !e.currentTarget.contains(next)) {
-                        closeMenu(false);
-                      }
+                    onKeyDown={(e) => {
+                      // Tab out of a body-level portal would land nowhere
+                      // useful and leave the menu open behind its
+                      // click-swallowing backdrop. Dismiss instead, per the
+                      // ARIA menu-button pattern, and put focus back on the
+                      // trigger so the next Tab continues from the row.
+                      if (e.key !== 'Tab') return;
+                      e.preventDefault();
+                      closeMenu(true);
                     }}
                   >
                     <button
