@@ -40,35 +40,39 @@ const entry = (
 
 const noop = () => {};
 
+const rail = (
+  workspaces: WorkspaceListEntry[],
+  overrides: Partial<React.ComponentProps<typeof WorkspaceRail>> = {},
+) => (
+  <WorkspaceRail
+    workspaces={workspaces}
+    selectedId={null}
+    attentionCounts={{}}
+    activeRuns={{}}
+    collapsed={false}
+    onToggleCollapsed={noop}
+    onSelect={noop}
+    onCreate={noop}
+    onRunNow={noop}
+    onTogglePause={noop}
+    onToggleStar={noop}
+    onSettings={noop}
+    onFork={noop}
+    onDelete={noop}
+    runNowBusyId={null}
+    forkBusyId={null}
+    pauseBusyId={null}
+    schedulerPaused={false}
+    schedulerPauseBusy={false}
+    onToggleSchedulerPaused={noop}
+    {...overrides}
+  />
+);
+
 const renderRail = (
   workspaces: WorkspaceListEntry[],
   overrides: Partial<React.ComponentProps<typeof WorkspaceRail>> = {},
-) =>
-  render(
-    <WorkspaceRail
-      workspaces={workspaces}
-      selectedId={null}
-      attentionCounts={{}}
-      activeRuns={{}}
-      collapsed={false}
-      onToggleCollapsed={noop}
-      onSelect={noop}
-      onCreate={noop}
-      onRunNow={noop}
-      onTogglePause={noop}
-      onToggleStar={noop}
-      onSettings={noop}
-      onFork={noop}
-      onDelete={noop}
-      runNowBusyId={null}
-      forkBusyId={null}
-      pauseBusyId={null}
-      schedulerPaused={false}
-      schedulerPauseBusy={false}
-      onToggleSchedulerPaused={noop}
-      {...overrides}
-    />,
-  );
+) => render(rail(workspaces, overrides));
 
 describe('WorkspaceRail sections', () => {
   it('renders a plain headerless list when nothing is starred or in attention', () => {
@@ -215,29 +219,31 @@ describe('WorkspaceRail sections', () => {
     });
 
     it('re-anchors to its row when the list re-renders under it', async () => {
-      renderRail([entry('a', 'Alpha')]);
+      const view = renderRail([entry('a', 'Alpha')]);
       const trigger = screen.getByRole('button', { name: 'More actions' });
       stubTriggerRect(trigger, { top: 100, bottom: 116, right: 240 });
       await userEvent.click(trigger);
       expect(screen.getByRole('menu').style.top).toBe('120px');
-      // Sections reorder from props while the menu is open; here typing in
-      // the filter stands in for any re-render that moves the row.
+      // The 5s workspace poll hands down a fresh list every tick, which can
+      // re-sort the rows out from under an open menu.
       stubTriggerRect(trigger, { top: 300, bottom: 316, right: 240 });
-      await userEvent.type(
-        screen.getByRole('textbox', { name: 'Filter workspaces by name' }),
-        'al',
-      );
+      await act(async () => {
+        view.rerender(rail([entry('a', 'Alpha', { updatedAt: 2n })]));
+      });
       expect(screen.getByRole('menu').style.top).toBe('320px');
     });
 
     it('forgets a menu whose row leaves the list', async () => {
-      renderRail([entry('a', 'Alpha')]);
+      const view = renderRail([entry('a', 'Alpha')]);
       await openMenuAt({ top: 100, bottom: 116, right: 240 });
-      const filter = screen.getByRole('textbox', { name: 'Filter workspaces by name' });
-      await userEvent.type(filter, 'zzz');
+      await act(async () => {
+        view.rerender(rail([]));
+      });
       expect(screen.queryByRole('menu')).toBeNull();
       // Reappearing rows must not bring a stale menu back with them.
-      await userEvent.clear(filter);
+      await act(async () => {
+        view.rerender(rail([entry('a', 'Alpha')]));
+      });
       expect(screen.getByText('Alpha')).toBeTruthy();
       expect(screen.queryByRole('menu')).toBeNull();
     });
@@ -257,18 +263,48 @@ describe('WorkspaceRail sections', () => {
     });
 
     it('holds its position when the trigger cannot be measured', async () => {
-      renderRail([entry('a', 'Alpha')]);
+      const view = renderRail([entry('a', 'Alpha')]);
       const trigger = screen.getByRole('button', { name: 'More actions' });
       stubTriggerRect(trigger, { top: 100, bottom: 116, right: 240 });
       await userEvent.click(trigger);
       // A hidden trigger measures zero; re-anchoring to that would fling the
       // menu into the viewport corner.
       stubTriggerRect(trigger, { top: 0, bottom: 0, right: 0, width: 0 });
-      await userEvent.type(
-        screen.getByRole('textbox', { name: 'Filter workspaces by name' }),
-        'al',
-      );
+      await act(async () => {
+        view.rerender(rail([entry('a', 'Alpha', { updatedAt: 2n })]));
+      });
       expect(screen.getByRole('menu').style.top).toBe('120px');
+    });
+
+    it('does not select the workspace when a menu item is activated by keyboard', async () => {
+      const onSelect = vi.fn();
+      const onSettings = vi.fn();
+      renderRail([entry('a', 'Alpha')], { onSelect, onSettings });
+      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      within(menu).getByRole('menuitem', { name: 'Settings' }).focus();
+      // Keydowns bubble through the React tree out of the portal, so the
+      // row's own Enter handler must ignore keys it did not receive.
+      await userEvent.keyboard('{Enter}');
+      expect(onSettings).toHaveBeenCalledWith('a');
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('returns focus to the trigger when an item is activated', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      const menu = await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      await userEvent.click(within(menu).getByRole('menuitem', { name: 'Star workspace' }));
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'More actions' }),
+      );
+    });
+
+    it('closes when focus leaves the menu', async () => {
+      renderRail([entry('a', 'Alpha')]);
+      await openMenuAt({ top: 100, bottom: 116, right: 240 });
+      // Tabbing out of a body-level portal would otherwise strand the menu
+      // behind its click-swallowing backdrop.
+      await userEvent.tab({ shift: true });
+      expect(screen.queryByRole('menu')).toBeNull();
     });
 
     it('closes on a window resize', async () => {

@@ -1,4 +1,11 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import ReactDOM from 'react-dom';
 import type { WorkspaceListEntry } from '../../generated/bindings';
 import {
@@ -90,10 +97,12 @@ const StarIcon = ({ filled }: { filled: boolean }) => (
 );
 
 /** Height reserved for the per-row ⋯ menu when deciding whether it fits
- *  below the trigger. The menu measures ~128px (four ~30px items plus 4px
- *  of padding at each end); the extra flips it up slightly early, which
- *  costs nothing because the flip only ever picks the roomier side. */
-const ROW_MENU_HEIGHT = 136;
+ *  below the trigger. Four items of 32px (12px text at line-height 1.5,
+ *  plus 7px padding top and bottom), three 1px gaps, 4px of padding at each
+ *  end and a 1px border each side ≈ 141px. Rounded up so the flip triggers
+ *  a hair early, which costs nothing: it only ever picks the roomier side.
+ *  Drift here is bounded — `maxHeight` caps the menu either way. */
+const ROW_MENU_HEIGHT = 144;
 const ROW_MENU_GAP = 4;
 /** Minimum margin kept between the menu and the viewport edges. */
 const ROW_MENU_MARGIN = 8;
@@ -199,6 +208,16 @@ const WorkspaceRail = ({
   const menuTriggerRef = useRef<HTMLElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const openMenuId = openMenu?.id ?? null;
+
+  // Opening the menu takes focus off the row, so every close the user drove
+  // hands it back to the ⋯ trigger — otherwise focus is stranded on <body>
+  // and the next Tab restarts from the top of the document. Focus first,
+  // then close: while the menu is open the row keeps its actions laid out,
+  // so the trigger is still focusable at this point.
+  const closeMenu = useCallback((restoreFocus: boolean) => {
+    if (restoreFocus) menuTriggerRef.current?.focus();
+    setOpenMenu(null);
+  }, []);
   const [query, setQuery] = useState('');
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
@@ -217,11 +236,10 @@ const WorkspaceRail = ({
   // Escape, which the click-away backdrop cannot cover for keyboard users.
   useEffect(() => {
     if (!openMenuId) return;
-    const close = () => setOpenMenu(null);
+    const close = () => closeMenu(false);
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      close();
-      menuTriggerRef.current?.focus();
+      closeMenu(true);
     };
     // Capture, because scroll does not bubble — but only scrollers that
     // actually carry the trigger count. The app scrolls other panes
@@ -244,7 +262,7 @@ const WorkspaceRail = ({
       window.removeEventListener('resize', close);
       window.removeEventListener('scroll', onScroll, true);
     };
-  }, [openMenuId]);
+  }, [openMenuId, closeMenu]);
 
   // Pure recency sort — grouping happens per-section below.
   const sorted = useMemo(
@@ -331,6 +349,10 @@ const WorkspaceRail = ({
         role="button"
         tabIndex={0}
         onKeyDown={(e) => {
+          // The ⋯ menu is portaled, but portals still bubble through the
+          // React tree — so Enter on a menu item (or on any row button)
+          // would select the workspace as well as run the action.
+          if (e.target !== e.currentTarget) return;
           if (e.key === 'Enter') onSelect(ws.id);
         }}
         onDragOver={(e) => {
@@ -462,12 +484,13 @@ const WorkspaceRail = ({
                 className={styles.iconButton}
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (openMenu?.id === ws.id) {
+                    setOpenMenu(null);
+                    return;
+                  }
                   const trigger = e.currentTarget;
-                  setOpenMenu((cur) => {
-                    if (cur?.id === ws.id) return null;
-                    menuTriggerRef.current = trigger;
-                    return { id: ws.id, style: rowMenuStyle(trigger) };
-                  });
+                  menuTriggerRef.current = trigger;
+                  setOpenMenu({ id: ws.id, style: rowMenuStyle(trigger) });
                 }}
                 title="More actions"
                 aria-label="More actions"
@@ -488,7 +511,7 @@ const WorkspaceRail = ({
                     tabIndex={-1}
                     onClick={(e) => {
                       e.stopPropagation();
-                      setOpenMenu(null);
+                      closeMenu(true);
                     }}
                   />
                   <div
@@ -496,6 +519,17 @@ const WorkspaceRail = ({
                     role="menu"
                     ref={menuRef}
                     style={openMenu.style}
+                    onBlur={(e) => {
+                      // Tabbing out would otherwise leave the menu open
+                      // behind a full-viewport backdrop that swallows the
+                      // next click. A null `relatedTarget` (window blur, or
+                      // a click on something unfocusable) is not a Tab-out
+                      // and must not pre-empt a menu item's own click.
+                      const next = e.relatedTarget as Node | null;
+                      if (next && !e.currentTarget.contains(next)) {
+                        closeMenu(false);
+                      }
+                    }}
                   >
                     <button
                       type="button"
@@ -503,7 +537,7 @@ const WorkspaceRail = ({
                       role="menuitem"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setOpenMenu(null);
+                        closeMenu(true);
                         onToggleStar(ws.id, isStarred);
                       }}
                     >
@@ -515,7 +549,7 @@ const WorkspaceRail = ({
                       role="menuitem"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setOpenMenu(null);
+                        closeMenu(true);
                         onSettings(ws.id);
                       }}
                     >
@@ -528,7 +562,7 @@ const WorkspaceRail = ({
                       disabled={forkBusyId === ws.id}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setOpenMenu(null);
+                        closeMenu(true);
                         onFork(ws.id);
                       }}
                     >
@@ -540,7 +574,7 @@ const WorkspaceRail = ({
                       role="menuitem"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setOpenMenu(null);
+                        closeMenu(true);
                         onDelete(ws.id, ws.title);
                       }}
                     >
