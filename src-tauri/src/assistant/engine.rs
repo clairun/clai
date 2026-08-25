@@ -9,16 +9,17 @@ use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
 use crate::assistant::repository;
-use crate::assistant::repository::{CreateMessageParams, CreateToolCallParams};
+use crate::assistant::repository::CreateMessageParams;
 use crate::assistant::run_lifecycle::{
-    cancel_run, complete_run_with_notices, fail_run, resolve_run_id,
+    cancel_run, complete_run_with_notices, fail_run, record_tool_call_result,
+    record_tool_call_started, resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
 use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
     AssistantMessage, CompactionTrigger, CompletionRequest, ContentPart, MessageRole,
     ProviderEvent, ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId,
-    ToolCallStatus, ToolInvocationDraft,
+    ToolInvocationDraft,
 };
 use crate::db::DbPool;
 use crate::AppState;
@@ -641,27 +642,15 @@ pub async fn run_session_turn(
             }
 
             // Persist tool call
-            let tool_invocation = repository::create_tool_call(
-                &deps.pool,
-                CreateToolCallParams {
-                    id: tc.tool_call_id.clone(),
-                    run_id: run_id.clone(),
-                    session_id: session.id.clone(),
-                    tool_name: tc.tool_name.clone(),
-                    params: tc.params.clone(),
-                    status: ToolCallStatus::Running,
-                },
+            record_tool_call_started(
+                deps,
+                &session,
+                &run_id,
+                &tc.tool_call_id,
+                &tc.tool_name,
+                tc.params.clone(),
             )
             .await?;
-
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&run_id),
-                AssistantUiEvent::ToolCallStarted {
-                    tool_call: tool_invocation.clone(),
-                },
-            );
 
             // Execute the tool
             let tool_context = ToolExecutionContext {
@@ -697,90 +686,25 @@ pub async fn run_session_turn(
                 ) => result,
             };
 
-            match tool_result {
-                Ok(result) => {
-                    let updated = repository::update_tool_call(
-                        &deps.pool,
-                        &tool_invocation.id,
-                        ToolCallStatus::Completed,
-                        Some(&result),
-                        None,
-                    )
-                    .await?;
-                    let tool_started_at = updated.started_at;
-                    let tool_completed_at = updated.completed_at;
-
-                    let _ = emit_event(
-                        &deps.app,
-                        &session,
-                        Some(&run_id),
-                        AssistantUiEvent::ToolCallCompleted { tool_call: updated },
-                    );
-
-                    // Persist tool result as a message
-                    let result_message = repository::create_message(
-                        &deps.pool,
-                        CreateMessageParams {
-                            session_id: session.id.clone(),
-                            role: MessageRole::Tool,
-                            content: vec![ContentPart::ToolResult {
-                                tool_call_id: tc.tool_call_id.clone(),
-                                payload: result,
-                                started_at: Some(tool_started_at),
-                                completed_at: tool_completed_at,
-                            }],
-                            provider_metadata: None,
-                        },
-                    )
-                    .await?;
-
-                    let _ = emit_event(
-                        &deps.app,
-                        &session,
-                        Some(&run_id),
-                        AssistantUiEvent::MessageCreated {
-                            message: result_message,
-                        },
-                    );
-                }
-                Err(error) => {
-                    let updated = repository::update_tool_call(
-                        &deps.pool,
-                        &tool_invocation.id,
-                        ToolCallStatus::Failed,
-                        None,
-                        Some(&error),
-                    )
-                    .await?;
-                    let tool_started_at = updated.started_at;
-                    let tool_completed_at = updated.completed_at;
-
-                    let _ = emit_event(
-                        &deps.app,
-                        &session,
-                        Some(&run_id),
-                        AssistantUiEvent::ToolCallFailed { tool_call: updated },
-                    );
-
-                    // Still persist the error as a tool result so the API can see it
-                    let error_payload = serde_json::json!({"error": error});
-                    repository::create_message(
-                        &deps.pool,
-                        CreateMessageParams {
-                            session_id: session.id.clone(),
-                            role: MessageRole::Tool,
-                            content: vec![ContentPart::ToolResult {
-                                tool_call_id: tc.tool_call_id.clone(),
-                                payload: error_payload,
-                                started_at: Some(tool_started_at),
-                                completed_at: tool_completed_at,
-                            }],
-                            provider_metadata: None,
-                        },
-                    )
-                    .await?;
-                }
-            }
+            // A failed tool still gets its result persisted, so the provider
+            // sees why the call failed on the next request.
+            let outcome = match tool_result {
+                Ok(result) => ToolCallOutcome::Completed { payload: result },
+                Err(ref error) => ToolCallOutcome::Failed {
+                    payload: serde_json::json!({ "error": error }),
+                    error: Some(error.as_str()),
+                },
+            };
+            record_tool_call_result(
+                deps,
+                &session,
+                &run_id,
+                &tc.tool_call_id,
+                outcome,
+                None,
+                MissingToolCall::Propagate,
+            )
+            .await?;
         }
 
         // Continue loop — will call API again with tool results in message history.

@@ -22,15 +22,16 @@ use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::{
     CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
 };
-use crate::assistant::repository::{self, CreateMessageParams, CreateToolCallParams};
+use crate::assistant::repository::{self, CreateMessageParams};
 use crate::assistant::run_lifecycle::{
-    cancel_run, complete_run_with_notices, fail_run, resolve_run_id,
+    cancel_run, complete_run_with_notices, fail_run, record_tool_call_result,
+    record_tool_call_started, resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
 use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
-    ProviderConnection, ProviderInputMessage, RunNotice, RunStatus, RunUsage, ToolCallStatus,
+    ProviderConnection, ProviderInputMessage, RunNotice, RunStatus, RunUsage,
 };
 use crate::AppState;
 
@@ -3541,28 +3542,16 @@ async fn persist_opencode_tool_use_and_result(
     let tool_call_id = opencode_tool_call_id(run_id, &raw_part_id);
     let tool_name = opencode_tool_name(part);
     let params = opencode_tool_arguments(part);
-    let invocation = repository::create_tool_call(
-        &deps.pool,
-        CreateToolCallParams {
-            id: tool_call_id.clone(),
-            run_id: run_id.to_string(),
-            session_id: session.id.clone(),
-            tool_name: tool_name.clone(),
-            params: params.clone(),
-            status: ToolCallStatus::Running,
-        },
+    record_tool_call_started(
+        deps,
+        session,
+        run_id,
+        &tool_call_id,
+        &tool_name,
+        params.clone(),
     )
     .await
     .map_err(LocalAgentRunError::failed)?;
-
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::ToolCallStarted {
-            tool_call: invocation,
-        },
-    );
 
     state.parts.push(ContentPart::ToolUse {
         tool_call_id: tool_call_id.clone(),
@@ -3600,65 +3589,25 @@ async fn apply_opencode_tool_result(
         opencode_tool_result_payload(part)
     };
 
-    let updated = match repository::update_tool_call(
-        &deps.pool,
-        tool_call_id,
-        if is_error {
-            ToolCallStatus::Failed
-        } else {
-            ToolCallStatus::Completed
-        },
-        (!is_error).then_some(&payload),
-        error_text.as_deref(),
-    )
-    .await
-    {
-        Ok(tc) => tc,
-        Err(err) => {
-            tracing::warn!(
-                tool_call_id = %tool_call_id,
-                error = %err,
-                "OpenCode tool update failed even after tool_use was registered"
-            );
-            return Ok(());
+    let outcome = if is_error {
+        ToolCallOutcome::Failed {
+            payload,
+            error: error_text.as_deref(),
         }
-    };
-
-    let started_at = updated.started_at;
-    let completed_at = updated.completed_at;
-    let ui_event = if is_error {
-        AssistantUiEvent::ToolCallFailed { tool_call: updated }
     } else {
-        AssistantUiEvent::ToolCallCompleted { tool_call: updated }
+        ToolCallOutcome::Completed { payload }
     };
-    let _ = emit_event(&deps.app, session, Some(run_id), ui_event);
 
-    let result_message = repository::create_message(
-        &deps.pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::Tool,
-            content: vec![ContentPart::ToolResult {
-                tool_call_id: tool_call_id.to_string(),
-                payload,
-                started_at: Some(started_at),
-                completed_at,
-            }],
-            provider_metadata: Some(serde_json::json!({
-                "source": CliProviderRuntime::OpenCode.metadata_source(),
-            })),
-        },
+    record_tool_call_result(
+        deps,
+        session,
+        run_id,
+        tool_call_id,
+        outcome,
+        Some(CliProviderRuntime::OpenCode.metadata_source()),
+        MissingToolCall::SkipQuietly,
     )
     .await?;
-
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::MessageCreated {
-            message: result_message,
-        },
-    );
 
     Ok(())
 }
@@ -4025,28 +3974,16 @@ async fn persist_codex_mcp_tool_use(
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let invocation = repository::create_tool_call(
-        &deps.pool,
-        CreateToolCallParams {
-            id: tool_call_id.clone(),
-            run_id: run_id.to_string(),
-            session_id: session.id.clone(),
-            tool_name: tool_name.clone(),
-            params: params.clone(),
-            status: ToolCallStatus::Running,
-        },
+    record_tool_call_started(
+        deps,
+        session,
+        run_id,
+        &tool_call_id,
+        &tool_name,
+        params.clone(),
     )
     .await
     .map_err(LocalAgentRunError::failed)?;
-
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::ToolCallStarted {
-            tool_call: invocation,
-        },
-    );
 
     state.parts.push(ContentPart::ToolUse {
         tool_call_id: tool_call_id.clone(),
@@ -4092,65 +4029,25 @@ async fn apply_codex_mcp_tool_result(
         codex_mcp_result_payload(item.get("result"))
     };
 
-    let updated = match repository::update_tool_call(
-        &deps.pool,
-        &tool_call_id,
-        if is_error {
-            ToolCallStatus::Failed
-        } else {
-            ToolCallStatus::Completed
-        },
-        (!is_error).then_some(&payload),
-        error_text.as_deref(),
-    )
-    .await
-    {
-        Ok(tc) => tc,
-        Err(err) => {
-            tracing::warn!(
-                tool_call_id = %tool_call_id,
-                error = %err,
-                "Codex MCP tool update failed even after tool_use was registered"
-            );
-            return Ok(());
+    let outcome = if is_error {
+        ToolCallOutcome::Failed {
+            payload,
+            error: error_text.as_deref(),
         }
-    };
-
-    let started_at = updated.started_at;
-    let completed_at = updated.completed_at;
-    let ui_event = if is_error {
-        AssistantUiEvent::ToolCallFailed { tool_call: updated }
     } else {
-        AssistantUiEvent::ToolCallCompleted { tool_call: updated }
+        ToolCallOutcome::Completed { payload }
     };
-    let _ = emit_event(&deps.app, session, Some(run_id), ui_event);
 
-    let result_message = repository::create_message(
-        &deps.pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::Tool,
-            content: vec![ContentPart::ToolResult {
-                tool_call_id,
-                payload,
-                started_at: Some(started_at),
-                completed_at,
-            }],
-            provider_metadata: Some(serde_json::json!({
-                "source": CliProviderRuntime::Codex.metadata_source(),
-            })),
-        },
+    record_tool_call_result(
+        deps,
+        session,
+        run_id,
+        &tool_call_id,
+        outcome,
+        Some(CliProviderRuntime::Codex.metadata_source()),
+        MissingToolCall::SkipQuietly,
     )
     .await?;
-
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::MessageCreated {
-            message: result_message,
-        },
-    );
     Ok(())
 }
 
@@ -4675,28 +4572,16 @@ async fn persist_tool_use(
     // provider (after a provider switch) to mimic the qualified names,
     // which used to fail dispatch with "not allowed for this session".
     let tool_name = strip_local_mcp_qualifier(tool_name);
-    let invocation = repository::create_tool_call(
-        &deps.pool,
-        CreateToolCallParams {
-            id: tool_call_id.to_string(),
-            run_id: run_id.to_string(),
-            session_id: session.id.clone(),
-            tool_name: tool_name.to_string(),
-            params: params.clone(),
-            status: ToolCallStatus::Running,
-        },
+    record_tool_call_started(
+        deps,
+        session,
+        run_id,
+        tool_call_id,
+        tool_name,
+        params.clone(),
     )
     .await
     .map_err(LocalAgentRunError::failed)?;
-
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::ToolCallStarted {
-            tool_call: invocation,
-        },
-    );
 
     state.parts.push(ContentPart::ToolUse {
         tool_call_id: tool_call_id.to_string(),
@@ -4846,7 +4731,7 @@ async fn adopt_complete_assistant_message(
 /// Update the persisted tool_call record from a `tool_result` block,
 /// emit the matching `ToolCallCompleted` / `ToolCallFailed` UI event,
 /// and create the Tool-role message whose `ContentPart::ToolResult`
-/// carries the payload the chat UI renders.
+/// carries the payload back to the provider on the next request.
 async fn apply_tool_result(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -4860,70 +4745,31 @@ async fn apply_tool_result(
         .unwrap_or(false);
     let payload = block.get("content").cloned().unwrap_or(Value::Null);
 
-    let (status, result_arg, error_arg) = if is_error {
-        let error_text = extract_text_from_tool_result(&payload)
-            .unwrap_or_else(|| "Tool execution failed".to_string());
-        (ToolCallStatus::Failed, None, Some(error_text))
-    } else {
-        (ToolCallStatus::Completed, Some(payload.clone()), None)
-    };
-
-    let updated = match repository::update_tool_call(
-        &deps.pool,
-        tool_use_id,
-        status.clone(),
-        result_arg.as_ref(),
-        error_arg.as_deref(),
-    )
-    .await
-    {
-        Ok(tc) => tc,
-        Err(err) => {
-            tracing::warn!(
-                tool_use_id = %tool_use_id,
-                error = %err,
-                "Claude tool_result update failed even after tool_use was registered"
-            );
-            return Ok(());
+    // Claude reports the reason inside the result block itself, so the error
+    // string is extracted from the same payload the chat will render.
+    let error_text = is_error.then(|| {
+        extract_text_from_tool_result(&payload)
+            .unwrap_or_else(|| "Tool execution failed".to_string())
+    });
+    let outcome = if is_error {
+        ToolCallOutcome::Failed {
+            payload,
+            error: error_text.as_deref(),
         }
-    };
-
-    let started_at = updated.started_at;
-    let completed_at = updated.completed_at;
-
-    let ui_event = if is_error {
-        AssistantUiEvent::ToolCallFailed { tool_call: updated }
     } else {
-        AssistantUiEvent::ToolCallCompleted { tool_call: updated }
+        ToolCallOutcome::Completed { payload }
     };
-    let _ = emit_event(&deps.app, session, Some(run_id), ui_event);
 
-    let result_message = repository::create_message(
-        &deps.pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::Tool,
-            content: vec![ContentPart::ToolResult {
-                tool_call_id: tool_use_id.to_string(),
-                payload,
-                started_at: Some(started_at),
-                completed_at,
-            }],
-            provider_metadata: Some(serde_json::json!({
-                "source": "claude-code",
-            })),
-        },
+    record_tool_call_result(
+        deps,
+        session,
+        run_id,
+        tool_use_id,
+        outcome,
+        Some(CliProviderRuntime::ClaudeCode.metadata_source()),
+        MissingToolCall::SkipQuietly,
     )
     .await?;
-
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::MessageCreated {
-            message: result_message,
-        },
-    );
 
     Ok(())
 }
