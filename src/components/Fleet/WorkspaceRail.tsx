@@ -14,6 +14,10 @@ import {
   formatScheduleLabel,
   num,
 } from '../../fleet/workspaceStatus';
+import {
+  fixedRightAlignedMenuStyle,
+  sameFloatingMenuStyle,
+} from '../../utils/floatingMenu';
 import styles from './WorkspaceRail.module.css';
 
 interface WorkspaceRailProps {
@@ -125,35 +129,13 @@ const ROW_MENU_MIN_WIDTH = 140;
  * ends up on so a short window scrolls the menu instead of cutting it off.
  */
 const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
-  const rect = trigger.getBoundingClientRect();
-  const spaceBelow = window.innerHeight - rect.bottom;
-  const flipUp = spaceBelow < ROW_MENU_HEIGHT && rect.top > spaceBelow;
-  const right = Math.min(
-    Math.max(window.innerWidth - rect.right, ROW_MENU_MARGIN),
-    Math.max(window.innerWidth - ROW_MENU_MIN_WIDTH - ROW_MENU_MARGIN, ROW_MENU_MARGIN),
-  );
-  // The flip picks the roomier side, so this only bites in a window too
-  // short for the menu either way — then `.menu` scrolls internally.
-  const maxHeight = Math.max(
-    (flipUp ? rect.top : spaceBelow) - ROW_MENU_GAP - ROW_MENU_MARGIN,
-    0,
-  );
-  return {
-    position: 'fixed',
-    right,
-    maxHeight,
-    ...(flipUp
-      ? { bottom: window.innerHeight - rect.top + ROW_MENU_GAP }
-      : { top: rect.bottom + ROW_MENU_GAP }),
-  };
+  return fixedRightAlignedMenuStyle(trigger, {
+    estimatedHeight: ROW_MENU_HEIGHT,
+    gap: ROW_MENU_GAP,
+    margin: ROW_MENU_MARGIN,
+    minWidth: ROW_MENU_MIN_WIDTH,
+  });
 };
-
-/** True when two computed menu positions place the menu identically. */
-const sameMenuStyle = (a: React.CSSProperties, b: React.CSSProperties): boolean =>
-  a.top === b.top &&
-  a.bottom === b.bottom &&
-  a.right === b.right &&
-  a.maxHeight === b.maxHeight;
 
 /**
  * Persistent left navigator for the unified Fleet/Workspace view. Lists
@@ -323,7 +305,7 @@ const WorkspaceRail = ({
     const rect = trigger.getBoundingClientRect();
     if (!rect.width && !rect.height) return;
     const style = rowMenuStyle(trigger);
-    if (!sameMenuStyle(style, openMenu.style)) {
+    if (!sameFloatingMenuStyle(style, openMenu.style)) {
       setOpenMenu({ id: openMenu.id, style });
     }
   }, [openMenu, sections, collapsed]);
