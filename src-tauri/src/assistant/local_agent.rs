@@ -3730,6 +3730,37 @@ fn accumulate_turn_usage(total: &mut Option<RunUsage>, next: RunUsage) {
     }
 }
 
+/// Apply (or skip) the usage snapshot carried by a streamed Anthropic event.
+///
+/// Claude Code emits both per-message snapshots (`message_start` carries
+/// the prompt preview with `output_tokens == 1`; `message_delta` carries
+/// the cumulative `output_tokens` for the in-flight message) and a final
+/// per-turn report on `result`. The per-message snapshots are NOT
+/// per-turn totals and are not surfaced live to the UI (only the run
+/// completion event carries `usage` to the frontend), so folding them
+/// in here would:
+///   1. clobber any prior accumulated turn total (replacing the
+///      `Option`),
+///   2. double-count the current turn once the matching `result` event
+///      later calls `accumulate_turn_usage` on top.
+///
+/// Both reproduced on multi-turn Claude Code runs against issue #177's
+/// token accounting. The fix is to ignore the per-message snapshots
+/// here and keep the `result` event as the sole authority. This helper
+/// exists so the dispatch is testable without an `AppHandle`;
+/// `handle_stream_event` delegates to it and the unit tests in this
+/// module lock the behavior in.
+fn apply_claude_stream_event_usage(usage: &mut Option<RunUsage>, event: &Value) {
+    let event_type = event.get("type").and_then(Value::as_str);
+    match event_type {
+        Some("message_start") | Some("message_delta") => {
+            // Intentionally a no-op: see the doc comment above.
+            let _ = (usage, event);
+        }
+        _ => {}
+    }
+}
+
 fn opencode_error_message(value: &Value) -> String {
     value
         .get("error")
@@ -4493,14 +4524,14 @@ async fn handle_stream_event(
                 }
             }
         }
+        // Per-message `message_start`/`message_delta` usage payloads from
+        // the Anthropic wire format are intentionally dropped from the run
+        // total — see `apply_claude_stream_event_usage` for the rationale
+        // and the unit tests that lock the behavior in. The `result`
+        // event is the sole authority on per-turn usage; see
+        // `handle_claude_event`'s `Some("result")` arm.
         Some("message_start") | Some("message_delta") => {
-            if let Some(parsed) = usage_from_value(
-                event
-                    .get("usage")
-                    .or_else(|| event.get("message").and_then(|m| m.get("usage"))),
-            ) {
-                *usage = Some(parsed);
-            }
+            apply_claude_stream_event_usage(usage, event);
         }
         _ => {}
     }
@@ -5887,6 +5918,172 @@ mod tests {
         })))
         .expect("claude usage");
         assert_eq!(claude.total_tokens, Some(15));
+    }
+
+    // -----------------------------------------------------------------
+    // Claude Code per-message usage snapshots must NOT clobber the run
+    // total. See `apply_claude_stream_event_usage` for the rationale.
+    // These tests lock the behavior in; if the dispatcher ever starts
+    // writing the per-message `message_start`/`message_delta` snapshots
+    // back into the shared `usage` slot, all four tests will fail.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn stream_message_start_does_not_touch_the_run_total() {
+        // Anthropic's wire format sends a prompt preview on `message_start`
+        // with `output_tokens == 1` and the real input_tokens for the
+        // upcoming message. Writing that into the shared `usage` slot
+        // would clobber any prior accumulated turn total — see
+        // `claude_two_turn_total_survives_message_snapshots` below for
+        // the multi-turn symptom this single-turn test guards.
+        let event = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 4120,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 11000
+                }
+            }
+        });
+        let mut total: Option<RunUsage> = None;
+        apply_claude_stream_event_usage(&mut total, &event);
+        assert!(
+            total.is_none(),
+            "message_start must not install a per-message preview into the run total"
+        );
+    }
+
+    #[test]
+    fn stream_message_delta_does_not_touch_the_run_total() {
+        // `message_delta` carries the cumulative `output_tokens` for the
+        // in-flight message — not the per-turn total. Writing it here
+        // would clobber any prior accumulated turn total AND set up a
+        // double-count once the matching `result` event later calls
+        // `accumulate_turn_usage` on top.
+        let event = serde_json::json!({
+            "type": "message_delta",
+            "usage": {
+                "input_tokens": 4120,
+                "output_tokens": 487
+            }
+        });
+        // Seed the run total as if turn 1 had already been folded in.
+        let mut total = Some(RunUsage {
+            input_tokens: Some(3300),
+            output_tokens: Some(220),
+            reasoning_tokens: None,
+            total_tokens: Some(3520),
+        });
+        apply_claude_stream_event_usage(&mut total, &event);
+        let after = total.expect("prior total must survive a message_delta");
+        assert_eq!(after.input_tokens, Some(3300));
+        assert_eq!(after.output_tokens, Some(220));
+        assert_eq!(after.total_tokens, Some(3520));
+    }
+
+    #[test]
+    fn stream_unknown_event_types_are_ignored() {
+        // Defensive: the dispatcher is invoked from a `match` arm, so
+        // the helper only ever sees `message_start`/`message_delta` in
+        // production. A test for any other event type guards against
+        // future call-site refactors that pass the raw event in without
+        // re-matching.
+        let mut total = Some(RunUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            reasoning_tokens: None,
+            total_tokens: Some(15),
+        });
+        for event_type in [
+            "content_block_start",
+            "content_block_delta",
+            "ping",
+            "error",
+        ] {
+            let event = serde_json::json!({
+                "type": event_type,
+                "usage": {"input_tokens": 9999, "output_tokens": 9999}
+            });
+            apply_claude_stream_event_usage(&mut total, &event);
+        }
+        let after = total.expect("total survives unrelated event types");
+        assert_eq!(after.input_tokens, Some(10));
+        assert_eq!(after.output_tokens, Some(5));
+        assert_eq!(after.total_tokens, Some(15));
+    }
+
+    #[test]
+    fn claude_two_turn_total_survives_message_snapshots() {
+        // The bug this test guards: a multi-turn run with the OLD
+        // dispatcher saw the per-message snapshot replace the previously
+        // accumulated turn total (losing turn 1) and then the matching
+        // `result` event called `accumulate_turn_usage` on top of the
+        // clobbered value (double-counting turn 2). The persisted
+        // `usage_json` ended up equal to just turn 2's `result` payload
+        // — i.e. turn 1 was silently dropped from the ledger.
+        //
+        // Drive the same dispatcher `handle_claude_event` uses (call
+        // `accumulate_turn_usage` on every `result` event) and the same
+        // helper `handle_stream_event` uses for per-message snapshots.
+        // The final total must equal the sum over the two `result`
+        // payloads, period.
+        let mut total: Option<RunUsage> = None;
+
+        // --- Turn 1 ---
+        apply_claude_stream_event_usage(
+            &mut total,
+            &serde_json::json!({
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 4120, "output_tokens": 1}}
+            }),
+        );
+        apply_claude_stream_event_usage(
+            &mut total,
+            &serde_json::json!({
+                "type": "message_delta",
+                "usage": {"input_tokens": 4120, "output_tokens": 220}
+            }),
+        );
+        let turn1 = usage_from_value(Some(&serde_json::json!({
+            "input_tokens": 4120,
+            "output_tokens": 220,
+            "cache_read_input_tokens": 11000
+        })))
+        .expect("turn 1 usage");
+        accumulate_turn_usage(&mut total, turn1);
+
+        // --- Turn 2 ---
+        // These are the events whose pre-fix behavior would clobber
+        // turn 1's accumulated total.
+        apply_claude_stream_event_usage(
+            &mut total,
+            &serde_json::json!({
+                "type": "message_start",
+                "message": {"usage": {"input_tokens": 5400, "output_tokens": 1}}
+            }),
+        );
+        apply_claude_stream_event_usage(
+            &mut total,
+            &serde_json::json!({
+                "type": "message_delta",
+                "usage": {"input_tokens": 5400, "output_tokens": 487}
+            }),
+        );
+        let turn2 = usage_from_value(Some(&serde_json::json!({
+            "input_tokens": 5400,
+            "output_tokens": 487,
+            "cache_read_input_tokens": 300
+        })))
+        .expect("turn 2 usage");
+        accumulate_turn_usage(&mut total, turn2);
+
+        // After both turns, the run total must reflect both turns.
+        let final_total = total.expect("two turns must produce a total");
+        assert_eq!(final_total.input_tokens, Some(4120 + 5400));
+        assert_eq!(final_total.output_tokens, Some(220 + 487));
+        // 4120 + 220 + 5400 + 487 = 10227.
+        assert_eq!(final_total.total_tokens, Some(4120 + 220 + 5400 + 487));
     }
 
     // -----------------------------------------------------------------
