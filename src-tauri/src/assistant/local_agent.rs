@@ -2101,9 +2101,25 @@ async fn handle_app_server_notification(
             }
         }
         "thread/tokenUsage/updated" => {
-            if let Some(parsed) = run_usage_from_app_server(params.get("tokenUsage")) {
-                *usage = Some(parsed);
-            }
+            // `thread/tokenUsage/updated` carries a `ThreadTokenUsage` shape
+            // (`{ total, last, modelContextWindow }`). `total` is the thread
+            // lifetime cumulative total (monotone-increasing across turns of
+            // the same Codex thread); `last` is the delta for the most recent
+            // upstream API request. A single in-flight turn emits one such
+            // notification per model request — the run total must be the
+            // sum of those `last` deltas, never a wholesale assign of
+            // `total`. Wholesale assignment clobbers two ways at once:
+            //   1. multi-notification-per-turn writes lose the per-request
+            //      increment from the earlier notifications,
+            //   2. on a resumed thread (`existing_thread_id` was
+            //      non-None on entry to `run_codex_turn_app_server`), the
+            //      very first notification already carries every token
+            //      previous turns of this Codex thread ever spent, so the
+            //      run ledger would attribute the entire thread's
+            //      history to the current run.
+            // The dispatch lives in `apply_codex_app_server_usage` so it
+            // can be unit-tested without an `AppHandle`.
+            apply_codex_app_server_usage(usage, params.get("tokenUsage"));
         }
         "error" => {
             if result_error.is_none() {
@@ -2359,6 +2375,17 @@ fn app_server_reasoning_text(item: &Value) -> String {
 }
 
 /// Map an app-server `ThreadTokenUsage` (`total` breakdown) to [`RunUsage`].
+///
+/// Kept for documentation and unit-test coverage even though the
+/// production app-server path now folds `last` deltas via
+/// `apply_codex_app_server_usage` and `last_usage_from_app_server`.
+/// Wholesale-assigning `total` is wrong on a resumed Codex thread,
+/// which is why this helper is no longer called from
+/// `handle_app_server_notification`; the
+/// `run_usage_from_app_server_maps_total_breakdown` test pins the
+/// shape of `ThreadTokenUsage.total` so the protocol mapping does not
+/// drift silently.
+#[allow(dead_code)]
 fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
     let total = token_usage?.get("total")?;
     let get = |key: &str| {
@@ -2388,6 +2415,76 @@ fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
     // app server does; the derivation below is only the fallback.
     usage.ensure_total();
     Some(usage)
+}
+
+/// Map an app-server `ThreadTokenUsage` `last` breakdown to [`RunUsage`].
+///
+/// `last` is the per-upstream-API-request delta for the most recent model
+/// call on the thread — it is NOT cumulative across the thread. A single
+/// CLI turn that issues N model requests emits N `thread/tokenUsage/updated`
+/// notifications whose `last` values sum to the turn's totals; we use it
+/// to accumulate the run total one `last` at a time via
+/// `apply_codex_app_server_usage`. Returns `None` when `last` is absent
+/// or carries no counts (the protocol does not promise it on every
+/// notification — treat absence as "nothing new to fold in").
+fn last_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
+    let last = token_usage?.get("last")?;
+    let get = |key: &str| {
+        last.get(key)
+            .and_then(Value::as_i64)
+            .and_then(|v| u64::try_from(v).ok())
+    };
+    let input_tokens = get("inputTokens");
+    let output_tokens = get("outputTokens");
+    let reasoning_tokens = get("reasoningOutputTokens");
+    let reported_total = get("totalTokens");
+    if input_tokens.is_none()
+        && output_tokens.is_none()
+        && reasoning_tokens.is_none()
+        && reported_total.is_none()
+    {
+        return None;
+    }
+    let mut usage = RunUsage {
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        total_tokens: reported_total,
+    };
+    // App server always reports its own `totalTokens` for `last`; the
+    // derivation is only the fallback for endpoints that omit it.
+    usage.ensure_total();
+    Some(usage)
+}
+
+/// Apply (or skip) the usage carried by one app-server
+/// `thread/tokenUsage/updated` notification.
+///
+/// The Codex app server reports token usage as a thread-lifetime
+/// cumulative `total` together with a per-request delta `last` — see
+/// `codex-rs/app-server-protocol/schema/typescript/v2/ThreadTokenUsage.ts`.
+/// On a fresh thread `total` starts at zero and grows monotonically as
+/// the turn issues model requests; on a *resumed* thread it opens at
+/// whatever previous turns of the same Codex thread already spent.
+///
+/// Only `last` is safe to fold into a run total: assigning `total`
+/// wholesale would (a) lose any earlier per-request increments from the
+/// same turn's other notifications and (b) attribute the entire previous
+/// history of the thread to the current run on a resumed thread —
+/// exactly the multi-turn double-count/under-count class that PR #181
+/// fixed for Claude Code (`apply_claude_stream_event_usage`).
+///
+/// Wholesale assign is therefore replaced with `add_turn`-style
+/// accumulation: each notification contributes its `last` report as a
+/// per-upstream-request delta, and the run total is the sum over the
+/// notifications that arrived during the in-flight turn. This helper
+/// exists so the dispatch is testable without an `AppHandle`;
+/// `handle_app_server_notification` delegates to it and the unit tests
+/// in this module lock the behavior in.
+fn apply_codex_app_server_usage(usage: &mut Option<RunUsage>, token_usage: Option<&Value>) {
+    if let Some(delta) = last_usage_from_app_server(token_usage) {
+        accumulate_turn_usage(usage, delta);
+    }
 }
 
 fn codex_developer_instructions(system_prompt: &str) -> String {
@@ -3841,6 +3938,17 @@ async fn handle_codex_event(
             }
         }
         Some("turn.completed") => {
+            // Single authoritative per-turn usage report. `codex exec
+            // --json` is one-turn-per-subprocess and emits exactly one
+            // `turn.completed` carrying `usage`; wholesale assign here
+            // matches the "one authoritative event per turn"
+            // contract enforced for Claude Code's `result` event by
+            // `apply_claude_stream_event_usage`. If a future change
+            // turns this into a multi-turn-per-subprocess loop or
+            // adds a second usage-bearing notification, revisit
+            // this assignment and switch to `accumulate_turn_usage`
+            // the way the app-server path already does in
+            // `apply_codex_app_server_usage`.
             if let Some(parsed) = codex_usage_from_value(value.get("usage")) {
                 *usage = Some(parsed);
             }
@@ -5882,6 +5990,179 @@ mod tests {
         .unwrap();
         assert_eq!(usage.reasoning_tokens, Some(10));
         assert_eq!(usage.total_tokens, Some(140));
+    }
+
+    /// `last` mirrors `total` in shape but represents one upstream API
+    /// request, not the thread lifetime. The values here deliberately
+    /// differ from the `total` block of the same payload to lock that
+    /// the new helper only reads `last`.
+    #[test]
+    fn last_usage_from_app_server_maps_last_breakdown() {
+        let token_usage = serde_json::json!({
+            "total": {
+                "inputTokens": 9_999, "outputTokens": 9_999,
+                "reasoningOutputTokens": 9_999, "totalTokens": 9_999
+            },
+            "last": {
+                "inputTokens": 100, "outputTokens": 40,
+                "reasoningOutputTokens": 10, "cachedInputTokens": 5, "totalTokens": 150
+            }
+        });
+        let usage = last_usage_from_app_server(Some(&token_usage)).unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(40));
+        assert_eq!(usage.reasoning_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(150));
+
+        // No `last` block -> None (the protocol does not promise one on
+        // every notification; treat absence as "nothing new to fold in").
+        assert!(last_usage_from_app_server(None).is_none());
+        assert!(last_usage_from_app_server(Some(&serde_json::json!({}))).is_none());
+        assert!(
+            last_usage_from_app_server(Some(&serde_json::json!({"total": {}}))).is_none(),
+            "presence of `total` alone does not yield a `last` delta"
+        );
+
+        // A `last` carrying only reasoning is still a report and is kept,
+        // but the derived total stays `None` because a total of reasoning
+        // alone would be meaningless.
+        let reasoning_only = last_usage_from_app_server(Some(&serde_json::json!({
+            "last": {"reasoningOutputTokens": 7}
+        })))
+        .expect("a reasoning-only `last` is still usage");
+        assert_eq!(reasoning_only.reasoning_tokens, Some(7));
+        assert_eq!(reasoning_only.total_tokens, None);
+    }
+
+    /// `last` reported without `totalTokens` falls back to input + output
+    /// (reasoning is excluded), matching the `total` derivation rule.
+    #[test]
+    fn last_usage_from_app_server_derived_total_excludes_reasoning() {
+        let usage = last_usage_from_app_server(Some(&serde_json::json!({
+            "last": {"inputTokens": 100, "outputTokens": 40, "reasoningOutputTokens": 10}
+        })))
+        .unwrap();
+        assert_eq!(usage.reasoning_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(140));
+    }
+
+    /// The fix the PR #181 follow-up applies to the Codex app-server
+    /// path. Driving `apply_codex_app_server_usage` with the exact
+    /// notification shape emitted for a turn that issues two upstream
+    /// model requests must fold both `last` snapshots into the run total
+    /// rather than clobbering it. This is the multi-snapshot analogue of
+    /// `claude_two_turn_total_survives_message_snapshots`.
+    #[test]
+    fn codex_app_server_two_notifications_sum_to_turn_total() {
+        let mut usage: Option<RunUsage> = None;
+
+        // First model request of the turn: e.g. the assistant thinking
+        // before the first tool call.
+        apply_codex_app_server_usage(
+            &mut usage,
+            Some(&serde_json::json!({
+                "total": {
+                    "inputTokens": 12, "outputTokens": 6,
+                    "reasoningOutputTokens": 4, "totalTokens": 18
+                },
+                "last": {
+                    "inputTokens": 12, "outputTokens": 6,
+                    "reasoningOutputTokens": 4, "totalTokens": 18
+                }
+            })),
+        );
+
+        // Second model request of the same turn: tool result plus final
+        // answer. `last` is strictly per-request, so it does not include
+        // the first request's tokens.
+        apply_codex_app_server_usage(
+            &mut usage,
+            Some(&serde_json::json!({
+                "total": {
+                    "inputTokens": 31, "outputTokens": 18,
+                    "reasoningOutputTokens": 11, "totalTokens": 49
+                },
+                "last": {
+                    "inputTokens": 19, "outputTokens": 12,
+                    "reasoningOutputTokens": 7, "totalTokens": 31
+                }
+            })),
+        );
+
+        let usage = usage.expect("two notifications must fold into a run total");
+        // 12 + 19 = 31, 6 + 12 = 18, 4 + 7 = 11, 18 + 31 = 49 — i.e. the
+        // sum of `last`, NOT the final `total` (which would have double-
+        // counted because the first `last` was already part of the first
+        // `total`).
+        assert_eq!(usage.input_tokens, Some(31));
+        assert_eq!(usage.output_tokens, Some(18));
+        assert_eq!(usage.reasoning_tokens, Some(11));
+        assert_eq!(usage.total_tokens, Some(49));
+    }
+
+    /// Resumed thread regression. A Codex thread that already spent
+    /// tokens in earlier turns starts its first notification with `total`
+    /// far larger than `last`. The wholesale-assign bug would attribute
+    /// the entire thread history to the current run; the accumulating
+    /// helper must instead fold only the `last` delta of the current
+    /// turn's first model request.
+    #[test]
+    fn codex_app_server_resumed_thread_first_notification_does_not_clobber() {
+        let mut usage: Option<RunUsage> = None;
+
+        // 50_000 input tokens already spent before this run touched the
+        // thread; the current run's first model request cost only 12
+        // input tokens. Wholesale assign of `total` would jump the run
+        // ledger to 50_012.
+        apply_codex_app_server_usage(
+            &mut usage,
+            Some(&serde_json::json!({
+                "total": {
+                    "inputTokens": 50_012, "outputTokens": 4_000,
+                    "reasoningOutputTokens": 1_000, "totalTokens": 54_012
+                },
+                "last": {
+                    "inputTokens": 12, "outputTokens": 4,
+                    "reasoningOutputTokens": 1, "totalTokens": 16
+                }
+            })),
+        );
+
+        let usage = usage.expect("a single `last` snapshot yields a run total");
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, Some(4));
+        assert_eq!(usage.reasoning_tokens, Some(1));
+        assert_eq!(usage.total_tokens, Some(16));
+    }
+
+    /// Notifications that omit `last` (the protocol permits this) must
+    /// not clobber an already-accumulated run total. Same defensive rule
+    /// the Claude Code path enforces with `apply_claude_stream_event_usage`.
+    #[test]
+    fn codex_app_server_notification_without_last_does_not_clobber() {
+        let mut usage: Option<RunUsage> = None;
+        apply_codex_app_server_usage(
+            &mut usage,
+            Some(&serde_json::json!({
+                "last": {"inputTokens": 10, "outputTokens": 4, "totalTokens": 14}
+            })),
+        );
+        let established = usage.clone().expect("first notification seeds the total");
+        assert_eq!(established.total_tokens, Some(14));
+
+        // Subsequent notification that lacks `last` must be a no-op.
+        apply_codex_app_server_usage(
+            &mut usage,
+            Some(&serde_json::json!({
+                "total": {
+                    "inputTokens": 10, "outputTokens": 4, "totalTokens": 14
+                }
+            })),
+        );
+        let after_noop = usage.expect("previous total survives an empty notification");
+        assert_eq!(after_noop.total_tokens, Some(14));
+        assert_eq!(after_noop.input_tokens, Some(10));
+        assert_eq!(after_noop.output_tokens, Some(4));
     }
 
     /// Claude Code reports no reasoning field at all, so its total is the plain
