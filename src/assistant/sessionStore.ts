@@ -17,6 +17,7 @@ import type {
   ContentPart,
   ToolInvocation,
 } from '../generated/bindings';
+import { ACTIVE_RUN_STATUSES, hasActiveAssistantRun } from './runStatus';
 
 // FE-only state that the BE snapshot doesn't carry. Lives on the store
 // for the lifetime of an in-flight ask_user question; cleared on
@@ -133,7 +134,7 @@ export interface AssistantStoreState {
     sessionId: string,
     session: AssistantSession,
     messages: AssistantMessage[],
-    runs?: AssistantRun[],
+    runs: AssistantRun[],
     toolCalls?: ToolInvocation[],
     queuedMessageIds?: string[],
     olderMessageCursor?: AssistantMessageCursor | null,
@@ -164,7 +165,6 @@ const createInitialSessionState = (session: AssistantSession): SessionState => (
 const DELIVERED_QUEUE_TOMBSTONE_LIMIT = 200;
 
 const TERMINAL_STATUSES = ['completed', 'completed_with_warnings', 'failed', 'cancelled'] as const;
-const ACTIVE_STATUSES = ['queued', 'running', 'waiting_for_tool'] as const;
 
 const useAssistantStore = create<AssistantStoreState>()(
   devtools(
@@ -394,7 +394,7 @@ const useAssistantStore = create<AssistantStoreState>()(
             delete state.streamingText[sessionId];
             s.runStartedAt = null;
             s.pendingAskUser = null;
-          } else if ((ACTIVE_STATUSES as readonly string[]).includes(run.status)) {
+          } else if (ACTIVE_RUN_STATUSES.includes(run.status)) {
             s.isStreaming = true;
             // Stamp the start the first time this run is seen running, so the
             // elapsed timer measures from the real run start (a fresh run
@@ -437,7 +437,7 @@ const useAssistantStore = create<AssistantStoreState>()(
         sessionId,
         session,
         messages,
-        runs = [],
+        runs,
         toolCalls = [],
         queuedMessageIds,
         olderMessageCursor,
@@ -446,10 +446,22 @@ const useAssistantStore = create<AssistantStoreState>()(
       ) =>
         set((state) => {
           const existing = state.sessions[sessionId];
+          const snapshotRuns = runs;
+          const snapshotRunIds = new Set(snapshotRuns.map((run) => run.id));
+          const localActiveRunsMissingFromSnapshot = (existing?.runs || []).filter(
+            (run) => ACTIVE_RUN_STATUSES.includes(run.status) && !snapshotRunIds.has(run.id),
+          );
+          const snapshotHasActiveRun = hasActiveAssistantRun(snapshotRuns);
+          const shouldStream = snapshotHasActiveRun || localActiveRunsMissingFromSnapshot.length > 0;
+          if (!shouldStream) {
+            delete state.streamingText[sessionId];
+          }
           state.sessions[sessionId] = {
             ...createInitialSessionState(session),
             messages,
-            runs,
+            runs: localActiveRunsMissingFromSnapshot.length
+              ? [...localActiveRunsMissingFromSnapshot, ...snapshotRuns]
+              : snapshotRuns,
             toolCalls,
             // The live event-driven set wins once the session is hydrated.
             // A snapshot reflects the queue at fetch time and can be staler
@@ -481,23 +493,30 @@ const useAssistantStore = create<AssistantStoreState>()(
               totalMessageCount !== undefined
                 ? totalMessageCount
                 : existing?.totalMessageCount ?? null,
-            // Preserve in-flight streaming state across snapshot refreshes.
-            // The DB only persists assistant text at end-of-run, so a poll
-            // tick that lands mid-stream would otherwise wipe the deltas the
-            // user is watching arrive, making text flicker on and off.
-            // (The streaming-text accumulator itself lives in the top-level
-            // `streamingText` map, so a session replacement here cannot wipe
-            // it by construction.)
-            isStreaming: existing?.isStreaming || false,
+            // Preserve in-flight streaming state while the supplied snapshot
+            // still has an active run. If a newer RunStarted event landed
+            // after the snapshot was fetched, keep that local active run too.
+            // Workspace polling skips heavy message hydration while
+            // streaming; if a terminal event is lost at a
+            // compaction/queued-message boundary, that stale `true` would
+            // otherwise keep the footer spinner and composer stop affordance
+            // alive forever even though the DB has no active run.
+            //
+            // Active-run snapshots still keep live deltas instead of
+            // flickering them: the streaming-text accumulator itself lives in
+            // the top-level `streamingText` map, so this session replacement
+            // cannot wipe it by construction.
+            isStreaming: shouldStream,
             // Run start is FE-only live state the BE snapshot doesn't carry;
-            // preserve it so a poll tick mid-run doesn't reset the elapsed timer.
-            runStartedAt: existing?.runStartedAt ?? null,
+            // preserve it while a run is active so a poll tick mid-run doesn't
+            // reset the elapsed timer. Clear it with terminal snapshots.
+            runStartedAt: shouldStream ? existing?.runStartedAt ?? null : null,
             // Same rationale for the pending ask_user request: it's
             // FE-only state that the BE snapshot doesn't carry, so a
             // poll tick landing while a question is open would unmount
             // AskUserPanel within ~5s and the user could never reach the
             // textarea/options. Cleared on ask_user_resolved.
-            pendingAskUser: existing?.pendingAskUser || null,
+            pendingAskUser: shouldStream ? existing?.pendingAskUser || null : null,
           };
         }),
 

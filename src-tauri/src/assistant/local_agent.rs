@@ -242,7 +242,7 @@ pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
 ) -> Result<(), AssistantEngineError> {
-    let mut session = repository::get_session(&deps.pool, &input.session_id)
+    let session = repository::get_session(&deps.pool, &input.session_id)
         .await?
         .ok_or_else(|| AssistantEngineError::SessionNotFound(input.session_id.clone()))?;
 
@@ -268,6 +268,21 @@ pub async fn run_session_turn(
         AssistantUiEvent::RunStarted { run },
     );
 
+    let failure_session = session.clone();
+    let result = run_started_session_turn(deps, input, session, connection, run_id.clone()).await;
+    if let Err(error) = &result {
+        fail_run_if_still_active(deps, &failure_session, &run_id, error).await;
+    }
+    result
+}
+
+async fn run_started_session_turn(
+    deps: &AssistantDeps,
+    input: RunTurnInput,
+    mut session: AssistantSession,
+    connection: ProviderConnection,
+    run_id: String,
+) -> Result<(), AssistantEngineError> {
     if input.cancel_token.is_cancelled() {
         cancel_run(deps, &session, &run_id, None).await?;
         return Ok(());
@@ -586,6 +601,46 @@ pub async fn run_session_turn(
                 crate::assistant::providers::types::ProviderError::RequestFailed(message),
             ))
         }
+    }
+}
+
+fn is_active_run_status(status: &RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool
+    )
+}
+
+async fn fail_run_if_still_active(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    error: &AssistantEngineError,
+) {
+    let run = match repository::get_run(&deps.pool, run_id).await {
+        Ok(Some(run)) => run,
+        Ok(None) => return,
+        Err(load_error) => {
+            tracing::error!(
+                run_id = %run_id,
+                error = %load_error,
+                "Failed to inspect CLI run after engine error"
+            );
+            return;
+        }
+    };
+    if !is_active_run_status(&run.status) {
+        return;
+    }
+
+    let message = error.to_string();
+    if let Err(close_error) = fail_run(deps, session, run_id, run.usage.as_ref(), &message).await {
+        tracing::error!(
+            run_id = %run_id,
+            original_error = %message,
+            close_error = %close_error,
+            "Failed to close active CLI run after engine error"
+        );
     }
 }
 
@@ -5506,6 +5561,17 @@ mod tests {
             "No conversation found with session ID"
         ));
         assert!(!is_usage_limit_error(""));
+    }
+
+    #[test]
+    fn unexpected_error_guard_only_closes_active_runs() {
+        assert!(is_active_run_status(&RunStatus::Queued));
+        assert!(is_active_run_status(&RunStatus::Running));
+        assert!(is_active_run_status(&RunStatus::WaitingForTool));
+        assert!(!is_active_run_status(&RunStatus::Completed));
+        assert!(!is_active_run_status(&RunStatus::CompletedWithWarnings));
+        assert!(!is_active_run_status(&RunStatus::Failed));
+        assert!(!is_active_run_status(&RunStatus::Cancelled));
     }
 
     #[test]

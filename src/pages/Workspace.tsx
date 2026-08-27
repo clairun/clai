@@ -27,6 +27,10 @@ import {
   setWorkspaceSchedulePaused,
   setWorkspaceTitle,
 } from '../workspace/client';
+import {
+  ACTIVE_RUN_STATUSES,
+  shouldHydrateWorkspaceSession,
+} from '../workspace/sessionHydration';
 import type {
   AssistantMessage,
   AssistantRun,
@@ -202,8 +206,6 @@ const TASK_STATUS_LABEL: Record<string, string> = {
   failed: 'Failed',
   blocked: 'Blocked',
 };
-
-const ACTIVE_RUN_STATUSES: AssistantRun['status'][] = ['queued', 'running', 'waiting_for_tool'];
 
 const isTaskAttention = (task: WorkspaceTaskResponse): boolean =>
   (task.status === 'blocked' || task.status === 'failed') &&
@@ -1955,12 +1957,16 @@ const Workspace = () => {
           store.setActiveSessionForTab(`workspace:${workspaceId}`, nextSnapshot.session.id);
 
           const existingSession = store.sessions[nextSnapshot.session.id];
-          const needsInitialHydration = !existingSession;
-          const hasUnloadedUpdate =
+          const hasUnloadedUpdate = Boolean(
             nextSnapshot.session.updatedAt &&
-            lastLoadedSessionUpdatedAtRef.current !== nextSnapshot.session.updatedAt;
-          const shouldHydrateSession =
-            needsInitialHydration || (hasUnloadedUpdate && !existingSession?.isStreaming);
+              lastLoadedSessionUpdatedAtRef.current !== nextSnapshot.session.updatedAt
+          );
+          const shouldHydrateSession = shouldHydrateWorkspaceSession({
+            existingSessionPresent: Boolean(existingSession),
+            hasUnloadedUpdate,
+            existingIsStreaming: !!existingSession?.isStreaming,
+            snapshotRuns: nextSnapshot.runs,
+          });
 
           if (shouldHydrateSession) {
             const [messagePage, runs] = await Promise.all([

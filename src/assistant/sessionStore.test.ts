@@ -102,7 +102,7 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
     store.setAskUserPending(SESSION.id, ASK_REQUEST);
-    store.loadSessionData(SESSION.id, SESSION, [], [], []);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'running')], []);
     expect(useAssistantStore.getState().sessions[SESSION.id]!.pendingAskUser).toEqual(
       ASK_REQUEST,
     );
@@ -113,11 +113,43 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     store.initSession(SESSION);
     store.appendDelta(SESSION.id, 'msg-1', 'Hello ');
     store.appendDelta(SESSION.id, 'msg-1', 'world');
-    store.loadSessionData(SESSION.id, SESSION, [], [], []);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'running')], []);
     expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe(
       'Hello world',
     );
     expect(useAssistantStore.getState().sessions[SESSION.id]!.isStreaming).toBe(true);
+  });
+
+  it('clears stale streaming state when a refreshed run snapshot has no active run', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running'));
+    store.setAskUserPending(SESSION.id, ASK_REQUEST);
+    store.appendDelta(SESSION.id, 'msg-1', 'partial');
+
+    store.loadSessionData(SESSION.id, SESSION, [msg('msg-1')], [run('run-1', 'completed')], []);
+
+    const s = useAssistantStore.getState().sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(false);
+    expect(s.runStartedAt).toBeNull();
+    expect(s.pendingAskUser).toBeNull();
+    expect(useAssistantStore.getState().streamingText[SESSION.id]).toBeUndefined();
+  });
+
+  it('does not let a stale terminal snapshot wipe a newer local active run', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-new', 'running'));
+    store.setAskUserPending(SESSION.id, ASK_REQUEST);
+    store.appendDelta(SESSION.id, 'msg-1', 'partial');
+
+    store.loadSessionData(SESSION.id, SESSION, [msg('msg-1')], [run('run-old', 'completed')], []);
+
+    const s = useAssistantStore.getState().sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(true);
+    expect(s.runs.map((r) => r.id)).toEqual(['run-new', 'run-old']);
+    expect(s.pendingAskUser).toEqual(ASK_REQUEST);
+    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe('partial');
   });
 
   it('overwrites messages/runs/toolCalls with the snapshot payload', () => {

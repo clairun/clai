@@ -9,7 +9,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 import AskUserPanel from './AskUserPanel';
 import useAssistantStore from '../../assistant/sessionStore';
 import type { PendingAskUser } from '../../assistant/sessionStore';
-import type { AssistantSession } from '../../generated/bindings';
+import type { AssistantRun, AssistantSession } from '../../generated/bindings';
 
 const SESSION: AssistantSession = {
   id: 'sess-1',
@@ -44,6 +44,9 @@ const askUserRequest = (overrides: Partial<PendingAskUser> = {}): PendingAskUser
   extraContext: null,
   ...overrides,
 });
+
+const run = (status: AssistantRun['status']): AssistantRun =>
+  ({ id: `run-${status}`, status }) as unknown as AssistantRun;
 
 const mountWithPending = (pending: PendingAskUser | null) => {
   useAssistantStore.setState({
@@ -312,8 +315,10 @@ describe('AskUserPanel — snapshot poll race regression', () => {
     expect(screen.getByText('Which option do you want?')).toBeInTheDocument();
 
     // Simulate the workspace poll firing while the question is open.
+    // An open ask_user request means the backend run is still active and
+    // waiting for the tool response.
     const store = useAssistantStore.getState();
-    store.loadSessionData(SESSION.id, SESSION, [], [], []);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('waiting_for_tool')], []);
 
     expect(screen.getByText('Which option do you want?')).toBeInTheDocument();
   });
