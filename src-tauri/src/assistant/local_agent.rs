@@ -6301,7 +6301,10 @@ mod tests {
                 }
             })),
         );
-        assert!(usage.is_none(), "replay must not be folded into the run total");
+        assert!(
+            usage.is_none(),
+            "replay must not be folded into the run total"
+        );
 
         // 2) Live first notification of the new turn. `turnId` matches
         // the freshly-started active turn. Step 2 folds `last` (the
