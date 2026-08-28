@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import ReactDOM from 'react-dom';
 import { useOutletContext, useParams } from 'react-router';
 import type { FleetOutletContext } from '../layouts/FleetLayout';
 import { workspaceDeleteAgent } from '../api/client';
@@ -38,6 +39,7 @@ import type {
 } from '../generated/bindings';
 import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
 import { shouldCancelRunOnKey } from '../utils/cancelRunHotkey';
+import { fixedRightAlignedMenuStyle, sameFloatingMenuStyle } from '../utils/floatingMenu';
 import styles from './Workspace.module.css';
 
 const DEFAULT_WORKSPACE_ID = 'default';
@@ -53,6 +55,13 @@ const MESSAGE_PAGE_LIMIT = 100;
 const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
   includeSessionPayload: false,
 };
+// Two menu items of 12px text plus vertical padding, 1px gap, wrapper
+// padding, and border measure about 69px. Rounded up so the flip starts
+// slightly early; `maxHeight` caps the menu in shorter windows either way.
+const ARTIFACT_ADD_MENU_HEIGHT = 76;
+const ARTIFACT_ADD_MENU_GAP = 4;
+const ARTIFACT_ADD_MENU_MARGIN = 8;
+const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 
 type NumericTimestamp = number | bigint | null | undefined;
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
@@ -109,6 +118,14 @@ const errorMessage = (error: unknown, fallback: string): string => {
   if (error instanceof Error && error.message) return error.message;
   return fallback;
 };
+
+const artifactAddMenuStyle = (trigger: HTMLElement): React.CSSProperties =>
+  fixedRightAlignedMenuStyle(trigger, {
+    estimatedHeight: ARTIFACT_ADD_MENU_HEIGHT,
+    gap: ARTIFACT_ADD_MENU_GAP,
+    margin: ARTIFACT_ADD_MENU_MARGIN,
+    minWidth: ARTIFACT_ADD_MENU_MIN_WIDTH,
+  });
 
 const formatTimestamp = (timestamp: NumericTimestamp): string => {
   const value = toNumber(timestamp);
@@ -1866,13 +1883,72 @@ const Workspace = () => {
   });
   const [agentBusy, setAgentBusy] = useState('');
   const [agentError, setAgentError] = useState('');
-  const [artifactAddMenuOpen, setArtifactAddMenuOpen] = useState(false);
+  const [artifactAddMenu, setArtifactAddMenu] = useState<{
+    style: React.CSSProperties;
+  } | null>(null);
   const [artifactImportBusy, setArtifactImportBusy] = useState(false);
+  const artifactAddMenuOpen = !!artifactAddMenu;
+  const artifactAddTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const artifactAddMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const closeArtifactAddMenu = useCallback(() => {
+    if (artifactAddMenuRef.current?.contains(document.activeElement)) {
+      artifactAddTriggerRef.current?.focus();
+    }
+    setArtifactAddMenu(null);
+  }, []);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Closes a transient header menu when its owning drawer is no longer visible.
-    if (activePanel !== 'artifacts') setArtifactAddMenuOpen(false);
+    if (activePanel !== 'artifacts') setArtifactAddMenu(null);
   }, [activePanel]);
+
+  useEffect(() => {
+    if (!artifactAddMenuOpen) return;
+    artifactAddMenuRef.current
+      ?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')
+      ?.focus();
+  }, [artifactAddMenuOpen]);
+
+  useEffect(() => {
+    if (!artifactAddMenuOpen) return;
+    const close = () => closeArtifactAddMenu();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeArtifactAddMenu();
+    };
+    const onScroll = (e: Event) => {
+      const trigger = artifactAddTriggerRef.current;
+      const target = e.target;
+      if (!trigger || target === document || !(target instanceof Node)) {
+        close();
+        return;
+      }
+      if (target.contains(trigger)) close();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', onScroll, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', onScroll, true);
+    };
+  }, [artifactAddMenuOpen, closeArtifactAddMenu]);
+
+  useLayoutEffect(() => {
+    const trigger = artifactAddTriggerRef.current;
+    if (!artifactAddMenu || !trigger) return;
+    if (!trigger.isConnected) {
+      setArtifactAddMenu(null);
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    if (!rect.width && !rect.height) return;
+    const style = artifactAddMenuStyle(trigger);
+    if (!sameFloatingMenuStyle(style, artifactAddMenu.style)) {
+      setArtifactAddMenu({ style });
+    }
+  }, [artifactAddMenu, activePanel]);
 
   // The Workspace instance is REUSED across workspace→workspace navigation, so
   // after the URL changes `snapshot` briefly still holds the PREVIOUS workspace's
@@ -2395,7 +2471,7 @@ const Workspace = () => {
   const handleAddArtifacts = useCallback(
     async (kind: ArtifactImportKind) => {
       if (artifactImportBusy) return;
-      setArtifactAddMenuOpen(false);
+      closeArtifactAddMenu();
       setArtifactImportBusy(true);
       let shouldRefresh = false;
       let importErrorMessage: string | null = null;
@@ -2425,7 +2501,7 @@ const Workspace = () => {
         setArtifactImportBusy(false);
       }
     },
-    [artifactImportBusy, workspaceId, loadSnapshot]
+    [artifactImportBusy, closeArtifactAddMenu, workspaceId, loadSnapshot]
   );
 
   return (
@@ -2511,9 +2587,17 @@ const Workspace = () => {
                     <span className={styles.artifactAddMenuAnchor}>
                       <button
                         type="button"
+                        ref={artifactAddTriggerRef}
                         className={styles.workspaceDrawerIconAction}
-                        onClick={() => setArtifactAddMenuOpen((open) => !open)}
-                        disabled={artifactImportBusy}
+                        onClick={(e) => {
+                          if (artifactImportBusy) return;
+                          if (artifactAddMenuOpen) {
+                            closeArtifactAddMenu();
+                            return;
+                          }
+                          setArtifactAddMenu({ style: artifactAddMenuStyle(e.currentTarget) });
+                        }}
+                        aria-disabled={artifactImportBusy || undefined}
                         title={
                           artifactImportBusy ? 'Adding…' : 'Add files or folders to the workspace'
                         }
@@ -2538,37 +2622,60 @@ const Workspace = () => {
                           <line x1="9" y1="15" x2="15" y2="15" />
                         </svg>
                       </button>
-                      {artifactAddMenuOpen && (
-                        <>
-                          <button
-                            type="button"
-                            className={styles.artifactAddBackdrop}
-                            aria-hidden="true"
-                            tabIndex={-1}
-                            onClick={() => setArtifactAddMenuOpen(false)}
-                          />
-                          <div className={styles.artifactAddMenu} role="menu">
+                      {artifactAddMenu &&
+                        ReactDOM.createPortal(
+                          <>
                             <button
                               type="button"
-                              className={styles.artifactAddMenuItem}
-                              role="menuitem"
-                              disabled={artifactImportBusy}
-                              onClick={() => handleAddArtifacts('files')}
+                              className={styles.artifactAddBackdrop}
+                              aria-hidden="true"
+                              tabIndex={-1}
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => closeArtifactAddMenu()}
+                            />
+                            <div
+                              className={styles.artifactAddMenu}
+                              role="menu"
+                              ref={artifactAddMenuRef}
+                              style={artifactAddMenu.style}
+                              onKeyDown={(e) => {
+                                if (e.key !== 'Tab') return;
+                                const items = Array.from(
+                                  e.currentTarget.querySelectorAll<HTMLElement>(
+                                    '[role="menuitem"]:not([disabled])'
+                                  )
+                                );
+                                const at = items.indexOf(document.activeElement as HTMLElement);
+                                const leaving = e.shiftKey
+                                  ? at <= 0
+                                  : at < 0 || at >= items.length - 1;
+                                if (!leaving) return;
+                                e.preventDefault();
+                                closeArtifactAddMenu();
+                              }}
                             >
-                              Files…
-                            </button>
-                            <button
-                              type="button"
-                              className={styles.artifactAddMenuItem}
-                              role="menuitem"
-                              disabled={artifactImportBusy}
-                              onClick={() => handleAddArtifacts('folders')}
-                            >
-                              Folders…
-                            </button>
-                          </div>
-                        </>
-                      )}
+                              <button
+                                type="button"
+                                className={styles.artifactAddMenuItem}
+                                role="menuitem"
+                                disabled={artifactImportBusy}
+                                onClick={() => handleAddArtifacts('files')}
+                              >
+                                Files…
+                              </button>
+                              <button
+                                type="button"
+                                className={styles.artifactAddMenuItem}
+                                role="menuitem"
+                                disabled={artifactImportBusy}
+                                onClick={() => handleAddArtifacts('folders')}
+                              >
+                                Folders…
+                              </button>
+                            </div>
+                          </>,
+                          document.body
+                        )}
                     </span>
                     <button
                       type="button"

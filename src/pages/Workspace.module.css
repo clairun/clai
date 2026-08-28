@@ -752,18 +752,19 @@
   color: var(--color-text-primary);
 }
 
-.workspaceDrawerIconAction:disabled {
+.workspaceDrawerIconAction:disabled,
+.workspaceDrawerIconAction[aria-disabled='true'] {
   opacity: 0.5;
   cursor: default;
 }
 
-.workspaceDrawerIconAction:disabled:hover {
+.workspaceDrawerIconAction:disabled:hover,
+.workspaceDrawerIconAction[aria-disabled='true']:hover {
   background: transparent;
   color: var(--color-text-secondary);
 }
 
 .artifactAddMenuAnchor {
-  position: relative;
   display: inline-flex;
 }
 
@@ -776,12 +777,14 @@
   cursor: default;
 }
 
+/* Portaled to document.body and positioned from JS: the drawer clips
+   overflow, so this menu cannot safely live as an absolute child of the
+   header button. */
 .artifactAddMenu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
+  position: fixed;
   z-index: 41;
   min-width: 116px;
+  overflow-y: auto;
   padding: 4px;
   display: flex;
   flex-direction: column;
