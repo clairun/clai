@@ -7348,7 +7348,10 @@ mod codex_resumed_thread_step1_seeds_before_step2_tests {
         );
         assert!(usage.is_none(), "step 1 folds nothing");
         assert_eq!(
-            baseline.clone().expect("baseline seeded by step 1").total_tokens,
+            baseline
+                .clone()
+                .expect("baseline seeded by step 1")
+                .total_tokens,
             Some(180)
         );
 

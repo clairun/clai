@@ -261,6 +261,17 @@ pub(crate) fn thread_start_request(
 /// `codex app-server` process, so the shell_tool disable and MCP registration
 /// must be set again on resume, mirroring how the exec path re-passes its flags
 /// on `exec resume`).
+///
+/// Deliberately omits `excludeTurns`: the app server derives `include_turns =
+/// !exclude_turns`, and with turns included it replays a
+/// `thread/tokenUsage/updated` notification built from the restored
+/// `TokenUsageInfo` right after the `thread/resume` response, before
+/// `turn/started`. Run usage accounting depends on that replay — it carries the
+/// previous run's `last` under a stale turn id, which is what seeds the
+/// per-run baseline in `apply_codex_app_server_usage` (see `local_agent.rs`).
+/// Adding `excludeTurns` here would silently make a resumed run's first
+/// notification fold a stale `last` into the run total. The unit test below
+/// pins the key's absence.
 pub(crate) fn thread_resume_request(
     id: i64,
     thread_id: &str,
@@ -476,6 +487,10 @@ mod tests {
             params["config"]["mcp_servers"]["clai"]["tool_timeout_sec"],
             42
         );
+        // Load-bearing for run usage accounting: with turns included the app
+        // server replays the restored token usage before `turn/started`, which
+        // is what seeds the per-run baseline. See the doc comment above.
+        assert!(params.get("excludeTurns").is_none());
     }
 
     #[test]
