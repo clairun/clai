@@ -13,12 +13,14 @@ use crate::config::{
     WorkspaceConfig,
 };
 use crate::db::DbPool;
+use crate::workspace_index::{WorkspaceIndex, WorkspaceLocator};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::RwLock;
 use tauri::{AppHandle, State};
 use ts_rs::TS;
 
@@ -2374,7 +2376,7 @@ pub async fn workspace_delete_path(
     let metadata = fs::symlink_metadata(&target)
         .map_err(|error| format!("Path not found: {}: {}", rel, error))?;
     if metadata.is_dir() {
-        fs::remove_dir_all(&target)
+        remove_dir_all_forcing_permissions(&target)
             .map_err(|error| format!("Failed to delete {}: {}", rel, error))?;
     } else {
         fs::remove_file(&target).map_err(|error| format!("Failed to delete {}: {}", rel, error))?;
@@ -3697,6 +3699,191 @@ pub fn get_scheduler_paused(state: State<'_, AppState>) -> Result<bool, String> 
     Ok(config_manager.get().scheduler_paused)
 }
 
+/// Give the owner write access to one entry, so the tree it belongs to can
+/// be deleted.
+///
+/// On Unix only directories are touched (`chmod u+rwx`): unlinking a file is
+/// governed by its *parent* directory's bits, never its own, so relaxing file
+/// modes would be collateral damage for nothing. On Windows the read-only
+/// attribute is cleared on both — std's `remove_dir_all` already deletes
+/// read-only entries on NTFS, but its FAT32 fallback does not. Neither
+/// platform's ACLs are touched; a `deny write` ACE still blocks deletion.
+///
+/// Never call this on a symlink: `fs::set_permissions` resolves it and would
+/// change the target's permissions, outside the tree being deleted.
+fn grant_owner_write(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !metadata.is_dir() {
+            return Ok(());
+        }
+        let mut permissions = metadata.permissions();
+        let mode = permissions.mode();
+        if mode & 0o700 == 0o700 {
+            return Ok(());
+        }
+        permissions.set_mode(mode | 0o700);
+        fs::set_permissions(path, permissions)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = metadata.permissions();
+        if !permissions.readonly() {
+            return Ok(());
+        }
+        // The lint warns that this is world-writable on Unix; this block
+        // only compiles off Unix, where clearing the read-only attribute is
+        // exactly the operation wanted.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)
+    }
+}
+
+/// Walk `root` granting owner write on the way down, best effort. Each
+/// directory is chmod-ed *before* its entries are listed, which is what lets
+/// the walk descend into a directory whose read or execute bits were stripped
+/// too (`0000`, `0300`): after the chmod it can be listed, before it cannot.
+///
+/// Symlinks are skipped, not followed: `remove_dir_all` unlinks them without
+/// entering, and chmod-ing one would reach outside the tree. The walk is
+/// path-based where the removal it precedes is `openat`-hardened, so a
+/// concurrent symlink swap inside the tree could in principle redirect a
+/// chmod; the blast radius is owner bits on a path the user owns and is
+/// deleting.
+fn grant_owner_write_recursively(root: &Path) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.is_symlink() {
+            continue;
+        }
+        if let Err(error) = grant_owner_write(&path, &metadata) {
+            tracing::debug!(path = %path.display(), "Could not grant write access: {}", error);
+        }
+        if !metadata.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            stack.push(entry.path());
+        }
+    }
+}
+
+/// `fs::remove_dir_all` that also clears the one obstacle the user owns and
+/// would otherwise have to clear by hand: directories inside the tree with
+/// their write bit stripped. Go's module cache (`pkg/mod`) and Cargo's
+/// registry sources publish theirs as `0555`, so a workspace that ever ran
+/// `go build` cannot be deleted — plain `rm -rf` fails on it too, and
+/// ownership does not help, because on Unix it is the *directory's* write bit
+/// that permits unlinking its children.
+///
+/// The chmod pass only runs after a `PermissionDenied`, so the common case
+/// pays nothing, and it stays inside `root`. When the retry fails anyway, the
+/// directories it relaxed keep their new modes — acceptable for a tree the
+/// user asked to delete, and visible to them since the error is surfaced.
+fn remove_dir_all_forcing_permissions(root: &Path) -> std::io::Result<()> {
+    match fs::remove_dir_all(root) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            grant_owner_write_recursively(root);
+            fs::remove_dir_all(root)
+        }
+        result => result,
+    }
+}
+
+/// Put a workspace back in the index after its deletion failed — unless the
+/// partial wipe already destroyed it.
+///
+/// `remove_dir_all` is not atomic and deletes children before the root, so it
+/// can take `.clai/config.json` with it and still fail. A locator whose
+/// config cannot be read poisons every lookup that walks the index, because
+/// `load_workspace_agent_as_config` fails on the first unreadable one
+/// (`agents/runner.rs:72-75`), which would stop scheduled runs across all
+/// workspaces. Such a leftover is left out, and stays out: the next startup
+/// scan cannot load it either, so it records a `load_failure` — a sink
+/// nothing reads today — and the directory sits on disk with no workspace in
+/// the rail. The `warn!` below is the only signal there is.
+fn restore_after_failed_delete(
+    workspace_index: &RwLock<WorkspaceIndex>,
+    locator: &WorkspaceLocator,
+) -> bool {
+    if let Err(config_error) = workspace_config::load(&locator.root_path) {
+        tracing::warn!(
+            workspace_id = %locator.id,
+            path = %locator.root_path.display(),
+            "Partially deleted workspace left behind, keeping it out of the index: {}",
+            config_error
+        );
+        return false;
+    }
+    match workspace_index.write() {
+        Ok(mut index) => {
+            index.insert_locator(locator.clone());
+            true
+        }
+        // The index is poisoned, so the entry stays lost until restart —
+        // at which point the scan finds the surviving directory anyway.
+        Err(lock_error) => {
+            tracing::error!(
+                workspace_id = %locator.id,
+                "Workspace index lock error while restoring a failed deletion: {}",
+                lock_error
+            );
+            false
+        }
+    }
+}
+
+/// A workspace wipe that failed: what to tell the user, and whether the
+/// workspace went back into the index. Only a restored workspace is still
+/// live — the caller keys the disposal of its runtime state on that.
+struct FailedWipe {
+    message: String,
+    restored: bool,
+}
+
+/// Delete a workspace's on-disk root, putting its index entry back if the
+/// removal fails.
+///
+/// `workspace_delete` pulls the locator out of the index before touching the
+/// disk: that is what closes the cached sqlx pool and hands us the root path.
+/// But the removal can still fail — a file owned by another user, an
+/// immutable attribute, a busy mount — and the workspace then vanished from
+/// the rail while its directory was still on disk, reappearing on the next
+/// restart because the index is rebuilt by scanning. Restoring the locator
+/// keeps the in-memory index honest about what is still there, so the user
+/// can deal with the obstacle and retry.
+///
+/// Only a workspace that survived the failed wipe is restored — see
+/// [`restore_after_failed_delete`].
+fn remove_workspace_root(
+    workspace_index: &RwLock<WorkspaceIndex>,
+    locator: &WorkspaceLocator,
+) -> Result<(), FailedWipe> {
+    if !locator.root_path.exists() {
+        return Ok(());
+    }
+    let Err(error) = remove_dir_all_forcing_permissions(&locator.root_path) else {
+        return Ok(());
+    };
+
+    Err(FailedWipe {
+        restored: restore_after_failed_delete(workspace_index, locator),
+        message: format!(
+            "Failed to delete workspace directory {}: {}",
+            locator.root_path.display(),
+            error
+        ),
+    })
+}
+
 /// Delete a general workspace — removes metadata, session data, filesystem
 /// root, and any in-memory state scoped to it (scheduler definitions /
 /// instances, pending permission and path-grant queues). Without this
@@ -3738,6 +3925,24 @@ pub async fn workspace_delete(
         .map(|cfg| cfg.agents.iter().map(|a| a.id.clone()).collect())
         .unwrap_or_default();
 
+    // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
+    // `memory/`, plus any artifact files written into the workspace
+    // directory.
+    let wipe = remove_workspace_root(&state.workspace_index, &locator);
+    if let Err(failure) = &wipe {
+        if failure.restored {
+            // The workspace is back in the index and still usable, so its
+            // scheduler entries and pending queues must stay as they are.
+            return Err(failure.message.clone());
+        }
+        // Not restored: the workspace is out of the index for good and the
+        // user cannot reach it any more, so its runtime state has to go even
+        // though the directory survived. Leaving scheduler instances behind
+        // wedges the runner — the next tick claims one, the agent lookup
+        // fails, and nothing releases the claim, so no scheduled run fires
+        // again in any workspace until restart.
+    }
+
     // Drop scheduler entries for every agent the workspace owned. Any
     // task already mid-flight will continue running with its own copy
     // of context, but no further ticks will be scheduled — and the
@@ -3748,19 +3953,6 @@ pub async fn workspace_delete(
             sched.remove_instances_for_agent(id);
             sched.remove_definition(id);
         }
-    }
-
-    // Now wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
-    // `memory/`, plus any artifact files written into the workspace
-    // directory.
-    if locator.root_path.exists() {
-        fs::remove_dir_all(&locator.root_path).map_err(|e| {
-            format!(
-                "Failed to delete workspace directory {}: {}",
-                locator.root_path.display(),
-                e
-            )
-        })?;
     }
 
     // Drain in-memory queues for this workspace. The purge helpers cancel
@@ -3792,10 +3984,11 @@ pub async fn workspace_delete(
         approvals_purged = purged_approvals.len(),
         path_grants_purged = purged_path_grants.len(),
         runs_cancelled = purged_run_ids.len(),
+        wiped = wipe.is_ok(),
         "Deleted general workspace"
     );
 
-    Ok(())
+    wipe.map_err(|failure| failure.message)
 }
 
 // ===============================================================================
@@ -3995,6 +4188,270 @@ mod tests {
             created_at: 0,
             updated_at,
         }
+    }
+
+    // A workspace that ever ran `go build` carries a module cache whose
+    // directories are 0555 by design. Deleting it used to fail with EACCES —
+    // `rm -rf` fails on it too — even though the user owns every byte.
+    #[cfg(unix)]
+    #[test]
+    fn remove_dir_all_forcing_permissions_deletes_a_read_only_subtree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn build_module_cache(parent: &Path) -> PathBuf {
+            let root = parent.join("ws");
+            let cache = root.join(".gopath/pkg/mod/gopkg.in/yaml.v3@v3.0.1");
+            fs::create_dir_all(cache.join("nested")).unwrap();
+            fs::write(cache.join("yaml.go"), "package yaml").unwrap();
+            fs::write(cache.join("nested/decode.go"), "package yaml").unwrap();
+            for dir in [cache.join("nested"), cache.clone()] {
+                fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+            }
+            root
+        }
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = build_module_cache(parent.path());
+
+        // Guard the fixture: as root the write bits are advisory, and every
+        // assertion below would pass without the code under test.
+        if fs::write(
+            root.join(".gopath/pkg/mod/gopkg.in/yaml.v3@v3.0.1/probe"),
+            "x",
+        )
+        .is_ok()
+        {
+            return;
+        }
+        assert!(
+            fs::remove_dir_all(&root).is_err(),
+            "fixture must be undeletable by a plain remove_dir_all"
+        );
+
+        // Same fixture again, deleted the way the app now does it. (The
+        // first one is left for `remove_dir_all_forcing_permissions` to
+        // clear as well, so the TempDir can clean itself up on drop.)
+        let second = build_module_cache(&parent.path().join("second"));
+        remove_dir_all_forcing_permissions(&second).unwrap();
+        assert!(!second.exists());
+        remove_dir_all_forcing_permissions(&root).unwrap();
+        assert!(!root.exists());
+    }
+
+    // A directory that lost read and execute along with write cannot even be
+    // listed until it is chmod-ed, which is why the walk relaxes each
+    // directory *before* reading its entries. Chmod-ing after the listing
+    // leaves the inner 0555 directory untouched and the retry still fails.
+    #[cfg(unix)]
+    #[test]
+    fn remove_dir_all_forcing_permissions_descends_into_an_unreadable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("ws");
+        let outer = root.join("outer");
+        let inner = outer.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(inner.join("file"), "x").unwrap();
+        fs::set_permissions(&inner, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::set_permissions(&outer, fs::Permissions::from_mode(0o000)).unwrap();
+
+        if fs::read_dir(&outer).is_ok() {
+            return; // running as root: the mode bits are advisory
+        }
+
+        remove_dir_all_forcing_permissions(&root).unwrap();
+        assert!(!root.exists());
+    }
+
+    // The walk must not reach outside the tree: `fs::set_permissions` follows
+    // symlinks. On Linux a symlink's own mode is already 0777, so the
+    // `is_symlink` guard in the walk is belt-and-braces there and this test
+    // passes without it; the guard earns its keep on Windows, where clearing
+    // the read-only attribute would land on the target.
+    #[cfg(unix)]
+    #[test]
+    fn remove_dir_all_forcing_permissions_does_not_chmod_through_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let outsider = parent.path().join("outsider");
+        fs::create_dir_all(outsider.join("child")).unwrap();
+        fs::set_permissions(&outsider, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let root = parent.path().join("ws");
+        let locked = root.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        std::os::unix::fs::symlink(&outsider, root.join("link")).unwrap();
+        fs::write(locked.join("file"), "x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+        if fs::write(locked.join("probe"), "x").is_ok() {
+            return;
+        }
+
+        remove_dir_all_forcing_permissions(&root).unwrap();
+        assert!(!root.exists());
+        assert!(outsider.exists(), "the symlink target must survive");
+        let mode = fs::metadata(&outsider).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o555, "the symlink target must keep its permissions");
+    }
+
+    fn locator(id: &str, root: &Path) -> WorkspaceLocator {
+        WorkspaceLocator {
+            id: id.to_string(),
+            root_path: root.to_path_buf(),
+            title: "Doomed".to_string(),
+            updated_at: 7,
+            last_run_completed_at: 0,
+            last_opened_at: 0,
+            starred_at: 0,
+            default_agent_id: "agent-1".to_string(),
+            schedule_enabled: false,
+            schedule_paused: false,
+            schedule_kind: None,
+        }
+    }
+
+    #[test]
+    fn remove_workspace_root_deletes_the_tree_and_leaves_the_index_alone() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("ws");
+        fs::create_dir_all(root.join("memory")).unwrap();
+        fs::write(root.join("memory/state.md"), "x").unwrap();
+
+        let index = RwLock::new(WorkspaceIndex::default());
+        let loc = locator("ws-1", &root);
+
+        assert!(remove_workspace_root(&index, &loc).is_ok());
+        assert!(!root.exists());
+        // The caller removed the entry before calling us; a success must
+        // not put it back.
+        assert!(index.read().unwrap().locator("ws-1").is_none());
+    }
+
+    fn write_config(root: &Path) {
+        let config = WorkspaceConfig::new(
+            "ws-1".to_string(),
+            "Doomed".to_string(),
+            7,
+            "agent-1".to_string(),
+        );
+        workspace_config::save(root, &config).unwrap();
+    }
+
+    // A workspace whose directory survived the failed wipe has to go back in
+    // the index — that is the whole point: it is still on disk, so hiding it
+    // only means it reappears at the next restart, when the index is rebuilt
+    // by scanning.
+    #[test]
+    fn restore_after_failed_delete_puts_a_surviving_workspace_back() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("ws");
+        fs::create_dir_all(&root).unwrap();
+        write_config(&root);
+
+        let index = RwLock::new(WorkspaceIndex::default());
+        assert!(restore_after_failed_delete(&index, &locator("ws-1", &root)));
+
+        let index = index.read().unwrap();
+        let restored = index
+            .locator("ws-1")
+            .expect("a workspace still on disk must stay in the index");
+        assert_eq!(restored.root_path, root);
+        assert_eq!(restored.title, "Doomed");
+        // Restored into the sorted view too, otherwise `workspace_list`
+        // still hides it from the rail.
+        assert_eq!(
+            index
+                .locators_sorted()
+                .iter()
+                .map(|l| l.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["ws-1".to_string()]
+        );
+    }
+
+    // Restoring a locator whose config the wipe already deleted would break
+    // far more than this delete: `load_workspace_agent_as_config` walks the
+    // whole index and fails on the first config it cannot read
+    // (`agents/runner.rs:72-75`), stopping scheduled runs everywhere.
+    #[test]
+    fn restore_after_failed_delete_skips_a_workspace_whose_config_is_gone() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("ws");
+        fs::create_dir_all(root.join("memory")).unwrap();
+
+        let index = RwLock::new(WorkspaceIndex::default());
+        assert!(!restore_after_failed_delete(
+            &index,
+            &locator("ws-1", &root)
+        ));
+
+        assert!(
+            index.read().unwrap().locator("ws-1").is_none(),
+            "an unloadable leftover must not be put back in the index"
+        );
+    }
+
+    // `remove_dir_all` deletes children before the root, so a wipe stopped by
+    // a read-only *parent* — the one obstacle the chmod pass cannot clear,
+    // since it only relaxes what is inside the tree — has already taken
+    // `.clai/config.json` with it. Restoring that locator would break far
+    // more than this delete: `load_workspace_agent_as_config` walks the whole
+    // index and fails on the first config it cannot read
+    // (`agents/runner.rs:72-75`), stopping scheduled runs everywhere.
+    #[cfg(unix)]
+    #[test]
+    fn remove_workspace_root_does_not_restore_a_workspace_whose_config_is_gone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().unwrap();
+        let holder = parent.path().join("holder");
+        let root = holder.join("ws");
+        fs::create_dir_all(&root).unwrap();
+        write_config(&root);
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o555)).unwrap();
+
+        if fs::create_dir(holder.join("probe")).is_ok() {
+            // Running as root: the mode bits are advisory and nothing fails.
+            fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let index = RwLock::new(WorkspaceIndex::default());
+        let failure = remove_workspace_root(&index, &locator("ws-1", &root)).unwrap_err();
+        assert!(
+            root.exists(),
+            "the root itself survives: {}",
+            failure.message
+        );
+        assert!(
+            workspace_config::load(&root).is_err(),
+            "the wipe got as far as the config before failing"
+        );
+        assert!(
+            index.read().unwrap().locator("ws-1").is_none(),
+            "an unloadable leftover must not be put back in the index"
+        );
+        // `workspace_delete` keys the disposal of the workspace's scheduler
+        // instances on this: unreachable workspace, so its runtime state has
+        // to go with it.
+        assert!(!failure.restored);
+
+        fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // A root that is already gone is a deletion that already happened, not
+    // a failure to report or an entry to resurrect.
+    #[test]
+    fn remove_workspace_root_treats_a_missing_root_as_deleted() {
+        let parent = tempfile::tempdir().unwrap();
+        let index = RwLock::new(WorkspaceIndex::default());
+        let loc = locator("ws-1", &parent.path().join("already-gone"));
+
+        assert!(remove_workspace_root(&index, &loc).is_ok());
+        assert!(index.read().unwrap().locator("ws-1").is_none());
     }
 
     // A workspace whose scheduled-run conversation was forked into its own
