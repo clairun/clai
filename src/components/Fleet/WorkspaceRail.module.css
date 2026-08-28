@@ -419,23 +419,31 @@
 
 .rowActions {
   flex-shrink: 0;
-  display: none;
+  display: inline-flex;
   align-items: center;
   gap: 2px;
+  /* Hidden actions still occupy their final width, so hover/focus never
+     remeasures the title column and makes ellipsized workspace names jump. */
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--transition-fast);
 }
 
 .row:hover .rowActions,
 .row:focus-within .rowActions {
-  display: inline-flex;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
-/* An open menu keeps its row's actions laid out. Opening the menu moves
-   focus into it, and it is portaled to <body>, so the row loses
-   `:focus-within` (and `:hover` as soon as the pointer moves onto the
-   menu) — which would collapse the ⋯ trigger the menu is positioned from
-   and leave nothing for Escape to return focus to. */
+/* An open menu keeps its row's actions visible. Opening the menu moves focus
+   into it, and it is portaled to <body>, so the row loses `:focus-within`
+   (and `:hover` as soon as the pointer moves onto the menu). */
 .rowActionsMenuOpen {
-  display: inline-flex;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .iconButton {
