@@ -1805,11 +1805,18 @@ async fn run_codex_turn_app_server(
     // `total` snapshot at the start of this run's first live
     // `thread/tokenUsage/updated` notification. The run total is the
     // field-wise `total.saturating_sub(baseline)` summed over every
-    // notification whose `turnId` matches `active_turn_id`. Seeded
-    // either from the first matching notification as `total - last` or
-    // earlier, from any dropped (out-of-turn) notification's `total`,
-    // so the first matching notification produces a delta of zero —
-    // see `apply_codex_app_server_usage` for the full rule.
+    // notification whose `turnId` matches `active_turn_id`. The
+    // baseline is seeded from the `total` of:
+    //  * step 1 — any notification whose `turnId` does not match
+    //    `active_turn_id` (the resume replay's notification arrives
+    //    first on a resumed thread), OR
+    //  * step 2 — the first live notification of a fresh thread
+    //    (no prior baseline exists, so step 2 seeds from the
+    //    notification's own `total`).
+    // In both cases the first matching live notification produces a
+    // zero delta and `last` is folded in step 2 (or step 3 once the
+    // baseline is set). Full rule lives on
+    // `apply_codex_app_server_usage`.
     let mut codex_usage_baseline: Option<RunUsage> = None;
     // Monotonic id for client-initiated requests after the handshake
     // (steer/interrupt), kept distinct from the handshake ids 1/2/3.
@@ -2389,18 +2396,20 @@ fn app_server_reasoning_text(item: &Value) -> String {
     out.join("\n")
 }
 
-/// Map an app-server `ThreadTokenUsage` (`total` breakdown) to [`RunUsage`].
-///
-/// Kept for documentation and unit-test coverage even though the
-/// production app-server path now folds `last` deltas via
-/// `apply_codex_app_server_usage` and `last_usage_from_app_server`.
-/// Wholesale-assigning `total` is wrong on a resumed Codex thread,
-/// which is why this helper is no longer called from
-/// `handle_app_server_notification`; the
+/// Map an app-server `ThreadTokenUsage` `total` breakdown to
+/// [`RunUsage`]. Called by `apply_codex_app_server_usage` to read
+/// the notification's `total`, which is the cumulative token count
+/// across the entire Codex thread — NOT just this run's portion.
+/// Wholesale-assigning this to the run ledger would be wrong on a
+/// resumed thread, which is why `apply_codex_app_server_usage`
+/// seeds a `baseline` from the first notification and folds the
+/// field-wise delta `total - baseline` thereafter; this helper only
+/// parses the wire shape. Returns `None` when `total` is absent or
+/// carries no counts (the protocol does not promise it on every
+/// notification). The
 /// `run_usage_from_app_server_maps_total_breakdown` test pins the
 /// shape of `ThreadTokenUsage.total` so the protocol mapping does not
 /// drift silently.
-#[allow(dead_code)]
 fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
     let total = token_usage?.get("total")?;
     let get = |key: &str| {
@@ -2434,14 +2443,18 @@ fn run_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
 
 /// Map an app-server `ThreadTokenUsage` `last` breakdown to [`RunUsage`].
 ///
-/// `last` is the per-upstream-API-request delta for the most recent model
-/// call on the thread — it is NOT cumulative across the thread. A single
-/// CLI turn that issues N model requests emits N `thread/tokenUsage/updated`
-/// notifications whose `last` values sum to the turn's totals; we use it
-/// to accumulate the run total one `last` at a time via
-/// `apply_codex_app_server_usage`. Returns `None` when `last` is absent
-/// or carries no counts (the protocol does not promise it on every
-/// notification — treat absence as "nothing new to fold in").
+/// `last` is the per-upstream-API-request delta for the most recent
+/// model call on the thread — it is NOT cumulative across the thread.
+/// A single CLI turn that issues N model requests emits N
+/// `thread/tokenUsage/updated` notifications; we accumulate one `last`
+/// at a time (NOT a sum) via `apply_codex_app_server_usage`. The
+/// first live notification folds its `last` in step 2 (when there is
+/// no prior baseline to subtract from); subsequent notifications
+/// fold `total - baseline`, which equals `last` by the codex
+/// invariant `total_new = total_prev + last_new`. Returns `None`
+/// when `last` is absent or carries no counts (the protocol does not
+/// promise it on every notification — treat absence as "nothing new
+/// to fold in").
 fn last_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
     let last = token_usage?.get("last")?;
     let get = |key: &str| {
@@ -2520,10 +2533,16 @@ fn last_usage_from_app_server(token_usage: Option<&Value>) -> Option<RunUsage> {
 ///      grow between repeats (delta is 0), and the run total is
 ///      updated only when the delta is non-zero.
 ///
-/// `fill_to_context_window` is the one path that overwrites `total`
-/// (with `{total_tokens: context_window, ..Default}`, `protocol.rs:2113`);
-/// a run that spans an auto-compaction / `ContextWindowExceeded`
-/// under-reports, exactly as codex's own per-turn metric does.
+/// `fill_to_context_window` (codex `core/src/protocol/protocol.rs:2113`,
+/// invoked on auto-compaction / `ContextWindowExceeded`) overwrites
+/// `total` with `{total_tokens: context_window, ..Default}`. After
+/// such a notification the run ledger over-reports `total_tokens`
+/// by `context_window - previous_total` (the real cumulative tokens
+/// should be much smaller because compaction discarded history),
+/// exactly as codex's own per-turn metric does. The per-request
+/// `last` continues to reflect only the delta for the just-completed
+/// request, so the `last`-derived parts of the run total stay
+/// accurate even across a compaction boundary.
 ///
 /// Read the `turnId` and `tokenUsage` out of a raw notification
 /// payload and dispatch to [`apply_codex_app_server_usage`]. This is
@@ -6493,7 +6512,9 @@ mod tests {
                 }
             })),
         );
-        let total1 = usage.as_ref().expect("first live notification yields a run total");
+        let total1 = usage
+            .as_ref()
+            .expect("first live notification yields a run total");
         assert_eq!(total1.input_tokens, Some(12));
         assert_eq!(total1.output_tokens, Some(4));
         assert_eq!(total1.reasoning_tokens, Some(1));
@@ -7277,5 +7298,83 @@ mod tests {
         assert!(!out.interrupted);
         assert!(!out.owes_turn);
         assert!(out.payload.is_empty(), "nothing is written to stdin");
+    }
+}
+
+/// MUST FIX 2 invariant: on a resumed thread the helper that drives
+/// `apply_codex_app_server_usage` (`restored_token_usage_turn_id`
+/// path in `request_processors/token_usage_replay.rs`) emits a
+/// `thread/tokenUsage/updated` notification whose `turnId` is the
+/// **previous** run's last active turn id and never matches the
+/// freshly-started active turn. Step 1 of the algorithm therefore
+/// fires for that notification (it seeds the baseline and folds
+/// nothing), so when the first live notification of the resumed
+/// turn arrives it goes straight to step 3 — step 2's unconditional
+/// `last` fold is unreachable on the resumed-thread path.
+///
+/// The tests below drive step 1 and step 2 in the exact order the
+/// replay machinery would issue them, then assert the run ledger
+/// is what step 3 alone would produce. If a future change ever lets
+/// a live notification reach step 2 with a baseline already set
+/// (i.e. step 1 was skipped), the run total would explode and this
+/// test fails loudly.
+#[cfg(test)]
+mod codex_resumed_thread_step1_seeds_before_step2_tests {
+    use super::*;
+
+    #[test]
+    fn resumed_thread_step1_seeds_baseline_before_first_live_notification() {
+        // Resume replay notification: turnId is from the previous
+        // run and so does not match the freshly-started active
+        // turn. Step 1 fires: seed baseline = total, fold nothing.
+        let mut usage: Option<RunUsage> = None;
+        let mut baseline: Option<RunUsage> = None;
+        let resume_replay_payload = serde_json::json!({
+            "total": {
+                "inputTokens": 100, "outputTokens": 80,
+                "totalTokens": 180
+            },
+            "last": {
+                "inputTokens": 50, "outputTokens": 40,
+                "totalTokens": 90
+            }
+        });
+        apply_codex_app_server_usage(
+            &mut usage,
+            &mut baseline,
+            Some("active_turn_after_resume"),
+            Some("turn_from_previous_run"),
+            Some(&resume_replay_payload),
+        );
+        assert!(usage.is_none(), "step 1 folds nothing");
+        assert_eq!(
+            baseline.clone().expect("baseline seeded by step 1").total_tokens,
+            Some(180)
+        );
+
+        // First live notification of the resumed turn: turnId
+        // matches the active turn, baseline is already set, so
+        // step 3 fires. The `last` from step 1 is NOT folded again.
+        let first_live = serde_json::json!({
+            "total": {
+                "inputTokens": 110, "outputTokens": 85,
+                "totalTokens": 195
+            },
+            "last": {
+                "inputTokens": 10, "outputTokens": 5,
+                "totalTokens": 15
+            }
+        });
+        apply_codex_app_server_usage(
+            &mut usage,
+            &mut baseline,
+            Some("active_turn_after_resume"),
+            Some("active_turn_after_resume"),
+            Some(&first_live),
+        );
+        let established = usage.clone().expect("step 3 folds the delta");
+        assert_eq!(established.input_tokens, Some(10));
+        assert_eq!(established.output_tokens, Some(5));
+        assert_eq!(established.total_tokens, Some(15));
     }
 }
