@@ -383,6 +383,10 @@ pub async fn run_session_turn(
     let mut assistant_slot: Option<AssistantMessage> = None;
     let mut retried_after_session_lost = false;
     let mut retried_after_context_compaction = false;
+    // Tokens a discarded attempt already burned. Both recovery paths below
+    // re-enter the turn fn, which starts a fresh `usage`, so without this the
+    // run would bill only the attempt that happened to succeed.
+    let mut spent_before_retry: Option<RunUsage> = None;
 
     let run_result = loop {
         let attempt = match provider_runtime {
@@ -471,7 +475,7 @@ pub async fn run_session_turn(
         // id and retry exactly once with a fresh session — transparently. The
         // retried turn reuses `assistant_slot`, and a freshly-minted session
         // can't itself be "lost", so this is naturally bounded.
-        if let Err(LocalAgentRunError::Failed { message, .. }) = &attempt {
+        if let Err(LocalAgentRunError::Failed { message, usage }) = &attempt {
             if !retried_after_session_lost && is_session_lost_error(provider_runtime, message) {
                 tracing::info!(
                     target: "clai::cli_session",
@@ -480,6 +484,7 @@ pub async fn run_session_turn(
                     "{} session was lost; restarting with a fresh session",
                     provider_runtime.display_name()
                 );
+                carry_forward_spent_usage(&mut spent_before_retry, usage);
                 clear_cli_session_id(deps, &mut session).await?;
                 retried_after_session_lost = true;
                 continue;
@@ -516,6 +521,7 @@ pub async fn run_session_turn(
                                 summary_message: outcome.summary_message,
                             },
                         );
+                        carry_forward_spent_usage(&mut spent_before_retry, usage);
                         retried_after_context_compaction = true;
                         continue;
                     }
@@ -542,6 +548,7 @@ pub async fn run_session_turn(
 
         break attempt;
     };
+    let run_result = with_spent_before_retry(run_result, spent_before_retry);
 
     drop(binding_guard);
 
@@ -3826,6 +3833,56 @@ fn accumulate_turn_usage(total: &mut Option<RunUsage>, next: RunUsage) {
     }
 }
 
+/// Remember what a failed attempt already spent, before a recovery path throws
+/// that attempt away.
+///
+/// A failed turn is not a free turn: the provider billed every request it
+/// served before the failure, and `LocalAgentRunError::Failed` carries that
+/// count. Both in-run recovery paths (`is_session_lost_error` and the
+/// context-limit compaction) `continue` the retry loop and re-enter the turn
+/// fn, which starts from an empty `usage` — so unless the discarded attempt's
+/// tokens are held here, the run reports only the attempt that succeeded and
+/// silently under-bills the user. Cancellation never needed this because it
+/// leaves the loop instead of retrying.
+fn carry_forward_spent_usage(spent: &mut Option<RunUsage>, attempt: &Option<RunUsage>) {
+    if let Some(attempt) = attempt.clone() {
+        accumulate_turn_usage(spent, attempt);
+    }
+}
+
+/// Fold usage spent by discarded attempts into whatever the last attempt
+/// produced.
+///
+/// Every outcome is a live case: the retry can succeed (`Ok`), be cancelled
+/// mid-flight, or fail again — and the second failure's message is what the
+/// user sees, so the counts must ride along with it rather than being dropped
+/// on the two error arms. Summing (rather than taking a maximum) is the right
+/// fold because each attempt is a separate set of provider requests, each
+/// billed on its own. With nothing carried this is the identity, which is the
+/// path almost every run takes.
+fn with_spent_before_retry(
+    result: Result<Option<RunUsage>, LocalAgentRunError>,
+    spent: Option<RunUsage>,
+) -> Result<Option<RunUsage>, LocalAgentRunError> {
+    let fold = |usage: Option<RunUsage>| {
+        let mut total = spent.clone();
+        if let Some(usage) = usage {
+            accumulate_turn_usage(&mut total, usage);
+        }
+        total
+    };
+    match result {
+        Ok(usage) => Ok(fold(usage)),
+        Err(LocalAgentRunError::Cancelled { usage }) => {
+            Err(LocalAgentRunError::Cancelled { usage: fold(usage) })
+        }
+        Err(LocalAgentRunError::Failed { message, usage }) => Err(LocalAgentRunError::Failed {
+            message,
+            usage: fold(usage),
+        }),
+    }
+}
+
 /// Apply (or skip) the usage snapshot carried by a streamed Anthropic event.
 ///
 /// Claude Code emits both per-message snapshots (`message_start` carries
@@ -5080,6 +5137,7 @@ fn spawn_stderr_logger(
     });
 }
 
+#[derive(Debug)]
 enum LocalAgentRunError {
     Cancelled {
         usage: Option<RunUsage>,
@@ -5819,6 +5877,107 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.reasoning_tokens, Some(1));
         assert_eq!(usage.total_tokens, Some(23));
+    }
+
+    fn usage(input: u64, output: u64, total: u64) -> RunUsage {
+        RunUsage {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            reasoning_tokens: None,
+            total_tokens: Some(total),
+        }
+    }
+
+    /// A failed attempt still cost money. Both retry paths discard the attempt,
+    /// so the counts have to be lifted out first or the run under-bills.
+    #[test]
+    fn a_discarded_attempt_keeps_its_tokens() {
+        let mut spent = None;
+        carry_forward_spent_usage(&mut spent, &Some(usage(10, 2, 12)));
+        carry_forward_spent_usage(&mut spent, &Some(usage(7, 3, 10)));
+
+        let spent = spent.expect("spent");
+        assert_eq!(spent.input_tokens, Some(17));
+        assert_eq!(spent.output_tokens, Some(5));
+        assert_eq!(spent.total_tokens, Some(22));
+    }
+
+    /// An attempt that failed before any provider reply reported nothing, and
+    /// "nothing" must not become a zeroed report that outranks a later one.
+    #[test]
+    fn a_discarded_attempt_that_reported_nothing_changes_nothing() {
+        let mut spent = Some(usage(10, 2, 12));
+        carry_forward_spent_usage(&mut spent, &None);
+        assert_eq!(spent.expect("spent").input_tokens, Some(10));
+
+        let mut spent = None;
+        carry_forward_spent_usage(&mut spent, &None);
+        assert!(spent.is_none());
+    }
+
+    /// The retry can end three ways and the carried tokens must survive all
+    /// three — the failure arm especially, since a run that failed twice is
+    /// exactly the one that burned the most.
+    #[test]
+    fn carried_tokens_survive_every_outcome_of_the_retry() {
+        let spent = Some(usage(10, 2, 12));
+
+        let completed = with_spent_before_retry(Ok(Some(usage(1, 1, 2))), spent.clone())
+            .expect("ok")
+            .expect("usage");
+        assert_eq!(completed.total_tokens, Some(14));
+
+        let cancelled = with_spent_before_retry(
+            Err(LocalAgentRunError::Cancelled {
+                usage: Some(usage(1, 1, 2)),
+            }),
+            spent.clone(),
+        );
+        let Err(LocalAgentRunError::Cancelled { usage: Some(u) }) = cancelled else {
+            panic!("expected a cancellation carrying usage");
+        };
+        assert_eq!(u.total_tokens, Some(14));
+
+        let failed = with_spent_before_retry(
+            Err(LocalAgentRunError::Failed {
+                message: "second failure".to_string(),
+                usage: Some(usage(1, 1, 2)),
+            }),
+            spent,
+        );
+        let Err(LocalAgentRunError::Failed {
+            message,
+            usage: Some(u),
+        }) = failed
+        else {
+            panic!("expected a failure carrying usage");
+        };
+        assert_eq!(message, "second failure");
+        assert_eq!(u.total_tokens, Some(14));
+    }
+
+    /// The retried attempt can itself report nothing (a crash before the first
+    /// reply). The tokens the first attempt burned are still owed.
+    #[test]
+    fn carried_tokens_stand_alone_when_the_retry_reports_none() {
+        let carried = with_spent_before_retry(Ok(None), Some(usage(10, 2, 12)))
+            .expect("ok")
+            .expect("usage");
+        assert_eq!(carried.total_tokens, Some(12));
+    }
+
+    /// The overwhelming majority of runs never retry. That path must be exactly
+    /// what it was before: the attempt's own report, untouched.
+    #[test]
+    fn a_run_that_never_retried_is_left_alone() {
+        let untouched = with_spent_before_retry(Ok(Some(usage(10, 2, 12))), None)
+            .expect("ok")
+            .expect("usage");
+        assert_eq!(untouched.total_tokens, Some(12));
+
+        assert!(with_spent_before_retry(Ok(None), None)
+            .expect("ok")
+            .is_none());
     }
 
     /// The first turn *installs* the run total; nothing else does. Without this
