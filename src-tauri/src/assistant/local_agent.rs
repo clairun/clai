@@ -383,10 +383,11 @@ pub async fn run_session_turn(
     let mut assistant_slot: Option<AssistantMessage> = None;
     let mut retried_after_session_lost = false;
     let mut retried_after_context_compaction = false;
-    // Tokens a discarded attempt already burned. Both recovery paths below
-    // re-enter the turn fn, which starts a fresh `usage`, so without this the
-    // run would bill only the attempt that happened to succeed.
-    let mut spent_before_retry: Option<RunUsage> = None;
+    // The run's token total, owned here rather than by the turn fns, so that
+    // the two recovery paths below can restart a failed attempt without
+    // discarding what it already spent. A failed turn is not a free turn: the
+    // provider billed every request it served before the failure.
+    let mut usage: Option<RunUsage> = None;
 
     let run_result = loop {
         let attempt = match provider_runtime {
@@ -398,7 +399,7 @@ pub async fn run_session_turn(
                         Ok(path) => path,
                         Err(error) => {
                             let message = error.message();
-                            fail_run(deps, &session, &run_id, None, &message).await?;
+                            fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
                             discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot)
                                 .await;
                             return Err(AssistantEngineError::Provider(
@@ -419,6 +420,7 @@ pub async fn run_session_turn(
                     &input.cancel_token,
                     &input.trigger,
                     &mut assistant_slot,
+                    &mut usage,
                 )
                 .await;
                 let _ = std::fs::remove_file(&mcp_config_path);
@@ -436,6 +438,7 @@ pub async fn run_session_turn(
                         &input.cancel_token,
                         &input.trigger,
                         &mut assistant_slot,
+                        &mut usage,
                     )
                     .await
                 } else {
@@ -449,6 +452,7 @@ pub async fn run_session_turn(
                         &input.cancel_token,
                         &input.trigger,
                         &mut assistant_slot,
+                        &mut usage,
                     )
                     .await
                 }
@@ -464,6 +468,7 @@ pub async fn run_session_turn(
                     &input.cancel_token,
                     &input.trigger,
                     &mut assistant_slot,
+                    &mut usage,
                 )
                 .await
             }
@@ -475,7 +480,7 @@ pub async fn run_session_turn(
         // id and retry exactly once with a fresh session — transparently. The
         // retried turn reuses `assistant_slot`, and a freshly-minted session
         // can't itself be "lost", so this is naturally bounded.
-        if let Err(LocalAgentRunError::Failed { message, usage }) = &attempt {
+        if let Err(LocalAgentRunError::Failed { message }) = &attempt {
             if !retried_after_session_lost && is_session_lost_error(provider_runtime, message) {
                 tracing::info!(
                     target: "clai::cli_session",
@@ -484,7 +489,6 @@ pub async fn run_session_turn(
                     "{} session was lost; restarting with a fresh session",
                     provider_runtime.display_name()
                 );
-                carry_forward_spent_usage(&mut spent_before_retry, usage);
                 clear_cli_session_id(deps, &mut session).await?;
                 retried_after_session_lost = true;
                 continue;
@@ -521,7 +525,6 @@ pub async fn run_session_turn(
                                 summary_message: outcome.summary_message,
                             },
                         );
-                        carry_forward_spent_usage(&mut spent_before_retry, usage);
                         retried_after_context_compaction = true;
                         continue;
                     }
@@ -548,22 +551,21 @@ pub async fn run_session_turn(
 
         break attempt;
     };
-    let run_result = with_spent_before_retry(run_result, spent_before_retry);
 
     drop(binding_guard);
 
     match run_result {
-        Ok(usage) => {
+        Ok(()) => {
             let notices = notices
                 .lock()
                 .map(|mut n| std::mem::take(&mut *n))
                 .unwrap_or_default();
             complete_run_with_notices(deps, &session, &run_id, usage.as_ref(), &notices).await
         }
-        Err(LocalAgentRunError::Cancelled { usage }) => {
+        Err(LocalAgentRunError::Cancelled) => {
             cancel_run(deps, &session, &run_id, usage.as_ref()).await
         }
-        Err(LocalAgentRunError::Failed { message, usage }) => {
+        Err(LocalAgentRunError::Failed { message }) => {
             let message = if should_recover_cli_context_limit(&message) {
                 compaction::context_limit_failure_message(
                     provider_runtime.display_name(),
@@ -1106,7 +1108,8 @@ async fn run_claude_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+    usage: &mut Option<RunUsage>,
+) -> Result<(), LocalAgentRunError> {
     let prompt = prepare_prompt(
         deps,
         session,
@@ -1264,7 +1267,6 @@ async fn run_claude_turn(
         .ok_or_else(|| LocalAgentRunError::failed("Claude stdout was not captured"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = ClaudeStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
     // Mid-run input state (only meaningful while `live_stdin` is Some).
     // `turn_active` tracks whether a turn is in flight (first streamed event
@@ -1285,7 +1287,7 @@ async fn run_claude_turn(
                 let _ = child.kill().await;
                 finalize_assistant_message(deps, session, run_id, &assistant_message, &state)
                     .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             _ = queue_poll.tick(), if live_stdin.is_some() => {
                 // Never interrupt while a tool call is executing — cutting a
@@ -1359,7 +1361,7 @@ async fn run_claude_turn(
             &assistant_message,
             &value,
             &mut state,
-            &mut usage,
+            usage,
             &mut result_error,
         )
         .await?;
@@ -1442,19 +1444,15 @@ async fn run_claude_turn(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
     if !status.success() {
         let base = format!("Claude Code exited with status {}", status);
         return Err(LocalAgentRunError::Failed {
             message: append_stderr_tail(&base, &stderr_tail),
-            usage,
         });
     }
-    Ok(usage)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1468,7 +1466,8 @@ async fn run_codex_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+    usage: &mut Option<RunUsage>,
+) -> Result<(), LocalAgentRunError> {
     let existing_thread_id = session.context.cli_session_id.clone();
     let prompt = prepare_prompt(
         deps,
@@ -1588,7 +1587,6 @@ async fn run_codex_turn(
         .ok_or_else(|| LocalAgentRunError::failed("Codex stdout was not captured"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = CodexStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
 
     loop {
@@ -1603,7 +1601,7 @@ async fn run_codex_turn(
                     &state.parts,
                 )
                 .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             next = lines.next_line() => next
         }
@@ -1625,7 +1623,7 @@ async fn run_codex_turn(
             &assistant_message,
             &value,
             &mut state,
-            &mut usage,
+            usage,
             &mut result_error,
         )
         .await?;
@@ -1640,19 +1638,15 @@ async fn run_codex_turn(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
     if !status.success() {
         let base = format!("Codex exited with status {}", status);
         return Err(LocalAgentRunError::Failed {
             message: append_stderr_tail(&base, &stderr_tail),
-            usage,
         });
     }
-    Ok(usage)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,7 +1670,8 @@ async fn run_codex_turn_app_server(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+    usage: &mut Option<RunUsage>,
+) -> Result<(), LocalAgentRunError> {
     use crate::assistant::codex_app_server as aps;
 
     let existing_thread_id = session.context.cli_session_id.clone();
@@ -1804,7 +1799,6 @@ async fn run_codex_turn_app_server(
         .map_err(LocalAgentRunError::failed)?;
 
     let mut state = CodexStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
     // Set on turn/started, cleared on turn/completed. Steering is only valid
     // while a turn is active, and `turn/steer` must carry this exact id.
@@ -1839,7 +1833,7 @@ async fn run_codex_turn_app_server(
                     deps, session, run_id, &assistant_message, &state.parts,
                 )
                 .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             _ = steer_poll.tick() => {
                 // Steer queued messages into the *live* turn (the win over the
@@ -1944,7 +1938,7 @@ async fn run_codex_turn_app_server(
             method,
             &message,
             &mut state,
-            &mut usage,
+            usage,
             &mut result_error,
             &mut active_turn_id,
             &mut codex_usage_baseline,
@@ -1961,12 +1955,9 @@ async fn run_codex_turn_app_server(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
-    Ok(usage)
+    Ok(())
 }
 
 fn app_server_turn_start_error(response: &Value) -> Option<String> {
@@ -1998,7 +1989,7 @@ async fn aps_request_await(
         .map_err(LocalAgentRunError::failed)?;
     loop {
         let message = tokio::select! {
-            _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled { usage: None }),
+            _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled),
             _ = tokio::time::sleep_until(deadline) => {
                 return Err(LocalAgentRunError::failed(format!(
                     "codex app-server did not answer the handshake within {}s",
@@ -2534,7 +2525,8 @@ async fn run_opencode_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+    usage: &mut Option<RunUsage>,
+) -> Result<(), LocalAgentRunError> {
     let existing_session_id = session.context.cli_session_id.clone();
     let prompt = prepare_prompt(
         deps,
@@ -2637,7 +2629,6 @@ async fn run_opencode_turn(
         .ok_or_else(|| LocalAgentRunError::failed("OpenCode stdout was not captured"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = OpenCodeStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
 
     loop {
@@ -2652,7 +2643,7 @@ async fn run_opencode_turn(
                     &state.parts,
                 )
                 .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             next = lines.next_line() => next
         }
@@ -2675,7 +2666,7 @@ async fn run_opencode_turn(
             &assistant_message,
             &value,
             &mut state,
-            &mut usage,
+            usage,
             &mut result_error,
         )
         .await?;
@@ -2690,19 +2681,15 @@ async fn run_opencode_turn(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
     if !status.success() {
         let base = format!("OpenCode exited with status {}", status);
         return Err(LocalAgentRunError::Failed {
             message: append_stderr_tail(&base, &stderr_tail),
-            usage,
         });
     }
-    Ok(usage)
+    Ok(())
 }
 
 fn opencode_turn_prompt(system_prompt: &str, prompt: &str) -> String {
@@ -3830,56 +3817,6 @@ fn accumulate_turn_usage(total: &mut Option<RunUsage>, next: RunUsage) {
     match total.as_mut() {
         Some(existing) => existing.add_turn(&next),
         None => *total = Some(next),
-    }
-}
-
-/// Remember what a failed attempt already spent, before a recovery path throws
-/// that attempt away.
-///
-/// A failed turn is not a free turn: the provider billed every request it
-/// served before the failure, and `LocalAgentRunError::Failed` carries that
-/// count. Both in-run recovery paths (`is_session_lost_error` and the
-/// context-limit compaction) `continue` the retry loop and re-enter the turn
-/// fn, which starts from an empty `usage` — so unless the discarded attempt's
-/// tokens are held here, the run reports only the attempt that succeeded and
-/// silently under-bills the user. Cancellation never needed this because it
-/// leaves the loop instead of retrying.
-fn carry_forward_spent_usage(spent: &mut Option<RunUsage>, attempt: &Option<RunUsage>) {
-    if let Some(attempt) = attempt.clone() {
-        accumulate_turn_usage(spent, attempt);
-    }
-}
-
-/// Fold usage spent by discarded attempts into whatever the last attempt
-/// produced.
-///
-/// Every outcome is a live case: the retry can succeed (`Ok`), be cancelled
-/// mid-flight, or fail again — and the second failure's message is what the
-/// user sees, so the counts must ride along with it rather than being dropped
-/// on the two error arms. Summing (rather than taking a maximum) is the right
-/// fold because each attempt is a separate set of provider requests, each
-/// billed on its own. With nothing carried this is the identity, which is the
-/// path almost every run takes.
-fn with_spent_before_retry(
-    result: Result<Option<RunUsage>, LocalAgentRunError>,
-    spent: Option<RunUsage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
-    let fold = |usage: Option<RunUsage>| {
-        let mut total = spent.clone();
-        if let Some(usage) = usage {
-            accumulate_turn_usage(&mut total, usage);
-        }
-        total
-    };
-    match result {
-        Ok(usage) => Ok(fold(usage)),
-        Err(LocalAgentRunError::Cancelled { usage }) => {
-            Err(LocalAgentRunError::Cancelled { usage: fold(usage) })
-        }
-        Err(LocalAgentRunError::Failed { message, usage }) => Err(LocalAgentRunError::Failed {
-            message,
-            usage: fold(usage),
-        }),
     }
 }
 
@@ -5137,29 +5074,26 @@ fn spawn_stderr_logger(
     });
 }
 
-#[derive(Debug)]
+/// Why a CLI turn stopped. It deliberately carries no usage: the token
+/// accumulator is owned by `run_session_turn` and threaded into the turn fns,
+/// so a failed attempt's tokens are already in the run total by the time this
+/// is constructed — and there is no per-attempt copy for a retry to drop.
 enum LocalAgentRunError {
-    Cancelled {
-        usage: Option<RunUsage>,
-    },
-    Failed {
-        message: String,
-        usage: Option<RunUsage>,
-    },
+    Cancelled,
+    Failed { message: String },
 }
 
 impl LocalAgentRunError {
     fn failed(message: impl Into<String>) -> Self {
         Self::Failed {
             message: message.into(),
-            usage: None,
         }
     }
 
     fn message(self) -> String {
         match self {
-            LocalAgentRunError::Cancelled { .. } => "run cancelled".to_string(),
-            LocalAgentRunError::Failed { message, .. } => message,
+            LocalAgentRunError::Cancelled => "run cancelled".to_string(),
+            LocalAgentRunError::Failed { message } => message,
         }
     }
 }
@@ -5877,107 +5811,6 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.reasoning_tokens, Some(1));
         assert_eq!(usage.total_tokens, Some(23));
-    }
-
-    fn usage(input: u64, output: u64, total: u64) -> RunUsage {
-        RunUsage {
-            input_tokens: Some(input),
-            output_tokens: Some(output),
-            reasoning_tokens: None,
-            total_tokens: Some(total),
-        }
-    }
-
-    /// A failed attempt still cost money. Both retry paths discard the attempt,
-    /// so the counts have to be lifted out first or the run under-bills.
-    #[test]
-    fn a_discarded_attempt_keeps_its_tokens() {
-        let mut spent = None;
-        carry_forward_spent_usage(&mut spent, &Some(usage(10, 2, 12)));
-        carry_forward_spent_usage(&mut spent, &Some(usage(7, 3, 10)));
-
-        let spent = spent.expect("spent");
-        assert_eq!(spent.input_tokens, Some(17));
-        assert_eq!(spent.output_tokens, Some(5));
-        assert_eq!(spent.total_tokens, Some(22));
-    }
-
-    /// An attempt that failed before any provider reply reported nothing, and
-    /// "nothing" must not become a zeroed report that outranks a later one.
-    #[test]
-    fn a_discarded_attempt_that_reported_nothing_changes_nothing() {
-        let mut spent = Some(usage(10, 2, 12));
-        carry_forward_spent_usage(&mut spent, &None);
-        assert_eq!(spent.expect("spent").input_tokens, Some(10));
-
-        let mut spent = None;
-        carry_forward_spent_usage(&mut spent, &None);
-        assert!(spent.is_none());
-    }
-
-    /// The retry can end three ways and the carried tokens must survive all
-    /// three — the failure arm especially, since a run that failed twice is
-    /// exactly the one that burned the most.
-    #[test]
-    fn carried_tokens_survive_every_outcome_of_the_retry() {
-        let spent = Some(usage(10, 2, 12));
-
-        let completed = with_spent_before_retry(Ok(Some(usage(1, 1, 2))), spent.clone())
-            .expect("ok")
-            .expect("usage");
-        assert_eq!(completed.total_tokens, Some(14));
-
-        let cancelled = with_spent_before_retry(
-            Err(LocalAgentRunError::Cancelled {
-                usage: Some(usage(1, 1, 2)),
-            }),
-            spent.clone(),
-        );
-        let Err(LocalAgentRunError::Cancelled { usage: Some(u) }) = cancelled else {
-            panic!("expected a cancellation carrying usage");
-        };
-        assert_eq!(u.total_tokens, Some(14));
-
-        let failed = with_spent_before_retry(
-            Err(LocalAgentRunError::Failed {
-                message: "second failure".to_string(),
-                usage: Some(usage(1, 1, 2)),
-            }),
-            spent,
-        );
-        let Err(LocalAgentRunError::Failed {
-            message,
-            usage: Some(u),
-        }) = failed
-        else {
-            panic!("expected a failure carrying usage");
-        };
-        assert_eq!(message, "second failure");
-        assert_eq!(u.total_tokens, Some(14));
-    }
-
-    /// The retried attempt can itself report nothing (a crash before the first
-    /// reply). The tokens the first attempt burned are still owed.
-    #[test]
-    fn carried_tokens_stand_alone_when_the_retry_reports_none() {
-        let carried = with_spent_before_retry(Ok(None), Some(usage(10, 2, 12)))
-            .expect("ok")
-            .expect("usage");
-        assert_eq!(carried.total_tokens, Some(12));
-    }
-
-    /// The overwhelming majority of runs never retry. That path must be exactly
-    /// what it was before: the attempt's own report, untouched.
-    #[test]
-    fn a_run_that_never_retried_is_left_alone() {
-        let untouched = with_spent_before_retry(Ok(Some(usage(10, 2, 12))), None)
-            .expect("ok")
-            .expect("usage");
-        assert_eq!(untouched.total_tokens, Some(12));
-
-        assert!(with_spent_before_retry(Ok(None), None)
-            .expect("ok")
-            .is_none());
     }
 
     /// The first turn *installs* the run total; nothing else does. Without this
