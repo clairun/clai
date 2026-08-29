@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  asPayloadObject,
   cleanToolName,
   guessLang,
   summarizeToolCall,
@@ -78,6 +79,110 @@ describe('summarizeToolResult', () => {
       tone: 'error',
     });
   });
+
+  // A CLI provider (Claude Code) runs our built-ins over MCP and reports the
+  // wire envelope, so the payload arrives as a JSON string inside a content
+  // part. Without unwrapping, every one of these summaries reads an object
+  // with none of its keys: "0 entries" for a real listing, no exit code at all.
+  it('summarizes results wrapped in an MCP content envelope', () => {
+    const wrap = (payload: unknown) => [{ type: 'text', text: JSON.stringify(payload) }];
+
+    expect(summarizeToolResult('bash_exec', wrap({ exitCode: 2 }), null, 'completed')).toEqual({
+      text: 'exit 2',
+      tone: 'error',
+    });
+    expect(summarizeToolResult('fs_list', wrap({ entries: [1, 2, 3] }), null, 'completed')).toEqual(
+      { text: '3 entries', tone: 'neutral' }
+    );
+    expect(summarizeToolResult('fs_read', wrap({ content: 'a\nb' }), null, 'completed')).toEqual({
+      text: '2 lines',
+      tone: 'neutral',
+    });
+    expect(summarizeToolResult('fs_glob', wrap({ matches: [1] }), null, 'completed')).toEqual({
+      text: '1 match',
+      tone: 'neutral',
+    });
+  });
+
+  it('summarizes results wrapped in an MCP client envelope object', () => {
+    const result = {
+      serverId: 'srv-1',
+      toolName: 'fs_list',
+      content: [{ type: 'text', text: '{"entries":[1,2]}' }],
+      text: '{"entries":[1,2]}',
+    };
+    expect(summarizeToolResult('fs_list', result, null, 'completed')).toEqual({
+      text: '2 entries',
+      tone: 'neutral',
+    });
+  });
+});
+
+describe('asPayloadObject', () => {
+  it('passes plain objects and JSON strings through', () => {
+    expect(asPayloadObject({ a: 1 })).toEqual({ a: 1 });
+    expect(asPayloadObject('{"a":1}')).toEqual({ a: 1 });
+  });
+
+  it('unwraps MCP content envelopes carrying a JSON object', () => {
+    expect(asPayloadObject([{ type: 'text', text: '{"a":1}' }])).toEqual({ a: 1 });
+    expect(asPayloadObject({ content: [{ type: 'text', text: '{"a":1}' }] })).toEqual({ a: 1 });
+  });
+
+  it('yields nothing when the envelope text is not a JSON object', () => {
+    // An MCP tool answering in prose (or with a JSON array) has no payload
+    // object; the envelope's own keys are the wire, not the tool's answer, so
+    // the per-tool formatters must not see them.
+    expect(
+      asPayloadObject({ content: [{ type: 'text', text: 'all good' }], text: 'all good' })
+    ).toBeNull();
+    expect(asPayloadObject([{ type: 'text', text: '[1,2]' }])).toBeNull();
+  });
+
+  it('does not mistake a string `content` field for an envelope', () => {
+    // fs_read results carry the file in `content`; promoting it would replace
+    // the result with whatever the file happens to contain.
+    expect(asPayloadObject({ path: '/a.json', content: '{"a":1}' })).toEqual({
+      path: '/a.json',
+      content: '{"a":1}',
+    });
+  });
+
+  it('promotes nothing from a multi-part envelope, in either shape', () => {
+    // rmcp's `structured()` emits exactly one text part for our built-ins, so a
+    // multi-part envelope is a third-party MCP result: the envelope IS the
+    // payload and there is no tool JSON to promote. The joined text is not a
+    // JSON object, and both envelope shapes must agree on that.
+    const parts = [
+      { type: 'text', text: '{"a":1}' },
+      { type: 'text', text: 'trailing prose' },
+    ];
+    expect(asPayloadObject(parts)).toBeNull();
+    expect(asPayloadObject({ serverId: 's', toolName: 't', content: parts })).toBeNull();
+  });
+
+  it('unwraps a client envelope that carries only `text`', () => {
+    expect(asPayloadObject({ serverId: 's', toolName: 't', text: '{"entries":[1,2]}' })).toEqual({
+      entries: [1, 2],
+    });
+  });
+
+  it('ignores content parts that are not text parts, in either shape', () => {
+    // Only `type: 'text'` parts carry the payload; a resource part's own text
+    // would otherwise be joined in front of it and break the parse.
+    const parts = [
+      { type: 'resource', text: 'file:///a.txt' },
+      { type: 'text', text: '{"a":1}' },
+    ];
+    expect(asPayloadObject({ content: parts })).toEqual({ a: 1 });
+    expect(asPayloadObject(parts)).toEqual({ a: 1 });
+  });
+
+  it('yields null for non-objects', () => {
+    expect(asPayloadObject(null)).toBeNull();
+    expect(asPayloadObject(42)).toBeNull();
+    expect(asPayloadObject('not json')).toBeNull();
+  });
 });
 
 describe('toPreviewText', () => {
@@ -92,6 +197,29 @@ describe('toPreviewText', () => {
 
   it('extracts MCP envelope text', () => {
     expect(toPreviewText('mcp.x.y', { content: [{ type: 'text', text: 'hello' }] }, null)).toBe('hello');
+  });
+
+  it('formats built-in results wrapped in an MCP content envelope', () => {
+    const wrap = (payload: unknown) => [{ type: 'text', text: JSON.stringify(payload) }];
+
+    expect(toPreviewText('bash_exec', wrap({ stdout: 'out', stderr: 'err' }), null)).toBe(
+      'out\nerr'
+    );
+    expect(toPreviewText('fs_read', wrap({ content: 'line1\nline2' }), null)).toBe(
+      'line1\nline2'
+    );
+    expect(
+      toPreviewText('fs_list', wrap({ entries: [{ path: '/a' }, { path: '/b' }] }), null)
+    ).toBe('/a\n/b');
+  });
+
+  it('joins the text parts of a multi-part envelope, in either shape', () => {
+    const parts = [
+      { type: 'text', text: 'first' },
+      { type: 'text', text: 'second' },
+    ];
+    expect(toPreviewText('mcp.x.y', parts, null)).toBe('first\n\nsecond');
+    expect(toPreviewText('mcp.x.y', { content: parts }, null)).toBe('first\n\nsecond');
   });
 
   it('prefers the error message', () => {
