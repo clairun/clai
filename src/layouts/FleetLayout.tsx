@@ -103,6 +103,9 @@ const FleetLayout = () => {
   // toggle persists server-side and survives restarts.
   const [schedulerPaused, setSchedulerPausedState] = useState(false);
   const [schedulerPauseBusy, setSchedulerPauseBusy] = useState(false);
+  // Delete failures live next to the dialog, not in the page banner -- see
+  // handleConfirmDelete for why the banner cannot hold them.
+  const [deleteError, setDeleteError] = useState('');
 
   const activeRunsByWorkspace = useFleetActivity() as Record<string, number>;
   const pendingPermissionCounts = usePermissionAttention() as Record<string, number>;
@@ -283,6 +286,7 @@ const FleetLayout = () => {
 
   const handleRequestDelete = useCallback((id: string, title?: string) => {
     if (!id) return;
+    setDeleteError('');
     setPendingDelete({ id, title: title || 'this workspace' });
   }, []);
 
@@ -295,20 +299,36 @@ const FleetLayout = () => {
     if (!pendingDelete) return;
     const { id } = pendingDelete;
     setDeleting(true);
+    setDeleteError('');
     try {
       await deleteWorkspace(id);
-      await loadWorkspaces();
-      setPendingDelete(null);
-      // If we just deleted the open workspace, fall back to /fleet so the
-      // index can re-pick a most-recent target (or show the empty state).
-      if (selectedId === id) {
-        navigate('/fleet', { replace: true });
-      }
     } catch (err) {
-      setError(errText(err, 'Failed to delete workspace.'));
+      // Keep the dialog open and report inline. The page-level error banner
+      // is not a usable channel here: it sits under the modal overlay, and
+      // `loadWorkspaces` clears it on every successful 5s poll, so the
+      // message would be gone within seconds of the user reading it. Some
+      // failures are also retryable on the spot -- deleting a workspace with
+      // an active run -- and leaving the dialog up makes the retry one click.
+      setDeleteError(errText(err, 'Failed to delete workspace.'));
+      return;
     } finally {
+      // Scoped to the delete call alone. `busy` disables both buttons and
+      // gates Escape and overlay-click, so a dialog left busy has no way
+      // out at all -- it must never outlive the request it describes.
       setDeleting(false);
     }
+    // Close on the delete itself. Waiting for the refresh below left the
+    // modal sitting over a workspace that was already gone, which is what
+    // read as a hung dialog.
+    setPendingDelete(null);
+    // If we just deleted the open workspace, fall back to /fleet so the index
+    // can re-pick a most-recent target (or show the empty state). Before the
+    // refresh, so the route stops pointing at a dead id immediately rather
+    // than one `listWorkspaces` round trip later.
+    if (selectedId === id) {
+      navigate('/fleet', { replace: true });
+    }
+    await loadWorkspaces();
   }, [pendingDelete, loadWorkspaces, selectedId, navigate]);
 
   const handleRunNow = useCallback(
@@ -554,6 +574,7 @@ const FleetLayout = () => {
         confirmLabel="Delete workspace"
         cancelLabel="Cancel"
         confirmTone="danger"
+        error={deleteError}
         busy={deleting}
         onCancel={handleCancelDelete}
         onConfirm={handleConfirmDelete}

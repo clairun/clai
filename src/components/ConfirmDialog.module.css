@@ -41,6 +41,17 @@
   font-weight: 600;
 }
 
+.error {
+  padding: 8px 10px;
+  border: 1px solid var(--color-critical-border);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--color-critical-bg);
+  color: var(--color-critical-dark);
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .actions {
   display: flex;
   justify-content: flex-end;

@@ -138,26 +138,34 @@ impl WorkspaceIndex {
     }
 
     pub fn insert_config(&mut self, root_path: PathBuf, config: &WorkspaceConfig) {
-        self.by_id.insert(
-            config.id.clone(),
-            WorkspaceLocator {
-                id: config.id.clone(),
-                root_path,
-                title: config.title.clone(),
-                updated_at: config.updated_at,
-                last_run_completed_at: config.last_run_completed_at,
-                last_opened_at: config.last_opened_at,
-                starred_at: config.starred_at,
-                default_agent_id: config.default_agent_id.clone(),
-                schedule_enabled: config.schedule.enabled,
-                schedule_paused: config.schedule.paused,
-                schedule_kind: if config.schedule.enabled {
-                    Some(config.schedule.kind.clone())
-                } else {
-                    None
-                },
+        self.insert_locator(WorkspaceLocator {
+            id: config.id.clone(),
+            root_path,
+            title: config.title.clone(),
+            updated_at: config.updated_at,
+            last_run_completed_at: config.last_run_completed_at,
+            last_opened_at: config.last_opened_at,
+            starred_at: config.starred_at,
+            default_agent_id: config.default_agent_id.clone(),
+            schedule_enabled: config.schedule.enabled,
+            schedule_paused: config.schedule.paused,
+            schedule_kind: if config.schedule.enabled {
+                Some(config.schedule.kind.clone())
+            } else {
+                None
             },
-        );
+        });
+    }
+
+    /// Insert an already-built locator, no `config.json` read involved.
+    /// Used to undo a `remove_workspace` when the deletion it was part of
+    /// failed and the workspace is still on disk.
+    ///
+    /// Deliberately not symmetric with `remove_workspace`: the sqlx pool that
+    /// one dropped is not restored, because `AppState::workspace_db` re-opens
+    /// a missing pool on demand.
+    pub fn insert_locator(&mut self, locator: WorkspaceLocator) {
+        self.by_id.insert(locator.id.clone(), locator);
         self.resort();
     }
 
