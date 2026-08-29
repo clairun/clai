@@ -13,8 +13,7 @@ use std::collections::HashMap;
 
 use crate::assistant::types::{
     AuthMode, CompletionRequest, ContentPart, MessageRole, ModelInfo, ProtocolFamily,
-    ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, RunUsage,
-    ToolInvocationDraft,
+    ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, ToolInvocationDraft,
 };
 
 use super::catalog::{self, ModelsEndpointStyle};
@@ -532,11 +531,6 @@ fn parse_sse_frame(
                 *emitted_start = true;
                 events.push(Ok(ProviderEvent::MessageStart));
             }
-            // Extract usage from message_start if present
-            if let Some(usage_obj) = json.get("message").and_then(|m| m.get("usage")) {
-                let usage = parse_usage(usage_obj);
-                events.push(Ok(ProviderEvent::Usage { usage }));
-            }
         }
         "content_block_start" => {
             if !*emitted_start {
@@ -644,13 +638,6 @@ fn parse_sse_frame(
                 }));
             }
         }
-        "message_delta" => {
-            // May contain usage info and stop_reason
-            if let Some(usage_obj) = json.get("usage") {
-                let usage = parse_usage(usage_obj);
-                events.push(Ok(ProviderEvent::Usage { usage }));
-            }
-        }
         "message_stop" => {
             events.push(Ok(ProviderEvent::MessageComplete));
         }
@@ -669,15 +656,6 @@ fn parse_sse_frame(
     }
 
     events
-}
-
-fn parse_usage(usage_obj: &serde_json::Value) -> RunUsage {
-    RunUsage {
-        input_tokens: usage_obj.get("input_tokens").and_then(|v| v.as_u64()),
-        output_tokens: usage_obj.get("output_tokens").and_then(|v| v.as_u64()),
-        reasoning_tokens: None,
-        total_tokens: None,
-    }
 }
 
 #[cfg(test)]

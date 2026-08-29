@@ -76,7 +76,6 @@ async fn setup_test_pool() -> DbPool {
             connection_id TEXT NOT NULL,
             protocol_id TEXT NOT NULL,
             model_id TEXT NOT NULL,
-            usage_json TEXT,
             error TEXT,
             notices_json TEXT,
             started_at INTEGER NOT NULL,
@@ -622,7 +621,6 @@ async fn test_user_message_queue_lifecycle() {
             connection_id: "conn-1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -674,7 +672,6 @@ async fn test_get_active_run_ignores_terminal_runs() {
             connection_id: "conn-1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -691,7 +688,6 @@ async fn test_get_active_run_ignores_terminal_runs() {
             connection_id: "conn-1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -744,7 +740,6 @@ async fn test_workspace_has_active_run_tracks_any_session() {
             connection_id: "conn-1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -759,7 +754,6 @@ async fn test_workspace_has_active_run_tracks_any_session() {
             connection_id: "conn-1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -797,7 +791,6 @@ async fn test_create_and_get_run() {
             connection_id: "conn-1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -839,7 +832,6 @@ async fn test_list_runs_ordered_by_started_at_desc() {
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -857,7 +849,6 @@ async fn test_list_runs_ordered_by_started_at_desc() {
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: Some("Timeout".to_string()),
         },
     )
@@ -894,7 +885,6 @@ async fn test_update_run_status_to_terminal_sets_completed_at() {
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -935,7 +925,6 @@ async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -950,7 +939,7 @@ async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
 }
 
 #[tokio::test]
-async fn test_complete_run_with_usage_and_notices() {
+async fn test_complete_run_with_notices() {
     let pool = setup_test_pool().await;
 
     let session = create_session(
@@ -973,19 +962,12 @@ async fn test_complete_run_with_usage_and_notices() {
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
     .await
     .unwrap();
 
-    let usage = RunUsage {
-        input_tokens: Some(100),
-        output_tokens: Some(50),
-        reasoning_tokens: None,
-        total_tokens: Some(150),
-    };
     let notices = vec![RunNotice {
         kind: RunNoticeKind::CommandDenied,
         message: "sudo denied".to_string(),
@@ -996,7 +978,6 @@ async fn test_complete_run_with_usage_and_notices() {
         &pool,
         &run.id,
         RunStatus::CompletedWithWarnings,
-        Some(&usage),
         None,
         &notices,
     )
@@ -1004,56 +985,8 @@ async fn test_complete_run_with_usage_and_notices() {
     .unwrap();
 
     assert_eq!(completed.status, RunStatus::CompletedWithWarnings);
-    assert!(completed.usage.is_some());
-    let u = completed.usage.unwrap();
-    assert_eq!(u.total_tokens, Some(150));
     assert_eq!(completed.notices.len(), 1);
     assert!(completed.completed_at.is_some());
-}
-
-#[tokio::test]
-async fn test_complete_run_preserves_existing_usage_when_none_passed() {
-    let pool = setup_test_pool().await;
-
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let run = create_run(
-        &pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Running,
-            trigger: RunTrigger::UserMessage,
-            connection_id: "c1".to_string(),
-            protocol_id: "openai".to_string(),
-            model_id: "gpt-4".to_string(),
-            usage: Some(RunUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(5),
-                reasoning_tokens: None,
-                total_tokens: Some(15),
-            }),
-            error: None,
-        },
-    )
-    .await
-    .unwrap();
-
-    let completed = complete_run(&pool, &run.id, RunStatus::Completed, None, None, &[])
-        .await
-        .unwrap();
-
-    assert_eq!(completed.status, RunStatus::Completed);
-    assert!(completed.usage.is_some());
-    assert_eq!(completed.usage.unwrap().total_tokens, Some(15));
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,7 +1034,6 @@ async fn test_full_session_lifecycle() {
             connection_id: "conn-1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
-            usage: None,
             error: None,
         },
     )
@@ -1109,7 +1041,7 @@ async fn test_full_session_lifecycle() {
     .unwrap();
 
     // 4. Complete the run
-    complete_run(&pool, &run.id, RunStatus::Completed, None, None, &[])
+    complete_run(&pool, &run.id, RunStatus::Completed, None, &[])
         .await
         .unwrap();
 

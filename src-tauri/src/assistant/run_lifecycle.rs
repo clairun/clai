@@ -22,7 +22,7 @@ use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
 use crate::assistant::types::{
-    AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice, RunStatus, RunUsage,
+    AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice, RunStatus,
     ToolCallStatus, ToolInvocation,
 };
 use serde_json::Value;
@@ -59,7 +59,6 @@ pub(crate) async fn resolve_run_id(
                     connection_id: connection.id.clone(),
                     protocol_id: connection.protocol_id.clone(),
                     model_id: connection.model_id.clone(),
-                    usage: None,
                     error: None,
                 },
             )
@@ -77,7 +76,6 @@ pub(crate) async fn fail_run(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    usage: Option<&RunUsage>,
     error_msg: &str,
 ) -> Result<(), AssistantEngineError> {
     for tool_call in
@@ -90,15 +88,8 @@ pub(crate) async fn fail_run(
             AssistantUiEvent::ToolCallFailed { tool_call },
         );
     }
-    let run = repository::complete_run(
-        &deps.pool,
-        run_id,
-        RunStatus::Failed,
-        usage,
-        Some(error_msg),
-        &[],
-    )
-    .await?;
+    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Failed, Some(error_msg), &[])
+        .await?;
     let _ = emit_event(
         &deps.app,
         session,
@@ -116,7 +107,6 @@ pub(crate) async fn cancel_run(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    usage: Option<&RunUsage>,
 ) -> Result<(), AssistantEngineError> {
     for tool_call in
         repository::fail_running_tool_calls_for_run(&deps.pool, run_id, "Run cancelled").await?
@@ -128,8 +118,7 @@ pub(crate) async fn cancel_run(
             AssistantUiEvent::ToolCallFailed { tool_call },
         );
     }
-    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, usage, None, &[])
-        .await?;
+    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, None, &[]).await?;
     let _ = emit_event(
         &deps.app,
         session,
@@ -158,18 +147,10 @@ pub(crate) async fn complete_run_with_notices(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    usage: Option<&RunUsage>,
     notices: &[RunNotice],
 ) -> Result<(), AssistantEngineError> {
-    let run = repository::complete_run(
-        &deps.pool,
-        run_id,
-        final_status(notices),
-        usage,
-        None,
-        notices,
-    )
-    .await?;
+    let run =
+        repository::complete_run(&deps.pool, run_id, final_status(notices), None, notices).await?;
     let _ = emit_event(
         &deps.app,
         session,

@@ -294,90 +294,6 @@ pub struct AssistantMessagePage {
     pub total_count: u32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct RunUsage {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub total_tokens: Option<u64>,
-}
-
-impl RunUsage {
-    /// Collapse one more usage report belonging to the *same* provider turn.
-    ///
-    /// A single turn can report usage more than once: Anthropic sends
-    /// `input_tokens` in `message_start` and then a cumulative `output_tokens`
-    /// in `message_delta`, and `message_start` already carries a small
-    /// `output_tokens` preview. Each report restates the running total for the
-    /// fields it carries rather than adding to it, so the correct fold is a
-    /// field-wise maximum: summing would double-count that preview.
-    pub fn merge_turn_report(&mut self, next: &RunUsage) {
-        self.input_tokens = max_optional(self.input_tokens, next.input_tokens);
-        self.output_tokens = max_optional(self.output_tokens, next.output_tokens);
-        self.reasoning_tokens = max_optional(self.reasoning_tokens, next.reasoning_tokens);
-        self.total_tokens = max_optional(self.total_tokens, next.total_tokens);
-    }
-
-    /// Fold a finished turn into the run total.
-    ///
-    /// An agentic run issues one provider request per turn, and each request
-    /// bills its own prompt and completion independently, so the run total is
-    /// the sum over turns. Without this the persisted usage would describe only
-    /// the final turn, which is the shortest one in a typical tool-using run.
-    pub fn add_turn(&mut self, turn: &RunUsage) {
-        self.input_tokens = add_optional(self.input_tokens, turn.input_tokens);
-        self.output_tokens = add_optional(self.output_tokens, turn.output_tokens);
-        self.reasoning_tokens = add_optional(self.reasoning_tokens, turn.reasoning_tokens);
-        self.total_tokens = add_optional(self.total_tokens, turn.total_tokens);
-    }
-
-    /// Fill in `total_tokens` from the components when the provider never sent
-    /// one. Anthropic never sends a total, and several OpenAI-compatible
-    /// endpoints (MiniMax among them) omit it too, which previously left the
-    /// run with input and output counts but no total at all.
-    ///
-    /// Reasoning tokens are deliberately excluded: both native providers bill
-    /// them inside the completion/output count, so adding them again would
-    /// overstate the total. Call this once per turn, after the turn's reports
-    /// have been merged, so the derived total covers the whole turn.
-    pub fn ensure_total(&mut self) {
-        if self.total_tokens.is_some() {
-            return;
-        }
-        self.total_tokens = match (self.input_tokens, self.output_tokens) {
-            (None, None) => None,
-            _ => Some(
-                self.input_tokens
-                    .unwrap_or(0)
-                    .saturating_add(self.output_tokens.unwrap_or(0)),
-            ),
-        };
-    }
-}
-
-/// Sum of two optional counters, where absent means "not reported" rather than
-/// zero: the result is only absent when neither side reported anything.
-fn add_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        _ => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
-    }
-}
-
-/// Larger of two optional counters, with the same absent-vs-zero distinction.
-fn max_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
-    match (left, right) {
-        (None, None) => None,
-        _ => Some(left.unwrap_or(0).max(right.unwrap_or(0))),
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -392,8 +308,6 @@ pub struct AssistantRun {
     pub started_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<RunUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -636,9 +550,6 @@ pub enum ProviderEvent {
         tool_call: ToolInvocationDraft,
     },
     MessageComplete,
-    Usage {
-        usage: RunUsage,
-    },
     ProviderError {
         message: String,
     },
@@ -681,113 +592,5 @@ mod tests {
             }
             other => panic!("expected Image, got {other:?}"),
         }
-    }
-
-    /// Regression: the engine used to overwrite `usage` on every provider
-    /// usage event, so a multi-turn run persisted only its final turn — the
-    /// shortest one in a tool-using run.
-    #[test]
-    fn run_usage_sums_completed_turns() {
-        let mut run = RunUsage::default();
-
-        let mut first = RunUsage {
-            input_tokens: Some(12_000),
-            output_tokens: Some(400),
-            ..RunUsage::default()
-        };
-        first.ensure_total();
-        run.add_turn(&first);
-
-        let mut second = RunUsage {
-            input_tokens: Some(13_500),
-            output_tokens: Some(120),
-            ..RunUsage::default()
-        };
-        second.ensure_total();
-        run.add_turn(&second);
-
-        assert_eq!(run.input_tokens, Some(25_500));
-        assert_eq!(run.output_tokens, Some(520));
-        assert_eq!(run.total_tokens, Some(26_020));
-    }
-
-    /// Anthropic reports twice per turn: `message_start` carries the prompt
-    /// count plus a tiny output preview, `message_delta` the cumulative output.
-    /// Each report restates the turn's counters, so they must collapse
-    /// field-wise rather than add.
-    #[test]
-    fn run_usage_collapses_repeated_reports_within_one_turn() {
-        let mut turn = RunUsage::default();
-
-        turn.merge_turn_report(&RunUsage {
-            input_tokens: Some(1_000),
-            output_tokens: Some(1),
-            ..RunUsage::default()
-        });
-        turn.merge_turn_report(&RunUsage {
-            output_tokens: Some(500),
-            ..RunUsage::default()
-        });
-
-        assert_eq!(turn.input_tokens, Some(1_000));
-        // 500, not 501: the preview is restated, not additional.
-        assert_eq!(turn.output_tokens, Some(500));
-
-        turn.ensure_total();
-        assert_eq!(turn.total_tokens, Some(1_500));
-    }
-
-    /// Anthropic sends no total and several OpenAI-compatible endpoints
-    /// (MiniMax) omit it, which used to persist a run with no total at all.
-    #[test]
-    fn run_usage_derives_absent_total() {
-        let mut usage = RunUsage {
-            input_tokens: Some(700),
-            output_tokens: Some(80),
-            ..RunUsage::default()
-        };
-        usage.ensure_total();
-        assert_eq!(usage.total_tokens, Some(780));
-    }
-
-    /// An authoritative provider total always wins over the derived one.
-    #[test]
-    fn run_usage_keeps_provider_supplied_total() {
-        let mut usage = RunUsage {
-            input_tokens: Some(700),
-            output_tokens: Some(80),
-            reasoning_tokens: None,
-            total_tokens: Some(999),
-        };
-        usage.ensure_total();
-        assert_eq!(usage.total_tokens, Some(999));
-    }
-
-    /// Both native providers bill reasoning inside the output count, so the
-    /// derived total must not add it a second time.
-    #[test]
-    fn run_usage_derived_total_excludes_reasoning() {
-        let mut usage = RunUsage {
-            input_tokens: Some(100),
-            output_tokens: Some(60),
-            reasoning_tokens: Some(45),
-            total_tokens: None,
-        };
-        usage.ensure_total();
-        assert_eq!(usage.total_tokens, Some(160));
-    }
-
-    /// Absent must stay distinguishable from zero: a provider that reports
-    /// nothing should not manufacture a zeroed usage record.
-    #[test]
-    fn run_usage_absent_stays_absent() {
-        let mut usage = RunUsage::default();
-        usage.ensure_total();
-        assert_eq!(usage.total_tokens, None);
-
-        let mut run = RunUsage::default();
-        run.add_turn(&RunUsage::default());
-        assert_eq!(run.input_tokens, None);
-        assert_eq!(run.total_tokens, None);
     }
 }
