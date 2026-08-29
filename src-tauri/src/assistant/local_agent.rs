@@ -1640,7 +1640,7 @@ async fn run_codex_turn(
 // ---------------------------------------------------------------------------
 
 /// Run a Codex turn over the `codex app-server` JSON-RPC transport instead of
-/// `codex exec`: streaming, tool calls, usage, errors, plus real-time mid-run
+/// `codex exec`: streaming, tool calls, errors, plus real-time mid-run
 /// input via `turn/steer` (queued messages are injected into the live turn).
 /// Reuses the shared [`CodexStreamState`] + tool-call helpers by normalizing
 /// app-server items into the exec item shape.
@@ -5479,28 +5479,6 @@ mod tests {
         assert!(app_server_reasoning_text(&empty).is_empty());
         assert!(normalize_app_server_item(&empty).is_none());
     }
-
-    // -----------------------------------------------------------------
-    // Mutation-kill tests added at peer re-review of PR #183
-    // (clai/fix/codex-run-usage-thread-scope). Each test is shaped to
-    // fail when its corresponding mutation is applied, so removing any
-    // of the following guards falls out of the test suite immediately:
-    //
-    //   - `codex_app_server_step1_seeds_baseline_when_none`           (M3)
-    //   - `codex_app_server_step2_seeds_baseline_from_total`         (M10)
-    //   - `codex_app_server_three_notifications_keep_accumulating`   (M7)
-    //   - `codex_app_server_wiring_reads_params_turn_id`             (M8)
-    //   - `codex_app_server_zero_last_repeat_keeps_field_none`       (M1)
-    //   - `codex_app_server_absent_output_field_stays_none`          (M9)
-    // -----------------------------------------------------------------
-
-    // -----------------------------------------------------------------
-    // Claude Code per-message usage snapshots must NOT clobber the run
-    // total. See `apply_claude_stream_event_usage` for the rationale.
-    // These tests lock the behavior in; if the dispatcher ever starts
-    // writing the per-message `message_start`/`message_delta` snapshots
-    // back into the shared `usage` slot, all four tests will fail.
-    // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------
     // Mid-run injected-turn accounting

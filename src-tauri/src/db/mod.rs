@@ -226,6 +226,25 @@ mod tests {
         );
     }
 
+    /// The `usage_json` column was dropped in `20260829000000_drop_run_usage`
+    /// along with all token accounting. A migration that silently fails to
+    /// drop it would otherwise ship green — nothing reads the column, so only
+    /// this assertion notices.
+    #[tokio::test]
+    async fn assistant_runs_has_no_usage_json_column() {
+        let (_tmp, pool) = create_workspace_test_pool().await;
+        let columns: Vec<String> =
+            sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('assistant_runs')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(
+            !columns.iter().any(|c| c == "usage_json"),
+            "token accounting was removed; columns: {:?}",
+            columns
+        );
+    }
+
     #[tokio::test]
     async fn sweep_marks_running_rows_as_failed() {
         let (_tmp, pool) = create_workspace_test_pool().await;

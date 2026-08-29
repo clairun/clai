@@ -803,9 +803,17 @@ async fn test_create_and_get_run() {
     assert!(run.completed_at.is_none());
     assert!(run.notices.is_empty());
 
-    let fetched = get_run(&pool, &run.id).await.unwrap();
-    assert!(fetched.is_some());
-    assert_eq!(fetched.unwrap().id, run.id);
+    // Assert on the *stored* row, not the struct `create_run` returned: the
+    // INSERT binds `protocol_id` and `model_id` as adjacent strings, so only a
+    // round-trip catches a swapped pair.
+    let fetched = get_run(&pool, &run.id)
+        .await
+        .unwrap()
+        .expect("run persisted");
+    assert_eq!(fetched.id, run.id);
+    assert_eq!(fetched.protocol_id, "openai");
+    assert_eq!(fetched.model_id, "gpt-4");
+    assert_eq!(fetched.connection_id, "conn-1");
 }
 
 #[tokio::test]

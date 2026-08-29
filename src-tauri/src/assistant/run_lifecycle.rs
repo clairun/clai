@@ -31,7 +31,7 @@ use serde_json::Value;
 ///
 /// A supplied `run_id` must belong to the same connection the turn is running
 /// on: continuing a run against a different connection would attribute the new
-/// turn's usage and model to the wrong row, so it is rejected as
+/// turn's model to the wrong row, so it is rejected as
 /// `RunConnectionMismatch` rather than silently re-pointed.
 pub(crate) async fn resolve_run_id(
     deps: &AssistantDeps,
