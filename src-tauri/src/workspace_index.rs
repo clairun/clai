@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::config::workspace_config::ScheduleSurface;
 use crate::config::{workspace_config, AppConfig, WorkspaceConfig};
 
 #[derive(Debug, Clone)]
@@ -23,12 +24,12 @@ pub struct WorkspaceLocator {
     /// "Starred" section can be derived without re-reading configs.
     pub starred_at: i64,
     pub default_agent_id: String,
-    pub schedule_enabled: bool,
-    pub schedule_paused: bool,
-    /// Snapshot of the workspace's schedule mode (interval vs cron) for
-    /// quick reads by Fleet/list endpoints. `None` when the workspace
-    /// isn't scheduled. Refreshed via `insert_config`.
-    pub schedule_kind: Option<crate::config::workspace_config::ScheduleKind>,
+    /// The workspace's schedule as the rail and Fleet surfaces read it, so
+    /// those endpoints need no `config.json` access on a poll. Derived by
+    /// [`workspace_config::WorkspaceSchedule::surface`], never field by field
+    /// — deriving it here by hand is what made this locator disagree with the
+    /// snapshot about `paused`. Refreshed via `insert_config`.
+    pub schedule: ScheduleSurface,
 }
 
 #[derive(Debug, Clone)]
@@ -147,13 +148,7 @@ impl WorkspaceIndex {
             last_opened_at: config.last_opened_at,
             starred_at: config.starred_at,
             default_agent_id: config.default_agent_id.clone(),
-            schedule_enabled: config.schedule.enabled,
-            schedule_paused: config.schedule.paused,
-            schedule_kind: if config.schedule.enabled {
-                Some(config.schedule.kind.clone())
-            } else {
-                None
-            },
+            schedule: config.schedule.surface(),
         });
     }
 
@@ -215,5 +210,45 @@ impl WorkspaceIndex {
             )
         });
         self.sorted_by_updated = ids;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::workspace_config::ScheduleKind;
+
+    fn config(enabled: bool, paused: bool) -> WorkspaceConfig {
+        let mut config = WorkspaceConfig::new("ws-1".into(), "WS".into(), 0, "mgr-1".into());
+        config.schedule.enabled = enabled;
+        config.schedule.paused = paused;
+        config.schedule.kind = ScheduleKind::Interval {
+            interval_minutes: 5,
+        };
+        config
+    }
+
+    #[test]
+    fn locator_schedule_is_the_shared_surface_not_the_raw_config() {
+        let mut index = WorkspaceIndex::default();
+
+        // Rebuilding the surface field by field here is exactly the drift this
+        // locator used to carry, so it is what this test exists to catch.
+        index.insert_config(PathBuf::from("/tmp/ws-1"), &config(false, true));
+        assert_eq!(
+            index.locator("ws-1").unwrap().schedule,
+            ScheduleSurface::default(),
+            "a disabled schedule must not surface a stale on-disk pause"
+        );
+
+        index.insert_config(PathBuf::from("/tmp/ws-1"), &config(true, true));
+        let schedule = index.locator("ws-1").unwrap().schedule;
+        assert!(schedule.enabled && schedule.paused);
+        assert_eq!(
+            schedule.kind,
+            Some(ScheduleKind::Interval {
+                interval_minutes: 5
+            })
+        );
     }
 }
