@@ -5514,10 +5514,12 @@ mod tests {
         assert_eq!(names, vec!["index.md", "state.md", "note.md"]);
         // Memory paths are relative to the workspace root, not to the memory
         // directory — the panel opens them through the same file commands as
-        // any artifact.
+        // any artifact. Compared as a `Path`, not as a string: the separator
+        // is `\` on Windows, which is what first broke this assertion in CI.
+        let memory_prefix = Path::new(".clai").join("memory");
         assert!(memories
             .iter()
-            .all(|entry| entry.relative_path.starts_with(".clai/memory/")));
+            .all(|entry| Path::new(&entry.relative_path).starts_with(&memory_prefix)));
 
         assert_eq!(
             stats.file_count, 2,
