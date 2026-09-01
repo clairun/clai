@@ -18,7 +18,7 @@ use super::SandboxProfile;
 /// and, via the shared session, sibling sessions — down with it; the OS still
 /// reaps the process once it unblocks. The same bound guards the stdout/stderr
 /// reader joins so a grandchild holding a pipe fd open can't hang us either.
-const POST_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const POST_KILL_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct SandboxCommand {
@@ -164,7 +164,7 @@ pub(crate) async fn run_spawned_child(
 /// `start_kill()` is then the only available reap — and on platforms with
 /// neither mechanism.
 #[cfg(unix)]
-fn kill_process_tree(pid: Option<u32>) {
+pub(crate) fn kill_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     // SAFETY: `kill(2)` with a negative pid targets a process group and has no
     // memory effects. A stale/already-dead group yields ESRCH, which we ignore.
@@ -174,13 +174,13 @@ fn kill_process_tree(pid: Option<u32>) {
 }
 
 #[cfg(windows)]
-fn kill_process_tree(pid: Option<u32>) {
+pub(crate) fn kill_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else { return };
     kill_process_tree_windows(pid);
 }
 
 #[cfg(all(not(unix), not(windows)))]
-fn kill_process_tree(_pid: Option<u32>) {}
+pub(crate) fn kill_process_tree(_pid: Option<u32>) {}
 
 /// Windows tree-kill via the built-in `taskkill` utility.
 ///
