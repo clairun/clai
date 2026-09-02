@@ -323,7 +323,19 @@ const WorkspaceRail = ({
     // Suppressed while selected — the open page is marking it seen.
     const isUnread = !!ws.unread && !isSelected;
     const initial = (ws.title || '?').trim().charAt(0).toUpperCase() || '?';
-    const rowClasses = [styles.row, isSelected ? styles.rowSelected : ''].join(' ');
+    const rowClasses = [
+      styles.row,
+      isSelected ? styles.rowSelected : '',
+      // Sizes the hover-action overlay (scheduled rows show two extra buttons).
+      ws.scheduleEnabled ? styles.rowScheduled : '',
+      // An open menu keeps its row's actions visible. Opening the menu moves
+      // focus into it, and it is portaled to <body>, so the row loses
+      // `:focus-within` (and `:hover` as soon as the pointer moves onto the
+      // menu).
+      openMenu?.id === ws.id ? styles.rowMenuOpen : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
 
     return (
       <div
@@ -417,11 +429,7 @@ const WorkspaceRail = ({
               />
             )}
 
-            <span
-              className={`${styles.rowActions}${
-                openMenu?.id === ws.id ? ` ${styles.rowActionsMenuOpen}` : ''
-              }`}
-            >
+            <span className={styles.rowActions}>
               <button
                 type="button"
                 className={`${styles.iconButton} ${isStarred ? styles.starButtonActive : ''}`}

@@ -256,10 +256,27 @@ describe('WorkspaceRail sections', () => {
       // needs an explicit "menu open" class or the ⋯ trigger the menu is
       // positioned from collapses to a zero box. (CSS is off in jsdom, so
       // this asserts the class, not the computed display.)
-      expect(trigger.parentElement?.className).not.toMatch(/rowActionsMenuOpen/);
+      const row = trigger.closest('[role="button"]') as HTMLElement;
+      expect(row.className).not.toMatch(/rowMenuOpen/);
       stubTriggerRect(trigger, { top: 100, bottom: 116, right: 240 });
       await userEvent.click(trigger);
-      expect(trigger.parentElement?.className).toMatch(/rowActionsMenuOpen/);
+      expect(row.className).toMatch(/rowMenuOpen/);
+      // …and releases it again when the menu closes.
+      await userEvent.keyboard('{Escape}');
+      expect(row.className).not.toMatch(/rowMenuOpen/);
+    });
+
+    it('sizes the hover-action overlay per row: scheduled rows reserve room for run/pause', () => {
+      renderRail([
+        entry('a', 'Alpha'),
+        entry('b', 'Beta', { scheduleEnabled: true }),
+      ]);
+      // The overlay width lives in CSS keyed off this class; jsdom cannot
+      // measure it, so assert the class routing instead.
+      const alphaRow = screen.getByText('Alpha').closest('[role="button"]');
+      const betaRow = screen.getByText('Beta').closest('[role="button"]');
+      expect(alphaRow?.className).not.toMatch(/rowScheduled/);
+      expect(betaRow?.className).toMatch(/rowScheduled/);
     });
 
     it('holds its position when the trigger cannot be measured', async () => {
