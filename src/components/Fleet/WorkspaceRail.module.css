@@ -417,33 +417,75 @@
   justify-content: center;
 }
 
+/* Hover actions overlay the row's right edge instead of sitting in the flex
+   flow. Reserving flex space for them (the previous approach) truncated short
+   workspace names even at rest; toggling `display` (the approach before that)
+   shrank the title column on hover and made ellipsized names jump. Overlaying
+   avoids both: the title keeps the full row width at rest, and because the
+   title is left-aligned nowrap text, showing the actions never moves a glyph —
+   the tail the buttons cover is faded out by the `.rowBody` mask below. */
 .rowActions {
-  flex-shrink: 0;
+  position: absolute;
+  /* Right-aligned with the row's 9px content padding. */
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  /* Hidden actions still occupy their final width, so hover/focus never
-     remeasures the title column and makes ellipsized workspace names jump. */
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
   transition: opacity var(--transition-fast);
 }
 
+/* Width of the action overlay: 24px icon buttons with 2px gaps — two buttons
+   (star, menu) normally, four (star, run, pause, menu) on scheduled rows.
+   Keep in sync with `.iconButton` width and `.rowActions` gap. */
+.row {
+  --row-actions-overlay: 50px;
+}
+
+.rowScheduled {
+  --row-actions-overlay: 102px;
+}
+
 .row:hover .rowActions,
-.row:focus-within .rowActions {
+.row:focus-within .rowActions,
+.rowMenuOpen .rowActions {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
 }
 
-/* An open menu keeps its row's actions visible. Opening the menu moves focus
-   into it, and it is portaled to <body>, so the row loses `:focus-within`
-   (and `:hover` as soon as the pointer moves onto the menu). */
-.rowActionsMenuOpen {
-  opacity: 1;
-  visibility: visible;
-  pointer-events: auto;
+/* While the actions are shown they own the right edge: fade the title (and
+   meta line) out under them instead of letting glyphs collide with buttons. */
+.row:hover .rowBody,
+.row:focus-within .rowBody,
+.rowMenuOpen .rowBody {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    black calc(100% - var(--row-actions-overlay) - 28px),
+    transparent calc(100% - var(--row-actions-overlay))
+  );
+  mask-image: linear-gradient(
+    to right,
+    black calc(100% - var(--row-actions-overlay) - 28px),
+    transparent calc(100% - var(--row-actions-overlay))
+  );
+}
+
+/* The badge/unread dot sit where the actions appear; while the actions are
+   shown, drop them from the flow entirely. Removing (not just hiding) them
+   widens `.rowBody`, but left-aligned nowrap text only reveals more tail on
+   the right — inside the masked region — so nothing visibly moves. */
+.row:hover .attentionBadge,
+.row:focus-within .attentionBadge,
+.rowMenuOpen .attentionBadge,
+.row:hover .unreadDot,
+.row:focus-within .unreadDot,
+.rowMenuOpen .unreadDot {
+  display: none;
 }
 
 .iconButton {
