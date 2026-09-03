@@ -3,6 +3,7 @@
 //! These commands handle saving and loading the workspace state
 //! (tabs, commands, layout) to/from SQLite.
 
+use crate::agents::types::AgentInstance;
 use crate::assistant::repository;
 use crate::assistant::types::{
     AssistantMessage, AssistantRun, AssistantSession, ContentPart, SessionContext, SessionKind,
@@ -1798,6 +1799,37 @@ fn resolve_workspace_file_target(root: &Path, relative_path: &str) -> Result<Pat
 // Snapshot aggregation — workspace_get_snapshot
 // ===============================================================================
 
+/// The memory entries and artifact counters a snapshot reports.
+///
+/// Both are skipped wholesale on a lightweight poll (`includeFiles: false`)
+/// and for a workspace with no filesystem root; spelling that empty result
+/// once here is what keeps the two conditions from drifting apart — they were
+/// two nested `if`s with the same `(vec![], default())` arm written twice.
+///
+/// Memories are returned as entries (their panel renders the flat list), so
+/// they are subject to `collect_files`' [`MAX_ENTRY_COUNT`] cap. Artifacts are
+/// *not* walked into entries — the panel lazy-loads each directory level via
+/// `workspace_list_dir`, so only the recursive count for the header counter is
+/// computed here. That keeps the periodic 5s poll bounded, and it is why the
+/// artifact count is not truncated at 500 the way an entry list would be.
+fn snapshot_files(
+    root_path: Option<&Path>,
+    include_files: bool,
+) -> Result<(Vec<WorkspaceFileEntry>, ArtifactTreeStats), String> {
+    let Some(root_path) = root_path.filter(|_| include_files) else {
+        return Ok((Vec::new(), ArtifactTreeStats::default()));
+    };
+
+    let memory_root = root_path.join(".clai").join("memory");
+    let mut memories = Vec::new();
+    if memory_root.exists() {
+        collect_files(&memory_root, root_path, &mut memories, false)?;
+    }
+    sort_workspace_entries(&mut memories);
+
+    Ok((memories, artifact_tree_stats(root_path)))
+}
+
 #[tauri::command]
 pub async fn workspace_get_snapshot(
     workspace_id: Option<String>,
@@ -1836,28 +1868,8 @@ pub async fn workspace_get_snapshot(
         Vec::new()
     };
 
-    // Memories are still returned in full (their panel renders the flat list);
-    // artifacts are no longer walked here — the panel lazy-loads each directory
-    // level via `workspace_list_dir`, so we only need the true recursive count
-    // for the header counter. This also keeps the periodic 5s poll bounded:
-    // counting is cheaper than building + serializing every entry, and there is
-    // no longer a 500-entry cap silently truncating large workspaces.
-    let (memories, artifact_stats) = if options.include_files() {
-        if let Some(root_path) = &descriptor.root_path {
-            let memory_root = root_path.join(".clai").join("memory");
-            let mut memories = Vec::new();
-            if memory_root.exists() {
-                collect_files(&memory_root, root_path, &mut memories, false)?;
-            }
-            sort_workspace_entries(&mut memories);
-
-            (memories, artifact_tree_stats(root_path))
-        } else {
-            (Vec::new(), ArtifactTreeStats::default())
-        }
-    } else {
-        (Vec::new(), ArtifactTreeStats::default())
-    };
+    let (memories, artifact_stats) =
+        snapshot_files(descriptor.root_path.as_deref(), options.include_files())?;
     let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
 
     let (assigned_agents, default_workspace_agent_id) =
@@ -1869,28 +1881,20 @@ pub async fn workspace_get_snapshot(
     // Workspace-level schedule (no longer per-agent). The scheduled tick
     // invokes the default agent.
     let enabled: Option<bool> = None;
-    let workspace_config_for_schedule = state
+    let schedule = state
         .workspace_root(&descriptor.workspace_id)
-        .and_then(|root| workspace_config::load(&root).ok());
-    let (schedule_enabled, schedule_paused, schedule_kind) =
-        match workspace_config_for_schedule.as_ref() {
-            Some(cfg) if cfg.schedule.enabled => {
-                (true, cfg.schedule.paused, Some(cfg.schedule.kind.clone()))
-            }
-            _ => (false, false, None),
-        };
-    let next_run_in_seconds = if schedule_enabled && !schedule_paused {
-        if let Some(manager_id) = default_workspace_agent_id.as_deref() {
-            let instance_id = format!("{}::", manager_id);
+        .and_then(|root| workspace_config::load(&root).ok())
+        .map(|config| config.schedule.surface())
+        .unwrap_or_default();
+    let next_run_in_seconds = match default_workspace_agent_id.as_deref() {
+        Some(manager_id) if schedule.wants_countdown() => {
+            let instance_id = AgentInstance::workspace_instance_id(manager_id);
             let scheduler = state.scheduler.lock().await;
             scheduler
                 .get_instance(&instance_id)
                 .map(|instance| instance.seconds_until_next_run())
-        } else {
-            None
         }
-    } else {
-        None
+        _ => None,
     };
 
     Ok(WorkspaceSnapshot {
@@ -1917,9 +1921,9 @@ pub async fn workspace_get_snapshot(
         artifact_latest_modified_at: artifact_stats.latest_modified_at,
         queued_message_ids,
         enabled,
-        schedule_enabled,
-        schedule_paused,
-        schedule_kind,
+        schedule_enabled: schedule.enabled,
+        schedule_paused: schedule.paused,
+        schedule_kind: schedule.kind,
         next_run_in_seconds,
     })
 }
@@ -3458,19 +3462,11 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         let message_count =
             count_session_messages(&workspace_pool, &id, &locator.default_agent_id).await;
         let task_attention = workspace_task_attention_summary(&workspace_pool, &id).await?;
-        let schedule_enabled = locator.schedule_enabled;
-        let schedule_paused = locator.schedule_paused;
-        let schedule_kind = locator.schedule_kind.clone();
-
-        // Only surface next_run for actually-scheduled workspaces that are not
-        // paused. Paused workspaces keep their next_run_at intact in-memory
-        // (so resume picks up from where they left off), but the FE would
-        // mis-render a countdown that won't actually advance until resume.
-        let next_run_in_seconds = if schedule_enabled && !schedule_paused {
-            scheduler_seconds.get(&locator.default_agent_id).copied()
-        } else {
-            None
-        };
+        let schedule = locator.schedule;
+        let next_run_in_seconds = schedule
+            .wants_countdown()
+            .then(|| scheduler_seconds.get(&locator.default_agent_id).copied())
+            .flatten();
 
         entries.push(WorkspaceListEntry {
             id,
@@ -3488,9 +3484,9 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             latest_attention_task_status: task_attention.latest_attention_task_status,
             latest_attention_task_summary: task_attention.latest_attention_task_summary,
             latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
-            schedule_enabled,
-            schedule_paused,
-            schedule_kind,
+            schedule_enabled: schedule.enabled,
+            schedule_paused: schedule.paused,
+            schedule_kind: schedule.kind,
             next_run_in_seconds,
             unread: locator.last_run_completed_at > 0
                 && locator.last_run_completed_at > locator.last_opened_at,
@@ -4165,6 +4161,7 @@ async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::workspace_config::ScheduleSurface;
 
     const WS: &str = "ws-1";
     const MGR: &str = "mgr-1";
@@ -4307,9 +4304,7 @@ mod tests {
             last_opened_at: 0,
             starred_at: 0,
             default_agent_id: "agent-1".to_string(),
-            schedule_enabled: false,
-            schedule_paused: false,
-            schedule_kind: None,
+            schedule: ScheduleSurface::default(),
         }
     }
 
@@ -5474,6 +5469,100 @@ mod tests {
             mime_for_path(Path::new("/w/no-extension")),
             "application/octet-stream",
         );
+    }
+
+    /// A workspace root with two memory files and two artifacts. `.clai` is
+    /// skip-listed for the artifact walk, so the memory files must not be
+    /// counted as artifacts. `state.md` is backdated so the expected entry
+    /// order differs from the directory walk's own order — otherwise a
+    /// dropped sort would go unnoticed.
+    fn workspace_with_memories(root: &Path) {
+        write_file(&root.join(".clai/memory/index.md"), "index");
+        write_file(&root.join(".clai/memory/state.md"), "state");
+        set_modified(&root.join(".clai/memory/state.md"), 3_600);
+        // `dist` is on the artifact walk's skip list, but the memory walk does
+        // not apply it — a memory directory that happens to be named after a
+        // build output is still memory.
+        write_file(&root.join(".clai/memory/dist/note.md"), "note");
+        set_modified(&root.join(".clai/memory/dist/note.md"), 7_200);
+        write_file(&root.join("report.md"), "report");
+        write_file(&root.join("nested/data.json"), "{}");
+    }
+
+    /// Backdate `path` by `seconds`.
+    fn set_modified(path: &Path, seconds: u64) {
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn snapshot_files_lists_memories_and_counts_artifacts_separately() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        workspace_with_memories(root);
+
+        let (memories, stats) = snapshot_files(Some(root), true).unwrap();
+
+        // Newest first — the memory panel renders this order verbatim, so the
+        // sort is part of what this function owes its caller.
+        let names: Vec<_> = memories.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, vec!["index.md", "state.md", "note.md"]);
+        // Memory paths are relative to the workspace root, not to the memory
+        // directory — the panel opens them through the same file commands as
+        // any artifact. Compared as a `Path`, not as a string: the separator
+        // is `\` on Windows, which is what first broke this assertion in CI.
+        let memory_prefix = Path::new(".clai").join("memory");
+        assert!(memories
+            .iter()
+            .all(|entry| Path::new(&entry.relative_path).starts_with(&memory_prefix)));
+
+        assert_eq!(
+            stats.file_count, 2,
+            "artifacts count the two files outside `.clai`, never the memories"
+        );
+        assert!(!stats.capped);
+        assert!(stats.latest_modified_at > 0);
+    }
+
+    #[test]
+    fn snapshot_files_skips_both_walks_on_a_lightweight_poll() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        workspace_with_memories(root);
+
+        // `includeFiles: false` is what the 5s poll sends; neither walk may
+        // run, however much is on disk.
+        let (memories, stats) = snapshot_files(Some(root), false).unwrap();
+
+        assert!(memories.is_empty());
+        assert_eq!(stats, ArtifactTreeStats::default());
+    }
+
+    #[test]
+    fn snapshot_files_returns_empty_for_a_workspace_without_a_root() {
+        let (memories, stats) = snapshot_files(None, true).unwrap();
+
+        assert!(memories.is_empty());
+        assert_eq!(stats, ArtifactTreeStats::default());
+    }
+
+    #[test]
+    fn snapshot_files_tolerates_a_workspace_that_has_no_memory_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        write_file(&root.join("report.md"), "report");
+
+        // A fresh workspace has no `.clai/memory` yet. That is not an error,
+        // and it must not stop the artifact count from being reported.
+        let (memories, stats) = snapshot_files(Some(root), true).unwrap();
+
+        assert!(memories.is_empty());
+        assert_eq!(stats.file_count, 1);
     }
 
     #[test]

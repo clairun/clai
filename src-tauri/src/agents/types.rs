@@ -117,9 +117,28 @@ fn default_true() -> bool {
 }
 
 impl AgentInstance {
+    /// The scheduler key for an `(agent, space, room)` triple.
+    ///
+    /// The scheduler is a `HashMap<String, AgentInstance>`, so every lookup
+    /// outside this module has to rebuild the key. Callers must go through
+    /// here rather than re-spelling the format: a lookup that gets the shape
+    /// wrong does not fail loudly, it silently finds no instance — which the
+    /// UI renders as "no next run scheduled".
+    pub fn instance_id_for(agent_id: &str, space_id: &str, room_id: &str) -> String {
+        format!("{agent_id}:{space_id}:{room_id}")
+    }
+
+    /// The scheduler key of a *workspace-level* instance. Those are registered
+    /// with an empty space and room (`agents::init::apply_workspace_schedule`
+    /// calls `create_instance(&agent.id, "", "")`), the agent id being the
+    /// manager `workspace_agents` row id.
+    pub fn workspace_instance_id(agent_id: &str) -> String {
+        Self::instance_id_for(agent_id, "", "")
+    }
+
     /// Creates a new agent instance.
     pub fn new(definition: &AgentDefinition, space_id: String, room_id: String) -> Self {
-        let instance_id = format!("{}:{}:{}", definition.id, space_id, room_id);
+        let instance_id = Self::instance_id_for(&definition.id, &space_id, &room_id);
 
         Self {
             agent_id: definition.id.clone(),
@@ -190,6 +209,21 @@ mod tests {
         assert_eq!(instance.room_id, "room1");
         assert!(!instance.is_running);
         assert!(instance.enabled);
+    }
+
+    #[test]
+    fn workspace_instance_id_matches_the_key_a_workspace_instance_registers_under() {
+        let def = AgentDefinition::new("mgr-1", "Manager");
+        let registered = AgentInstance::new(&def, String::new(), String::new());
+
+        // `workspace_get_snapshot` looks the manager's countdown up by this
+        // key. If the two ever disagree the lookup misses silently and the
+        // workspace reports no next run.
+        assert_eq!(
+            AgentInstance::workspace_instance_id("mgr-1"),
+            registered.instance_id
+        );
+        assert_eq!(AgentInstance::workspace_instance_id("mgr-1"), "mgr-1::");
     }
 
     #[test]

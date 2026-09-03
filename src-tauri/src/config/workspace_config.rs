@@ -93,7 +93,7 @@ pub struct WorkspaceSchedule {
 /// into `0` and tripped the "interval must be ≥1" validator —
 /// surfacing as a confusing save error when the user's interval was
 /// actually 24h.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -123,6 +123,58 @@ impl Default for ScheduleKind {
     fn default() -> Self {
         Self::Interval {
             interval_minutes: 0,
+        }
+    }
+}
+
+/// The schedule as every UI surface reports it: the workspace snapshot, the
+/// rail locator and the Fleet card.
+///
+/// It exists because those three derived the same three fields from
+/// [`WorkspaceSchedule`] independently and did not agree on the disabled case:
+/// the snapshot zeroed `paused` and dropped the cadence, the rail locator
+/// passed `paused` through. No production write path can produce a disabled
+/// schedule that is still paused — `workspace_set_schedule` clears the pause
+/// when it disables, `workspace_set_schedule_paused` refuses while disabled,
+/// and a fork clears both — so the disagreement needs a hand-edited
+/// `config.json` to show. The point of deriving it once is that a future edit
+/// to any one of the three cannot silently reintroduce a difference.
+///
+/// The rule: a disabled schedule has no cadence, is not paused, and never
+/// fires, whatever the persisted fields say.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScheduleSurface {
+    pub enabled: bool,
+    /// Only meaningful when `enabled`; always `false` otherwise.
+    pub paused: bool,
+    /// `None` unless `enabled` — a cadence label for a schedule that cannot
+    /// fire is a promise the app does not keep.
+    pub kind: Option<ScheduleKind>,
+}
+
+impl ScheduleSurface {
+    /// Whether a countdown to the next run is worth showing — and, therefore,
+    /// whether the in-memory scheduler is worth consulting at all.
+    ///
+    /// A paused workspace keeps its `next_run_at` in memory so resuming picks
+    /// up where it left off, but that instant does not advance while paused,
+    /// so rendering a countdown off it would tick down to a run that never
+    /// happens.
+    pub fn wants_countdown(&self) -> bool {
+        self.enabled && !self.paused
+    }
+}
+
+impl WorkspaceSchedule {
+    /// Derive the [`ScheduleSurface`] for this schedule.
+    pub fn surface(&self) -> ScheduleSurface {
+        if !self.enabled {
+            return ScheduleSurface::default();
+        }
+        ScheduleSurface {
+            enabled: true,
+            paused: self.paused,
+            kind: Some(self.kind.clone()),
         }
     }
 }
@@ -511,6 +563,85 @@ pub fn merge_mcp_selection(previous: &[McpRef], requested_ids: &[String]) -> Vec
                 .any(|mcp_ref| mcp_ref.id == *id && mcp_ref.disabled),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod schedule_surface_tests {
+    use super::*;
+
+    fn schedule(enabled: bool, paused: bool, kind: ScheduleKind) -> WorkspaceSchedule {
+        WorkspaceSchedule {
+            enabled,
+            paused,
+            kind,
+            next_run_at_unix_ms: None,
+        }
+    }
+
+    fn cron() -> ScheduleKind {
+        ScheduleKind::Cron {
+            expression: "0 9 * * 1-5".to_string(),
+            timezone: "America/New_York".to_string(),
+        }
+    }
+
+    #[test]
+    fn enabled_schedule_surfaces_its_cadence_and_wants_a_countdown() {
+        let surface = schedule(true, false, cron()).surface();
+
+        assert_eq!(
+            surface,
+            ScheduleSurface {
+                enabled: true,
+                paused: false,
+                kind: Some(cron()),
+            }
+        );
+        assert!(surface.wants_countdown());
+    }
+
+    #[test]
+    fn paused_schedule_keeps_its_cadence_but_wants_no_countdown() {
+        let surface = schedule(true, true, cron()).surface();
+
+        assert!(surface.enabled);
+        assert!(surface.paused);
+        assert_eq!(surface.kind, Some(cron()));
+        assert!(
+            !surface.wants_countdown(),
+            "a paused schedule's next_run_at does not advance, so a countdown \
+             off it would tick down to a run that never fires"
+        );
+    }
+
+    #[test]
+    fn disabled_schedule_reports_no_cadence_and_is_never_paused() {
+        // `enabled: false, paused: true` is only reachable through a
+        // hand-edited config.json — every command that disables a schedule
+        // clears the pause. It is the case the three copies of this derivation
+        // disagreed on, so it is the case worth pinning.
+        let surface = schedule(false, true, cron()).surface();
+
+        assert_eq!(surface, ScheduleSurface::default());
+        assert!(
+            !surface.paused,
+            "a disabled schedule is not paused, it is off"
+        );
+        assert!(surface.kind.is_none());
+        assert!(!surface.wants_countdown());
+    }
+
+    #[test]
+    fn interval_cadence_survives_the_round_trip() {
+        let kind = ScheduleKind::Interval {
+            interval_minutes: 45,
+        };
+
+        assert_eq!(
+            schedule(true, false, kind.clone()).surface().kind,
+            Some(kind)
+        );
+    }
 }
 
 #[cfg(test)]
