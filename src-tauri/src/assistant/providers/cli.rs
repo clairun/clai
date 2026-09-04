@@ -311,13 +311,44 @@ fn cli_command(
 
 async fn run_cli_json_command(
     runtime: CliRuntime,
+    command: tokio::process::Command,
+    prompt: &str,
+) -> Result<String, ProviderError> {
+    run_cli_json_command_with_timeout(runtime, command, prompt, CLI_SUMMARY_TIMEOUT).await
+}
+
+/// Feed `prompt` to a CLI summarizer on stdin and collect its stdout.
+///
+/// The prompt reaches `SUMMARY_TRANSCRIPT_MAX_CHARS` (~96 KB), far more than a
+/// pipe buffer holds, so the order here is load-bearing: both output pipes are
+/// drained concurrently with the write, and the whole exchange — write, wait,
+/// and both reads — sits under one timeout. Writing first and reading
+/// afterwards deadlocks against any child that stalls before consuming the
+/// prompt, and a timeout around `wait()` alone cannot break it because the hang
+/// happens before `wait()` is ever reached. The reads are inside the budget for
+/// the same reason: `read_to_end` only sees EOF when the *last* holder of the
+/// write end closes it, so a grandchild that inherited the pipe would otherwise
+/// hang us after the child has already exited.
+///
+/// Timeout cleanup follows `sandbox::runner`: kill the process *group*, not the
+/// direct child, then bound the reap. These CLIs spawn helpers of their own
+/// (MCP servers, sandbox helpers, an OpenCode server), and orphaning them is
+/// how the pipes stay open.
+async fn run_cli_json_command_with_timeout(
+    runtime: CliRuntime,
     mut command: tokio::process::Command,
     prompt: &str,
+    timeout: Duration,
 ) -> Result<String, ProviderError> {
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // If the caller's future is dropped mid-summary, don't leave the CLI
+        // running with our pipes.
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().map_err(|e| {
         ProviderError::RequestFailed(format!(
             "Failed to launch {} summarizer: {}",
@@ -325,14 +356,6 @@ async fn run_cli_json_command(
             e
         ))
     })?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| ProviderError::RequestFailed(format!("Failed to write prompt: {}", e)))?;
-        drop(stdin);
-    }
 
     let stdout = child
         .stdout
@@ -344,33 +367,83 @@ async fn run_cli_json_command(
         .ok_or_else(|| ProviderError::RequestFailed("CLI stderr was not captured".to_string()))?;
     let stdout_task = tokio::spawn(read_pipe(stdout));
     let stderr_task = tokio::spawn(read_pipe(stderr));
+    let stdout_abort = stdout_task.abort_handle();
+    let stderr_abort = stderr_task.abort_handle();
 
-    let status = match tokio::time::timeout(CLI_SUMMARY_TIMEOUT, child.wait()).await {
-        Ok(result) => result.map_err(|e| ProviderError::RequestFailed(e.to_string()))?,
+    let stdin = child.stdin.take();
+    let owned_prompt = prompt.to_string();
+    let write_task = tokio::spawn(async move {
+        let Some(mut stdin) = stdin else {
+            return Ok(());
+        };
+        stdin.write_all(owned_prompt.as_bytes()).await?;
+        stdin.shutdown().await
+    });
+    let write_abort = write_task.abort_handle();
+
+    // Capture the pid up front: `child.id()` is `None` once the child has been
+    // reaped, and the timeout arm needs it to signal the group.
+    let child_pid = child.id();
+
+    let exchange = async {
+        // A write error is usually the child having exited early, in which case
+        // its status and stderr say why; keep it and only report it if the child
+        // then claims success on input it never received.
+        let write_error = match write_task.await {
+            Ok(result) => result.err(),
+            Err(join_error) => Some(std::io::Error::other(join_error)),
+        };
+        let status = child.wait().await;
+        let stdout = stdout_task.await;
+        let stderr = stderr_task.await;
+        (write_error, status, stdout, stderr)
+    };
+
+    let exchange = tokio::time::timeout(timeout, exchange).await;
+    let (write_error, status, stdout, stderr) = match exchange {
+        Ok(outcome) => outcome,
         Err(_) => {
-            let _ = child.kill().await;
+            crate::assistant::sandbox::runner::kill_process_tree(child_pid);
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(
+                crate::assistant::sandbox::runner::POST_KILL_REAP_TIMEOUT,
+                child.wait(),
+            )
+            .await;
+            write_abort.abort();
+            stdout_abort.abort();
+            stderr_abort.abort();
             return Err(ProviderError::RequestFailed(format!(
                 "{} summarizer timed out after {}s",
                 runtime.display_name(),
-                CLI_SUMMARY_TIMEOUT.as_secs()
+                timeout.as_secs()
             )));
         }
     };
 
-    let stdout = stdout_task
-        .await
-        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?
-        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
-    let stderr = stderr_task
-        .await
-        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?
-        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+    let status = status.map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+    let stdout = join_pipe(stdout)?;
+    let stderr = join_pipe(stderr)?;
 
     if !status.success() {
         return Err(command_failed(runtime, status, &stdout, &stderr));
     }
+    if let Some(error) = write_error {
+        return Err(ProviderError::RequestFailed(format!(
+            "Failed to write prompt: {}",
+            error
+        )));
+    }
 
     Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+fn join_pipe(
+    result: Result<std::io::Result<Vec<u8>>, tokio::task::JoinError>,
+) -> Result<Vec<u8>, ProviderError> {
+    result
+        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?
+        .map_err(|e| ProviderError::RequestFailed(e.to_string()))
 }
 
 async fn read_pipe<R>(mut pipe: R) -> Result<Vec<u8>, std::io::Error>
@@ -910,5 +983,161 @@ mod tests {
         let err = parse_opencode_summary(stdout).unwrap_err().to_string();
 
         assert!(err.contains("provider failed"), "got: {err}");
+    }
+
+    /// A prompt at the production ceiling: `SUMMARY_TRANSCRIPT_MAX_CHARS`
+    /// (96_000) plus the framing `sessionless_prompt_parts` adds. Bigger than
+    /// any pipe buffer, which is the whole point of these tests.
+    #[cfg(unix)]
+    fn oversized_prompt() -> String {
+        "x".repeat(96_300)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_summary_survives_a_child_that_writes_before_reading() {
+        // The reachable deadlock shape, at the real prompt size: the child
+        // fills its own 64 KiB stdout pipe before it drains stdin, so nothing
+        // moves unless we are reading while we write.
+        let prompt = oversized_prompt();
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg("head -c 70000 /dev/zero; exec cat");
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_cli_json_command(CliRuntime::Codex, command, &prompt),
+        )
+        .await
+        .expect("writing and draining must be concurrent, not sequential")
+        .expect("the child should succeed");
+
+        assert_eq!(output.len(), prompt.len() + 70_000);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_summary_times_out_while_the_prompt_is_still_being_written() {
+        // A child that never reads stdin blocks our write forever; the timeout
+        // has to cover the write, not just `wait()`.
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg("sleep 60");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_cli_json_command_with_timeout(
+                CliRuntime::Codex,
+                command,
+                &oversized_prompt(),
+                Duration::from_millis(250),
+            ),
+        )
+        .await
+        .expect("the timeout must fire even though the write never finished");
+
+        match result {
+            Err(ProviderError::RequestFailed(message)) => {
+                assert!(
+                    message.contains("timed out"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected a timeout error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_summary_is_bounded_when_a_grandchild_holds_the_pipes_open() {
+        // The child exits immediately but leaves a backgrounded grandchild
+        // holding the write end of both pipes, so `read_to_end` never sees EOF.
+        // Two properties at once: the timeout still bounds the call, and the
+        // cleanup kills the process *group* rather than the direct child - the
+        // grandchild's marker must never appear.
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("grandchild-ran");
+        let script = format!("( sleep 2; touch '{}' ) & exit 0", marker.to_str().unwrap());
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(&script);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_cli_json_command_with_timeout(
+                CliRuntime::Codex,
+                command,
+                "small prompt",
+                Duration::from_millis(250),
+            ),
+        )
+        .await
+        .expect("an inherited pipe must not outlive the timeout");
+
+        match result {
+            Err(ProviderError::RequestFailed(message)) => {
+                assert!(
+                    message.contains("timed out"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected a timeout error, got {other:?}"),
+        }
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(
+            !marker.exists(),
+            "grandchild survived the timeout - its process group was not reaped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_summary_reports_the_child_failure_not_the_broken_pipe() {
+        // Exiting before reading the prompt breaks our write; the useful
+        // diagnosis is the child's own stderr, not "Failed to write prompt".
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg("echo 'boom' >&2; exit 3");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_cli_json_command(CliRuntime::Codex, command, &oversized_prompt()),
+        )
+        .await
+        .expect("an early exit must not hang the write");
+
+        match result {
+            Err(ProviderError::RequestFailed(message)) => {
+                assert!(message.contains("boom"), "unexpected message: {message}");
+                assert!(
+                    message.contains("exited with status"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected the child failure, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_summary_reports_a_write_failure_when_the_child_claims_success() {
+        // Success on input the child never received is not success: it would
+        // summarize a prompt that was never delivered.
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg("exit 0");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_cli_json_command(CliRuntime::Codex, command, &oversized_prompt()),
+        )
+        .await
+        .expect("a silent early exit must not hang the write");
+
+        match result {
+            Err(ProviderError::RequestFailed(message)) => {
+                assert!(
+                    message.contains("Failed to write prompt"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected a write failure, got {other:?}"),
+        }
     }
 }
