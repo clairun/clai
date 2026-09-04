@@ -108,15 +108,30 @@ const parseJsonObject = (text: string): Record<string, unknown> | null => {
 };
 
 /**
- * Coerce a tool's params or result into the plain object the per-tool
- * formatters read.
+ * Coerce a tool's params into a plain object: the object itself, or a
+ * JSON-encoded string of one. Params never travel in an MCP envelope, so a
+ * params object that happens to carry a `text` string or a `content` array
+ * (both common in third-party tool schemas) is the tool's input, not a wrapper
+ * — it must not go through `asPayloadObject`, which would unwrap it to nothing.
+ */
+export const asParamsObject = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value === 'string') return parseJsonObject(value);
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return null;
+};
+
+/**
+ * Coerce a tool's result into the plain object the per-tool formatters read.
+ * (Params take `asParamsObject`: they never travel in an envelope.)
  *
  * A result reaches the chat in one of three shapes, and all three describe the
  * same tool output:
- *   - the object itself           — the local agent stores the tool's JSON value;
- *   - a JSON-encoded string       — some providers stringify it;
- *   - an MCP content envelope     — a CLI provider (Claude Code) bridges our
- *     built-ins over MCP and reports the wire form,
+ *   - the object itself           — the Anthropic provider stores the tool's JSON value;
+ *   - a JSON-encoded string       — Claude Code stringifies it;
+ *   - an MCP content envelope     — Codex reaches our built-ins through the local
+ *     MCP server and stores the wire form,
  *     `[{ type: 'text', text: '<the JSON>' }]`, as does our own MCP client with
  *     `{ content: [...], text }`.
  * The envelope must be unwrapped here or every per-tool formatter reads an
@@ -168,7 +183,7 @@ const firstScalarParam = (obj: Record<string, unknown> | null): string => {
  */
 export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSummary => {
   const name = cleanToolName(toolName || '');
-  const obj = asPayloadObject(params);
+  const obj = asParamsObject(params);
   const get = (key: string): string => oneLine(obj?.[key]);
 
   switch (name) {

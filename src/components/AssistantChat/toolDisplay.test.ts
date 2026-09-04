@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  asParamsObject,
   asPayloadObject,
   cleanToolName,
   guessLang,
@@ -38,6 +39,16 @@ describe('summarizeToolCall', () => {
 
   it('parses JSON-string params', () => {
     expect(summarizeToolCall('fs_read', '{"path":"/x.ts"}')).toEqual({ verb: 'Read', arg: '/x.ts' });
+  });
+
+  it('reads params that carry a `text` string or a `content` array as the input, not as an envelope', () => {
+    expect(summarizeToolCall('mcp__slack__post', { text: 'do it', channel: 'x' })).toEqual({
+      verb: 'post',
+      arg: 'do it',
+    });
+    expect(
+      summarizeToolCall('mcp__x__create', { content: [{ type: 'text', text: 'hi' }], target: 'y' })
+    ).toEqual({ verb: 'create', arg: 'y' });
   });
 });
 
@@ -115,6 +126,27 @@ describe('summarizeToolResult', () => {
       text: '2 entries',
       tone: 'neutral',
     });
+  });
+});
+
+describe('asParamsObject', () => {
+  it('passes plain objects and JSON strings through', () => {
+    expect(asParamsObject({ path: '/a' })).toEqual({ path: '/a' });
+    expect(asParamsObject('{"path":"/a"}')).toEqual({ path: '/a' });
+  });
+
+  it('never unwraps: a `text` string or `content` array is the tool input', () => {
+    const withText = { text: 'do it', channel: 'x' };
+    expect(asParamsObject(withText)).toBe(withText);
+    const withContent = { content: [{ type: 'text', text: 'hi' }], target: 'y' };
+    expect(asParamsObject(withContent)).toBe(withContent);
+  });
+
+  it('yields null for arrays, non-objects and non-object JSON', () => {
+    expect(asParamsObject([{ type: 'text', text: '{"a":1}' }])).toBeNull();
+    expect(asParamsObject(null)).toBeNull();
+    expect(asParamsObject(42)).toBeNull();
+    expect(asParamsObject('"just a string"')).toBeNull();
   });
 });
 

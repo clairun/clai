@@ -17,6 +17,7 @@ import type {
   ToolInvocation,
 } from '../../generated/bindings';
 import {
+  asParamsObject,
   asPayloadObject,
   cleanToolName,
   extractMcpText,
@@ -1030,7 +1031,7 @@ const renderToolOutput = (
   }
 
   if (name === 'bash_exec') {
-    const command = asPayloadObject(params)?.command;
+    const command = asParamsObject(params)?.command;
     const body = toPreviewText('bash_exec', result, error);
     return (
       <div className={styles.toolTerminalWrap}>
@@ -1045,7 +1046,7 @@ const renderToolOutput = (
   }
 
   if (name === 'ask_user') {
-    const p = asPayloadObject(params);
+    const p = asParamsObject(params);
     const r = asPayloadObject(result);
     const question = typeof p?.question === 'string' ? p.question : '';
     const context = typeof p?.context === 'string' ? p.context : '';
@@ -1107,7 +1108,7 @@ const renderToolOutput = (
 
   if (name === 'fs_read' || name === 'fs_write') {
     const fromResult = asPayloadObject(result);
-    const fromParams = asPayloadObject(params);
+    const fromParams = asParamsObject(params);
     const path =
       (typeof fromResult?.path === 'string' && fromResult.path) ||
       (typeof fromParams?.path === 'string' && fromParams.path) ||
