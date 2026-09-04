@@ -13,8 +13,7 @@ use std::collections::HashMap;
 
 use crate::assistant::types::{
     AuthMode, CompletionRequest, ContentPart, MessageRole, ModelInfo, ProtocolFamily,
-    ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, RunUsage,
-    ToolInvocationDraft,
+    ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, ToolInvocationDraft,
 };
 
 use super::catalog::{self, ModelsEndpointStyle};
@@ -235,7 +234,6 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
         "model": request.model_id,
         "messages": messages,
         "stream": true,
-        "stream_options": { "include_usage": true },
     });
 
     // Add tools if present
@@ -655,24 +653,6 @@ fn parse_sse_frame(
                         {
                             tool_calls_buf[index].arguments.push_str(args);
                         }
-                    }
-                }
-
-                // Extract usage if present
-                if let Some(usage_obj) = json.get("usage") {
-                    if !usage_obj.is_null() {
-                        let usage = RunUsage {
-                            input_tokens: usage_obj.get("prompt_tokens").and_then(|v| v.as_u64()),
-                            output_tokens: usage_obj
-                                .get("completion_tokens")
-                                .and_then(|v| v.as_u64()),
-                            reasoning_tokens: usage_obj
-                                .get("completion_tokens_details")
-                                .and_then(|d| d.get("reasoning_tokens"))
-                                .and_then(|v| v.as_u64()),
-                            total_tokens: usage_obj.get("total_tokens").and_then(|v| v.as_u64()),
-                        };
-                        events.push(Ok(ProviderEvent::Usage { usage }));
                     }
                 }
             }

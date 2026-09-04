@@ -262,12 +262,13 @@ pub(crate) fn thread_start_request(
 /// must be set again on resume, mirroring how the exec path re-passes its flags
 /// on `exec resume`).
 ///
-/// Deliberately omits `excludeTurns`: with turns included the app server
-/// replays a `thread/tokenUsage/updated` notification for the restored thread
-/// before `turn/started`, which seeds this run's usage baseline (see
-/// `apply_codex_app_server_usage`). The normal path counts correctly either
-/// way; without the replay, a usage-limit or context-window failure on a
-/// resumed run's first request would fold a stale `last`.
+/// Deliberately omits `excludeTurns`, which leaves the app server's default —
+/// the thread is restored with its turns included. Nothing here depends on the
+/// difference any more (the one notification we used to consume on resume,
+/// `thread/tokenUsage/updated`, no longer has a handler), so this is a
+/// deliberate "follow upstream's default" rather than a load-bearing flag.
+/// Setting it would be a behaviour change to weigh on its own merits, which is
+/// why the assertion below pins the current shape.
 pub(crate) fn thread_resume_request(
     id: i64,
     thread_id: &str,
@@ -483,7 +484,8 @@ mod tests {
             params["config"]["mcp_servers"]["clai"]["tool_timeout_sec"],
             42
         );
-        // Load-bearing for run usage accounting: see the doc comment above.
+        // Pins upstream's default rather than a requirement of ours: see the
+        // doc comment on `thread_resume_request`.
         assert!(params.get("excludeTurns").is_none());
     }
 

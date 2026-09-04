@@ -632,7 +632,6 @@ pub async fn assistant_send_message(
             connection_id: connection_id.clone(),
             protocol_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
-            usage: None,
             error: None,
         },
     )
@@ -853,7 +852,6 @@ pub async fn assistant_retry_run(
             connection_id: connection_id.clone(),
             protocol_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
-            usage: None,
             error: None,
         },
     )
@@ -998,7 +996,6 @@ pub(crate) async fn start_queued_followup_if_idle(
             connection_id: connection_id.clone(),
             protocol_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
-            usage: None,
             error: None,
         },
     )

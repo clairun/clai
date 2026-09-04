@@ -18,7 +18,7 @@ use crate::assistant::system_prompt::{build_system_prompt, live_agent_descriptio
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{
     AssistantMessage, CompactionTrigger, CompletionRequest, ContentPart, MessageRole,
-    ProviderEvent, ProviderInputMessage, RunId, RunStatus, RunTrigger, RunUsage, SessionId,
+    ProviderEvent, ProviderInputMessage, RunId, RunStatus, RunTrigger, SessionId,
     ToolInvocationDraft,
 };
 use crate::db::DbPool;
@@ -120,7 +120,7 @@ pub async fn run_session_turn(
     );
 
     if input.cancel_token.is_cancelled() {
-        cancel_run(deps, &session, &run_id, usage_none()).await?;
+        cancel_run(deps, &session, &run_id).await?;
         return Ok(());
     }
 
@@ -145,13 +145,6 @@ pub async fn run_session_turn(
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_allowed_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_blocked_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-
-    // `usage` is the run total reported to every terminal path (complete,
-    // cancel, fail). `completed_usage` holds only the turns that have finished,
-    // so the in-flight turn can be re-folded as it restates its counters
-    // without double-counting earlier turns.
-    let mut usage: Option<RunUsage> = None;
-    let mut completed_usage: Option<RunUsage> = None;
 
     // === Tool execution loop ===
     // Build system prompt (prepended to every API call, not persisted).
@@ -203,7 +196,7 @@ pub async fn run_session_turn(
     let mut compaction_attempt = compaction::CompactionAttempt::NotAttempted;
     loop {
         if input.cancel_token.is_cancelled() {
-            cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
+            cancel_run(deps, &session, &run_id).await?;
             return Ok(());
         }
 
@@ -355,7 +348,7 @@ pub async fn run_session_turn(
                 let provider_message = e.to_string();
                 let failure =
                     failure_message_with_compaction_context(&provider_message, &compaction_attempt);
-                fail_run(deps, &session, &run_id, usage.as_ref(), &failure).await?;
+                fail_run(deps, &session, &run_id, &failure).await?;
                 // First iteration: the provider rejected the request outright
                 // (connection/auth/limit), so the user's message never reached
                 // the LLM — drop it. Later iterations already produced content.
@@ -383,7 +376,7 @@ pub async fn run_session_turn(
         )
         .await
         {
-            fail_run(deps, &session, &run_id, usage.as_ref(), &e).await?;
+            fail_run(deps, &session, &run_id, &e).await?;
             return Err(AssistantEngineError::Persistence(e));
         }
         if !queued_message_ids_in_request.is_empty() {
@@ -429,9 +422,6 @@ pub async fn run_session_turn(
         // is tracked separately because the execution loop below needs it.
         let mut content_parts: Vec<ContentPart> = Vec::new();
         let mut tool_calls: Vec<ToolInvocationDraft> = Vec::new();
-        // Usage reported by this turn so far. Reset every iteration because a
-        // provider request bills its own prompt and completion.
-        let mut turn_usage: Option<RunUsage> = None;
 
         let stream_exit = loop {
             match tokio::select! {
@@ -474,26 +464,6 @@ pub async fn run_session_turn(
                         // block, so each block keeps its own signature.
                         set_thinking_signature(&mut content_parts, signature);
                     }
-                    ProviderEvent::Usage { usage: u } => {
-                        // A turn may report usage several times, each report
-                        // restating that turn's running counters rather than
-                        // adding to them, so collapse them field-wise. The run
-                        // total is the finished turns plus this turn's latest
-                        // report; keeping `usage` in that derived form means the
-                        // cancel and failure paths below already see the tokens
-                        // spent by every earlier turn.
-                        let turn = turn_usage.get_or_insert_with(RunUsage::default);
-                        turn.merge_turn_report(&u);
-                        // Derive the total on a copy: a later report in this
-                        // same turn may still raise input or output, and a total
-                        // derived from a partial report must not survive the
-                        // field-wise merge above as if the provider had sent it.
-                        let mut turn_so_far = turn.clone();
-                        turn_so_far.ensure_total();
-                        let mut total = completed_usage.clone().unwrap_or_default();
-                        total.add_turn(&turn_so_far);
-                        usage = Some(total);
-                    }
                     ProviderEvent::ToolCallReady { tool_call } => {
                         // Record it in content (in position) and in tool_calls
                         // (for the execution loop below).
@@ -524,18 +494,6 @@ pub async fn run_session_turn(
                 None => break StreamExit::Completed,
             }
         };
-
-        // This turn is over: fold its final report into the completed-turn
-        // total so the next turn accumulates on top of it. Before this the run
-        // kept only the last turn's usage, which in a tool-using run is the
-        // shortest turn of all.
-        if let Some(mut turn) = turn_usage.take() {
-            turn.ensure_total();
-            let mut total = completed_usage.take().unwrap_or_default();
-            total.add_turn(&turn);
-            completed_usage = Some(total);
-            usage = completed_usage.clone();
-        }
 
         // Finalize the assistant message from whatever we accumulated, on
         // *every* way out of the stream loop — normal end, Stop, or a
@@ -581,7 +539,7 @@ pub async fn run_session_turn(
         match stream_exit {
             StreamExit::Completed => {}
             StreamExit::Cancelled => {
-                cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
+                cancel_run(deps, &session, &run_id).await?;
                 return Ok(());
             }
             // Mid-stream failure before anything came back (some providers
@@ -590,7 +548,7 @@ pub async fn run_session_turn(
             StreamExit::ProviderReported { message } => {
                 let message =
                     failure_message_with_compaction_context(&message, &compaction_attempt);
-                fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
+                fail_run(deps, &session, &run_id, &message).await?;
                 if iteration == 0 && produced_no_content {
                     discard_unanswered_run_input(
                         deps,
@@ -606,7 +564,7 @@ pub async fn run_session_turn(
             StreamExit::StreamFailed { message } => {
                 let message =
                     failure_message_with_compaction_context(&message, &compaction_attempt);
-                fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
+                fail_run(deps, &session, &run_id, &message).await?;
                 if iteration == 0 && produced_no_content {
                     discard_unanswered_run_input(
                         deps,
@@ -637,7 +595,7 @@ pub async fn run_session_turn(
         // Execute each tool call
         for tc in &tool_calls {
             if input.cancel_token.is_cancelled() {
-                cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
+                cancel_run(deps, &session, &run_id).await?;
                 return Ok(());
             }
 
@@ -675,7 +633,7 @@ pub async fn run_session_turn(
             };
             let tool_result = tokio::select! {
                 _ = input.cancel_token.cancelled() => {
-                    cancel_run(deps, &session, &run_id, usage.as_ref()).await?;
+                    cancel_run(deps, &session, &run_id).await?;
                     return Ok(());
                 }
                 result = tools::execute_tool(
@@ -733,13 +691,9 @@ pub async fn run_session_turn(
         session_blocked_command_prefixes,
     };
     let notices = tool_context.take_notices();
-    complete_run_with_notices(deps, &session, &run_id, usage.as_ref(), &notices).await?;
+    complete_run_with_notices(deps, &session, &run_id, &notices).await?;
 
     Ok(())
-}
-
-fn usage_none() -> Option<&'static RunUsage> {
-    None
 }
 
 // Production helper fns (normalize_history_for_provider, build_trigger_message,

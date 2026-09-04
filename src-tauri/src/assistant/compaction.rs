@@ -527,8 +527,7 @@ async fn summarize_window(
             | ProviderEvent::ThinkingSignature { .. }
             | ProviderEvent::ToolCallDelta { .. }
             | ProviderEvent::ToolCallReady { .. }
-            | ProviderEvent::MessageComplete
-            | ProviderEvent::Usage { .. } => {}
+            | ProviderEvent::MessageComplete => {}
         }
     }
 

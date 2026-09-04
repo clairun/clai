@@ -31,7 +31,7 @@ use crate::assistant::system_prompt::{build_system_prompt, live_agent_descriptio
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
-    ProviderConnection, ProviderInputMessage, RunNotice, RunStatus, RunUsage,
+    ProviderConnection, ProviderInputMessage, RunNotice, RunStatus,
 };
 use crate::AppState;
 
@@ -269,7 +269,7 @@ pub async fn run_session_turn(
     );
 
     if input.cancel_token.is_cancelled() {
-        cancel_run(deps, &session, &run_id, None).await?;
+        cancel_run(deps, &session, &run_id).await?;
         return Ok(());
     }
 
@@ -281,7 +281,7 @@ pub async fn run_session_turn(
                     "CLI provider '{}' is registered but not implemented yet",
                     connection.protocol_id
                 );
-                fail_run(deps, &session, &run_id, None, &message).await?;
+                fail_run(deps, &session, &run_id, &message).await?;
                 discard_if_unanswered(deps, &session, &run_id, &input, &None).await;
                 return Err(AssistantEngineError::Provider(
                     crate::assistant::providers::types::ProviderError::RequestFailed(message),
@@ -394,7 +394,7 @@ pub async fn run_session_turn(
                         Ok(path) => path,
                         Err(error) => {
                             let message = error.message();
-                            fail_run(deps, &session, &run_id, None, &message).await?;
+                            fail_run(deps, &session, &run_id, &message).await?;
                             discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot)
                                 .await;
                             return Err(AssistantEngineError::Provider(
@@ -546,17 +546,15 @@ pub async fn run_session_turn(
     drop(binding_guard);
 
     match run_result {
-        Ok(usage) => {
+        Ok(()) => {
             let notices = notices
                 .lock()
                 .map(|mut n| std::mem::take(&mut *n))
                 .unwrap_or_default();
-            complete_run_with_notices(deps, &session, &run_id, usage.as_ref(), &notices).await
+            complete_run_with_notices(deps, &session, &run_id, &notices).await
         }
-        Err(LocalAgentRunError::Cancelled { usage }) => {
-            cancel_run(deps, &session, &run_id, usage.as_ref()).await
-        }
-        Err(LocalAgentRunError::Failed { message, usage }) => {
+        Err(LocalAgentRunError::Cancelled) => cancel_run(deps, &session, &run_id).await,
+        Err(LocalAgentRunError::Failed { message }) => {
             let message = if should_recover_cli_context_limit(&message) {
                 compaction::context_limit_failure_message(
                     provider_runtime.display_name(),
@@ -580,7 +578,7 @@ pub async fn run_session_turn(
                     message
                 );
             }
-            fail_run(deps, &session, &run_id, usage.as_ref(), &message).await?;
+            fail_run(deps, &session, &run_id, &message).await?;
             discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot).await;
             Err(AssistantEngineError::Provider(
                 crate::assistant::providers::types::ProviderError::RequestFailed(message),
@@ -1099,7 +1097,7 @@ async fn run_claude_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+) -> Result<(), LocalAgentRunError> {
     let prompt = prepare_prompt(
         deps,
         session,
@@ -1257,7 +1255,6 @@ async fn run_claude_turn(
         .ok_or_else(|| LocalAgentRunError::failed("Claude stdout was not captured"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = ClaudeStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
     // Mid-run input state (only meaningful while `live_stdin` is Some).
     // `turn_active` tracks whether a turn is in flight (first streamed event
@@ -1278,7 +1275,7 @@ async fn run_claude_turn(
                 let _ = child.kill().await;
                 finalize_assistant_message(deps, session, run_id, &assistant_message, &state)
                     .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             _ = queue_poll.tick(), if live_stdin.is_some() => {
                 // Never interrupt while a tool call is executing — cutting a
@@ -1352,7 +1349,6 @@ async fn run_claude_turn(
             &assistant_message,
             &value,
             &mut state,
-            &mut usage,
             &mut result_error,
         )
         .await?;
@@ -1435,19 +1431,15 @@ async fn run_claude_turn(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
     if !status.success() {
         let base = format!("Claude Code exited with status {}", status);
         return Err(LocalAgentRunError::Failed {
             message: append_stderr_tail(&base, &stderr_tail),
-            usage,
         });
     }
-    Ok(usage)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1461,7 +1453,7 @@ async fn run_codex_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+) -> Result<(), LocalAgentRunError> {
     let existing_thread_id = session.context.cli_session_id.clone();
     let prompt = prepare_prompt(
         deps,
@@ -1581,7 +1573,6 @@ async fn run_codex_turn(
         .ok_or_else(|| LocalAgentRunError::failed("Codex stdout was not captured"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = CodexStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
 
     loop {
@@ -1596,7 +1587,7 @@ async fn run_codex_turn(
                     &state.parts,
                 )
                 .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             next = lines.next_line() => next
         }
@@ -1618,7 +1609,6 @@ async fn run_codex_turn(
             &assistant_message,
             &value,
             &mut state,
-            &mut usage,
             &mut result_error,
         )
         .await?;
@@ -1633,19 +1623,15 @@ async fn run_codex_turn(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
     if !status.success() {
         let base = format!("Codex exited with status {}", status);
         return Err(LocalAgentRunError::Failed {
             message: append_stderr_tail(&base, &stderr_tail),
-            usage,
         });
     }
-    Ok(usage)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1654,7 +1640,7 @@ async fn run_codex_turn(
 // ---------------------------------------------------------------------------
 
 /// Run a Codex turn over the `codex app-server` JSON-RPC transport instead of
-/// `codex exec`: streaming, tool calls, usage, errors, plus real-time mid-run
+/// `codex exec`: streaming, tool calls, errors, plus real-time mid-run
 /// input via `turn/steer` (queued messages are injected into the live turn).
 /// Reuses the shared [`CodexStreamState`] + tool-call helpers by normalizing
 /// app-server items into the exec item shape.
@@ -1669,7 +1655,7 @@ async fn run_codex_turn_app_server(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+) -> Result<(), LocalAgentRunError> {
     use crate::assistant::codex_app_server as aps;
 
     let existing_thread_id = session.context.cli_session_id.clone();
@@ -1797,14 +1783,10 @@ async fn run_codex_turn_app_server(
         .map_err(LocalAgentRunError::failed)?;
 
     let mut state = CodexStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
     // Set on turn/started, cleared on turn/completed. Steering is only valid
     // while a turn is active, and `turn/steer` must carry this exact id.
     let mut active_turn_id: Option<String> = None;
-    // This run's slice of the thread-lifetime `total`; see
-    // `apply_codex_app_server_usage`.
-    let mut codex_usage_baseline: Option<RunUsage> = None;
     // Monotonic id for client-initiated requests after the handshake
     // (steer/interrupt), kept distinct from the handshake ids 1/2/3.
     let mut next_request_id: i64 = 10;
@@ -1832,7 +1814,7 @@ async fn run_codex_turn_app_server(
                     deps, session, run_id, &assistant_message, &state.parts,
                 )
                 .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             _ = steer_poll.tick() => {
                 // Steer queued messages into the *live* turn (the win over the
@@ -1937,10 +1919,8 @@ async fn run_codex_turn_app_server(
             method,
             &message,
             &mut state,
-            &mut usage,
             &mut result_error,
             &mut active_turn_id,
-            &mut codex_usage_baseline,
         )
         .await?;
         if turn_done {
@@ -1954,12 +1934,9 @@ async fn run_codex_turn_app_server(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
-    Ok(usage)
+    Ok(())
 }
 
 fn app_server_turn_start_error(response: &Value) -> Option<String> {
@@ -1991,7 +1968,7 @@ async fn aps_request_await(
         .map_err(LocalAgentRunError::failed)?;
     loop {
         let message = tokio::select! {
-            _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled { usage: None }),
+            _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled),
             _ = tokio::time::sleep_until(deadline) => {
                 return Err(LocalAgentRunError::failed(format!(
                     "codex app-server did not answer the handshake within {}s",
@@ -2045,10 +2022,8 @@ async fn handle_app_server_notification(
     method: &str,
     message: &Value,
     state: &mut CodexStreamState,
-    usage: &mut Option<RunUsage>,
     result_error: &mut Option<String>,
     active_turn_id: &mut Option<String>,
-    codex_usage_baseline: &mut Option<RunUsage>,
 ) -> Result<bool, LocalAgentRunError> {
     let null = Value::Null;
     let params = message.get("params").unwrap_or(&null);
@@ -2104,14 +2079,6 @@ async fn handle_app_server_notification(
                     .await?;
                 }
             }
-        }
-        "thread/tokenUsage/updated" => {
-            apply_codex_app_server_usage(
-                usage,
-                codex_usage_baseline,
-                active_turn_id.as_deref(),
-                Some(params),
-            );
         }
         "error" => {
             if result_error.is_none() {
@@ -2366,126 +2333,6 @@ fn app_server_reasoning_text(item: &Value) -> String {
     out.join("\n")
 }
 
-/// Map one `ThreadTokenUsage` breakdown (`"total"` or `"last"`) to
-/// [`RunUsage`]. `None` when the key is absent or carries no counts — the
-/// protocol promises neither on every notification.
-fn app_server_usage(token_usage: Option<&Value>, key: &str) -> Option<RunUsage> {
-    let breakdown = token_usage?.get(key)?;
-    let get = |field: &str| {
-        breakdown
-            .get(field)
-            .and_then(Value::as_i64)
-            .and_then(|v| u64::try_from(v).ok())
-    };
-    let input_tokens = get("inputTokens");
-    let output_tokens = get("outputTokens");
-    let reasoning_tokens = get("reasoningOutputTokens");
-    let reported_total = get("totalTokens");
-    if input_tokens.is_none()
-        && output_tokens.is_none()
-        && reasoning_tokens.is_none()
-        && reported_total.is_none()
-    {
-        return None;
-    }
-    let mut usage = RunUsage {
-        input_tokens,
-        output_tokens,
-        reasoning_tokens,
-        total_tokens: reported_total,
-    };
-    usage.ensure_total();
-    Some(usage)
-}
-
-/// Fold the usage carried by one `thread/tokenUsage/updated` notification into
-/// this run's ledger.
-///
-/// `tokenUsage.total` is cumulative over the whole Codex thread, so assigning
-/// it bills a resumed thread's entire history to this run. `tokenUsage.last`
-/// is the delta of the request that just completed, but upstream re-emits the
-/// same snapshot from rate-limit updates and compaction recomputes, so summing
-/// every `last` over-counts. Both are avoided by keeping a per-run baseline
-/// over the monotone `total` and folding `total - baseline` — the arithmetic
-/// codex uses for its own per-turn metric
-/// (`core/src/tasks/mod.rs::turn_token_usage`). Three steps per notification:
-/// (1) not this run's turn — seed the baseline and report nothing, which is how
-/// the `thread/resume` usage replay is discarded; (2) this run's turn with no
-/// baseline yet — fold the payload's own `last`; (3) this run's turn with a
-/// baseline — fold `total - baseline`, then advance the baseline.
-///
-/// Exact per-request usage is also on the wire as `rawResponse/completed`, but
-/// it is gated on `thread/start.experimentalRawEvents` and `thread/resume`
-/// cannot re-enable it, so reading that instead would record nothing at all
-/// for every resumed run (probed against codex-cli 0.146.1).
-fn apply_codex_app_server_usage(
-    usage: &mut Option<RunUsage>,
-    baseline: &mut Option<RunUsage>,
-    active_turn_id: Option<&str>,
-    params: Option<&Value>,
-) {
-    let token_usage = params.and_then(|p| p.get("tokenUsage"));
-    let Some(total) = app_server_usage(token_usage, "total") else {
-        return;
-    };
-    let notification_turn_id = params.and_then(|p| p.get("turnId")).and_then(Value::as_str);
-    let is_live_turn = matches!(
-        (notification_turn_id, active_turn_id),
-        (Some(notif), Some(active)) if notif == active
-    );
-    if !is_live_turn {
-        baseline.get_or_insert(total);
-        return;
-    }
-    match baseline.replace(total.clone()) {
-        None => {
-            if let Some(last) = app_server_usage(token_usage, "last") {
-                accumulate_turn_usage(usage, last);
-            }
-        }
-        Some(base) => {
-            let delta = subtract_run_usage(&total, &base);
-            if run_usage_is_nonzero(&delta) {
-                accumulate_turn_usage(usage, delta);
-            }
-        }
-    }
-}
-
-/// True when any field is present and non-zero, so a repeat snapshot's zero
-/// delta records nothing.
-fn run_usage_is_nonzero(usage: &RunUsage) -> bool {
-    fn nz(field: Option<u64>) -> bool {
-        matches!(field, Some(v) if v > 0)
-    }
-    nz(usage.input_tokens)
-        || nz(usage.output_tokens)
-        || nz(usage.reasoning_tokens)
-        || nz(usage.total_tokens)
-}
-
-/// Field-wise saturating subtraction. Absent on either side counts as 0; the
-/// result is absent only when both sides are absent.
-fn subtract_run_usage(end: &RunUsage, start: &RunUsage) -> RunUsage {
-    let input = sub_optional(end.input_tokens, start.input_tokens);
-    let output = sub_optional(end.output_tokens, start.output_tokens);
-    let reasoning = sub_optional(end.reasoning_tokens, start.reasoning_tokens);
-    let total = sub_optional(end.total_tokens, start.total_tokens);
-    RunUsage {
-        input_tokens: input,
-        output_tokens: output,
-        reasoning_tokens: reasoning,
-        total_tokens: total,
-    }
-}
-
-fn sub_optional(end: Option<u64>, start: Option<u64>) -> Option<u64> {
-    match (end, start) {
-        (None, None) => None,
-        _ => Some(end.unwrap_or(0).saturating_sub(start.unwrap_or(0))),
-    }
-}
-
 fn codex_developer_instructions(system_prompt: &str) -> String {
     format!(
         "System instructions for this CLAI run:\n{}\n\nUse the connected `clai` MCP tools for workspace work, shell execution, file access, and user interaction.",
@@ -2527,7 +2374,7 @@ async fn run_opencode_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
-) -> Result<Option<RunUsage>, LocalAgentRunError> {
+) -> Result<(), LocalAgentRunError> {
     let existing_session_id = session.context.cli_session_id.clone();
     let prompt = prepare_prompt(
         deps,
@@ -2630,7 +2477,6 @@ async fn run_opencode_turn(
         .ok_or_else(|| LocalAgentRunError::failed("OpenCode stdout was not captured"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = OpenCodeStreamState::new();
-    let mut usage: Option<RunUsage> = None;
     let mut result_error: Option<String> = None;
 
     loop {
@@ -2645,7 +2491,7 @@ async fn run_opencode_turn(
                     &state.parts,
                 )
                 .await?;
-                return Err(LocalAgentRunError::Cancelled { usage });
+                return Err(LocalAgentRunError::Cancelled);
             }
             next = lines.next_line() => next
         }
@@ -2668,7 +2514,6 @@ async fn run_opencode_turn(
             &assistant_message,
             &value,
             &mut state,
-            &mut usage,
             &mut result_error,
         )
         .await?;
@@ -2683,19 +2528,15 @@ async fn run_opencode_turn(
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed {
-            message: enriched,
-            usage,
-        });
+        return Err(LocalAgentRunError::Failed { message: enriched });
     }
     if !status.success() {
         let base = format!("OpenCode exited with status {}", status);
         return Err(LocalAgentRunError::Failed {
             message: append_stderr_tail(&base, &stderr_tail),
-            usage,
         });
     }
-    Ok(usage)
+    Ok(())
 }
 
 fn opencode_turn_prompt(system_prompt: &str, prompt: &str) -> String {
@@ -3524,7 +3365,6 @@ async fn handle_opencode_event(
     assistant_message: &AssistantMessage,
     value: &Value,
     state: &mut OpenCodeStreamState,
-    usage: &mut Option<RunUsage>,
     result_error: &mut Option<String>,
 ) -> Result<(), LocalAgentRunError> {
     if let Some(session_id) = value.get("sessionID").and_then(Value::as_str) {
@@ -3584,11 +3424,6 @@ async fn handle_opencode_event(
                     part,
                 )
                 .await?;
-            }
-        }
-        Some("step_finish") => {
-            if let Some(parsed) = opencode_usage_from_part(value.get("part")) {
-                accumulate_turn_usage(usage, parsed);
             }
         }
         Some("error") => {
@@ -3744,119 +3579,6 @@ fn opencode_tool_result_payload(part: &Value) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// OpenCode is the **exception**: its reasoning count is disjoint from its
-/// output count, so its total is additive.
-///
-/// `Session.getUsage` (`packages/opencode/src/session/session.ts`, unchanged
-/// from `v1.15.0` through HEAD) writes `output: safe(outputTokens -
-/// reasoningTokens)` and charges reasoning separately at the output rate, so
-/// deriving `input + output` here would silently drop every reasoning token.
-/// When OpenCode forwards the provider's own `total` we prefer it, exactly as
-/// the Codex app-server path does.
-fn opencode_usage_from_part(part: Option<&Value>) -> Option<RunUsage> {
-    let tokens = part?.get("tokens")?;
-    let field = |key: &str| {
-        tokens
-            .get(key)
-            .and_then(Value::as_i64)
-            .and_then(|v| u64::try_from(v).ok())
-    };
-    let input_tokens = field("input");
-    let output_tokens = field("output");
-    let reasoning_tokens = field("reasoning");
-    let total_tokens = field("total").or(match (input_tokens, output_tokens, reasoning_tokens) {
-        (None, None, None) => None,
-        _ => Some(
-            input_tokens
-                .unwrap_or(0)
-                .saturating_add(output_tokens.unwrap_or(0))
-                .saturating_add(reasoning_tokens.unwrap_or(0)),
-        ),
-    });
-    Some(RunUsage {
-        input_tokens,
-        output_tokens,
-        reasoning_tokens,
-        total_tokens,
-    })
-}
-
-/// Build a usage report whose `total_tokens` is derived the way the API path
-/// derives it: **input + output, with reasoning excluded**.
-///
-/// Codex (both transports) and Claude Code bill reasoning *inside* their output
-/// count, so adding it again overstates the run. Verified against the payloads
-/// on this machine: across 56_314 usage snapshots in 557 Codex rollouts,
-/// `total_tokens == input_tokens + output_tokens` holds 55_987 times, no
-/// snapshot anywhere satisfies `total == input + output + reasoning` with
-/// non-zero reasoning (0 of 50_356), and `reasoning_output_tokens` never
-/// exceeds `output_tokens`. Claude Code reports no `reasoning_tokens` field at
-/// all — its thinking tokens ride in `output_tokens_details.thinking_tokens`,
-/// a breakdown *of* the output count — so this is a no-op there today and a
-/// guard against drift tomorrow. `RunUsage::ensure_total` states the same rule
-/// for the API path; this is the CLI side of the one rule.
-///
-/// **OpenCode does not use this** — see `opencode_usage_from_part`.
-fn derived_total(
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    reasoning_tokens: Option<u64>,
-) -> RunUsage {
-    let mut usage = RunUsage {
-        input_tokens,
-        output_tokens,
-        reasoning_tokens,
-        total_tokens: None,
-    };
-    usage.ensure_total();
-    usage
-}
-
-/// Fold one finished CLI turn into the run total.
-///
-/// A single CLI process can serve several turns (mid-run user input on Claude
-/// Code, one `step_finish` per step on OpenCode), and each turn bills its own
-/// prompt and completion, so the run total is the sum over turns — the same
-/// rule as `RunUsage::add_turn`, which this now delegates to instead of
-/// repeating the optional-field arithmetic.
-fn accumulate_turn_usage(total: &mut Option<RunUsage>, next: RunUsage) {
-    match total.as_mut() {
-        Some(existing) => existing.add_turn(&next),
-        None => *total = Some(next),
-    }
-}
-
-/// Apply (or skip) the usage snapshot carried by a streamed Anthropic event.
-///
-/// Claude Code emits both per-message snapshots (`message_start` carries
-/// the prompt preview with `output_tokens == 1`; `message_delta` carries
-/// the cumulative `output_tokens` for the in-flight message) and a final
-/// per-turn report on `result`. The per-message snapshots are NOT
-/// per-turn totals and are not surfaced live to the UI (only the run
-/// completion event carries `usage` to the frontend), so folding them
-/// in here would:
-///   1. clobber any prior accumulated turn total (replacing the
-///      `Option`),
-///   2. double-count the current turn once the matching `result` event
-///      later calls `accumulate_turn_usage` on top.
-///
-/// Both reproduced on multi-turn Claude Code runs against issue #177's
-/// token accounting. The fix is to ignore the per-message snapshots
-/// here and keep the `result` event as the sole authority. This helper
-/// exists so the dispatch is testable without an `AppHandle`;
-/// `handle_stream_event` delegates to it and the unit tests in this
-/// module lock the behavior in.
-fn apply_claude_stream_event_usage(usage: &mut Option<RunUsage>, event: &Value) {
-    let event_type = event.get("type").and_then(Value::as_str);
-    match event_type {
-        Some("message_start") | Some("message_delta") => {
-            // Intentionally a no-op: see the doc comment above.
-            let _ = (usage, event);
-        }
-        _ => {}
-    }
-}
-
 fn opencode_error_message(value: &Value) -> String {
     value
         .get("error")
@@ -3927,21 +3649,12 @@ async fn handle_codex_event(
     assistant_message: &AssistantMessage,
     value: &Value,
     state: &mut CodexStreamState,
-    usage: &mut Option<RunUsage>,
     result_error: &mut Option<String>,
 ) -> Result<(), LocalAgentRunError> {
     match value.get("type").and_then(Value::as_str) {
         Some("thread.started") => {
             if let Some(thread_id) = value.get("thread_id").and_then(Value::as_str) {
                 set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
-            }
-        }
-        Some("turn.completed") => {
-            // Upstream builds this from `TokenUsageInfo.total`, so it is the
-            // thread-lifetime cumulative, not this turn's: a resumed exec run
-            // over-reports. The exec path has no baseline yet.
-            if let Some(parsed) = codex_usage_from_value(value.get("usage")) {
-                *usage = Some(parsed);
             }
         }
         Some("turn.failed") => {
@@ -4240,23 +3953,6 @@ fn codex_auxiliary_item_summary(item: &Value) -> Option<String> {
     }
 }
 
-fn codex_usage_from_value(value: Option<&Value>) -> Option<RunUsage> {
-    let value = value?;
-    let input_tokens = value
-        .get("input_tokens")
-        .and_then(Value::as_i64)
-        .and_then(|v| u64::try_from(v).ok());
-    let output_tokens = value
-        .get("output_tokens")
-        .and_then(Value::as_i64)
-        .and_then(|v| u64::try_from(v).ok());
-    let reasoning_tokens = value
-        .get("reasoning_output_tokens")
-        .and_then(Value::as_i64)
-        .and_then(|v| u64::try_from(v).ok());
-    Some(derived_total(input_tokens, output_tokens, reasoning_tokens))
-}
-
 async fn flush_codex_assistant_message_content(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -4306,22 +4002,12 @@ async fn handle_claude_event(
     assistant_message: &AssistantMessage,
     value: &Value,
     state: &mut ClaudeStreamState,
-    usage: &mut Option<RunUsage>,
     result_error: &mut Option<String>,
 ) -> Result<(), LocalAgentRunError> {
     match value.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
             let event = value.get("event").unwrap_or(&Value::Null);
-            handle_stream_event(
-                deps,
-                session,
-                run_id,
-                assistant_message,
-                event,
-                state,
-                usage,
-            )
-            .await?;
+            handle_stream_event(deps, session, run_id, assistant_message, event, state).await?;
         }
         Some("assistant") => {
             // Complete (non-partial) assistant message. We treat this
@@ -4358,11 +4044,6 @@ async fn handle_claude_event(
             }
         }
         Some("result") => {
-            if let Some(parsed) = usage_from_value(value.get("usage")) {
-                // Sum across turns: with mid-run input one process can run
-                // several turns, each reporting its own usage in its result.
-                accumulate_turn_usage(usage, parsed);
-            }
             if value
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -4421,7 +4102,6 @@ async fn handle_stream_event(
     assistant_message: &AssistantMessage,
     event: &Value,
     state: &mut ClaudeStreamState,
-    usage: &mut Option<RunUsage>,
 ) -> Result<(), LocalAgentRunError> {
     let event_type = event.get("type").and_then(Value::as_str);
     let block_index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -4622,15 +4302,6 @@ async fn handle_stream_event(
                     .await?;
                 }
             }
-        }
-        // Per-message `message_start`/`message_delta` usage payloads from
-        // the Anthropic wire format are intentionally dropped from the run
-        // total — see `apply_claude_stream_event_usage` for the rationale
-        // and the unit tests that lock the behavior in. The `result`
-        // event is the sole authority on per-turn usage; see
-        // `handle_claude_event`'s `Some("result")` arm.
-        Some("message_start") | Some("message_delta") => {
-            apply_claude_stream_event_usage(usage, event);
         }
         _ => {}
     }
@@ -5013,14 +4684,6 @@ fn content_part_text(part: &ContentPart) -> Option<String> {
     }
 }
 
-fn usage_from_value(value: Option<&Value>) -> Option<RunUsage> {
-    let value = value?;
-    let input_tokens = value.get("input_tokens").and_then(Value::as_u64);
-    let output_tokens = value.get("output_tokens").and_then(Value::as_u64);
-    let reasoning_tokens = value.get("reasoning_tokens").and_then(Value::as_u64);
-    Some(derived_total(input_tokens, output_tokens, reasoning_tokens))
-}
-
 fn write_mcp_config(url: &str, token: &str) -> Result<PathBuf, LocalAgentRunError> {
     let dir = dirs::config_dir()
         .ok_or_else(|| LocalAgentRunError::failed("Could not determine config directory"))?
@@ -5081,26 +4744,20 @@ fn spawn_stderr_logger(
 }
 
 enum LocalAgentRunError {
-    Cancelled {
-        usage: Option<RunUsage>,
-    },
-    Failed {
-        message: String,
-        usage: Option<RunUsage>,
-    },
+    Cancelled,
+    Failed { message: String },
 }
 
 impl LocalAgentRunError {
     fn failed(message: impl Into<String>) -> Self {
         Self::Failed {
             message: message.into(),
-            usage: None,
         }
     }
 
     fn message(self) -> String {
         match self {
-            LocalAgentRunError::Cancelled { .. } => "run cancelled".to_string(),
+            LocalAgentRunError::Cancelled => "run cancelled".to_string(),
             LocalAgentRunError::Failed { message, .. } => message,
         }
     }
@@ -5110,31 +4767,6 @@ impl From<String> for LocalAgentRunError {
     fn from(value: String) -> Self {
         LocalAgentRunError::failed(value)
     }
-}
-
-/// Test shim for the pre-extraction call shape: builds the notification
-/// `params` object the wire delivers.
-#[cfg(test)]
-fn apply_usage(
-    usage: &mut Option<RunUsage>,
-    baseline: &mut Option<RunUsage>,
-    active_turn_id: Option<&str>,
-    notification_turn_id: Option<&str>,
-    token_usage: Option<&Value>,
-) {
-    let mut params = serde_json::Map::new();
-    if let Some(id) = notification_turn_id {
-        params.insert("turnId".into(), Value::from(id));
-    }
-    if let Some(token_usage) = token_usage {
-        params.insert("tokenUsage".into(), token_usage.clone());
-    }
-    apply_codex_app_server_usage(
-        usage,
-        baseline,
-        active_turn_id,
-        Some(&Value::Object(params)),
-    );
 }
 
 #[cfg(test)]
@@ -5725,25 +5357,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_usage_maps_jsonl_turn_usage() {
-        let usage = codex_usage_from_value(Some(&serde_json::json!({
-            "input_tokens": 10,
-            "output_tokens": 7,
-            "reasoning_output_tokens": 3
-        })))
-        .expect("usage");
-
-        assert_eq!(usage.input_tokens, Some(10));
-        assert_eq!(usage.output_tokens, Some(7));
-        assert_eq!(usage.reasoning_tokens, Some(3));
-        // Reasoning is a subset of the output count, so the total is 10 + 7 and
-        // not 10 + 7 + 3. Real Codex rollouts satisfy
-        // `total_tokens == input_tokens + output_tokens` on every snapshot while
-        // `reasoning_output_tokens` is non-zero.
-        assert_eq!(usage.total_tokens, Some(17));
-    }
-
-    #[test]
     fn codex_mcp_result_prefers_structured_content() {
         let payload = codex_mcp_result_payload(Some(&serde_json::json!({
             "content": [{"type": "text", "text": "fallback"}],
@@ -5756,89 +5369,6 @@ mod tests {
     #[test]
     fn codex_tool_call_ids_are_run_scoped() {
         assert_eq!(codex_tool_call_id("run-a", "item_0"), "codex:run-a:item_0");
-    }
-
-    #[test]
-    fn opencode_usage_maps_step_finish_tokens() {
-        let usage = opencode_usage_from_part(Some(&serde_json::json!({
-            "tokens": {
-                "input": 11,
-                "output": 5,
-                "reasoning": 2,
-                "cache": {"read": 100, "write": 0}
-            }
-        })))
-        .expect("usage");
-
-        assert_eq!(usage.input_tokens, Some(11));
-        assert_eq!(usage.output_tokens, Some(5));
-        assert_eq!(usage.reasoning_tokens, Some(2));
-        // 11 + 5 + 2. OpenCode subtracts reasoning out of `tokens.output`
-        // before it writes the part (`output: safe(outputTokens -
-        // reasoningTokens)`), so unlike every other CLI its reasoning count is
-        // disjoint and the total is additive. `tokens.cache` is a separate
-        // bucket this parser still ignores.
-        assert_eq!(usage.total_tokens, Some(18));
-    }
-
-    /// When OpenCode forwards the provider's own total, it wins — the value
-    /// here is deliberately not the additive sum, so a derivation can't fake it.
-    #[test]
-    fn opencode_reported_total_is_preferred_over_the_derivation() {
-        let usage = opencode_usage_from_part(Some(&serde_json::json!({
-            "tokens": {
-                "input": 11, "output": 5, "reasoning": 2, "total": 99,
-                "cache": {"read": 100, "write": 0}
-            }
-        })))
-        .expect("usage");
-
-        assert_eq!(usage.total_tokens, Some(99));
-    }
-
-    #[test]
-    fn turn_usage_accumulates_across_steps() {
-        let mut usage = Some(RunUsage {
-            input_tokens: Some(10),
-            output_tokens: Some(2),
-            reasoning_tokens: None,
-            total_tokens: Some(12),
-        });
-        accumulate_turn_usage(
-            &mut usage,
-            RunUsage {
-                input_tokens: Some(7),
-                output_tokens: Some(3),
-                reasoning_tokens: Some(1),
-                total_tokens: Some(11),
-            },
-        );
-
-        let usage = usage.expect("usage");
-        assert_eq!(usage.input_tokens, Some(17));
-        assert_eq!(usage.output_tokens, Some(5));
-        assert_eq!(usage.reasoning_tokens, Some(1));
-        assert_eq!(usage.total_tokens, Some(23));
-    }
-
-    /// The first turn *installs* the run total; nothing else does. Without this
-    /// the `None` arm is untested and a run could report no usage at all.
-    #[test]
-    fn the_first_turn_seeds_the_run_total() {
-        let mut usage = None;
-        accumulate_turn_usage(
-            &mut usage,
-            RunUsage {
-                input_tokens: Some(9),
-                output_tokens: Some(4),
-                reasoning_tokens: Some(1),
-                total_tokens: Some(13),
-            },
-        );
-
-        let usage = usage.expect("first turn installs the total");
-        assert_eq!(usage.input_tokens, Some(9));
-        assert_eq!(usage.total_tokens, Some(13));
     }
 
     #[test]
@@ -5948,1009 +5478,6 @@ mod tests {
         let empty = serde_json::json!({ "type": "reasoning" });
         assert!(app_server_reasoning_text(&empty).is_empty());
         assert!(normalize_app_server_item(&empty).is_none());
-    }
-
-    #[test]
-    fn app_server_usage_maps_total_breakdown() {
-        let token_usage = serde_json::json!({
-            "total": {
-                "inputTokens": 100, "outputTokens": 40,
-                "reasoningOutputTokens": 10, "cachedInputTokens": 5, "totalTokens": 150
-            },
-            "last": {}
-        });
-        let usage = app_server_usage(Some(&token_usage), "total").unwrap();
-        assert_eq!(usage.input_tokens, Some(100));
-        assert_eq!(usage.output_tokens, Some(40));
-        assert_eq!(usage.reasoning_tokens, Some(10));
-        assert_eq!(usage.total_tokens, Some(150));
-
-        // No usage at all -> None (don't clobber a prior value with zeros).
-        assert!(app_server_usage(None, "total").is_none());
-        assert!(app_server_usage(Some(&serde_json::json!({})), "total").is_none());
-
-        // A breakdown carrying *only* reasoning is still a report, so it is
-        // kept — but it yields no total, because a total made of reasoning
-        // tokens alone would be meaningless.
-        let reasoning_only = app_server_usage(
-            Some(&serde_json::json!({
-                "total": {"reasoningOutputTokens": 7}
-            })),
-            "total",
-        )
-        .expect("a reasoning-only breakdown is still usage");
-        assert_eq!(reasoning_only.reasoning_tokens, Some(7));
-        assert_eq!(reasoning_only.total_tokens, None);
-    }
-
-    /// The app server sends its own `totalTokens`, and a provider-reported
-    /// total always wins over anything we would derive. Its value here (150)
-    /// is deliberately *not* input + output, so a derivation could not fake it.
-    #[test]
-    fn app_server_reported_total_is_preferred_over_the_derivation() {
-        let usage = app_server_usage(
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 100, "outputTokens": 40,
-                    "reasoningOutputTokens": 10, "totalTokens": 150
-                }
-            })),
-            "total",
-        )
-        .unwrap();
-        assert_eq!(usage.total_tokens, Some(150));
-    }
-
-    /// ...and when it omits the total, the fallback is input + output only.
-    #[test]
-    fn app_server_derived_total_excludes_reasoning() {
-        let usage = app_server_usage(
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 100, "outputTokens": 40, "reasoningOutputTokens": 10
-                }
-            })),
-            "total",
-        )
-        .unwrap();
-        assert_eq!(usage.reasoning_tokens, Some(10));
-        assert_eq!(usage.total_tokens, Some(140));
-    }
-
-    /// `last` mirrors `total` in shape but represents one upstream API
-    /// request, not the thread lifetime. The values here deliberately
-    /// differ from the `total` block of the same payload to lock that
-    /// the new helper only reads `last`.
-    #[test]
-    fn app_server_usage_maps_last_breakdown() {
-        let token_usage = serde_json::json!({
-            "total": {
-                "inputTokens": 9_999, "outputTokens": 9_999,
-                "reasoningOutputTokens": 9_999, "totalTokens": 9_999
-            },
-            "last": {
-                "inputTokens": 100, "outputTokens": 40,
-                "reasoningOutputTokens": 10, "cachedInputTokens": 5, "totalTokens": 150
-            }
-        });
-        let usage = app_server_usage(Some(&token_usage), "last").unwrap();
-        assert_eq!(usage.input_tokens, Some(100));
-        assert_eq!(usage.output_tokens, Some(40));
-        assert_eq!(usage.reasoning_tokens, Some(10));
-        assert_eq!(usage.total_tokens, Some(150));
-
-        // No `last` block -> None (the protocol does not promise one on
-        // every notification; treat absence as "nothing new to fold in").
-        assert!(app_server_usage(None, "last").is_none());
-        assert!(app_server_usage(Some(&serde_json::json!({})), "last").is_none());
-        assert!(
-            app_server_usage(Some(&serde_json::json!({"total": {}})), "last").is_none(),
-            "presence of `total` alone does not yield a `last` delta"
-        );
-
-        // A `last` carrying only reasoning is still a report and is kept,
-        // but the derived total stays `None` because a total of reasoning
-        // alone would be meaningless.
-        let reasoning_only = app_server_usage(
-            Some(&serde_json::json!({
-                "last": {"reasoningOutputTokens": 7}
-            })),
-            "last",
-        )
-        .expect("a reasoning-only `last` is still usage");
-        assert_eq!(reasoning_only.reasoning_tokens, Some(7));
-        assert_eq!(reasoning_only.total_tokens, None);
-    }
-
-    /// `last` reported without `totalTokens` falls back to input + output
-    /// (reasoning is excluded), matching the `total` derivation rule.
-    #[test]
-    fn app_server_usage_derived_total_excludes_reasoning() {
-        let usage = app_server_usage(
-            Some(&serde_json::json!({
-                "last": {"inputTokens": 100, "outputTokens": 40, "reasoningOutputTokens": 10}
-            })),
-            "last",
-        )
-        .unwrap();
-        assert_eq!(usage.reasoning_tokens, Some(10));
-        assert_eq!(usage.total_tokens, Some(140));
-    }
-
-    /// The fix the PR #181 follow-up applies to the Codex app-server
-    /// path. Driving `apply_codex_app_server_usage` with the exact
-    /// notification shape emitted for a turn that issues two upstream
-    /// model requests must fold both `last` snapshots into the run total
-    /// rather than clobbering it. This is the multi-snapshot analogue of
-    /// `claude_two_turn_total_survives_message_snapshots`.
-    #[test]
-    fn codex_app_server_two_notifications_sum_to_turn_total() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        let active = Some("turn_1");
-
-        // First model request of the turn: e.g. the assistant thinking
-        // before the first tool call. The notification carries the
-        // current run's `turnId` (matches the active turn), so step 1
-        // proceeds. Step 2 folds `last` and seeds the baseline to
-        // `total`.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 12, "outputTokens": 6,
-                    "reasoningOutputTokens": 4, "totalTokens": 18
-                },
-                "last": {
-                    "inputTokens": 12, "outputTokens": 6,
-                    "reasoningOutputTokens": 4, "totalTokens": 18
-                }
-            })),
-        );
-
-        // Second model request of the same turn: tool result plus final
-        // answer. `last` is strictly per-request, so it does not include
-        // the first request's tokens. Step 3 folds the delta
-        // `total - baseline = last_new` (the codex invariant).
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 31, "outputTokens": 18,
-                    "reasoningOutputTokens": 11, "totalTokens": 49
-                },
-                "last": {
-                    "inputTokens": 19, "outputTokens": 12,
-                    "reasoningOutputTokens": 7, "totalTokens": 31
-                }
-            })),
-        );
-
-        let usage = usage.expect("two notifications must fold into a run total");
-        // 12 + 19 = 31, 6 + 12 = 18, 4 + 7 = 11, 18 + 31 = 49 — i.e. the
-        // sum of `last`, NOT the final `total` (which would have double-
-        // counted because the first `last` was already part of the first
-        // `total`).
-        assert_eq!(usage.input_tokens, Some(31));
-        assert_eq!(usage.output_tokens, Some(18));
-        assert_eq!(usage.reasoning_tokens, Some(11));
-        assert_eq!(usage.total_tokens, Some(49));
-    }
-
-    /// Resumed thread regression. A Codex thread that already spent
-    /// tokens in earlier turns of the same Codex thread emits the
-    /// resume-replay notification
-    /// (`request_processors/token_usage_replay.rs`) carrying the
-    /// *previous* run's `turnId`. The helper must drop that snapshot
-    /// without seeding the run ledger. The first *live* notification
-    /// of the new turn then folds its `last` into the run total even
-    /// though the matching `total` already includes the previous
-    /// turn's contribution — so a wholesale-assign of `total` would
-    /// over-count by ~50_000 input tokens.
-    #[test]
-    fn codex_app_server_resumed_thread_first_notification_does_not_clobber() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        // The resume replay arrives before `turn/started`; the run
-        // ledger therefore has no active turn id yet.
-        let active: Option<&str> = None;
-
-        // 1) Resume replay: `turnId` is the *previous* run's last
-        // active turn id (`restored_token_usage_turn_id` in
-        // `token_usage_replay.rs`), so `notification_turn_id !=
-        // active_turn_id` (None). Step 1 drops it and seeds the
-        // baseline so the first live notification's delta is zero.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("prev_turn"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 50_012, "outputTokens": 4_000,
-                    "reasoningOutputTokens": 1_000, "totalTokens": 54_012
-                },
-                "last": {
-                    "inputTokens": 12, "outputTokens": 4,
-                    "reasoningOutputTokens": 1, "totalTokens": 16
-                }
-            })),
-        );
-        assert!(
-            usage.is_none(),
-            "replay must not be folded into the run total"
-        );
-
-        // 2) Live first notification of the new turn. `turnId` matches
-        // the freshly-started active turn. Step 2 folds `last` (the
-        // per-request delta for the request that just completed) and
-        // seeds the baseline to `total`.
-        let active = Some("turn_2");
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_2"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 50_024, "outputTokens": 4_004,
-                    "reasoningOutputTokens": 1_001, "totalTokens": 54_028
-                },
-                "last": {
-                    "inputTokens": 12, "outputTokens": 4,
-                    "reasoningOutputTokens": 1, "totalTokens": 16
-                }
-            })),
-        );
-
-        let usage = usage.expect("a single `last` snapshot yields a run total");
-        assert_eq!(usage.input_tokens, Some(12));
-        assert_eq!(usage.output_tokens, Some(4));
-        assert_eq!(usage.reasoning_tokens, Some(1));
-        assert_eq!(usage.total_tokens, Some(16));
-    }
-
-    /// Repeat snapshots (same `total` and same `last` re-emitted by
-    /// `update_rate_limits`, `recompute_token_usage`, etc.) must be
-    /// idempotent. Step 3's non-zero guard plus the field-wise
-    /// saturating subtraction in `subtract_run_usage` guarantee no
-    /// run-total contribution when the upstream counter did not move.
-    /// The protocol also permits `last` to be absent (rate-limit
-    /// notifications, for example); such a notification carries no
-    /// per-request delta and must also be a no-op.
-    #[test]
-    fn codex_app_server_repeat_snapshot_does_not_clobber() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        let active = Some("turn_1");
-        let token_usage = Some(&serde_json::json!({
-            "total": {
-                "inputTokens": 10, "outputTokens": 4,
-                "reasoningOutputTokens": 2, "totalTokens": 14
-            },
-            "last": {
-                "inputTokens": 10, "outputTokens": 4,
-                "reasoningOutputTokens": 2, "totalTokens": 14
-            }
-        }));
-
-        // First live notification: step 2 folds `last` and seeds the
-        // baseline to `total`.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            token_usage,
-        );
-        let established = usage.clone().expect("first notification seeds the total");
-        assert_eq!(established.input_tokens, Some(10));
-        assert_eq!(established.output_tokens, Some(4));
-        assert_eq!(established.total_tokens, Some(14));
-
-        // Repeat: identical `total` and `last`. Step 3's delta is
-        // `(0,0,0,0)`, the non-zero guard skips accumulation, and the
-        // baseline is updated to the same `total`.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            token_usage,
-        );
-        let after_repeat = usage.expect("previous total survives a repeat snapshot");
-        assert_eq!(after_repeat.input_tokens, Some(10));
-        assert_eq!(after_repeat.output_tokens, Some(4));
-        assert_eq!(after_repeat.total_tokens, Some(14));
-    }
-
-    // -----------------------------------------------------------------
-    // Mutation-kill tests added at peer re-review of PR #183
-    // (clai/fix/codex-run-usage-thread-scope). Each test is shaped to
-    // fail when its corresponding mutation is applied, so removing any
-    // of the following guards falls out of the test suite immediately:
-    //
-    //   - `codex_app_server_step1_seeds_baseline_when_none`           (M3)
-    //   - `codex_app_server_step2_seeds_baseline_from_total`         (M10)
-    //   - `codex_app_server_three_notifications_keep_accumulating`   (M7)
-    //   - `codex_app_server_wiring_reads_params_turn_id`             (M8)
-    //   - `codex_app_server_zero_last_repeat_keeps_field_none`       (M1)
-    //   - `codex_app_server_absent_output_field_stays_none`          (M9)
-    // -----------------------------------------------------------------
-
-    /// Mutation M3: in step 1, the resume-replay path seeds the
-    /// baseline to `total` only when the baseline is `None`. Dropping
-    /// the seed makes the next live notification fold an extra
-    /// ~50_000 input tokens — the same over-count the original PR was
-    /// written to prevent.
-    ///
-    /// M10 variant: in step 2, the first live notification folds its
-    /// `last` and then seeds the baseline to `total`. If the seed uses
-    /// `last` instead, the very next notification (whose `total`
-    /// already includes the first `last`) folds zero delta — the run
-    /// total freezes at the first request's tokens even when more
-    /// requests follow.
-    ///
-    /// Both mutations are exposed by driving the helper with the
-    /// exact wire shape emitted for a resumed thread followed by two
-    /// live notifications on the new turn.
-    #[test]
-    fn codex_app_server_step1_seeds_baseline_when_none() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-
-        // Resume replay: arrives before `turn/started`, so `active`
-        // is None and the helper falls into step 1. The notification
-        // carries the previous run's `turnId`. M3 drops the
-        // `*baseline = Some(total)` so `baseline` stays None.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            None,
-            Some("prev_turn"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 50_012, "outputTokens": 4_000,
-                    "reasoningOutputTokens": 1_000, "totalTokens": 54_012
-                },
-                "last": {
-                    "inputTokens": 12, "outputTokens": 4,
-                    "reasoningOutputTokens": 1, "totalTokens": 16
-                }
-            })),
-        );
-        assert!(
-            baseline.is_some(),
-            "step 1 must seed the baseline so the next live notification produces a 0 delta"
-        );
-        assert!(
-            usage.is_none(),
-            "resume replay must not be folded into the run total"
-        );
-
-        // Live first notification: step 2 folds `last` and seeds the
-        // baseline to `total` (M10 target).
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            Some("turn_2"),
-            Some("turn_2"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 50_024, "outputTokens": 4_004,
-                    "reasoningOutputTokens": 1_001, "totalTokens": 54_028
-                },
-                "last": {
-                    "inputTokens": 12, "outputTokens": 4,
-                    "reasoningOutputTokens": 1, "totalTokens": 16
-                }
-            })),
-        );
-        let total1 = usage
-            .as_ref()
-            .expect("first live notification yields a run total");
-        assert_eq!(total1.input_tokens, Some(12));
-        assert_eq!(total1.output_tokens, Some(4));
-        assert_eq!(total1.reasoning_tokens, Some(1));
-        assert_eq!(total1.total_tokens, Some(16));
-
-        // Live second notification: `total` grew by the second
-        // request's tokens, so the delta folds into the run total.
-        // If M10 substituted `last` for `total` in step 2's baseline
-        // seed, the baseline here would be the first `last` instead
-        // of the first `total`, and the delta would be the full
-        // second `total` rather than the second `last`. That would
-        // double-count the second request.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            Some("turn_2"),
-            Some("turn_2"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 50_043, "outputTokens": 4_010,
-                    "reasoningOutputTokens": 1_003, "totalTokens": 54_053
-                },
-                "last": {
-                    "inputTokens": 19, "outputTokens": 6,
-                    "reasoningOutputTokens": 2, "totalTokens": 25
-                }
-            })),
-        );
-        let total2 = usage.as_ref().expect("second notification folds its last");
-        // 12 + 19 = 31; 4 + 6 = 10; 1 + 2 = 3; 16 + 25 = 41.
-        assert_eq!(total2.input_tokens, Some(31));
-        assert_eq!(total2.output_tokens, Some(10));
-        assert_eq!(total2.reasoning_tokens, Some(3));
-        assert_eq!(total2.total_tokens, Some(41));
-    }
-
-    /// Mutation M10: step 2 (first live notification on a fresh
-    /// turn) seeds the baseline to `total`, not `last`. Substituting
-    /// `last` makes the second notification's `total - baseline`
-    /// equal the *second* `total` (which already contains both
-    /// requests' tokens) instead of the second `last` (only the new
-    /// request's tokens). Exposed by feeding a first live
-    /// notification whose `total` and `last` differ — the cleanest
-    /// possible kill because the second notification's run total
-    /// becomes the second `total` instead of the second `last`.
-    #[test]
-    fn codex_app_server_step2_seeds_baseline_from_total() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        let active = Some("turn_1");
-
-        // First live notification: total != last (total = 100, last
-        // = 12). Step 2 folds `last` and seeds the baseline to
-        // `total` (= 100). If M10 substitutes `last` for the
-        // baseline seed, the baseline becomes 12 instead of 100.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 100, "outputTokens": 50,
-                    "reasoningOutputTokens": 20, "totalTokens": 150
-                },
-                "last": {
-                    "inputTokens": 12, "outputTokens": 6,
-                    "reasoningOutputTokens": 4, "totalTokens": 18
-                }
-            })),
-        );
-        let after_first = usage
-            .as_ref()
-            .expect("first notification yields a run total");
-        assert_eq!(after_first.input_tokens, Some(12));
-        assert_eq!(after_first.total_tokens, Some(18));
-
-        // Second live notification: `total` grew by `last_2` (the
-        // second request's tokens). With the fix, step 3's delta is
-        // `total - baseline = total - 100 = last_2`, so the run
-        // total grows by exactly `last_2`. With M10 applied, the
-        // baseline is `last_1` (12), so the delta is `total - 12`
-        // = the entire second `total` (which double-counts the
-        // first request's tokens).
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 119, "outputTokens": 57,
-                    "reasoningOutputTokens": 24, "totalTokens": 176
-                },
-                "last": {
-                    "inputTokens": 19, "outputTokens": 7,
-                    "reasoningOutputTokens": 4, "totalTokens": 26
-                }
-            })),
-        );
-        let after_second = usage
-            .as_ref()
-            .expect("second notification yields a run total");
-        // 12 + 19 = 31, 6 + 7 = 13, 4 + 4 = 8, 18 + 26 = 44.
-        assert_eq!(after_second.input_tokens, Some(31));
-        assert_eq!(after_second.output_tokens, Some(13));
-        assert_eq!(after_second.reasoning_tokens, Some(8));
-        assert_eq!(after_second.total_tokens, Some(44));
-    }
-
-    /// Mutation M7: step 3 must reset the baseline to the new `total`
-    /// after every notification that does not accumulate (including
-    /// any notification whose delta is zero). Dropping the reset
-    /// leaves the baseline pinned at the seed value, so the next
-    /// notification's `total - baseline` over-shoots by exactly the
-    /// first request's tokens.
-    ///
-    /// Exposed by feeding three live notifications on a single turn:
-    /// the run total after the third notification equals
-    /// `last_1 + last_2 + last_3`, not `last_1 + 2 * last_2 + last_3`.
-    #[test]
-    fn codex_app_server_three_notifications_keep_accumulating() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        let active = Some("turn_1");
-
-        // First request.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 10, "outputTokens": 4,
-                    "reasoningOutputTokens": 2, "totalTokens": 14
-                },
-                "last": {
-                    "inputTokens": 10, "outputTokens": 4,
-                    "reasoningOutputTokens": 2, "totalTokens": 14
-                }
-            })),
-        );
-        let after_first = usage.clone().expect("first notification yields a total");
-        assert_eq!(after_first.input_tokens, Some(10));
-        assert_eq!(after_first.total_tokens, Some(14));
-
-        // Second request: `total` grew by `last_2`.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 25, "outputTokens": 11,
-                    "reasoningOutputTokens": 6, "totalTokens": 36
-                },
-                "last": {
-                    "inputTokens": 15, "outputTokens": 7,
-                    "reasoningOutputTokens": 4, "totalTokens": 22
-                }
-            })),
-        );
-        let after_second = usage.clone().expect("second notification yields a total");
-        assert_eq!(after_second.input_tokens, Some(25));
-        assert_eq!(after_second.total_tokens, Some(36));
-
-        // Third request: `total` grew by `last_3`. With M7 applied,
-        // step 3's missing baseline reset would subtract the *first*
-        // `total` again, producing 25 + 15 = 40 instead of the
-        // correct 25 + 8 = 33.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 33, "outputTokens": 16,
-                    "reasoningOutputTokens": 9, "totalTokens": 49
-                },
-                "last": {
-                    "inputTokens": 8, "outputTokens": 5,
-                    "reasoningOutputTokens": 3, "totalTokens": 13
-                }
-            })),
-        );
-        let after_third = usage.expect("third notification yields a total");
-        // 10 + 15 + 8 = 33, 4 + 7 + 5 = 16, 2 + 4 + 3 = 9, 14 + 22 + 13 = 49.
-        assert_eq!(after_third.input_tokens, Some(33));
-        assert_eq!(after_third.output_tokens, Some(16));
-        assert_eq!(after_third.reasoning_tokens, Some(9));
-        assert_eq!(after_third.total_tokens, Some(49));
-    }
-
-    /// Mutation M8: the only path from the wire format into the run
-    /// ledger is `apply_codex_app_server_usage_from_params`. If the
-    /// helper hard-codes `None` for either turn id (the reviewer's
-    /// M8 mutation), every notification drops into step 1 and the
-    /// baseline is seeded to the first live `total` — leaving the
-    /// run total stuck at the empty `Option`. This test drives the
-    /// helper with the exact raw notification payload shape the JSON
-    /// stream emits, then asserts the run ledger was updated.
-    #[test]
-    fn codex_app_server_wiring_reads_params_turn_id() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-
-        // First live notification, delivered as the raw notification
-        // payload (`params` is the `notification.params` object, not
-        // the already-extracted `tokenUsage`).
-        let params = serde_json::json!({
-            "turnId": "turn_1",
-            "tokenUsage": {
-                "total": {
-                    "inputTokens": 10, "outputTokens": 4,
-                    "reasoningOutputTokens": 2, "totalTokens": 14
-                },
-                "last": {
-                    "inputTokens": 10, "outputTokens": 4,
-                    "reasoningOutputTokens": 2, "totalTokens": 14
-                }
-            }
-        });
-        apply_codex_app_server_usage(&mut usage, &mut baseline, Some("turn_1"), Some(&params));
-        let after_first = usage
-            .clone()
-            .expect("wiring helper must forward `turnId` to the run ledger");
-        assert_eq!(after_first.input_tokens, Some(10));
-        assert_eq!(after_first.total_tokens, Some(14));
-
-        // A second notification proves the helper still forwards
-        // `turnId` on subsequent calls; without M8 alive, the
-        // baseline is never reset and the delta over-shoots.
-        let params2 = serde_json::json!({
-            "turnId": "turn_1",
-            "tokenUsage": {
-                "total": {
-                    "inputTokens": 25, "outputTokens": 11,
-                    "reasoningOutputTokens": 6, "totalTokens": 36
-                },
-                "last": {
-                    "inputTokens": 15, "outputTokens": 7,
-                    "reasoningOutputTokens": 4, "totalTokens": 22
-                }
-            }
-        });
-        apply_codex_app_server_usage(&mut usage, &mut baseline, Some("turn_1"), Some(&params2));
-        let after_second = usage.expect("second wiring call yields a total");
-        assert_eq!(after_second.input_tokens, Some(25));
-        assert_eq!(after_second.total_tokens, Some(36));
-    }
-
-    /// Mutation M1: `run_usage_is_nonzero` gates step 3 so a
-    /// repeat-snapshot notification (delta is zero) cannot clobber a
-    /// field that is currently `None` with `Some(0)`. The most
-    /// damaging case is a repeat where the live `last` is exactly
-    /// zero: with the guard removed, `add_optional(None, Some(0))`
-    /// produces `Some(0)`, so the run total's `input_tokens` field
-    /// (which was previously `None` because no upstream counter
-    /// reported it) becomes `Some(0)` — making the field appear in
-    /// the persisted ledger as zero rather than absent.
-    ///
-    /// `subtract_run_usage` is exercised separately for the None-vs-
-    /// zero branch (see M9 below); M1 covers the accumulation side.
-    #[test]
-    fn codex_app_server_zero_last_repeat_keeps_field_none() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        let active = Some("turn_1");
-
-        // First live notification: input = 5, output absent,
-        // reasoning absent. Step 2 folds `last` and seeds the
-        // baseline to `total`. The run total's `output_tokens`
-        // becomes `Some(0)` (from the implicit `last.totalTokens -
-        // input` derivation in `last_usage_from_app_server`) and
-        // `reasoning_tokens` stays `None`.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 5, "outputTokens": 0, "totalTokens": 5
-                },
-                "last": {
-                    "inputTokens": 5, "outputTokens": 0, "totalTokens": 5
-                }
-            })),
-        );
-        let established = usage.clone().expect("first notification yields a total");
-        assert_eq!(established.input_tokens, Some(5));
-        assert_eq!(established.reasoning_tokens, None);
-
-        // Second live notification: input = 0, output = 0,
-        // reasoning = 0. `total` did not move relative to the first
-        // notification, so step 3's delta is zero and the run total
-        // must be left alone. With M1 applied, the guard
-        // `run_usage_is_nonzero` is dropped and `add_optional`
-        // promotes `None` to `Some(0)` for the `reasoning_tokens`
-        // field.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 5, "outputTokens": 0,
-                    "reasoningOutputTokens": 0, "totalTokens": 5
-                },
-                "last": {
-                    "inputTokens": 0, "outputTokens": 0,
-                    "reasoningOutputTokens": 0, "totalTokens": 0
-                }
-            })),
-        );
-        let after_repeat = usage.expect("repeat snapshot preserves the total");
-        assert_eq!(after_repeat.input_tokens, Some(5));
-        assert_eq!(
-            after_repeat.reasoning_tokens, None,
-            "M1 would promote None -> Some(0); the guard must keep the field absent"
-        );
-    }
-
-    /// Mutation M9: `subtract_run_usage`'s `(None, None)` arm must
-    /// stay `None`. Collapsing it to `(None, Some(0))` makes the
-    /// delta for an absent field equal `Some(0)`, so step 3 folds
-    /// `Some(0)` into the run total via `add_optional`. The persisted
-    /// ledger then reports `output_tokens = Some(0)` for a token
-    /// type the upstream counter never reported.
-    ///
-    /// The kill shape: a notification whose `total` and `last` both
-    /// omit the `outputTokens` field. With the fix, step 3's delta
-    /// has `output_tokens: None` and `add_optional(None, None)` is
-    /// a no-op. With M9 collapsed, the delta has `output_tokens:
-    /// Some(0)` and the run total gains `Some(0)`.
-    #[test]
-    fn codex_app_server_absent_output_field_stays_none() {
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        let active = Some("turn_1");
-
-        // First live notification: input reported, output absent.
-        // Step 2 folds `last`; the `output_tokens` field stays None.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 5, "totalTokens": 5
-                },
-                "last": {
-                    "inputTokens": 5, "totalTokens": 5
-                }
-            })),
-        );
-        let established = usage.clone().expect("first notification yields a total");
-        assert_eq!(established.input_tokens, Some(5));
-        assert_eq!(
-            established.output_tokens, None,
-            "absent upstream counter must stay absent in the run total"
-        );
-
-        // Second live notification: input grew by 2, output still
-        // absent. Step 3's delta for `output_tokens` is
-        // `None - None` = `None`; with M9 collapsed it becomes
-        // `Some(0) - Some(0)` = `Some(0)`, and the run total's
-        // `output_tokens` becomes `Some(0)`.
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            active,
-            Some("turn_1"),
-            Some(&serde_json::json!({
-                "total": {
-                    "inputTokens": 7, "totalTokens": 7
-                },
-                "last": {
-                    "inputTokens": 2, "totalTokens": 2
-                }
-            })),
-        );
-        let after_second = usage.expect("second notification folds its input");
-        assert_eq!(after_second.input_tokens, Some(7));
-        assert_eq!(
-            after_second.output_tokens, None,
-            "M9 would set output_tokens to Some(0); the (None, None) arm must keep it None"
-        );
-    }
-
-    /// Claude Code reports no reasoning field at all, so its total is the plain
-    /// sum — this pins that the shared derivation did not change that path. so its total is the plain
-    /// sum — this pins that the shared derivation did not change that path.
-    #[test]
-    fn claude_result_usage_totals_input_plus_output() {
-        let usage = usage_from_value(Some(&serde_json::json!({
-            "input_tokens": 1200,
-            "output_tokens": 340,
-            "cache_read_input_tokens": 41312
-        })))
-        .expect("usage");
-        assert_eq!(usage.input_tokens, Some(1200));
-        assert_eq!(usage.output_tokens, Some(340));
-        assert_eq!(usage.reasoning_tokens, None);
-        assert_eq!(usage.total_tokens, Some(1540));
-    }
-
-    /// Reasoning tokens never inflate the total on the paths that bill them
-    /// inside output. (OpenCode is the exception and has its own tests.)
-    #[test]
-    fn codex_and_claude_exclude_reasoning_from_the_total() {
-        let codex = codex_usage_from_value(Some(&serde_json::json!({
-            "input_tokens": 3_721_144,
-            "output_tokens": 15_660,
-            "reasoning_output_tokens": 9_930
-        })))
-        .expect("codex usage");
-        // The arithmetic of a real rollout snapshot.
-        assert_eq!(codex.total_tokens, Some(3_736_804));
-
-        let claude = usage_from_value(Some(&serde_json::json!({
-            "input_tokens": 10, "output_tokens": 5, "reasoning_tokens": 4
-        })))
-        .expect("claude usage");
-        assert_eq!(claude.total_tokens, Some(15));
-    }
-
-    // -----------------------------------------------------------------
-    // Claude Code per-message usage snapshots must NOT clobber the run
-    // total. See `apply_claude_stream_event_usage` for the rationale.
-    // These tests lock the behavior in; if the dispatcher ever starts
-    // writing the per-message `message_start`/`message_delta` snapshots
-    // back into the shared `usage` slot, all four tests will fail.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn stream_message_start_does_not_touch_the_run_total() {
-        // Anthropic's wire format sends a prompt preview on `message_start`
-        // with `output_tokens == 1` and the real input_tokens for the
-        // upcoming message. Writing that into the shared `usage` slot
-        // would clobber any prior accumulated turn total — see
-        // `claude_two_turn_total_survives_message_snapshots` below for
-        // the multi-turn symptom this single-turn test guards.
-        let event = serde_json::json!({
-            "type": "message_start",
-            "message": {
-                "usage": {
-                    "input_tokens": 4120,
-                    "output_tokens": 1,
-                    "cache_read_input_tokens": 11000
-                }
-            }
-        });
-        let mut total: Option<RunUsage> = None;
-        apply_claude_stream_event_usage(&mut total, &event);
-        assert!(
-            total.is_none(),
-            "message_start must not install a per-message preview into the run total"
-        );
-    }
-
-    #[test]
-    fn stream_message_delta_does_not_touch_the_run_total() {
-        // `message_delta` carries the cumulative `output_tokens` for the
-        // in-flight message — not the per-turn total. Writing it here
-        // would clobber any prior accumulated turn total AND set up a
-        // double-count once the matching `result` event later calls
-        // `accumulate_turn_usage` on top.
-        let event = serde_json::json!({
-            "type": "message_delta",
-            "usage": {
-                "input_tokens": 4120,
-                "output_tokens": 487
-            }
-        });
-        // Seed the run total as if turn 1 had already been folded in.
-        let mut total = Some(RunUsage {
-            input_tokens: Some(3300),
-            output_tokens: Some(220),
-            reasoning_tokens: None,
-            total_tokens: Some(3520),
-        });
-        apply_claude_stream_event_usage(&mut total, &event);
-        let after = total.expect("prior total must survive a message_delta");
-        assert_eq!(after.input_tokens, Some(3300));
-        assert_eq!(after.output_tokens, Some(220));
-        assert_eq!(after.total_tokens, Some(3520));
-    }
-
-    #[test]
-    fn stream_unknown_event_types_are_ignored() {
-        // Defensive: the dispatcher is invoked from a `match` arm, so
-        // the helper only ever sees `message_start`/`message_delta` in
-        // production. A test for any other event type guards against
-        // future call-site refactors that pass the raw event in without
-        // re-matching.
-        let mut total = Some(RunUsage {
-            input_tokens: Some(10),
-            output_tokens: Some(5),
-            reasoning_tokens: None,
-            total_tokens: Some(15),
-        });
-        for event_type in [
-            "content_block_start",
-            "content_block_delta",
-            "ping",
-            "error",
-        ] {
-            let event = serde_json::json!({
-                "type": event_type,
-                "usage": {"input_tokens": 9999, "output_tokens": 9999}
-            });
-            apply_claude_stream_event_usage(&mut total, &event);
-        }
-        let after = total.expect("total survives unrelated event types");
-        assert_eq!(after.input_tokens, Some(10));
-        assert_eq!(after.output_tokens, Some(5));
-        assert_eq!(after.total_tokens, Some(15));
-    }
-
-    #[test]
-    fn claude_two_turn_total_survives_message_snapshots() {
-        // The bug this test guards: a multi-turn run with the OLD
-        // dispatcher saw the per-message snapshot replace the previously
-        // accumulated turn total (losing turn 1) and then the matching
-        // `result` event called `accumulate_turn_usage` on top of the
-        // clobbered value (double-counting turn 2). The persisted
-        // `usage_json` ended up equal to just turn 2's `result` payload
-        // — i.e. turn 1 was silently dropped from the ledger.
-        //
-        // Drive the same dispatcher `handle_claude_event` uses (call
-        // `accumulate_turn_usage` on every `result` event) and the same
-        // helper `handle_stream_event` uses for per-message snapshots.
-        // The final total must equal the sum over the two `result`
-        // payloads, period.
-        let mut total: Option<RunUsage> = None;
-
-        // --- Turn 1 ---
-        apply_claude_stream_event_usage(
-            &mut total,
-            &serde_json::json!({
-                "type": "message_start",
-                "message": {"usage": {"input_tokens": 4120, "output_tokens": 1}}
-            }),
-        );
-        apply_claude_stream_event_usage(
-            &mut total,
-            &serde_json::json!({
-                "type": "message_delta",
-                "usage": {"input_tokens": 4120, "output_tokens": 220}
-            }),
-        );
-        let turn1 = usage_from_value(Some(&serde_json::json!({
-            "input_tokens": 4120,
-            "output_tokens": 220,
-            "cache_read_input_tokens": 11000
-        })))
-        .expect("turn 1 usage");
-        accumulate_turn_usage(&mut total, turn1);
-
-        // --- Turn 2 ---
-        // These are the events whose pre-fix behavior would clobber
-        // turn 1's accumulated total.
-        apply_claude_stream_event_usage(
-            &mut total,
-            &serde_json::json!({
-                "type": "message_start",
-                "message": {"usage": {"input_tokens": 5400, "output_tokens": 1}}
-            }),
-        );
-        apply_claude_stream_event_usage(
-            &mut total,
-            &serde_json::json!({
-                "type": "message_delta",
-                "usage": {"input_tokens": 5400, "output_tokens": 487}
-            }),
-        );
-        let turn2 = usage_from_value(Some(&serde_json::json!({
-            "input_tokens": 5400,
-            "output_tokens": 487,
-            "cache_read_input_tokens": 300
-        })))
-        .expect("turn 2 usage");
-        accumulate_turn_usage(&mut total, turn2);
-
-        // After both turns, the run total must reflect both turns.
-        let final_total = total.expect("two turns must produce a total");
-        assert_eq!(final_total.input_tokens, Some(4120 + 5400));
-        assert_eq!(final_total.output_tokens, Some(220 + 487));
-        // 4120 + 220 + 5400 + 487 = 10227.
-        assert_eq!(final_total.total_tokens, Some(4120 + 220 + 5400 + 487));
     }
 
     // -----------------------------------------------------------------
@@ -7128,86 +5655,5 @@ mod tests {
         assert!(!out.interrupted);
         assert!(!out.owes_turn);
         assert!(out.payload.is_empty(), "nothing is written to stdin");
-    }
-}
-
-/// MUST FIX 2 invariant: on a resumed thread the helper that drives
-/// `apply_codex_app_server_usage` (`restored_token_usage_turn_id`
-/// path in `request_processors/token_usage_replay.rs`) emits a
-/// `thread/tokenUsage/updated` notification whose `turnId` is the
-/// **previous** run's last active turn id and never matches the
-/// freshly-started active turn. Step 1 of the algorithm therefore
-/// fires for that notification (it seeds the baseline and folds
-/// nothing), so when the first live notification of the resumed
-/// turn arrives it goes straight to step 3 — step 2's unconditional
-/// `last` fold is unreachable on the resumed-thread path.
-///
-/// The tests below drive step 1 and step 2 in the exact order the
-/// replay machinery would issue them, then assert the run ledger
-/// is what step 3 alone would produce. If a future change ever lets
-/// a live notification reach step 2 with a baseline already set
-/// (i.e. step 1 was skipped), the run total would explode and this
-/// test fails loudly.
-#[cfg(test)]
-mod codex_resumed_thread_step1_seeds_before_step2_tests {
-    use super::*;
-
-    #[test]
-    fn resumed_thread_step1_seeds_baseline_before_first_live_notification() {
-        // Resume replay notification: turnId is from the previous
-        // run and so does not match the freshly-started active
-        // turn. Step 1 fires: seed baseline = total, fold nothing.
-        let mut usage: Option<RunUsage> = None;
-        let mut baseline: Option<RunUsage> = None;
-        let resume_replay_payload = serde_json::json!({
-            "total": {
-                "inputTokens": 100, "outputTokens": 80,
-                "totalTokens": 180
-            },
-            "last": {
-                "inputTokens": 50, "outputTokens": 40,
-                "totalTokens": 90
-            }
-        });
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            Some("active_turn_after_resume"),
-            Some("turn_from_previous_run"),
-            Some(&resume_replay_payload),
-        );
-        assert!(usage.is_none(), "step 1 folds nothing");
-        assert_eq!(
-            baseline
-                .clone()
-                .expect("baseline seeded by step 1")
-                .total_tokens,
-            Some(180)
-        );
-
-        // First live notification of the resumed turn: turnId
-        // matches the active turn, baseline is already set, so
-        // step 3 fires. The `last` from step 1 is NOT folded again.
-        let first_live = serde_json::json!({
-            "total": {
-                "inputTokens": 110, "outputTokens": 85,
-                "totalTokens": 195
-            },
-            "last": {
-                "inputTokens": 10, "outputTokens": 5,
-                "totalTokens": 15
-            }
-        });
-        apply_usage(
-            &mut usage,
-            &mut baseline,
-            Some("active_turn_after_resume"),
-            Some("active_turn_after_resume"),
-            Some(&first_live),
-        );
-        let established = usage.clone().expect("step 3 folds the delta");
-        assert_eq!(established.input_tokens, Some(10));
-        assert_eq!(established.output_tokens, Some(5));
-        assert_eq!(established.total_tokens, Some(15));
     }
 }
