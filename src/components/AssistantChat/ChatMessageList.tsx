@@ -17,6 +17,8 @@ import type {
   ToolInvocation,
 } from '../../generated/bindings';
 import {
+  asParamsObject,
+  asPayloadObject,
   cleanToolName,
   extractMcpText,
   guessLang,
@@ -408,10 +410,13 @@ const groupMessages = (messages: AssistantMessage[]): RenderItem[] => {
 const renderToolResult = (result: unknown): React.ReactNode => {
   if (result == null) return null;
 
-  // Try MCP text extraction first (handles envelope objects and content arrays)
+  // Unwrap MCP envelopes (objects with a content array, bare content arrays)
+  // down to their text, then render that text by the rules below — an
+  // envelope carrying JSON gets the same pretty-printed fence a bare JSON
+  // string does, instead of one unreadable escaped line.
   const mcpText = typeof result === 'object' ? extractMcpText(result) : null;
   if (mcpText) {
-    return <MarkdownMessage content={mcpText} isStreaming={false} />;
+    return renderToolResult(mcpText);
   }
 
   // String: render as markdown (detect JSON strings)
@@ -1000,24 +1005,6 @@ const MergedToolGroup = memo(
   }
 );
 
-/** Coerce a value into a plain object (parsing JSON strings) or null. */
-const toObj = (value: unknown): Record<string, unknown> | null => {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
-      }
-    } catch {
-      /* not JSON */
-    }
-  }
-  return null;
-};
-
 /**
  * Render a tool's expanded output, formatted per tool:
  * - bash_exec → the command as a `$ …` line + a terminal-style block (raw,
@@ -1044,7 +1031,7 @@ const renderToolOutput = (
   }
 
   if (name === 'bash_exec') {
-    const command = toObj(params)?.command;
+    const command = asParamsObject(params)?.command;
     const body = toPreviewText('bash_exec', result, error);
     return (
       <div className={styles.toolTerminalWrap}>
@@ -1059,8 +1046,8 @@ const renderToolOutput = (
   }
 
   if (name === 'ask_user') {
-    const p = toObj(params);
-    const r = toObj(result);
+    const p = asParamsObject(params);
+    const r = asPayloadObject(result);
     const question = typeof p?.question === 'string' ? p.question : '';
     const context = typeof p?.context === 'string' ? p.context : '';
     const options = Array.isArray(p?.options)
@@ -1120,8 +1107,8 @@ const renderToolOutput = (
   }
 
   if (name === 'fs_read' || name === 'fs_write') {
-    const fromResult = toObj(result);
-    const fromParams = toObj(params);
+    const fromResult = asPayloadObject(result);
+    const fromParams = asParamsObject(params);
     const path =
       (typeof fromResult?.path === 'string' && fromResult.path) ||
       (typeof fromParams?.path === 'string' && fromParams.path) ||

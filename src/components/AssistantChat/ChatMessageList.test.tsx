@@ -209,6 +209,106 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('exit 0')).toBeInTheDocument();
   });
 
+  it('reads a bash result delivered as an MCP content envelope', () => {
+    // Claude Code reaches our built-ins through the local MCP server, so the
+    // result is stored as the wire envelope rather than the tool's own JSON.
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'bash_exec', arguments: {} },
+        ],
+      }),
+    ];
+    const toolCalls: ToolInvocation[] = [
+      {
+        id: 'tc-1',
+        runId: 'r-1',
+        sessionId: 'sess-1',
+        toolName: 'bash_exec',
+        params: { command: 'ls' },
+        status: 'completed',
+        result: [
+          {
+            type: 'text',
+            text: JSON.stringify({ exitCode: 0, stdout: 'Build complete', stderr: '' }),
+          },
+        ],
+        error: null,
+        startedAt: 0n,
+        completedAt: 1n,
+      },
+    ];
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    expect(screen.getByText('exit 0')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Bash'));
+    // The terminal block shows the command's output, not the raw envelope.
+    expect(screen.getByText('Build complete')).toBeInTheDocument();
+  });
+
+  it('shows file content from an MCP-enveloped fs_read result', () => {
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'fs_read', arguments: {} }],
+      }),
+    ];
+    const toolCalls: ToolInvocation[] = [
+      {
+        id: 'tc-1',
+        runId: 'r-1',
+        sessionId: 'sess-1',
+        toolName: 'fs_read',
+        params: { path: '/main.rs' },
+        status: 'completed',
+        result: [
+          { type: 'text', text: JSON.stringify({ path: '/main.rs', content: 'fn main() {}' }) },
+        ],
+        error: null,
+        startedAt: 0n,
+        completedAt: 1n,
+      },
+    ];
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    expect(screen.getByText('1 line')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Read'));
+    // Fenced with the language guessed from the path, not dumped as JSON.
+    const rendered = screen.getAllByTestId('markdown').map((el) => el.textContent ?? '');
+    expect(rendered).toContain('```rust\nfn main() {}\n```');
+  });
+
+  it('pretty-prints an MCP-enveloped JSON result instead of one escaped line', () => {
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'fs_glob', arguments: {} }],
+      }),
+    ];
+    const toolCalls: ToolInvocation[] = [
+      {
+        id: 'tc-1',
+        runId: 'r-1',
+        sessionId: 'sess-1',
+        toolName: 'fs_glob',
+        params: { pattern: '**/*.rs' },
+        status: 'completed',
+        result: [{ type: 'text', text: '{"matches":[{"path":"/a.rs"}]}' }],
+        error: null,
+        startedAt: 0n,
+        completedAt: 1n,
+      },
+    ];
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    fireEvent.click(screen.getByText('Glob'));
+    const rendered = screen.getAllByTestId('markdown').map((el) => el.textContent ?? '');
+    expect(rendered.some((text) => text.includes('```json\n{\n  "matches"'))).toBe(true);
+  });
+
   it('hides the empty assistant placeholder until content or streaming text arrives', () => {
     // Each turn is seeded with an empty Text placeholder before anything
     // streams. Rendering it would create a zero-height virtual item whose

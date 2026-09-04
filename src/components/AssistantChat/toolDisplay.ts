@@ -48,28 +48,112 @@ export const cleanToolName = (name: string): string => {
   return match ? match[1]! : name;
 };
 
+interface McpTextPart {
+  type?: string;
+  text?: string;
+}
+
 /**
- * Coerce a params/result value into a plain object: objects pass through,
- * JSON-encoded strings are parsed, everything else yields null.
+ * Join the `type: 'text'` parts of an MCP content array. Other part kinds
+ * (images, embedded resources — which carry text of their own) are not the
+ * tool's answer and would corrupt the join. Null when there is no text part.
  */
-const asObject = (value: unknown): Record<string, unknown> | null => {
+const joinTextParts = (parts: unknown[]): string | null => {
+  const texts = (parts as McpTextPart[])
+    .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+    .map((p) => p.text as string);
+  return texts.length > 0 ? texts.join('\n\n') : null;
+};
+
+/**
+ * Extract displayable text from an MCP-style result. MCP results can be an
+ * envelope { content: [{type:"text", text}], text, … }, a bare content array,
+ * a plain string, or a generic object. Returns null when no text is found.
+ */
+export const extractMcpText = (result: unknown): string | null => {
+  if (typeof result === 'string') return result;
+  if (!result || typeof result !== 'object') return null;
+
+  const envelope = result as { content?: unknown; text?: unknown };
+
+  if (Array.isArray(envelope.content)) {
+    const joined = joinTextParts(envelope.content);
+    if (joined !== null) return joined;
+  }
+
+  if (typeof envelope.text === 'string' && envelope.text.trim()) {
+    return envelope.text;
+  }
+
+  if (Array.isArray(result)) {
+    const joined = joinTextParts(result);
+    if (joined !== null) return joined;
+  }
+
+  return null;
+};
+
+/** Parse a JSON object out of text; null for anything that isn't one. */
+const parseJsonObject = (text: string): Record<string, unknown> | null => {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Coerce a tool's params into a plain object: the object itself, or a
+ * JSON-encoded string of one. Params never travel in an MCP envelope, so a
+ * params object that happens to carry a `text` string or a `content` array
+ * (both common in third-party tool schemas) is the tool's input, not a wrapper
+ * — it must not go through `asPayloadObject`, which would unwrap it to nothing.
+ */
+export const asParamsObject = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value === 'string') return parseJsonObject(value);
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          return parsed as Record<string, unknown>;
-        }
-      } catch {
-        /* not JSON */
-      }
-    }
-  }
   return null;
+};
+
+/**
+ * Coerce a tool's result into the plain object the per-tool formatters read.
+ * (Params take `asParamsObject`: they never travel in an envelope.)
+ *
+ * A result reaches the chat in one of three shapes, and all three describe the
+ * same tool output:
+ *   - the object itself           — the Anthropic provider stores the tool's JSON value;
+ *   - a JSON-encoded string       — Claude Code stringifies it;
+ *   - an MCP content envelope     — Codex reaches our built-ins through the local
+ *     MCP server and stores the wire form,
+ *     `[{ type: 'text', text: '<the JSON>' }]`, as does our own MCP client with
+ *     `{ content: [...], text }`.
+ * The envelope must be unwrapped here or every per-tool formatter reads an
+ * object that has none of the keys it looks for: a 40-file listing summarised
+ * as "0 entries", a bash run with no exit code, a file preview showing escaped
+ * JSON instead of the file.
+ *
+ * An envelope describes the wire, not the tool, so it yields the JSON object it
+ * carries or nothing at all: falling back to its own keys would hand the
+ * formatters `{ serverId, toolName, content, text }`. An MCP tool answering in
+ * prose therefore has no payload object — which costs nothing, since the
+ * per-tool formatters only run for our built-ins and the prose still reaches
+ * the preview through `extractMcpText`.
+ */
+export const asPayloadObject = (value: unknown): Record<string, unknown> | null => {
+  if (typeof value === 'string') return parseJsonObject(value);
+  if (!value || typeof value !== 'object') return null;
+
+  const mcpText = extractMcpText(value);
+  if (mcpText !== null) return parseJsonObject(mcpText);
+
+  return Array.isArray(value) ? null : (value as Record<string, unknown>);
 };
 
 /** Collapse whitespace/newlines so a value fits on the single-line row. */
@@ -99,7 +183,7 @@ const firstScalarParam = (obj: Record<string, unknown> | null): string => {
  */
 export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSummary => {
   const name = cleanToolName(toolName || '');
-  const obj = asObject(params);
+  const obj = asParamsObject(params);
   const get = (key: string): string => oneLine(obj?.[key]);
 
   switch (name) {
@@ -152,7 +236,7 @@ export const summarizeToolResult = (
   // bash exit code is the most useful signal even on failure, so check it
   // before the generic error branch.
   if (name === 'bash_exec') {
-    const obj = asObject(result);
+    const obj = asPayloadObject(result);
     if (obj && obj.exitCode != null) {
       const code = Number(obj.exitCode);
       return { text: `exit ${code}`, tone: code === 0 ? 'neutral' : 'error' };
@@ -167,7 +251,7 @@ export const summarizeToolResult = (
   }
   if (status === 'running') return null;
 
-  const obj = asObject(result);
+  const obj = asPayloadObject(result);
   switch (name) {
     case 'fs_read': {
       const n = countLines(obj?.content);
@@ -196,43 +280,6 @@ export const summarizeToolResult = (
   }
 };
 
-interface McpTextPart {
-  type?: string;
-  text?: string;
-}
-
-/**
- * Extract displayable text from an MCP-style result. MCP results can be an
- * envelope { content: [{type:"text", text}], text, … }, a bare content array,
- * a plain string, or a generic object. Returns null when no text is found.
- */
-export const extractMcpText = (result: unknown): string | null => {
-  if (typeof result === 'string') return result;
-  if (!result || typeof result !== 'object') return null;
-
-  const envelope = result as { content?: unknown; text?: unknown };
-
-  if (Array.isArray(envelope.content)) {
-    const textParts = (envelope.content as McpTextPart[])
-      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-      .map((p) => p.text as string);
-    if (textParts.length > 0) return textParts.join('\n\n');
-  }
-
-  if (typeof envelope.text === 'string' && envelope.text.trim()) {
-    return envelope.text;
-  }
-
-  if (Array.isArray(result)) {
-    const textParts = (result as McpTextPart[])
-      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
-      .map((p) => p.text as string);
-    if (textParts.length > 0) return textParts.join('\n\n');
-  }
-
-  return null;
-};
-
 /**
  * Plain-text view of a tool's result, used for the inline preview and the
  * terminal-style expanded output. Specialises the built-in tools whose result
@@ -245,7 +292,7 @@ export const toPreviewText = (
 ): string => {
   if (error) return error;
   const name = cleanToolName(toolName || '');
-  const obj = asObject(result);
+  const obj = asPayloadObject(result);
 
   if (name === 'bash_exec' && obj) {
     const stdout = typeof obj.stdout === 'string' ? obj.stdout : '';
