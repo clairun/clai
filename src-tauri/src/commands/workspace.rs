@@ -2328,25 +2328,86 @@ pub struct WorkspaceDeletePathRequest {
     pub path: String,
 }
 
-/// True when the path's first component is a protected/skipped directory
-/// (`.clai`, `.git`, `target`, …). These never surface as artifact rows, but
-/// the delete command enforces it regardless so a crafted request can't wipe
-/// the DB, git, or build state.
-fn is_protected_artifact_path(relative_path: &Path) -> bool {
-    match relative_path.components().next() {
-        Some(Component::Normal(first)) => first
-            .to_str()
-            .map(|name| SKIPPED_ARTIFACT_DIRS.contains(&name))
-            .unwrap_or(false),
-        _ => true, // empty, `..`, or non-normal leading component: refuse
+/// Validate + resolve a delete target relative to `root_path`.
+///
+/// Mirrors the containment rules of [`resolve_copy_source`]: rejects the root
+/// itself, traversal/non-normal components, and a protected directory
+/// (`SKIPPED_ARTIFACT_DIRS`) at ANY depth — not just the first component, so
+/// `sub/.git` is refused as well. It then resolves the target's PARENT with
+/// `canonicalize` and requires it to stay within the canonical workspace root,
+/// so an intermediate symlink pointing outside the workspace cannot be used to
+/// delete foreign data.
+///
+/// The FINAL component is deliberately *not* dereferenced: deleting a symlink
+/// must stay possible, and must remove only the link, never its target.
+fn resolve_deletable_path(root_path: &Path, rel: &str) -> Result<PathBuf, String> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Err("Cannot delete the workspace root.".to_string());
     }
+
+    let relative = Path::new(rel);
+    let mut has_name = false;
+    for component in relative.components() {
+        match component {
+            Component::Normal(name) => {
+                has_name = true;
+                if name
+                    .to_str()
+                    .map(|n| SKIPPED_ARTIFACT_DIRS.contains(&n))
+                    .unwrap_or(false)
+                {
+                    return Err(format!("Refusing to delete a protected path: {}", rel));
+                }
+            }
+            Component::CurDir => {}
+            // `..`, absolute prefixes, root: refuse before touching the fs.
+            _ => return Err(format!("Path {} is outside the workspace root", rel)),
+        }
+    }
+    if !has_name {
+        return Err("Cannot delete the workspace root.".to_string());
+    }
+
+    let requested = normalize_path(root_path.join(relative));
+    if !requested.starts_with(root_path) {
+        return Err(format!("Path {} is outside the workspace root", rel));
+    }
+    if requested == *root_path {
+        return Err("Cannot delete the workspace root.".to_string());
+    }
+
+    let canon_root = root_path
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve the workspace root: {}", error))?;
+    let parent = requested
+        .parent()
+        .ok_or_else(|| format!("Path {} is outside the workspace root", rel))?;
+    let canon_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("Path not found: {}: {}", rel, error))?;
+    if !canon_parent.starts_with(&canon_root) {
+        return Err(format!("Path {} is outside the workspace root", rel));
+    }
+
+    let name = requested
+        .file_name()
+        .ok_or_else(|| format!("Path {} is outside the workspace root", rel))?;
+    let target = canon_parent.join(name);
+    if target == canon_root {
+        return Err("Cannot delete the workspace root.".to_string());
+    }
+
+    Ok(target)
 }
 
 /// Delete a single artifact file or folder (recursive) from the workspace.
 ///
-/// Guards: the resolved path must stay inside the workspace root, must not be
-/// the root itself, and must not target a protected directory
-/// (`SKIPPED_ARTIFACT_DIRS`). Folders are removed recursively.
+/// Guards (see [`resolve_deletable_path`]): the path is resolved through
+/// intermediate symlinks and must stay inside the canonical workspace root,
+/// must not be the root itself, and must not name a protected directory
+/// (`SKIPPED_ARTIFACT_DIRS`) at any depth. Folders are removed recursively; a
+/// symlink is unlinked without following it.
 #[tauri::command]
 pub async fn workspace_delete_path(
     request: WorkspaceDeletePathRequest,
@@ -2361,21 +2422,7 @@ pub async fn workspace_delete_path(
     ensure_agent_workspace_root(root_path)?;
 
     let rel = request.path.trim();
-    if rel.is_empty() {
-        return Err("Cannot delete the workspace root.".to_string());
-    }
-    let relative = Path::new(rel);
-    if is_protected_artifact_path(relative) {
-        return Err(format!("Refusing to delete a protected path: {}", rel));
-    }
-
-    let target = normalize_path(root_path.join(relative));
-    if !target.starts_with(root_path) {
-        return Err(format!("Path {} is outside the workspace root", rel));
-    }
-    if target == *root_path {
-        return Err("Cannot delete the workspace root.".to_string());
-    }
+    let target = resolve_deletable_path(root_path, rel)?;
 
     let metadata = fs::symlink_metadata(&target)
         .map_err(|error| format!("Path not found: {}: {}", rel, error))?;
@@ -4514,23 +4561,157 @@ mod tests {
     }
 
     #[test]
-    fn protected_artifact_path_guards_dbs_and_traversal() {
-        // Protected first-component dirs are refused.
-        assert!(is_protected_artifact_path(Path::new(".clai")));
-        assert!(is_protected_artifact_path(Path::new(".clai/data.sqlite")));
-        assert!(is_protected_artifact_path(Path::new(".git/config")));
-        assert!(is_protected_artifact_path(Path::new("target/debug")));
-        assert!(is_protected_artifact_path(Path::new("node_modules/x")));
-        // Empty / traversal / non-normal leading components are refused too.
-        assert!(is_protected_artifact_path(Path::new("")));
-        assert!(is_protected_artifact_path(Path::new("../escape")));
-        assert!(is_protected_artifact_path(Path::new("/abs")));
-        // Ordinary artifacts are deletable.
-        assert!(!is_protected_artifact_path(Path::new("report.md")));
-        assert!(!is_protected_artifact_path(Path::new(
-            "work/repo/src/main.rs"
-        )));
-        assert!(!is_protected_artifact_path(Path::new("images/pic.png")));
+    fn resolve_deletable_path_guards_dbs_and_traversal() {
+        // Canonicalize the root: on Windows canonicalize() prepends the `\\?\`
+        // prefix, and resolve_deletable_path returns canonical paths.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .canonicalize()
+            .expect("canonicalize tempdir root");
+        for rel in [
+            ".clai",
+            ".git",
+            "target",
+            "node_modules",
+            "work/repo/src",
+            "images",
+            "sub/.git",
+        ] {
+            std::fs::create_dir_all(root.join(rel)).unwrap();
+        }
+        write_file(&root.join(".clai/data.sqlite"), "db");
+        write_file(&root.join(".git/config"), "cfg");
+        write_file(&root.join("report.md"), "r");
+        write_file(&root.join("work/repo/src/main.rs"), "fn main() {}");
+        write_file(&root.join("images/pic.png"), "png");
+        write_file(&root.join("sub/.git/config"), "cfg");
+
+        // Protected dirs are refused, at the first component …
+        for rel in [
+            ".clai",
+            ".clai/data.sqlite",
+            ".git/config",
+            "target/debug",
+            "node_modules/x",
+        ] {
+            let err = resolve_deletable_path(&root, rel).unwrap_err();
+            assert!(err.contains("Refusing to delete a protected path"), "{err}");
+        }
+        // … and at ANY depth, matching the copy/move resolvers.
+        let err = resolve_deletable_path(&root, "sub/.git").unwrap_err();
+        assert!(err.contains("Refusing to delete a protected path"), "{err}");
+        let err = resolve_deletable_path(&root, "sub/.git/config").unwrap_err();
+        assert!(err.contains("Refusing to delete a protected path"), "{err}");
+
+        // Empty / traversal / non-normal components are refused too.
+        assert_eq!(
+            resolve_deletable_path(&root, "").unwrap_err(),
+            "Cannot delete the workspace root."
+        );
+        assert_eq!(
+            resolve_deletable_path(&root, "   ").unwrap_err(),
+            "Cannot delete the workspace root."
+        );
+        assert_eq!(
+            resolve_deletable_path(&root, ".").unwrap_err(),
+            "Cannot delete the workspace root."
+        );
+        for rel in ["../escape", "sub/../../escape"] {
+            let err = resolve_deletable_path(&root, rel).unwrap_err();
+            assert!(err.contains("outside the workspace root"), "{err}");
+        }
+        let err = resolve_deletable_path(&root, "/abs").unwrap_err();
+        assert!(err.contains("outside the workspace root"), "{err}");
+
+        // Ordinary artifacts stay deletable and resolve inside the root.
+        for rel in ["report.md", "work/repo/src/main.rs", "images/pic.png"] {
+            let resolved = resolve_deletable_path(&root, rel).expect(rel);
+            assert_eq!(resolved, root.join(rel));
+        }
+
+        // A missing path is reported as not found, not as a containment error.
+        let err = resolve_deletable_path(&root, "nope/gone.txt").unwrap_err();
+        assert!(err.contains("Path not found"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_deletable_path_refuses_a_symlinked_parent_that_escapes_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().canonicalize().unwrap();
+        let victim = outside.join("victim.txt");
+        write_file(&victim, "precious");
+
+        // `link` is an intermediate component that leaves the workspace: the
+        // lexical check passes but the canonical parent lands outside.
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        let err = resolve_deletable_path(&root, "link/victim.txt").unwrap_err();
+        assert!(err.contains("outside the workspace root"), "{err}");
+        assert!(victim.exists(), "the outside file must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_deletable_path_allows_deleting_the_symlink_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().canonicalize().unwrap();
+        let target_file = outside.join("victim.txt");
+        write_file(&target_file, "precious");
+        std::os::unix::fs::symlink(&target_file, root.join("link")).unwrap();
+
+        // The final component is never dereferenced, so the link resolves to
+        // its own location inside the root …
+        let resolved = resolve_deletable_path(&root, "link").expect("symlink item resolves");
+        assert_eq!(resolved, root.join("link"));
+
+        // … and deleting it removes only the link, never its target.
+        let meta = std::fs::symlink_metadata(&resolved).unwrap();
+        assert!(meta.file_type().is_symlink());
+        assert!(!meta.is_dir(), "a symlink must not be treated as a dir");
+        std::fs::remove_file(&resolved).unwrap();
+        assert!(root.join("link").symlink_metadata().is_err());
+        assert!(target_file.exists(), "the link target must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_deletable_path_refuses_a_symlinked_root_child_used_as_a_directory() {
+        // Same escape, one level deeper: `nested/link` -> outside.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().canonicalize().unwrap();
+        write_file(&outside.join("victim.txt"), "precious");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("nested/link")).unwrap();
+
+        let err = resolve_deletable_path(&root, "nested/link/victim.txt").unwrap_err();
+        assert!(err.contains("outside the workspace root"), "{err}");
+        assert!(outside.join("victim.txt").exists());
+    }
+
+    #[test]
+    fn resolve_deletable_path_resolves_nested_files_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        write_file(&root.join("sub/deep/note.md"), "hi");
+
+        let file = resolve_deletable_path(&root, "sub/deep/note.md").unwrap();
+        assert_eq!(file, root.join("sub/deep/note.md"));
+        std::fs::remove_file(&file).unwrap();
+        assert!(!root.join("sub/deep/note.md").exists());
+
+        let folder = resolve_deletable_path(&root, "sub/deep").unwrap();
+        assert_eq!(folder, root.join("sub/deep"));
+        remove_dir_all_forcing_permissions(&folder).unwrap();
+        assert!(!root.join("sub/deep").exists());
+        assert!(root.join("sub").exists(), "only the target is removed");
     }
 
     #[test]
