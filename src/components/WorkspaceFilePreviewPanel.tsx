@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { save } from '@tauri-apps/plugin-dialog';
 import MarkdownMessage from './Chat/MarkdownMessage';
+import VegaChart from './Chat/VegaChart';
+import { WorkspaceFileContext, type WorkspaceFileLocation } from './Chat/WorkspaceFileContext';
 import { downloadWorkspaceFile, openWorkspacePath, readWorkspaceFile } from '../workspace/client';
 import {
   bundleHtmlForPreview,
@@ -13,7 +15,8 @@ import { openExternal } from '../utils/openExternal';
 import type { WorkspaceFileContent, WorkspaceFileEntry } from '../generated/bindings';
 import styles from './WorkspaceFilePreviewPanel.module.css';
 
-type HtmlMode = 'preview' | 'source';
+// HTML and Vega-Lite files have a rendered preview and a raw-source view.
+type ViewMode = 'preview' | 'source';
 
 // The loaded-file shape this panel renders. `viewer`/`path` mirror the
 // WorkspaceFileContent payload from `readWorkspaceFile`; `error` is set
@@ -286,6 +289,12 @@ const looksLikeMarkdown = (viewer: string | undefined, path: string | undefined)
   return lower.endsWith('.md') || lower.endsWith('.markdown');
 };
 
+const looksLikeVegaLite = (viewer: string | undefined, path: string | undefined): boolean => {
+  if (viewer === 'vega-lite') return true;
+  if (!path) return false;
+  return path.toLowerCase().endsWith('.vl.json');
+};
+
 const isJsonLike = (viewer: string | undefined, path: string | undefined): boolean => {
   if (viewer === 'json') return true;
   if (!path) return false;
@@ -301,7 +310,8 @@ const looksLikeHtml = (viewer: string | undefined, path: string | undefined): bo
 
 const renderBody = (
   file: LoadedFile | null,
-  htmlMode: HtmlMode,
+  fileLocation: WorkspaceFileLocation | null,
+  viewMode: ViewMode,
   htmlBundle: string | null,
   bundling: boolean,
   onMarkdownLinkClick: (event: React.MouseEvent) => void,
@@ -338,11 +348,23 @@ const renderBody = (
         onClickCapture={onMarkdownLinkClick}
         onAuxClickCapture={onMarkdownLinkClick}
       >
-        <MarkdownMessage content={file.content} />
+        <WorkspaceFileContext.Provider value={fileLocation}>
+          <MarkdownMessage content={file.content} />
+        </WorkspaceFileContext.Provider>
       </div>
     );
   }
-  if (looksLikeHtml(file.viewer, file.path) && htmlMode === 'preview') {
+  if (looksLikeVegaLite(file.viewer, file.path) && viewMode === 'preview') {
+    // The spec's `data.url` resolves relative to the spec file itself.
+    return (
+      <div className={styles.markdownBody}>
+        <WorkspaceFileContext.Provider value={fileLocation}>
+          <VegaChart source={file.content} />
+        </WorkspaceFileContext.Provider>
+      </div>
+    );
+  }
+  if (looksLikeHtml(file.viewer, file.path) && viewMode === 'preview') {
     // The bundler inlines any local siblings (stylesheets, scripts, images,
     // fonts) the report references by relative path — `srcDoc` has no base
     // URL, so without this they'd silently fail to load. We wait for it
@@ -410,7 +432,7 @@ export default function WorkspaceFilePreviewPanel({
   }, [armedDeletePath]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [htmlMode, setHtmlMode] = useState<HtmlMode>('preview');
+  const [viewMode, setViewMode] = useState<ViewMode>('preview');
   // Self-contained HTML for the preview iframe: the raw markup with every
   // local resource inlined. Null until the bundler resolves for the current
   // file; `bundling` gates the iframe so it never mounts mid-inline.
@@ -485,8 +507,8 @@ export default function WorkspaceFilePreviewPanel({
   }, [workspaceId, entry?.path, entry?.viewer]);
 
   useEffect(() => {
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets htmlMode/justCopied/copiedField when the entry path changes; 3-field prop→state mirror cannot be expressed as a useMemo without re-rendering on every copy click.
-    setHtmlMode('preview');
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets viewMode/justCopied/copiedField when the entry path changes; 3-field prop→state mirror cannot be expressed as a useMemo without re-rendering on every copy click.
+    setViewMode('preview');
     setJustCopied(false);
     setCopiedField(null);
   }, [entry?.path]);
@@ -496,7 +518,7 @@ export default function WorkspaceFilePreviewPanel({
   // panel can paint immediately; falls back to the raw markup if inlining
   // fails so a broken asset never blanks the preview.
   useEffect(() => {
-    if (!file || file.error || htmlMode !== 'preview' || !looksLikeHtml(file.viewer, file.path)) {
+    if (!file || file.error || viewMode !== 'preview' || !looksLikeHtml(file.viewer, file.path)) {
       return undefined;
     }
     let cancelled = false;
@@ -516,7 +538,7 @@ export default function WorkspaceFilePreviewPanel({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, file, htmlMode]);
+  }, [workspaceId, file, viewMode]);
 
   const canAct = Boolean(
     !loading && !error && file && typeof file.content === 'string' && file.content.length > 0,
@@ -634,10 +656,20 @@ export default function WorkspaceFilePreviewPanel({
     [onNavigate, file?.path, entry?.path],
   );
 
+  // Stable per file so chart effects keyed on it don't re-run on unrelated
+  // panel re-renders (copy feedback, fullscreen toggle, …).
+  const loadedPath = file?.path;
+  const fileLocation = useMemo<WorkspaceFileLocation | null>(
+    () => (loadedPath ? { workspaceId, basePath: loadedPath } : null),
+    [workspaceId, loadedPath],
+  );
+
   if (!entry) return null;
 
   const kindLabel = kind === 'memory' ? 'Memory' : 'Artifact';
-  const isHtml = looksLikeHtml(file?.viewer || entry.viewer, file?.path || entry.path);
+  const viewer = file?.viewer || entry.viewer;
+  const path = file?.path || entry.path;
+  const hasPreview = looksLikeHtml(viewer, path) || looksLikeVegaLite(viewer, path);
 
   return (
     <aside
@@ -789,19 +821,19 @@ export default function WorkspaceFilePreviewPanel({
                 <span>{formatTimestamp(entry.updatedAt)}</span>
               </>
             )}
-            {isHtml && (
-              <span className={styles.viewSwitch} role="group" aria-label="HTML view mode">
+            {hasPreview && (
+              <span className={styles.viewSwitch} role="group" aria-label="View mode">
                 <button
                   type="button"
-                  className={`${styles.viewSwitchButton} ${htmlMode === 'preview' ? styles.viewSwitchButtonActive : ''}`}
-                  onClick={() => setHtmlMode('preview')}
+                  className={`${styles.viewSwitchButton} ${viewMode === 'preview' ? styles.viewSwitchButtonActive : ''}`}
+                  onClick={() => setViewMode('preview')}
                 >
                   Preview
                 </button>
                 <button
                   type="button"
-                  className={`${styles.viewSwitchButton} ${htmlMode === 'source' ? styles.viewSwitchButtonActive : ''}`}
-                  onClick={() => setHtmlMode('source')}
+                  className={`${styles.viewSwitchButton} ${viewMode === 'source' ? styles.viewSwitchButtonActive : ''}`}
+                  onClick={() => setViewMode('source')}
                 >
                   Source
                 </button>
@@ -811,7 +843,7 @@ export default function WorkspaceFilePreviewPanel({
         )}
         {loading && <div className={styles.empty}>Loading…</div>}
         {!loading && error && <div className={styles.error}>{error}</div>}
-        {!loading && !error && renderBody(file, htmlMode, htmlBundle, bundling, handleMarkdownLinkClick, handleOpenExternal)}
+        {!loading && !error && renderBody(file, fileLocation, viewMode, htmlBundle, bundling, handleMarkdownLinkClick, handleOpenExternal)}
       </div>
     </aside>
   );

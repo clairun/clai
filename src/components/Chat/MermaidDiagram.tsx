@@ -1,4 +1,5 @@
 import React, { memo, useEffect, useState } from 'react';
+import { useAppTheme } from './useAppTheme';
 import styles from './MermaidDiagram.module.css';
 
 /**
@@ -32,9 +33,6 @@ const loadMermaid = (): Promise<MermaidAPI> => {
   return mermaidPromise;
 };
 
-const resolveAppTheme = (): 'light' | 'dark' =>
-  document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
-
 // mermaid's theme is global initialize() state, not per-render; track what
 // we last initialized with and re-initialize only on change.
 let initializedTheme: string | null = null;
@@ -64,17 +62,8 @@ interface MermaidDiagramProps {
 const MermaidDiagram = memo(({ code, isStreaming = false }: MermaidDiagramProps) => {
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [appTheme, setAppTheme] = useState<'light' | 'dark'>(resolveAppTheme);
-
   // Follow live theme switches (Settings toggle / OS change with "system").
-  useEffect(() => {
-    const observer = new MutationObserver(() => setAppTheme(resolveAppTheme()));
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['data-theme'],
-    });
-    return () => observer.disconnect();
-  }, []);
+  const appTheme = useAppTheme();
 
   useEffect(() => {
     let cancelled = false;

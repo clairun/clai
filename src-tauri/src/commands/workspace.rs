@@ -561,6 +561,12 @@ fn viewer_for_path(path: &Path) -> String {
         return "html".to_string();
     }
 
+    // Vega-Lite specs are JSON, but the frontend renders them as charts
+    // (see `VegaChart`); checked before the generic JSON branch.
+    if file_name.ends_with(".vl.json") {
+        return "vega-lite".to_string();
+    }
+
     if ext == "json" {
         return "json".to_string();
     }
@@ -4725,6 +4731,16 @@ mod tests {
         assert_eq!(viewer_for_path(Path::new("notes.md")), "markdown");
         assert_eq!(viewer_for_path(Path::new("main.rs")), "text");
         assert_eq!(viewer_for_path(Path::new("data.json")), "json");
+    }
+
+    #[test]
+    fn viewer_for_path_routes_vega_lite_specs_to_the_chart_viewer() {
+        use std::path::Path;
+        assert_eq!(viewer_for_path(Path::new("charts/q3.vl.json")), "vega-lite");
+        assert_eq!(viewer_for_path(Path::new("Q3.VL.JSON")), "vega-lite");
+        // Only the `.vl.json` double extension is a chart; plain JSON is unchanged.
+        assert_eq!(viewer_for_path(Path::new("charts/q3.json")), "json");
+        assert_eq!(viewer_for_path(Path::new("vl.json")), "json");
     }
 
     #[test]

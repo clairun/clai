@@ -9,6 +9,7 @@ import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
+import { WorkspaceFileContext, type WorkspaceFileLocation } from '../Chat/WorkspaceFileContext';
 import VirtualizedList from '../common/VirtualizedList';
 import type {
   AssistantMessage,
@@ -581,6 +582,12 @@ const ChatMessageList = ({
     return map;
   }, [toolCalls]);
 
+  // Lets markdown in messages resolve workspace-relative references (a
+  // `.vl.json` chart link, a spec's `data.url`) against the workspace root.
+  const fileLocation = useMemo<WorkspaceFileLocation | null>(
+    () => (workspaceId ? { workspaceId, basePath: '' } : null),
+    [workspaceId]
+  );
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
   // conversation viewport). Folded into scrollToBottomSignal below with a wide
@@ -734,30 +741,32 @@ const ChatMessageList = ({
   ) : null;
 
   return (
-    <VirtualizedList
-      items={grouped}
-      itemKey={itemKey}
-      renderItem={renderItem}
-      className={styles.activityList}
-      // Most turns are now one-line tool rows (~30px). A large estimate
-      // over-allocates each not-yet-measured row, so during an active run the
-      // footer/last row sits well below the real content and stick-to-bottom
-      // scrolls into that empty slot — the "jumps off the bottom on every new
-      // tool" gap. Estimating near the common row height keeps the transient
-      // gap negligible; taller text blocks correct on measure (overscan keeps
-      // them rendered/measured).
-      estimateSize={48}
-      overscan={1400}
-      gap={12}
-      footer={footer}
-      footerEstimateSize={56}
-      initialScrollToBottom
-      scrollToBottomSignal={messages.length + scrollNudge * 1_000_000}
-      scrollToBottomBehavior="auto"
-      forceScrollToBottomKey={lastUserMessageId}
-      throttledMeasureKeys={throttledMeasureKeys}
-      onApproachTop={handleApproachTop}
-    />
+    <WorkspaceFileContext.Provider value={fileLocation}>
+      <VirtualizedList
+        items={grouped}
+        itemKey={itemKey}
+        renderItem={renderItem}
+        className={styles.activityList}
+        // Most turns are now one-line tool rows (~30px). A large estimate
+        // over-allocates each not-yet-measured row, so during an active run the
+        // footer/last row sits well below the real content and stick-to-bottom
+        // scrolls into that empty slot — the "jumps off the bottom on every new
+        // tool" gap. Estimating near the common row height keeps the transient
+        // gap negligible; taller text blocks correct on measure (overscan keeps
+        // them rendered/measured).
+        estimateSize={48}
+        overscan={1400}
+        gap={12}
+        footer={footer}
+        footerEstimateSize={56}
+        initialScrollToBottom
+        scrollToBottomSignal={messages.length + scrollNudge * 1_000_000}
+        scrollToBottomBehavior="auto"
+        forceScrollToBottomKey={lastUserMessageId}
+        throttledMeasureKeys={throttledMeasureKeys}
+        onApproachTop={handleApproachTop}
+      />
+    </WorkspaceFileContext.Provider>
   );
 };
 

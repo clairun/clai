@@ -1,0 +1,87 @@
+/* Vega-Lite chart card — same surface as MermaidDiagram.module.css so
+   diagrams and charts sit consistently inside markdown. */
+
+.card {
+  margin: 12px 0;
+  padding: 16px;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border-light);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+/* Host for the vega-embed element(s). `position: relative` anchors the
+   hidden pending render so it measures the same width as the live chart. */
+.chart {
+  position: relative;
+  width: 100%;
+}
+
+.chart :global(.vega-embed) {
+  display: block;
+  width: 100%;
+}
+
+.chart :global(.vega-embed) svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* A replacement render in progress: takes the host's width for Vega's
+   "container" sizing but stays invisible until it succeeds. */
+.pending {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.loading {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+/* Raw-source fallback (streaming / not yet rendered) — mirrors .codeBlock
+   in MarkdownMessage.module.css. */
+.codeFallback {
+  margin: 0;
+  padding: 12px 16px;
+  background: var(--color-code-bg);
+  border: 1px solid var(--color-code-border);
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.codeFallback code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-text-primary);
+  white-space: pre;
+  word-wrap: normal;
+}
+
+/* Render error on final (non-streaming) content */
+.errorContainer {
+  padding: 12px 16px;
+  background: var(--color-error-alpha-06);
+  border: 1px solid var(--color-error-alpha-20);
+  border-radius: 6px;
+}
+
+.errorLabel {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-error);
+  margin-bottom: 4px;
+}
+
+.errorMessage {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+}
