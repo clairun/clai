@@ -100,7 +100,10 @@ export const withContainerWidth = (spec: Record<string, unknown>): Record<string
  * what rejects `javascript:` and other disallowed schemes for the `href`
  * channel — Vega dispatches a click on an `<a>` built from `sanitize()`'s
  * result, so a passthrough here would let a spec run script in the app.
- * Links open in a new window like every other markdown link.
+ * `target=_blank` is set for safety; note that the anchor Vega clicks is
+ * detached from the document, so the app's link interception does not see it
+ * and `href` marks currently open nothing in the Tauri WebView (follow-up:
+ * route `context: 'href'` through `openExternal`).
  */
 // vega-loader's sanitize() copies `target`/`rel` onto the anchor it builds for
 // `href` clicks (vega-loader/src/loader.js); vega-typings' per-call
@@ -165,7 +168,9 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   // state.
   const currentRef = useRef<{ result: Result; el: HTMLElement } | null>(null);
   const [rendered, setRendered] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Parse/render failure for a specific spec text; ignored once the text
+  // changes so a switched spec link never shows the previous one's error.
+  const [renderError, setRenderError] = useState<{ text: string; message: string } | null>(null);
   const [specFile, setSpecFile] = useState<LoadedSpecFile | null>(null);
 
   // Where the spec lives, for resolving its `data.url`: the enclosing
@@ -202,6 +207,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
     ? fileIsCurrent ? specFile.text : null
     : source ?? null;
   // A spec link outside any workspace context can never resolve.
+  const error = renderError !== null && renderError.text === text ? renderError.message : null;
   const fileError = specPath
     ? !location
       ? `Cannot load ${specPath}: no workspace to read it from`
@@ -215,15 +221,18 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
 
     let cancelled = false;
     const timer = setTimeout(async () => {
+      const fail = (err: unknown) => {
+        if (!cancelled) setRenderError({ text, message: err instanceof Error ? err.message : String(err) });
+      };
       let spec: unknown;
       try {
         spec = JSON.parse(text);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        fail(err);
         return;
       }
       if (!isPlainObject(spec)) {
-        if (!cancelled) setError('A Vega-Lite spec must be a JSON object');
+        fail('A Vega-Lite spec must be a JSON object');
         return;
       }
 
@@ -261,10 +270,10 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         if (styles.pending) target.classList.remove(styles.pending);
         currentRef.current = { result, el: target };
         setRendered(true);
-        setError(null);
+        setRenderError(null);
       } catch (err) {
         target.remove();
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        fail(err);
       }
     }, isStreaming ? STREAMING_RENDER_DEBOUNCE_MS : 0);
 

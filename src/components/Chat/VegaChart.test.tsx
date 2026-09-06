@@ -353,6 +353,25 @@ describe('VegaChart (spec file)', () => {
     expect(readWorkspaceFileBase64Mock).not.toHaveBeenCalled();
   });
 
+  it('drops the previous spec\'s error when the link changes to a file still loading', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValueOnce(bytesOf('{"mark": "bar",'));
+    const { rerender } = render(
+      <WorkspaceFileContext.Provider value={LOCATION}>
+        <VegaChart specPath="charts/q3.vl.json" />
+      </WorkspaceFileContext.Provider>,
+    );
+    await screen.findByText('Vega-Lite chart failed to render');
+
+    readWorkspaceFileBase64Mock.mockReturnValue(new Promise(() => {}));
+    rerender(
+      <WorkspaceFileContext.Provider value={LOCATION}>
+        <VegaChart specPath="charts/q4.vl.json" />
+      </WorkspaceFileContext.Provider>,
+    );
+    expect(screen.queryByText('Vega-Lite chart failed to render')).not.toBeInTheDocument();
+    expect(screen.getByText('Loading chart…')).toBeInTheDocument();
+  });
+
   it('reloads when the referenced path changes', async () => {
     readWorkspaceFileBase64Mock.mockResolvedValue(bytesOf(SOURCE));
     const { rerender } = render(
