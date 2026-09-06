@@ -52,13 +52,15 @@ interface HastNodeLike {
 
 // Markdown puts every image inside a <p>, but a chart renders as a block
 // (<div>), which is not valid inside <p>. Paragraphs containing a chart link
-// are rendered as a <div> with the paragraph styling instead.
+// (at any depth — it may sit inside a link or emphasis) are rendered as a
+// <div> with the paragraph styling instead.
 const containsChartLink = (node: HastNodeLike | undefined): boolean =>
   (node?.children ?? []).some(
     (child) =>
-      child.type === 'element' &&
-      child.tagName === 'img' &&
-      isVegaLiteSpecLink(typeof child.properties?.src === 'string' ? child.properties.src : undefined),
+      (child.type === 'element' &&
+        child.tagName === 'img' &&
+        isVegaLiteSpecLink(typeof child.properties?.src === 'string' ? child.properties.src : undefined)) ||
+      containsChartLink(child),
   );
 
 /**

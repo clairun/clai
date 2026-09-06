@@ -39,12 +39,21 @@ import styles from './VegaChart.module.css';
 
 type EmbedFn = (typeof import('vega-embed'))['default'];
 
-let embedPromise: Promise<EmbedFn> | null = null;
-const loadEmbed = (): Promise<EmbedFn> => {
-  if (!embedPromise) {
-    embedPromise = import('vega-embed').then((m) => m.default);
+interface VegaRuntime {
+  embed: EmbedFn;
+  /** Vega's default loader; supplies the URL sanitizer we delegate to. */
+  createLoader: () => Loader;
+}
+
+let runtimePromise: Promise<VegaRuntime> | null = null;
+const loadVega = (): Promise<VegaRuntime> => {
+  if (!runtimePromise) {
+    runtimePromise = import('vega-embed').then((m) => ({
+      embed: m.default,
+      createLoader: () => m.vega.loader(),
+    }));
   }
-  return embedPromise;
+  return runtimePromise;
 };
 
 // Debounce while streaming: mid-arrival JSON is almost never valid, and a
@@ -86,11 +95,22 @@ export const withContainerWidth = (spec: Record<string, unknown>): Record<string
 
 /**
  * A Vega data loader that serves relative `data.url`s from the workspace.
- * `baseFilePath` is the document the URL is relative to.
+ * `baseFilePath` is the document the URL is relative to. Only `load` is ours;
+ * URL sanitizing is delegated to Vega's default loader (`base`), which is
+ * what rejects `javascript:` and other disallowed schemes for the `href`
+ * channel — Vega dispatches a click on an `<a>` built from `sanitize()`'s
+ * result, so a passthrough here would let a spec run script in the app.
+ * Links open in a new window like every other markdown link.
  */
+// vega-loader's sanitize() copies `target`/`rel` onto the anchor it builds for
+// `href` clicks (vega-loader/src/loader.js); vega-typings' per-call
+// `LoaderOptionsWithContext` does not admit them (`rel` is undeclared entirely).
+const LINK_TARGET_OPTIONS: Record<string, string> = { target: '_blank', rel: 'noopener noreferrer' };
+
 export const makeWorkspaceLoader = (
   location: WorkspaceFileLocation | null,
   baseFilePath: string,
+  base: Loader,
 ): Loader => {
   const http = async (uri: string, options?: Partial<RequestInit>): Promise<string> => {
     const response = await fetch(uri, options);
@@ -111,11 +131,7 @@ export const makeWorkspaceLoader = (
       const path = resolveWorkspacePath(baseFilePath, uri);
       return readWorkspaceText(location.workspaceId, path);
     },
-    // Vega's default sanitizer resolves against a base URL and filters
-    // schemes for image marks; here every URL is either a workspace path we
-    // resolve ourselves in `load` or an http(s) URL, and `<img src>` cannot
-    // execute script, so passthrough is sufficient.
-    sanitize: async (uri) => ({ href: uri }),
+    sanitize: (uri, options) => base.sanitize(uri, Object.assign({}, options, LINK_TARGET_OPTIONS)),
     http,
     file: async (filename) => {
       throw new Error(`File loading is not available: ${filename}`);
@@ -218,7 +234,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
       target.className = styles.pending ?? '';
       host.appendChild(target);
       try {
-        const embed = await loadEmbed();
+        const { embed, createLoader } = await loadVega();
         if (cancelled) {
           target.remove();
           return;
@@ -227,7 +243,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           actions: false,
           renderer: 'svg',
           config: buildVegaConfig(readChartThemeTokens()),
-          loader: makeWorkspaceLoader(location, dataBasePath),
+          loader: makeWorkspaceLoader(location, dataBasePath, createLoader()),
           tooltip: { theme: appTheme },
         };
         const result = await embed(target, withContainerWidth(spec) as VisualizationSpec, options);
@@ -273,14 +289,17 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   const finalError = fileError ?? (isStreaming ? null : error);
   const showFallback = !rendered && !finalError;
 
+  // Errors on final content are always reported; when a previous chart is
+  // still up (a failed re-render) it stays visible above the message, and
+  // the source is only repeated when there is no chart to look at.
   return (
     <div className={styles.card}>
       <div ref={hostRef} className={styles.chart} data-testid="vega-chart" />
-      {finalError && !rendered && (
+      {finalError && (
         <div className={styles.errorContainer}>
           <div className={styles.errorLabel}>Vega-Lite chart failed to render</div>
           <div className={styles.errorMessage}>{finalError}</div>
-          {source !== undefined && (
+          {source !== undefined && !rendered && (
             <pre className={styles.codeFallback}>
               <code>{source}</code>
             </pre>

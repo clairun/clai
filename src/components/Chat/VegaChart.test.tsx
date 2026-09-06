@@ -1,11 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 
+import { loader as createVegaLoader } from 'vega';
+
 // vega-embed does real layout; mock it so we exercise this component's
 // state machine (parse → embed → swap/fallback) and the options it passes.
+// Vega's real loader is kept: its sanitizer is what we delegate to.
 const embedMock = vi.fn();
 vi.mock('vega-embed', () => ({
   default: (...args: unknown[]) => embedMock(...args),
+  vega: { loader: createVegaLoader },
 }));
 
 const readWorkspaceFileBase64Mock = vi.fn();
@@ -90,22 +94,25 @@ describe('withContainerWidth', () => {
 });
 
 describe('makeWorkspaceLoader', () => {
+  const makeLoader = (location: typeof LOCATION | null, base: string) =>
+    makeWorkspaceLoader(location, base, createVegaLoader());
+
   it('reads relative data URLs from the workspace bytes endpoint, relative to the spec file', async () => {
     readWorkspaceFileBase64Mock.mockResolvedValue(bytesOf('a,b\n1,2'));
-    const loader = makeWorkspaceLoader(LOCATION, 'reports/charts/q3.vl.json');
+    const loader = makeLoader(LOCATION, 'reports/charts/q3.vl.json');
     await expect(loader.load('../sales.csv')).resolves.toBe('a,b\n1,2');
     expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/sales.csv');
   });
 
   it('decodes non-ASCII file content as UTF-8', async () => {
     readWorkspaceFileBase64Mock.mockResolvedValue(bytesOf('país,ventas\nEspaña,3'));
-    const loader = makeWorkspaceLoader(LOCATION, '');
+    const loader = makeLoader(LOCATION, '');
     await expect(loader.load('ventas.csv')).resolves.toBe('país,ventas\nEspaña,3');
   });
 
   it('propagates a rejected read (e.g. oversize or missing file) instead of charting a prefix', async () => {
     readWorkspaceFileBase64Mock.mockRejectedValue(new Error('big.csv is too large to preview'));
-    const loader = makeWorkspaceLoader(LOCATION, '');
+    const loader = makeLoader(LOCATION, '');
     await expect(loader.load('big.csv')).rejects.toThrow(/too large/);
   });
 
@@ -113,7 +120,7 @@ describe('makeWorkspaceLoader', () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => 'x,y' });
     vi.stubGlobal('fetch', fetchMock);
     try {
-      const loader = makeWorkspaceLoader(LOCATION, '');
+      const loader = makeLoader(LOCATION, '');
       await expect(loader.load('https://example.com/d.csv')).resolves.toBe('x,y');
       expect(fetchMock).toHaveBeenCalledWith('https://example.com/d.csv', undefined);
       await expect(loader.load('data:text/csv,a')).rejects.toThrow(/Unsupported data URL/);
@@ -126,15 +133,30 @@ describe('makeWorkspaceLoader', () => {
   it('surfaces a non-2xx response as an error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => '' }));
     try {
-      const loader = makeWorkspaceLoader(LOCATION, '');
+      const loader = makeLoader(LOCATION, '');
       await expect(loader.load('https://example.com/missing.csv')).rejects.toThrow(/HTTP 404/);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
+  it("delegates href sanitizing to Vega's loader: script schemes are rejected", async () => {
+    const loader = makeLoader(LOCATION, '');
+    await expect(loader.sanitize('javascript:alert(1)', { context: 'href' })).rejects.toThrow();
+    await expect(loader.sanitize(' JavaScript:alert(1)', { context: 'href' })).rejects.toThrow();
+  });
+
+  it('opens allowed hrefs in a new window with rel=noopener', async () => {
+    const loader = makeLoader(LOCATION, '');
+    await expect(loader.sanitize('https://example.com/report', { context: 'href' })).resolves.toEqual({
+      href: 'https://example.com/report',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+    });
+  });
+
   it('rejects relative URLs when there is no workspace to resolve them in', async () => {
-    const loader = makeWorkspaceLoader(null, '');
+    const loader = makeLoader(null, '');
     await expect(loader.load('sales.csv')).rejects.toThrow(/no workspace/);
     expect(readWorkspaceFileBase64Mock).not.toHaveBeenCalled();
   });
@@ -219,10 +241,13 @@ describe('VegaChart (inline source)', () => {
     embedMock.mockRejectedValue(new Error('bad encoding'));
     rerender(<VegaChart source={JSON.stringify({ ...SPEC, mark: 'nope' })} />);
     await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(2));
-    // Old chart still up, failed sibling removed, old view not finalized.
+    // Old chart still up, failed sibling removed, old view not finalized —
+    // and the failure is reported (without repeating the source).
     expect(renderedCharts()).toBe(1);
     expect(screen.getByTestId('vega-chart').childElementCount).toBe(1);
     expect(finalizeMock).not.toHaveBeenCalled();
+    await screen.findByText('bad encoding');
+    expect(screen.queryByText(SOURCE)).not.toBeInTheDocument();
   });
 
   it('replaces the chart (and releases the old view) when the spec changes', async () => {
@@ -265,6 +290,19 @@ describe('VegaChart (inline source)', () => {
     const options = embedCall(0)[2];
     await options.loader.load('data/sales.csv');
     expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/data/sales.csv');
+  });
+
+  it("hands vega-embed a loader whose sanitizer is Vega's (script hrefs rejected)", async () => {
+    render(<VegaChart source={SOURCE} />);
+    await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(1));
+    const loader = embedCall(0)[2].loader as unknown as {
+      sanitize: (uri: string, o: { context: string }) => Promise<{ href: string }>;
+    };
+    await expect(loader.sanitize('javascript:alert(1)', { context: 'href' })).rejects.toThrow();
+    await expect(loader.sanitize('https://example.com', { context: 'href' })).resolves.toMatchObject({
+      href: 'https://example.com',
+      target: '_blank',
+    });
   });
 });
 

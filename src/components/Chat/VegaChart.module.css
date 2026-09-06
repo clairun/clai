@@ -66,6 +66,7 @@
 
 /* Render error on final (non-streaming) content */
 .errorContainer {
+  margin-top: 8px;
   padding: 12px 16px;
   background: var(--color-error-alpha-06);
   border: 1px solid var(--color-error-alpha-20);
