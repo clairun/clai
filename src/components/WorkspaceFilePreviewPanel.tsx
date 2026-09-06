@@ -3,7 +3,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { save } from '@tauri-apps/plugin-dialog';
 import MarkdownMessage from './Chat/MarkdownMessage';
-import VegaChart from './Chat/VegaChart';
+import VegaChart, { isVegaLiteSpecPath } from './Chat/VegaChart';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from './Chat/WorkspaceFileContext';
 import { downloadWorkspaceFile, openWorkspacePath, readWorkspaceFile } from '../workspace/client';
 import {
@@ -289,11 +289,8 @@ const looksLikeMarkdown = (viewer: string | undefined, path: string | undefined)
   return lower.endsWith('.md') || lower.endsWith('.markdown');
 };
 
-const looksLikeVegaLite = (viewer: string | undefined, path: string | undefined): boolean => {
-  if (viewer === 'vega-lite') return true;
-  if (!path) return false;
-  return path.toLowerCase().endsWith('.vl.json');
-};
+const looksLikeVegaLite = (viewer: string | undefined, path: string | undefined): boolean =>
+  viewer === 'vega-lite' || (!!path && isVegaLiteSpecPath(path));
 
 const isJsonLike = (viewer: string | undefined, path: string | undefined): boolean => {
   if (viewer === 'json') return true;

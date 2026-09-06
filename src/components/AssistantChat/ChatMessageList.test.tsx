@@ -29,9 +29,20 @@ vi.mock('../common/VirtualizedList', () => ({
 // MarkdownMessage / StreamingMarkdown render markdown via heavy deps
 // (react-markdown, prism). For these tests we only care that the text
 // reaches the DOM, so render it plainly.
-vi.mock('../Chat/MarkdownMessage', () => ({
-  default: ({ content }: { content: string }) => <div data-testid="markdown">{content}</div>,
-}));
+vi.mock('../Chat/MarkdownMessage', async () => {
+  const { useWorkspaceFileLocation } = await import('../Chat/WorkspaceFileContext');
+  const MarkdownMock = ({ content }: { content: string }) => {
+    // Expose the workspace location markdown would resolve relative links
+    // (`.vl.json` charts, `data.url`) against.
+    const location = useWorkspaceFileLocation();
+    return (
+      <div data-testid="markdown" data-workspace={location?.workspaceId ?? ''} data-base={location?.basePath ?? ''}>
+        {content}
+      </div>
+    );
+  };
+  return { default: MarkdownMock };
+});
 vi.mock('../Chat/StreamingMarkdown', () => ({
   default: ({ content }: { content: string }) => <div data-testid="streaming">{content}</div>,
 }));
@@ -348,6 +359,24 @@ describe('ChatMessageList', () => {
     // Image-only message is not hidden, and the thumbnail loads from the store.
     const img = await screen.findByAltText('shot.png');
     expect(img).toHaveAttribute('src', 'data:image/png;base64,QUJD');
+  });
+
+  it('provides the workspace (root-relative) to markdown so chart links resolve', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'See ![Q3](charts/q3.vl.json)' }] }),
+    ];
+    render(<ChatMessageList messages={messages} workspaceId="ws-1" userLabel="You" />);
+    const markdown = screen.getByTestId('markdown');
+    expect(markdown.dataset.workspace).toBe('ws-1');
+    expect(markdown.dataset.base).toBe('');
+  });
+
+  it('provides no workspace location when workspaceId is absent', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'hello' }] }),
+    ];
+    render(<ChatMessageList messages={messages} userLabel="You" />);
+    expect(screen.getByTestId('markdown').dataset.workspace).toBe('');
   });
 
   it('hides image parts when no workspaceId is provided', () => {

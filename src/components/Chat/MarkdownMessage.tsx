@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import MermaidDiagram from './MermaidDiagram';
-import VegaChart from './VegaChart';
+import VegaChart, { isVegaLiteSpecPath } from './VegaChart';
 import { isWorkspaceRelativeHref } from '../../utils/htmlBundle';
 import styles from './MarkdownMessage.module.css';
 
@@ -38,7 +38,7 @@ const remarkPlugins = [remarkGfm];
 // (resolved relative to the enclosing document, see WorkspaceFileContext);
 // any other image renders as usual.
 const isVegaLiteSpecLink = (src: string | undefined): src is string =>
-  !!src && isWorkspaceRelativeHref(src) && /\.vl\.json$/i.test(src.replace(/[?#].*$/, ''));
+  !!src && isWorkspaceRelativeHref(src) && isVegaLiteSpecPath(src);
 
 // Minimal structural view of the hast node react-markdown hands to
 // component renderers; enough to inspect a paragraph's children.

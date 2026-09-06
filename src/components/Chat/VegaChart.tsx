@@ -1,8 +1,8 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { EmbedOptions, Result, VisualizationSpec } from 'vega-embed';
 import type { Loader } from 'vega';
-import { readWorkspaceFile } from '../../workspace/client';
-import { isWorkspaceRelativeHref, resolveWorkspacePath } from '../../utils/htmlBundle';
+import { readWorkspaceFileBase64 } from '../../workspace/client';
+import { base64ToText, isWorkspaceRelativeHref, resolveWorkspacePath } from '../../utils/htmlBundle';
 import { useWorkspaceFileLocation, type WorkspaceFileLocation } from './WorkspaceFileContext';
 import { useAppTheme } from './useAppTheme';
 import { buildVegaConfig, readChartThemeTokens } from './vegaTheme';
@@ -18,12 +18,14 @@ import styles from './VegaChart.module.css';
  *
  * Behavior mirrors MermaidDiagram:
  *   - While the source is incomplete (streaming) or fails to parse, the raw
- *     JSON is shown; once a render succeeds the chart replaces it, and later
- *     transient failures during streaming keep the last good chart.
+ *     JSON is shown; once a render succeeds the chart replaces it.
  *   - When streaming ends with a spec that still doesn't render, the error
  *     and the raw JSON are shown.
  *   - Styling is injected by the host (see vegaTheme.ts) and follows the app
- *     theme live.
+ *     theme live. A re-render (theme flip, spec file change) is drawn into a
+ *     hidden sibling and swapped in only when it succeeds, so the visible
+ *     chart never blanks or collapses and a failed re-render keeps the
+ *     previous one.
  *
  * Data: a spec's `data.url` is resolved relative to the enclosing document
  * (chat → workspace root, artifact → the file's directory, `.vl.json` link →
@@ -51,6 +53,25 @@ const STREAMING_RENDER_DEBOUNCE_MS = 250;
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Whether a workspace path (or link target) names a Vega-Lite spec file.
+ * The one place this rule lives on the frontend; the backend mirrors it in
+ * `viewer_for_path` (`.vl.json` → viewer "vega-lite"). Ignores any
+ * `?query`/`#fragment`, case-insensitive.
+ */
+export const isVegaLiteSpecPath = (path: string): boolean =>
+  /\.vl\.json$/i.test(path.replace(/[?#].*$/, ''));
+
+/**
+ * Read a workspace text file for chart use. Goes through the bytes endpoint
+ * rather than `readWorkspaceFile`: the text endpoint silently truncates at
+ * 200 KB (a preview convenience), which would chart a prefix of a large CSV
+ * as if it were the whole dataset; the bytes endpoint rejects oversize files
+ * outright (10 MB) so the failure is visible.
+ */
+const readWorkspaceText = async (workspaceId: string, path: string): Promise<string> =>
+  base64ToText((await readWorkspaceFileBase64(workspaceId, path)).base64);
 
 /**
  * Unit and layered specs without an explicit width fill the card, so charts
@@ -88,9 +109,12 @@ export const makeWorkspaceLoader = (
         throw new Error(`Cannot load ${uri}: no workspace to resolve it in`);
       }
       const path = resolveWorkspacePath(baseFilePath, uri);
-      const file = await readWorkspaceFile(location.workspaceId, path);
-      return file.content;
+      return readWorkspaceText(location.workspaceId, path);
     },
+    // Vega's default sanitizer resolves against a base URL and filters
+    // schemes for image marks; here every URL is either a workspace path we
+    // resolve ourselves in `load` or an http(s) URL, and `<img src>` cannot
+    // execute script, so passthrough is sufficient.
     sanitize: async (uri) => ({ href: uri }),
     http,
     file: async (filename) => {
@@ -138,15 +162,11 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
 
   // Load a referenced spec file. Inline sources need no fetch.
   useEffect(() => {
-    if (!specPath || resolvedSpecPath === null) return undefined;
-    if (!location) {
-      setSpecFile({ path: resolvedSpecPath, text: null, error: `Cannot load ${specPath}: no workspace to read it from` });
-      return undefined;
-    }
+    if (!specPath || resolvedSpecPath === null || !location) return undefined;
     let cancelled = false;
-    readWorkspaceFile(location.workspaceId, resolvedSpecPath)
-      .then((file) => {
-        if (!cancelled) setSpecFile({ path: resolvedSpecPath, text: file.content, error: null });
+    readWorkspaceText(location.workspaceId, resolvedSpecPath)
+      .then((content) => {
+        if (!cancelled) setSpecFile({ path: resolvedSpecPath, text: content, error: null });
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -165,7 +185,12 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   const text: string | null = specPath
     ? fileIsCurrent ? specFile.text : null
     : source ?? null;
-  const fileError = specPath && fileIsCurrent ? specFile.error : null;
+  // A spec link outside any workspace context can never resolve.
+  const fileError = specPath
+    ? !location
+      ? `Cannot load ${specPath}: no workspace to read it from`
+      : fileIsCurrent ? specFile.error : null
+    : null;
 
   useEffect(() => {
     if (text === null) return undefined;
@@ -186,8 +211,9 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         return;
       }
 
-      // Render into a hidden sibling so the previous chart stays up until
-      // the new one is ready (and survives if the new one fails).
+      // Render into a hidden sibling: the previous chart stays up (no blank,
+      // no height collapse) until the new one is ready, and survives if the
+      // new one fails.
       const target = document.createElement('div');
       target.className = styles.pending ?? '';
       host.appendChild(target);
@@ -214,7 +240,9 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           currentRef.current.result.finalize();
           currentRef.current.el.remove();
         }
-        target.className = '';
+        // Only drop our own marker: vega-embed tags the target with its
+        // `vega-embed` class, which the stylesheet relies on.
+        if (styles.pending) target.classList.remove(styles.pending);
         currentRef.current = { result, el: target };
         setRendered(true);
         setError(null);

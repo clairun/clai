@@ -105,7 +105,8 @@ interface ResourceReader {
   readDataUri: (path: string) => Promise<string>;
 }
 
-const base64ToText = (base64: string): string => {
+/** Decode a base64 payload from `readWorkspaceFileBase64` as UTF-8 text. */
+export const base64ToText = (base64: string): string => {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);

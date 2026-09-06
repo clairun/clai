@@ -205,6 +205,7 @@ export default function WorkspaceTaskTranscriptPanel({
             <ChatMessageList
               key={sessionId}
               messages={messages}
+              workspaceId={task.workspaceId}
               toolCalls={toolCalls}
               streamingText={streamingText}
               isStreaming={isStreaming}

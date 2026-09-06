@@ -3,7 +3,9 @@ import { render, screen } from '@testing-library/react';
 
 // The chart renderer has its own tests; here we only care that markdown
 // routes the right constructs to it with the right props.
-vi.mock('./VegaChart', () => ({
+vi.mock('./VegaChart', async (importOriginal) => ({
+  // Keep the real path predicate; only the renderer is stubbed.
+  ...(await importOriginal<typeof import('./VegaChart')>()),
   default: ({ source, specPath, isStreaming }: { source?: string; specPath?: string; isStreaming?: boolean }) => (
     <div
       data-testid="vega-chart-mock"

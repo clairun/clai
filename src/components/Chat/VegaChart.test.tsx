@@ -8,17 +8,24 @@ vi.mock('vega-embed', () => ({
   default: (...args: unknown[]) => embedMock(...args),
 }));
 
-const readWorkspaceFileMock = vi.fn();
+const readWorkspaceFileBase64Mock = vi.fn();
 vi.mock('../../workspace/client', () => ({
-  readWorkspaceFile: (...args: unknown[]) => readWorkspaceFileMock(...args),
+  readWorkspaceFileBase64: (...args: unknown[]) => readWorkspaceFileBase64Mock(...args),
 }));
 
-import VegaChart, { makeWorkspaceLoader, withContainerWidth } from './VegaChart';
+import VegaChart, { isVegaLiteSpecPath, makeWorkspaceLoader, withContainerWidth } from './VegaChart';
 import { WorkspaceFileContext } from './WorkspaceFileContext';
 
 const SPEC = { mark: 'bar', data: { values: [{ a: 1 }] }, encoding: { x: { field: 'a' } } };
 const SOURCE = JSON.stringify(SPEC);
 const LOCATION = { workspaceId: 'ws-1', basePath: 'reports/q3.md' };
+
+// What the bytes endpoint returns for a UTF-8 text file.
+const bytesOf = (text: string) => ({
+  path: '',
+  mime: 'text/plain',
+  base64: btoa(String.fromCharCode(...new TextEncoder().encode(text))),
+});
 
 const finalizeMock = vi.fn();
 
@@ -33,11 +40,13 @@ interface CapturedOptions {
 type EmbedCall = [HTMLElement, Record<string, unknown>, CapturedOptions];
 const embedCall = (index: number): EmbedCall => embedMock.mock.calls[index] as EmbedCall;
 
-// Simulate vega-embed: it renders into the target element and returns a
-// handle whose finalize() releases the view.
+// Simulate vega-embed: it clears the target, tags the target itself with the
+// `vega-embed` class, renders into it and returns a handle whose finalize()
+// releases the view.
 const fakeEmbed = async (el: HTMLElement) => {
-  const view = document.createElement('div');
-  view.className = 'vega-embed';
+  el.innerHTML = '';
+  el.classList.add('vega-embed');
+  const view = document.createElement('svg');
   view.textContent = 'chart';
   el.appendChild(view);
   return { finalize: finalizeMock, view: {} };
@@ -49,12 +58,23 @@ const settle = (ms: number) => act(() => new Promise<void>((resolve) => setTimeo
 beforeEach(() => {
   embedMock.mockReset().mockImplementation(fakeEmbed);
   finalizeMock.mockReset();
-  readWorkspaceFileMock.mockReset();
+  readWorkspaceFileBase64Mock.mockReset();
   document.documentElement.setAttribute('data-theme', 'light');
 });
 
 const renderedCharts = () =>
   screen.getByTestId('vega-chart').querySelectorAll('.vega-embed').length;
+
+describe('isVegaLiteSpecPath', () => {
+  it('matches the .vl.json double extension case-insensitively, ignoring query/fragment', () => {
+    expect(isVegaLiteSpecPath('charts/q3.vl.json')).toBe(true);
+    expect(isVegaLiteSpecPath('Charts/Q3.VL.JSON#top')).toBe(true);
+    expect(isVegaLiteSpecPath('q3.vl.json?v=2')).toBe(true);
+    expect(isVegaLiteSpecPath('charts/q3.json')).toBe(false);
+    expect(isVegaLiteSpecPath('vl.json')).toBe(false);
+    expect(isVegaLiteSpecPath('q3.vl.json.bak')).toBe(false);
+  });
+});
 
 describe('withContainerWidth', () => {
   it('fills the container for unit and layered specs without a width', () => {
@@ -70,11 +90,23 @@ describe('withContainerWidth', () => {
 });
 
 describe('makeWorkspaceLoader', () => {
-  it('reads relative data URLs from the workspace, relative to the spec file', async () => {
-    readWorkspaceFileMock.mockResolvedValue({ content: 'a,b\n1,2', viewer: 'text', path: '' });
+  it('reads relative data URLs from the workspace bytes endpoint, relative to the spec file', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValue(bytesOf('a,b\n1,2'));
     const loader = makeWorkspaceLoader(LOCATION, 'reports/charts/q3.vl.json');
     await expect(loader.load('../sales.csv')).resolves.toBe('a,b\n1,2');
-    expect(readWorkspaceFileMock).toHaveBeenCalledWith('ws-1', 'reports/sales.csv');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/sales.csv');
+  });
+
+  it('decodes non-ASCII file content as UTF-8', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValue(bytesOf('país,ventas\nEspaña,3'));
+    const loader = makeWorkspaceLoader(LOCATION, '');
+    await expect(loader.load('ventas.csv')).resolves.toBe('país,ventas\nEspaña,3');
+  });
+
+  it('propagates a rejected read (e.g. oversize or missing file) instead of charting a prefix', async () => {
+    readWorkspaceFileBase64Mock.mockRejectedValue(new Error('big.csv is too large to preview'));
+    const loader = makeWorkspaceLoader(LOCATION, '');
+    await expect(loader.load('big.csv')).rejects.toThrow(/too large/);
   });
 
   it('fetches http(s) URLs and rejects other schemes', async () => {
@@ -85,7 +117,7 @@ describe('makeWorkspaceLoader', () => {
       await expect(loader.load('https://example.com/d.csv')).resolves.toBe('x,y');
       expect(fetchMock).toHaveBeenCalledWith('https://example.com/d.csv', undefined);
       await expect(loader.load('data:text/csv,a')).rejects.toThrow(/Unsupported data URL/);
-      expect(readWorkspaceFileMock).not.toHaveBeenCalled();
+      expect(readWorkspaceFileBase64Mock).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -104,7 +136,7 @@ describe('makeWorkspaceLoader', () => {
   it('rejects relative URLs when there is no workspace to resolve them in', async () => {
     const loader = makeWorkspaceLoader(null, '');
     await expect(loader.load('sales.csv')).rejects.toThrow(/no workspace/);
-    expect(readWorkspaceFileMock).not.toHaveBeenCalled();
+    expect(readWorkspaceFileBase64Mock).not.toHaveBeenCalled();
   });
 });
 
@@ -123,6 +155,14 @@ describe('VegaChart (inline source)', () => {
     expect(typeof options.loader.load).toBe('function');
     // The raw-source fallback is gone once the chart is up.
     expect(screen.queryByText(SOURCE)).not.toBeInTheDocument();
+  });
+
+  it('keeps vega-embed\'s own class on the live chart and drops only the pending marker', async () => {
+    render(<VegaChart source={SOURCE} />);
+    await waitFor(() => expect(renderedCharts()).toBe(1));
+    const [target] = embedCall(0);
+    expect(target.classList.contains('vega-embed')).toBe(true);
+    expect(Array.from(target.classList)).toEqual(['vega-embed']);
   });
 
   it('shows the raw source until the chart renders', () => {
@@ -161,7 +201,7 @@ describe('VegaChart (inline source)', () => {
     expect(embedMock).not.toHaveBeenCalled();
   });
 
-  it('keeps the last good chart when a streaming update fails to parse', async () => {
+  it('does not tear down a rendered chart when a later update fails to parse', async () => {
     const { rerender } = render(<VegaChart source={SOURCE} />);
     await waitFor(() => expect(renderedCharts()).toBe(1));
 
@@ -170,6 +210,19 @@ describe('VegaChart (inline source)', () => {
     expect(renderedCharts()).toBe(1);
     expect(finalizeMock).not.toHaveBeenCalled();
     expect(screen.queryByText('Vega-Lite chart failed to render')).not.toBeInTheDocument();
+  });
+
+  it('keeps the previous chart when a re-render (e.g. new spec) fails in vega-embed', async () => {
+    const { rerender } = render(<VegaChart source={SOURCE} />);
+    await waitFor(() => expect(renderedCharts()).toBe(1));
+
+    embedMock.mockRejectedValue(new Error('bad encoding'));
+    rerender(<VegaChart source={JSON.stringify({ ...SPEC, mark: 'nope' })} />);
+    await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(2));
+    // Old chart still up, failed sibling removed, old view not finalized.
+    expect(renderedCharts()).toBe(1);
+    expect(screen.getByTestId('vega-chart').childElementCount).toBe(1);
+    expect(finalizeMock).not.toHaveBeenCalled();
   });
 
   it('replaces the chart (and releases the old view) when the spec changes', async () => {
@@ -202,7 +255,7 @@ describe('VegaChart (inline source)', () => {
   });
 
   it('resolves inline-spec data relative to the enclosing document', async () => {
-    readWorkspaceFileMock.mockResolvedValue({ content: 'a\n1', viewer: 'text', path: '' });
+    readWorkspaceFileBase64Mock.mockResolvedValue(bytesOf('a\n1'));
     render(
       <WorkspaceFileContext.Provider value={LOCATION}>
         <VegaChart source={SOURCE} />
@@ -211,34 +264,31 @@ describe('VegaChart (inline source)', () => {
     await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(1));
     const options = embedCall(0)[2];
     await options.loader.load('data/sales.csv');
-    expect(readWorkspaceFileMock).toHaveBeenCalledWith('ws-1', 'reports/data/sales.csv');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/data/sales.csv');
   });
 });
 
 describe('VegaChart (spec file)', () => {
   it('reads the .vl.json relative to the document and resolves its data relative to the spec', async () => {
-    readWorkspaceFileMock.mockImplementation(async (_ws: string, path: string) => {
-      if (path === 'reports/charts/q3.vl.json') {
-        return { content: SOURCE, viewer: 'vega-lite', path };
-      }
-      return { content: 'a\n1', viewer: 'text', path };
-    });
+    readWorkspaceFileBase64Mock.mockImplementation(async (_ws: string, path: string) =>
+      bytesOf(path === 'reports/charts/q3.vl.json' ? SOURCE : 'a\n1'),
+    );
     render(
       <WorkspaceFileContext.Provider value={LOCATION}>
         <VegaChart specPath="charts/q3.vl.json" />
       </WorkspaceFileContext.Provider>,
     );
     await waitFor(() => expect(renderedCharts()).toBe(1));
-    expect(readWorkspaceFileMock).toHaveBeenCalledWith('ws-1', 'reports/charts/q3.vl.json');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/charts/q3.vl.json');
 
     const [, spec, options] = embedCall(0);
     expect(spec.mark).toBe('bar');
     await options.loader.load('../sales.csv');
-    expect(readWorkspaceFileMock).toHaveBeenCalledWith('ws-1', 'reports/sales.csv');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/sales.csv');
   });
 
   it('shows a loading placeholder, not raw source, before the file arrives', () => {
-    readWorkspaceFileMock.mockReturnValue(new Promise(() => {}));
+    readWorkspaceFileBase64Mock.mockReturnValue(new Promise(() => {}));
     render(
       <WorkspaceFileContext.Provider value={LOCATION}>
         <VegaChart specPath="charts/q3.vl.json" />
@@ -248,7 +298,7 @@ describe('VegaChart (spec file)', () => {
   });
 
   it('shows the read error when the spec file cannot be loaded', async () => {
-    readWorkspaceFileMock.mockRejectedValue(new Error('File not found: charts/q3.vl.json'));
+    readWorkspaceFileBase64Mock.mockRejectedValue(new Error('File not found: charts/q3.vl.json'));
     render(
       <WorkspaceFileContext.Provider value={LOCATION}>
         <VegaChart specPath="charts/q3.vl.json" />
@@ -259,14 +309,14 @@ describe('VegaChart (spec file)', () => {
     expect(embedMock).not.toHaveBeenCalled();
   });
 
-  it('explains when there is no workspace to read the spec from', async () => {
+  it('explains when there is no workspace to read the spec from', () => {
     render(<VegaChart specPath="charts/q3.vl.json" />);
-    await screen.findByText(/no workspace to read it from/);
-    expect(readWorkspaceFileMock).not.toHaveBeenCalled();
+    expect(screen.getByText(/no workspace to read it from/)).toBeInTheDocument();
+    expect(readWorkspaceFileBase64Mock).not.toHaveBeenCalled();
   });
 
   it('reloads when the referenced path changes', async () => {
-    readWorkspaceFileMock.mockResolvedValue({ content: SOURCE, viewer: 'vega-lite', path: '' });
+    readWorkspaceFileBase64Mock.mockResolvedValue(bytesOf(SOURCE));
     const { rerender } = render(
       <WorkspaceFileContext.Provider value={LOCATION}>
         <VegaChart specPath="charts/q3.vl.json" />
@@ -278,7 +328,9 @@ describe('VegaChart (spec file)', () => {
         <VegaChart specPath="charts/q4.vl.json" />
       </WorkspaceFileContext.Provider>,
     );
-    await waitFor(() => expect(readWorkspaceFileMock).toHaveBeenCalledWith('ws-1', 'reports/charts/q4.vl.json'));
+    await waitFor(() =>
+      expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/charts/q4.vl.json'),
+    );
     await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(2));
   });
 });
