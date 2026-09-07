@@ -46,6 +46,12 @@ vi.mock('../Chat/MarkdownMessage', async () => {
 vi.mock('../Chat/StreamingMarkdown', () => ({
   default: ({ content }: { content: string }) => <div data-testid="streaming">{content}</div>,
 }));
+// VegaChart pulls in vega-embed; the list only needs to hand it the path.
+vi.mock('../Chat/VegaChart', () => ({
+  default: ({ specPath }: { specPath?: string }) => (
+    <div data-testid="vega-chart" data-spec-path={specPath ?? ''} />
+  ),
+}));
 
 // ImageAttachment loads bytes from the workspace image store; stub the fetch
 // so the transcript renders a data-URL thumbnail without a real backend.
@@ -114,6 +120,58 @@ describe('ChatMessageList', () => {
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
     // cleanToolName strips the mcp.<id>. prefix.
     expect(screen.getByText('get_metric_data')).toBeInTheDocument();
+  });
+
+  const chartCall = (over: Partial<ToolInvocation>): [AssistantMessage[], ToolInvocation[]] => [
+    [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'create_vega_chart', arguments: {} },
+        ],
+      }),
+    ],
+    [
+      {
+        id: 'tc-1',
+        runId: 'r-1',
+        sessionId: 'sess-1',
+        toolName: 'create_vega_chart',
+        params: { title: 'Q3 Revenue', spec: {} },
+        status: 'completed',
+        result: { ok: true, path: 'charts/q3-revenue.vl.json', display: true },
+        error: null,
+        startedAt: 0n,
+        completedAt: 1n,
+        ...over,
+      },
+    ],
+  ];
+
+  it('renders the chart a completed create_vega_chart call produced, under its row', () => {
+    const [messages, toolCalls] = chartCall({});
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.getByText('Chart')).toBeInTheDocument();
+    expect(screen.getByText('Q3 Revenue')).toBeInTheDocument();
+    expect(screen.getByTestId('vega-chart')).toHaveAttribute('data-spec-path', 'charts/q3-revenue.vl.json');
+  });
+
+  it('renders no chart for a failed call or one with display:false', () => {
+    const [failedMessages, failedCalls] = chartCall({
+      status: 'failed',
+      result: null,
+      error: 'The spec is not a valid Vega-Lite chart',
+    });
+    const { unmount } = render(<ChatMessageList messages={failedMessages} toolCalls={failedCalls} />);
+    expect(screen.queryByTestId('vega-chart')).toBeNull();
+    unmount();
+
+    const [hiddenMessages, hiddenCalls] = chartCall({
+      result: { ok: true, path: 'charts/q3-revenue.vl.json', display: false },
+    });
+    render(<ChatMessageList messages={hiddenMessages} toolCalls={hiddenCalls} />);
+    expect(screen.queryByTestId('vega-chart')).toBeNull();
   });
 
   it('renders a collapsed thinking block', () => {

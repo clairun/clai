@@ -4,6 +4,7 @@ import {
   asPayloadObject,
   cleanToolName,
   guessLang,
+  inlineChartPath,
   summarizeToolCall,
   summarizeToolResult,
   toPreviewText,
@@ -82,6 +83,54 @@ describe('summarizeToolResult', () => {
   it('returns null while running and for unknown tools', () => {
     expect(summarizeToolResult('fs_read', null, null, 'running')).toBeNull();
     expect(summarizeToolResult('some_mcp_tool', { ok: true }, null, 'completed')).toBeNull();
+  });
+
+  it('labels chart calls by title and shows the saved path', () => {
+    expect(summarizeToolCall('create_vega_chart', { title: 'Q3 Revenue', spec: {} })).toEqual({
+      verb: 'Chart',
+      arg: 'Q3 Revenue',
+    });
+    const result = { ok: true, path: 'charts/q3-revenue.vl.json', display: true };
+    expect(summarizeToolResult('create_vega_chart', result, null, 'completed')).toEqual({
+      text: 'charts/q3-revenue.vl.json',
+      tone: 'neutral',
+    });
+    expect(summarizeToolResult('create_vega_chart', null, 'invalid spec', 'failed')).toEqual({
+      text: 'error',
+      tone: 'error',
+    });
+  });
+});
+
+describe('inlineChartPath', () => {
+  const result = { ok: true, path: 'charts/q3.vl.json', display: true };
+
+  it('returns the chart path for a completed call that asked to display', () => {
+    expect(inlineChartPath('create_vega_chart', result, null, 'completed')).toBe('charts/q3.vl.json');
+    // `display` defaults to true when the payload omits it.
+    expect(inlineChartPath('create_vega_chart', { ok: true, path: 'charts/q3.vl.json' }, null, 'completed')).toBe(
+      'charts/q3.vl.json'
+    );
+    // Claude Code stores the JSON as text; Codex reaches us via MCP envelopes.
+    expect(inlineChartPath('mcp__clai__create_vega_chart', JSON.stringify(result), null, 'completed')).toBe(
+      'charts/q3.vl.json'
+    );
+    expect(
+      inlineChartPath(
+        'create_vega_chart',
+        { content: [{ type: 'text', text: JSON.stringify(result) }] },
+        null,
+        'completed'
+      )
+    ).toBe('charts/q3.vl.json');
+  });
+
+  it('returns null when there is nothing to show inline', () => {
+    expect(inlineChartPath('create_vega_chart', { ...result, display: false }, null, 'completed')).toBeNull();
+    expect(inlineChartPath('create_vega_chart', result, 'schema error', 'failed')).toBeNull();
+    expect(inlineChartPath('create_vega_chart', null, null, 'running')).toBeNull();
+    expect(inlineChartPath('create_vega_chart', { ok: false }, null, 'completed')).toBeNull();
+    expect(inlineChartPath('fs_write', { ok: true, path: 'charts/q3.vl.json' }, null, 'completed')).toBeNull();
   });
 
   it('flags errors', () => {

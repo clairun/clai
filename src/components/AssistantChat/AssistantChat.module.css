@@ -640,6 +640,12 @@
 }
 
 /* Expanded view, indented under the row's verb. */
+/* Chart produced by a `create_vega_chart` call, shown under its row without
+   expanding it: the chart is the result. */
+.toolChartCard {
+  margin: 4px 0 8px 22px;
+}
+
 .toolContent {
   margin: 2px 0 8px 22px;
   padding-top: 8px;

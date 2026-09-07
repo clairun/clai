@@ -2,6 +2,7 @@ import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { EmbedOptions, Result, VisualizationSpec } from 'vega-embed';
 import type { Loader } from 'vega';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
+import { openExternal } from '../../utils/openExternal';
 import { base64ToText, isWorkspaceRelativeHref, resolveWorkspacePath } from '../../utils/htmlBundle';
 import { useWorkspaceFileLocation, type WorkspaceFileLocation } from './WorkspaceFileContext';
 import { useAppTheme } from './useAppTheme';
@@ -97,19 +98,17 @@ export const withContainerWidth = (spec: Record<string, unknown>): Record<string
  * A Vega data loader that serves relative `data.url`s from the workspace.
  * `baseFilePath` is the document the URL is relative to. Only `load` is ours;
  * URL sanitizing is delegated to Vega's default loader (`base`), which is
- * what rejects `javascript:` and other disallowed schemes for the `href`
- * channel — Vega dispatches a click on an `<a>` built from `sanitize()`'s
- * result, so a passthrough here would let a spec run script in the app.
- * `target=_blank` is set for safety; note that the anchor Vega clicks is
- * detached from the document, so the app's link interception does not see it
- * and `href` marks currently open nothing in the Tauri WebView (follow-up:
- * route `context: 'href'` through `openExternal`).
+ * what rejects `javascript:` and other disallowed schemes.
+ *
+ * `href` marks: on click Vega sanitizes the URL with `context: 'href'`, then
+ * dispatches a synthetic click on a *detached* `<a>` built from the result
+ * (vega-scenegraph `Handler.handleHref`). A detached anchor never reaches the
+ * app's link interception, so in the WebView the click opened nothing. The
+ * loader therefore opens allowed `http(s)` hrefs itself through
+ * `openExternal` and rejects, which `handleHref` swallows — Vega builds no
+ * anchor at all. Only click handling uses this context (the SVG *string*
+ * renderer's `sanitizeURL` does too, but the live renderer is `svg`).
  */
-// vega-loader's sanitize() copies `target`/`rel` onto the anchor it builds for
-// `href` clicks (vega-loader/src/loader.js); vega-typings' per-call
-// `LoaderOptionsWithContext` does not admit them (`rel` is undeclared entirely).
-const LINK_TARGET_OPTIONS: Record<string, string> = { target: '_blank', rel: 'noopener noreferrer' };
-
 export const makeWorkspaceLoader = (
   location: WorkspaceFileLocation | null,
   baseFilePath: string,
@@ -134,7 +133,15 @@ export const makeWorkspaceLoader = (
       const path = resolveWorkspacePath(baseFilePath, uri);
       return readWorkspaceText(location.workspaceId, path);
     },
-    sanitize: (uri, options) => base.sanitize(uri, Object.assign({}, options, LINK_TARGET_OPTIONS)),
+    sanitize: async (uri, options) => {
+      const result = await base.sanitize(uri, options);
+      if (options?.context !== 'href') return result;
+      if (!/^https?:\/\//i.test(result.href)) {
+        throw new Error(`Unsupported link target: ${result.href}`);
+      }
+      void openExternal(result.href);
+      throw new Error(`Opened externally: ${result.href}`);
+    },
     http,
     file: async (filename) => {
       throw new Error(`File loading is not available: ${filename}`);

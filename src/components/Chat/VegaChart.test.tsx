@@ -17,6 +17,11 @@ vi.mock('../../workspace/client', () => ({
   readWorkspaceFileBase64: (...args: unknown[]) => readWorkspaceFileBase64Mock(...args),
 }));
 
+const openExternalMock = vi.fn<(url: string) => Promise<void>>(async () => undefined);
+vi.mock('../../utils/openExternal', () => ({
+  openExternal: (url: string) => openExternalMock(url),
+}));
+
 import VegaChart, { isVegaLiteSpecPath, makeWorkspaceLoader, withContainerWidth } from './VegaChart';
 import { WorkspaceFileContext } from './WorkspaceFileContext';
 
@@ -63,6 +68,7 @@ beforeEach(() => {
   embedMock.mockReset().mockImplementation(fakeEmbed);
   finalizeMock.mockReset();
   readWorkspaceFileBase64Mock.mockReset();
+  openExternalMock.mockClear();
   document.documentElement.setAttribute('data-theme', 'light');
 });
 
@@ -146,13 +152,28 @@ describe('makeWorkspaceLoader', () => {
     await expect(loader.sanitize(' JavaScript:alert(1)', { context: 'href' })).rejects.toThrow();
   });
 
-  it('opens allowed hrefs in a new window with rel=noopener', async () => {
+  // Vega clicks a detached <a> built from the sanitize result, which the
+  // WebView ignores; the loader must open the link itself and give Vega
+  // nothing to click.
+  it('opens allowed http(s) hrefs externally and rejects so Vega builds no anchor', async () => {
     const loader = makeLoader(LOCATION, '');
-    await expect(loader.sanitize('https://example.com/report', { context: 'href' })).resolves.toEqual({
-      href: 'https://example.com/report',
-      target: '_blank',
-      rel: 'noopener noreferrer',
+    await expect(loader.sanitize('https://example.com/report', { context: 'href' })).rejects.toThrow(
+      /Opened externally/
+    );
+    expect(openExternalMock).toHaveBeenCalledWith('https://example.com/report');
+  });
+
+  it('does not open non-http hrefs and leaves other contexts alone', async () => {
+    const loader = makeLoader(LOCATION, '');
+    await expect(loader.sanitize('ftp://example.com/x', { context: 'href' })).rejects.toThrow(
+      /Unsupported link target/
+    );
+    await expect(loader.sanitize('reports/q3.md', { context: 'href' })).rejects.toThrow();
+    expect(openExternalMock).not.toHaveBeenCalled();
+    await expect(loader.sanitize('https://example.com/logo.png', { context: 'image' })).resolves.toEqual({
+      href: 'https://example.com/logo.png',
     });
+    expect(openExternalMock).not.toHaveBeenCalled();
   });
 
   it('rejects relative URLs when there is no workspace to resolve them in', async () => {
@@ -299,10 +320,12 @@ describe('VegaChart (inline source)', () => {
       sanitize: (uri: string, o: { context: string }) => Promise<{ href: string }>;
     };
     await expect(loader.sanitize('javascript:alert(1)', { context: 'href' })).rejects.toThrow();
-    await expect(loader.sanitize('https://example.com', { context: 'href' })).resolves.toMatchObject({
-      href: 'https://example.com',
-      target: '_blank',
-    });
+    expect(openExternalMock).not.toHaveBeenCalled();
+    // Allowed hrefs are opened by the app, not by a detached anchor.
+    await expect(loader.sanitize('https://example.com', { context: 'href' })).rejects.toThrow(
+      /Opened externally/
+    );
+    expect(openExternalMock).toHaveBeenCalledWith('https://example.com');
   });
 });
 

@@ -29,6 +29,7 @@ pub fn available_tools(
         tools.push(fs_write_def());
         tools.push(fs_request_grant_def());
         tools.push(history_query_def());
+        tools.push(create_vega_chart_def());
     }
 
     if context.agent_workspace_id.is_some()
@@ -116,6 +117,7 @@ fn all_builtin_defs() -> Vec<ToolDefinition> {
         web_search_def(),
         web_fetch_def(),
         history_query_def(),
+        create_vega_chart_def(),
     ]
 }
 
@@ -241,6 +243,24 @@ fn history_query_def() -> ToolDefinition {
                 "maxRows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 100, max 1000). Page larger result sets with LIMIT/OFFSET." }
             },
             "required": ["sql"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn create_vega_chart_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "create_vega_chart".to_string(),
+        description: "Create a chart. This is the ONLY way to produce a chart: never write a Vega-Lite spec with fs_write or paste one into chat. The spec is validated against the Vega-Lite v6 JSON schema; on failure the error lists the violations with their JSON paths so you can fix the spec and call again, on success it is saved as `charts/<slug>.vl.json` (or at `path`) and `{ok, path, markdown}` is returned. The saved file renders as an interactive chart in the chat (when `display` is true), in the artifacts panel, and inside markdown documents via `![title](charts/x.vl.json)` — paste the returned `markdown` into reports. Pass EITHER `spec` (the Vega-Lite spec) OR `path` (an existing `.vl.json` file to validate). One chart per call. Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace and reference it with `data.url` (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`) instead of inlining `data.values`.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "Chart title. Also names the file (`charts/<slug>.vl.json`) when `path` is omitted; re-creating a chart with the same title updates that file." },
+                "spec": { "type": ["object", "string"], "description": "A Vega-Lite v6 spec as a JSON object (a JSON string is also accepted). Omit `$schema` or set it to https://vega.github.io/schema/vega-lite/v6.json." },
+                "path": { "type": "string", "description": "Workspace-relative `.vl.json` path: where to save `spec`, or — when `spec` is omitted — the existing file to validate." },
+                "display": { "type": "boolean", "description": "Render the chart inline in the chat as this call's result (default true). Set false for charts that only belong in a report." }
+            },
+            "required": ["title"],
             "additionalProperties": false
         }),
     }

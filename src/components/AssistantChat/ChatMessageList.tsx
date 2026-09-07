@@ -9,6 +9,7 @@ import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
+import VegaChart from '../Chat/VegaChart';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from '../Chat/WorkspaceFileContext';
 import VirtualizedList from '../common/VirtualizedList';
 import type {
@@ -23,6 +24,7 @@ import {
   cleanToolName,
   extractMcpText,
   guessLang,
+  inlineChartPath,
   summarizeToolCall,
   summarizeToolResult,
   toPreviewText,
@@ -1208,6 +1210,13 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
     () => summarizeToolResult(toolName, result, error, status),
     [toolName, result, error, status]
   );
+  // A `create_vega_chart` result is the chart itself: render it under the
+  // row from the saved file, so a reload draws it again without re-running
+  // the tool.
+  const chartPath = useMemo(
+    () => inlineChartPath(toolName, result, error, status),
+    [toolName, result, error, status]
+  );
 
   const isRunning = status === 'running';
   const isFailed = status === 'failed' || !!error;
@@ -1252,6 +1261,12 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
           <span className={`${styles.toolRowChevron} ${isExpanded ? styles.expanded : ''}`}>▾</span>
         </span>
       </button>
+
+      {chartPath && (
+        <div className={styles.toolChartCard}>
+          <VegaChart specPath={chartPath} />
+        </div>
+      )}
 
       {isExpanded && (
         <div className={styles.toolContent}>
