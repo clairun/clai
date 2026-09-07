@@ -35,7 +35,8 @@ const SPEC_EXTENSION: &str = ".vl.json";
 const MAX_SPEC_BYTES: usize = 1_000_000;
 /// Above this many inline `data.values` rows the result carries a warning
 /// steering the model to `data.url`. Not an error: small tables are fine.
-const INLINE_ROWS_WARNING_THRESHOLD: usize = 200;
+/// The system prompt and tool description quote the same "~50 rows".
+const INLINE_ROWS_WARNING_THRESHOLD: usize = 50;
 /// How many schema violations are reported. The deepest ones are kept; the
 /// rest is noise from the other branches of the top-level `anyOf`.
 const MAX_REPORTED_VIOLATIONS: usize = 8;
@@ -245,6 +246,16 @@ pub fn validate_spec(spec: &serde_json::Value) -> Result<(), String> {
             spec["$schema"], VEGA_LITE_SCHEMA_URL
         ));
     }
+    // A plain Vega spec (`marks`/`signals`/`scales` arrays) fails the
+    // Vega-Lite schema on `data` being an array — a misleading first line.
+    if let Some(key) = ["marks", "signals", "scales"]
+        .into_iter()
+        .find(|key| spec.get(key).is_some_and(|v| v.is_array()))
+    {
+        return Err(format!(
+            "This looks like a plain Vega spec (it has a `{key}` array); write a Vega-Lite spec for {VEGA_LITE_SCHEMA_URL} instead (`mark` + `encoding`, or `layer`/`facet`/`concat`)."
+        ));
+    }
     let errors: Vec<ValidationError<'_>> = validator.iter_errors(spec).collect();
     if errors.is_empty() {
         return Ok(());
@@ -301,9 +312,21 @@ fn collect_leaf_violations(error: &ValidationError<'_>, out: &mut Vec<(usize, St
     match &error.kind {
         ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
             let before = out.len();
-            for branch in context {
-                for nested in branch {
-                    collect_leaf_violations(nested, out);
+            // A branch that failed on a `const` — a discriminator such as
+            // `type: "boxplot"` in the composite-mark definitions — was never
+            // the branch the spec meant; its `/mark/type` failure would
+            // otherwise outrank the real mistake at `/mark`. Drop such
+            // branches unless every branch is discriminated.
+            let discriminated: Vec<bool> = context
+                .iter()
+                .map(|branch| branch_failed_on_const(branch))
+                .collect();
+            let keep_all = discriminated.iter().all(|d| *d);
+            for (branch, discriminated) in context.iter().zip(discriminated) {
+                if keep_all || !discriminated {
+                    for nested in branch {
+                        collect_leaf_violations(nested, out);
+                    }
                 }
             }
             if out.len() == before {
@@ -312,6 +335,18 @@ fn collect_leaf_violations(error: &ValidationError<'_>, out: &mut Vec<(usize, St
         }
         _ => out.push(describe_leaf(error)),
     }
+}
+
+/// Whether an `anyOf` branch failed because a `const` did not match. A
+/// nested `anyOf` counts only when all of its branches did.
+fn branch_failed_on_const(branch: &[ValidationError<'_>]) -> bool {
+    branch.iter().any(|error| match &error.kind {
+        ValidationErrorKind::Constant { .. } => true,
+        ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
+            !context.is_empty() && context.iter().all(|b| branch_failed_on_const(b))
+        }
+        _ => false,
+    })
 }
 
 fn describe_leaf(error: &ValidationError<'_>) -> (usize, String) {
@@ -349,8 +384,18 @@ fn spec_warnings(spec: &serde_json::Value) -> Vec<String> {
 /// Normalize a model-supplied spec path: workspace-relative, no `..`, ends
 /// in `.vl.json` (the extension is what routes the file to the chart viewer
 /// and the chart image-link renderer).
+///
+/// Deliberately narrower than `local::resolve_allowed_path` (the `fs_*`
+/// policy, which also admits granted paths outside the workspace): a chart
+/// only renders when the frontend can read it through the workspace file
+/// endpoints, so any destination outside the workspace would be a broken
+/// chart, and `..` is rejected rather than normalized away so the model
+/// learns the rule instead of landing somewhere it did not intend.
 pub fn spec_relative_path(input: &str) -> Result<PathBuf, String> {
-    let trimmed = input.trim();
+    // Backslashes are separators on every platform here: on Windows the
+    // model may type them, on Unix a `charts\\x.vl.json` file is never wanted.
+    let trimmed = input.trim().replace('\\', "/");
+    let trimmed = trimmed.as_str();
     if trimmed.is_empty() {
         return Err("`path` must not be empty".to_string());
     }
@@ -531,6 +576,11 @@ mod tests {
             "https://example.com/schema.json#/x"
         );
         assert_eq!(schema["list"][0]["$ref"], "#/definitions/Dict%3C%22a%22%3E");
+        // Non-ASCII is encoded per UTF-8 byte, never pushed through as a char.
+        assert_eq!(
+            percent_encode_fragment("/definitions/Späti"),
+            "/definitions/Sp%C3%A4ti"
+        );
         // The encoded refs must still resolve: a color channel goes through
         // `MarkPropDef<(Gradient|string|null)>`.
         let mut spec = bar_spec();
@@ -569,6 +619,44 @@ mod tests {
             "root anyOf noise leaked: {error}"
         );
         assert!(error.contains("call create_vega_chart again"), "{error}");
+    }
+
+    /// `mark` is `anyOf[CompositeMark, CompositeMarkDef, Mark, MarkDef]`;
+    /// the composite defs fail on `const type` one level deeper than the
+    /// real mistake and must not be the ones reported.
+    #[test]
+    fn reports_the_real_mistake_inside_a_mark_object_not_the_composite_discriminators() {
+        let mut spec = bar_spec();
+        spec["mark"] = serde_json::json!({"type": "bar", "colour": "red"});
+        let error = validate_spec(&spec).unwrap_err();
+        assert!(error.contains("colour"), "{error}");
+        assert!(
+            !error.contains("boxplot"),
+            "composite-mark noise leaked: {error}"
+        );
+
+        let mut spec = bar_spec();
+        spec["mark"] = serde_json::json!({"type": "line", "point": true, "strokeWith": 2});
+        let error = validate_spec(&spec).unwrap_err();
+        assert!(error.contains("strokeWith"), "{error}");
+        assert!(!error.contains("errorbar"), "{error}");
+
+        // A wrong discriminator everywhere still reports something useful.
+        let mut spec = bar_spec();
+        spec["mark"] = serde_json::json!({"type": "barr"});
+        let error = validate_spec(&spec).unwrap_err();
+        assert!(error.contains("/mark"), "{error}");
+    }
+
+    #[test]
+    fn names_a_plain_vega_spec_instead_of_listing_schema_noise() {
+        let vega = serde_json::json!({
+            "data": [{"name": "table", "values": [{"x": 1}]}],
+            "marks": [{"type": "rect", "from": {"data": "table"}}]
+        });
+        let error = validate_spec(&vega).unwrap_err();
+        assert!(error.contains("plain Vega spec"), "{error}");
+        assert!(error.contains("`marks`"), "{error}");
     }
 
     #[test]
@@ -629,6 +717,11 @@ mod tests {
             spec_relative_path("./charts/./a.vl.json").unwrap(),
             PathBuf::from("charts/a.vl.json")
         );
+        assert_eq!(
+            spec_relative_path("charts\\q3\\a.vl.json").unwrap(),
+            PathBuf::from("charts/q3/a.vl.json")
+        );
+        assert!(spec_relative_path("..\\escape.vl.json").is_err());
         assert!(spec_relative_path("../escape.vl.json")
             .unwrap_err()
             .contains("inside the workspace"));
