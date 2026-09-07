@@ -286,6 +286,32 @@ describe('ChatMessageList', () => {
     expect(screen.queryByText('tool_9')).toBeNull();
     expect(screen.getByText('tool_10')).toBeInTheDocument();
     expect(screen.getByText('tool_13')).toBeInTheDocument();
+
+    // Each run toggles on its own: expanding the first leaves the second collapsed.
+    fireEvent.click(screen.getByText('Show 3 earlier calls'));
+    expect(screen.getByText('tool_0')).toBeInTheDocument();
+    expect(screen.queryByText('tool_9')).toBeNull();
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+  });
+
+  it('renders adjacent chart rows back to back with no empty run between them', () => {
+    const { messages, toolCalls } = toolGroupWithChart(2, 0);
+    const second = toolCalls[1];
+    if (!second) throw new Error('expected two tool calls');
+    (messages[0]?.content[1] as { tool_name: string }).tool_name = 'create_vega_chart';
+    toolCalls[1] = {
+      ...second,
+      toolName: 'create_vega_chart',
+      params: { title: 'Second', spec: {} },
+      result: { ok: true, path: 'charts/second.vl.json', display: true },
+    };
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    const charts = screen.getAllByTestId('vega-chart');
+    expect(charts.map((el) => el.getAttribute('data-spec-path'))).toEqual([
+      'charts/q3-revenue.vl.json',
+      'charts/second.vl.json',
+    ]);
+    expect(screen.queryByText(/earlier/)).toBeNull();
   });
 
   it('keeps a trailing chart row visible even when the run before it overflows', () => {
