@@ -373,8 +373,8 @@ fn describe_leaf(error: &ValidationError<'_>) -> (usize, String) {
     (depth, format!("- at `{location}`: {error}"))
 }
 
-/// Advice attached to a valid spec. Inline tables beyond a couple hundred
-/// rows bloat the spec, the transcript and every later prompt; the renderer
+/// Advice attached to a valid spec. Inline tables beyond
+/// `INLINE_ROWS_WARNING_THRESHOLD` rows bloat the spec, the transcript and every later prompt; the renderer
 /// reads `data.url` from the workspace, so a CSV/JSON file is the better
 /// home for them.
 fn spec_warnings(spec: &serde_json::Value) -> Vec<String> {
