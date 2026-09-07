@@ -1,4 +1,4 @@
-import type { Config } from 'vega-embed';
+import type { Config } from 'vega-lite';
 
 /**
  * Host-side Vega-Lite theme.
@@ -83,33 +83,53 @@ export const buildVegaConfig = (tokens: ChartThemeTokens): Config => ({
   font: tokens.font,
   // Hover tooltips on every mark by default — the model shouldn't have to
   // ask for the single most useful interaction.
-  mark: { tooltip: true },
+  mark: { tooltip: true, color: tokens.colors[0] },
   range: { category: tokens.colors },
-  view: { stroke: null },
+  view: { stroke: null, continuousHeight: 280 },
+  bar: { cornerRadiusEnd: 3 },
+  line: { strokeWidth: 2.5, strokeCap: 'round', strokeJoin: 'round' },
+  point: { size: 70, filled: true },
+  circle: { size: 70 },
+  square: { size: 70 },
   title: {
     color: tokens.title,
-    fontSize: 14,
+    fontSize: 17,
     fontWeight: 600,
     anchor: 'start',
-    offset: 12,
+    offset: 20,
     // Vega styles the subtitle from `subtitleColor` alone — without it the
     // subtitle falls back to Vega's default black, unreadable on a dark
     // card even though `color` above themes the title correctly.
     subtitleColor: tokens.label,
-    subtitleFontSize: 11,
+    subtitleFontSize: 12,
+    subtitlePadding: 6,
   },
   axis: {
     labelColor: tokens.label,
     titleColor: tokens.title,
     gridColor: tokens.grid,
+    gridDash: [3, 4],
+    domain: false,
+    ticks: false,
+    labelPadding: 8,
+    labelLimit: 160,
     domainColor: tokens.axis,
     tickColor: tokens.axis,
     labelFontSize: 11,
     titleFontSize: 12,
     titleFontWeight: 500,
-    titlePadding: 8,
+    titlePadding: 12,
   },
   legend: {
+    orient: 'top',
+    direction: 'horizontal',
+    offset: 16,
+    rowPadding: 6,
+    columnPadding: 16,
+    symbolSize: 80,
+    symbolOpacity: 1,
+    symbolStrokeWidth: 2,
+    labelLimit: 160,
     labelColor: tokens.label,
     titleColor: tokens.title,
     labelFontSize: 11,

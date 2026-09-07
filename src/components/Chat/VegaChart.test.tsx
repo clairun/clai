@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { loader as createVegaLoader } from 'vega';
 
@@ -37,6 +37,8 @@ const bytesOf = (text: string) => ({
 });
 
 const finalizeMock = vi.fn();
+const signalMock = vi.fn();
+const runAsyncMock = vi.fn();
 
 // The shape of the vega-embed call we assert on.
 interface CapturedOptions {
@@ -58,7 +60,7 @@ const fakeEmbed = async (el: HTMLElement) => {
   const view = document.createElement('svg');
   view.textContent = 'chart';
   el.appendChild(view);
-  return { finalize: finalizeMock, view: {} };
+  return { finalize: finalizeMock, view: { signal: signalMock, runAsync: runAsyncMock } };
 };
 
 // Let a streaming debounce window elapse (inside act: the effect may set state).
@@ -67,6 +69,8 @@ const settle = (ms: number) => act(() => new Promise<void>((resolve) => setTimeo
 beforeEach(() => {
   embedMock.mockReset().mockImplementation(fakeEmbed);
   finalizeMock.mockReset();
+  signalMock.mockReset().mockReturnValue(false);
+  runAsyncMock.mockReset().mockResolvedValue(undefined);
   readWorkspaceFileBase64Mock.mockReset();
   openExternalMock.mockClear();
   document.documentElement.setAttribute('data-theme', 'light');
@@ -412,5 +416,76 @@ describe('VegaChart (spec file)', () => {
       expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/charts/q4.vl.json'),
     );
     await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(2));
+  });
+});
+
+
+describe('VegaChart interaction controls', () => {
+  const interactiveSource = JSON.stringify({
+    mark: 'point',
+    data: { values: [{ x: 1, y: 2, series: 'A' }] },
+    encoding: {
+      x: { field: 'x', type: 'quantitative' },
+      y: { field: 'y', type: 'quantitative' },
+      color: { field: 'series', type: 'nominal' },
+    },
+  });
+
+  it('enables pan/zoom on the live view without re-embedding or losing legend selections', async () => {
+    render(<VegaChart source={interactiveSource} />);
+    const toggle = await screen.findByRole('button', { name: 'Pan & zoom' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(toggle);
+    expect(signalMock).toHaveBeenCalledWith('clai_auto_pan_enabled', true);
+    expect(runAsyncMock).toHaveBeenCalledOnce();
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText('Drag to pan · Scroll to zoom')).toBeInTheDocument();
+    expect(embedMock).toHaveBeenCalledOnce();
+    signalMock.mockReturnValue(true);
+    fireEvent.click(toggle);
+    expect(signalMock).toHaveBeenCalledWith('clai_auto_pan_enabled', false);
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('resets by replacing and finalizing the view, with pan/zoom disabled again', async () => {
+    render(<VegaChart source={interactiveSource} />);
+    const toggle = await screen.findByRole('button', { name: 'Pan & zoom' });
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole('button', { name: 'Reset chart' }));
+    await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'));
+    expect(finalizeMock).toHaveBeenCalledOnce();
+    expect(renderedCharts()).toBe(1);
+  });
+
+  it('falls back to the original spec when augmentation fails and advertises no broken controls', async () => {
+    embedMock.mockRejectedValueOnce(new Error('Automatic selection could not compile'));
+    render(<VegaChart source={interactiveSource} />);
+    await screen.findByText('Automatic interactions unavailable for this chart.');
+    expect(embedMock).toHaveBeenCalledTimes(2);
+    expect(embedCall(1)[1]).toEqual({ ...JSON.parse(interactiveSource), width: 'container' });
+    expect(renderedCharts()).toBe(1);
+    expect(screen.queryByRole('group', { name: 'Chart interactions' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Vega-Lite chart failed to render')).not.toBeInTheDocument();
+  });
+
+  it('reports the original error if neither version renders, and does not retry indefinitely', async () => {
+    embedMock.mockRejectedValueOnce(new Error('Automatic selection failed'));
+    embedMock.mockRejectedValueOnce(new Error('Original spec failed'));
+    render(<VegaChart source={interactiveSource} />);
+    await screen.findByText('Original spec failed');
+    expect(embedMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: 'Pan & zoom' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the prior chart and its controls when a replacement fails', async () => {
+    const { rerender } = render(<VegaChart source={interactiveSource} />);
+    await screen.findByRole('button', { name: 'Pan & zoom' });
+    embedMock.mockRejectedValueOnce(new Error('Invalid chart'));
+    rerender(<VegaChart source={SOURCE} />);
+    await screen.findByText('Invalid chart');
+    expect(renderedCharts()).toBe(1);
+    expect(screen.getByRole('button', { name: 'Pan & zoom' })).toBeInTheDocument();
+    expect(finalizeMock).not.toHaveBeenCalled();
   });
 });

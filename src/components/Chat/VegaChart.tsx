@@ -7,6 +7,7 @@ import { base64ToText, isWorkspaceRelativeHref, resolveWorkspacePath } from '../
 import { useWorkspaceFileLocation, type WorkspaceFileLocation } from './WorkspaceFileContext';
 import { useAppTheme } from './useAppTheme';
 import { buildVegaConfig, readChartThemeTokens } from './vegaTheme';
+import { withChartInteractions } from './vegaInteractions';
 import styles from './VegaChart.module.css';
 
 /**
@@ -173,7 +174,14 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   // The live vega view (finalize() on replace/unmount) and the element it
   // was rendered into. Kept in refs: they are DOM bookkeeping, not render
   // state.
-  const currentRef = useRef<{ result: Result; el: HTMLElement } | null>(null);
+  const currentRef = useRef<{
+    result: Result; el: HTMLElement; panZoomSignal: string | null;
+  } | null>(null);
+  const [interactionState, setInteractionState] = useState({
+    legendFocus: false, canPanZoom: false, unavailable: false,
+  });
+  const [panZoomActive, setPanZoomActive] = useState(false);
+  const [resetVersion, setResetVersion] = useState(0);
   const [rendered, setRendered] = useState(false);
   // Parse/render failure for a specific spec text; ignored once the text
   // changes so a switched spec link never shows the previous one's error.
@@ -262,7 +270,21 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           loader: makeWorkspaceLoader(location, dataBasePath, createLoader()),
           tooltip: { theme: appTheme },
         };
-        const result = await embed(target, withContainerWidth(spec) as VisualizationSpec, options);
+        const baseSpec = withContainerWidth(spec);
+        const interactions = withChartInteractions(baseSpec);
+        let result: Result;
+        let unavailable = false;
+        try {
+          result = await embed(target, interactions.spec as VisualizationSpec, options);
+        } catch (err) {
+          if (interactions.spec === baseSpec || cancelled) throw err;
+          // Automatic conveniences must not prevent an otherwise valid chart
+          // from rendering. Retry the untouched spec, then expose its error if
+          // that also fails. Do not advertise controls that did not render.
+          target.replaceChildren();
+          result = await embed(target, baseSpec as VisualizationSpec, options);
+          unavailable = true;
+        }
         if (cancelled) {
           result.finalize();
           target.remove();
@@ -275,7 +297,15 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         // Only drop our own marker: vega-embed tags the target with its
         // `vega-embed` class, which the stylesheet relies on.
         if (styles.pending) target.classList.remove(styles.pending);
-        currentRef.current = { result, el: target };
+        currentRef.current = {
+          result, el: target, panZoomSignal: unavailable ? null : interactions.panZoomSignal,
+        };
+        setInteractionState({
+          legendFocus: !unavailable && interactions.legendFocus,
+          canPanZoom: !unavailable && interactions.panZoomSignal !== null,
+          unavailable,
+        });
+        setPanZoomActive(false);
         setRendered(true);
         setRenderError(null);
       } catch (err) {
@@ -288,7 +318,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [text, isStreaming, appTheme, location, dataBasePath]);
+  }, [text, isStreaming, appTheme, location, dataBasePath, resetVersion]);
 
   // Release the vega view on unmount.
   useEffect(
@@ -302,6 +332,18 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
     [],
   );
 
+  const togglePanZoom = () => {
+    const chart = currentRef.current;
+    if (!chart?.panZoomSignal) return;
+    const enabled = !chart.result.view.signal(chart.panZoomSignal);
+    chart.result.view.signal(chart.panZoomSignal, enabled);
+    setPanZoomActive(enabled);
+    void chart.result.view.runAsync().catch((err: unknown) => {
+      if (currentRef.current !== chart || text === null) return;
+      setRenderError({ text, message: err instanceof Error ? err.message : String(err) });
+    });
+  };
+
   const finalError = fileError ?? (isStreaming ? null : error);
   const showFallback = !rendered && !finalError;
 
@@ -310,7 +352,41 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   // the source is only repeated when there is no chart to look at.
   return (
     <div className={styles.card}>
-      <div ref={hostRef} className={styles.chart} data-testid="vega-chart" />
+      <div
+        ref={hostRef}
+        className={styles.chart}
+        data-testid="vega-chart"
+        data-pan-zoom={panZoomActive || undefined}
+      />
+      {rendered && (interactionState.legendFocus || interactionState.canPanZoom) && (
+        <div className={styles.toolbar} role="group" aria-label="Chart interactions">
+          <span className={styles.hint}>
+            {panZoomActive
+              ? 'Drag to pan · Scroll to zoom'
+              : interactionState.legendFocus ? 'Click legend to focus · Shift-click for multiple' : 'Explore the chart'}
+          </span>
+          {interactionState.canPanZoom && (
+            <button
+              type="button"
+              className={styles.control}
+              aria-pressed={panZoomActive}
+              onClick={togglePanZoom}
+            >
+              Pan &amp; zoom
+            </button>
+          )}
+          <button
+            type="button"
+            className={styles.control}
+            onClick={() => setResetVersion((version) => version + 1)}
+          >
+            Reset chart
+          </button>
+        </div>
+      )}
+      {rendered && interactionState.unavailable && (
+        <div className={styles.hint}>Automatic interactions unavailable for this chart.</div>
+      )}
       {finalError && (
         <div className={styles.errorContainer}>
           <div className={styles.errorLabel}>Vega-Lite chart failed to render</div>
