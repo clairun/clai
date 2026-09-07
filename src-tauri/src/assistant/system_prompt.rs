@@ -321,7 +321,7 @@ pub(crate) fn build_system_prompt(
             "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
         ));
         prompt.push_str(
-            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec with `fs_write` or paste one into chat. The tool validates the spec (fix and retry on a schema error) and saves it as `charts/<slug>.vl.json`; the saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](charts/<slug>.vl.json)` (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `fs_write` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
+            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec with `fs_write` or paste one into chat. The tool validates the spec (fix and retry on a schema error) and saves it as `charts/<slug>.vl.json`; the saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/charts/<slug>.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `fs_write` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
         );
 
         if context.execution.filesystem.extra_paths.is_empty() {
@@ -662,7 +662,7 @@ mod tests {
         assert!(text.contains("never write a Vega-Lite spec with `fs_write`"));
         // Where charts land and how a report embeds one.
         assert!(text.contains("charts/<slug>.vl.json"));
-        assert!(text.contains("![title](charts/<slug>.vl.json)"));
+        assert!(text.contains("![title](/charts/<slug>.vl.json)"));
         // Large tables go to a workspace file referenced by data.url.
         assert!(text.contains("`data.url`"));
 

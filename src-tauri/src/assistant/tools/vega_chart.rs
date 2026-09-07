@@ -121,7 +121,9 @@ pub async fn execute(
         "path": path_string,
         "title": title,
         "display": display,
-        "markdown": format!("![{}]({})", title.replace(']', "\\]"), path_string),
+        // Leading `/` = workspace root for the markdown renderer (same rule
+        // as `data.url`), so the snippet renders from a report at any depth.
+        "markdown": format!("![{}](/{})", title.replace(']', "\\]"), path_string),
     });
     if !warnings.is_empty() {
         result["warnings"] = serde_json::Value::Array(
@@ -309,6 +311,8 @@ fn describe_violations(errors: &[ValidationError<'_>]) -> Vec<String> {
 }
 
 fn collect_leaf_violations(error: &ValidationError<'_>, out: &mut Vec<(usize, String)>) {
+    // `OneOfMultipleValid` is deliberately not unpacked: the Vega-Lite
+    // schema has no `oneOf`, and that variant carries no branch context.
     match &error.kind {
         ValidationErrorKind::AnyOf { context } | ValidationErrorKind::OneOfNotValid { context } => {
             let before = out.len();
@@ -366,19 +370,30 @@ fn describe_leaf(error: &ValidationError<'_>) -> (usize, String) {
 /// home for them.
 fn spec_warnings(spec: &serde_json::Value) -> Vec<String> {
     let mut warnings = Vec::new();
-    if let Some(rows) = spec
-        .get("data")
-        .and_then(|d| d.get("values"))
-        .and_then(|v| v.as_array())
-    {
-        if rows.len() > INLINE_ROWS_WARNING_THRESHOLD {
-            warnings.push(format!(
-                "data.values inlines {} rows; write the data to a CSV or JSON file in the workspace (fs_write) and reference it with data.url instead (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`)",
-                rows.len()
-            ));
-        }
+    let rows = max_inline_rows(spec);
+    if rows > INLINE_ROWS_WARNING_THRESHOLD {
+        warnings.push(format!(
+            "data.values inlines {rows} rows; write the data to a CSV or JSON file in the workspace (fs_write) and reference it with data.url instead (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`)"
+        ));
     }
     warnings
+}
+
+/// Largest inline `data.values` table anywhere in the spec — the top level
+/// or a `layer`/`concat`/`facet`/`repeat` child.
+fn max_inline_rows(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(map) => {
+            let here = map
+                .get("data")
+                .and_then(|d| d.get("values"))
+                .and_then(|v| v.as_array())
+                .map_or(0, |rows| rows.len());
+            map.values().map(max_inline_rows).fold(here, usize::max)
+        }
+        serde_json::Value::Array(items) => items.iter().map(max_inline_rows).max().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// Normalize a model-supplied spec path: workspace-relative, no `..`, ends
@@ -750,9 +765,10 @@ mod tests {
         assert_eq!(result["ok"], true);
         assert_eq!(result["action"], "written");
         assert_eq!(result["path"], "charts/q3-revenue-by-region.vl.json");
+        // Root-anchored so it renders from a report in any subdirectory.
         assert_eq!(
             result["markdown"],
-            "![Q3 Revenue by Region](charts/q3-revenue-by-region.vl.json)"
+            "![Q3 Revenue by Region](/charts/q3-revenue-by-region.vl.json)"
         );
         assert_eq!(result["display"], true);
         assert!(result.get("warnings").is_none());
@@ -855,6 +871,14 @@ mod tests {
                 .map(|i| serde_json::json!({"a": i.to_string(), "b": i}))
                 .collect(),
         );
+        let layered = serde_json::json!({
+            "layer": [
+                {"mark": "bar", "encoding": {"x": {"field": "a", "type": "nominal"}}},
+                {"data": spec["data"].clone(), "mark": "rule"}
+            ]
+        });
+        let warning = spec_warnings(&layered);
+        assert_eq!(warning.len(), 1, "inline rows in a layer child must warn");
         let result = execute(
             &context,
             CreateVegaChartParams {
