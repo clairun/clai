@@ -323,6 +323,9 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec with `fs_write` or paste one into chat. The tool validates the spec (fix and retry on a schema error) and saves it as `charts/<slug>.vl.json`; the saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/charts/<slug>.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `fs_write` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
         );
+        prompt.push_str(
+            "- Make the chart worth looking at — aim for what an analyst would publish, not the default output. Give it a `title` whose `subtitle` states the finding and the units; sort categorical axes by value, not alphabetically; quiet the frame with `axis.domain`/`axis.ticks` false and a light dashed grid. Pick the mark that answers the question — a `rect` heatmap for a value across two keys, layered `rule` + `point` to compare two measures per category, `stack: \"center\"` area for composition over time, log or sqrt scales for values spanning orders of magnitude — and let `transform` (`fold`, `window`, `regression`, `joinaggregate`, `timeUnit`) shape the data instead of pre-chewing it. CLAI already themes colours, fonts and tooltips, so spend your effort on the encoding, and add an explicit `tooltip` array only to choose which fields show. One hard rule: declare a selection `param` inside a single unit view — one mark — and read it from the other views with `{\"filter\": {\"param\": …}}`, `scale.domain.param` or `condition.param`. Vega-Lite copies a param down into every unit view in its scope, so a param placed on a `layer` of two or more marks (directly, or above one through a concat/facet/repeat) validates and then fails to render with `Duplicate signal name`.\n",
+        );
 
         if context.execution.filesystem.extra_paths.is_empty() {
             prompt.push_str("- Additional path grants: none\n");
@@ -665,6 +668,18 @@ mod tests {
         assert!(text.contains("![title](/charts/<slug>.vl.json)"));
         // Large tables go to a workspace file referenced by data.url.
         assert!(text.contains("`data.url`"));
+        // The quality bar, and the param-placement rule behind the one
+        // failure mode the schema cannot catch (`Duplicate signal name`).
+        assert!(text.contains("aim for what an analyst would publish"));
+        // The param rule is scoped to `layer` on purpose: concat/facet views
+        // accept a top-level param and render fine (checked against the
+        // vendored vega-lite), so a broader claim would be false.
+        assert!(text.contains("declare a selection `param` inside a single unit view"));
+        assert!(text.contains("Duplicate signal name"));
+        // Stated by scope, not by container: a param above a multi-child
+        // layer collides through a concat/facet/repeat parent too, while a
+        // concat of plain unit views is fine (both measured).
+        assert!(text.contains("through a concat/facet/repeat"));
 
         // Without a workspace there is no tool and no guidance.
         let plain = build_system_prompt(
