@@ -30,9 +30,12 @@ pub const CHARTS_DIR: &str = "charts";
 /// renderer (`vega-lite` npm package) and the vendored schema implement.
 const VEGA_LITE_SCHEMA_URL: &str = "https://vega.github.io/schema/vega-lite/v6.json";
 const SPEC_EXTENSION: &str = ".vl.json";
-/// Ceiling on an inline spec. Data belongs in a workspace file referenced
-/// by `data.url`; a spec this large is almost always inlined rows.
-const MAX_SPEC_BYTES: usize = 1_000_000;
+/// Ceiling on a spec: the artifact preview reads `.vl.json` files through
+/// the workspace text endpoint, which truncates at this size, so a larger
+/// spec would validate here and still fail to render there. Data belongs in
+/// a workspace file referenced by `data.url`; a spec this large is almost
+/// always inlined rows.
+const MAX_SPEC_BYTES: usize = crate::commands::workspace::MAX_FILE_CONTENT_BYTES;
 /// Above this many inline `data.values` rows the result carries a warning
 /// steering the model to `data.url`. Not an error: small tables are fine.
 /// The system prompt and tool description quote the same "~50 rows".
@@ -123,7 +126,7 @@ pub async fn execute(
         "display": display,
         // Leading `/` = workspace root for the markdown renderer (same rule
         // as `data.url`), so the snippet renders from a report at any depth.
-        "markdown": format!("![{}](/{})", title.replace(']', "\\]"), path_string),
+        "markdown": format!("![{}](/{})", markdown_alt_text(title), path_string),
     });
     if !warnings.is_empty() {
         result["warnings"] = serde_json::Value::Array(
@@ -134,6 +137,12 @@ pub async fn execute(
         );
     }
     Ok(result)
+}
+
+/// Alt text for the embed snippet: brackets are escaped so an unbalanced
+/// `[` or `]` in the title cannot break the image syntax.
+fn markdown_alt_text(title: &str) -> String {
+    title.replace('[', "\\[").replace(']', "\\]")
 }
 
 /// Accept the spec as an object or as a string containing JSON.
@@ -413,6 +422,11 @@ pub fn spec_relative_path(input: &str) -> Result<PathBuf, String> {
     let trimmed = trimmed.as_str();
     if trimmed.is_empty() {
         return Err("`path` must not be empty".to_string());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "`path` must not contain whitespace (got `{trimmed}`): the embed snippet `![title](/{trimmed})` would not parse as markdown; use `-` instead"
+        ));
     }
     if !trimmed.to_ascii_lowercase().ends_with(SPEC_EXTENSION) {
         return Err(format!(
@@ -719,6 +733,13 @@ mod tests {
     }
 
     #[test]
+    fn embed_snippet_escapes_brackets_in_the_title() {
+        assert_eq!(markdown_alt_text("Sales [Q3]"), "Sales \\[Q3\\]");
+        assert_eq!(markdown_alt_text("Sales [Q3"), "Sales \\[Q3");
+        assert_eq!(markdown_alt_text("plain"), "plain");
+    }
+
+    #[test]
     fn spec_paths_stay_inside_the_workspace_and_keep_the_extension() {
         assert_eq!(
             spec_relative_path("reports/q3/revenue.vl.json").unwrap(),
@@ -744,6 +765,9 @@ mod tests {
         assert!(spec_relative_path("charts/a.json")
             .unwrap_err()
             .contains(".vl.json"));
+        assert!(spec_relative_path("reports/my chart.vl.json")
+            .unwrap_err()
+            .contains("whitespace"));
         assert!(spec_relative_path("   ").is_err());
     }
 

@@ -27,7 +27,7 @@ use ts_rs::TS;
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
 const MAX_ENTRY_COUNT: usize = 500;
-const MAX_FILE_CONTENT_BYTES: usize = 200_000;
+pub(crate) const MAX_FILE_CONTENT_BYTES: usize = 200_000;
 
 /// Upper bound on a single resource inlined into an HTML preview bundle.
 /// Larger assets (e.g. multi-megabyte videos) are left as broken links
