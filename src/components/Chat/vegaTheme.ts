@@ -92,6 +92,11 @@ export const buildVegaConfig = (tokens: ChartThemeTokens): Config => ({
     fontWeight: 600,
     anchor: 'start',
     offset: 12,
+    // Vega styles the subtitle from `subtitleColor` alone — without it the
+    // subtitle falls back to Vega's default black, unreadable on a dark
+    // card even though `color` above themes the title correctly.
+    subtitleColor: tokens.label,
+    subtitleFontSize: 11,
   },
   axis: {
     labelColor: tokens.label,

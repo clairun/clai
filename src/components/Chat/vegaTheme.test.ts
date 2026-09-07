@@ -63,5 +63,12 @@ describe('buildVegaConfig', () => {
     expect(config.axis.domainColor).toBe('rgba(0, 0, 0, 0.15)');
     expect(config.legend.labelColor).toBe('#666666');
     expect(config.title.color).toBe('#0a0a0a');
+    // Vega reads the subtitle colour from its own key; without this the
+    // subtitle renders black whatever the theme (verified against the
+    // rendered SVG), so the model's subtitles vanish on a dark card.
+    expect(config.title.subtitleColor).toBe('#666666');
+    // Pinned: Vega's default subtitle is the same 12px as the title, which
+    // reads as a second heading rather than a caption.
+    expect(config.title.subtitleFontSize).toBe(11);
   });
 });
