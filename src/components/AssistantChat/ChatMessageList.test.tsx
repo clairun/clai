@@ -248,6 +248,64 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('tool_5')).toBeInTheDocument();
   });
 
+  // A tool group where call `chartIndex` is a completed create_vega_chart;
+  // every other call is a plain tool_N.
+  const toolGroupWithChart = (
+    count: number,
+    chartIndex: number,
+    display = true
+  ): { messages: AssistantMessage[]; toolCalls: ToolInvocation[] } => {
+    const { messages, toolCalls } = toolGroup(count);
+    const part = messages[0]?.content[chartIndex] as { tool_name: string };
+    part.tool_name = 'create_vega_chart';
+    return {
+      messages,
+      toolCalls: toolCalls.map((tc, i) =>
+        i === chartIndex
+          ? {
+              ...tc,
+              toolName: 'create_vega_chart',
+              params: { title: 'Q3 Revenue', spec: {} },
+              result: { ok: true, path: 'charts/q3-revenue.vl.json', display },
+            }
+          : tc
+      ),
+    };
+  };
+
+  it('never collapses a displayed chart row; plain runs on each side collapse on their own', () => {
+    // 7 plain, chart, 6 plain → "Show 3 earlier" + 4 rows, chart, "Show 2 earlier" + 4 rows.
+    const { messages, toolCalls } = toolGroupWithChart(14, 7);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.getByTestId('vega-chart')).toHaveAttribute('data-spec-path', 'charts/q3-revenue.vl.json');
+    expect(screen.getByText('Show 3 earlier calls')).toBeInTheDocument();
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+    expect(screen.queryByText('tool_2')).toBeNull();
+    expect(screen.getByText('tool_3')).toBeInTheDocument();
+    expect(screen.getByText('tool_6')).toBeInTheDocument();
+    expect(screen.queryByText('tool_9')).toBeNull();
+    expect(screen.getByText('tool_10')).toBeInTheDocument();
+    expect(screen.getByText('tool_13')).toBeInTheDocument();
+  });
+
+  it('keeps a trailing chart row visible even when the run before it overflows', () => {
+    const { messages, toolCalls } = toolGroupWithChart(6, 5);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.getByTestId('vega-chart')).toBeInTheDocument();
+    // 5 plain rows before the chart → 1 hidden.
+    expect(screen.getByText('Show 1 earlier call')).toBeInTheDocument();
+    expect(screen.queryByText('tool_0')).toBeNull();
+    expect(screen.getByText('tool_4')).toBeInTheDocument();
+  });
+
+  it('collapses a display:false chart call like any other row', () => {
+    const { messages, toolCalls } = toolGroupWithChart(6, 0, false);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.queryByTestId('vega-chart')).toBeNull();
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+    expect(screen.queryByText('Q3 Revenue')).toBeNull();
+  });
+
   it('shows a bash row summary (verb, command, exit code) without expanding', () => {
     const messages: AssistantMessage[] = [
       msg({

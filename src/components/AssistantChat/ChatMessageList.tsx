@@ -1142,21 +1142,85 @@ const renderToolOutput = (
 };
 
 /**
+ * A tool list split at the rows whose result is a displayed chart. A chart
+ * row is the agent's output, not noise, so it is never collapsed; the plain
+ * rows on either side of it collapse as independent runs.
+ */
+type ToolSegment =
+  // `key` is the first call's id so a run keeps its expanded/collapsed
+  // state as later calls append to it.
+  | { kind: 'rows'; key: string; toolUses: EnrichedToolUse[] }
+  | { kind: 'chart'; toolUse: EnrichedToolUse };
+
+const splitAtChartRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
+  const segments: ToolSegment[] = [];
+  let run: EnrichedToolUse[] = [];
+  const flushRun = () => {
+    const first = run[0];
+    if (first) segments.push({ kind: 'rows', key: first.toolCallId, toolUses: run });
+    run = [];
+  };
+  for (const tu of toolUses) {
+    if (inlineChartPath(tu.toolName, tu.result, tu.error, tu.status)) {
+      flushRun();
+      segments.push({ kind: 'chart', toolUse: tu });
+    } else {
+      run.push(tu);
+    }
+  }
+  flushRun();
+  return segments;
+};
+
+/**
  * ToolCallGroup — renders a turn's tool calls as compact one-line rows.
  * Beyond MAX_VISIBLE_TOOLS, older calls collapse behind a "show N earlier"
  * toggle so a 35-tool turn stays scannable.
+ *
+ * Rows that carry a displayed chart break the count: the chart stays on
+ * screen wherever it was produced and the calls that follow it collapse
+ * *below* it, so the chart never gets hidden and never gets pushed down by
+ * rows appearing above it while the run is still streaming.
  */
 const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
-  const [showEarlier, setShowEarlier] = useState(false);
+  const segments = useMemo(() => splitAtChartRows(toolUses), [toolUses]);
 
   if (toolUses.length === 0) return null;
+
+  return (
+    <div className={styles.toolList}>
+      {segments.map((seg) =>
+        seg.kind === 'chart' ? (
+          <ToolRow
+            key={seg.toolUse.toolCallId}
+            toolName={seg.toolUse.toolName}
+            params={seg.toolUse.params ?? seg.toolUse.arguments}
+            status={seg.toolUse.status}
+            result={seg.toolUse.result}
+            error={seg.toolUse.error}
+          />
+        ) : (
+          <CollapsibleToolRows key={seg.key} toolUses={seg.toolUses} />
+        )
+      )}
+    </div>
+  );
+});
+
+/**
+ * CollapsibleToolRows — one run of plain tool rows. Beyond MAX_VISIBLE_TOOLS
+ * the oldest collapse behind a "show N earlier" toggle; the most-recent rows
+ * stay on screen.
+ */
+const CollapsibleToolRows = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
+  const [showEarlier, setShowEarlier] = useState(false);
 
   const overflow = toolUses.length - MAX_VISIBLE_TOOLS;
   const hasOverflow = overflow > 0;
   const visible = hasOverflow && !showEarlier ? toolUses.slice(-MAX_VISIBLE_TOOLS) : toolUses;
 
   return (
-    <div className={styles.toolList}>
+    <>
       {hasOverflow && (
         <button
           type="button"
@@ -1182,7 +1246,7 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
           error={tu.error}
         />
       ))}
-    </div>
+    </>
   );
 });
 
