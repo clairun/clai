@@ -77,8 +77,8 @@ function defaultFont(): string {
 
 /** Build the Vega-Lite `config` object for a set of tokens. */
 export const buildVegaConfig = (tokens: ChartThemeTokens, spec: Record<string, unknown> = {}): Config => {
-  // Retain native scatter transparency, including an authored global opacity.
-  const symbolOpacity = (spec.config as Config | undefined)?.mark?.opacity ?? 0.7;
+  const authoredMark = (spec.config as Config | undefined)?.mark;
+  const embedOptions = (spec.usermeta as { embedOptions?: unknown } | undefined)?.embedOptions;
   const singleView = 'mark' in spec || 'layer' in spec;
   return {
     // The surrounding card supplies the surface; a transparent view lets the
@@ -87,16 +87,23 @@ export const buildVegaConfig = (tokens: ChartThemeTokens, spec: Record<string, u
     font: tokens.font,
     // Hover tooltips on every mark by default — the model shouldn't have to
     // ask for the single most useful interaction.
-    mark: { tooltip: true, color: tokens.colors[0], opacity: 1 },
+    mark: { tooltip: true, color: tokens.colors[0] },
     range: { category: tokens.colors },
     view: { stroke: null, ...(singleView ? { continuousHeight: 280 } : {}) },
-    line: { strokeWidth: 2.5, strokeCap: 'round', strokeJoin: 'round' },
-    point: { size: 70, filled: true, opacity: symbolOpacity },
-    circle: { size: 70, opacity: symbolOpacity },
-    square: { size: 70, opacity: symbolOpacity },
-    tick: { opacity: symbolOpacity },
-    text: { color: tokens.label },
-    rule: { color: tokens.label },
+    // These mark-specific defaults outrank config.mark in Vega-Lite, so carry
+    // authored values forward. Embed options may supply config we cannot see.
+    ...(embedOptions === undefined ? {
+      line: {
+        strokeWidth: authoredMark?.strokeWidth ?? 2.5,
+        strokeCap: authoredMark?.strokeCap ?? 'round',
+        strokeJoin: authoredMark?.strokeJoin ?? 'round',
+      },
+      point: { size: authoredMark?.size ?? 70, filled: authoredMark?.filled ?? true },
+      circle: { size: authoredMark?.size ?? 70 },
+      square: { size: authoredMark?.size ?? 70 },
+      text: { color: authoredMark?.color ?? tokens.label },
+      rule: { color: authoredMark?.color ?? tokens.label },
+    } : {}),
     title: {
       color: tokens.title,
       fontSize: 17,

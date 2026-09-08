@@ -37,13 +37,13 @@ interface SceneItem {
   items?: SceneItem[];
   mark?: { role?: string };
   datum?: { series?: string };
-  opacity?: number;
+  opacity?: number | null;
   x?: number;
   y?: number;
   size?: number;
 }
 const markItems = (item: SceneItem): SceneItem[] => [
-  ...(item.mark?.role === 'mark' && item.opacity !== undefined ? [item] : []),
+  ...(item.mark?.role === 'mark' ? [item] : []),
   ...(item.items ?? []).flatMap(markItems),
 ];
 
@@ -152,6 +152,8 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     ['authored selection defaults', { ...POINTS, config: { selection: {
       point: { resolve: 'union' }, interval: { resolve: 'union' },
     } } }],
+    ['custom canvas renderer', { ...POINTS, usermeta: { embedOptions: { renderer: 'canvas' } } }],
+    ['custom embed config', { ...POINTS, usermeta: { embedOptions: { config: { mark: { opacity: 0 } } } } }],
     ['explicit opt out', { ...POINTS, usermeta: { clai: { interactions: false } } }],
   ])('leaves %s untouched', (_name, spec) => {
     expect(withChartInteractions(spec)).toEqual({ spec, legendFocus: false, canPanZoom: false, resetEvent: null });
@@ -225,6 +227,31 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     expect(items.every((item) => item.opacity === opacity)).toBe(true);
   });
 
+  it.each([
+    ['line', { strokeWidth: 0, strokeCap: 'butt', strokeJoin: 'miter' }, { strokeWidth: 0, strokeCap: 'butt', strokeJoin: 'miter' }],
+    ['point', { filled: false, size: 5 }, { fill: 'transparent', size: 5 }],
+    ['circle', { size: 5 }, { size: 5 }],
+    ['square', { size: 5 }, { size: 5 }],
+    ['text', { color: '#123456' }, { fill: '#123456' }],
+    ['rule', { color: '#123456' }, { stroke: '#123456' }],
+  ])('preserves authored global %s styling', async (mark, authored, expected) => {
+    const { view } = await render({ ...POINTS, mark, config: { mark: authored }, encoding: {
+      x: POINTS.encoding.x, y: POINTS.encoding.y, ...(mark === 'text' ? { text: { field: 'series' } } : {}),
+    } });
+    const items = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
+    expect(items.length).toBeGreaterThan(0);
+    items.forEach((item) => expect(item).toMatchObject(expected));
+  });
+
+  it('retains native opacity for aggregated symbols', async () => {
+    const { view } = await render({ ...POINTS, encoding: {
+      ...POINTS.encoding, y: { ...POINTS.encoding.y, aggregate: 'sum' },
+    } });
+    const items = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
+    expect(items).toHaveLength(4);
+    expect(items.every((item) => (item.opacity ?? 1) === 1)).toBe(true);
+  });
+
   it('ignores composition-like data keys and avoids named-data collisions', async () => {
     const { enhanced } = await render({
       ...POINTS,
@@ -248,7 +275,7 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     const { enhanced, view } = await render({ ...POINTS, ...properties });
     expect(enhanced.legendFocus).toBe(false);
     const points = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
-    expect(points.some((point) => point.opacity !== undefined && point.opacity < 0.12)).toBe(true);
+    expect(points.some((point) => point.opacity != null && point.opacity < 0.12)).toBe(true);
   });
 
   it('keeps default marks visible and padded inside the clipping boundary, including after zoom', async () => {
@@ -275,7 +302,7 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     const { view } = await render({ ...POINTS, mark });
     const items = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
     expect(items.length).toBeGreaterThan(0);
-    expect(items.every((item) => item.opacity === 1)).toBe(true);
+    expect(items.every((item) => (item.opacity ?? 1) === 1)).toBe(true);
   });
 
   it.each([undefined, 'right'])('keeps a twelve-series legend compact (orient %s)', async (orient) => {

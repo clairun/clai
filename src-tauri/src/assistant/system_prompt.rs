@@ -671,9 +671,6 @@ mod tests {
         // The quality bar, and the param-placement rule behind the one
         // failure mode the schema cannot catch (`Duplicate signal name`).
         assert!(text.contains("aim for what an analyst would publish"));
-        // The param rule is scoped to `layer` on purpose: concat/facet views
-        // accept a top-level param and render fine (checked against the
-        // vendored vega-lite), so a broader claim would be false.
         assert!(text.contains("declare a selection `param` inside a single unit view"));
         assert!(text.contains("Duplicate signal name"));
         // Stated by scope, not by container: a param above a multi-child

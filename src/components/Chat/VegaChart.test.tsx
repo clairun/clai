@@ -458,6 +458,22 @@ describe('VegaChart interaction controls', () => {
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
   });
 
+  it.each([
+    { renderer: 'canvas' },
+    { config: { mark: { opacity: 0 } } },
+  ])('preserves custom embedding without automatic controls: %j', async (embedOptions) => {
+    const spec = { ...JSON.parse(interactiveSource), usermeta: { embedOptions } };
+    render(<VegaChart source={JSON.stringify(spec)} />);
+    await waitFor(() => expect(renderedCharts()).toBe(1));
+    expect(embedCall(0)[1]).toEqual({ ...spec, width: 'container' });
+    expect(screen.queryByRole('group', { name: 'Chart interactions' })).not.toBeInTheDocument();
+    const wheel = vi.fn();
+    const svg = screen.getByTestId('vega-chart').querySelector('svg')!;
+    svg.addEventListener('wheel', wheel);
+    fireEvent.wheel(svg);
+    expect(wheel).toHaveBeenCalledOnce();
+  });
+
   it('restores the displayed view without reloading data, with pan/zoom disabled again', async () => {
     render(<VegaChart source={interactiveSource} />);
     const toggle = await screen.findByRole('button', { name: 'Pan & zoom' });

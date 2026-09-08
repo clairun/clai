@@ -32,11 +32,17 @@ it.each([
   view = new View(parse(compiled), { renderer: 'svg' });
   const error = vi.spyOn(console, 'error');
   await view.initialize(host).runAsync();
+  const markOpacities = () => Array.from(host.querySelectorAll('.role-mark path'),
+    (node) => Number(node.getAttribute('opacity') ?? 1));
+  const initialOpacities = markOpacities();
+  expect(initialOpacities.length).toBeGreaterThan(0);
+  expect(initialOpacities.every((opacity) => opacity >= 0.7)).toBe(true);
   const labels = host.querySelectorAll('.role-legend-label text');
   expect(labels).toHaveLength(2);
   labels[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await view.runAsync();
   expect(view.data('clai_auto_legend_store').map((tuple: { values: string[] }) => tuple.values)).toEqual([['A']]);
+  expect(markOpacities()).toContain(0.12);
 
   labels[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
   await view.runAsync();
@@ -64,6 +70,7 @@ it.each([
   await view.runAsync();
   expect(view.scale('x').domain()).toEqual(domain);
   expect(view.data('clai_auto_legend_store')).toHaveLength(0);
+  expect(markOpacities()).toEqual(initialOpacities);
   expect(view.width()).toBe(450);
   labels[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   point.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: 150, deltaY: -100 }));
@@ -73,6 +80,7 @@ it.each([
   svg.dispatchEvent(new Event(enhanced.resetEvent!));
   await view.runAsync();
   expect(view.data('clai_auto_legend_store')).toHaveLength(0);
+  expect(markOpacities()).toEqual(initialOpacities);
   expect(view.scale('x').domain()).toEqual(domain);
   expect(error).not.toHaveBeenCalled();
 });

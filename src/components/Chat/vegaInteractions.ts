@@ -30,6 +30,9 @@ export interface ChartInteractions {
 export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
   const unchanged: ChartInteractions = { spec, legendFocus: false, canPanZoom: false, resetEvent: null };
   if (object(object(spec.usermeta).clai).interactions === false) return unchanged;
+  // Embed options can change the renderer, config or compiled spec after this
+  // pass. Preserve those charts' authored behavior instead of guessing it here.
+  if (object(spec.usermeta).embedOptions !== undefined) return unchanged;
 
   const config = object(spec.config);
   if (config.selection !== undefined) return unchanged;
