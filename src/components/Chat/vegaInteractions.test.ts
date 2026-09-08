@@ -25,7 +25,7 @@ afterEach(() => views.splice(0).forEach((view) => view.finalize()));
 const render = async (spec: Record<string, unknown>) => {
   const enhanced = withChartInteractions(spec);
   const compiled = compile(enhanced.spec as unknown as TopLevelSpec, {
-    config: buildVegaConfig(readChartThemeTokens(() => '')),
+    config: buildVegaConfig(readChartThemeTokens(() => ''), spec),
   }).spec;
   const view = new View(parse(compiled), { renderer: 'none' });
   views.push(view);
@@ -154,7 +154,7 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     } } }],
     ['explicit opt out', { ...POINTS, usermeta: { clai: { interactions: false } } }],
   ])('leaves %s untouched', (_name, spec) => {
-    expect(withChartInteractions(spec)).toEqual({ spec, legendFocus: false, canPanZoom: false });
+    expect(withChartInteractions(spec)).toEqual({ spec, legendFocus: false, canPanZoom: false, resetEvent: null });
     expect(withChartInteractions(spec).spec).toBe(spec);
   });
 
@@ -175,6 +175,9 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     for (const x of [
       { field: 'x', type: 'nominal' },
       { field: 'x', type: 'quantitative', bin: true },
+      // Vega-Lite 6.4.3 compiles sqrt gestures with linear math, moving the
+      // value under the pointer during zoom. Leave that axis unbound.
+      { field: 'x', type: 'quantitative', scale: { type: 'sqrt' } },
       { field: 'x', type: 'quantitative', scale: { domain: [0, 10] } },
       { field: 'x', type: 'quantitative', scale: { domainMin: 0 } },
       { field: 'x', type: 'quantitative', scale: { domainMax: 10 } },
@@ -184,6 +187,42 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
       const result = withChartInteractions({ ...POINTS, encoding: { x } });
       expect(result.canPanZoom).toBe(false);
     }
+  });
+
+  it.each([
+    { type: 'log' }, { type: 'pow', exponent: 0.5 }, { type: 'symlog', constant: 2 },
+  ])('keeps the pointer anchor fixed for supported nonlinear scales: %j', async (scale) => {
+    const { view } = await render({
+      ...POINTS, data: { values: [{ x: 1 }, { x: 100 }] },
+      encoding: { x: { field: 'x', type: 'quantitative', scale: { ...scale, nice: false } } },
+    });
+    const anchor = view.scale('x').invert(200);
+    view.signal('clai_auto_zoom_zoom_anchor', { x: anchor });
+    view.signal('clai_auto_zoom_zoom_delta', 0.5);
+    await view.runAsync();
+    expect(view.scale('x')(anchor)).toBeCloseTo(200);
+  });
+
+  it.each(['bar', 'area'])('keeps stacked %s baselines on the plot floor', async (mark) => {
+    const { view, compiled } = await render({ ...POINTS, mark });
+    expect(view.scale('y')(0)).toBe(view.height());
+    // Rounded stack segments would leave notches at their joins.
+    expect(JSON.stringify(compiled.marks)).not.toContain('cornerRadius');
+  });
+
+  it.each([
+    { encoding: { ...POINTS.encoding, x: { ...POINTS.encoding.x, scale: { padding: 0 } } } },
+    { config: { scale: { continuousPadding: 0 } } },
+  ])('preserves authored scale padding: %j', async (properties) => {
+    const { view } = await render({ ...POINTS, ...properties });
+    expect(view.scale('x')(0)).toBe(0);
+  });
+
+  it.each([0.05, 0.5])('preserves authored global mark opacity %s', async (opacity) => {
+    const { view } = await render({ ...POINTS, config: { mark: { opacity } } });
+    const items = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
+    expect(items).toHaveLength(4);
+    expect(items.every((item) => item.opacity === opacity)).toBe(true);
   });
 
   it('ignores composition-like data keys and avoids named-data collisions', async () => {
@@ -219,7 +258,7 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     const items = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
     expect(items).toHaveLength(2);
     for (const point of items) {
-      expect(point.opacity).toBe(1);
+      expect(point.opacity).toBe(0.7);
       expect(point.x).toBeGreaterThan(Math.sqrt(point.size ?? 0));
       expect(point.x).toBeLessThan(500 - Math.sqrt(point.size ?? 0));
       expect(point.y).toBeGreaterThan(Math.sqrt(point.size ?? 0));

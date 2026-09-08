@@ -37,7 +37,6 @@ const bytesOf = (text: string) => ({
 });
 
 const finalizeMock = vi.fn();
-
 // The shape of the vega-embed call we assert on.
 interface CapturedOptions {
   actions: unknown;
@@ -58,7 +57,7 @@ const fakeEmbed = async (el: HTMLElement) => {
   const view = document.createElement('svg');
   view.textContent = 'chart';
   el.appendChild(view);
-  return { finalize: finalizeMock, view: {} };
+  return { finalize: finalizeMock };
 };
 
 // Let a streaming debounce window elapse (inside act: the effect may set state).
@@ -459,14 +458,18 @@ describe('VegaChart interaction controls', () => {
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
   });
 
-  it('resets by replacing and finalizing the view, with pan/zoom disabled again', async () => {
+  it('restores the displayed view without reloading data, with pan/zoom disabled again', async () => {
     render(<VegaChart source={interactiveSource} />);
     const toggle = await screen.findByRole('button', { name: 'Pan & zoom' });
     fireEvent.click(toggle);
+    const svg = screen.getByTestId('vega-chart').querySelector('svg')!;
+    const reset = vi.fn();
+    svg.addEventListener('clai_auto_reset', reset);
     fireEvent.click(screen.getByRole('button', { name: 'Reset chart' }));
-    await waitFor(() => expect(embedMock).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'));
-    expect(finalizeMock).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(embedMock).toHaveBeenCalledOnce();
+    expect(finalizeMock).not.toHaveBeenCalled();
     expect(renderedCharts()).toBe(1);
   });
 
@@ -499,5 +502,13 @@ describe('VegaChart interaction controls', () => {
     expect(renderedCharts()).toBe(1);
     expect(screen.getByRole('button', { name: 'Pan & zoom' })).toBeInTheDocument();
     expect(finalizeMock).not.toHaveBeenCalled();
+    const svg = screen.getByTestId('vega-chart').querySelector('svg')!;
+    const reset = vi.fn();
+    svg.addEventListener('clai_auto_reset', reset);
+    fireEvent.click(screen.getByRole('button', { name: 'Reset chart' }));
+    expect(reset).toHaveBeenCalledOnce();
+    // Reset must affect the retained chart, not retry the broken source.
+    expect(embedMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('Invalid chart')).toBeInTheDocument();
   });
 });

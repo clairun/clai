@@ -15,17 +15,20 @@ const SIMPLE_MARKS = new Set([
 ]);
 const ZOOM_MARKS = new Set(['circle', 'line', 'point', 'square', 'trail']);
 const DIMMED_OPACITY = 0.12;
-const CONTINUOUS_SCALES = new Set(['linear', 'log', 'pow', 'sqrt', 'symlog', 'time', 'utc']);
+// Vega-Lite 6.4.3 uses linear gesture math for sqrt scales, so omit sqrt.
+const CONTINUOUS_SCALES = new Set(['linear', 'log', 'pow', 'symlog', 'time', 'utc']);
 
 export interface ChartInteractions {
   spec: ObjectValue;
   legendFocus: boolean;
   /** The host gates these gestures until the user enables pan/zoom. */
   canPanZoom: boolean;
+  /** Native clear event dispatched on the displayed SVG by the host. */
+  resetEvent: string | null;
 }
 
 export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
-  const unchanged: ChartInteractions = { spec, legendFocus: false, canPanZoom: false };
+  const unchanged: ChartInteractions = { spec, legendFocus: false, canPanZoom: false, resetEvent: null };
   if (object(object(spec.usermeta).clai).interactions === false) return unchanged;
 
   const config = object(spec.config);
@@ -92,6 +95,7 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
   while (source.includes(prefix)) prefix += '_';
   const legendName = `${prefix}_legend`;
   const zoomName = `${prefix}_zoom`;
+  const resetEvent = `${prefix}_reset`;
   const canPanZoom = zoomChannels.length > 0;
   const params: ObjectValue[] = [];
   if (legendFocus) {
@@ -100,7 +104,7 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
       select: { type: 'point', fields: [firstColor.field] },
       // Vega's default legend binding also clears on background clicks,
       // including the click dispatched after a drag-pan. Reset is explicit.
-      bind: { legend: "click[event.item && indexof(event.item.mark.role, 'legend') >= 0]" },
+      bind: { legend: `click[event.item && indexof(event.item.mark.role, 'legend') >= 0], ${resetEvent}` },
     });
   }
   if (canPanZoom) {
@@ -114,7 +118,7 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
           // cannot reference signals (they compile but fail when dispatched).
           translate: '[pointerdown, window:pointerup] > window:pointermove!',
           zoom: 'wheel!',
-          clear: false,
+          clear: resetEvent,
         },
         bind: 'scales',
       },
@@ -130,12 +134,20 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
         condition: { test: { not: { param: legendName } }, value: DIMMED_OPACITY },
       };
     }
-    // Vega-Lite clips marks automatically when their scales are bound.
+    // Vega-Lite clips marks when scales are bound. Pad only these axes;
+    // global continuous padding would detach bar/area baselines from zero.
+    for (const channel of zoomChannels) {
+      const field = object(encoding[channel]);
+      if (object(field.scale).padding === undefined && object(config.scale).continuousPadding === undefined) {
+        encoding[channel] = { ...field, scale: { ...object(field.scale), padding: 8 } };
+      }
+    }
     return { ...unit, encoding, ...(index === 0 ? { params } : {}) };
   });
   return {
     spec: Array.isArray(spec.layer) ? { ...spec, layer: enhanced } : enhanced[0] ?? spec,
     legendFocus,
     canPanZoom,
+    resetEvent,
   };
 };

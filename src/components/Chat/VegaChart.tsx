@@ -174,12 +174,13 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   // The live vega view (finalize() on replace/unmount) and the element it
   // was rendered into. Kept in refs: they are DOM bookkeeping, not render
   // state.
-  const currentRef = useRef<{ result: Result; el: HTMLElement } | null>(null);
+  const currentRef = useRef<{
+    result: Result; el: HTMLElement; resetEvent: string | null;
+  } | null>(null);
   const [interactionState, setInteractionState] = useState({
     legendFocus: false, canPanZoom: false, unavailable: false,
   });
   const [panZoomActive, setPanZoomActive] = useState(false);
-  const [resetVersion, setResetVersion] = useState(0);
   const [rendered, setRendered] = useState(false);
   // Parse/render failure for a specific spec text; ignored once the text
   // changes so a switched spec link never shows the previous one's error.
@@ -264,7 +265,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         const options: EmbedOptions = {
           actions: false,
           renderer: 'svg',
-          config: buildVegaConfig(readChartThemeTokens(), 'mark' in spec || 'layer' in spec),
+          config: buildVegaConfig(readChartThemeTokens(), spec),
           loader: makeWorkspaceLoader(location, dataBasePath, createLoader()),
           tooltip: { theme: appTheme },
         };
@@ -297,7 +298,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         // Only drop our own marker: vega-embed tags the target with its
         // `vega-embed` class, which the stylesheet relies on.
         if (styles.pending) target.classList.remove(styles.pending);
-        currentRef.current = { result, el: target };
+        currentRef.current = { result, el: target, resetEvent: unavailable ? null : interactions.resetEvent };
         setInteractionState({
           legendFocus: !unavailable && interactions.legendFocus,
           canPanZoom: !unavailable && interactions.canPanZoom,
@@ -316,7 +317,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [text, isStreaming, appTheme, location, dataBasePath, resetVersion]);
+  }, [text, isStreaming, appTheme, location, dataBasePath]);
 
   // Release the vega view on unmount.
   useEffect(
@@ -334,6 +335,15 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   // browser scrolling/text selection intact; authored interactions bypass it.
   const gatePanZoom = (event: React.SyntheticEvent) => {
     if (interactionState.canPanZoom && !panZoomActive) event.stopPropagation();
+  };
+
+  const resetChart = () => {
+    const chart = currentRef.current;
+    if (!chart?.resetEvent) return;
+    // Native selection clearing keeps the displayed View, its loaded data
+    // and current dimensions, even when a newer source failed to render.
+    chart.el.querySelector('svg')?.dispatchEvent(new Event(chart.resetEvent));
+    setPanZoomActive(false);
   };
 
   const finalError = fileError ?? (isStreaming ? null : error);
@@ -372,7 +382,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           <button
             type="button"
             className={styles.control}
-            onClick={() => setResetVersion((version) => version + 1)}
+            onClick={resetChart}
           >
             Reset chart
           </button>

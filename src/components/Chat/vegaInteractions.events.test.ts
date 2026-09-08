@@ -7,14 +7,17 @@ import { buildVegaConfig, readChartThemeTokens } from './vegaTheme';
 let view: View | undefined;
 afterEach(() => { view?.finalize(); document.body.replaceChildren(); vi.restoreAllMocks(); });
 
-it('dispatches real Vega legend and zoom events, and preserves focus on background clicks after panning', async () => {
+it.each([
+  ['unit', { mark: 'point' }],
+  ['flat layer', { layer: [{ mark: 'line' }, { mark: 'point' }] }],
+])('handles legend, zoom and repeated Reset events on a %s chart', async (_name, marks) => {
   const enhanced = withChartInteractions({
     width: 400, height: 240,
     data: { values: [
       { x: 1, y: 2, series: 'A' }, { x: 2, y: 4, series: 'A' },
       { x: 1, y: 3, series: 'B' }, { x: 2, y: 6, series: 'B' },
     ] },
-    layer: [{ mark: 'line' }, { mark: 'point' }],
+    ...marks,
     encoding: {
       x: { field: 'x', type: 'quantitative' },
       y: { field: 'y', type: 'quantitative' },
@@ -22,7 +25,7 @@ it('dispatches real Vega legend and zoom events, and preserves focus on backgrou
     },
   });
   const compiled = compile(enhanced.spec as unknown as TopLevelSpec, {
-    config: buildVegaConfig(readChartThemeTokens(() => '')),
+    config: buildVegaConfig(readChartThemeTokens(() => ''), enhanced.spec),
   }).spec;
   const host = document.createElement('div');
   document.body.appendChild(host);
@@ -54,5 +57,22 @@ it('dispatches real Vega legend and zoom events, and preserves focus on backgrou
   svg.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   await view.runAsync();
   expect(view.data('clai_auto_legend_store')).toHaveLength(2);
+  // A reset restores the selection state without restoring layout dimensions.
+  view.width(450);
+  await view.runAsync();
+  svg.dispatchEvent(new Event(enhanced.resetEvent!));
+  await view.runAsync();
+  expect(view.scale('x').domain()).toEqual(domain);
+  expect(view.data('clai_auto_legend_store')).toHaveLength(0);
+  expect(view.width()).toBe(450);
+  labels[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  point.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, clientX: 150, deltaY: -100 }));
+  await view.runAsync();
+  expect(view.data('clai_auto_legend_store')).toHaveLength(1);
+  expect(view.scale('x').domain()).not.toEqual(domain);
+  svg.dispatchEvent(new Event(enhanced.resetEvent!));
+  await view.runAsync();
+  expect(view.data('clai_auto_legend_store')).toHaveLength(0);
+  expect(view.scale('x').domain()).toEqual(domain);
   expect(error).not.toHaveBeenCalled();
 });

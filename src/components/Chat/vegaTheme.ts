@@ -76,71 +76,75 @@ function defaultFont(): string {
 }
 
 /** Build the Vega-Lite `config` object for a set of tokens. */
-export const buildVegaConfig = (tokens: ChartThemeTokens, singleView = false): Config => ({
-  // The surrounding card supplies the surface; a transparent view lets the
-  // CSS-driven background (and theme flips) show through.
-  background: 'transparent',
-  font: tokens.font,
-  // Hover tooltips on every mark by default — the model shouldn't have to
-  // ask for the single most useful interaction.
-  mark: { tooltip: true, color: tokens.colors[0], opacity: 1 },
-  range: { category: tokens.colors },
-  scale: { continuousPadding: 8 },
-  view: { stroke: null, ...(singleView ? { continuousHeight: 280 } : {}) },
-  bar: { cornerRadiusEnd: 3 },
-  line: { strokeWidth: 2.5, strokeCap: 'round', strokeJoin: 'round' },
-  point: { size: 70, filled: true },
-  circle: { size: 70 },
-  square: { size: 70 },
-  text: { color: tokens.label },
-  rule: { color: tokens.label },
-  title: {
-    color: tokens.title,
-    fontSize: 17,
-    fontWeight: 600,
-    anchor: 'start',
-    offset: 20,
-    // Vega styles the subtitle from `subtitleColor` alone — without it the
-    // subtitle falls back to Vega's default black, unreadable on a dark
-    // card even though `color` above themes the title correctly.
-    subtitleColor: tokens.label,
-    subtitleFontSize: 12,
-    subtitlePadding: 6,
-  },
-  axis: {
-    labelColor: tokens.label,
-    titleColor: tokens.title,
-    gridColor: tokens.grid,
-    gridDash: [3, 4],
-    domain: false,
-    ticks: false,
-    labelPadding: 8,
-    tickCount: 5,
-    labelLimit: 160,
-    domainColor: tokens.axis,
-    tickColor: tokens.axis,
-    labelFontSize: 11,
-    titleFontSize: 12,
-    titleFontWeight: 500,
-    titlePadding: 12,
-  },
-  legend: {
-    // Keep Vega-Lite's orientation-dependent layout, including side legends.
-    offset: 16,
-    rowPadding: 6,
-    columnPadding: 16,
-    symbolSize: 80,
-    symbolOpacity: 1,
-    symbolStrokeWidth: 2,
-    labelLimit: 160,
-    labelColor: tokens.label,
-    titleColor: tokens.title,
-    labelFontSize: 11,
-    titleFontSize: 12,
-    titleFontWeight: 500,
-  },
-  header: {
-    labelColor: tokens.label,
-    titleColor: tokens.title,
-  },
-});
+export const buildVegaConfig = (tokens: ChartThemeTokens, spec: Record<string, unknown> = {}): Config => {
+  // Retain native scatter transparency, including an authored global opacity.
+  const symbolOpacity = (spec.config as Config | undefined)?.mark?.opacity ?? 0.7;
+  const singleView = 'mark' in spec || 'layer' in spec;
+  return {
+    // The surrounding card supplies the surface; a transparent view lets the
+    // CSS-driven background (and theme flips) show through.
+    background: 'transparent',
+    font: tokens.font,
+    // Hover tooltips on every mark by default — the model shouldn't have to
+    // ask for the single most useful interaction.
+    mark: { tooltip: true, color: tokens.colors[0], opacity: 1 },
+    range: { category: tokens.colors },
+    view: { stroke: null, ...(singleView ? { continuousHeight: 280 } : {}) },
+    line: { strokeWidth: 2.5, strokeCap: 'round', strokeJoin: 'round' },
+    point: { size: 70, filled: true, opacity: symbolOpacity },
+    circle: { size: 70, opacity: symbolOpacity },
+    square: { size: 70, opacity: symbolOpacity },
+    tick: { opacity: symbolOpacity },
+    text: { color: tokens.label },
+    rule: { color: tokens.label },
+    title: {
+      color: tokens.title,
+      fontSize: 17,
+      fontWeight: 600,
+      anchor: 'start',
+      offset: 20,
+      // Vega styles the subtitle from `subtitleColor` alone — without it the
+      // subtitle falls back to Vega's default black, unreadable on a dark
+      // card even though `color` above themes the title correctly.
+      subtitleColor: tokens.label,
+      subtitleFontSize: 12,
+      subtitlePadding: 6,
+    },
+    axis: {
+      labelColor: tokens.label,
+      titleColor: tokens.title,
+      gridColor: tokens.grid,
+      gridDash: [3, 4],
+      domain: false,
+      ticks: false,
+      labelPadding: 8,
+      tickCount: 5,
+      labelLimit: 160,
+      domainColor: tokens.axis,
+      tickColor: tokens.axis,
+      labelFontSize: 11,
+      titleFontSize: 12,
+      titleFontWeight: 500,
+      titlePadding: 12,
+    },
+    legend: {
+      // Keep Vega-Lite's orientation-dependent layout, including side legends.
+      offset: 16,
+      rowPadding: 6,
+      columnPadding: 16,
+      symbolSize: 80,
+      symbolOpacity: 1,
+      symbolStrokeWidth: 2,
+      labelLimit: 160,
+      labelColor: tokens.label,
+      titleColor: tokens.title,
+      labelFontSize: 11,
+      titleFontSize: 12,
+      titleFontWeight: 500,
+    },
+    header: {
+      labelColor: tokens.label,
+      titleColor: tokens.title,
+    },
+  };
+};
