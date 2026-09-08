@@ -14,18 +14,22 @@ const SIMPLE_MARKS = new Set([
   'arc', 'area', 'bar', 'circle', 'line', 'point', 'rect', 'rule', 'square', 'text', 'tick', 'trail',
 ]);
 const ZOOM_MARKS = new Set(['circle', 'line', 'point', 'square', 'trail']);
+const DIMMED_OPACITY = 0.12;
 const CONTINUOUS_SCALES = new Set(['linear', 'log', 'pow', 'sqrt', 'symlog', 'time', 'utc']);
 
 export interface ChartInteractions {
   spec: ObjectValue;
   legendFocus: boolean;
-  /** A Vega signal controlling pan/zoom event handling; initially false. */
-  panZoomSignal: string | null;
+  /** The host gates these gestures until the user enables pan/zoom. */
+  canPanZoom: boolean;
 }
 
 export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
-  const unchanged: ChartInteractions = { spec, legendFocus: false, panZoomSignal: null };
+  const unchanged: ChartInteractions = { spec, legendFocus: false, canPanZoom: false };
   if (object(object(spec.usermeta).clai).interactions === false) return unchanged;
+
+  const config = object(spec.config);
+  if (config.selection !== undefined) return unchanged;
 
   const units = Array.isArray(spec.layer) ? spec.layer.map(object) : [spec];
   const views = [spec, ...units];
@@ -43,8 +47,17 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
 
   const colors = encodings.map((encoding) => object(encoding.color));
   const firstColor = object(colors[0]);
-  const config = object(spec.config);
-  const legendFocus = object(config.legend).disable !== true && colors.every((color, index) =>
+  // Let Vega retain opacity precedence. Skip faint, expression-based or
+  // transparent overlay marks: a fixed dimming value could reveal them.
+  const opacityStyles = [config.mark, ...Object.values(object(config.style)),
+    ...[...SIMPLE_MARKS].map((mark) => config[mark]), ...units.map((unit) => unit.mark)];
+  const canDim = opacityStyles.every((style) => {
+    const props = object(style);
+    return props.point !== 'transparent' && [props, object(props.point), object(props.line)].every((part) =>
+      part.opacity === undefined || (typeof part.opacity === 'number' && part.opacity >= DIMMED_OPACITY)
+    );
+  });
+  const legendFocus = canDim && object(config.legend).disable !== true && colors.every((color, index) =>
     typeof color.field === 'string' && color.field === firstColor.field
     && (color.type === 'nominal' || color.type === 'ordinal') && color.type === firstColor.type
     && color.condition === undefined && color.aggregate === undefined && !color.bin && !color.timeUnit
@@ -67,7 +80,7 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
         && (field.type === 'quantitative' || field.type === 'temporal') && field.type === first.type
         && !field.bin && !field.timeUnit && !field.aggregate && !field.stack
         && field.scale !== null && (scale.type === undefined || CONTINUOUS_SCALES.has(String(scale.type)))
-        && scale.domain === undefined && scale.domainRaw === undefined
+        && ['domain', 'domainRaw', 'domainMin', 'domainMax', 'domainMid'].every((key) => scale[key] === undefined)
         && object(encodings[index])[`${channel}2`] === undefined;
     })
   );
@@ -79,26 +92,29 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
   while (source.includes(prefix)) prefix += '_';
   const legendName = `${prefix}_legend`;
   const zoomName = `${prefix}_zoom`;
-  const panZoomSignal = zoomChannels.length > 0 ? `${prefix}_pan_enabled` : null;
+  const canPanZoom = zoomChannels.length > 0;
   const params: ObjectValue[] = [];
   if (legendFocus) {
     params.push({
       name: legendName,
       select: { type: 'point', fields: [firstColor.field] },
-      bind: 'legend',
+      // Vega's default legend binding also clears on background clicks,
+      // including the click dispatched after a drag-pan. Reset is explicit.
+      bind: { legend: "click[event.item && indexof(event.item.mark.role, 'legend') >= 0]" },
     });
   }
-  if (panZoomSignal) {
+  if (canPanZoom) {
     params.push(
       {
         name: zoomName,
         select: {
           type: 'interval',
           encodings: zoomChannels,
-          // A toolbar switch gates BOTH gestures. Normal wheel events keep
-          // scrolling the chat, and dragging normally can still select text.
-          translate: `[pointerdown[${panZoomSignal}], window:pointerup] > window:pointermove!`,
-          zoom: `wheel![${panZoomSignal}]`,
+          // The host gates these events in capture phase. Vega event filters
+          // cannot reference signals (they compile but fail when dispatched).
+          translate: '[pointerdown, window:pointerup] > window:pointermove!',
+          zoom: 'wheel!',
+          clear: false,
         },
         bind: 'scales',
       },
@@ -111,19 +127,15 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
       encoding.opacity = {
         // No fallback value: Vega-Lite retains the mark/config's original
         // opacity for selected marks (and for the initial, empty selection).
-        condition: { test: { not: { param: legendName } }, value: 0.12 },
+        condition: { test: { not: { param: legendName } }, value: DIMMED_OPACITY },
       };
     }
-    const mark = panZoomSignal
-      ? { ...(typeof unit.mark === 'string' ? { type: unit.mark } : object(unit.mark)), clip: true }
-      : unit.mark;
-    return { ...unit, mark, encoding, ...(index === 0 ? { params } : {}) };
+    // Vega-Lite clips marks automatically when their scales are bound.
+    return { ...unit, encoding, ...(index === 0 ? { params } : {}) };
   });
   return {
-    spec: Array.isArray(spec.layer)
-      ? { ...spec, layer: enhanced, ...(panZoomSignal ? { params: [{ name: panZoomSignal, value: false }] } : {}) }
-      : { ...enhanced[0], params: [...(panZoomSignal ? [{ name: panZoomSignal, value: false }] : []), ...params] },
+    spec: Array.isArray(spec.layer) ? { ...spec, layer: enhanced } : enhanced[0] ?? spec,
     legendFocus,
-    panZoomSignal,
+    canPanZoom,
   };
 };

@@ -38,6 +38,9 @@ interface SceneItem {
   mark?: { role?: string };
   datum?: { series?: string };
   opacity?: number;
+  x?: number;
+  y?: number;
+  size?: number;
 }
 const markItems = (item: SceneItem): SceneItem[] => [
   ...(item.mark?.role === 'mark' && item.opacity !== undefined ? [item] : []),
@@ -95,19 +98,16 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     expect(await view.toSVG()).not.toMatch(/NaN|undefined/);
   });
 
-  it('gates wheel and drag events with an initially disabled signal, including in a layer', async () => {
-    const { view, compiled, enhanced } = await render({
+  it('binds continuous scales in a layer with native event-only gesture handlers', async () => {
+    const { compiled, enhanced } = await render({
       ...POINTS, mark: undefined, layer: [{ mark: 'line' }, { mark: 'point' }],
     });
-    expect(enhanced.panZoomSignal).toBe('clai_auto_pan_enabled');
-    expect(view.signal('clai_auto_pan_enabled')).toBe(false);
+    expect(enhanced.canPanZoom).toBe(true);
     const zoom = compiled.signals?.find((signal) => signal.name === 'clai_auto_zoom_zoom_delta');
     const pan = compiled.signals?.find((signal) => signal.name === 'clai_auto_zoom_translate_anchor');
-    expect(JSON.stringify(zoom)).toContain('"filter":["clai_auto_pan_enabled"]');
-    expect(JSON.stringify(pan)).toContain('"filter":["clai_auto_pan_enabled"]');
-    view.signal('clai_auto_pan_enabled', true);
-    await view.runAsync();
-    expect(view.signal('clai_auto_pan_enabled')).toBe(true);
+    expect(JSON.stringify(zoom)).toContain('"type":"wheel"');
+    expect(JSON.stringify(pan)).toContain('"type":"pointerdown"');
+    expect(compiled.scales?.filter((scale) => scale.domainRaw !== undefined)).toHaveLength(2);
   });
 
   it('preserves URL-backed data and transforms and never mutates the saved spec', async () => {
@@ -149,9 +149,12 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     ['encoding facet', { ...POINTS, encoding: { ...POINTS.encoding, column: { field: 'series' } } }],
     ['independent scales', { ...POINTS, resolve: { scale: { x: 'independent' } } }],
     ['composite mark', { ...POINTS, mark: 'boxplot' }],
+    ['authored selection defaults', { ...POINTS, config: { selection: {
+      point: { resolve: 'union' }, interval: { resolve: 'union' },
+    } } }],
     ['explicit opt out', { ...POINTS, usermeta: { clai: { interactions: false } } }],
   ])('leaves %s untouched', (_name, spec) => {
-    expect(withChartInteractions(spec)).toEqual({ spec, legendFocus: false, panZoomSignal: null });
+    expect(withChartInteractions(spec)).toEqual({ spec, legendFocus: false, canPanZoom: false });
     expect(withChartInteractions(spec).spec).toBe(spec);
   });
 
@@ -173,10 +176,13 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
       { field: 'x', type: 'nominal' },
       { field: 'x', type: 'quantitative', bin: true },
       { field: 'x', type: 'quantitative', scale: { domain: [0, 10] } },
+      { field: 'x', type: 'quantitative', scale: { domainMin: 0 } },
+      { field: 'x', type: 'quantitative', scale: { domainMax: 10 } },
+      { field: 'x', type: 'quantitative', scale: { domainMid: 5 } },
       { field: 'x', type: 'quantitative', stack: 'zero' },
     ]) {
       const result = withChartInteractions({ ...POINTS, encoding: { x } });
-      expect(result.panZoomSignal).toBeNull();
+      expect(result.canPanZoom).toBe(false);
     }
   });
 
@@ -188,6 +194,69 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
       ] },
     });
     expect(enhanced.legendFocus).toBe(true);
-    expect(enhanced.panZoomSignal).not.toBe('clai_auto_pan_enabled');
+    expect(enhanced.canPanZoom).toBe(true);
+  });
+
+  it.each([
+    { mark: { type: 'point', opacity: 0.05 } },
+    { mark: { type: 'point', opacity: { expr: '0.05' } } },
+    { mark: { type: 'line', point: 'transparent' } },
+    { mark: { type: 'line', point: { opacity: 0 } } },
+    { config: { point: { opacity: 0.05 } } },
+    { config: { mark: { opacity: 0.05 } } },
+    { mark: { type: 'point', style: 'faint' }, config: { style: { faint: { opacity: 0.05 } } } },
+  ])('does not brighten faint or transparent marks with legend focus: %j', async (properties) => {
+    const { enhanced, view } = await render({ ...POINTS, ...properties });
+    expect(enhanced.legendFocus).toBe(false);
+    const points = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
+    expect(points.some((point) => point.opacity !== undefined && point.opacity < 0.12)).toBe(true);
+  });
+
+  it('keeps default marks visible and padded inside the clipping boundary, including after zoom', async () => {
+    const { view } = await render({ ...POINTS, data: { values: [
+      { x: 0, y: 0, series: 'A' }, { x: 100, y: 100, series: 'B' },
+    ] } });
+    const items = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
+    expect(items).toHaveLength(2);
+    for (const point of items) {
+      expect(point.opacity).toBe(1);
+      expect(point.x).toBeGreaterThan(Math.sqrt(point.size ?? 0));
+      expect(point.x).toBeLessThan(500 - Math.sqrt(point.size ?? 0));
+      expect(point.y).toBeGreaterThan(Math.sqrt(point.size ?? 0));
+      expect(point.y).toBeLessThan(260 - Math.sqrt(point.size ?? 0));
+    }
+    view.signal('clai_auto_zoom_x', [20, 80]);
+    view.signal('clai_auto_zoom_y', [20, 80]);
+    await view.runAsync();
+    // Out-of-domain points remain clipped; the chart cannot grow into its axes.
+    expect(await view.toSVG()).toContain('clip-path="url(#');
+  });
+
+  it.each(['line', 'rule', 'text'])('keeps a default %s visible before any legend click', async (mark) => {
+    const { view } = await render({ ...POINTS, mark });
+    const items = markItems((view.scenegraph() as unknown as { root: SceneItem }).root);
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.every((item) => item.opacity === 1)).toBe(true);
+  });
+
+  it.each([undefined, 'right'])('keeps a twelve-series legend compact (orient %s)', async (orient) => {
+    const { view } = await render({ ...POINTS,
+      data: { values: Array.from({ length: 12 }, (_,i) => ({ x: i, y: i, series: `Series ${i}` })) },
+      encoding: { ...POINTS.encoding, color: { ...POINTS.encoding.color, legend: { orient } } },
+    });
+    const svg = await view.toSVG();
+    expect(Number(svg.match(/<svg[^>]* width="(\d+)"/)?.[1])).toBeLessThan(760);
+    expect(svg).toContain('Series 11');
+  });
+
+  it.each(['rule', 'text'])('themes unencoded %s marks for a dark card', async (mark) => {
+    const tokens = { ...readChartThemeTokens(() => ''), label: '#ccddee' };
+    const compiled = compile({
+      data: POINTS.data, mark, encoding: { y: POINTS.encoding.y, ...(mark === 'text' ? { text: { field: 'series' } } : {}) },
+    } as TopLevelSpec, { config: buildVegaConfig(tokens) }).spec;
+    const view = new View(parse(compiled), { renderer: 'none' });
+    views.push(view);
+    await view.runAsync();
+    expect(await view.toSVG()).toContain(mark === 'rule' ? 'stroke="#ccddee"' : 'fill="#ccddee"');
   });
 });

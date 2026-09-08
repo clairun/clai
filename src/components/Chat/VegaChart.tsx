@@ -174,9 +174,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   // The live vega view (finalize() on replace/unmount) and the element it
   // was rendered into. Kept in refs: they are DOM bookkeeping, not render
   // state.
-  const currentRef = useRef<{
-    result: Result; el: HTMLElement; panZoomSignal: string | null;
-  } | null>(null);
+  const currentRef = useRef<{ result: Result; el: HTMLElement } | null>(null);
   const [interactionState, setInteractionState] = useState({
     legendFocus: false, canPanZoom: false, unavailable: false,
   });
@@ -266,7 +264,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         const options: EmbedOptions = {
           actions: false,
           renderer: 'svg',
-          config: buildVegaConfig(readChartThemeTokens()),
+          config: buildVegaConfig(readChartThemeTokens(), 'mark' in spec || 'layer' in spec),
           loader: makeWorkspaceLoader(location, dataBasePath, createLoader()),
           tooltip: { theme: appTheme },
         };
@@ -281,6 +279,8 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           // Automatic conveniences must not prevent an otherwise valid chart
           // from rendering. Retry the untouched spec, then expose its error if
           // that also fails. Do not advertise controls that did not render.
+          // vega-embed exposes no View when it rejects. It cannot be finalized
+          // here if failure happened after View construction (an upstream limit).
           target.replaceChildren();
           result = await embed(target, baseSpec as VisualizationSpec, options);
           unavailable = true;
@@ -297,12 +297,10 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         // Only drop our own marker: vega-embed tags the target with its
         // `vega-embed` class, which the stylesheet relies on.
         if (styles.pending) target.classList.remove(styles.pending);
-        currentRef.current = {
-          result, el: target, panZoomSignal: unavailable ? null : interactions.panZoomSignal,
-        };
+        currentRef.current = { result, el: target };
         setInteractionState({
           legendFocus: !unavailable && interactions.legendFocus,
-          canPanZoom: !unavailable && interactions.panZoomSignal !== null,
+          canPanZoom: !unavailable && interactions.canPanZoom,
           unavailable,
         });
         setPanZoomActive(false);
@@ -332,16 +330,10 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
     [],
   );
 
-  const togglePanZoom = () => {
-    const chart = currentRef.current;
-    if (!chart?.panZoomSignal) return;
-    const enabled = !chart.result.view.signal(chart.panZoomSignal);
-    chart.result.view.signal(chart.panZoomSignal, enabled);
-    setPanZoomActive(enabled);
-    void chart.result.view.runAsync().catch((err: unknown) => {
-      if (currentRef.current !== chart || text === null) return;
-      setRenderError({ text, message: err instanceof Error ? err.message : String(err) });
-    });
+  // Block only our automatic Vega gesture handlers. stopPropagation leaves
+  // browser scrolling/text selection intact; authored interactions bypass it.
+  const gatePanZoom = (event: React.SyntheticEvent) => {
+    if (interactionState.canPanZoom && !panZoomActive) event.stopPropagation();
   };
 
   const finalError = fileError ?? (isStreaming ? null : error);
@@ -357,20 +349,22 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
         className={styles.chart}
         data-testid="vega-chart"
         data-pan-zoom={panZoomActive || undefined}
+        onWheelCapture={gatePanZoom}
+        onPointerDownCapture={gatePanZoom}
       />
       {rendered && (interactionState.legendFocus || interactionState.canPanZoom) && (
         <div className={styles.toolbar} role="group" aria-label="Chart interactions">
           <span className={styles.hint}>
             {panZoomActive
               ? 'Drag to pan · Scroll to zoom'
-              : interactionState.legendFocus ? 'Click legend to focus · Shift-click for multiple' : 'Explore the chart'}
+              : interactionState.legendFocus ? 'Click legend to focus · Shift-click for multiple' : 'Enable pan & zoom to explore'}
           </span>
           {interactionState.canPanZoom && (
             <button
               type="button"
               className={styles.control}
               aria-pressed={panZoomActive}
-              onClick={togglePanZoom}
+              onClick={() => setPanZoomActive((active) => !active)}
             >
               Pan &amp; zoom
             </button>

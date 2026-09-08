@@ -37,8 +37,6 @@ const bytesOf = (text: string) => ({
 });
 
 const finalizeMock = vi.fn();
-const signalMock = vi.fn();
-const runAsyncMock = vi.fn();
 
 // The shape of the vega-embed call we assert on.
 interface CapturedOptions {
@@ -60,7 +58,7 @@ const fakeEmbed = async (el: HTMLElement) => {
   const view = document.createElement('svg');
   view.textContent = 'chart';
   el.appendChild(view);
-  return { finalize: finalizeMock, view: { signal: signalMock, runAsync: runAsyncMock } };
+  return { finalize: finalizeMock, view: {} };
 };
 
 // Let a streaming debounce window elapse (inside act: the effect may set state).
@@ -69,8 +67,6 @@ const settle = (ms: number) => act(() => new Promise<void>((resolve) => setTimeo
 beforeEach(() => {
   embedMock.mockReset().mockImplementation(fakeEmbed);
   finalizeMock.mockReset();
-  signalMock.mockReset().mockReturnValue(false);
-  runAsyncMock.mockReset().mockResolvedValue(undefined);
   readWorkspaceFileBase64Mock.mockReset();
   openExternalMock.mockClear();
   document.documentElement.setAttribute('data-theme', 'light');
@@ -431,19 +427,35 @@ describe('VegaChart interaction controls', () => {
     },
   });
 
-  it('enables pan/zoom on the live view without re-embedding or losing legend selections', async () => {
+  it('gates native wheel/drag handlers while preserving default scrolling and legend clicks', async () => {
     render(<VegaChart source={interactiveSource} />);
     const toggle = await screen.findByRole('button', { name: 'Pan & zoom' });
-    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    const svg = screen.getByTestId('vega-chart').querySelector('svg')!;
+    const wheel = vi.fn();
+    const pointer = vi.fn();
+    const click = vi.fn();
+    svg.addEventListener('wheel', wheel);
+    svg.addEventListener('pointerdown', pointer);
+    svg.addEventListener('click', click);
+    const scroll = new Event('wheel', { bubbles: true, cancelable: true });
+    fireEvent(svg, scroll);
+    fireEvent.pointerDown(svg);
+    fireEvent.click(svg);
+    expect(wheel).not.toHaveBeenCalled();
+    expect(pointer).not.toHaveBeenCalled();
+    expect(scroll.defaultPrevented).toBe(false);
+    expect(click).toHaveBeenCalledOnce();
+
     fireEvent.click(toggle);
-    expect(signalMock).toHaveBeenCalledWith('clai_auto_pan_enabled', true);
-    expect(runAsyncMock).toHaveBeenCalledOnce();
+    fireEvent.wheel(svg);
+    fireEvent.pointerDown(svg);
+    expect(wheel).toHaveBeenCalledOnce();
+    expect(pointer).toHaveBeenCalledOnce();
     expect(toggle).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByText('Drag to pan · Scroll to zoom')).toBeInTheDocument();
     expect(embedMock).toHaveBeenCalledOnce();
-    signalMock.mockReturnValue(true);
     fireEvent.click(toggle);
-    expect(signalMock).toHaveBeenCalledWith('clai_auto_pan_enabled', false);
+    fireEvent.wheel(svg);
+    expect(wheel).toHaveBeenCalledOnce();
     expect(toggle).toHaveAttribute('aria-pressed', 'false');
   });
 

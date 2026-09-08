@@ -76,21 +76,24 @@ function defaultFont(): string {
 }
 
 /** Build the Vega-Lite `config` object for a set of tokens. */
-export const buildVegaConfig = (tokens: ChartThemeTokens): Config => ({
+export const buildVegaConfig = (tokens: ChartThemeTokens, singleView = false): Config => ({
   // The surrounding card supplies the surface; a transparent view lets the
   // CSS-driven background (and theme flips) show through.
   background: 'transparent',
   font: tokens.font,
   // Hover tooltips on every mark by default — the model shouldn't have to
   // ask for the single most useful interaction.
-  mark: { tooltip: true, color: tokens.colors[0] },
+  mark: { tooltip: true, color: tokens.colors[0], opacity: 1 },
   range: { category: tokens.colors },
-  view: { stroke: null, continuousHeight: 280 },
+  scale: { continuousPadding: 8 },
+  view: { stroke: null, ...(singleView ? { continuousHeight: 280 } : {}) },
   bar: { cornerRadiusEnd: 3 },
   line: { strokeWidth: 2.5, strokeCap: 'round', strokeJoin: 'round' },
   point: { size: 70, filled: true },
   circle: { size: 70 },
   square: { size: 70 },
+  text: { color: tokens.label },
+  rule: { color: tokens.label },
   title: {
     color: tokens.title,
     fontSize: 17,
@@ -112,6 +115,7 @@ export const buildVegaConfig = (tokens: ChartThemeTokens): Config => ({
     domain: false,
     ticks: false,
     labelPadding: 8,
+    tickCount: 5,
     labelLimit: 160,
     domainColor: tokens.axis,
     tickColor: tokens.axis,
@@ -121,8 +125,7 @@ export const buildVegaConfig = (tokens: ChartThemeTokens): Config => ({
     titlePadding: 12,
   },
   legend: {
-    orient: 'top',
-    direction: 'horizontal',
+    // Keep Vega-Lite's orientation-dependent layout, including side legends.
     offset: 16,
     rowPadding: 6,
     columnPadding: 16,
