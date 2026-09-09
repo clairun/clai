@@ -284,13 +284,14 @@ fn execute_fs_write(
     params: FsWriteParams,
 ) -> Result<serde_json::Value, String> {
     let grants = filesystem_grants(context)?;
-    let path = resolve_allowed_path(&params.path, &grants, true).inspect_err(|e| {
+    let allowed = resolve_allowed_path_forms(&params.path, &grants, true).inspect_err(|e| {
         if e.contains("outside the agent's allowed filesystem grants") || e.contains("not writable")
         {
             context.add_notice(RunNoticeKind::PathDenied, e.clone());
         }
     })?;
-    ensure_fs_reachable(&path)?;
+    ensure_fs_reachable(&allowed.requested)?;
+    let path = allowed.resolved;
 
     if params.create_parents {
         if let Some(parent) = path.parent() {
@@ -699,9 +700,12 @@ fn resolve_shell_cwd(
     let cwd = if base == "." {
         agent_workspace.clone()
     } else {
+        // The sandbox binds grants at their configured (lexical) paths, so the
+        // cwd stays lexical; containment is still checked on the resolved form.
         let grants = filesystem_grants(context)?;
-        resolve_allowed_path(base, &grants, true)
-            .or_else(|_| resolve_allowed_path(base, &grants, false))?
+        resolve_allowed_path_forms(base, &grants, true)
+            .or_else(|_| resolve_allowed_path_forms(base, &grants, false))?
+            .requested
     };
 
     Ok(cwd)
@@ -776,16 +780,20 @@ fn resolve_allowed_existing_path(
     grants: &[ResolvedGrant],
     require_write: bool,
 ) -> Result<PathBuf, String> {
-    let candidate = resolve_allowed_path(path, grants, require_write)?;
+    let allowed = resolve_allowed_path_forms(path, grants, require_write)?;
     // In Flatpak, surface the host-only reachability BEFORE the existence
     // probe — otherwise a granted-but-unreachable path (e.g. /tmp, a private
     // tmpfs in Flatpak) fails the in-sandbox exists() check and returns a
-    // misleading "Path does not exist" instead of steering to bash_exec.
-    ensure_fs_reachable(&candidate)?;
-    if !candidate.exists() {
-        return Err(format!("Path does not exist: {}", candidate.display()));
+    // misleading "Path does not exist" instead of steering to bash_exec. The
+    // check uses the path as addressed, which is what the sandbox view maps.
+    ensure_fs_reachable(&allowed.requested)?;
+    if !allowed.resolved.exists() {
+        return Err(format!(
+            "Path does not exist: {}",
+            allowed.requested.display()
+        ));
     }
-    Ok(candidate)
+    Ok(allowed.resolved)
 }
 
 /// The user's real home directory, resolved once. Inside Flatpak this is the
@@ -847,12 +855,97 @@ fn retain_flatpak_reachable_grants(grants: Vec<ResolvedGrant>) -> Vec<ResolvedGr
         .collect()
 }
 
+/// A path that passed the grant check, in both forms the callers need.
+#[derive(Debug)]
+struct AllowedPath {
+    /// Lexically normalized path exactly as the agent addressed it.
+    requested: PathBuf,
+    /// Symlink-resolved path the grant check was evaluated against; this is
+    /// the location the in-process `fs::*` call actually touches.
+    resolved: PathBuf,
+}
+
+/// Resolve `path` through symlinks so containment is judged on where the
+/// filesystem call really lands, not on the spelling of the path.
+///
+/// The nearest existing ancestor (or the path itself) is canonicalized and the
+/// not-yet-existing tail is re-appended unchanged; nothing is created. An
+/// existing component that cannot be resolved (a dangling symlink) is an error
+/// because `fs::write` would follow it to an unverifiable destination. If
+/// nothing along the path exists, no symlink can be involved and the path is
+/// returned as is.
+fn resolve_symlinks_through_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
+    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut ancestor = path;
+    loop {
+        if fs::symlink_metadata(ancestor).is_ok() {
+            let mut resolved = ancestor.canonicalize()?;
+            for name in missing.iter().rev() {
+                resolved.push(name);
+            }
+            return Ok(resolved);
+        }
+        let (Some(name), Some(parent)) = (ancestor.file_name(), ancestor.parent()) else {
+            return Ok(path.to_path_buf());
+        };
+        missing.push(name);
+        ancestor = parent;
+    }
+}
+
+/// Grant roots in the same symlink-resolved form as the candidate. A root
+/// that cannot be resolved (it may not exist yet) keeps its configured form.
+fn canonical_grant_roots(grants: &[ResolvedGrant]) -> Vec<ResolvedGrant> {
+    grants
+        .iter()
+        .map(|grant| ResolvedGrant {
+            root: resolve_symlinks_through_existing_ancestor(&grant.root)
+                .unwrap_or_else(|_| grant.root.clone()),
+            access: grant.access,
+        })
+        .collect()
+}
+
+#[cfg(test)]
 fn resolve_allowed_path(
     path: &str,
     grants: &[ResolvedGrant],
     require_write: bool,
 ) -> Result<PathBuf, String> {
-    let candidate = resolve_candidate_path(path, grants)?;
+    Ok(resolve_allowed_path_forms(path, grants, require_write)?.resolved)
+}
+
+fn resolve_allowed_path_forms(
+    path: &str,
+    grants: &[ResolvedGrant],
+    require_write: bool,
+) -> Result<AllowedPath, String> {
+    resolve_allowed_path_with_home(path, grants, require_write, real_host_home().as_deref())
+}
+
+/// Grant containment is decided on symlink-resolved paths on BOTH sides: the
+/// candidate, every grant root and the home used for the workspace mask. A
+/// lexical `starts_with` alone lets a symlink created inside a granted
+/// directory (e.g. via `bash_exec`) reach any host path or a sibling
+/// workspace.
+fn resolve_allowed_path_with_home(
+    path: &str,
+    grants: &[ResolvedGrant],
+    require_write: bool,
+    home: Option<&Path>,
+) -> Result<AllowedPath, String> {
+    let requested = resolve_candidate_path(path, grants)?;
+    let candidate = resolve_symlinks_through_existing_ancestor(&requested).map_err(|e| {
+        format!(
+            "Path {} resolves outside the agent's allowed filesystem grants: {}",
+            requested.display(),
+            e
+        )
+    })?;
+    let grants = canonical_grant_roots(grants);
+    let home = home.map(|home| {
+        resolve_symlinks_through_existing_ancestor(home).unwrap_or_else(|_| home.to_path_buf())
+    });
 
     // Workspace isolation: an agent reaches its own workspace and HOME, but not
     // sibling workspaces — even though they sit under the same HOME grant. The
@@ -863,7 +956,7 @@ fn resolve_allowed_path(
     // own workspace, or another workspace the user explicitly granted). See
     // `sandbox::profile::workspace_mask`.
     let mask = grants.first().and_then(|ws| {
-        crate::assistant::sandbox::profile::workspace_mask(&ws.root, real_host_home().as_deref())
+        crate::assistant::sandbox::profile::workspace_mask(&ws.root, home.as_deref())
     });
 
     // Grants that actually authorize this candidate (broad ancestors of the
@@ -892,7 +985,7 @@ fn resolve_allowed_path(
     let Some(depth) = deepest else {
         return Err(format!(
             "Path {} is outside the agent's allowed filesystem grants",
-            candidate.display()
+            requested.display()
         ));
     };
 
@@ -907,12 +1000,15 @@ fn resolve_allowed_path(
         if !writable {
             return Err(format!(
                 "Path {} is not writable for this agent",
-                candidate.display()
+                requested.display()
             ));
         }
     }
 
-    Ok(candidate)
+    Ok(AllowedPath {
+        requested,
+        resolved: candidate,
+    })
 }
 
 /// True when `grant_root` is only a broad *ancestor* of the masked workspace
@@ -2479,7 +2575,12 @@ mod tests {
             },
         ];
         let resolved = resolve_allowed_path("/home/me/project/src/main.rs", &grants, true).unwrap();
-        assert_eq!(resolved, PathBuf::from("/home/me/project/src/main.rs"));
+        // The canonical form may gain a drive prefix on Windows; compare the tail.
+        assert!(
+            resolved.ends_with("home/me/project/src/main.rs"),
+            "{}",
+            resolved.display()
+        );
     }
 
     // The dual: a read-only carve-out on a subdirectory must override a broader
@@ -2508,7 +2609,11 @@ mod tests {
             access: AccessKind::ReadOnly,
         }];
         let resolved = resolve_allowed_path("/home/me/notes.txt", &grants, false).unwrap();
-        assert_eq!(resolved, PathBuf::from("/home/me/notes.txt"));
+        assert!(
+            resolved.ends_with("home/me/notes.txt"),
+            "{}",
+            resolved.display()
+        );
     }
 
     // A read-write entry coexisting at the SAME root as a read-only one (the
@@ -2527,7 +2632,11 @@ mod tests {
             },
         ];
         let resolved = resolve_allowed_path("/data/out.json", &grants, true).unwrap();
-        assert_eq!(resolved, PathBuf::from("/data/out.json"));
+        assert!(
+            resolved.ends_with("data/out.json"),
+            "{}",
+            resolved.display()
+        );
     }
 
     // Paths outside every grant root are still rejected as out-of-bounds.
@@ -2542,6 +2651,294 @@ mod tests {
             err.contains("outside the agent's allowed filesystem grants"),
             "unexpected error: {err}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // resolve_allowed_path — containment is decided on symlink-resolved paths
+    // ------------------------------------------------------------------
+
+    const OUTSIDE_GRANTS: &str = "outside the agent's allowed filesystem grants";
+
+    fn ro_grant_for(path: &Path) -> ResolvedGrant {
+        ResolvedGrant {
+            root: path.to_path_buf(),
+            access: AccessKind::ReadOnly,
+        }
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+
+    fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempdir().unwrap();
+        let path = dir.path().canonicalize().unwrap();
+        (dir, path)
+    }
+
+    // A new file whose intermediate directories do not exist yet must still
+    // resolve (this is the `createParents` path of `fs_write`), and validation
+    // must not create anything.
+    #[test]
+    fn new_write_target_with_missing_parents_stays_allowed() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let grants = vec![grant_for(&ws)];
+
+        let resolved = resolve_allowed_path("a/b/c.md", &grants, true).unwrap();
+        assert_eq!(resolved, ws.join("a/b/c.md"));
+        assert!(!ws.join("a").exists(), "validation must not create dirs");
+
+        let resolved =
+            resolve_allowed_path(ws.join("deep/er/file.txt").to_str().unwrap(), &grants, true)
+                .unwrap();
+        assert_eq!(resolved, ws.join("deep/er/file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_dir_escaping_all_grants_is_refused() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let (_outside_dir, outside) = canonical_tempdir();
+        write_file(&outside.join("secret.txt"), "classified");
+        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+        fs::create_dir_all(ws.join("nested")).unwrap();
+        std::os::unix::fs::symlink(&outside, ws.join("nested/link")).unwrap();
+        let grants = vec![grant_for(&ws)];
+
+        // Relative and absolute spellings, direct and nested link.
+        for path in [
+            "link/secret.txt".to_string(),
+            "nested/link/secret.txt".to_string(),
+            ws.join("link/secret.txt").display().to_string(),
+            // Listing the linked directory itself is an escape too.
+            "link".to_string(),
+        ] {
+            let err = resolve_allowed_path(&path, &grants, false).unwrap_err();
+            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
+            let err = resolve_allowed_existing_path(&path, &grants, false).unwrap_err();
+            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_into_another_grant_uses_the_target_grants_access() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let (_ro_dir, ro) = canonical_tempdir();
+        write_file(&ro.join("file.txt"), "read me");
+        std::os::unix::fs::symlink(&ro, ws.join("link")).unwrap();
+        let grants = vec![grant_for(&ws), ro_grant_for(&ro)];
+
+        // Reading through the link is fine and lands on the canonical target.
+        let resolved = resolve_allowed_path("link/file.txt", &grants, false).unwrap();
+        assert_eq!(resolved, ro.join("file.txt"));
+        let resolved = resolve_allowed_existing_path("link/file.txt", &grants, false).unwrap();
+        assert_eq!(resolved, ro.join("file.txt"));
+
+        // The link lives in a read-write grant, but the target is read-only:
+        // the target's grant decides.
+        for path in ["link/file.txt", "link/new.txt"] {
+            let err = resolve_allowed_path(path, &grants, true).unwrap_err();
+            assert!(err.contains("not writable"), "{path}: {err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_sibling_workspace_dir_is_refused_with_only_the_workspace_granted() {
+        // <container>/own is the workspace, <container>/other a sibling.
+        let (_container_dir, container) = canonical_tempdir();
+        let own = container.join("own");
+        let other = container.join("other");
+        fs::create_dir_all(&own).unwrap();
+        write_file(&other.join("secret.txt"), "sibling data");
+        std::os::unix::fs::symlink("../other", own.join("link")).unwrap();
+        let grants = vec![grant_for(&own)];
+
+        let err = resolve_allowed_path("link/secret.txt", &grants, false).unwrap_err();
+        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
+        let err = resolve_allowed_path("link/planted.txt", &grants, true).unwrap_err();
+        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
+        assert!(!other.join("planted.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_sibling_workspace_is_masked_even_under_a_home_grant() {
+        // <home>/.clai/workspaces/{own,other}: the broad home grant must not
+        // authorize the sibling, and a symlink must not change that.
+        let (_home_dir, home) = canonical_tempdir();
+        let own = home.join(".clai/workspaces/own");
+        let other = home.join(".clai/workspaces/other");
+        fs::create_dir_all(&own).unwrap();
+        write_file(&other.join("secret.txt"), "sibling data");
+        write_file(&home.join("notes.txt"), "home data");
+        std::os::unix::fs::symlink(&other, own.join("link")).unwrap();
+        let grants = vec![grant_for(&own), ro_grant_for(&home)];
+
+        let err = resolve_allowed_path_with_home("link/secret.txt", &grants, false, Some(&home))
+            .unwrap_err();
+        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
+        // Direct spelling is masked as before...
+        let err = resolve_allowed_path_with_home(
+            other.join("secret.txt").to_str().unwrap(),
+            &grants,
+            false,
+            Some(&home),
+        )
+        .unwrap_err();
+        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
+        // ...while ordinary home content stays readable through the home grant.
+        let allowed = resolve_allowed_path_with_home(
+            home.join("notes.txt").to_str().unwrap(),
+            &grants,
+            false,
+            Some(&home),
+        )
+        .unwrap();
+        assert_eq!(allowed.resolved, home.join("notes.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_target_under_escaping_symlinked_parent_is_refused() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let (_outside_dir, outside) = canonical_tempdir();
+        let victim = outside.join("victim.txt");
+        write_file(&victim, "precious");
+        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+        let grants = vec![grant_for(&ws)];
+
+        // Overwrite an existing foreign file, create a new one, and create one
+        // with missing intermediate dirs (the `createParents` shape).
+        for path in [
+            "link/victim.txt",
+            "link/fresh.txt",
+            "link/new/dir/fresh.txt",
+        ] {
+            let err = resolve_allowed_path(path, &grants, true).unwrap_err();
+            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
+        }
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert!(!outside.join("fresh.txt").exists());
+        assert!(!outside.join("new").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_target_under_in_grant_symlinked_parent_resolves_canonically() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        fs::create_dir_all(ws.join("real")).unwrap();
+        std::os::unix::fs::symlink(ws.join("real"), ws.join("alias")).unwrap();
+        let grants = vec![grant_for(&ws)];
+
+        let allowed = resolve_allowed_path_forms("alias/out.txt", &grants, true).unwrap();
+        assert_eq!(allowed.requested, ws.join("alias/out.txt"));
+        assert_eq!(allowed.resolved, ws.join("real/out.txt"));
+
+        let allowed = resolve_allowed_path_forms("alias/sub/dir/out.txt", &grants, true).unwrap();
+        assert_eq!(allowed.resolved, ws.join("real/sub/dir/out.txt"));
+        assert!(
+            !ws.join("real/sub").exists(),
+            "validation must not create dirs"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_final_symlink_is_refused() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let (_outside_dir, outside) = canonical_tempdir();
+        std::os::unix::fs::symlink(outside.join("new.txt"), ws.join("dangling.txt")).unwrap();
+        // Dangling within the grant as well: the destination is unverifiable.
+        std::os::unix::fs::symlink(ws.join("gone.txt"), ws.join("dangling_inside.txt")).unwrap();
+        let grants = vec![grant_for(&ws)];
+
+        for path in ["dangling.txt", "dangling_inside.txt"] {
+            let err = resolve_allowed_path(path, &grants, true).unwrap_err();
+            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
+            let err = resolve_allowed_path(path, &grants, false).unwrap_err();
+            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
+        }
+        assert!(!outside.join("new.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escaping_final_symlink_is_refused_and_in_grant_one_still_works() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let (_outside_dir, outside) = canonical_tempdir();
+        let victim = outside.join("victim.txt");
+        write_file(&victim, "precious");
+        std::os::unix::fs::symlink(&victim, ws.join("escape.txt")).unwrap();
+        write_file(&ws.join("real.txt"), "inside");
+        std::os::unix::fs::symlink(ws.join("real.txt"), ws.join("alias.txt")).unwrap();
+        let grants = vec![grant_for(&ws)];
+
+        for require_write in [false, true] {
+            let err = resolve_allowed_path("escape.txt", &grants, require_write).unwrap_err();
+            assert!(err.contains(OUTSIDE_GRANTS), "{err}");
+        }
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+
+        // fs::write follows the link, so the resolved path is the target.
+        assert_eq!(
+            resolve_allowed_path("alias.txt", &grants, true).unwrap(),
+            ws.join("real.txt")
+        );
+        assert_eq!(
+            resolve_allowed_existing_path("alias.txt", &grants, false).unwrap(),
+            ws.join("real.txt")
+        );
+    }
+
+    // A grant whose configured root is itself a symlink (macOS `/tmp` →
+    // `/private/tmp`, or a user-level link) must keep authorizing its content:
+    // the roots are resolved the same way as the candidate.
+    #[cfg(unix)]
+    #[test]
+    fn access_through_a_symlinked_grant_root_keeps_working() {
+        let (_base_dir, base) = canonical_tempdir();
+        let real = base.join("real");
+        write_file(&real.join("file.txt"), "data");
+        let link_root = base.join("link_root");
+        std::os::unix::fs::symlink(&real, &link_root).unwrap();
+        let grants = vec![grant_for(&link_root)];
+
+        // Addressed through the link and through the real location alike.
+        for path in [link_root.join("file.txt"), real.join("file.txt")] {
+            let resolved =
+                resolve_allowed_existing_path(path.to_str().unwrap(), &grants, true).unwrap();
+            assert_eq!(resolved, real.join("file.txt"), "{}", path.display());
+        }
+        let resolved = resolve_allowed_path("new/file.txt", &grants, true).unwrap();
+        assert_eq!(resolved, real.join("new/file.txt"));
+    }
+
+    // The walkers behind fs_list/fs_glob classify entries without following
+    // symlinks, so a linked directory is reported as a symlink and never
+    // descended into.
+    #[cfg(unix)]
+    #[test]
+    fn list_and_glob_do_not_follow_symlinked_directories() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let (_outside_dir, outside) = canonical_tempdir();
+        write_file(&outside.join("secret.md"), "classified");
+        write_file(&ws.join("own.md"), "mine");
+        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
+
+        let (entries, _) = list_entries_at_path(&ws, true, 100).unwrap();
+        let names: Vec<String> = entries
+            .iter()
+            .map(|e| e.path.strip_prefix(&ws).unwrap().display().to_string())
+            .collect();
+        assert_eq!(names, vec!["link", "own.md"]);
+        assert_eq!(entries[0].kind, "symlink");
+
+        let (matches, _) = glob_allowed_paths("**/*.md", &[grant_for(&ws)], 100).unwrap();
+        let matched: Vec<PathBuf> = matches.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(matched, vec![ws.join("own.md")]);
     }
 
     // ------------------------------------------------------------------
