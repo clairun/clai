@@ -161,11 +161,14 @@ const useMarkdownComponents = (isStreaming: boolean): Components =>
       }
       return <img src={source} alt={alt} title={title} />;
     },
-    a: ({ href, children }) => (
-      <a href={href} className={styles.link} target="_blank" rel="noopener noreferrer">
-        {children}
-      </a>
-    ),
+    a: ({ href, children, node }) =>
+      containsChartLink(node) ? (
+        <>{children}</>
+      ) : (
+        <a href={href} className={styles.link} target="_blank" rel="noopener noreferrer">
+          {children}
+        </a>
+      ),
     table: ({ children }) => (
       <div className={styles.tableWrapper}>
         <table className={styles.table}>{children}</table>

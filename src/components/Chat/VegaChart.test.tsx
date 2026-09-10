@@ -235,6 +235,33 @@ describe('VegaChart (inline source)', () => {
     expect(screen.getByTestId('vega-chart').childElementCount).toBe(0);
   });
 
+  it('shows a data loading error even when Vega resolves with an empty view', async () => {
+    readWorkspaceFileBase64Mock.mockRejectedValue(new Error('File not found: missing.csv'));
+    embedMock.mockImplementation(async (el: HTMLElement, _spec: unknown, options: CapturedOptions) => {
+      // Vega catches loader rejections, logs a warning, and resolves runAsync.
+      await options.loader.load('missing.csv').catch(() => undefined);
+      return fakeEmbed(el);
+    });
+    const source = JSON.stringify({
+      mark: 'point',
+      data: { url: 'missing.csv' },
+      encoding: {
+        x: { field: 'x', type: 'quantitative' },
+        y: { field: 'y', type: 'quantitative' },
+      },
+    });
+    render(
+      <WorkspaceFileContext.Provider value={LOCATION}>
+        <VegaChart source={source} />
+      </WorkspaceFileContext.Provider>,
+    );
+
+    await screen.findByText('File not found: missing.csv');
+    expect(embedMock).toHaveBeenCalledTimes(1);
+    expect(finalizeMock).toHaveBeenCalledTimes(1);
+    expect(renderedCharts()).toBe(0);
+  });
+
   it('keeps showing the source, without an error, while streaming content does not parse', async () => {
     render(<VegaChart source={'{"mark": "ba'} isStreaming />);
     await settle(350);

@@ -15,6 +15,7 @@
 //! `embedded/vega-lite-schema.json` (a vitest keeps it in sync with the npm
 //! package the renderer uses) and is compiled once per process.
 
+use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -102,7 +103,7 @@ pub async fn execute(
         }
         (None, Some(path)) => {
             let relative = spec_relative_path(&path)?;
-            let absolute = workspace_root.join(&relative);
+            let absolute = resolve_spec_for_read(&workspace_root, &relative)?;
             let text = read_spec_file(&absolute, &relative)?;
             let spec = parse_spec_text(&text)?;
             validate_spec(&spec)?;
@@ -505,13 +506,98 @@ fn write_spec(
             MAX_SPEC_BYTES
         ));
     }
-    let absolute = workspace_root.join(relative);
-    if let Some(parent) = absolute.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
-    }
+    let absolute = resolve_spec_for_write(workspace_root, relative)?;
     std::fs::write(&absolute, text.as_bytes())
         .map_err(|e| format!("Failed to write {}: {e}", absolute.display()))
+}
+
+fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf, String> {
+    workspace_root.canonicalize().map_err(|e| {
+        format!(
+            "Cannot resolve workspace root {}: {e}",
+            workspace_root.display()
+        )
+    })
+}
+
+fn ensure_inside_workspace(
+    canonical_root: &Path,
+    resolved: &Path,
+    relative: &Path,
+) -> Result<(), String> {
+    if resolved.starts_with(canonical_root) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Chart path `{}` resolves outside the workspace",
+            relative_path_string(relative)
+        ))
+    }
+}
+
+fn resolve_spec_for_read(workspace_root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let canonical_root = canonical_workspace_root(workspace_root)?;
+    let resolved = canonical_root
+        .join(relative)
+        .canonicalize()
+        .map_err(|e| format!("Cannot read `{}`: {e}", relative_path_string(relative)))?;
+    ensure_inside_workspace(&canonical_root, &resolved, relative)?;
+    Ok(resolved)
+}
+
+/// Resolve a destination without letting an existing symlink redirect the
+/// write outside the workspace. New directories are created only after the
+/// nearest existing ancestor has been canonicalized and checked.
+fn resolve_spec_for_write(workspace_root: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let canonical_root = canonical_workspace_root(workspace_root)?;
+    let requested = canonical_root.join(relative);
+    let requested_parent = requested
+        .parent()
+        .ok_or_else(|| format!("Invalid chart path `{}`", relative_path_string(relative)))?;
+
+    let mut existing = requested_parent;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                existing = existing.parent().ok_or_else(|| {
+                    format!("Invalid chart path `{}`", relative_path_string(relative))
+                })?;
+            }
+            Err(error) => {
+                return Err(format!("Cannot inspect {}: {error}", existing.display()));
+            }
+        }
+    }
+
+    let canonical_existing = existing
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve {}: {e}", existing.display()))?;
+    ensure_inside_workspace(&canonical_root, &canonical_existing, relative)?;
+    let missing = requested_parent
+        .strip_prefix(existing)
+        .map_err(|_| format!("Invalid chart path `{}`", relative_path_string(relative)))?;
+    let parent = canonical_existing.join(missing);
+    std::fs::create_dir_all(&parent)
+        .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve {}: {e}", parent.display()))?;
+    ensure_inside_workspace(&canonical_root, &canonical_parent, relative)?;
+
+    let file_name = requested
+        .file_name()
+        .ok_or_else(|| format!("Invalid chart path `{}`", relative_path_string(relative)))?;
+    let target = canonical_parent.join(file_name);
+    match std::fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "Chart path `{}` must not be a symlink",
+            relative_path_string(relative)
+        )),
+        Ok(_) => Ok(target),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(target),
+        Err(error) => Err(format!("Cannot inspect {}: {error}", target.display())),
+    }
 }
 
 fn read_spec_file(absolute: &Path, relative: &Path) -> Result<String, String> {
@@ -804,6 +890,76 @@ mod tests {
         .unwrap();
         assert_eq!(written["$schema"], VEGA_LITE_SCHEMA_URL);
         assert_eq!(written["mark"], "bar");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlinks_that_redirect_reads_or_writes_outside_the_workspace() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let original = bar_spec().to_string();
+        std::fs::write(outside.path().join("existing.vl.json"), &original).unwrap();
+        symlink(outside.path(), workspace.path().join("charts")).unwrap();
+        let context = context_for(Some(workspace.path().to_path_buf()));
+
+        let read_error = execute(
+            &context,
+            CreateVegaChartParams {
+                title: "Existing".to_string(),
+                display: true,
+                spec: None,
+                path: Some("charts/existing.vl.json".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(read_error.contains("outside the workspace"), "{read_error}");
+
+        let write_error = execute(
+            &context,
+            CreateVegaChartParams {
+                title: "New".to_string(),
+                display: true,
+                spec: Some(bar_spec()),
+                path: Some("charts/new.vl.json".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            write_error.contains("outside the workspace"),
+            "{write_error}"
+        );
+        assert!(!outside.path().join("new.vl.json").exists());
+
+        let reports = workspace.path().join("reports");
+        std::fs::create_dir(&reports).unwrap();
+        symlink(
+            outside.path().join("existing.vl.json"),
+            reports.join("linked.vl.json"),
+        )
+        .unwrap();
+        let target_error = execute(
+            &context,
+            CreateVegaChartParams {
+                title: "Linked".to_string(),
+                display: true,
+                spec: Some(bar_spec()),
+                path: Some("reports/linked.vl.json".to_string()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            target_error.contains("must not be a symlink"),
+            "{target_error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("existing.vl.json")).unwrap(),
+            original
+        );
     }
 
     #[tokio::test]

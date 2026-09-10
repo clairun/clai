@@ -114,6 +114,7 @@ export const makeWorkspaceLoader = (
   location: WorkspaceFileLocation | null,
   baseFilePath: string,
   base: Loader,
+  onLoadError?: (error: Error) => void,
 ): Loader => {
   const http = async (uri: string, options?: Partial<RequestInit>): Promise<string> => {
     const response = await fetch(uri, options);
@@ -124,15 +125,21 @@ export const makeWorkspaceLoader = (
   };
   return {
     load: async (uri) => {
-      if (/^https?:/i.test(uri)) return http(uri);
-      if (!isWorkspaceRelativeHref(uri)) {
-        throw new Error(`Unsupported data URL: ${uri}`);
+      try {
+        if (/^https?:/i.test(uri)) return await http(uri);
+        if (!isWorkspaceRelativeHref(uri)) {
+          throw new Error(`Unsupported data URL: ${uri}`);
+        }
+        if (!location) {
+          throw new Error(`Cannot load ${uri}: no workspace to resolve it in`);
+        }
+        const path = resolveWorkspacePath(baseFilePath, uri);
+        return await readWorkspaceText(location.workspaceId, path);
+      } catch (error) {
+        const loadError = error instanceof Error ? error : new Error(String(error));
+        onLoadError?.(loadError);
+        throw loadError;
       }
-      if (!location) {
-        throw new Error(`Cannot load ${uri}: no workspace to resolve it in`);
-      }
-      const path = resolveWorkspacePath(baseFilePath, uri);
-      return readWorkspaceText(location.workspaceId, path);
     },
     sanitize: async (uri, options) => {
       const result = await base.sanitize(uri, options);
@@ -262,28 +269,43 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           target.remove();
           return;
         }
+        let loadError: Error | null = null;
         const options: EmbedOptions = {
           actions: false,
           renderer: 'svg',
           config: buildVegaConfig(readChartThemeTokens(), spec),
-          loader: makeWorkspaceLoader(location, dataBasePath, createLoader()),
+          loader: makeWorkspaceLoader(location, dataBasePath, createLoader(), (error) => {
+            loadError ??= error;
+          }),
           tooltip: { theme: appTheme },
         };
         const baseSpec = withContainerWidth(spec);
         const interactions = withChartInteractions(baseSpec);
+        const renderSpec = async (candidate: Record<string, unknown>): Promise<Result> => {
+          loadError = null;
+          const rendered = await embed(target, candidate as VisualizationSpec, options);
+          if (loadError) {
+            rendered.finalize();
+            throw loadError;
+          }
+          return rendered;
+        };
         let result: Result;
         let unavailable = false;
         try {
-          result = await embed(target, interactions.spec as VisualizationSpec, options);
+          result = await renderSpec(interactions.spec);
         } catch (err) {
-          if (interactions.spec === baseSpec || cancelled) throw err;
+          // A data failure belongs to the authored chart, not to our automatic
+          // interaction parameters. Retrying the base spec would only repeat
+          // the same read before showing the error.
+          if (err === loadError || interactions.spec === baseSpec || cancelled) throw err;
           // Automatic conveniences must not prevent an otherwise valid chart
           // from rendering. Retry the untouched spec, then expose its error if
           // that also fails. Do not advertise controls that did not render.
           // vega-embed exposes no View when it rejects. It cannot be finalized
           // here if failure happened after View construction (an upstream limit).
           target.replaceChildren();
-          result = await embed(target, baseSpec as VisualizationSpec, options);
+          result = await renderSpec(baseSpec);
           unavailable = true;
         }
         if (cancelled) {

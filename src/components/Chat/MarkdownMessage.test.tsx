@@ -62,11 +62,11 @@ describe('MarkdownMessage — Vega-Lite embedding', () => {
     expect(screen.getByTestId('vega-chart-mock').dataset.specPath).toBe('Charts/Q3.VL.JSON#top');
   });
 
-  it('also swaps the paragraph when the chart link is nested inside a link', () => {
+  it('unwraps a link around a chart so chart interactions cannot navigate', () => {
     render(<MarkdownMessage content="[![Q3](charts/q3.vl.json)](charts/q3.vl.json)" />);
     const chart = screen.getByTestId('vega-chart-mock');
     expect(chart.closest('p')).toBeNull();
-    expect(chart.closest('a')).not.toBeNull();
+    expect(chart.closest('a')).toBeNull();
   });
 
   it('keeps ordinary and external images as <img>', () => {
