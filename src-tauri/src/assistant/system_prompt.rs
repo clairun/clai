@@ -321,6 +321,9 @@ pub(crate) fn build_system_prompt(
             "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
         ));
         prompt.push_str(
+            "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
+        );
+        prompt.push_str(
             "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec with `fs_write` or paste one into chat. The tool validates the spec (fix and retry on a schema error) and saves it as `charts/<slug>.vl.json`; the saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/charts/<slug>.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `fs_write` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
         );
         prompt.push_str(
@@ -661,6 +664,9 @@ mod tests {
         };
         // The tool is the only sanctioned chart path; fs_write is named as
         // the anti-pattern so the model does not route around validation.
+        assert!(text.contains("Choose a chart proactively"));
+        assert!(text.contains("materially easier to understand than prose or a short table"));
+        assert!(text.contains("Skip charts for a single fact"));
         assert!(text.contains("`create_vega_chart` tool"));
         assert!(text.contains("never write a Vega-Lite spec with `fs_write`"));
         // Where charts land and how a report embeds one.
