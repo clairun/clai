@@ -69,6 +69,19 @@ describe('MarkdownMessage — Vega-Lite embedding', () => {
     expect(chart.closest('a')).toBeNull();
   });
 
+  it('keeps ordinary Markdown links clickable and opens them safely', () => {
+    render(<MarkdownMessage content="Read the [Vega-Lite docs](https://vega.github.io/vega-lite/)" />);
+    expect(screen.getByRole('link', { name: 'Vega-Lite docs' })).toHaveAttribute(
+      'href',
+      'https://vega.github.io/vega-lite/',
+    );
+    expect(screen.getByRole('link', { name: 'Vega-Lite docs' })).toHaveAttribute('target', '_blank');
+    expect(screen.getByRole('link', { name: 'Vega-Lite docs' })).toHaveAttribute(
+      'rel',
+      'noopener noreferrer',
+    );
+  });
+
   it('keeps ordinary and external images as <img>', () => {
     render(
       <MarkdownMessage

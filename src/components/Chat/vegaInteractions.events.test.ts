@@ -1,11 +1,35 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { compile, type TopLevelSpec } from 'vega-lite';
-import { parse, View } from 'vega';
+import { loader, logger, parse, View, Warn } from 'vega';
 import { withChartInteractions } from './vegaInteractions';
 import { buildVegaConfig, readChartThemeTokens } from './vegaTheme';
 
 let view: View | undefined;
 afterEach(() => { view?.finalize(); document.body.replaceChildren(); vi.restoreAllMocks(); });
+
+it('reports malformed JSON data through Vega\'s ingestion warning contract', async () => {
+  const compiled = compile({
+    data: { url: 'bad.json', format: { type: 'json' } },
+    mark: 'point',
+    encoding: {
+      x: { field: 'x', type: 'quantitative' },
+      y: { field: 'y', type: 'quantitative' },
+    },
+  }).spec;
+  const warnings: unknown[][] = [];
+  const dataLoader = loader();
+  dataLoader.load = async () => '{]';
+  view = new View(parse(compiled), {
+    loader: dataLoader,
+    logger: logger(Warn, undefined, (_method, _level, args) => warnings.push(args)),
+    renderer: 'none',
+  });
+
+  await view.runAsync();
+
+  expect(warnings.some((args) => args[0] === 'Data ingestion failed' && args[1] === 'bad.json')).toBe(true);
+  expect(view.data('source_0')).toHaveLength(0);
+});
 
 it.each([
   ['unit', { mark: 'point' }],
