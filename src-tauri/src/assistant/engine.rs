@@ -104,7 +104,11 @@ pub async fn run_session_turn(
     };
 
     if providers::is_cli_provider(&connection.protocol_id) {
-        return crate::assistant::local_agent::run_session_turn(deps, input).await;
+        // The CLI path takes over from here with the same session and
+        // connection this function just loaded and validated, so it must not
+        // look them up a second time.
+        return crate::assistant::local_agent::run_session_turn(deps, input, session, connection)
+            .await;
     }
 
     // Get or create the run

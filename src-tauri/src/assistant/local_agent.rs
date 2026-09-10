@@ -33,7 +33,6 @@ use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
     ProviderConnection, ProviderInputMessage, RunNotice, RunStatus,
 };
-use crate::AppState;
 
 const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
@@ -238,26 +237,19 @@ impl CliProviderRuntime {
     }
 }
 
+/// Drives one turn of a CLI-backed provider (Claude Code, Codex, OpenCode).
+///
+/// Only `engine::run_session_turn` calls this, after it has loaded the
+/// session for `input.session_id` and the connection for
+/// `input.connection_id` and rejected the turn if either was missing. Both
+/// are handed over as-is: the session is taken by value because this path
+/// rewrites its CLI session id in place, and neither is loaded again here.
 pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
+    mut session: AssistantSession,
+    connection: ProviderConnection,
 ) -> Result<(), AssistantEngineError> {
-    let mut session = repository::get_session(&deps.pool, &input.session_id)
-        .await?
-        .ok_or_else(|| AssistantEngineError::SessionNotFound(input.session_id.clone()))?;
-
-    let connection = deps
-        .app
-        .try_state::<AppState>()
-        .and_then(|state| {
-            state
-                .config_manager
-                .lock()
-                .ok()?
-                .get_provider_connection(&input.connection_id)
-        })
-        .ok_or_else(|| AssistantEngineError::ProviderNotConfigured(input.connection_id.clone()))?;
-
     let run_id = resolve_run_id(deps, &session, &connection, &input).await?;
 
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
