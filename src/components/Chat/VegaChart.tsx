@@ -1,6 +1,6 @@
 import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { EmbedOptions, Result, VisualizationSpec } from 'vega-embed';
-import type { Loader } from 'vega';
+import type { Loader, LoggerInterface } from 'vega';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
 import { openExternal } from '../../utils/openExternal';
 import { base64ToText, isWorkspaceRelativeHref, resolveWorkspacePath } from '../../utils/htmlBundle';
@@ -45,6 +45,8 @@ interface VegaRuntime {
   embed: EmbedFn;
   /** Vega's default loader; supplies the URL sanitizer we delegate to. */
   createLoader: () => Loader;
+  /** Report data parsing failures that Vega otherwise logs and swallows. */
+  createLogger: (onDataError: (error: Error) => void) => LoggerInterface;
 }
 
 let runtimePromise: Promise<VegaRuntime> | null = null;
@@ -53,6 +55,20 @@ const loadVega = (): Promise<VegaRuntime> => {
     runtimePromise = import('vega-embed').then((m) => ({
       embed: m.default,
       createLoader: () => m.vega.loader(),
+      createLogger: (onDataError) => {
+        const base = m.vega.logger(m.vega.Warn);
+        return m.vega.logger(m.vega.Warn, undefined, (method, _level, args) => {
+          if (args[0] === 'Data ingestion failed') {
+            const uri = typeof args[1] === 'string' ? args[1] : 'external data';
+            const cause = args[2];
+            const detail = cause instanceof Error ? cause.message : String(cause);
+            onDataError(new Error(`Data ingestion failed for ${uri}: ${detail}`));
+          }
+          // Keep Vega's existing console diagnostics available for debugging.
+          if (method === 'error') base.error(...args);
+          else if (method === 'warn') base.warn(...args);
+        });
+      },
     }));
   }
   return runtimePromise;
@@ -264,7 +280,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
       target.className = styles.pending ?? '';
       host.appendChild(target);
       try {
-        const { embed, createLoader } = await loadVega();
+        const { embed, createLoader, createLogger } = await loadVega();
         if (cancelled) {
           target.remove();
           return;
@@ -277,18 +293,29 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           loader: makeWorkspaceLoader(location, dataBasePath, createLoader(), (error) => {
             loadError ??= error;
           }),
+          logger: createLogger((error) => {
+            loadError ??= error;
+          }),
           tooltip: { theme: appTheme },
         };
         const baseSpec = withContainerWidth(spec);
         const interactions = withChartInteractions(baseSpec);
         const renderSpec = async (candidate: Record<string, unknown>): Promise<Result> => {
           loadError = null;
-          const rendered = await embed(target, candidate as VisualizationSpec, options);
-          if (loadError) {
-            rendered.finalize();
-            throw loadError;
+          try {
+            const rendered = await embed(target, candidate as VisualizationSpec, options);
+            if (loadError) {
+              rendered.finalize();
+              throw loadError;
+            }
+            return rendered;
+          } catch (error) {
+            // Vega can reject after its loader or parser already reported a
+            // better error. Keep that root cause and do not retry the same
+            // authored data through the unenhanced-spec fallback.
+            if (loadError) throw loadError;
+            throw error;
           }
-          return rendered;
         };
         let result: Result;
         let unavailable = false;

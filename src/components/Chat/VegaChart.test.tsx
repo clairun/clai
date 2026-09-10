@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-import { loader as createVegaLoader } from 'vega';
+import { loader as createVegaLoader, logger as createVegaLogger, Warn as VegaWarn } from 'vega';
 
 // vega-embed does real layout; mock it so we exercise this component's
 // state machine (parse → embed → swap/fallback) and the options it passes.
@@ -9,7 +9,7 @@ import { loader as createVegaLoader } from 'vega';
 const embedMock = vi.fn();
 vi.mock('vega-embed', () => ({
   default: (...args: unknown[]) => embedMock(...args),
-  vega: { loader: createVegaLoader },
+  vega: { loader: createVegaLoader, logger: createVegaLogger, Warn: VegaWarn },
 }));
 
 const readWorkspaceFileBase64Mock = vi.fn();
@@ -44,6 +44,7 @@ interface CapturedOptions {
   tooltip: unknown;
   config: { range: { category: unknown }; mark: { tooltip: unknown } };
   loader: { load: (uri: string) => Promise<string> };
+  logger: { warn: (...args: unknown[]) => unknown };
 }
 type EmbedCall = [HTMLElement, Record<string, unknown>, CapturedOptions];
 const embedCall = (index: number): EmbedCall => embedMock.mock.calls[index] as EmbedCall;
@@ -257,6 +258,23 @@ describe('VegaChart (inline source)', () => {
     );
 
     await screen.findByText('File not found: missing.csv');
+    expect(embedMock).toHaveBeenCalledTimes(1);
+    expect(finalizeMock).toHaveBeenCalledTimes(1);
+    expect(renderedCharts()).toBe(0);
+  });
+
+  it('shows a data parsing error that Vega reports only through its logger', async () => {
+    embedMock.mockImplementation(async (el: HTMLElement, _spec: unknown, options: CapturedOptions) => {
+      options.logger.warn(
+        'Data ingestion failed',
+        'bad.json',
+        new Error('Unexpected token } in JSON'),
+      );
+      return fakeEmbed(el);
+    });
+    render(<VegaChart source={SOURCE} />);
+
+    await screen.findByText('Data ingestion failed for bad.json: Unexpected token } in JSON');
     expect(embedMock).toHaveBeenCalledTimes(1);
     expect(finalizeMock).toHaveBeenCalledTimes(1);
     expect(renderedCharts()).toBe(0);
