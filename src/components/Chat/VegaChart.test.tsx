@@ -474,6 +474,7 @@ describe('VegaChart interaction controls', () => {
   it('gates native wheel/drag handlers while preserving default scrolling and legend clicks', async () => {
     render(<VegaChart source={interactiveSource} />);
     const toggle = await screen.findByRole('button', { name: 'Pan & zoom' });
+    expect(screen.getByText('Click legend to focus · Ctrl/Cmd-click for multiple')).toBeInTheDocument();
     const svg = screen.getByTestId('vega-chart').querySelector('svg')!;
     const wheel = vi.fn();
     const pointer = vi.fn();

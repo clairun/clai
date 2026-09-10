@@ -49,7 +49,8 @@ const markItems = (item: SceneItem): SceneItem[] => [
 
 describe('automatic chart interactions, using the installed Vega runtime', () => {
   it('focuses a series without filtering rows, changing domains or losing the other legend entries', async () => {
-    const { view } = await render({ ...POINTS, mark: { type: 'point', opacity: 0.8 } });
+    const { view, enhanced } = await render({ ...POINTS, mark: { type: 'point', opacity: 0.8 } });
+    expect(JSON.stringify(enhanced.spec)).toContain('event.ctrlKey || event.metaKey');
     const xDomain = view.scale('x').domain();
     const yDomain = view.scale('y').domain();
     view.signal('clai_auto_legend_series_legend', 'A');
@@ -64,7 +65,7 @@ describe('automatic chart interactions, using the installed Vega runtime', () =>
     expect(view.data('source_0')).toHaveLength(4);
     expect(await view.toSVG()).not.toMatch(/NaN|undefined/);
 
-    // The same store used by Shift-click can contain multiple series.
+    // The same store used by Ctrl/Cmd-click can contain multiple series.
     view.signal('clai_auto_legend_toggle', true);
     view.signal('clai_auto_legend_series_legend', 'B');
     await view.runAsync();

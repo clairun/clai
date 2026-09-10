@@ -416,7 +416,7 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
           <span className={styles.hint}>
             {panZoomActive
               ? 'Drag to pan · Scroll to zoom'
-              : interactionState.legendFocus ? 'Click legend to focus · Shift-click for multiple' : 'Enable pan & zoom to explore'}
+              : interactionState.legendFocus ? 'Click legend to focus · Ctrl/Cmd-click for multiple' : 'Enable pan & zoom to explore'}
           </span>
           {interactionState.canPanZoom && (
             <button

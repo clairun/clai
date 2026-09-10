@@ -104,7 +104,13 @@ export const withChartInteractions = (spec: ObjectValue): ChartInteractions => {
   if (legendFocus) {
     params.push({
       name: legendName,
-      select: { type: 'point', fields: [firstColor.field] },
+      select: {
+        type: 'point',
+        fields: [firstColor.field],
+        // Shift-click also extends the browser's text selection over SVG
+        // labels. Use the platform's additive-selection modifier instead.
+        toggle: 'event.ctrlKey || event.metaKey',
+      },
       // Vega's default legend binding also clears on background clicks,
       // including the click dispatched after a drag-pan. Reset is explicit.
       bind: { legend: `click[event.item && indexof(event.item.mark.role, 'legend') >= 0], ${resetEvent}` },

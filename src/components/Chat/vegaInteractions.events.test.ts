@@ -34,7 +34,7 @@ it('reports malformed JSON data through Vega\'s ingestion warning contract', asy
 it.each([
   ['unit', { mark: 'point' }],
   ['flat layer', { layer: [{ mark: 'line' }, { mark: 'point' }] }],
-])('handles legend, zoom and repeated Reset events on a %s chart', async (_name, marks) => {
+])('handles legend, zoom and repeated Reset events on a %s chart', async (name, marks) => {
   const enhanced = withChartInteractions({
     width: 400, height: 240,
     data: { values: [
@@ -69,6 +69,13 @@ it.each([
   expect(markOpacities()).toContain(0.12);
 
   labels[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true, shiftKey: true }));
+  await view.runAsync();
+  expect(view.data('clai_auto_legend_store').map((tuple: { values: string[] }) => tuple.values)).toEqual([['B']]);
+
+  labels[0]!.dispatchEvent(new MouseEvent('click', {
+    bubbles: true,
+    ...(name === 'unit' ? { ctrlKey: true } : { metaKey: true }),
+  }));
   await view.runAsync();
   expect(view.data('clai_auto_legend_store')).toHaveLength(2);
 
