@@ -22,3 +22,6 @@ pub mod types;
 
 #[cfg(test)]
 mod repository_tests;
+
+#[cfg(test)]
+mod run_lifecycle_tests;

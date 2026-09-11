@@ -25,7 +25,38 @@ use crate::assistant::types::{
     AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice, RunStatus,
     ToolCallStatus, ToolInvocation,
 };
+use crate::db::DbPool;
 use serde_json::Value;
+
+/// What a run-lifecycle edge needs from the running app: the database it
+/// records the state change in, and the channel it announces that change on.
+///
+/// `AssistantDeps` is the only production implementation, and every call site
+/// passes it exactly as before. The trait exists so this module's *wiring* —
+/// which row each edge writes, which event follows it, and in what order — can
+/// be asserted by a test. It could not be until now: `AssistantDeps::app` is a
+/// `tauri::AppHandle<Wry>`, which cannot be built outside a running app
+/// (`tauri::test::mock_app()` hands back an `AppHandle<MockRuntime>`, a
+/// different type), so every function below was unreachable from a unit test
+/// even though its database half has had an in-memory harness all along.
+///
+/// `announce` returns nothing because the call sites all discarded the emit
+/// error, deliberately: a frontend that is not listening must not fail a run
+/// that has already reached its terminal state.
+pub(crate) trait RunLifecycleHost {
+    fn pool(&self) -> &DbPool;
+    fn announce(&self, session: &AssistantSession, run_id: &str, event: AssistantUiEvent);
+}
+
+impl RunLifecycleHost for AssistantDeps {
+    fn pool(&self) -> &DbPool {
+        &self.pool
+    }
+
+    fn announce(&self, session: &AssistantSession, run_id: &str, event: AssistantUiEvent) {
+        let _ = emit_event(&self.app, session, Some(run_id), event);
+    }
+}
 
 /// Reuse the run the caller was handed, or open a new one.
 ///
@@ -34,14 +65,14 @@ use serde_json::Value;
 /// turn's model to the wrong row, so it is rejected as
 /// `RunConnectionMismatch` rather than silently re-pointed.
 pub(crate) async fn resolve_run_id(
-    deps: &AssistantDeps,
+    deps: &impl RunLifecycleHost,
     session: &AssistantSession,
     connection: &ProviderConnection,
     input: &RunTurnInput,
 ) -> Result<String, AssistantEngineError> {
     match &input.run_id {
         Some(id) => {
-            let existing_run = repository::get_run(&deps.pool, id).await?.ok_or_else(|| {
+            let existing_run = repository::get_run(deps.pool(), id).await?.ok_or_else(|| {
                 AssistantEngineError::Persistence(format!("run not found: {}", id))
             })?;
             if existing_run.connection_id != input.connection_id {
@@ -51,7 +82,7 @@ pub(crate) async fn resolve_run_id(
         }
         None => {
             let run = repository::create_run(
-                &deps.pool,
+                deps.pool(),
                 CreateRunParams {
                     session_id: session.id.clone(),
                     status: RunStatus::Queued,
@@ -73,29 +104,24 @@ pub(crate) async fn resolve_run_id(
 /// The tool calls are closed first so the UI never keeps a spinner alive under
 /// a terminal run.
 pub(crate) async fn fail_run(
-    deps: &AssistantDeps,
+    deps: &impl RunLifecycleHost,
     session: &AssistantSession,
     run_id: &str,
     error_msg: &str,
 ) -> Result<(), AssistantEngineError> {
     for tool_call in
-        repository::fail_running_tool_calls_for_run(&deps.pool, run_id, error_msg).await?
+        repository::fail_running_tool_calls_for_run(deps.pool(), run_id, error_msg).await?
     {
-        let _ = emit_event(
-            &deps.app,
+        deps.announce(
             session,
-            Some(run_id),
+            run_id,
             AssistantUiEvent::ToolCallFailed { tool_call },
         );
     }
-    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Failed, Some(error_msg), &[])
-        .await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunFailed { run },
-    );
+    let run =
+        repository::complete_run(deps.pool(), run_id, RunStatus::Failed, Some(error_msg), &[])
+            .await?;
+    deps.announce(session, run_id, AssistantUiEvent::RunFailed { run });
     Ok(())
 }
 
@@ -104,27 +130,22 @@ pub(crate) async fn fail_run(
 /// streamed. (This used to take a `_message_id` it ignored, which is exactly
 /// the shape a silent data-loss bug takes.)
 pub(crate) async fn cancel_run(
-    deps: &AssistantDeps,
+    deps: &impl RunLifecycleHost,
     session: &AssistantSession,
     run_id: &str,
 ) -> Result<(), AssistantEngineError> {
     for tool_call in
-        repository::fail_running_tool_calls_for_run(&deps.pool, run_id, "Run cancelled").await?
+        repository::fail_running_tool_calls_for_run(deps.pool(), run_id, "Run cancelled").await?
     {
-        let _ = emit_event(
-            &deps.app,
+        deps.announce(
             session,
-            Some(run_id),
+            run_id,
             AssistantUiEvent::ToolCallFailed { tool_call },
         );
     }
-    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, None, &[]).await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunCancelled { run },
-    );
+    let run =
+        repository::complete_run(deps.pool(), run_id, RunStatus::Cancelled, None, &[]).await?;
+    deps.announce(session, run_id, AssistantUiEvent::RunCancelled { run });
     Ok(())
 }
 
@@ -144,19 +165,14 @@ pub(crate) fn final_status(notices: &[RunNotice]) -> RunStatus {
 
 /// Close a run that finished on its own terms, carrying its notices.
 pub(crate) async fn complete_run_with_notices(
-    deps: &AssistantDeps,
+    deps: &impl RunLifecycleHost,
     session: &AssistantSession,
     run_id: &str,
     notices: &[RunNotice],
 ) -> Result<(), AssistantEngineError> {
     let run =
-        repository::complete_run(&deps.pool, run_id, final_status(notices), None, notices).await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunCompleted { run },
-    );
+        repository::complete_run(deps.pool(), run_id, final_status(notices), None, notices).await?;
+    deps.announce(session, run_id, AssistantUiEvent::RunCompleted { run });
     Ok(())
 }
 
@@ -168,7 +184,7 @@ pub(crate) async fn complete_run_with_notices(
 /// stream envelope — but from here on the record and the event are the same on
 /// all four, so this is where they converge.
 pub(crate) async fn record_tool_call_started(
-    deps: &AssistantDeps,
+    deps: &impl RunLifecycleHost,
     session: &AssistantSession,
     run_id: &str,
     tool_call_id: &str,
@@ -176,7 +192,7 @@ pub(crate) async fn record_tool_call_started(
     params: Value,
 ) -> Result<(), String> {
     let invocation = repository::create_tool_call(
-        &deps.pool,
+        deps.pool(),
         CreateToolCallParams {
             id: tool_call_id.to_string(),
             run_id: run_id.to_string(),
@@ -188,10 +204,9 @@ pub(crate) async fn record_tool_call_started(
     )
     .await?;
 
-    let _ = emit_event(
-        &deps.app,
+    deps.announce(
         session,
-        Some(run_id),
+        run_id,
         AssistantUiEvent::ToolCallStarted {
             tool_call: invocation,
         },
@@ -276,7 +291,7 @@ fn tool_result_metadata(metadata_source: Option<&str>) -> Option<Value> {
 /// Does nothing beyond a warning when the row cannot be updated under
 /// `MissingToolCall::SkipQuietly`.
 pub(crate) async fn record_tool_call_result(
-    deps: &AssistantDeps,
+    deps: &impl RunLifecycleHost,
     session: &AssistantSession,
     run_id: &str,
     tool_call_id: &str,
@@ -285,39 +300,39 @@ pub(crate) async fn record_tool_call_result(
     on_missing: MissingToolCall,
 ) -> Result<(), String> {
     let (status, result, error) = tool_call_update(&outcome);
-    let updated =
-        match repository::update_tool_call(&deps.pool, tool_call_id, status.clone(), result, error)
-            .await
-        {
-            Ok(tool_call) => tool_call,
-            Err(err) => match on_missing {
-                MissingToolCall::Propagate => return Err(err),
-                MissingToolCall::SkipQuietly => {
-                    tracing::warn!(
-                        tool_call_id = %tool_call_id,
-                        source = ?metadata_source,
-                        error = %err,
-                        "Tool call update failed even after the tool_use was registered"
-                    );
-                    return Ok(());
-                }
-            },
-        };
+    let updated = match repository::update_tool_call(
+        deps.pool(),
+        tool_call_id,
+        status.clone(),
+        result,
+        error,
+    )
+    .await
+    {
+        Ok(tool_call) => tool_call,
+        Err(err) => match on_missing {
+            MissingToolCall::Propagate => return Err(err),
+            MissingToolCall::SkipQuietly => {
+                tracing::warn!(
+                    tool_call_id = %tool_call_id,
+                    source = ?metadata_source,
+                    error = %err,
+                    "Tool call update failed even after the tool_use was registered"
+                );
+                return Ok(());
+            }
+        },
+    };
 
     let started_at = updated.started_at;
     let completed_at = updated.completed_at;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        completion_event(status, updated),
-    );
+    deps.announce(session, run_id, completion_event(status, updated));
 
     let payload = match outcome {
         ToolCallOutcome::Completed { payload } | ToolCallOutcome::Failed { payload, .. } => payload,
     };
     let message = repository::create_message(
-        &deps.pool,
+        deps.pool(),
         CreateMessageParams {
             session_id: session.id.clone(),
             role: MessageRole::Tool,
@@ -332,10 +347,9 @@ pub(crate) async fn record_tool_call_result(
     )
     .await?;
 
-    let _ = emit_event(
-        &deps.app,
+    deps.announce(
         session,
-        Some(run_id),
+        run_id,
         AssistantUiEvent::MessageCreated { message },
     );
 
