@@ -217,6 +217,10 @@ impl AppState {
 /// `mobile_entry_point` attribute only when compiling for mobile.
 /// This is how Rust handles platform-specific code.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 220 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub fn run() {
     // Initialize tracing (structured logging)
     // In development, this outputs to stderr with colors
@@ -452,7 +456,6 @@ pub fn run() {
             commands::workspace::workspace_read_file_base64,
             commands::workspace::workspace_list_dir,
             commands::workspace::workspace_search_artifacts,
-            commands::workspace::workspace_write_file,
             commands::workspace::workspace_delete_path,
             commands::workspace::workspace_copy_path,
             commands::workspace::workspace_move_path,

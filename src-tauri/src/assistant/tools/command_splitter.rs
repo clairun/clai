@@ -44,6 +44,14 @@ impl Segment {
 ///
 /// The returned vector preserves separator order. Empty (whitespace-only)
 /// segments produced by adjacent separators are discarded.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 65 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 366 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub fn split_command(input: &str) -> Vec<Segment> {
     let bytes = input.as_bytes();
     let n = bytes.len();
@@ -507,7 +515,7 @@ pub fn split_command(input: &str) -> Vec<Segment> {
     // command or a control-flow keyword as Opaque. These run other programs
     // (xargs, bash -c, ...) or open scoped scopes that aren't safely
     // allowlistable.
-    for seg in segments.iter_mut() {
+    for seg in &mut segments {
         if let Segment::Simple(s) = seg {
             if head_is_opaque_trigger(s) {
                 *seg = Segment::Opaque(s.clone());

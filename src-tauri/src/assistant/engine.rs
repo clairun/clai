@@ -66,6 +66,14 @@ impl From<String> for AssistantEngineError {
     }
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 87 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 497 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
@@ -1732,14 +1740,13 @@ async fn resolve_request_images(
     use base64::Engine as _;
     let mut out: std::collections::HashMap<String, crate::assistant::types::ResolvedImage> =
         std::collections::HashMap::new();
-    let root = match session
+    let Some(root) = session
         .context
         .workspace_id
         .as_deref()
         .and_then(|id| deps.app.state::<AppState>().workspace_root(id))
-    {
-        Some(root) => root,
-        None => return out,
+    else {
+        return out;
     };
     for message in messages {
         for part in &message.content {
@@ -1791,7 +1798,7 @@ fn strip_unsupported_images(messages: Vec<ProviderInputMessage>) -> Vec<Provider
     messages
         .into_iter()
         .map(|mut message| {
-            for part in message.content.iter_mut() {
+            for part in &mut message.content {
                 if matches!(part, ContentPart::Image { .. }) {
                     *part = ContentPart::Text {
                         text: "[image omitted]".to_string(),
@@ -1803,6 +1810,14 @@ fn strip_unsupported_images(messages: Vec<ProviderInputMessage>) -> Vec<Provider
         .collect()
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 41 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 123 lines against a 100-line budget; split it, do not raise the budget"
+)]
 fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<ProviderInputMessage> {
     let mut out: Vec<ProviderInputMessage> = Vec::new();
 
@@ -2182,6 +2197,10 @@ pub(crate) fn run_produced_no_content(parts: &[ContentPart]) -> bool {
 /// so switching to a vision-capable model after the failure just works.
 /// Errors are logged, not propagated — cleanup must never mask the original
 /// failure.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 33 against a budget of 25"
+)]
 pub(crate) async fn discard_unanswered_run_input(
     deps: &AssistantDeps,
     session: &crate::assistant::types::AssistantSession,

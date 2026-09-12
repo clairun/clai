@@ -315,7 +315,7 @@ fn resolve_shell_cwd(
     let base = requested_cwd.unwrap_or(".");
 
     let cwd = if base == "." {
-        agent_workspace.clone()
+        agent_workspace
     } else {
         // The sandbox binds grants at their configured (lexical) paths, so the
         // cwd stays lexical; containment is still checked on the resolved form.
@@ -1463,9 +1463,8 @@ fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<serde_json::V
             break;
         }
 
-        let link = match element.select(&link_selector).next() {
-            Some(a) => a,
-            None => continue,
+        let Some(link) = element.select(&link_selector).next() else {
+            continue;
         };
 
         let title = link.text().collect::<String>().trim().to_string();

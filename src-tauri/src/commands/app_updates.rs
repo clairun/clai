@@ -411,6 +411,10 @@ pub fn spawn_startup_check(app: AppHandle) {
 /// Re-checks the updater manifest to get a fresh signed package descriptor,
 /// downloads it, caches the bytes, and re-emits the availability event with
 /// `downloaded: true` so the badge grows its "Restart to install" action.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 40 against a budget of 25"
+)]
 async fn download_update_in_background(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;

@@ -35,7 +35,7 @@ fn main() {
         println!("cargo:rerun-if-changed=../.git/packed-refs");
     }
 
-    tauri_build::build()
+    tauri_build::build();
 }
 
 /// `git describe` for HEAD, or the reason it produced nothing usable.

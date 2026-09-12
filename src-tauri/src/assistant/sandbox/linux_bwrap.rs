@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn launch_argv_wraps_with_flatpak_spawn_in_flatpak() {
         let bwrap_args = vec![os("--die-with-parent"), os("--"), os("/bin/sh")];
-        let (program, args) = launch_argv(bwrap_args.clone(), true);
+        let (program, args) = launch_argv(bwrap_args, true);
         assert_eq!(program, "flatpak-spawn");
         // flatpak-spawn --host bwrap <original bwrap args...>
         let rendered: Vec<String> = args
@@ -1195,7 +1195,7 @@ mod tests {
             profile: SandboxProfile {
                 workspace_root: workspace.clone(),
                 path_grants: vec![SandboxPathGrant {
-                    host_path: ancestor.clone(),
+                    host_path: ancestor,
                     access: SandboxPathAccess::ReadOnly,
                 }],
                 network: SandboxNetworkMode::Host,

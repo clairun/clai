@@ -154,7 +154,7 @@ pub fn skills_list(state: State<'_, AppState>) -> Result<Vec<SkillDefinition>, S
         config_manager.get()
     };
 
-    discover_skills(&config)
+    Ok(discover_skills(&config))
 }
 
 #[tauri::command]
@@ -171,7 +171,6 @@ pub fn skills_catalog(state: State<'_, AppState>) -> Result<SkillCatalogResponse
     Ok(SkillCatalogResponse {
         sources: config
             .skill_sources
-            .clone()
             .into_iter()
             .map(SkillSourceResponse::from)
             .collect(),
@@ -217,7 +216,7 @@ pub async fn skill_source_add(
                 .map(str::to_string);
             let mut source =
                 SkillSourceConfig::new_git(name.to_string(), uri.to_string(), reference, None);
-            let local_path = skill_source_cache_root()?.join(&source.id);
+            let local_path = skill_source_cache_root().join(&source.id);
             if let SkillSourceKind::Git {
                 local_path: slot, ..
             } = &mut source.source
@@ -359,8 +358,8 @@ pub async fn skill_source_delete(id: String, state: State<'_, AppState>) -> Resu
     }
 }
 
-fn skill_source_cache_root() -> Result<PathBuf, String> {
-    Ok(crate::paths::clai_cache_skill_sources_root())
+fn skill_source_cache_root() -> PathBuf {
+    crate::paths::clai_cache_skill_sources_root()
 }
 
 pub async fn sync_default_skill_source(state: &AppState) -> Result<(), String> {
@@ -433,7 +432,7 @@ fn sync_git_skill_source(source: &mut SkillSourceConfig) -> Result<(), String> {
         return Ok(());
     };
 
-    let root = skill_source_cache_root()?;
+    let root = skill_source_cache_root();
     let path = local_path
         .as_ref()
         .map(PathBuf::from)
@@ -628,7 +627,7 @@ fn remove_git_cache_if_owned(source: &SkillSourceConfig) -> Result<(), String> {
         return Ok(());
     };
 
-    let root = skill_source_cache_root()?;
+    let root = skill_source_cache_root();
     let path = PathBuf::from(local_path);
     if path.starts_with(&root) && path.exists() {
         fs::remove_dir_all(&path)

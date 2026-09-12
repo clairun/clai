@@ -92,7 +92,7 @@ impl ConfigManager {
     ///
     /// If no automations exist in the config, creates the default one.
     pub fn new() -> Result<Self, ConfigError> {
-        let config_path = Self::get_config_path()?;
+        let config_path = Self::get_config_path();
 
         if let Some(parent) = config_path.parent() {
             fs::create_dir_all(parent).map_err(|e| ConfigError::Io {
@@ -139,8 +139,8 @@ impl ConfigManager {
     }
 
     /// Gets the platform-specific config file path.
-    fn get_config_path() -> Result<PathBuf, ConfigError> {
-        Ok(crate::paths::clai_home().join(CONFIG_FILE_NAME))
+    fn get_config_path() -> PathBuf {
+        crate::paths::clai_home().join(CONFIG_FILE_NAME)
     }
 
     /// Loads config from a file.
@@ -364,8 +364,8 @@ impl ConfigManager {
     }
 }
 
-pub fn discover_skills(config: &ClaiConfig) -> Result<Vec<SkillDefinition>, String> {
-    Ok(discover_skills_with_diagnostics(config).0)
+pub fn discover_skills(config: &ClaiConfig) -> Vec<SkillDefinition> {
+    discover_skills_with_diagnostics(config).0
 }
 
 pub fn discover_skills_with_diagnostics(
@@ -448,9 +448,7 @@ pub fn compose_agent_instructions(
     selected_skill_ids: &[String],
 ) -> String {
     let base = description.to_string();
-    let Ok(skills) = discover_skills(config) else {
-        return base;
-    };
+    let skills = discover_skills(config);
     let selected: Vec<_> = selected_skill_ids
         .iter()
         .filter_map(|skill_id| skills.iter().find(|skill| &skill.id == skill_id))
@@ -688,7 +686,7 @@ mod tests {
         let mut config = ClaiConfig::default();
         config.skill_sources.push(source.clone());
 
-        let skills = discover_skills(&config).unwrap();
+        let skills = discover_skills(&config);
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "Code Review");
@@ -960,7 +958,7 @@ mod tests {
             temp_dir.path().display().to_string(),
         ));
 
-        let skills = discover_skills(&config).unwrap();
+        let skills = discover_skills(&config);
         assert_eq!(skills.len(), 2);
         assert_eq!(skills[0].name, "alpha skill");
         assert_eq!(skills[1].name, "Zeta Skill");

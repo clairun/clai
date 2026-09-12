@@ -400,14 +400,6 @@ pub struct WorkspaceDownloadRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceWriteFileRequest {
-    pub workspace_id: String,
-    pub path: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WorkspaceTaskActionRequest {
     pub workspace_id: String,
     pub task_id: String,
@@ -1423,7 +1415,7 @@ fn concise_agent_description(description: Option<String>) -> Option<String> {
     Some(summary)
 }
 
-async fn list_workspace_agent_responses(
+fn list_workspace_agent_responses(
     state: &AppState,
     workspace_id: &str,
 ) -> Result<(Vec<WorkspaceAgentResponse>, Option<String>), String> {
@@ -1532,11 +1524,11 @@ async fn list_workspace_task_responses(
         .collect())
 }
 
-pub(crate) async fn workspace_agent_summaries(
+pub(crate) fn workspace_agent_summaries(
     state: &AppState,
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceAgentSummary>, String> {
-    let (agents, _) = list_workspace_agent_responses(state, workspace_id).await?;
+    let (agents, _) = list_workspace_agent_responses(state, workspace_id)?;
 
     Ok(agents
         .into_iter()
@@ -1589,7 +1581,7 @@ fn agent_config_from_row(
     }
 }
 
-async fn resolve_workspace_manager_agent(
+fn resolve_workspace_manager_agent(
     state: &AppState,
     workspace_id: &str,
 ) -> Result<Option<AgentConfig>, String> {
@@ -1802,17 +1794,6 @@ fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathB
     Ok(resolved)
 }
 
-fn resolve_workspace_file_target(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
-    let candidate = normalize_path(root.join(relative_path));
-    if !candidate.starts_with(root) {
-        return Err(format!(
-            "Path {} is outside the workspace root",
-            candidate.display()
-        ));
-    }
-    Ok(candidate)
-}
-
 // ===============================================================================
 // Snapshot aggregation — workspace_get_snapshot
 // ===============================================================================
@@ -1891,7 +1872,7 @@ pub async fn workspace_get_snapshot(
     let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
 
     let (assigned_agents, default_workspace_agent_id) =
-        list_workspace_agent_responses(state.inner(), &descriptor.workspace_id).await?;
+        list_workspace_agent_responses(state.inner(), &descriptor.workspace_id)?;
     let tasks =
         list_workspace_task_responses(&workspace_pool, state.inner(), &descriptor.workspace_id)
             .await?;
@@ -2154,10 +2135,9 @@ pub async fn workspace_get_or_create_session(
     let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
     let provider_connection_id = provider_selection.preferred_connection_id;
     let existing = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let workspace_agents =
-        workspace_agent_summaries(state.inner(), &descriptor.workspace_id).await?;
+    let workspace_agents = workspace_agent_summaries(state.inner(), &descriptor.workspace_id)?;
     let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id).await?;
+        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)?;
     let session = if let Some(existing) = existing {
         let desired_context = desired_workspace_context(
             &descriptor,
@@ -2311,31 +2291,6 @@ pub async fn workspace_download_file(
         }
         Err(_) => Err(format!("File not found: {}", request.path)),
     }
-}
-
-#[tauri::command]
-pub async fn workspace_write_file(
-    request: WorkspaceWriteFileRequest,
-    state: State<'_, AppState>,
-) -> Result<String, String> {
-    let descriptor =
-        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
-    let root_path = descriptor
-        .root_path
-        .as_ref()
-        .ok_or_else(|| "This workspace does not expose a filesystem root".to_string())?;
-
-    ensure_agent_workspace_root(root_path)?;
-    let target = resolve_workspace_file_target(root_path, &request.path)?;
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to prepare {}: {}", parent.display(), error))?;
-    }
-
-    fs::write(&target, request.content)
-        .map_err(|error| format!("Failed to write {}: {}", target.display(), error))?;
-
-    Ok(request.path)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2922,7 +2877,7 @@ fn resolve_agent_workspace_root(state: &AppState, workspace_id: &str) -> Result<
 /// Both image-attach commands reduce to: acquire bytes + media type + filename,
 /// then call this. Centralising the disk write and the `ContentPart::Image`
 /// literal keeps `width: None` / `height: None` in sync between paths.
-async fn store_workspace_image(
+fn store_workspace_image(
     root: &Path,
     bytes: &[u8],
     media_type: &str,
@@ -2963,7 +2918,6 @@ pub async fn workspace_store_image(
         &request.media_type,
         request.filename,
     )
-    .await
 }
 
 /// Guess an image MIME type from a file extension.
@@ -3034,9 +2988,12 @@ pub async fn workspace_pick_and_store_image(
         .await
         .map_err(|error| format!("Could not read image file: {}", error))?;
 
-    Ok(Some(
-        store_workspace_image(root_path.as_path(), &bytes, media_type, filename).await?,
-    ))
+    Ok(Some(store_workspace_image(
+        root_path.as_path(),
+        &bytes,
+        media_type,
+        filename,
+    )?))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3081,10 +3038,9 @@ pub async fn workspace_update_session_mcp(
         resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
     let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
     let existing = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let workspace_agents =
-        workspace_agent_summaries(state.inner(), &descriptor.workspace_id).await?;
+    let workspace_agents = workspace_agent_summaries(state.inner(), &descriptor.workspace_id)?;
     let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id).await?;
+        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)?;
 
     let session = if let Some(session) = existing {
         session
@@ -3207,7 +3163,7 @@ pub async fn workspace_list_agents(
     state: State<'_, AppState>,
 ) -> Result<Vec<WorkspaceAgentResponse>, String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let (agents, _) = list_workspace_agent_responses(state.inner(), &workspace_id).await?;
+    let (agents, _) = list_workspace_agent_responses(state.inner(), &workspace_id)?;
     Ok(agents)
 }
 

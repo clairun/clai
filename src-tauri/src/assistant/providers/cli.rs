@@ -400,25 +400,22 @@ async fn run_cli_json_command_with_timeout(
     };
 
     let exchange = tokio::time::timeout(timeout, exchange).await;
-    let (write_error, status, stdout, stderr) = match exchange {
-        Ok(outcome) => outcome,
-        Err(_) => {
-            crate::assistant::sandbox::runner::kill_process_tree(child_pid);
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(
-                crate::assistant::sandbox::runner::POST_KILL_REAP_TIMEOUT,
-                child.wait(),
-            )
-            .await;
-            write_abort.abort();
-            stdout_abort.abort();
-            stderr_abort.abort();
-            return Err(ProviderError::RequestFailed(format!(
-                "{} summarizer timed out after {}s",
-                runtime.display_name(),
-                timeout.as_secs()
-            )));
-        }
+    let Ok((write_error, status, stdout, stderr)) = exchange else {
+        crate::assistant::sandbox::runner::kill_process_tree(child_pid);
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(
+            crate::assistant::sandbox::runner::POST_KILL_REAP_TIMEOUT,
+            child.wait(),
+        )
+        .await;
+        write_abort.abort();
+        stdout_abort.abort();
+        stderr_abort.abort();
+        return Err(ProviderError::RequestFailed(format!(
+            "{} summarizer timed out after {}s",
+            runtime.display_name(),
+            timeout.as_secs()
+        )));
     };
 
     let status = status.map_err(|e| ProviderError::RequestFailed(e.to_string()))?;

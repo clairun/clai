@@ -47,6 +47,10 @@ pub struct McpCatalogEntry {
     pub notes: Option<String>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 122 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub fn catalog_entries() -> Vec<McpCatalogEntry> {
     vec![
         McpCatalogEntry {

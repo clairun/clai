@@ -120,7 +120,7 @@ pub async fn execute(
         "workspace_listAgents" => {
             let params: ListWorkspaceAgentsParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_listAgents params: {}", e))?;
-            list_agents(deps, context, params).await
+            list_agents(deps, context, params)
         }
         "workspace_assignTask" => {
             let params: AssignWorkspaceTaskParams = serde_json::from_value(params)
@@ -136,7 +136,7 @@ pub async fn execute(
     }
 }
 
-async fn list_agents(
+fn list_agents(
     deps: &AssistantDeps,
     context: &ToolExecutionContext,
     params: ListWorkspaceAgentsParams,
@@ -172,6 +172,10 @@ async fn list_agents(
     }))
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 145 lines against a 100-line budget; split it, do not raise the budget"
+)]
 async fn assign_task(
     deps: &AssistantDeps,
     context: &ToolExecutionContext,
@@ -237,7 +241,7 @@ async fn assign_task(
     )
     .await?;
 
-    let connection = match resolve_first_connection(deps, &target_config).await {
+    let connection = match resolve_first_connection(deps, &target_config) {
         Ok(connection) => connection,
         Err(message) => {
             update_task_status(
@@ -491,7 +495,7 @@ fn task_session_context(
     }
 }
 
-async fn resolve_first_connection(
+fn resolve_first_connection(
     deps: &AssistantDeps,
     config: &AgentConfig,
 ) -> Result<ProviderConnection, String> {
@@ -766,14 +770,11 @@ async fn load_task(
     .map_err(|e| format!("Failed to load workspace task: {}", e))?
     .ok_or_else(|| format!("Workspace task not found: {}", task_id))?;
 
-    map_task_row(&row, workspace_id)
+    Ok(map_task_row(&row, workspace_id))
 }
 
-fn map_task_row(
-    row: &sqlx::sqlite::SqliteRow,
-    workspace_id: &str,
-) -> Result<WorkspaceTaskRow, String> {
-    Ok(WorkspaceTaskRow {
+fn map_task_row(row: &sqlx::sqlite::SqliteRow, workspace_id: &str) -> WorkspaceTaskRow {
+    WorkspaceTaskRow {
         id: row.get("id"),
         workspace_id: workspace_id.to_string(),
         created_by_workspace_agent_id: row.get("created_by_workspace_agent_id"),
@@ -790,7 +791,7 @@ fn map_task_row(
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         completed_at: row.get("completed_at"),
-    })
+    }
 }
 
 fn task_to_response(task: WorkspaceTaskRow) -> Result<WorkspaceTaskResponse, String> {
@@ -1048,7 +1049,7 @@ mod tests {
     #[test]
     fn concise_agent_description_truncates_long_line() {
         let long = "x".repeat(300);
-        let result = concise_agent_description(Some(long.clone()));
+        let result = concise_agent_description(Some(long));
         let expected = "x".repeat(240) + "...";
         assert_eq!(result, Some(expected));
     }

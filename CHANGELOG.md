@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Code quality
+
+- **The Rust crate now has a lint policy.** `Cargo.toml` carries an explicit
+  `[lints]` block and `clippy.toml` states the complexity budgets (100 lines,
+  cognitive complexity 25), so the thresholds are reviewable instead of
+  inherited silently. CI lints `--all-targets`, which brings test code
+  under the same rules for the first time.
+- **Signatures that lied have been corrected.** Eight helpers were `async`
+  with nothing to await, and five returned a `Result`/`Option` that was always
+  `Ok`/`Some` — one of which had grown a fallback branch that could never run
+  (`compose_agent_instructions`). Callers no longer pay for an unreachable
+  error path or a pointless future.
+- **The unused `workspace_write_file` command is gone**, along with its
+  request type, its path resolver, and the `writeWorkspaceFile` wrapper in the
+  frontend: nothing in the app had called it since the artifact panel landed.
+  A new `ipc_surface` test now fails the build when the two name lists
+  disagree: a registered Tauri command that no `invoke()` names, or an
+  `invoke()` naming a command that does not exist — the second case used to
+  reach users as a silent runtime `Command not found`. It does not catch a
+  wrapper that still invokes but has no importers; that is unused-export
+  analysis and belongs on the TypeScript side.
+- **`tower` is no longer a direct dependency**; it was declared but never
+  named in the code.
+
 ### Codex
 
 - **Codex now uses `codex app-server` by default.** This enables live mid-turn

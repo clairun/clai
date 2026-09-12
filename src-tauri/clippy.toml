@@ -1,0 +1,9 @@
+# Complexity budgets for `clippy::too_many_lines` and
+# `clippy::cognitive_complexity` (see `[lints.clippy]` in Cargo.toml).
+#
+# Both are clippy's defaults, restated here so the numbers are reviewable and
+# can be tightened deliberately rather than inherited silently. A function past
+# either budget is not a style problem: it is a function no reviewer reads in
+# one pass, which is where the bugs live.
+too-many-lines-threshold = 100
+cognitive-complexity-threshold = 25

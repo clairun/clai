@@ -550,6 +550,10 @@ impl McpClientManager {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "lint debt: 105 lines against a 100-line budget; split it, do not raise the budget"
+    )]
     async fn connect_server(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
         match &config.transport {
             crate::config::McpServerTransport::Http { url, headers } => {

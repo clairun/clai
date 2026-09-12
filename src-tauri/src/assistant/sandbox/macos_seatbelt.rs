@@ -808,7 +808,7 @@ mod tests {
 
         let mut command = sample_command(&workspace);
         command.profile.workspace_root = workspace.clone();
-        command.cwd = workspace.clone();
+        command.cwd = workspace;
         command.profile.scratch_tmp = Some(mine.clone());
         command.profile.env = SandboxEnv::filtered_from_iter(
             [("PATH", "/usr/bin:/bin")],

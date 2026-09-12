@@ -60,7 +60,7 @@ pub async fn execute_tool(
         "create_vega_chart" => {
             let params: super::vega_chart::CreateVegaChartParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid create_vega_chart params: {}", e))?;
-            super::vega_chart::execute(context, params).await
+            super::vega_chart::execute(context, params)
         }
         _ => execute_external_mcp_tool(deps, context, unqualified, params).await,
     }

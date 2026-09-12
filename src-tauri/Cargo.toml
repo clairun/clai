@@ -14,6 +14,54 @@ edition = "2021"
 name = "clai_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Lint policy. CI runs `cargo clippy --all-targets -- -D warnings`, so every
+# lint listed here fails the build whatever its level; `warn` is the default
+# here so that a local `cargo clippy` reports the whole set in one pass instead
+# of stopping at the first. `deny` is reserved for what must never be merged at
+# all. Keep this list small and justified — a lint whose findings we would only
+# silence does not belong here.
+[lints.rust]
+# A lifetime nobody names is usually the residue of a signature that changed.
+unused_lifetimes = "warn"
+
+[lints.clippy]
+# Complexity. Thresholds live in `clippy.toml`.
+#
+# Existing offenders are marked in place. `too_many_lines` debt uses
+# `#[expect(...)]`, so splitting the function makes clippy demand the marker be
+# removed — the debt cannot rot silently. `cognitive_complexity` debt uses
+# `#[allow(...)]` instead, deliberately: it is a clippy *nursery* lint, its
+# score is a heuristic that shifts between clippy releases, and CI installs
+# whatever stable is current. An `#[expect]` there would turn a toolchain bump
+# into red CI on a PR that changed nothing.
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+# Zero findings today; kept as a ratchet. More than three bools in a signature
+# is a call nobody can read at the call site.
+fn_params_excessive_bools = "warn"
+
+# Signatures that lie: `async` with nothing to await makes a caller pay for a
+# future, and a `Result`/`Option` that is always `Ok`/`Some` makes every caller
+# write a branch that can never run.
+unused_async = "warn"
+unnecessary_wraps = "warn"
+
+# Readability of control flow. `match_same_arms` is deliberately absent: on an
+# exhaustive enum match it wants a named variant folded into `_`, which is
+# exactly what stops a newly added variant from being flagged.
+manual_let_else = "warn"
+explicit_iter_loop = "warn"
+semicolon_if_nothing_returned = "warn"
+
+# `redundant_clone` is deliberately absent: it is nursery, it is the nursery
+# lint most known for false positives, and under CI's `-D warnings` on a
+# floating stable toolchain that is a trap. Its findings were fixed here
+# anyway — the clones were real.
+
+# Debugging leftovers and unfinished code must not reach `main`.
+dbg_macro = "deny"
+todo = "deny"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -107,7 +155,6 @@ jsonschema = "0.33"
 
 # HTTP server for MCP (AI CLIs connect via HTTP)
 axum = "0.8"
-tower = "0.5"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # SQLite database for workspace state persistence

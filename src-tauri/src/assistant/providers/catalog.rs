@@ -141,6 +141,10 @@ fn hosted_openai(
 }
 
 /// The bundled provider catalog (v1). See the provider-catalog design doc §5.
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 152 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
     let mut entries = vec![
         // --- Hosted, OpenAI-compatible ---

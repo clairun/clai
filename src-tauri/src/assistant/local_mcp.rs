@@ -524,14 +524,14 @@ fn tool_definition_to_mcp(definition: ToolDefinition) -> RmcpTool {
     let title = definition.name.clone();
     let mut tool = RmcpTool::new(definition.name, definition.description, input_schema);
     tool.title = Some(title);
-    tool.annotations = tool_annotations();
+    tool.annotations = Some(tool_annotations());
     tool
 }
 
-fn tool_annotations() -> Option<ToolAnnotations> {
+fn tool_annotations() -> ToolAnnotations {
     let mut annotations = ToolAnnotations::default();
     annotations.open_world_hint = Some(true);
-    Some(annotations)
+    annotations
 }
 
 fn bearer_token(context: &RequestContext<RoleServer>) -> Option<String> {

@@ -95,6 +95,10 @@ pub async fn provider_catalog_list() -> Result<Vec<ProviderCatalogEntry>, String
 /// the call) and reuses the adapter's `list_models`. On failure the caller
 /// falls back to the catalog entry's `curated_models`.
 #[tauri::command]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 106 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub async fn provider_catalog_probe_models(
     request: ProbeModelsRequest,
     state: State<'_, AppState>,
@@ -505,6 +509,14 @@ pub async fn provider_connection_list_models(
 }
 
 #[tauri::command]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 64 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 148 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub async fn provider_connection_test(
     id: String,
     state: State<'_, AppState>,
