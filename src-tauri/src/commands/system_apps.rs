@@ -400,11 +400,8 @@ mod tests {
         std::fs::write(&file, "copied").unwrap();
         let missing = source_dir.path().join("missing.md");
 
-        let err = import_picked_paths(
-            vec![file.clone(), missing.clone()],
-            dest_dir.path().to_path_buf(),
-        )
-        .unwrap_err();
+        let err =
+            import_picked_paths(vec![file, missing], dest_dir.path().to_path_buf()).unwrap_err();
 
         assert!(err.contains("Failed to stat"));
         assert_eq!(

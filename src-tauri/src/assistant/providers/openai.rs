@@ -268,6 +268,10 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
 
 /// Build a single OpenAI message from a ProviderInputMessage.
 /// Handles text, tool_use (assistant with tool_calls), and tool_result (role: tool).
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 125 lines against a 100-line budget; split it, do not raise the budget"
+)]
 fn build_message(
     msg: &crate::assistant::types::ProviderInputMessage,
     images: &HashMap<String, ResolvedImage>,
@@ -540,6 +544,10 @@ fn find_sse_frame_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Parse a single SSE frame into ProviderEvent values.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 27 against a budget of 25"
+)]
 fn parse_sse_frame(
     frame: &str,
     is_first: &mut bool,

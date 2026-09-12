@@ -244,6 +244,14 @@ impl CliProviderRuntime {
 /// `input.connection_id` and rejected the turn if either was missing. Both
 /// are handed over as-is: the session is taken by value because this path
 /// rewrites its CLI session id in place, and neither is loaded again here.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 79 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 283 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
@@ -265,21 +273,19 @@ pub async fn run_session_turn(
         return Ok(());
     }
 
-    let provider_runtime =
-        match CliProviderRuntime::for_provider_id(connection.protocol_id.as_str()) {
-            Some(runtime) => runtime,
-            None => {
-                let message = format!(
-                    "CLI provider '{}' is registered but not implemented yet",
-                    connection.protocol_id
-                );
-                fail_run(deps, &session, &run_id, &message).await?;
-                discard_if_unanswered(deps, &session, &run_id, &input, &None).await;
-                return Err(AssistantEngineError::Provider(
-                    crate::assistant::providers::types::ProviderError::RequestFailed(message),
-                ));
-            }
-        };
+    let Some(provider_runtime) =
+        CliProviderRuntime::for_provider_id(connection.protocol_id.as_str())
+    else {
+        let message = format!(
+            "CLI provider '{}' is registered but not implemented yet",
+            connection.protocol_id
+        );
+        fail_run(deps, &session, &run_id, &message).await?;
+        discard_if_unanswered(deps, &session, &run_id, &input, &None).await;
+        return Err(AssistantEngineError::Provider(
+            crate::assistant::providers::types::ProviderError::RequestFailed(message),
+        ));
+    };
     // A CLI session id is provider-specific (Claude generates its own UUID;
     // Codex returns a server-side thread id), so an id created by one CLI is
     // meaningless to another — resuming it fails (e.g. Codex: "no rollout
@@ -968,6 +974,10 @@ fn build_midrun_payload(user_lines: String, turn_active: bool) -> MidRunPayload 
 /// fails (rare DB error) the followup path may re-deliver the same text —
 /// a duplicate the model shrugs off. The reverse order could mark a message
 /// delivered that never reached the process, silently losing it.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 49 against a budget of 25"
+)]
 async fn try_deliver_queued_to_claude(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -1078,6 +1088,14 @@ async fn try_deliver_queued_to_claude(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 54 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 265 lines against a 100-line budget; split it, do not raise the budget"
+)]
 async fn run_claude_turn(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -1100,7 +1118,7 @@ async fn run_claude_turn(
         is_new_session,
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
+    let system_prompt = system_prompt_text(&deps.app, session, trigger);
     let mut assistant_message = ensure_assistant_message_slot(
         deps,
         session,
@@ -1435,6 +1453,10 @@ async fn run_claude_turn(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 165 lines against a 100-line budget; split it, do not raise the budget"
+)]
 async fn run_codex_turn(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
@@ -1457,7 +1479,7 @@ async fn run_codex_turn(
         existing_thread_id.is_none(),
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
+    let system_prompt = system_prompt_text(&deps.app, session, trigger);
     let developer_instructions = codex_developer_instructions(&system_prompt);
     let prompt_chars = prompt.chars().count();
     trace_codex_input_sizes(run_id, "exec", &developer_instructions, &prompt);
@@ -1637,6 +1659,14 @@ async fn run_codex_turn(
 /// Reuses the shared [`CodexStreamState`] + tool-call helpers by normalizing
 /// app-server items into the exec item shape.
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 41 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 244 lines against a 100-line budget; split it, do not raise the budget"
+)]
 async fn run_codex_turn_app_server(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
@@ -1661,7 +1691,7 @@ async fn run_codex_turn_app_server(
         existing_thread_id.is_none(),
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
+    let system_prompt = system_prompt_text(&deps.app, session, trigger);
     let developer_instructions = codex_developer_instructions(&system_prompt);
     let prompt_chars = prompt.chars().count();
     trace_codex_input_sizes(run_id, "app-server", &developer_instructions, &prompt);
@@ -2216,6 +2246,10 @@ async fn split_codex_assistant_message(
 /// Resolve a `turn/steer` response: on accept, mark the carried messages
 /// delivered and notify the UI; on reject (turn ended / id mismatch) leave them
 /// queued so the followup run delivers them. Always clears their in-flight mark.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 26 against a budget of 25"
+)]
 async fn resolve_codex_steer_response(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -2356,6 +2390,10 @@ fn codex_input_too_large_message(actual_chars: usize) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 152 lines against a 100-line budget; split it, do not raise the budget"
+)]
 async fn run_opencode_turn(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
@@ -2378,7 +2416,7 @@ async fn run_opencode_turn(
         existing_session_id.is_none(),
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger).await;
+    let system_prompt = system_prompt_text(&deps.app, session, trigger);
     let prompt = opencode_turn_prompt(&system_prompt, &prompt);
 
     let assistant_message = ensure_assistant_message_slot(
@@ -2688,7 +2726,7 @@ async fn resolve_codex_image_paths(
         match crate::assistant::image_store::resolve_store_path(&root, &rel) {
             Some(abs) => out.push(abs),
             None => {
-                tracing::warn!(path = %rel, "Codex image: non-store/escaping/missing path rejected; skipping")
+                tracing::warn!(path = %rel, "Codex image: non-store/escaping/missing path rejected; skipping");
             }
         }
     }
@@ -3195,7 +3233,7 @@ fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
     prompt
 }
 
-async fn system_prompt_text(
+fn system_prompt_text(
     app: &tauri::AppHandle,
     session: &AssistantSession,
     trigger: &crate::assistant::types::RunTrigger,
@@ -4087,6 +4125,10 @@ async fn handle_claude_event(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 193 lines against a 100-line budget; split it, do not raise the budget"
+)]
 async fn handle_stream_event(
     deps: &AssistantDeps,
     session: &AssistantSession,

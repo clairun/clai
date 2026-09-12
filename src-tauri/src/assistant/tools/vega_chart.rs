@@ -66,7 +66,7 @@ fn default_display() -> bool {
     true
 }
 
-pub async fn execute(
+pub fn execute(
     context: &ToolExecutionContext,
     params: CreateVegaChartParams,
 ) -> Result<serde_json::Value, String> {
@@ -850,7 +850,6 @@ mod tests {
                 path: "reports/q3/revenue-by-region.vl.json".to_string(),
             },
         )
-        .await
         .unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(result["action"], "written");
@@ -893,7 +892,6 @@ mod tests {
                 path: "charts/existing.vl.json".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(read_error.contains("outside the workspace"), "{read_error}");
 
@@ -906,7 +904,6 @@ mod tests {
                 path: "charts/new.vl.json".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(
             write_error.contains("outside the workspace"),
@@ -930,7 +927,6 @@ mod tests {
                 path: "reports/linked.vl.json".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(
             target_error.contains("must not be a symlink"),
@@ -955,7 +951,6 @@ mod tests {
                 path: "reports/latency.vl.json".to_string(),
             },
         )
-        .await
         .unwrap();
         assert_eq!(result["path"], "reports/latency.vl.json");
         assert_eq!(result["display"], false);
@@ -977,7 +972,6 @@ mod tests {
                 path: "reports/broken.vl.json".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(error.contains("/mark"), "{error}");
         assert!(!dir.path().join("reports").exists());
@@ -1001,7 +995,6 @@ mod tests {
                 path: "charts/existing.vl.json".to_string(),
             },
         )
-        .await
         .unwrap();
         assert_eq!(result["action"], "validated");
         assert_eq!(result["path"], "charts/existing.vl.json");
@@ -1016,7 +1009,6 @@ mod tests {
                 path: "charts/missing.vl.json".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(error.contains("charts/missing.vl.json"), "{error}");
     }
@@ -1048,7 +1040,6 @@ mod tests {
                 path: "analysis/big.vl.json".to_string(),
             },
         )
-        .await
         .unwrap();
         assert_eq!(result["ok"], true);
         let warning = result["warnings"][0].as_str().unwrap();
@@ -1067,7 +1058,6 @@ mod tests {
                 path: "analysis/chart.vl.json".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(
             error.contains("not tied to an automation workspace"),
@@ -1085,7 +1075,6 @@ mod tests {
                 path: "analysis/chart.vl.json".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(error.contains("`title`"), "{error}");
 
@@ -1098,7 +1087,6 @@ mod tests {
                 path: "   ".to_string(),
             },
         )
-        .await
         .unwrap_err();
         assert!(error.contains("`path` must not be empty"), "{error}");
     }

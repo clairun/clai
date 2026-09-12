@@ -44,6 +44,14 @@ pub(crate) fn live_agent_description(
 /// a skill or editing a description is immediately visible to the model.
 /// Pass `None` only for sessions that have no associated agent (e.g. tests,
 /// or sessions whose underlying agent has been deleted).
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 40 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 312 lines against a 100-line budget; split it, do not raise the budget"
+)]
 pub(crate) fn build_system_prompt(
     context: &crate::assistant::types::SessionContext,
     agent_description: Option<&str>,
@@ -1032,9 +1040,8 @@ mod tests {
         // Unconditional: no tools, no memory, plain user message.
         let context = SessionContext::default();
         let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
-        let text = match &message.content[0] {
-            ContentPart::Text { text } => text,
-            _ => panic!("expected text"),
+        let ContentPart::Text { text } = &message.content[0] else {
+            panic!("expected text")
         };
 
         assert!(text.contains("## Response Style"));

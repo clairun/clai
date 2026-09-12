@@ -167,6 +167,14 @@ pub fn start_agent_runner(app_handle: AppHandle, scheduler: SharedScheduler) {
 /// 2. Gets the next ready agent (if any)
 /// 3. Executes the agent
 /// 4. Marks it complete
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 107 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 143 lines against a 100-line budget; split it, do not raise the budget"
+)]
 async fn run_next_agent(
     app_handle: &AppHandle,
     scheduler: &SharedScheduler,
@@ -204,12 +212,9 @@ async fn run_next_agent(
         sched.next_ready()
     };
 
-    let instance_id = match instance_id {
-        Some(id) => id,
-        None => {
-            tracing::debug!("No agents ready");
-            return Ok(());
-        }
+    let Some(instance_id) = instance_id else {
+        tracing::debug!("No agents ready");
+        return Ok(());
     };
 
     tracing::info!(instance_id = %instance_id, "Running agent");
@@ -496,19 +501,15 @@ async fn ensure_workspace_manager_session(
     let workspace_agents = if agent_config.workspace_id.is_empty() {
         Vec::new()
     } else {
-        crate::commands::workspace::workspace_agent_summaries(
-            &state,
-            &agent_config.workspace_id,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                workspace_id = %agent_config.workspace_id,
-                "Failed to load workspace agent summaries for scheduled run: {} — manager tools will be unavailable for this run",
-                e
-            );
-            Vec::new()
-        })
+        crate::commands::workspace::workspace_agent_summaries(&state, &agent_config.workspace_id)
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    workspace_id = %agent_config.workspace_id,
+                    "Failed to load workspace agent summaries for scheduled run: {} — manager tools will be unavailable for this run",
+                    e
+                );
+                Vec::new()
+            })
     };
     let desired_context = SessionContext {
         space_id: session_space_id.clone(),
@@ -657,6 +658,10 @@ fn resolve_agent_connections(
     Ok(resolved)
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 38 against a budget of 25"
+)]
 async fn run_scheduled_agent_with_fallback(
     app_handle: &AppHandle,
     pool: &DbPool,

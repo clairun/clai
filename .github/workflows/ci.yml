@@ -63,7 +63,10 @@ jobs:
 
       - name: Rust clippy
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        # --all-targets brings tests, benches and examples under the lint
+        # policy; a plain `cargo clippy` lints only the lib, the bin and
+        # build.rs. README already tells contributors to run it this way.
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Rust fmt check
         working-directory: src-tauri
@@ -116,7 +119,10 @@ jobs:
 
       - name: Rust clippy
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        # --all-targets brings tests, benches and examples under the lint
+        # policy; a plain `cargo clippy` lints only the lib, the bin and
+        # build.rs. README already tells contributors to run it this way.
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Rust tests
         working-directory: src-tauri

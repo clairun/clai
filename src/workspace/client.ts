@@ -114,16 +114,6 @@ export async function pickAndStoreWorkspaceImage(
   return invoke('workspace_pick_and_store_image', { workspaceId });
 }
 
-export async function writeWorkspaceFile(
-  workspaceId: string,
-  path: string,
-  content: string
-): Promise<string> {
-  return invoke('workspace_write_file', {
-    request: { workspaceId, path, content },
-  });
-}
-
 /** Delete an artifact file or folder (recursive) from the workspace. Backend
  *  refuses the root and protected dirs (.clai/.git/target/…). */
 export async function deleteWorkspacePath(workspaceId: string, path: string): Promise<void> {

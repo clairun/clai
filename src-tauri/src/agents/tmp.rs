@@ -14,7 +14,7 @@ pub fn clear_tmp_dir() {
             match std::fs::remove_dir_all(&tmp_dir) {
                 Ok(_) => tracing::debug!(path = %tmp_dir.display(), "Cleared clai tmp directory"),
                 Err(e) => {
-                    tracing::warn!(error = %e, path = %tmp_dir.display(), "Failed to clear clai tmp directory")
+                    tracing::warn!(error = %e, path = %tmp_dir.display(), "Failed to clear clai tmp directory");
                 }
             }
         }

@@ -199,9 +199,8 @@ fn cell_to_json(row: &SqliteRow, i: usize) -> serde_json::Value {
     // Inspect the value's *runtime* type, then drop the borrow before
     // decoding so the second `try_get` is a clean independent borrow.
     let type_name = {
-        let raw = match row.try_get_raw(i) {
-            Ok(raw) => raw,
-            Err(_) => return Value::Null,
+        let Ok(raw) = row.try_get_raw(i) else {
+            return Value::Null;
         };
         if raw.is_null() {
             return Value::Null;

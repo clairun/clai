@@ -482,6 +482,14 @@ fn find_sse_frame_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
         })
 }
 
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 42 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 149 lines against a 100-line budget; split it, do not raise the budget"
+)]
 fn parse_sse_frame(
     frame: &str,
     emitted_start: &mut bool,
