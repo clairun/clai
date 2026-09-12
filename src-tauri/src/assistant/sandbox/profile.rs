@@ -134,12 +134,6 @@ impl SandboxEnv {
     }
 }
 
-/// Name of the sandbox scratch container, a dot-prefixed sibling of the
-/// workspace roots inside the masked workspace container. Declared here rather
-/// than in [`super::scratch`] because the workspace index must recognise the
-/// directory on every platform.
-pub const SCRATCH_DIR_NAME: &str = ".scratch";
-
 /// The directory that holds the agent's workspace — i.e. the workspace root's
 /// parent, which is the container for *all* workspaces (e.g.
 /// `~/.clai/workspaces`). We mask this container so an agent can't reach

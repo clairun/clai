@@ -95,8 +95,8 @@ use std::time::{Duration, SystemTime};
 
 /// Scratch container, as a child of the workspace container. Dot-prefixed so it
 /// is visually distinct from the workspace-id directories beside it, and so the
-/// workspace index skips it. Shared with the index via `profile`.
-use super::profile::SCRATCH_DIR_NAME as SCRATCH_DIR;
+/// workspace index skips it along with every other dot-prefixed sibling.
+const SCRATCH_DIR: &str = ".scratch";
 /// Holds directories renamed out of use, awaiting unlink.
 const TRASH_DIR: &str = ".trash";
 
