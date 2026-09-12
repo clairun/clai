@@ -1,10 +1,12 @@
 //! Run lifecycle helpers shared by the API engine and the CLI local agent.
 //!
-//! Both `engine::run_session_turn` and `local_agent::run_session_turn` implement
-//! the same contract — `(AssistantDeps, RunTurnInput) -> Result<(),
-//! AssistantEngineError>` while emitting one `AssistantUiEvent` stream — so the
-//! bookkeeping at every edge of a run — open it, and close it as failed,
-//! cancelled or complete — has to behave identically on both paths. All four
+//! Both `engine::run_session_turn` and `local_agent::run_session_turn` drive one
+//! turn to a terminal run state, emitting one `AssistantUiEvent` stream and
+//! returning `Result<(), AssistantEngineError>`. `engine` is the only entry
+//! point: it loads the session and the connection, and hands both to
+//! `local_agent` when the protocol is a CLI provider. So the bookkeeping at
+//! every edge of a run — open it, and close it as failed, cancelled or
+//! complete — has to behave identically on both paths. All four
 //! edges used to be written twice: `fail_run` and `cancel_run` existed
 //! character-for-character in each file, `resolve_run_id` existed as a function
 //! in `local_agent` and as an inline `match` in `engine`, and the completion
