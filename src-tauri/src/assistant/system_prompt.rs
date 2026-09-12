@@ -469,9 +469,12 @@ fn push_shell_capability_lines(
         )
     } else {
         // No sandbox implementation on this platform (see
-        // `assistant::sandbox::unsupported`), so the command profile — grants
-        // included — is not enforced. Say so instead of implying it is.
-        "host shell — no sandbox on this platform, so the path grants are NOT enforced by the OS: the boundary below is a rule you have to keep yourself".to_string()
+        // `assistant::sandbox::unsupported`), so the path grants are advisory
+        // there. The allow/blocklists are a different mechanism — CLAI parses
+        // every command against them in `shell_policy` before spawning
+        // anything, on every platform — so do not let the warning imply that
+        // nothing is enforced.
+        "host shell — no OS sandbox on this platform, so the path grants are NOT enforced by the kernel and the boundary below is a rule you keep yourself. Your allowed and blocked command prefixes are still enforced by CLAI before any command runs".to_string()
     };
     prompt.push_str(&format!("- Shell sandbox: {}\n", sandbox_status));
     if cfg!(target_os = "linux")
@@ -516,7 +519,7 @@ fn push_shell_capability_lines(
 fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool) {
     prompt.push_str(
         "\n## Filesystem boundary\n\
-         The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms where the shell sandbox is not implemented yet, `bash_exec` is labeled as a host shell and this paragraph remains the authorization boundary.\n\
+         The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms with no sandbox implementation, `bash_exec` is labeled as a host shell: the command policy still applies, but nothing outside this paragraph stops you from reaching an ungranted path, so treat these rules as the boundary itself.\n\
          - Do not `cd`, redirect to, or pass paths outside the listed grants — not even via subshells, heredocs, scripts, or absolute paths.\n\
          - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
          - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
