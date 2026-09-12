@@ -1,131 +1,15 @@
 //! Tests for `src/assistant/repository.rs`
 //!
-//! These tests target the CRUD operations using an in-memory SQLite database.
-//! They do not depend on Tauri state or the full app runtime.
-//!
-//! To integrate: copy to `src/assistant/repository_tests.rs` and add
-//! `#[cfg(test)] mod repository_tests;` to `src/assistant/mod.rs`.
+//! These tests target the CRUD operations against a real workspace database:
+//! a tempdir `data.sqlite` with the embedded `migrations/workspace/` files
+//! applied, so the schema — including the foreign keys and cascades — is the
+//! one production runs. They do not depend on Tauri state or the full app
+//! runtime.
 
 use super::repository::*;
 use super::types::*;
 use crate::config::ExecutionCapabilityConfig;
-use crate::db::DbPool;
-use sqlx::sqlite::SqlitePoolOptions;
-
-async fn setup_test_pool() -> DbPool {
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .expect("Failed to create in-memory SQLite pool");
-
-    sqlx::query(
-        r#"
-        CREATE TABLE assistant_sessions (
-            id TEXT PRIMARY KEY,
-            tab_id TEXT,
-            kind TEXT NOT NULL,
-            title TEXT,
-            context_json TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
-        CREATE TABLE assistant_session_links (
-            child_session_id TEXT PRIMARY KEY,
-            parent_session_id TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK (kind IN ('rotation')),
-            created_at INTEGER NOT NULL
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
-        CREATE TABLE assistant_messages (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content_json TEXT NOT NULL,
-            provider_metadata_json TEXT,
-            created_at INTEGER NOT NULL
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
-        CREATE TABLE assistant_runs (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            status TEXT NOT NULL,
-            trigger TEXT NOT NULL,
-            connection_id TEXT NOT NULL,
-            protocol_id TEXT NOT NULL,
-            model_id TEXT NOT NULL,
-            error TEXT,
-            notices_json TEXT,
-            started_at INTEGER NOT NULL,
-            completed_at INTEGER
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
-        CREATE TABLE assistant_message_queue (
-            message_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            connection_id TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('pending', 'delivered')),
-            queued_at INTEGER NOT NULL,
-            delivered_run_id TEXT,
-            delivered_at INTEGER
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
-        CREATE TABLE assistant_tool_calls (
-            id TEXT PRIMARY KEY,
-            run_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            tool_name TEXT NOT NULL,
-            params_json TEXT NOT NULL,
-            status TEXT NOT NULL,
-            result_json TEXT,
-            error TEXT,
-            started_at INTEGER NOT NULL,
-            completed_at INTEGER
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    pool
-}
+use crate::db::test_support::{insert_task, workspace_pool};
 
 fn sample_context() -> SessionContext {
     SessionContext {
@@ -151,7 +35,7 @@ fn sample_context() -> SessionContext {
 
 #[tokio::test]
 async fn test_create_and_get_session() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -178,14 +62,14 @@ async fn test_create_and_get_session() {
 
 #[tokio::test]
 async fn test_get_session_missing_returns_none() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
     let result = get_session(&pool, "no-such-id").await.unwrap();
     assert!(result.is_none());
 }
 
 #[tokio::test]
 async fn test_list_sessions_ordered_by_updated_at_desc() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let s1 = create_session(
         &pool,
@@ -219,13 +103,7 @@ async fn test_list_sessions_ordered_by_updated_at_desc() {
 
 #[tokio::test]
 async fn test_list_non_task_sessions_excludes_task_sessions() {
-    let pool = setup_test_pool().await;
-    // Minimal stub of the workspace_tasks table the anti-join references.
-    sqlx::query("CREATE TABLE workspace_tasks (id TEXT PRIMARY KEY, session_id TEXT)")
-        .execute(&pool)
-        .await
-        .unwrap();
-
+    let (_tmp, pool) = workspace_pool().await;
     // The interactive chat (canonical conversation).
     let convo = create_session(
         &pool,
@@ -249,20 +127,11 @@ async fn test_list_non_task_sessions_excludes_task_sessions() {
     )
     .await
     .unwrap();
-    sqlx::query("INSERT INTO workspace_tasks (id, session_id) VALUES (?, ?)")
-        .bind("task-1")
-        .bind(&task.id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    insert_task(&pool, "task-1", "running", Some(&task.id), None).await;
 
     // A task with no session yet (NULL session_id) must not nuke the result
     // set via NOT IN / NULL semantics.
-    sqlx::query("INSERT INTO workspace_tasks (id, session_id) VALUES (?, NULL)")
-        .bind("task-pending")
-        .execute(&pool)
-        .await
-        .unwrap();
+    insert_task(&pool, "task-pending", "queued", None, None).await;
 
     // A non-task BackgroundJob session (e.g. a scheduled-run conversation).
     let scheduled = create_session(
@@ -295,7 +164,7 @@ async fn test_list_non_task_sessions_excludes_task_sessions() {
 
 #[tokio::test]
 async fn test_delete_session() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -320,7 +189,7 @@ async fn test_delete_session() {
 
 #[tokio::test]
 async fn test_create_session_rotation_link_loads_parent() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let parent = create_session(
         &pool,
@@ -357,7 +226,7 @@ async fn test_create_session_rotation_link_loads_parent() {
 
 #[tokio::test]
 async fn test_count_session_chain_messages() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     // grandparent ← parent ← child rotation chain, with messages at each level.
     let mut chain_ids = Vec::new();
@@ -431,7 +300,7 @@ async fn test_count_session_chain_messages() {
 
 #[tokio::test]
 async fn test_update_session_title_and_context() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -462,7 +331,7 @@ async fn test_update_session_title_and_context() {
 
 #[tokio::test]
 async fn test_create_and_list_messages() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -515,7 +384,7 @@ async fn test_create_and_list_messages() {
 
 #[tokio::test]
 async fn test_update_message_content() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -579,7 +448,7 @@ async fn test_update_message_content() {
 
 #[tokio::test]
 async fn test_user_message_queue_lifecycle() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -650,7 +519,7 @@ async fn test_user_message_queue_lifecycle() {
 
 #[tokio::test]
 async fn test_get_active_run_ignores_terminal_runs() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -706,7 +575,7 @@ async fn test_get_active_run_ignores_terminal_runs() {
 
 #[tokio::test]
 async fn test_workspace_has_active_run_tracks_any_session() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let first = create_session(
         &pool,
@@ -769,7 +638,7 @@ async fn test_workspace_has_active_run_tracks_any_session() {
 
 #[tokio::test]
 async fn test_create_and_get_run() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -818,7 +687,7 @@ async fn test_create_and_get_run() {
 
 #[tokio::test]
 async fn test_list_runs_ordered_by_started_at_desc() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -871,7 +740,7 @@ async fn test_list_runs_ordered_by_started_at_desc() {
 
 #[tokio::test]
 async fn test_update_run_status_to_terminal_sets_completed_at() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -911,7 +780,7 @@ async fn test_update_run_status_to_terminal_sets_completed_at() {
 
 #[tokio::test]
 async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -948,7 +817,7 @@ async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
 
 #[tokio::test]
 async fn test_complete_run_with_notices() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
         &pool,
@@ -1003,7 +872,7 @@ async fn test_complete_run_with_notices() {
 
 #[tokio::test]
 async fn test_full_session_lifecycle() {
-    let pool = setup_test_pool().await;
+    let (_tmp, pool) = workspace_pool().await;
 
     // 1. Create session
     let session = create_session(
@@ -1061,25 +930,22 @@ async fn test_full_session_lifecycle() {
     let messages = list_messages(&pool, &session.id).await.unwrap();
     assert_eq!(messages.len(), 1);
 
-    // 6. Delete session
+    // 6. Delete session — and with it, by ON DELETE CASCADE, its messages.
+    // `list_messages` filters on session_id alone and never joins
+    // assistant_sessions, so an orphaned row would still come back here.
     delete_session(&pool, &session.id).await.unwrap();
     assert!(get_session(&pool, &session.id).await.unwrap().is_none());
+    assert!(
+        list_messages(&pool, &session.id).await.unwrap().is_empty(),
+        "messages cascade-deleted with their session"
+    );
 }
 
 #[tokio::test]
 async fn test_create_session_and_link_task_links_atomically() {
-    let pool = setup_test_pool().await;
-    sqlx::query("CREATE TABLE workspace_tasks (id TEXT PRIMARY KEY, session_id TEXT)")
-        .execute(&pool)
-        .await
-        .unwrap();
-
+    let (_tmp, pool) = workspace_pool().await;
     // Insert a workspace_tasks row first (assignTask's order) without a session_id.
-    sqlx::query("INSERT INTO workspace_tasks (id, session_id) VALUES (?, NULL)")
-        .bind("task-1")
-        .execute(&pool)
-        .await
-        .unwrap();
+    insert_task(&pool, "task-1", "queued", None, None).await;
 
     // The atomic helper should INSERT the session AND stamp session_id in one
     // transaction, so list_non_task_sessions (run before/after) reflects the

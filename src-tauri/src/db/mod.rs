@@ -55,7 +55,14 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
         .synchronous(SqliteSynchronous::Normal)
         // WAL still serializes writers; wait briefly instead of erroring with
         // SQLITE_BUSY when concurrent agents write the same workspace DB.
-        .busy_timeout(Duration::from_secs(5));
+        .busy_timeout(Duration::from_secs(5))
+        // SQLite leaves FK enforcement off by default for backward
+        // compatibility, and `PRAGMA foreign_keys` is per-connection — which
+        // is why this belongs here and not in a one-off `pool.execute`. sqlx
+        // happens to default it on, but the schema's ON DELETE CASCADEs are
+        // load-bearing (`delete_session` relies on them), so say so rather
+        // than inherit a dependency default that could change.
+        .foreign_keys(true);
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -70,11 +77,6 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
 
     sweep_orphaned_task_state(&pool).await?;
     crate::assistant::repository::recover_stale_runs(&pool).await?;
-
-    sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&pool)
-        .await
-        .map_err(|e| format!("Failed to enable workspace foreign keys: {}", e))?;
 
     Ok(pool)
 }
@@ -145,38 +147,16 @@ pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::{insert_task, workspace_pool};
     use super::*;
-
-    /// Spins up a per-workspace pool in a tempdir. Runs the embedded
-    /// workspace migrations so the schema matches production.
-    async fn create_workspace_test_pool() -> (tempfile::TempDir, DbPool) {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = init_workspace_db(tmp.path()).await.unwrap();
-        (tmp, pool)
-    }
-
-    async fn insert_sweep_task(pool: &DbPool, id: &str, status: &str, error: Option<&str>) {
-        sqlx::query(
-            r#"
-            INSERT INTO workspace_tasks
-                (id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
-                 assigned_agent_definition_id, title, instructions, status, error,
-                 created_at, updated_at)
-            VALUES (?, NULL, 'agent-1', 'agent-1', 'Title', 'Do it', ?, ?, 1, 1)
-            "#,
-        )
-        .bind(id)
-        .bind(status)
-        .bind(error)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
 
     #[tokio::test]
     async fn workspace_init_creates_expected_tables() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
+        let (_tmp, pool) = workspace_pool().await;
 
         for table in [
             "assistant_sessions",
@@ -212,7 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_tasks_has_no_workspace_id_column() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
+        let (_tmp, pool) = workspace_pool().await;
         let columns: Vec<String> = sqlx::query_scalar::<_, String>(
             "SELECT name FROM pragma_table_info('workspace_tasks')",
         )
@@ -232,7 +212,7 @@ mod tests {
     /// this assertion notices.
     #[tokio::test]
     async fn assistant_runs_has_no_usage_json_column() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
+        let (_tmp, pool) = workspace_pool().await;
         let columns: Vec<String> =
             sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('assistant_runs')")
                 .fetch_all(&pool)
@@ -247,8 +227,8 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_marks_running_rows_as_failed() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
-        insert_sweep_task(&pool, "t1", "running", None).await;
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(&pool, "t1", "running", None, None).await;
 
         sweep_orphaned_task_state(&pool).await.unwrap();
 
@@ -265,8 +245,8 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_preserves_existing_error_via_coalesce() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
-        insert_sweep_task(&pool, "t1", "running", Some("custom failure reason")).await;
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(&pool, "t1", "running", None, Some("custom failure reason")).await;
 
         sweep_orphaned_task_state(&pool).await.unwrap();
 
@@ -283,8 +263,8 @@ mod tests {
     /// window leaves a `queued` orphan nothing will ever dispatch.
     #[tokio::test]
     async fn sweep_marks_queued_rows_as_failed_with_a_never_started_reason() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
-        insert_sweep_task(&pool, "t1", "queued", None).await;
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(&pool, "t1", "queued", None, None).await;
 
         sweep_orphaned_task_state(&pool).await.unwrap();
 
@@ -306,9 +286,9 @@ mod tests {
     /// pre-sweep status, not the `'failed'` it is being set to.
     #[tokio::test]
     async fn sweep_reasons_are_per_row() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
-        insert_sweep_task(&pool, "a-queued", "queued", None).await;
-        insert_sweep_task(&pool, "b-running", "running", None).await;
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(&pool, "a-queued", "queued", None, None).await;
+        insert_task(&pool, "b-running", "running", None, None).await;
 
         sweep_orphaned_task_state(&pool).await.unwrap();
 
@@ -332,10 +312,10 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_leaves_completed_failed_and_blocked_rows_untouched() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
-        insert_sweep_task(&pool, "done", "completed", None).await;
-        insert_sweep_task(&pool, "fail", "failed", Some("original error")).await;
-        insert_sweep_task(&pool, "stuck", "blocked", Some("needs a decision")).await;
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(&pool, "done", "completed", None, None).await;
+        insert_task(&pool, "fail", "failed", None, Some("original error")).await;
+        insert_task(&pool, "stuck", "blocked", None, Some("needs a decision")).await;
 
         sweep_orphaned_task_state(&pool).await.unwrap();
 
@@ -362,8 +342,15 @@ mod tests {
     /// before the CASE arm it guards.
     #[tokio::test]
     async fn sweep_preserves_an_existing_error_on_queued_rows_too() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
-        insert_sweep_task(&pool, "t1", "queued", Some("no active provider connection")).await;
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(
+            &pool,
+            "t1",
+            "queued",
+            None,
+            Some("no active provider connection"),
+        )
+        .await;
 
         sweep_orphaned_task_state(&pool).await.unwrap();
 
@@ -381,8 +368,8 @@ mod tests {
     /// `updated_at`/`completed_at` or overwrite the reason it wrote.
     #[tokio::test]
     async fn a_second_sweep_changes_nothing() {
-        let (_tmp, pool) = create_workspace_test_pool().await;
-        insert_sweep_task(&pool, "t1", "queued", None).await;
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(&pool, "t1", "queued", None, None).await;
         sweep_orphaned_task_state(&pool).await.unwrap();
 
         let before: (String, Option<String>, Option<i64>, i64) = sqlx::query_as(
@@ -409,8 +396,8 @@ mod tests {
     async fn workspace_init_sweeps_orphaned_task_state() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = init_workspace_db(tmp.path()).await.unwrap();
-        insert_sweep_task(&pool, "t1", "queued", None).await;
-        insert_sweep_task(&pool, "t2", "running", None).await;
+        insert_task(&pool, "t1", "queued", None, None).await;
+        insert_task(&pool, "t2", "running", None, None).await;
         drop(pool);
 
         let pool = init_workspace_db(tmp.path()).await.unwrap();

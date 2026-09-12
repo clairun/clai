@@ -529,10 +529,12 @@ pub async fn get_message(
     row.as_ref().map(map_message_row).transpose()
 }
 
-/// Permanently remove a message row and its `assistant_message_queue` row
-/// (deleted explicitly — the schema's ON DELETE CASCADE only fires on
-/// connections where `PRAGMA foreign_keys` happens to be on, which the
-/// pool doesn't guarantee). Used to discard run input that never got an
+/// Permanently remove a message row and its `assistant_message_queue` row.
+/// The queue row is deleted explicitly rather than left to the schema's
+/// ON DELETE CASCADE, so the two deletes share one transaction and the
+/// intent is visible at the call site. (FK enforcement itself is
+/// guaranteed: `init_workspace_db` sets `foreign_keys` on every pooled
+/// connection.) Used to discard run input that never got an
 /// answer — a user message (and the empty assistant placeholder) of a run
 /// that failed before the provider produced anything.
 pub async fn delete_message(pool: &DbPool, message_id: &str) -> Result<(), String> {
@@ -1540,14 +1542,7 @@ pub async fn recover_stale_runs(pool: &DbPool) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Per-test workspace pool in a tempdir, with the production
-    /// workspace migrations applied.
-    async fn create_test_pool() -> (tempfile::TempDir, DbPool) {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool = crate::db::init_workspace_db(tmp.path()).await.unwrap();
-        (tmp, pool)
-    }
+    use crate::db::test_support::workspace_pool;
 
     async fn insert_session(pool: &DbPool, id: &str) {
         sqlx::query(
@@ -1583,7 +1578,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_message_removes_row_and_queue_entry() {
-        let (_tmp, pool) = create_test_pool().await;
+        let (_tmp, pool) = workspace_pool().await;
         insert_session(&pool, "s1").await;
 
         // Queued variant: the queue side-table row must go with the message.
@@ -1611,7 +1606,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_pending_queued_message_only_removes_pending() {
-        let (_tmp, pool) = create_test_pool().await;
+        let (_tmp, pool) = workspace_pool().await;
         insert_session(&pool, "s1").await;
 
         // Pending → deleted, returns true.
@@ -1668,7 +1663,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_pending_queued_message_only_edits_pending() {
-        let (_tmp, pool) = create_test_pool().await;
+        let (_tmp, pool) = workspace_pool().await;
         insert_session(&pool, "s1").await;
 
         // Pending → edited; returns the updated message with original
