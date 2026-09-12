@@ -917,7 +917,7 @@ mod tests {
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_a".into(),
-                    tool_name: "fs_write".into(),
+                    tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
                 },
             ]),
@@ -966,7 +966,7 @@ mod tests {
             user_message("do work"),
             assistant_message_with_content(vec![ContentPart::ToolUse {
                 tool_call_id: "call_old".into(),
-                tool_name: "fs_write".into(),
+                tool_name: "bash_exec".into(),
                 arguments: serde_json::json!({}),
             }]),
             tool_message("call_old"),
@@ -1046,7 +1046,7 @@ mod tests {
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_a".into(),
-                    tool_name: "fs_write".into(),
+                    tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
                 },
             ]),
@@ -1091,12 +1091,12 @@ mod tests {
             assistant_message_with_content(vec![
                 ContentPart::ToolUse {
                     tool_call_id: "call_a".into(),
-                    tool_name: "fs_write".into(),
+                    tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_b".into(),
-                    tool_name: "fs_write".into(),
+                    tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
                 },
             ]),
@@ -1158,12 +1158,12 @@ mod tests {
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_a".into(),
-                    tool_name: "fs_write".into(),
+                    tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_b".into(),
-                    tool_name: "fs_write".into(),
+                    tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
                 },
             ]),
@@ -1199,7 +1199,7 @@ mod tests {
             user_message("kick off"),
             assistant_message_with_content(vec![ContentPart::ToolUse {
                 tool_call_id: "call_orphan".into(),
-                tool_name: "fs_write".into(),
+                tool_name: "bash_exec".into(),
                 arguments: serde_json::json!({}),
             }]),
         ];
@@ -1272,7 +1272,7 @@ mod tests {
             user_message("do work"),
             assistant_message_with_content(vec![ContentPart::ToolUse {
                 tool_call_id: "call_a".into(),
-                tool_name: "fs_write".into(),
+                tool_name: "bash_exec".into(),
                 arguments: serde_json::json!({}),
             }]),
             bogus_tool,
@@ -1381,7 +1381,7 @@ mod tests {
         // ToolUse alone is always non-empty.
         assert!(!assistant_content_is_empty(&[ContentPart::ToolUse {
             tool_call_id: "call_a".into(),
-            tool_name: "fs_write".into(),
+            tool_name: "bash_exec".into(),
             arguments: serde_json::json!({}),
         }]));
         // ToolResult alone is always non-empty (irrelevant for assistant but
@@ -1418,7 +1418,7 @@ mod tests {
         // a new Text part, not merged into anything.
         let mut target = vec![ContentPart::ToolUse {
             tool_call_id: "call_a".into(),
-            tool_name: "fs_write".into(),
+            tool_name: "bash_exec".into(),
             arguments: serde_json::json!({}),
         }];
         let source = vec![ContentPart::Text {
@@ -1439,7 +1439,7 @@ mod tests {
         }];
         let source = vec![ContentPart::ToolUse {
             tool_call_id: "call_a".into(),
-            tool_name: "fs_write".into(),
+            tool_name: "bash_exec".into(),
             arguments: serde_json::json!({}),
         }];
 

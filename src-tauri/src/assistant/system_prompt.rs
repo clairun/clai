@@ -51,6 +51,15 @@ pub(crate) fn build_system_prompt(
     trigger: &RunTrigger,
 ) -> ProviderInputMessage {
     let tool_names: Vec<&str> = tool_defs.iter().map(|t| t.name.as_str()).collect();
+    // `bash_exec` is the only tool that reads or writes arbitrary files, and in
+    // restricted mode the *write* capability is the allowlist rather than the
+    // mode. Guidance that assumes either is gated on these two flags: telling an
+    // agent to produce a file it cannot write stalls it on an approval prompt.
+    let shell_enabled = !matches!(
+        context.execution.shell.mode,
+        crate::config::ShellAccessMode::Off
+    );
+    let can_write_files = context.execution.shell.can_write_files();
     let current_datetime = chrono::Local::now()
         .format("%Y-%m-%d %H:%M:%S %:z")
         .to_string();
@@ -174,16 +183,29 @@ pub(crate) fn build_system_prompt(
     prompt.push_str(
         "## Tool Usage Guidelines\n\
          - First inspect what is available in this session and choose the smallest set of tools needed.\n\
-         - Use the configured MCP tools available in this session for domain-specific work.\n\
-         - Use `bash_exec` for local filesystem inspection and changes when shell access is available in this session.\n\
-         - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
+         - Use the configured MCP tools available in this session for domain-specific work.\n",
+    );
+    if shell_enabled {
+        prompt
+            .push_str("         - Use `bash_exec` for local filesystem inspection and changes.\n");
+    }
+    prompt.push_str(
+        "         - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
          - Evaluate whether prior tool outputs are still fresh enough for the current decision. When information can expire or change over time (for example issues, alerts, metrics, repo state, or external system status), re-run the relevant tools if freshness matters.\n\
          - Chat is the default output channel. Use normal assistant replies for status, findings, and conclusions.\n\
-         - When looking for code, files, or prior work, ALWAYS search your workspace first with `bash_exec` before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n\
-         - Durable outputs belong in the workspace: write them there with `bash_exec` so they persist after the run as user-visible artifacts.\n\
-         - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n\
          - Chat is the default output channel for status, findings, and conclusions.\n",
     );
+    if shell_enabled {
+        prompt.push_str(
+            "         - When looking for code, files, or prior work, ALWAYS search your workspace first with `bash_exec` before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n",
+        );
+    }
+    if can_write_files {
+        prompt.push_str(
+            "         - Durable outputs belong in the workspace: write them there with `bash_exec` so they persist after the run as user-visible artifacts.\n\
+             - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n",
+        );
+    }
 
     // Response style. Two failure modes: responses too long for a human to read,
     // and circling a plan the evidence has already ruled out because work was
@@ -214,7 +236,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "\n## Interactive Tool Reliability\n\
              A tool call can occasionally fail with a transport error such as `MCP server \"clai\" transport dropped mid-call; response for tool <name> was lost`. This means CLAI lost the in-flight call before its result reached you, so the call's outcome is UNKNOWN — it may or may not have run.\n\
-             - This matters specifically for tools that block on a user grant or response — `ask_user`, and approval-gated `bash_exec` / `fs_request_grant`. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost.\n\
+             - This matters specifically for tools that block on a user grant or response. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost.\n\
              - When it happens, re-issue the SAME interactive call once. CLAI replaces the lost prompt with the fresh one in the app, so the user simply answers the new prompt. Do NOT assume the lost call was approved, denied, or answered, and do NOT proceed past it.\n\
              - Apply this only to active CLAI human waits. If a user-input, command-approval, or filesystem-grant prompt is explicitly cancelled or denied, do not invent convoluted workarounds to bypass it. If the permission or answer is required, stop and explain what is blocked; retry only after a transport drop where the outcome is unknown.\n\
              - For non-interactive tools (reads, searches, writes), a transport drop needs no special handling — just retry normally if you still need the result.\n",
@@ -292,9 +314,15 @@ pub(crate) fn build_system_prompt(
             automation_name
         ));
         prompt.push_str(
-            "Your assistant text is visible to the user in chat. Treat chat as the primary way to communicate progress and outcomes.\n\
-             Save durable outputs as files in the workspace (via `bash_exec`) so they surface as artifacts.\n\
-             For routine scheduled passes, a concise chat update is often sufficient.\n\
+            "Your assistant text is visible to the user in chat. Treat chat as the primary way to communicate progress and outcomes.\n",
+        );
+        if can_write_files {
+            prompt.push_str(
+                "Save durable outputs as files in the workspace (via `bash_exec`) so they surface as artifacts.\n",
+            );
+        }
+        prompt.push_str(
+            "For routine scheduled passes, a concise chat update is often sufficient.\n\
              Prefer updating existing visuals over recreating duplicate panels when the topic is unchanged.\n",
         );
 
@@ -316,16 +344,12 @@ pub(crate) fn build_system_prompt(
     }
 
     if let Some(workspace_id) = context.agent_workspace_id.as_deref() {
-        // `bash_exec` is the only tool that reads or writes arbitrary files, so
-        // an agent with shell off has no filesystem at all — it keeps only
-        // `create_vega_chart` and `history_query`. Every section below that
-        // presumes file access is gated on this flag.
-        let shell_enabled = !matches!(
-            context.execution.shell.mode,
-            crate::config::ShellAccessMode::Off
-        );
         prompt.push_str("\n## Local Execution Capabilities\n");
-        if shell_enabled {
+        if shell_enabled && !can_write_files {
+            prompt.push_str(&format!(
+                "- Your workspace (id `{workspace_id}`) is your default shell working directory (run `pwd` for its path) and holds this workspace's artifacts, which you can read. Your command allowlist contains nothing that writes a file, so treat the whole filesystem as read-only: put your results in chat instead of trying to save them, and say so plainly if a request needs a file written.\n",
+            ));
+        } else if shell_enabled {
             prompt.push_str(&format!(
                 "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
             ));
@@ -338,9 +362,9 @@ pub(crate) fn build_system_prompt(
             "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
         );
         prompt.push_str(
-            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec directly with `bash_exec` or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`).\n",
+            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never hand-write a Vega-Lite spec into a file or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`).\n",
         );
-        if shell_enabled {
+        if can_write_files {
             prompt.push_str(
                 "- Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `bash_exec` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
             );
@@ -367,6 +391,9 @@ pub(crate) fn build_system_prompt(
 
         if shell_enabled {
             push_filesystem_boundary(&mut prompt);
+        }
+        // The memory protocol is all reads and writes of `.clai/memory/` files.
+        if can_write_files {
             push_agent_memory(&mut prompt, trigger);
         }
 
@@ -611,6 +638,8 @@ mod tests {
         ExecutionCapabilityConfig {
             shell: crate::config::types::ShellCapabilityConfig {
                 mode: ShellAccessMode::Restricted,
+                allowed_command_prefixes: crate::config::types::standard_restricted_shell_allowlist(
+                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -746,7 +775,7 @@ mod tests {
         assert!(text.contains("materially easier to understand than prose or a short table"));
         assert!(text.contains("Skip charts for a single fact"));
         assert!(text.contains("`create_vega_chart` tool"));
-        assert!(text.contains("never write a Vega-Lite spec directly with `bash_exec`"));
+        assert!(text.contains("never hand-write a Vega-Lite spec into a file"));
         // The model chooses an organized path and receives a portable embed.
         assert!(text.contains("complete workspace-relative `.vl.json` path"));
         assert!(text.contains("instead of defaulting to a shared charts directory"));
@@ -847,6 +876,18 @@ mod tests {
         assert!(!text.contains("any command not blocked"));
         assert!(text.contains("- Shell mode: off"));
         assert!(text.contains("no filesystem tools"));
+        // The strongest assertion: an agent without the tool is never told to
+        // reach for it. Header-only assertions let a stray bullet survive.
+        // Stronger than header assertions: no bullet anywhere may direct this
+        // agent at the tool it does not have. The only permitted mention is the
+        // shell-mode line saying it has none.
+        for instruction in ["Use `bash_exec`", "with `bash_exec`", "via `bash_exec`"] {
+            assert!(
+                !text.contains(instruction),
+                "shell-off prompt still says {instruction}"
+            );
+        }
+        assert!(text.contains("no `bash_exec` and no filesystem tools"));
         // Charts and the history DB survive: neither needs a shell.
         assert!(text.contains("`create_vega_chart`"));
         assert!(text.contains("## Conversation History Database"));
@@ -855,10 +896,47 @@ mod tests {
     }
 
     #[test]
+    fn build_system_prompt_withholds_write_guidance_from_a_read_only_allowlist() {
+        // The shipped `code-reviewer` template's shape: a shell, but nothing in
+        // the allowlist that writes. Every write it attempted would stop on an
+        // approval prompt, which an unattended scheduled run cannot answer — so
+        // it must not be told to keep memory or save durable outputs.
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.shell.mode = ShellAccessMode::Restricted;
+        execution.shell.allowed_command_prefixes = ["rg", "cat", "git diff"]
+            .iter()
+            .map(|command| (*command).to_string())
+            .collect();
+
+        let context = SessionContext {
+            agent_workspace_id: Some("agent-123".to_string()),
+            execution,
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(!text.contains("## Agent Memory"));
+        assert!(!text.contains("Durable outputs belong in the workspace"));
+        assert!(!text.contains("Save durable outputs as files"));
+        assert!(text.contains("treat the whole filesystem as read-only"));
+        // It still has a shell, so the boundary and the search guidance apply.
+        assert!(text.contains("## Filesystem boundary"));
+        assert!(text.contains("ALWAYS search your workspace first"));
+    }
+
+    #[test]
     fn build_system_prompt_describes_shell_mode_alongside_memory_guidance() {
         let mut execution = ExecutionCapabilityConfig::default();
         execution.shell.mode = ShellAccessMode::Restricted;
-        execution.shell.allowed_command_prefixes = vec!["cargo check".to_string()];
+        // `tee` is what makes this agent write-capable; without it the memory
+        // protocol below would be guidance it cannot act on.
+        execution.shell.allowed_command_prefixes =
+            vec!["cargo check".to_string(), "tee".to_string()];
 
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),

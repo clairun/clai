@@ -33,6 +33,13 @@ fn default_restricted_shell_blocklist() -> Vec<String> {
 /// workspace inspection and edits, but are not a guarantee that every flag
 /// combination is non-mutating; the filesystem sandbox and blocklist still
 /// define the hard safety boundary.
+/// Commands in our own restricted defaults that create or modify a file.
+/// Used by `ShellCapabilityConfig::can_write_files`; see the note there about
+/// why an incomplete list is the safe direction.
+const FILE_WRITING_COMMANDS: &[&str] = &[
+    "mkdir", "cp", "mv", "touch", "tee", "printf", "sed", "ln", "dd", "truncate",
+];
+
 pub fn standard_restricted_shell_allowlist() -> Vec<String> {
     vec![
         "pwd".to_string(),
@@ -353,6 +360,34 @@ impl Default for ShellCapabilityConfig {
 }
 
 impl ShellCapabilityConfig {
+    /// Whether this agent can create or modify a file at all.
+    ///
+    /// Generic file work runs through `bash_exec`, so in `Restricted` mode the
+    /// write capability is the allowlist, not the mode: a reviewer allowed only
+    /// `cat`/`rg`/`git diff` can read everything and write nothing, and every
+    /// write it attempts stops on an approval prompt. Callers use this to avoid
+    /// instructing such an agent to produce files.
+    ///
+    /// Deliberately conservative: an allowlist that writes through some other
+    /// command (`python3 -c ...`) reads as read-only here. A false negative only
+    /// withholds guidance; it never grants access.
+    pub fn can_write_files(&self) -> bool {
+        match self.mode {
+            ShellAccessMode::Off => false,
+            ShellAccessMode::Full => true,
+            ShellAccessMode::Restricted => {
+                self.effective_allowed_command_prefixes()
+                    .iter()
+                    .any(|prefix| {
+                        prefix
+                            .split_whitespace()
+                            .next()
+                            .is_some_and(|head| FILE_WRITING_COMMANDS.contains(&head))
+                    })
+            }
+        }
+    }
+
     pub fn effective_allowed_command_prefixes(&self) -> Vec<String> {
         let mut allowed = Vec::new();
         for prefix in &self.allowed_command_prefixes {
@@ -741,6 +776,50 @@ pub type ClaiConfig = AppConfig;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn restricted_with(prefixes: &[&str]) -> ShellCapabilityConfig {
+        ShellCapabilityConfig {
+            mode: ShellAccessMode::Restricted,
+            allowed_command_prefixes: prefixes.iter().map(|p| (*p).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn can_write_files_follows_the_allowlist_not_the_mode() {
+        // The shipped code-reviewer template's shape: a shell, no way to write.
+        assert!(!restricted_with(&["rg", "cat", "git diff", "gh pr view"]).can_write_files());
+        // Our own standard tier ships file commands.
+        assert!(ShellCapabilityConfig {
+            mode: ShellAccessMode::Restricted,
+            allowed_command_prefixes: standard_restricted_shell_allowlist(),
+            ..Default::default()
+        }
+        .can_write_files());
+        // A multi-word prefix still matches on its head command.
+        assert!(restricted_with(&["tee -a"]).can_write_files());
+        // Whitespace-only entries are dropped before the check.
+        assert!(!restricted_with(&["  "]).can_write_files());
+        // A command that merely contains a write command's name does not count.
+        assert!(!restricted_with(&["cpio", "sedate"]).can_write_files());
+    }
+
+    #[test]
+    fn can_write_files_is_decided_by_the_mode_outside_restricted() {
+        assert!(!ShellCapabilityConfig::default().can_write_files());
+        assert!(ShellCapabilityConfig {
+            mode: ShellAccessMode::Full,
+            ..Default::default()
+        }
+        .can_write_files());
+        // Full ignores the allowlist entirely, empty or not.
+        assert!(ShellCapabilityConfig {
+            mode: ShellAccessMode::Full,
+            allowed_command_prefixes: vec![],
+            ..Default::default()
+        }
+        .can_write_files());
+    }
 
     #[test]
     fn test_clai_config_serialization() {

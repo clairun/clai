@@ -397,9 +397,21 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
     let mut config: WorkspaceConfig = serde_json::from_str(&contents)
         .map_err(|source| WorkspaceConfigError::Parse { path, source })?;
     prune_legacy_mcp_refs(&mut config);
-    if config.version < 2 {
+    if config.version < WORKSPACE_CONFIG_VERSION {
         migrate_bash_only_filesystem_tools(&mut config);
-        config.version = 2;
+        config.version = WORKSPACE_CONFIG_VERSION;
+        // Write the upgrade back so it happens once. Left unpersisted, the file
+        // stays at version 1 and every load re-applies the migration, which
+        // would silently undo a user who deliberately restored the old list.
+        // Best-effort: a read-only or racing workspace still loads, it just
+        // migrates again next time.
+        if let Err(error) = save(root, &config) {
+            tracing::warn!(
+                "failed to persist workspace config migration to v{}: {}",
+                WORKSPACE_CONFIG_VERSION,
+                error
+            );
+        }
     }
     Ok(config)
 }
@@ -416,9 +428,22 @@ fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
 }
 
 /// Version-2 migration for moving generic file operations to `bash_exec`.
-/// Untouched manager defaults gain routine file commands. Existing bundled SOW
-/// trackers had an empty shell allowlist because they previously used the
-/// operational `fs_*` tools, so recognize them by their bundled skill.
+///
+/// Two shapes are upgraded, both of which mean "this agent did its file work
+/// through the `fs_*` tools that no longer exist":
+/// 1. an allowlist that is still an exact copy of the old inspection-only
+///    default, and
+/// 2. `Restricted` with an *empty* allowlist, which is what the old bundled
+///    templates persisted and which otherwise means "stop and ask before every
+///    single command" — a scheduled run would park on an approval card.
+///
+/// Anything else is the user's own policy and is left alone. That is a
+/// deliberate contract with a sharp edge: an allowlist edited even slightly
+/// away from the old default is preserved verbatim, so such an agent keeps a
+/// read-only command set and can no longer write files. It says so rather than
+/// failing silently — `ShellCapabilityConfig::can_write_files` withholds the
+/// write guidance and the prompt lists the allowlist — but the user has to
+/// widen it by hand.
 fn migrate_bash_only_filesystem_tools(config: &mut WorkspaceConfig) {
     for agent in &mut config.agents {
         let is_legacy_default = agent
@@ -433,15 +458,13 @@ fn migrate_bash_only_filesystem_tools(config: &mut WorkspaceConfig) {
             continue;
         }
 
-        let is_legacy_sow_tracker =
+        // Keyed on the configuration itself, not on the template that produced
+        // it: a bundled skill slug gets renamed upstream sooner or later, and a
+        // migration that silently stops matching is worse than no migration.
+        let prompts_for_every_command =
             matches!(agent.execution.shell.mode, ShellAccessMode::Restricted)
-                && agent.execution.shell.allowed_command_prefixes.is_empty()
-                && agent.selected_skills.iter().any(|skill| match skill {
-                    SkillRef::Bundled { slug }
-                    | SkillRef::Personal { slug }
-                    | SkillRef::Remote { slug, .. } => slug == "sow-workflow",
-                });
-        if is_legacy_sow_tracker {
+                && agent.execution.shell.allowed_command_prefixes.is_empty();
+        if prompts_for_every_command {
             agent.execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
         }
     }
@@ -871,7 +894,7 @@ mod attach_provider_tests {
     }
 
     #[test]
-    fn load_upgrades_existing_sow_tracker_with_empty_shell_allowlist() {
+    fn load_upgrades_a_restricted_agent_with_an_empty_allowlist() {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = workspace();
         config.version = LEGACY_WORKSPACE_CONFIG_VERSION;
@@ -881,15 +904,31 @@ mod attach_provider_tests {
             .shell
             .allowed_command_prefixes
             .clear();
-        config.agents[0].selected_skills = vec![SkillRef::Bundled {
-            slug: "sow-workflow".to_string(),
-        }];
         save(tmp.path(), &config).unwrap();
 
         let loaded = load(tmp.path()).unwrap();
         let allowed = &loaded.agents[0].execution.shell.allowed_command_prefixes;
         assert!(allowed.contains(&"cat".to_string()));
         assert!(allowed.contains(&"printf".to_string()));
+
+        // The upgrade is persisted, so it cannot re-apply over a later edit.
+        let on_disk: WorkspaceConfig =
+            serde_json::from_str(&std::fs::read_to_string(config_path(tmp.path())).unwrap())
+                .unwrap();
+        assert_eq!(on_disk.version, WORKSPACE_CONFIG_VERSION);
+
+        let mut narrowed = loaded;
+        narrowed.agents[0]
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .clear();
+        save(tmp.path(), &narrowed).unwrap();
+        assert!(load(tmp.path()).unwrap().agents[0]
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .is_empty());
     }
 
     // -------------------------------------------------------------------
