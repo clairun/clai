@@ -30,10 +30,9 @@
 //! [`super::profile::workspace_mask`] already hides.
 //!
 //! That placement is deliberate and load-bearing. The container is masked on
-//! every surface an agent can reach: the bwrap mount set, the seatbelt profile,
-//! and the in-process `fs_*` path validator. Putting scratch inside it means
-//! one workspace cannot read or write another's scratch through *any* of them,
-//! without a single line of new masking logic.
+//! both shell sandbox backends: the bwrap mount set and the seatbelt profile.
+//! Putting scratch inside it means one workspace cannot read or write another's
+//! scratch through either backend without new masking logic.
 //!
 //! The inverse is what makes this worth stating: a location under `$HOME` but
 //! outside the container (say the OS cache directory) is **not** safe here,
@@ -96,8 +95,8 @@ use std::time::{Duration, SystemTime};
 
 /// Scratch container, as a child of the workspace container. Dot-prefixed so it
 /// is visually distinct from the workspace-id directories beside it, and so the
-/// workspace index skips it. Shared with the `fs_*` tools via `profile`.
-use super::profile::SCRATCH_DIR_NAME as SCRATCH_DIR;
+/// workspace index skips it along with every other dot-prefixed sibling.
+const SCRATCH_DIR: &str = ".scratch";
 /// Holds directories renamed out of use, awaiting unlink.
 const TRASH_DIR: &str = ".trash";
 

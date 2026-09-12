@@ -660,7 +660,6 @@ dependencies = [
  "dbus-secret-service",
  "dirs 5.0.1",
  "futures",
- "glob",
  "htmd",
  "http",
  "iana-time-zone",

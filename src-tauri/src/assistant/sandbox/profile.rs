@@ -134,20 +134,13 @@ impl SandboxEnv {
     }
 }
 
-/// Name of the sandbox scratch container, a dot-prefixed sibling of the
-/// workspace roots inside the masked workspace container. Declared here rather
-/// than in [`super::scratch`] because that module is only compiled on platforms
-/// with a sandbox backend, while the `fs_*` tools and the workspace index must
-/// recognise the directory everywhere.
-pub const SCRATCH_DIR_NAME: &str = ".scratch";
-
 /// The directory that holds the agent's workspace — i.e. the workspace root's
 /// parent, which is the container for *all* workspaces (e.g.
 /// `~/.clai/workspaces`). We mask this container so an agent can't reach
 /// sibling workspaces through a broad grant (like `$HOME`), while its own
 /// workspace is re-exposed by the workspace bind/allow that runs after the
-/// mask. Both the bwrap and seatbelt backends — and the in-process `fs_*`
-/// path validator — derive the mask from here so the policy is identical.
+/// mask. Both the bwrap and seatbelt backends derive the mask from here so the
+/// policy is identical.
 ///
 /// Returns `None` (no masking) when:
 /// - the workspace root has no parent (pathological), or

@@ -51,6 +51,15 @@ pub(crate) fn build_system_prompt(
     trigger: &RunTrigger,
 ) -> ProviderInputMessage {
     let tool_names: Vec<&str> = tool_defs.iter().map(|t| t.name.as_str()).collect();
+    // `bash_exec` is the only tool that reads or writes arbitrary files, and in
+    // restricted mode the *write* capability is the allowlist rather than the
+    // mode. Guidance that assumes either is gated on these two flags: telling an
+    // agent to produce a file it cannot write stalls it on an approval prompt.
+    let shell_enabled = !matches!(
+        context.execution.shell.mode,
+        crate::config::ShellAccessMode::Off
+    );
+    let can_write_files = context.execution.shell.can_write_files();
     let current_datetime = chrono::Local::now()
         .format("%Y-%m-%d %H:%M:%S %:z")
         .to_string();
@@ -174,16 +183,31 @@ pub(crate) fn build_system_prompt(
     prompt.push_str(
         "## Tool Usage Guidelines\n\
          - First inspect what is available in this session and choose the smallest set of tools needed.\n\
-         - Use the configured MCP tools available in this session for domain-specific work.\n\
-         - Use exposed CLAI tools such as `fs_list`, `fs_read`, `fs_write`, `fs_glob`, and `bash_exec` only when those local execution capabilities are available in this session.\n\
-         - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
+         - Use the configured MCP tools available in this session for domain-specific work.\n",
+    );
+    if can_write_files {
+        prompt
+            .push_str("         - Use `bash_exec` for local filesystem inspection and changes.\n");
+    } else if shell_enabled {
+        prompt.push_str("         - Use `bash_exec` for local filesystem inspection.\n");
+    }
+    prompt.push_str(
+        "         - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
          - Evaluate whether prior tool outputs are still fresh enough for the current decision. When information can expire or change over time (for example issues, alerts, metrics, repo state, or external system status), re-run the relevant tools if freshness matters.\n\
          - Chat is the default output channel. Use normal assistant replies for status, findings, and conclusions.\n\
-         - When looking for code, files, or prior work, ALWAYS search your workspace first — `fs_glob`/`fs_list` from the workspace root, or a `bash_exec` search scoped to it — before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n\
-         - Durable outputs belong in the workspace: write them there with `fs_write` so they persist after the run as user-visible artifacts.\n\
-         - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n\
          - Chat is the default output channel for status, findings, and conclusions.\n",
     );
+    if shell_enabled {
+        prompt.push_str(
+            "         - When looking for code, files, or prior work, ALWAYS search your workspace first with `bash_exec` before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n",
+        );
+    }
+    if can_write_files {
+        prompt.push_str(
+            "         - Durable outputs belong in the workspace: write them there with `bash_exec` so they persist after the run as user-visible artifacts.\n\
+             - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n",
+        );
+    }
 
     // Response style. Two failure modes: responses too long for a human to read,
     // and circling a plan the evidence has already ruled out because work was
@@ -214,7 +238,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "\n## Interactive Tool Reliability\n\
              A tool call can occasionally fail with a transport error such as `MCP server \"clai\" transport dropped mid-call; response for tool <name> was lost`. This means CLAI lost the in-flight call before its result reached you, so the call's outcome is UNKNOWN — it may or may not have run.\n\
-             - This matters specifically for tools that block on a user grant or response — `ask_user`, and approval-gated `bash_exec` / `fs_request_grant`. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost.\n\
+             - This matters specifically for tools that block on a user grant or response. When one of these drops mid-call, the user may never have answered, or they answered but the decision was lost.\n\
              - When it happens, re-issue the SAME interactive call once. CLAI replaces the lost prompt with the fresh one in the app, so the user simply answers the new prompt. Do NOT assume the lost call was approved, denied, or answered, and do NOT proceed past it.\n\
              - Apply this only to active CLAI human waits. If a user-input, command-approval, or filesystem-grant prompt is explicitly cancelled or denied, do not invent convoluted workarounds to bypass it. If the permission or answer is required, stop and explain what is blocked; retry only after a transport drop where the outcome is unknown.\n\
              - For non-interactive tools (reads, searches, writes), a transport drop needs no special handling — just retry normally if you still need the result.\n",
@@ -292,9 +316,15 @@ pub(crate) fn build_system_prompt(
             automation_name
         ));
         prompt.push_str(
-            "Your assistant text is visible to the user in chat. Treat chat as the primary way to communicate progress and outcomes.\n\
-             Save durable outputs as files in the workspace (via `fs_write`) so they surface as artifacts.\n\
-             For routine scheduled passes, a concise chat update is often sufficient.\n\
+            "Your assistant text is visible to the user in chat. Treat chat as the primary way to communicate progress and outcomes.\n",
+        );
+        if can_write_files {
+            prompt.push_str(
+                "Save durable outputs as files in the workspace (via `bash_exec`) so they surface as artifacts.\n",
+            );
+        }
+        prompt.push_str(
+            "For routine scheduled passes, a concise chat update is often sufficient.\n\
              Prefer updating existing visuals over recreating duplicate panels when the topic is unchanged.\n",
         );
 
@@ -317,203 +347,57 @@ pub(crate) fn build_system_prompt(
 
     if let Some(workspace_id) = context.agent_workspace_id.as_deref() {
         prompt.push_str("\n## Local Execution Capabilities\n");
-        prompt.push_str(&format!(
-            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
-        ));
+        if shell_enabled && !can_write_files {
+            prompt.push_str(&format!(
+                "- Your workspace (id `{workspace_id}`) is your default shell working directory (run `pwd` for its path) and holds this workspace's artifacts, which you can read. Your command allowlist contains no command that writes a file, so any write you attempt through `bash_exec` stops and waits for the user to approve that command — which an unattended run has nobody to answer. Put your results in chat, save charts with `create_vega_chart` (it writes its own file and needs no shell), and say plainly when a request needs a file you cannot write.\n",
+            ));
+        } else if shell_enabled {
+            prompt.push_str(&format!(
+                "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
+            ));
+        } else {
+            prompt.push_str(&format!(
+                "- Your workspace (id `{workspace_id}`) is where the charts you save appear to the user as **artifacts** in the CLAI app. You have no shell and no filesystem tools this session: you cannot read, write, list, or search files. Chat is your output channel — put findings in your reply instead of promising files you cannot write.\n",
+            ));
+        }
         prompt.push_str(
             "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
         );
         prompt.push_str(
-            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec with `fs_write` or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `fs_write` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
+            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never hand-write a Vega-Lite spec into a file or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`).\n",
         );
+        if can_write_files {
+            prompt.push_str(
+                "- Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `bash_exec` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
+            );
+        } else {
+            prompt.push_str(
+                "- Keep the data inside the spec small: you cannot write a companion CSV/JSON this session, so aggregate to the rows that carry the finding instead of inlining a large table.\n",
+            );
+        }
         prompt.push_str(
             "- Make the chart worth looking at — aim for what an analyst would publish, not the default output. Give it a `title` whose `subtitle` states the finding and the units; sort categorical axes by value, not alphabetically. Numeric categories such as hour, age and rank must remain numeric: for CSV data, declare them in `data.format.parse`; otherwise provide an explicit domain order matching the source values, because nominal/ordinal CSV fields sort as strings by default (0, 1, 10, 11, …). Pick the mark that answers the question — a `rect` heatmap for a value across two keys, layered `rule` + `point` to compare two measures per category, `stack: \"center\"` area for composition over time, log or sqrt scales for values spanning orders of magnitude — and let `transform` (`fold`, `window`, `regression`, `joinaggregate`, `timeUnit`) shape the data instead of pre-chewing it. CLAI supplies the theme, quiet axes and tooltips, plus clickable categorical legends and a pan/zoom button on eligible unit or flat layered charts. Spend your effort on the encoding; add an explicit `tooltip` array only to choose which fields show. Specs with authored parameters keep control of their own interactions; set `usermeta.clai.interactions` to false to disable automatic interactions, or add native Vega-Lite parameters for linked brushing or composed views. One hard rule: declare a selection `param` inside a single unit view — one mark — and read it from the other views with `{\"filter\": {\"param\": …}}`, `scale.domain.param` or `condition.param`. Vega-Lite copies a param down into every unit view in its scope, so a param placed on a `layer` of two or more marks (directly, or above one through a concat/facet/repeat) validates and then fails to render with `Duplicate signal name`.\n",
         );
 
-        if context.execution.filesystem.extra_paths.is_empty() {
-            prompt.push_str("- Additional path grants: none\n");
+        if shell_enabled {
+            push_shell_capability_lines(&mut prompt, context);
         } else {
-            prompt.push_str("- Additional path grants:\n");
-            for grant in &context.execution.filesystem.extra_paths {
-                let access = match grant.access {
-                    crate::config::FilesystemPathAccess::ReadOnly => "read_only",
-                    crate::config::FilesystemPathAccess::ReadWrite => "read_write",
-                };
-                prompt.push_str(&format!("  - `{}` ({})\n", grant.path, access));
-            }
-        }
-
-        let shell_mode = match context.execution.shell.mode {
-            crate::config::ShellAccessMode::Off => "off",
-            crate::config::ShellAccessMode::Restricted => "restricted",
-            crate::config::ShellAccessMode::Full => "full",
-        };
-        prompt.push_str(&format!("- Shell mode: {}\n", shell_mode));
-        let network_status = match context.execution.sandbox.network {
-            crate::config::SandboxNetworkConfig::Enabled => "network allowed",
-            crate::config::SandboxNetworkConfig::Disabled => "network disabled",
-        };
-        let sandbox_status = if cfg!(target_os = "linux") {
-            let session_bus_status = match context.execution.sandbox.session_bus {
-                crate::config::SandboxSessionBusConfig::Allow => "session bus available",
-                crate::config::SandboxSessionBusConfig::Deny => "session bus blocked",
-            };
-            format!(
-                "sandboxed shell on Linux through bubblewrap when `bash_exec` is available ({}, {})",
-                network_status, session_bus_status
-            )
-        } else if cfg!(target_os = "macos") {
-            format!(
-                "sandboxed shell on macOS through Seatbelt/sandbox-exec when `bash_exec` is available ({})",
-                network_status
-            )
-        } else {
-            "host shell — sandbox not yet available on this platform".to_string()
-        };
-        prompt.push_str(&format!("- Shell sandbox: {}\n", sandbox_status));
-        if cfg!(target_os = "linux")
-            && matches!(
-                context.execution.sandbox.session_bus,
-                crate::config::SandboxSessionBusConfig::Allow
-            )
-        {
             prompt.push_str(
-                "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n",
+                "- Shell mode: off — no `bash_exec` and no filesystem tools. Do not plan work that depends on reading or writing files; say plainly that you lack the access if a request needs it. `create_vega_chart` still saves charts for you, and `history_query` still reads this workspace's conversation record.\n",
             );
-        }
-
-        if !context.execution.shell.blocked_command_prefixes.is_empty() {
-            prompt.push_str(&format!(
-                "- Blocked command prefixes: {}\n",
-                context.execution.shell.blocked_command_prefixes.join(", ")
-            ));
-        }
-
-        match context.execution.shell.mode {
-            crate::config::ShellAccessMode::Restricted => {
-                let allowed = context.execution.shell.effective_allowed_command_prefixes();
-                let allowed_text = if allowed.is_empty() {
-                    "none".to_string()
-                } else {
-                    allowed.join(", ")
-                };
-                prompt.push_str(&format!("- Allowed command prefixes: {}\n", allowed_text));
-            }
-            _ => {
-                prompt.push_str("- Allowed command prefixes: any command not blocked\n");
-            }
         }
 
         if context.execution.web.enabled {
             prompt.push_str("- Web access: enabled (`web_search` and `web_fetch` available)\n");
         }
 
-        prompt.push_str(
-            "\n## Filesystem boundary\n\
-             The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. The `fs_*` tools enforce this in-process. On Linux and macOS, `bash_exec` also runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms where the shell sandbox is not implemented yet, `bash_exec` is labeled as a host shell and this paragraph remains the authorization boundary.\n\
-             - Do not `cd`, redirect to, or pass paths outside the listed grants — not even via subshells, heredocs, scripts, or absolute paths.\n\
-             - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
-             - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
-             - If `fs_request_grant` is denied, do not retry the same path. Either request a narrower path, ask the user via `ask_user`, or stop and explain what was blocked.\n\
-             - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n\
-             - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n\
-             - Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
-        );
-
-        // Git/SSH etiquette guard. The agent shouldn't rewrite commit authorship
-        // to bypass GitHub's email-privacy block: that destroys provenance and
-        // does an end-run around a user-configured policy. Also note the SSH
-        // /etc/ssh overlay so the agent doesn't have to discover the
-        // -F /dev/null workaround experimentally.
-        prompt.push_str(
-            "\n## Git and SSH conventions inside the sandbox\n\
-             - Never rewrite commit authorship. Do not run `git commit --amend --reset-author`, do not change `user.email` / `user.name` away from what the commit already has, and do not use the `--author=` flag to overwrite an existing author. If a push is rejected because of GitHub's email privacy (error `GH007`) or because the author's email is not allowed, STOP and escalate via `ask_user` with the exact failing email and the rejection reason. The user owns the choice of which email to publish.\n",
-        );
-        if cfg!(target_os = "linux") {
-            prompt.push_str(
-                "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n",
-            );
+        if shell_enabled {
+            push_filesystem_boundary(&mut prompt, can_write_files);
         }
-
-        prompt.push_str(
-            "\n## Agent Memory\n\
-             The `.clai/memory/` directory inside your workspace is pre-created and ready to use as durable memory across runs. These memory files are surfaced to the user in the CLAI app's **Memory** view, so write them to be human-readable, not just machine notes.\n\
-             Memory has three layers, each with a distinct purpose:\n\n\
-             ### 1. State — short-horizon working memory (`state.md`)\n\
-             Current focus, pending actions, open questions, and outcome of the last run.\n\
-             Replaced (not appended) every run — this is what you are thinking about *right now*.\n\n\
-             ### 2. Knowledge — curated durable heuristics (`knowledge.md`)\n\
-             Patterns, baselines, and lessons that remain valid across multiple runs.\n\
-             Each entry should have a confidence tag and supporting evidence:\n\
-             - `hypothesis` — observed once, not yet confirmed.\n\
-             - `provisional` — observed multiple times or partially corroborated.\n\
-             - `confirmed` — verified through repeated observation or explicit validation.\n\
-             Remove or downgrade entries when contradicted by fresh evidence.\n\n\
-             ### 3. Journal — append-only audit trail (`journal/{date}.md`)\n\
-             One file per calendar day. Append timestamped entries for significant decisions, actions, and observations.\n\
-             Journals are write-once: never edit past entries, only append new ones.\n\n\
-             ### Additional files\n\
-             - `index.md` — catalog of all memory files with one-line summaries. Read this first to decide what else to read. Update it whenever you create, rename, or delete a memory file.\n\
-             - `checkpoints/<task>.md` — for multi-step work that spans several runs.\n\n\
-             ### File conventions\n\
-             - Each memory file should start with YAML frontmatter:\n\
-             ```\n\
-             ---\n\
-             updated_at: YYYY-MM-DDTHH:MM:SS\n\
-             summary: one-line description of this file's purpose\n\
-             tags: [subsystem, topic]   # optional, cross-cutting labels for retrieval\n\
-             ---\n\
-             ```\n\
-             - Keep each file under ~200 lines. When a file grows past this, prune stale entries or split into focused files.\n\
-             - Replace outdated sections rather than appending indefinitely (except in `journal/`).\n\
-             - Cross-link related memory with relative markdown links inside `.clai/memory/`, e.g. from `knowledge.md`: `[transport-drop fix](journal/2026-06-12.md)` or `[migration plan](checkpoints/db-migration.md)`. Link a knowledge entry to the evidence behind it (a journal day, a checkpoint, a PR url) so memory forms a navigable graph instead of disconnected notes.\n\
-             - Use `tags` to group cross-cutting entries (e.g. `[mcp, concurrency]`) so related heuristics are easy to retrieve as `knowledge.md` grows.\n\
-             - Tolerate broken links: a link whose target was pruned or not yet written is not an error — leave it or tidy it on your next pass, never let it block you.\n\n",
-        );
-
-        match trigger {
-            RunTrigger::Scheduled | RunTrigger::ManualAutomation => {
-                prompt.push_str(
-                    "### Startup protocol (autonomous runs)\n\
-                     1. Read `index.md` (if it exists) to see what memory is available.\n\
-                     2. Read `state.md` to resume context from the previous run.\n\
-                     3. Read `knowledge.md` only if the current task needs historical patterns.\n\
-                     4. Do your work.\n\
-                     5. Update `state.md` with current focus and outcome.\n\
-                     6. Append a journal entry to `journal/{today}.md`.\n\
-                     7. If you discovered a durable pattern, add it to `knowledge.md` with the appropriate confidence level.\n\
-                     8. If any analysis you produced is worth preserving, file it as a checkpoint or knowledge entry — don't let valuable findings vanish into chat history.\n\
-                     9. Update `index.md` if you created or removed any files.\n\
-                     10. Prune stale entries: if a knowledge entry or checkpoint is no longer relevant, remove it.\n",
-                );
-            }
-            RunTrigger::InterAgentCall
-            | RunTrigger::WorkspaceTask
-            | RunTrigger::UserMessage
-            | RunTrigger::Retry => {
-                prompt.push_str(
-                    "### Memory in user-driven runs\n\
-                     - Do NOT read memory unless the user's request specifically needs historical context.\n\
-                     - Focus on the user's latest message. Memory is supporting context, not the starting point.\n\
-                     - If the message seems to assume earlier context you don't have — it references prior decisions, files, or an ongoing task, but you see no conversation history — your session may have been reset (e.g. switching the underlying provider starts a fresh session). Before asking the user to repeat anything, read `.clai/memory/` (start with `index.md`, then `state.md` and any relevant file) to recover the lost context, then continue.\n\
-                     - If you discover something worth remembering for future runs, write it to the appropriate memory file.\n\
-                     - If the user's request produces a durable finding, consider filing it into knowledge or a checkpoint.\n",
-                );
-            }
+        // The memory protocol is all reads and writes of `.clai/memory/` files.
+        if can_write_files {
+            push_agent_memory(&mut prompt, trigger);
         }
-
-        prompt.push_str(
-            "\n### Hierarchy of truth\n\
-             When sources conflict, trust the higher-ranked source and update the lower one:\n\
-             1. User instruction or human directive (highest)\n\
-             2. Live tool output (fresh data from the current run)\n\
-             3. Agent knowledge (`knowledge.md`)\n\
-             4. Agent state (`state.md`, lowest)\n\n\
-             ### Guardrails\n\
-             - Treat memory as fallible working notes, not ground truth. Re-check time-sensitive facts with tools before acting.\n\
-             - Do not store secrets in memory unless the operator explicitly configured a path for that purpose.\n\
-             - Knowledge is not a dashboard — don't duplicate transient metrics there. State is not knowledge — don't put durable heuristics in `state.md`.\n",
-        );
 
         prompt.push_str(
             "\n## Conversation History Database (read-only)\n\
@@ -521,7 +405,15 @@ pub(crate) fn build_system_prompt(
              - PREFERRED: use the `history_query` tool. It runs a single read-only SQL query against THIS workspace's `.clai/data.sqlite` and returns rows as JSON. It needs no approval because it is structurally incapable of writing or escaping, so it is your always-available way to recover context: if you ever find yourself missing earlier context — for example right after a compaction — query the record to recover it instead of asking the user to repeat anything.\n\
              - Discover the schema first rather than assuming it — it changes between app versions: `SELECT name FROM sqlite_master WHERE type='table'`, then `PRAGMA table_info(<table>)`. The key tables are `assistant_messages` (conversation, `content_json`), `assistant_tool_calls` (every tool invocation and its result), `assistant_runs`, and `workspace_tasks`.\n\
              - Keep queries narrow. Single rows can hold megabytes of tool output, so always SELECT specific columns, filter (`WHERE ... LIKE`, `json_extract`, time ranges on `created_at`) and page with `LIMIT`/`OFFSET`; never dump whole tables or `SELECT *` unbounded.\n\
-             - `history_query` reads only THIS workspace's database. To read a DIFFERENT workspace's DB that you have been granted access to, fall back to the shell — STRICTLY READ-ONLY: open it only as `sqlite3 'file:<path>/.clai/data.sqlite?mode=ro'` (or python3's sqlite3 module with the same `mode=ro` URI). Never INSERT/UPDATE/DELETE, never VACUUM or ALTER, never open it without `mode=ro` — a write can corrupt the app's state.\n\
+             - `history_query` reads only THIS workspace's database.\n",
+        );
+        if shell_enabled {
+            prompt.push_str(
+                "             - To read a DIFFERENT workspace's DB that you have been granted access to, fall back to the shell — STRICTLY READ-ONLY: open it only as `sqlite3 'file:<path>/.clai/data.sqlite?mode=ro'` (or python3's sqlite3 module with the same `mode=ro` URI). Never INSERT/UPDATE/DELETE, never VACUUM or ALTER, never open it without `mode=ro` — a write can corrupt the app's state.\n",
+            );
+        }
+        prompt.push_str(
+            "\
              - Your own in-flight run is in there too. This is a tool for finding *past* work — check memory files first, and reach for the database when you need the verbatim record.\n",
         );
     }
@@ -532,6 +424,217 @@ pub(crate) fn build_system_prompt(
     }
 }
 
+/// Path grants, shell mode, sandbox posture and the command policy.
+/// Only meaningful when the agent actually has `bash_exec`.
+fn push_shell_capability_lines(
+    prompt: &mut String,
+    context: &crate::assistant::types::SessionContext,
+) {
+    if context.execution.filesystem.extra_paths.is_empty() {
+        prompt.push_str("- Additional path grants: none\n");
+    } else {
+        prompt.push_str("- Additional path grants:\n");
+        for grant in &context.execution.filesystem.extra_paths {
+            let access = match grant.access {
+                crate::config::FilesystemPathAccess::ReadOnly => "read_only",
+                crate::config::FilesystemPathAccess::ReadWrite => "read_write",
+            };
+            prompt.push_str(&format!("  - `{}` ({})\n", grant.path, access));
+        }
+    }
+
+    let shell_mode = match context.execution.shell.mode {
+        crate::config::ShellAccessMode::Off => "off",
+        crate::config::ShellAccessMode::Restricted => "restricted",
+        crate::config::ShellAccessMode::Full => "full",
+    };
+    prompt.push_str(&format!("- Shell mode: {}\n", shell_mode));
+    let network_status = match context.execution.sandbox.network {
+        crate::config::SandboxNetworkConfig::Enabled => "network allowed",
+        crate::config::SandboxNetworkConfig::Disabled => "network disabled",
+    };
+    let sandbox_status = if cfg!(target_os = "linux") {
+        let session_bus_status = match context.execution.sandbox.session_bus {
+            crate::config::SandboxSessionBusConfig::Allow => "session bus available",
+            crate::config::SandboxSessionBusConfig::Deny => "session bus blocked",
+        };
+        format!(
+            "sandboxed shell on Linux through bubblewrap when `bash_exec` is available ({}, {})",
+            network_status, session_bus_status
+        )
+    } else if cfg!(target_os = "macos") {
+        format!(
+            "sandboxed shell on macOS through Seatbelt/sandbox-exec when `bash_exec` is available ({})",
+            network_status
+        )
+    } else {
+        // No sandbox implementation on this platform (see
+        // `assistant::sandbox::unsupported`), so the path grants are advisory
+        // there. The allow/blocklists are a different mechanism — CLAI parses
+        // every command against them in `shell_policy` before spawning
+        // anything, on every platform — so do not let the warning imply that
+        // nothing is enforced.
+        "host shell — no OS sandbox on this platform, so the path grants are NOT enforced by the kernel and the boundary below is a rule you keep yourself. Your allowed and blocked command prefixes are still enforced by CLAI before any command runs".to_string()
+    };
+    prompt.push_str(&format!("- Shell sandbox: {}\n", sandbox_status));
+    if cfg!(target_os = "linux")
+        && matches!(
+            context.execution.sandbox.session_bus,
+            crate::config::SandboxSessionBusConfig::Allow
+        )
+    {
+        prompt.push_str(
+            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n",
+        );
+    }
+
+    if !context.execution.shell.blocked_command_prefixes.is_empty() {
+        prompt.push_str(&format!(
+            "- Blocked command prefixes: {}\n",
+            context.execution.shell.blocked_command_prefixes.join(", ")
+        ));
+    }
+
+    match context.execution.shell.mode {
+        crate::config::ShellAccessMode::Restricted => {
+            let allowed = context.execution.shell.effective_allowed_command_prefixes();
+            let allowed_text = if allowed.is_empty() {
+                "none".to_string()
+            } else {
+                allowed.join(", ")
+            };
+            prompt.push_str(&format!("- Allowed command prefixes: {}\n", allowed_text));
+        }
+        crate::config::ShellAccessMode::Full => {
+            prompt.push_str("- Allowed command prefixes: any command not blocked\n");
+        }
+        // Unreachable: the caller only reaches this helper with a shell.
+        crate::config::ShellAccessMode::Off => {}
+    }
+}
+
+/// The authorization boundary and the git/SSH etiquette that goes with it.
+/// Both describe how to behave *while running commands*, so they are
+/// omitted for agents without a shell.
+fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool) {
+    prompt.push_str(
+        "\n## Filesystem boundary\n\
+         The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms with no sandbox implementation, `bash_exec` is labeled as a host shell: the command policy still applies, but nothing outside this paragraph stops you from reaching an ungranted path, so treat these rules as the boundary itself.\n\
+         - Do not `cd`, redirect to, or pass paths outside the listed grants — not even via subshells, heredocs, scripts, or absolute paths.\n\
+         - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
+         - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
+         - If `fs_request_grant` is denied, do not retry the same path. Either request a narrower path, ask the user via `ask_user`, or stop and explain what was blocked.\n\
+         - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n",
+    );
+    if can_write_files {
+        prompt.push_str(
+            "         - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n",
+        );
+    }
+    prompt.push_str(
+        "         - Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
+    );
+
+    // Git/SSH etiquette guard. The agent shouldn't rewrite commit authorship
+    // to bypass GitHub's email-privacy block: that destroys provenance and
+    // does an end-run around a user-configured policy. Also note the SSH
+    // /etc/ssh overlay so the agent doesn't have to discover the
+    // -F /dev/null workaround experimentally.
+    prompt.push_str(
+        "\n## Git and SSH conventions inside the sandbox\n\
+         - Never rewrite commit authorship. Do not run `git commit --amend --reset-author`, do not change `user.email` / `user.name` away from what the commit already has, and do not use the `--author=` flag to overwrite an existing author. If a push is rejected because of GitHub's email privacy (error `GH007`) or because the author's email is not allowed, STOP and escalate via `ask_user` with the exact failing email and the rejection reason. The user owns the choice of which email to publish.\n",
+    );
+    if cfg!(target_os = "linux") {
+        prompt.push_str(
+            "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n",
+        );
+    }
+}
+
+/// The `.clai/memory/` protocol. Every step of it reads or writes a file,
+/// so it is only emitted for agents that can do that.
+fn push_agent_memory(prompt: &mut String, trigger: &RunTrigger) {
+    prompt.push_str(
+        "\n## Agent Memory\n\
+         The `.clai/memory/` directory inside your workspace is pre-created and ready to use as durable memory across runs. These memory files are surfaced to the user in the CLAI app's **Memory** view, so write them to be human-readable, not just machine notes.\n\
+         Memory has three layers, each with a distinct purpose:\n\n\
+         ### 1. State — short-horizon working memory (`state.md`)\n\
+         Current focus, pending actions, open questions, and outcome of the last run.\n\
+         Replaced (not appended) every run — this is what you are thinking about *right now*.\n\n\
+         ### 2. Knowledge — curated durable heuristics (`knowledge.md`)\n\
+         Patterns, baselines, and lessons that remain valid across multiple runs.\n\
+         Each entry should have a confidence tag and supporting evidence:\n\
+         - `hypothesis` — observed once, not yet confirmed.\n\
+         - `provisional` — observed multiple times or partially corroborated.\n\
+         - `confirmed` — verified through repeated observation or explicit validation.\n\
+         Remove or downgrade entries when contradicted by fresh evidence.\n\n\
+         ### 3. Journal — append-only audit trail (`journal/{date}.md`)\n\
+         One file per calendar day. Append timestamped entries for significant decisions, actions, and observations.\n\
+         Journals are write-once: never edit past entries, only append new ones.\n\n\
+         ### Additional files\n\
+         - `index.md` — catalog of all memory files with one-line summaries. Read this first to decide what else to read. Update it whenever you create, rename, or delete a memory file.\n\
+         - `checkpoints/<task>.md` — for multi-step work that spans several runs.\n\n\
+         ### File conventions\n\
+         - Each memory file should start with YAML frontmatter:\n\
+         ```\n\
+         ---\n\
+         updated_at: YYYY-MM-DDTHH:MM:SS\n\
+         summary: one-line description of this file's purpose\n\
+         tags: [subsystem, topic]   # optional, cross-cutting labels for retrieval\n\
+         ---\n\
+         ```\n\
+         - Keep each file under ~200 lines. When a file grows past this, prune stale entries or split into focused files.\n\
+         - Replace outdated sections rather than appending indefinitely (except in `journal/`).\n\
+         - Cross-link related memory with relative markdown links inside `.clai/memory/`, e.g. from `knowledge.md`: `[transport-drop fix](journal/2026-06-12.md)` or `[migration plan](checkpoints/db-migration.md)`. Link a knowledge entry to the evidence behind it (a journal day, a checkpoint, a PR url) so memory forms a navigable graph instead of disconnected notes.\n\
+         - Use `tags` to group cross-cutting entries (e.g. `[mcp, concurrency]`) so related heuristics are easy to retrieve as `knowledge.md` grows.\n\
+         - Tolerate broken links: a link whose target was pruned or not yet written is not an error — leave it or tidy it on your next pass, never let it block you.\n\n",
+    );
+
+    match trigger {
+        RunTrigger::Scheduled | RunTrigger::ManualAutomation => {
+            prompt.push_str(
+                "### Startup protocol (autonomous runs)\n\
+                 1. Read `index.md` (if it exists) to see what memory is available.\n\
+                 2. Read `state.md` to resume context from the previous run.\n\
+                 3. Read `knowledge.md` only if the current task needs historical patterns.\n\
+                 4. Do your work.\n\
+                 5. Update `state.md` with current focus and outcome.\n\
+                 6. Append a journal entry to `journal/{today}.md`.\n\
+                 7. If you discovered a durable pattern, add it to `knowledge.md` with the appropriate confidence level.\n\
+                 8. If any analysis you produced is worth preserving, file it as a checkpoint or knowledge entry — don't let valuable findings vanish into chat history.\n\
+                 9. Update `index.md` if you created or removed any files.\n\
+                 10. Prune stale entries: if a knowledge entry or checkpoint is no longer relevant, remove it.\n",
+            );
+        }
+        RunTrigger::InterAgentCall
+        | RunTrigger::WorkspaceTask
+        | RunTrigger::UserMessage
+        | RunTrigger::Retry => {
+            prompt.push_str(
+                "### Memory in user-driven runs\n\
+                 - Do NOT read memory unless the user's request specifically needs historical context.\n\
+                 - Focus on the user's latest message. Memory is supporting context, not the starting point.\n\
+                 - If the message seems to assume earlier context you don't have — it references prior decisions, files, or an ongoing task, but you see no conversation history — your session may have been reset (e.g. switching the underlying provider starts a fresh session). Before asking the user to repeat anything, read `.clai/memory/` (start with `index.md`, then `state.md` and any relevant file) to recover the lost context, then continue.\n\
+                 - If you discover something worth remembering for future runs, write it to the appropriate memory file.\n\
+                 - If the user's request produces a durable finding, consider filing it into knowledge or a checkpoint.\n",
+            );
+        }
+    }
+
+    prompt.push_str(
+        "\n### Hierarchy of truth\n\
+         When sources conflict, trust the higher-ranked source and update the lower one:\n\
+         1. User instruction or human directive (highest)\n\
+         2. Live tool output (fresh data from the current run)\n\
+         3. Agent knowledge (`knowledge.md`)\n\
+         4. Agent state (`state.md`, lowest)\n\n\
+         ### Guardrails\n\
+         - Treat memory as fallible working notes, not ground truth. Re-check time-sensitive facts with tools before acting.\n\
+         - Do not store secrets in memory unless the operator explicitly configured a path for that purpose.\n\
+         - Knowledge is not a dashboard — don't duplicate transient metrics there. State is not knowledge — don't put durable heuristics in `state.md`.\n",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,11 +642,26 @@ mod tests {
     use crate::assistant::types::WorkspaceAgentSummary;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
 
+    /// Execution config for an agent that can touch files. Generic file work
+    /// runs through `bash_exec`, so that means a shell — the `Default` impl is
+    /// `ShellAccessMode::Off`, which now means no filesystem at all.
+    fn shell_execution() -> ExecutionCapabilityConfig {
+        ExecutionCapabilityConfig {
+            shell: crate::config::types::ShellCapabilityConfig {
+                mode: ShellAccessMode::Restricted,
+                allowed_command_prefixes: crate::config::types::standard_restricted_shell_allowlist(
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn build_system_prompt_includes_agent_memory_guidance_for_automations() {
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
-            execution: ExecutionCapabilityConfig::default(),
+            execution: shell_execution(),
             ..Default::default()
         };
 
@@ -592,7 +710,7 @@ mod tests {
     fn build_system_prompt_tells_user_runs_to_recover_lost_context_from_memory() {
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
-            execution: ExecutionCapabilityConfig::default(),
+            execution: shell_execution(),
             ..Default::default()
         };
 
@@ -627,7 +745,7 @@ mod tests {
     fn build_system_prompt_makes_agent_self_aware_of_clai_workspace_model() {
         let context = SessionContext {
             agent_workspace_id: Some("ws-abc".to_string()),
-            execution: ExecutionCapabilityConfig::default(),
+            execution: shell_execution(),
             ..Default::default()
         };
 
@@ -654,7 +772,7 @@ mod tests {
     fn build_system_prompt_routes_charts_through_create_vega_chart() {
         let context = SessionContext {
             agent_workspace_id: Some("ws-abc".to_string()),
-            execution: ExecutionCapabilityConfig::default(),
+            execution: shell_execution(),
             ..Default::default()
         };
         let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
@@ -662,13 +780,13 @@ mod tests {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
         };
-        // The tool is the only sanctioned chart path; fs_write is named as
+        // The tool is the only sanctioned chart path; bash_exec is named as
         // the anti-pattern so the model does not route around validation.
         assert!(text.contains("Choose a chart proactively"));
         assert!(text.contains("materially easier to understand than prose or a short table"));
         assert!(text.contains("Skip charts for a single fact"));
         assert!(text.contains("`create_vega_chart` tool"));
-        assert!(text.contains("never write a Vega-Lite spec with `fs_write`"));
+        assert!(text.contains("never hand-write a Vega-Lite spec into a file"));
         // The model chooses an organized path and receives a portable embed.
         assert!(text.contains("complete workspace-relative `.vl.json` path"));
         assert!(text.contains("instead of defaulting to a shared charts directory"));
@@ -707,7 +825,7 @@ mod tests {
     fn build_system_prompt_documents_readonly_conversation_history_db() {
         let context = SessionContext {
             agent_workspace_id: Some("ws-abc".to_string()),
-            execution: ExecutionCapabilityConfig::default(),
+            execution: shell_execution(),
             ..Default::default()
         };
 
@@ -745,10 +863,100 @@ mod tests {
     }
 
     #[test]
+    fn build_system_prompt_withholds_filesystem_guidance_from_shell_off_agents() {
+        // With generic file operations routed through `bash_exec`, a shell-off
+        // agent has no filesystem: instructing it to obey a path boundary or to
+        // keep `.clai/memory/` up to date asks for work it cannot perform.
+        let context = SessionContext {
+            agent_workspace_id: Some("agent-123".to_string()),
+            execution: ExecutionCapabilityConfig::default(),
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(!text.contains("## Filesystem boundary"));
+        assert!(!text.contains("## Agent Memory"));
+        assert!(!text.contains("## Git and SSH conventions"));
+        assert!(!text.contains("- Additional path grants"));
+        // The old `_` arm advertised an unrestricted shell to agents with none.
+        assert!(!text.contains("any command not blocked"));
+        assert!(text.contains("- Shell mode: off"));
+        assert!(text.contains("no filesystem tools"));
+        // The strongest assertion: an agent without the tool is never told to
+        // reach for it. Header-only assertions let a stray bullet survive.
+        // Stronger than header assertions: no bullet anywhere may direct this
+        // agent at the tool it does not have. The only permitted mention is the
+        // shell-mode line saying it has none.
+        for instruction in ["Use `bash_exec`", "with `bash_exec`", "via `bash_exec`"] {
+            assert!(
+                !text.contains(instruction),
+                "shell-off prompt still says {instruction}"
+            );
+        }
+        assert!(text.contains("no `bash_exec` and no filesystem tools"));
+        // Charts and the history DB survive: neither needs a shell.
+        assert!(text.contains("`create_vega_chart`"));
+        assert!(text.contains("## Conversation History Database"));
+        // ...but the sqlite3 fallback for other workspaces does need one.
+        assert!(!text.contains("?mode=ro'"));
+    }
+
+    #[test]
+    fn build_system_prompt_withholds_write_guidance_from_a_read_only_allowlist() {
+        // The shipped `code-reviewer` template's shape: a shell, but nothing in
+        // the allowlist that writes. Every write it attempted would stop on an
+        // approval prompt, which an unattended scheduled run cannot answer — so
+        // it must not be told to keep memory or save durable outputs.
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.shell.mode = ShellAccessMode::Restricted;
+        execution.shell.allowed_command_prefixes = ["rg", "cat", "git diff"]
+            .iter()
+            .map(|command| (*command).to_string())
+            .collect();
+
+        let context = SessionContext {
+            agent_workspace_id: Some("agent-123".to_string()),
+            // An automation, so the "save durable outputs as files" line is
+            // reachable — otherwise reverting its gate survives this test.
+            automation_name: Some("Nightly review".to_string()),
+            execution,
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(text.contains("This session belongs to the automation"));
+        assert!(!text.contains("## Agent Memory"));
+        assert!(!text.contains("Durable outputs belong in the workspace"));
+        assert!(!text.contains("Save durable outputs as files"));
+        assert!(!text.contains("Default your writes to the workspace"));
+        assert!(!text.contains("inspection and changes"));
+        assert!(text.contains("no command that writes a file"));
+        // Approval-blocked, not denied, and charts are still writable.
+        assert!(text.contains("waits for the user to approve"));
+        assert!(text.contains("save charts with `create_vega_chart`"));
+        // It still has a shell, so the boundary and the search guidance apply.
+        assert!(text.contains("## Filesystem boundary"));
+        assert!(text.contains("ALWAYS search your workspace first"));
+    }
+
+    #[test]
     fn build_system_prompt_describes_shell_mode_alongside_memory_guidance() {
         let mut execution = ExecutionCapabilityConfig::default();
         execution.shell.mode = ShellAccessMode::Restricted;
-        execution.shell.allowed_command_prefixes = vec!["cargo check".to_string()];
+        // `tee` is what makes this agent write-capable; without it the memory
+        // protocol below would be guidance it cannot act on.
+        execution.shell.allowed_command_prefixes =
+            vec!["cargo check".to_string(), "tee".to_string()];
 
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
@@ -866,7 +1074,7 @@ mod tests {
     fn build_system_prompt_omits_interactive_reliability_guidance_without_blocking_tool() {
         let context = SessionContext::default();
         let tools = [crate::assistant::types::ToolDefinition {
-            name: "fs_read".to_string(),
+            name: "non_interactive_tool".to_string(),
             description: "desc".to_string(),
             input_schema: serde_json::json!({}),
         }];
@@ -884,6 +1092,7 @@ mod tests {
     fn build_system_prompt_describes_autonomous_run_mode() {
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
+            execution: shell_execution(),
             ..Default::default()
         };
 
@@ -907,6 +1116,7 @@ mod tests {
     fn build_system_prompt_describes_user_driven_run_mode() {
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
+            execution: shell_execution(),
             ..Default::default()
         };
 
@@ -1144,6 +1354,7 @@ mod tests {
     fn build_system_prompt_memory_guardrails_present_in_both_modes() {
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
+            execution: shell_execution(),
             ..Default::default()
         };
 

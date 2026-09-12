@@ -23,18 +23,17 @@ pub fn available_tools(
     }
 
     if context.agent_workspace_id.is_some() {
-        tools.push(fs_list_def());
-        tools.push(fs_glob_def());
-        tools.push(fs_read_def());
-        tools.push(fs_write_def());
-        tools.push(fs_request_grant_def());
         tools.push(history_query_def());
         tools.push(create_vega_chart_def());
     }
 
+    // `bash_exec` is the only consumer of a path grant, so with the shell off
+    // there is nothing for `fs_request_grant` to unlock: offering it would only
+    // invite the agent to ask the user for access it still cannot use.
     if context.agent_workspace_id.is_some()
         && !matches!(context.execution.shell.mode, ShellAccessMode::Off)
     {
+        tools.push(fs_request_grant_def());
         tools.push(bash_exec_def());
     }
 
@@ -108,10 +107,6 @@ fn all_builtin_defs() -> Vec<ToolDefinition> {
         workspace_assign_task_def(),
         workspace_get_task_result_def(),
         ask_user_def(),
-        fs_list_def(),
-        fs_glob_def(),
-        fs_read_def(),
-        fs_write_def(),
         fs_request_grant_def(),
         bash_exec_def(),
         web_search_def(),
@@ -149,76 +144,10 @@ fn ask_user_def() -> ToolDefinition {
     )
 }
 
-fn fs_list_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "fs_list".to_string(),
-        description: "List files and directories under the agent workspace or another allowed filesystem path. Supports optional recursive traversal with a hard result limit.".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "recursive": { "type": "boolean" },
-                "limit": { "type": "integer", "minimum": 1 }
-            },
-            "additionalProperties": false
-        }),
-    }
-}
-
-fn fs_glob_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "fs_glob".to_string(),
-        description: "Find files or directories matching a glob pattern within the agent workspace or another allowed filesystem path.".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string" },
-                "limit": { "type": "integer", "minimum": 1 }
-            },
-            "required": ["pattern"],
-            "additionalProperties": false
-        }),
-    }
-}
-
-fn fs_read_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "fs_read".to_string(),
-        description: "Read a text file from the agent workspace or from an additional allowed filesystem path.".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "offset": { "type": "integer", "minimum": 0 },
-                "limit": { "type": "integer", "minimum": 1 }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        }),
-    }
-}
-
-fn fs_write_def() -> ToolDefinition {
-    ToolDefinition {
-        name: "fs_write".to_string(),
-        description: "Write a text file to the agent workspace or to an additional writable filesystem path. Creates parent directories when requested.".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "content": { "type": "string" },
-                "createParents": { "type": "boolean" }
-            },
-            "required": ["path", "content"],
-            "additionalProperties": false
-        }),
-    }
-}
-
 fn fs_request_grant_def() -> ToolDefinition {
     ToolDefinition {
         name: "fs_request_grant".to_string(),
-        description: "Request the user's approval to extend this agent's filesystem grants. Use BEFORE attempting work that needs paths outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI). Request the narrowest path that satisfies the task. The user can approve (once or always), narrow the path, downgrade the access, or deny. If granted `once`, the access lasts the rest of this run. If granted `always`, the grant persists to agent settings. If the path is already covered by existing grants, the tool returns immediately without prompting.".to_string(),
+        description: "Request the user's approval to extend this agent's filesystem grants. Use BEFORE attempting work that needs paths outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI). The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. Request the narrowest path that satisfies the task. The user can approve (once or always), narrow the path, downgrade the access, or deny. If granted `once`, the access lasts the rest of this run. If granted `always`, the grant persists to agent settings. If the path is already covered by existing grants, the tool returns immediately without prompting.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -251,7 +180,7 @@ fn history_query_def() -> ToolDefinition {
 fn create_vega_chart_def() -> ToolDefinition {
     ToolDefinition {
         name: "create_vega_chart".to_string(),
-        description: "Create a chart. This is the ONLY way to produce a chart: never write a Vega-Lite spec with fs_write or paste one into chat. The spec is validated against the Vega-Lite v6 JSON schema; on failure the error lists the violations with their JSON paths so you can fix the spec and call again. Provide the complete workspace-relative `.vl.json` `path` on every call: with `spec`, the validated chart is saved there; without `spec`, the existing chart there is validated. Choose a path that keeps the chart with its related task or document instead of defaulting to a shared charts directory; avoid cache, dependency, and build-output directories hidden from workspace artifacts. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The tool returns `{ok, path, markdown}`. The saved file renders as an interactive chart in the chat (when `display` is true), in the artifacts panel when stored in a visible artifact directory, and inside markdown documents via `![title](/reports/q3/chart.vl.json)` (leading `/` = workspace root, so it works from a report in any folder) — paste the returned `markdown` into reports. One chart per call. Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace and reference it with `data.url` (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`) instead of inlining `data.values`.".to_string(),
+        description: "Create a chart. This is the ONLY way to produce a chart: never write a Vega-Lite spec directly with bash_exec or paste one into chat. The spec is validated against the Vega-Lite v6 JSON schema; on failure the error lists the violations with their JSON paths so you can fix the spec and call again. Provide the complete workspace-relative `.vl.json` `path` on every call: with `spec`, the validated chart is saved there; without `spec`, the existing chart there is validated. Choose a path that keeps the chart with its related task or document instead of defaulting to a shared charts directory; avoid cache, dependency, and build-output directories hidden from workspace artifacts. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The tool returns `{ok, path, markdown}`. The saved file renders as an interactive chart in the chat (when `display` is true), in the artifacts panel when stored in a visible artifact directory, and inside markdown documents via `![title](/reports/q3/chart.vl.json)` (leading `/` = workspace root, so it works from a report in any folder) — paste the returned `markdown` into reports. One chart per call. Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with bash_exec and reference it with `data.url` (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`) instead of inlining `data.values`.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -269,7 +198,7 @@ fn create_vega_chart_def() -> ToolDefinition {
 fn bash_exec_def() -> ToolDefinition {
     ToolDefinition {
         name: "bash_exec".to_string(),
-        description: "Run a shell command through CLAI's guarded executor inside this automation's allowed working directory. On Linux this runs inside the local execution sandbox; if the sandbox is unavailable, the command fails closed. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 1800000 (30 min); the default is 300000 (5 min).".to_string(),
+        description: "Run a shell command, including filesystem inspection and changes, through CLAI's guarded executor inside this automation's allowed working directory. On Linux this runs inside the local execution sandbox; if the sandbox is unavailable, the command fails closed. For long-running work (CI tails, builds, large test suites), pass an explicit timeoutMs up to 1800000 (30 min); the default is 300000 (5 min).".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -377,6 +306,39 @@ mod tests {
     fn external_tool_names_have_no_builtin_validator() {
         assert!(builtin_param_validator("mcp__1c47ed2d__search").is_none());
         assert!(builtin_param_validator("not_a_tool").is_none());
+        assert!(builtin_param_validator("fs_read").is_none());
+    }
+
+    #[test]
+    fn workspace_tools_use_bash_instead_of_operational_fs_tools() {
+        let mut context = SessionContext {
+            agent_workspace_id: Some("workspace".to_string()),
+            ..Default::default()
+        };
+
+        let names = |context: &SessionContext| {
+            available_tools(context, &[])
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
+        };
+
+        let shell_off = names(&context);
+        assert!(!shell_off.contains(&"bash_exec".to_string()));
+        // `bash_exec` is the only consumer of a path grant, so a shell-off
+        // agent has nothing to unlock with one.
+        assert!(!shell_off.contains(&"fs_request_grant".to_string()));
+        for retired in ["fs_list", "fs_glob", "fs_read", "fs_write"] {
+            assert!(!shell_off.contains(&retired.to_string()));
+        }
+        // Tools that carry their own filesystem access survive shell-off.
+        assert!(shell_off.contains(&"create_vega_chart".to_string()));
+        assert!(shell_off.contains(&"history_query".to_string()));
+
+        context.execution.shell.mode = ShellAccessMode::Restricted;
+        let shell_on = names(&context);
+        assert!(shell_on.contains(&"bash_exec".to_string()));
+        assert!(shell_on.contains(&"fs_request_grant".to_string()));
     }
 
     #[test]

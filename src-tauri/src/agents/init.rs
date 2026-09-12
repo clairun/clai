@@ -94,7 +94,7 @@ pub fn apply_workspace_schedule(
     }
 
     let execution: ExecutionCapabilityConfig = agent.execution.clone();
-    let mut tools: Vec<&'static str> = vec!["dashboard", "tabs", "fs"];
+    let mut tools: Vec<&'static str> = vec!["dashboard", "tabs"];
     if !matches!(execution.shell.mode, ShellAccessMode::Off) {
         tools.push("bash");
     }
@@ -167,7 +167,7 @@ mod tests {
 
         assert_eq!(definition.id, agent.id);
         assert_eq!(definition.name, "Test Agent");
-        assert_eq!(definition.required_tools, vec!["dashboard", "tabs", "fs"]);
+        assert_eq!(definition.required_tools, vec!["dashboard", "tabs"]);
     }
 
     #[tokio::test]

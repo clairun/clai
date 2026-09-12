@@ -14,6 +14,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepts `false`, `no`, `off`, or an empty value) to fall back to legacy
   `codex exec`.
 
+### Filesystem tools
+
+- **The `fs_list`, `fs_glob`, `fs_read`, and `fs_write` tools are gone.**
+  Agents do their file work through `bash_exec` instead, which is one
+  permission surface rather than two and gives an agent the whole shell
+  vocabulary (`rg`, `sed`, `find`, pipelines) where it previously had four
+  fixed verbs. `fs_request_grant` stays: it is how an agent asks for a path
+  outside its grants. Past conversations still render the removed tool calls.
+- **Restricted allowlists gained the file commands.** The default restricted
+  allowlist now includes what the removed tools used to do (`mkdir`, `cp`,
+  `mv`, `touch`, `tee`, `sed`, and friends), and new agents default to the
+  restricted tier, since the shell is now also the filesystem.
+- **Existing agents are left alone.** There is no config migration: an agent
+  you already configured keeps exactly the allowlist you gave it. The first
+  time it needs `mkdir` or `tee`, Restricted mode asks, and "Always allow"
+  widens the list — so the commands arrive when they are actually used, by
+  your decision, instead of being written into your config on upgrade.
+- **Prompt guidance follows real capability.** An agent with no shell, or with
+  an allowlist containing no command that writes a file, is no longer told to
+  keep memory files, save durable outputs, or write companion data files for
+  charts — guidance it could only have stalled on. It is told what it can do
+  instead: report in chat, and save charts with `create_vega_chart`, which
+  writes its own file without a shell.
+
 ### Shell permissions
 
 - **Restricted mode is now interactive.** When an agent in Restricted

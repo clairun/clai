@@ -319,6 +319,11 @@ pub fn default_agent_execution() -> ExecutionCapabilityConfig {
         });
     }
     execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
+    // Generic file operations run through `bash_exec`, so a shell-off agent has
+    // no filesystem at all — it cannot read its own memory or write an artifact.
+    // Start every new agent on the restricted tier (allowlisted commands inside
+    // the sandbox); the user can still set it back to off in agent settings.
+    execution.shell.mode = ShellAccessMode::Restricted;
     execution
 }
 
@@ -329,7 +334,6 @@ impl WorkspaceAgent {
         // bash_exec with the default blocklist) and web access by default. The
         // user can still tighten either in agent settings.
         let mut execution = default_agent_execution();
-        execution.shell.mode = ShellAccessMode::Restricted;
         execution.web.enabled = true;
         Self {
             id,
@@ -708,6 +712,21 @@ mod attach_provider_tests {
     }
 
     #[test]
+    fn new_agents_default_to_a_shell_because_the_shell_is_the_filesystem() {
+        // Generic file operations run through `bash_exec`. A shell-off agent
+        // therefore cannot read its own memory or write an artifact, so a
+        // brand-new agent must not start there.
+        let execution = default_agent_execution();
+        assert_eq!(execution.shell.mode, ShellAccessMode::Restricted);
+        assert!(execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cat".to_string()));
+        // Members stay off the network until the user opts in.
+        assert!(!execution.web.enabled);
+    }
+
+    #[test]
     fn new_manager_defaults_to_restricted_shell_and_web_enabled() {
         let manager = WorkspaceAgent::new_manager("mgr".to_string(), 1);
         assert_eq!(manager.execution.shell.mode, ShellAccessMode::Restricted);
@@ -717,6 +736,16 @@ mod attach_provider_tests {
             .shell
             .allowed_command_prefixes
             .contains(&"rg".to_string()));
+        assert!(manager
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cat".to_string()));
+        assert!(manager
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"mkdir".to_string()));
     }
 
     // -------------------------------------------------------------------

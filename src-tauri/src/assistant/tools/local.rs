@@ -1,5 +1,4 @@
 use futures::StreamExt;
-use glob::{MatchOptions, Pattern};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Component, Path, PathBuf};
@@ -20,12 +19,6 @@ use crate::config::{
 
 use super::ToolExecutionContext;
 
-const DEFAULT_FILE_READ_LIMIT: usize = 20_000;
-const MAX_FILE_READ_LIMIT: usize = 200_000;
-const DEFAULT_FS_LIST_LIMIT: usize = 200;
-const MAX_FS_LIST_LIMIT: usize = 2_000;
-const DEFAULT_FS_GLOB_LIMIT: usize = 200;
-const MAX_FS_GLOB_LIMIT: usize = 2_000;
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 300_000;
 const MAX_BASH_TIMEOUT_MS: u64 = 1_800_000;
 const DEFAULT_BASH_OUTPUT_LIMIT: usize = 20_000;
@@ -39,44 +32,6 @@ const MAX_WEB_FETCH_REDIRECTS: usize = 5;
 const DEFAULT_WEB_SEARCH_MAX_RESULTS: usize = 10;
 const MAX_WEB_SEARCH_MAX_RESULTS: usize = 20;
 const WEB_SEARCH_TIMEOUT_MS: u64 = 10_000;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FsListParams {
-    #[serde(default = "default_current_path")]
-    path: String,
-    #[serde(default)]
-    recursive: bool,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FsGlobParams {
-    pattern: String,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FsReadParams {
-    path: String,
-    #[serde(default)]
-    offset: Option<usize>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FsWriteParams {
-    path: String,
-    content: String,
-    #[serde(default)]
-    create_parents: bool,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -133,12 +88,6 @@ struct ResolvedGrant {
     access: AccessKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FilesystemEntry {
-    path: PathBuf,
-    kind: &'static str,
-}
-
 pub async fn execute_local_tool(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
@@ -146,26 +95,6 @@ pub async fn execute_local_tool(
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     match tool_name {
-        "fs_list" => {
-            let params: FsListParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid fs_list params: {}", e))?;
-            execute_fs_list(context, params)
-        }
-        "fs_glob" => {
-            let params: FsGlobParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid fs_glob params: {}", e))?;
-            execute_fs_glob(context, params)
-        }
-        "fs_read" => {
-            let params: FsReadParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid fs_read params: {}", e))?;
-            execute_fs_read(context, params)
-        }
-        "fs_write" => {
-            let params: FsWriteParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid fs_write params: {}", e))?;
-            execute_fs_write(context, params)
-        }
         "bash_exec" => {
             let params: BashExecParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid bash_exec params: {}", e))?;
@@ -188,130 +117,6 @@ pub async fn execute_local_tool(
         }
         _ => Err(format!("Unknown local tool: {}", tool_name)),
     }
-}
-
-fn default_current_path() -> String {
-    ".".to_string()
-}
-
-fn execute_fs_list(
-    context: &ToolExecutionContext,
-    params: FsListParams,
-) -> Result<serde_json::Value, String> {
-    let grants = filesystem_grants(context)?;
-    let path = resolve_allowed_existing_path(&params.path, &grants, false).inspect_err(|e| {
-        if e.contains("outside the agent's allowed filesystem grants") || e.contains("not writable")
-        {
-            context.add_notice(RunNoticeKind::PathDenied, e.clone());
-        }
-    })?;
-    let limit = params
-        .limit
-        .unwrap_or(DEFAULT_FS_LIST_LIMIT)
-        .min(MAX_FS_LIST_LIMIT);
-    let (entries, truncated) = list_entries_at_path(&path, params.recursive, limit)?;
-
-    Ok(serde_json::json!({
-        "path": agent_path_string(&path),
-        "entries": serialize_entries(&entries),
-        "recursive": params.recursive,
-        "truncated": truncated,
-        "limit": limit
-    }))
-}
-
-fn execute_fs_glob(
-    context: &ToolExecutionContext,
-    params: FsGlobParams,
-) -> Result<serde_json::Value, String> {
-    // Only search grant roots the in-process tools can actually reach: in
-    // Flatpak, non-home roots are invisible or a divergent private view, so
-    // walking them yields misleading results. No-op outside Flatpak.
-    let grants = retain_flatpak_reachable_grants(filesystem_grants(context)?);
-    let limit = params
-        .limit
-        .unwrap_or(DEFAULT_FS_GLOB_LIMIT)
-        .min(MAX_FS_GLOB_LIMIT);
-    let (entries, truncated) =
-        glob_allowed_paths(&params.pattern, &grants, limit).inspect_err(|e| {
-            if e.contains("outside the agent's allowed filesystem grants") {
-                context.add_notice(RunNoticeKind::PathDenied, e.clone());
-            }
-        })?;
-
-    Ok(serde_json::json!({
-        "pattern": params.pattern,
-        "matches": serialize_entries(&entries),
-        "truncated": truncated,
-        "limit": limit
-    }))
-}
-
-fn execute_fs_read(
-    context: &ToolExecutionContext,
-    params: FsReadParams,
-) -> Result<serde_json::Value, String> {
-    let grants = filesystem_grants(context)?;
-    let path = resolve_allowed_existing_path(&params.path, &grants, false).inspect_err(|e| {
-        if e.contains("outside the agent's allowed filesystem grants") || e.contains("not writable")
-        {
-            context.add_notice(RunNoticeKind::PathDenied, e.clone());
-        }
-    })?;
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    let offset = params.offset.unwrap_or(0);
-    let limit = params
-        .limit
-        .unwrap_or(DEFAULT_FILE_READ_LIMIT)
-        .min(MAX_FILE_READ_LIMIT);
-    let chars: Vec<char> = content.chars().collect();
-    let start = offset.min(chars.len());
-    let end = (start + limit).min(chars.len());
-    let slice: String = chars[start..end].iter().collect();
-
-    Ok(serde_json::json!({
-        "path": agent_path_string(&path),
-        "content": slice,
-        "truncated": end < chars.len(),
-        "offset": start,
-        "limit": limit
-    }))
-}
-
-fn execute_fs_write(
-    context: &ToolExecutionContext,
-    params: FsWriteParams,
-) -> Result<serde_json::Value, String> {
-    let grants = filesystem_grants(context)?;
-    let allowed = resolve_allowed_path_forms(&params.path, &grants, true).inspect_err(|e| {
-        if e.contains("outside the agent's allowed filesystem grants") || e.contains("not writable")
-        {
-            context.add_notice(RunNoticeKind::PathDenied, e.clone());
-        }
-    })?;
-    ensure_fs_reachable(&allowed.requested)?;
-    let path = allowed.resolved;
-
-    if params.create_parents {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Failed to create parent directories for {}: {}",
-                    path.display(),
-                    e
-                )
-            })?;
-        }
-    }
-
-    fs::write(&path, params.content.as_bytes())
-        .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-
-    Ok(serde_json::json!({
-        "path": agent_path_string(&path),
-        "bytesWritten": params.content.len()
-    }))
 }
 
 async fn execute_bash_exec(
@@ -471,194 +276,6 @@ fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant
     Ok(grants)
 }
 
-fn list_entries_at_path(
-    path: &Path,
-    recursive: bool,
-    limit: usize,
-) -> Result<(Vec<FilesystemEntry>, bool), String> {
-    let mut entries = Vec::new();
-
-    if path.is_dir() {
-        let truncated = collect_dir_entries(path, recursive, limit, &mut entries)?;
-        Ok((entries, truncated))
-    } else {
-        Ok((vec![describe_path(path)?], false))
-    }
-}
-
-fn collect_dir_entries(
-    dir: &Path,
-    recursive: bool,
-    limit: usize,
-    entries: &mut Vec<FilesystemEntry>,
-) -> Result<bool, String> {
-    let mut dir_entries = fs::read_dir(dir)
-        .map_err(|e| format!("Failed to list {}: {}", dir.display(), e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to list {}: {}", dir.display(), e))?;
-    dir_entries.sort_by_key(|entry| entry.path());
-
-    for entry in dir_entries {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
-        entries.push(FilesystemEntry {
-            path: path.clone(),
-            kind: classify_file_type(&file_type),
-        });
-
-        if entries.len() >= limit {
-            return Ok(true);
-        }
-
-        if recursive && file_type.is_dir() && collect_dir_entries(&path, true, limit, entries)? {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-fn glob_allowed_paths(
-    pattern: &str,
-    grants: &[ResolvedGrant],
-    limit: usize,
-) -> Result<(Vec<FilesystemEntry>, bool), String> {
-    let normalized_pattern = normalize_pattern_string(pattern);
-    if normalized_pattern.is_empty() {
-        return Err("Glob pattern cannot be empty".to_string());
-    }
-
-    let matcher =
-        Pattern::new(&normalized_pattern).map_err(|e| format!("Invalid glob pattern: {}", e))?;
-    let absolute_pattern = Path::new(&normalized_pattern).is_absolute();
-
-    if absolute_pattern {
-        if let Some(prefix) = literal_path_prefix(&normalized_pattern) {
-            let intersects_grants = grants
-                .iter()
-                .any(|grant| path_prefix_intersects(&prefix, &grant.root));
-            if !intersects_grants {
-                return Err(format!(
-                    "Pattern {} is outside the agent's allowed filesystem grants",
-                    normalized_pattern
-                ));
-            }
-        }
-    }
-
-    let options = MatchOptions {
-        case_sensitive: !cfg!(windows),
-        require_literal_separator: true,
-        require_literal_leading_dot: false,
-    };
-
-    // Same container mask `resolve_allowed_path` applies, so the walk agrees
-    // with what `fs_read`/`fs_list` would actually allow.
-    let scratch_mask = grants.first().and_then(|ws| {
-        crate::assistant::sandbox::profile::workspace_mask(&ws.root, real_host_home().as_deref())
-    });
-
-    let mut ctx = GlobWalkContext {
-        matcher,
-        options,
-        absolute_pattern,
-        limit,
-        seen: std::collections::HashSet::new(),
-        matches: Vec::new(),
-        scratch_mask,
-    };
-
-    for grant in grants {
-        if collect_glob_matches(&grant.root, &grant.root, &mut ctx)? {
-            return Ok((ctx.matches, true));
-        }
-    }
-
-    Ok((ctx.matches, false))
-}
-
-struct GlobWalkContext {
-    /// Workspace container, used to locate the one `.scratch` dir to skip.
-    scratch_mask: Option<PathBuf>,
-    matcher: Pattern,
-    options: MatchOptions,
-    absolute_pattern: bool,
-    limit: usize,
-    seen: std::collections::HashSet<PathBuf>,
-    matches: Vec<FilesystemEntry>,
-}
-
-/// True only for THE sandbox scratch container — `<mask>/.scratch`, where
-/// `mask` is the workspace container from `sandbox::profile::workspace_mask`.
-///
-/// Deliberately an exact path test, not a basename match: a user directory that
-/// happens to be called `.scratch` is ordinary content, and silently pruning it
-/// from glob results would lose their data with no way to notice.
-fn is_sandbox_scratch_dir(path: &Path, mask: Option<&Path>) -> bool {
-    let Some(mask) = mask else {
-        return false;
-    };
-    path == mask.join(crate::assistant::sandbox::profile::SCRATCH_DIR_NAME)
-}
-
-fn collect_glob_matches(
-    root: &Path,
-    current: &Path,
-    ctx: &mut GlobWalkContext,
-) -> Result<bool, String> {
-    let mut dir_entries = fs::read_dir(current)
-        .map_err(|e| format!("Failed to list {}: {}", current.display(), e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to list {}: {}", current.display(), e))?;
-    dir_entries.sort_by_key(|entry| entry.path());
-
-    for entry in dir_entries {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
-        let candidate = if ctx.absolute_pattern {
-            path_to_match_string(&path)
-        } else {
-            let relative_path = path.strip_prefix(root).map_err(|e| {
-                format!(
-                    "Failed to resolve relative path for {}: {}",
-                    path.display(),
-                    e
-                )
-            })?;
-            path_to_match_string(relative_path)
-        };
-
-        if ctx.matcher.matches_with(&candidate, ctx.options) && ctx.seen.insert(path.clone()) {
-            ctx.matches.push(FilesystemEntry {
-                path: path.clone(),
-                kind: classify_file_type(&file_type),
-            });
-            if ctx.matches.len() >= ctx.limit {
-                return Ok(true);
-            }
-        }
-
-        // Never descend into the sandbox scratch tree. It holds other
-        // workspaces' temp files (which the mask denies to `fs_read`/`fs_list`,
-        // so enumerating their paths here would be inconsistent) and it holds
-        // persistent build caches, so walking it would make every glob pay for
-        // tens of thousands of irrelevant entries.
-        if file_type.is_dir() && is_sandbox_scratch_dir(&path, ctx.scratch_mask.as_deref()) {
-            continue;
-        }
-
-        if file_type.is_dir() && collect_glob_matches(root, &path, ctx)? {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
 fn resolve_grant(grant: &FilesystemPathGrant) -> Result<ResolvedGrant, String> {
     Ok(ResolvedGrant {
         root: resolve_configured_path(&grant.path)?,
@@ -703,9 +320,7 @@ fn resolve_shell_cwd(
         // The sandbox binds grants at their configured (lexical) paths, so the
         // cwd stays lexical; containment is still checked on the resolved form.
         let grants = filesystem_grants(context)?;
-        resolve_allowed_path_forms(base, &grants, true)
-            .or_else(|_| resolve_allowed_path_forms(base, &grants, false))?
-            .requested
+        resolve_allowed_cwd(base, &grants)?
     };
 
     Ok(cwd)
@@ -775,105 +390,22 @@ fn sandbox_profile(
     })
 }
 
-fn resolve_allowed_existing_path(
-    path: &str,
-    grants: &[ResolvedGrant],
-    require_write: bool,
-) -> Result<PathBuf, String> {
-    let allowed = resolve_allowed_path_forms(path, grants, require_write)?;
-    // In Flatpak, surface the host-only reachability BEFORE the existence
-    // probe — otherwise a granted-but-unreachable path (e.g. /tmp, a private
-    // tmpfs in Flatpak) fails the in-sandbox exists() check and returns a
-    // misleading "Path does not exist" instead of steering to bash_exec. The
-    // check uses the path as addressed, which is what the sandbox view maps.
-    ensure_fs_reachable(&allowed.requested)?;
-    if !allowed.resolved.exists() {
-        return Err(format!(
-            "Path does not exist: {}",
-            allowed.requested.display()
-        ));
-    }
-    Ok(allowed.resolved)
-}
-
 /// The user's real home directory, resolved once. Inside Flatpak this is the
-/// host home (resolved via a host-spawn), cached so the fs_* path doesn't
-/// spawn a process per call.
+/// host home (resolved via a host-spawn).
 fn real_host_home() -> Option<PathBuf> {
     static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
     HOME.get_or_init(|| crate::providers::get_home_dir().map(PathBuf::from))
         .clone()
 }
 
-/// True when `resolved` lies outside the home subtree. `home` is `None` when
-/// the real home can't be determined, in which case we don't block (fail open).
-fn path_outside_home(resolved: &Path, home: Option<&Path>) -> bool {
-    match home {
-        Some(home) => !resolved.starts_with(home),
-        None => false,
-    }
-}
-
-/// In a Flatpak build the in-process fs_* tools see only what the sandbox's
-/// `--filesystem` permission exposes — in practice the user's home directory.
-/// `/tmp` is a *private* tmpfs in Flatpak and other roots (`/opt`, `/mnt`, …)
-/// aren't mapped at all, so a granted path outside home is either invisible or
-/// a different view from what `bash_exec` (which runs host-side) sees. Probing
-/// existence can't distinguish "not visible" from "absent" — a private `/tmp`
-/// both exists and is empty — so we gate structurally on the home subtree.
-fn fs_unreachable_in_flatpak(resolved: &Path, home: Option<&Path>) -> bool {
-    crate::providers::is_flatpak() && path_outside_home(resolved, home)
-}
-
-/// Fail a single-path fs_* op whose resolved path is granted but unreachable by
-/// the in-process tools in Flatpak, steering the agent to `bash_exec` instead
-/// of silently lying ("Path does not exist") or writing a phantom file into the
-/// sandbox-private view that neither bash_exec nor the host can see.
-fn ensure_fs_reachable(resolved: &Path) -> Result<(), String> {
-    if fs_unreachable_in_flatpak(resolved, real_host_home().as_deref()) {
-        return Err(format!(
-            "`{}` is granted but unreachable by fs_* tools in the Flatpak build, which can \
-             only see your home directory. Use bash_exec for this path — it runs on the host \
-             and can reach every granted path.",
-            resolved.display()
-        ));
-    }
-    Ok(())
-}
-
-/// Drop grant roots the in-process tools can't reach in Flatpak so a glob only
-/// searches what it can actually see, rather than walking a divergent
-/// sandbox-private view. No-op outside Flatpak.
-fn retain_flatpak_reachable_grants(grants: Vec<ResolvedGrant>) -> Vec<ResolvedGrant> {
-    if !crate::providers::is_flatpak() {
-        return grants;
-    }
-    let home = real_host_home();
-    grants
-        .into_iter()
-        .filter(|grant| !path_outside_home(&grant.root, home.as_deref()))
-        .collect()
-}
-
-/// A path that passed the grant check, in both forms the callers need.
-#[derive(Debug)]
-struct AllowedPath {
-    /// Lexically normalized path exactly as the agent addressed it.
-    requested: PathBuf,
-    /// Symlink-resolved path the grant check was evaluated against; this is
-    /// the location the in-process `fs::*` call actually touches.
-    resolved: PathBuf,
-}
-
-/// Resolve `path` through symlinks so containment is judged on where the
-/// filesystem call really lands, not on the spelling of the path.
+/// Resolve `path` through symlinks so a requested shell working directory is
+/// checked by where it actually lands, not by its spelling.
 ///
 /// The nearest existing ancestor (or the path itself) is canonicalized and the
 /// not-yet-existing tail is re-appended unchanged; nothing is created. An
-/// existing component that cannot be resolved (a dangling symlink) is an error
-/// because `fs::write` would follow it to an unverifiable destination. If
-/// nothing along the path exists, no symlink can be involved and the path is
-/// returned as is.
+/// existing component that cannot be resolved (for example, a dangling
+/// symlink) is refused. If nothing along the path exists, no symlink can be
+/// involved and the path is returned as is.
 fn resolve_symlinks_through_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
     let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
     let mut ancestor = path;
@@ -895,45 +427,28 @@ fn resolve_symlinks_through_existing_ancestor(path: &Path) -> std::io::Result<Pa
 
 /// Grant roots in the same symlink-resolved form as the candidate. A root
 /// that cannot be resolved (it may not exist yet) keeps its configured form.
-fn canonical_grant_roots(grants: &[ResolvedGrant]) -> Vec<ResolvedGrant> {
+fn canonical_grant_roots(grants: &[ResolvedGrant]) -> Vec<PathBuf> {
     grants
         .iter()
-        .map(|grant| ResolvedGrant {
-            root: resolve_symlinks_through_existing_ancestor(&grant.root)
-                .unwrap_or_else(|_| grant.root.clone()),
-            access: grant.access,
+        .map(|grant| {
+            resolve_symlinks_through_existing_ancestor(&grant.root)
+                .unwrap_or_else(|_| grant.root.clone())
         })
         .collect()
 }
 
-#[cfg(test)]
-fn resolve_allowed_path(
-    path: &str,
-    grants: &[ResolvedGrant],
-    require_write: bool,
-) -> Result<PathBuf, String> {
-    Ok(resolve_allowed_path_forms(path, grants, require_write)?.resolved)
+fn resolve_allowed_cwd(path: &str, grants: &[ResolvedGrant]) -> Result<PathBuf, String> {
+    resolve_allowed_cwd_with_home(path, grants, real_host_home().as_deref())
 }
 
-fn resolve_allowed_path_forms(
+/// Validate a shell working directory against symlink-resolved grants, then
+/// return the lexical path because sandbox backends bind configured paths at
+/// those names.
+fn resolve_allowed_cwd_with_home(
     path: &str,
     grants: &[ResolvedGrant],
-    require_write: bool,
-) -> Result<AllowedPath, String> {
-    resolve_allowed_path_with_home(path, grants, require_write, real_host_home().as_deref())
-}
-
-/// Grant containment is decided on symlink-resolved paths on BOTH sides: the
-/// candidate, every grant root and the home used for the workspace mask. A
-/// lexical `starts_with` alone lets a symlink created inside a granted
-/// directory (e.g. via `bash_exec`) reach any host path or a sibling
-/// workspace.
-fn resolve_allowed_path_with_home(
-    path: &str,
-    grants: &[ResolvedGrant],
-    require_write: bool,
     home: Option<&Path>,
-) -> Result<AllowedPath, String> {
+) -> Result<PathBuf, String> {
     let requested = resolve_candidate_path(path, grants)?;
     let candidate = resolve_symlinks_through_existing_ancestor(&requested).map_err(|e| {
         format!(
@@ -942,7 +457,7 @@ fn resolve_allowed_path_with_home(
             e
         )
     })?;
-    let grants = canonical_grant_roots(grants);
+    let grant_roots = canonical_grant_roots(grants);
     let home = home.map(|home| {
         resolve_symlinks_through_existing_ancestor(home).unwrap_or_else(|_| home.to_path_buf())
     });
@@ -955,60 +470,22 @@ fn resolve_allowed_path_with_home(
     // path inside it; only a grant rooted at-or-below the container does (the
     // own workspace, or another workspace the user explicitly granted). See
     // `sandbox::profile::workspace_mask`.
-    let mask = grants.first().and_then(|ws| {
-        crate::assistant::sandbox::profile::workspace_mask(&ws.root, home.as_deref())
+    let mask = grant_roots.first().and_then(|workspace_root| {
+        crate::assistant::sandbox::profile::workspace_mask(workspace_root, home.as_deref())
     });
 
-    // Grants that actually authorize this candidate (broad ancestors of the
-    // masked container are dropped for paths inside it).
-    let effective: Vec<&ResolvedGrant> = grants
-        .iter()
-        .filter(|grant| {
-            candidate.starts_with(&grant.root)
-                && !grant_masked_for_candidate(&grant.root, &candidate, mask.as_deref())
-        })
-        .collect();
-
-    // Resolve against the MOST SPECIFIC (deepest-rooted) grant that contains the
-    // candidate, not merely the first one in iteration order. Grants nest: a
-    // broad read-only `/home/me` can coexist with a narrower read-write
-    // `/home/me/project` accepted via `fs_request_grant`. The deeper grant is
-    // the more precise statement of intent for its subtree and must win —
-    // mirroring the last-writer-wins bind ordering in `linux_bwrap`. A
-    // first-match scan let a read-only ancestor shadow a read-write descendant
-    // and rejected legitimate writes (and vice-versa for read-only carve-outs).
-    let deepest = effective
-        .iter()
-        .map(|grant| grant.root.components().count())
-        .max();
-
-    let Some(depth) = deepest else {
+    let allowed = grant_roots.iter().any(|root| {
+        candidate.starts_with(root)
+            && !grant_masked_for_candidate(root, &candidate, mask.as_deref())
+    });
+    if !allowed {
         return Err(format!(
             "Path {} is outside the agent's allowed filesystem grants",
             requested.display()
         ));
-    };
-
-    if require_write {
-        // Among equally-specific grants (same root, conflicting access), the
-        // read-write one wins: an explicit fresh grant must not be shadowed by
-        // a coincidental read-only entry at the same root.
-        let writable = effective
-            .iter()
-            .filter(|grant| grant.root.components().count() == depth)
-            .any(|grant| grant.access == AccessKind::ReadWrite);
-        if !writable {
-            return Err(format!(
-                "Path {} is not writable for this agent",
-                requested.display()
-            ));
-        }
     }
 
-    Ok(AllowedPath {
-        requested,
-        resolved: candidate,
-    })
+    Ok(requested)
 }
 
 /// True when `grant_root` is only a broad *ancestor* of the masked workspace
@@ -1065,91 +542,13 @@ fn normalize_path(path: PathBuf) -> PathBuf {
     normalized
 }
 
-fn classify_file_type(file_type: &fs::FileType) -> &'static str {
-    if file_type.is_dir() {
-        "directory"
-    } else if file_type.is_file() {
-        "file"
-    } else if file_type.is_symlink() {
-        "symlink"
-    } else {
-        "other"
-    }
-}
-
-fn describe_path(path: &Path) -> Result<FilesystemEntry, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|e| format!("Failed to inspect {}: {}", path.display(), e))?;
-    Ok(FilesystemEntry {
-        path: path.to_path_buf(),
-        kind: classify_file_type(&metadata.file_type()),
-    })
-}
-
-fn serialize_entries(entries: &[FilesystemEntry]) -> Vec<serde_json::Value> {
-    entries
-        .iter()
-        .map(|entry| {
-            serde_json::json!({
-                "path": agent_path_string(&entry.path),
-                "kind": entry.kind
-            })
-        })
-        .collect()
-}
-
-fn normalize_pattern_string(pattern: &str) -> String {
-    pattern.trim().replace('\\', "/")
-}
-
-fn literal_path_prefix(pattern: &str) -> Option<PathBuf> {
-    let normalized = normalize_pattern_string(pattern);
-    let is_absolute = normalized.starts_with('/');
-    let mut prefix = if is_absolute {
-        PathBuf::from(std::path::MAIN_SEPARATOR_STR)
-    } else {
-        PathBuf::new()
-    };
-    let mut saw_literal_segment = false;
-
-    for segment in normalized.split('/') {
-        if segment.is_empty() {
-            continue;
-        }
-        if segment_contains_glob(segment) {
-            break;
-        }
-        prefix.push(segment);
-        saw_literal_segment = true;
-    }
-
-    if is_absolute || saw_literal_segment {
-        Some(prefix)
-    } else {
-        None
-    }
-}
-
-fn segment_contains_glob(segment: &str) -> bool {
-    segment.contains('*') || segment.contains('?') || segment.contains('[') || segment.contains('{')
-}
-
-fn path_prefix_intersects(a: &Path, b: &Path) -> bool {
-    a.starts_with(b) || b.starts_with(a)
-}
-
-fn path_to_match_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
 /// Render a path for agent-facing tool output.
 ///
 /// On Windows the agent's `bash_exec` runs inside Git Bash, where `\` is an
 /// escape character, so paths handed to the model must use `/` to round-trip
 /// back into shell commands. We also strip the `\\?\` verbatim prefix that
-/// `std::fs::canonicalize` adds, leaving clean `C:/Users/...` paths that both
-/// the Windows file APIs (for `fs_read`/`fs_write` round-trips) and Git Bash
-/// accept.
+/// `std::fs::canonicalize` adds, leaving clean `C:/Users/...` paths that Git
+/// Bash accepts.
 ///
 /// On Unix the path is returned verbatim: `\` is a legal byte in a filename,
 /// so rewriting it would corrupt names.
@@ -1724,10 +1123,13 @@ fn canonicalize_requested_path(input: &str) -> Result<PathBuf, String> {
             input
         ));
     }
-    // Try to canonicalize (resolve symlinks). If the path doesn't exist
-    // yet, fall back to the normalized form — the user can still grant
-    // access to a not-yet-existing path (e.g. a future cache dir).
-    Ok(std::fs::canonicalize(&expanded).unwrap_or_else(|_| normalize_path(expanded)))
+    std::fs::canonicalize(&expanded).map_err(|error| {
+        format!(
+            "fs_request_grant requires an existing path because the shell sandbox cannot bind a nonexistent target: {}. Request an existing parent directory instead ({})",
+            expanded.display(),
+            error
+        )
+    })
 }
 
 fn path_already_covered(
@@ -2554,107 +1956,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // resolve_allowed_path — most-specific grant wins over iteration order
-    // ------------------------------------------------------------------
-
-    // Regression: a read-write grant on a subdirectory must be honored even
-    // when a broader read-only grant on an ancestor appears earlier in the
-    // list. Previously the first-match scan let the read-only ancestor shadow
-    // the read-write descendant, rejecting legitimate writes (this is exactly
-    // what blocked `fs_write` after `fs_request_grant` returned read_write).
-    #[test]
-    fn rw_descendant_grant_is_writable_under_ro_ancestor() {
-        let grants = vec![
-            ResolvedGrant {
-                root: PathBuf::from("/home/me"),
-                access: AccessKind::ReadOnly,
-            },
-            ResolvedGrant {
-                root: PathBuf::from("/home/me/project"),
-                access: AccessKind::ReadWrite,
-            },
-        ];
-        let resolved = resolve_allowed_path("/home/me/project/src/main.rs", &grants, true).unwrap();
-        // The canonical form may gain a drive prefix on Windows; compare the tail.
-        assert!(
-            resolved.ends_with("home/me/project/src/main.rs"),
-            "{}",
-            resolved.display()
-        );
-    }
-
-    // The dual: a read-only carve-out on a subdirectory must override a broader
-    // read-write ancestor, so writes into the carve-out are denied.
-    #[test]
-    fn ro_descendant_carveout_denies_write_under_rw_ancestor() {
-        let grants = vec![
-            ResolvedGrant {
-                root: PathBuf::from("/home/me"),
-                access: AccessKind::ReadWrite,
-            },
-            ResolvedGrant {
-                root: PathBuf::from("/home/me/.ssh"),
-                access: AccessKind::ReadOnly,
-            },
-        ];
-        let err = resolve_allowed_path("/home/me/.ssh/id_ed25519", &grants, true).unwrap_err();
-        assert!(err.contains("not writable"), "unexpected error: {err}");
-    }
-
-    // Reads under a read-only ancestor still work when no deeper grant applies.
-    #[test]
-    fn read_is_allowed_under_ro_ancestor_without_deeper_grant() {
-        let grants = vec![ResolvedGrant {
-            root: PathBuf::from("/home/me"),
-            access: AccessKind::ReadOnly,
-        }];
-        let resolved = resolve_allowed_path("/home/me/notes.txt", &grants, false).unwrap();
-        assert!(
-            resolved.ends_with("home/me/notes.txt"),
-            "{}",
-            resolved.display()
-        );
-    }
-
-    // A read-write entry coexisting at the SAME root as a read-only one (the
-    // dedup in filesystem_grants only drops exact root+access duplicates) must
-    // resolve as writable.
-    #[test]
-    fn rw_grant_wins_over_ro_grant_at_same_root() {
-        let grants = vec![
-            ResolvedGrant {
-                root: PathBuf::from("/data"),
-                access: AccessKind::ReadOnly,
-            },
-            ResolvedGrant {
-                root: PathBuf::from("/data"),
-                access: AccessKind::ReadWrite,
-            },
-        ];
-        let resolved = resolve_allowed_path("/data/out.json", &grants, true).unwrap();
-        assert!(
-            resolved.ends_with("data/out.json"),
-            "{}",
-            resolved.display()
-        );
-    }
-
-    // Paths outside every grant root are still rejected as out-of-bounds.
-    #[test]
-    fn path_outside_all_grants_is_rejected() {
-        let grants = vec![ResolvedGrant {
-            root: PathBuf::from("/home/me"),
-            access: AccessKind::ReadWrite,
-        }];
-        let err = resolve_allowed_path("/etc/passwd", &grants, false).unwrap_err();
-        assert!(
-            err.contains("outside the agent's allowed filesystem grants"),
-            "unexpected error: {err}"
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // resolve_allowed_path — containment is decided on symlink-resolved paths
+    // resolve_allowed_cwd — lexical cwd, resolved containment
     // ------------------------------------------------------------------
 
     const OUTSIDE_GRANTS: &str = "outside the agent's allowed filesystem grants";
@@ -2666,304 +1968,82 @@ mod tests {
         }
     }
 
-    fn write_file(path: &Path, content: &str) {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, content).unwrap();
-    }
-
     fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
         let dir = tempdir().unwrap();
         let path = dir.path().canonicalize().unwrap();
         (dir, path)
     }
 
-    // A new file whose intermediate directories do not exist yet must still
-    // resolve (this is the `createParents` path of `fs_write`), and validation
-    // must not create anything.
     #[test]
-    fn new_write_target_with_missing_parents_stays_allowed() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let grants = vec![grant_for(&ws)];
-
-        let resolved = resolve_allowed_path("a/b/c.md", &grants, true).unwrap();
-        assert_eq!(resolved, ws.join("a/b/c.md"));
-        assert!(!ws.join("a").exists(), "validation must not create dirs");
-
-        let resolved =
-            resolve_allowed_path(ws.join("deep/er/file.txt").to_str().unwrap(), &grants, true)
-                .unwrap();
-        assert_eq!(resolved, ws.join("deep/er/file.txt"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_dir_escaping_all_grants_is_refused() {
+    fn cwd_outside_all_grants_is_rejected() {
         let (_ws_dir, ws) = canonical_tempdir();
         let (_outside_dir, outside) = canonical_tempdir();
-        write_file(&outside.join("secret.txt"), "classified");
-        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
-        fs::create_dir_all(ws.join("nested")).unwrap();
-        std::os::unix::fs::symlink(&outside, ws.join("nested/link")).unwrap();
-        let grants = vec![grant_for(&ws)];
-
-        // Relative and absolute spellings, direct and nested link.
-        for path in [
-            "link/secret.txt".to_string(),
-            "nested/link/secret.txt".to_string(),
-            ws.join("link/secret.txt").display().to_string(),
-            // Listing the linked directory itself is an escape too.
-            "link".to_string(),
-        ] {
-            let err = resolve_allowed_path(&path, &grants, false).unwrap_err();
-            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
-            let err = resolve_allowed_existing_path(&path, &grants, false).unwrap_err();
-            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
-        }
+        let error = resolve_allowed_cwd(outside.to_str().unwrap(), &[grant_for(&ws)]).unwrap_err();
+        assert!(error.contains(OUTSIDE_GRANTS), "{error}");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn symlink_into_another_grant_uses_the_target_grants_access() {
+    fn read_only_grant_can_be_used_as_a_shell_cwd() {
         let (_ws_dir, ws) = canonical_tempdir();
-        let (_ro_dir, ro) = canonical_tempdir();
-        write_file(&ro.join("file.txt"), "read me");
-        std::os::unix::fs::symlink(&ro, ws.join("link")).unwrap();
-        let grants = vec![grant_for(&ws), ro_grant_for(&ro)];
-
-        // Reading through the link is fine and lands on the canonical target.
-        let resolved = resolve_allowed_path("link/file.txt", &grants, false).unwrap();
-        assert_eq!(resolved, ro.join("file.txt"));
-        let resolved = resolve_allowed_existing_path("link/file.txt", &grants, false).unwrap();
-        assert_eq!(resolved, ro.join("file.txt"));
-
-        // The link lives in a read-write grant, but the target is read-only:
-        // the target's grant decides.
-        for path in ["link/file.txt", "link/new.txt"] {
-            let err = resolve_allowed_path(path, &grants, true).unwrap_err();
-            assert!(err.contains("not writable"), "{path}: {err}");
-        }
+        let (_read_dir, read_dir) = canonical_tempdir();
+        let addressed = read_dir.join("nested");
+        fs::create_dir(&addressed).unwrap();
+        let resolved = resolve_allowed_cwd(
+            addressed.to_str().unwrap(),
+            &[grant_for(&ws), ro_grant_for(&read_dir)],
+        )
+        .unwrap();
+        assert_eq!(resolved, addressed);
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlink_to_sibling_workspace_dir_is_refused_with_only_the_workspace_granted() {
-        // <container>/own is the workspace, <container>/other a sibling.
-        let (_container_dir, container) = canonical_tempdir();
-        let own = container.join("own");
-        let other = container.join("other");
-        fs::create_dir_all(&own).unwrap();
-        write_file(&other.join("secret.txt"), "sibling data");
-        std::os::unix::fs::symlink("../other", own.join("link")).unwrap();
-        let grants = vec![grant_for(&own)];
+    fn symlinked_cwd_escaping_all_grants_is_refused() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        let (_outside_dir, outside) = canonical_tempdir();
+        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
 
-        let err = resolve_allowed_path("link/secret.txt", &grants, false).unwrap_err();
-        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
-        let err = resolve_allowed_path("link/planted.txt", &grants, true).unwrap_err();
-        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
-        assert!(!other.join("planted.txt").exists());
+        let error = resolve_allowed_cwd("link", &[grant_for(&ws)]).unwrap_err();
+        assert!(error.contains(OUTSIDE_GRANTS), "{error}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn symlink_to_sibling_workspace_is_masked_even_under_a_home_grant() {
-        // <home>/.clai/workspaces/{own,other}: the broad home grant must not
-        // authorize the sibling, and a symlink must not change that.
+    fn in_grant_symlinked_cwd_keeps_the_addressed_path() {
+        let (_ws_dir, ws) = canonical_tempdir();
+        fs::create_dir(ws.join("real")).unwrap();
+        std::os::unix::fs::symlink(ws.join("real"), ws.join("alias")).unwrap();
+
+        let resolved = resolve_allowed_cwd("alias", &[grant_for(&ws)]).unwrap();
+        assert_eq!(resolved, ws.join("alias"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_cwd_to_sibling_workspace_is_masked_under_home_grant() {
         let (_home_dir, home) = canonical_tempdir();
         let own = home.join(".clai/workspaces/own");
         let other = home.join(".clai/workspaces/other");
         fs::create_dir_all(&own).unwrap();
-        write_file(&other.join("secret.txt"), "sibling data");
-        write_file(&home.join("notes.txt"), "home data");
+        fs::create_dir_all(&other).unwrap();
         std::os::unix::fs::symlink(&other, own.join("link")).unwrap();
         let grants = vec![grant_for(&own), ro_grant_for(&home)];
 
-        let err = resolve_allowed_path_with_home("link/secret.txt", &grants, false, Some(&home))
-            .unwrap_err();
-        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
-        // Direct spelling is masked as before...
-        let err = resolve_allowed_path_with_home(
-            other.join("secret.txt").to_str().unwrap(),
-            &grants,
-            false,
-            Some(&home),
-        )
-        .unwrap_err();
-        assert!(err.contains(OUTSIDE_GRANTS), "{err}");
-        // ...while ordinary home content stays readable through the home grant.
-        let allowed = resolve_allowed_path_with_home(
-            home.join("notes.txt").to_str().unwrap(),
-            &grants,
-            false,
-            Some(&home),
-        )
-        .unwrap();
-        assert_eq!(allowed.resolved, home.join("notes.txt"));
+        let error = resolve_allowed_cwd_with_home("link", &grants, Some(&home)).unwrap_err();
+        assert!(error.contains(OUTSIDE_GRANTS), "{error}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn write_target_under_escaping_symlinked_parent_is_refused() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let (_outside_dir, outside) = canonical_tempdir();
-        let victim = outside.join("victim.txt");
-        write_file(&victim, "precious");
-        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
-        let grants = vec![grant_for(&ws)];
-
-        // Overwrite an existing foreign file, create a new one, and create one
-        // with missing intermediate dirs (the `createParents` shape).
-        for path in [
-            "link/victim.txt",
-            "link/fresh.txt",
-            "link/new/dir/fresh.txt",
-        ] {
-            let err = resolve_allowed_path(path, &grants, true).unwrap_err();
-            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
-        }
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
-        assert!(!outside.join("fresh.txt").exists());
-        assert!(!outside.join("new").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_target_under_in_grant_symlinked_parent_resolves_canonically() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        fs::create_dir_all(ws.join("real")).unwrap();
-        std::os::unix::fs::symlink(ws.join("real"), ws.join("alias")).unwrap();
-        let grants = vec![grant_for(&ws)];
-
-        let allowed = resolve_allowed_path_forms("alias/out.txt", &grants, true).unwrap();
-        assert_eq!(allowed.requested, ws.join("alias/out.txt"));
-        assert_eq!(allowed.resolved, ws.join("real/out.txt"));
-
-        let allowed = resolve_allowed_path_forms("alias/sub/dir/out.txt", &grants, true).unwrap();
-        assert_eq!(allowed.resolved, ws.join("real/sub/dir/out.txt"));
-        assert!(
-            !ws.join("real/sub").exists(),
-            "validation must not create dirs"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dangling_final_symlink_is_refused() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let (_outside_dir, outside) = canonical_tempdir();
-        std::os::unix::fs::symlink(outside.join("new.txt"), ws.join("dangling.txt")).unwrap();
-        // Dangling within the grant as well: the destination is unverifiable.
-        std::os::unix::fs::symlink(ws.join("gone.txt"), ws.join("dangling_inside.txt")).unwrap();
-        let grants = vec![grant_for(&ws)];
-
-        for path in ["dangling.txt", "dangling_inside.txt"] {
-            let err = resolve_allowed_path(path, &grants, true).unwrap_err();
-            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
-            let err = resolve_allowed_path(path, &grants, false).unwrap_err();
-            assert!(err.contains(OUTSIDE_GRANTS), "{path}: {err}");
-        }
-        assert!(!outside.join("new.txt").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn escaping_final_symlink_is_refused_and_in_grant_one_still_works() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let (_outside_dir, outside) = canonical_tempdir();
-        let victim = outside.join("victim.txt");
-        write_file(&victim, "precious");
-        std::os::unix::fs::symlink(&victim, ws.join("escape.txt")).unwrap();
-        write_file(&ws.join("real.txt"), "inside");
-        std::os::unix::fs::symlink(ws.join("real.txt"), ws.join("alias.txt")).unwrap();
-        let grants = vec![grant_for(&ws)];
-
-        for require_write in [false, true] {
-            let err = resolve_allowed_path("escape.txt", &grants, require_write).unwrap_err();
-            assert!(err.contains(OUTSIDE_GRANTS), "{err}");
-        }
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
-
-        // fs::write follows the link, so the resolved path is the target.
-        assert_eq!(
-            resolve_allowed_path("alias.txt", &grants, true).unwrap(),
-            ws.join("real.txt")
-        );
-        assert_eq!(
-            resolve_allowed_existing_path("alias.txt", &grants, false).unwrap(),
-            ws.join("real.txt")
-        );
-    }
-
-    // A grant whose configured root is itself a symlink (macOS `/tmp` →
-    // `/private/tmp`, or a user-level link) must keep authorizing its content:
-    // the roots are resolved the same way as the candidate.
-    #[cfg(unix)]
-    #[test]
-    fn access_through_a_symlinked_grant_root_keeps_working() {
+    fn symlinked_grant_root_still_authorizes_a_shell_cwd() {
         let (_base_dir, base) = canonical_tempdir();
         let real = base.join("real");
-        write_file(&real.join("file.txt"), "data");
-        let link_root = base.join("link_root");
+        fs::create_dir(&real).unwrap();
+        let link_root = base.join("link-root");
         std::os::unix::fs::symlink(&real, &link_root).unwrap();
-        let grants = vec![grant_for(&link_root)];
 
-        // Addressed through the link and through the real location alike.
-        for path in [link_root.join("file.txt"), real.join("file.txt")] {
-            let resolved =
-                resolve_allowed_existing_path(path.to_str().unwrap(), &grants, true).unwrap();
-            assert_eq!(resolved, real.join("file.txt"), "{}", path.display());
-        }
-        let resolved = resolve_allowed_path("new/file.txt", &grants, true).unwrap();
-        assert_eq!(resolved, real.join("new/file.txt"));
-    }
-
-    // The walkers behind fs_list/fs_glob classify entries without following
-    // symlinks, so a linked directory is reported as a symlink and never
-    // descended into.
-    #[cfg(unix)]
-    #[test]
-    fn list_and_glob_do_not_follow_symlinked_directories() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let (_outside_dir, outside) = canonical_tempdir();
-        write_file(&outside.join("secret.md"), "classified");
-        write_file(&ws.join("own.md"), "mine");
-        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
-
-        let (entries, _) = list_entries_at_path(&ws, true, 100).unwrap();
-        let names: Vec<String> = entries
-            .iter()
-            .map(|e| e.path.strip_prefix(&ws).unwrap().display().to_string())
-            .collect();
-        assert_eq!(names, vec!["link", "own.md"]);
-        assert_eq!(entries[0].kind, "symlink");
-
-        let (matches, _) = glob_allowed_paths("**/*.md", &[grant_for(&ws)], 100).unwrap();
-        let matched: Vec<PathBuf> = matches.iter().map(|e| e.path.clone()).collect();
-        assert_eq!(matched, vec![ws.join("own.md")]);
-    }
-
-    // ------------------------------------------------------------------
-    // path_outside_home — Flatpak fs_* reachability predicate
-    // ------------------------------------------------------------------
-
-    // The structural gate behind `fs_unreachable_in_flatpak`: paths under the
-    // real host home are reachable by the in-process tools; everything else
-    // (e.g. /tmp — a private tmpfs in Flatpak — or /opt) is not. An unknown
-    // home fails open so non-Flatpak/edge contexts are never blocked.
-    #[test]
-    fn path_outside_home_gates_non_home_paths() {
-        let home = PathBuf::from("/home/me");
-        assert!(!path_outside_home(
-            Path::new("/home/me/.clai/workspaces/ws/file.txt"),
-            Some(&home)
-        ));
-        assert!(!path_outside_home(Path::new("/home/me"), Some(&home)));
-        assert!(path_outside_home(
-            Path::new("/tmp/test_file.txt"),
-            Some(&home)
-        ));
-        assert!(path_outside_home(Path::new("/opt/thing"), Some(&home)));
-        // Unknown real home → never block.
-        assert!(!path_outside_home(Path::new("/tmp/x"), None));
+        let resolved = resolve_allowed_cwd(".", &[grant_for(&link_root)]).unwrap();
+        assert_eq!(resolved, link_root);
     }
 
     // ------------------------------------------------------------------
@@ -2990,15 +2070,9 @@ mod tests {
             std::env::set_var("HOME", temp.path());
         }
 
-        let resolved = canonicalize_requested_path("~/some/subpath").unwrap();
-        // The "~/some/subpath" target does not exist, so the product returns
-        // the normalized (non-canonicalized) form. Compare structurally:
-        // `canonicalize` would add a Windows `\\?\` verbatim prefix and resolve
-        // the macOS `/var`->`/private/var` symlink, both of which break a naive
-        // prefix match. Component-based checks are separator-agnostic.
+        let resolved = canonicalize_requested_path("~").unwrap();
         assert!(resolved.is_absolute());
-        assert!(resolved.starts_with(temp.path()));
-        assert!(resolved.ends_with(std::path::Path::new("some").join("subpath")));
+        assert_eq!(resolved, temp.path().canonicalize().unwrap());
 
         unsafe {
             match prev {
@@ -3009,108 +2083,12 @@ mod tests {
     }
 
     #[test]
-    fn fs_list_returns_sorted_entries_and_recursive_children() {
+    fn canonicalize_rejects_nonexistent_grant_target() {
         let temp = tempdir().unwrap();
-        let root = temp.path();
-        fs::write(root.join("b.txt"), "b").unwrap();
-        fs::write(root.join("a.txt"), "a").unwrap();
-        fs::create_dir(root.join("notes")).unwrap();
-        fs::write(root.join("notes").join("todo.md"), "todo").unwrap();
-
-        let (top_level, truncated) = list_entries_at_path(root, false, 10).unwrap();
-        let top_level_paths: Vec<String> = top_level
-            .iter()
-            .map(|entry| {
-                entry
-                    .path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
-
-        assert_eq!(top_level_paths, vec!["a.txt", "b.txt", "notes"]);
-        assert!(!truncated);
-
-        let (recursive, recursive_truncated) = list_entries_at_path(root, true, 10).unwrap();
-        let recursive_paths: Vec<String> = recursive
-            .iter()
-            .map(|entry| {
-                entry
-                    .path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    // Normalize Windows `\` to `/` so the assertion is
-                    // separator-agnostic (no-op on Unix).
-                    .replace('\\', "/")
-            })
-            .collect();
-
-        assert_eq!(
-            recursive_paths,
-            vec!["a.txt", "b.txt", "notes", "notes/todo.md"]
-        );
-        assert!(!recursive_truncated);
-    }
-
-    #[test]
-    fn fs_glob_matches_relative_patterns_within_allowed_grants() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-        fs::create_dir_all(root.join(".clai").join("memory").join("checkpoints")).unwrap();
-        fs::write(root.join(".clai").join("memory").join("status.md"), "ok").unwrap();
-        fs::write(root.join(".clai").join("memory").join("facts.json"), "{}").unwrap();
-        fs::write(
-            root.join(".clai")
-                .join("memory")
-                .join("checkpoints")
-                .join("restart.md"),
-            "resume",
-        )
-        .unwrap();
-
-        let (matches, truncated) =
-            glob_allowed_paths(".clai/memory/**/*.md", &[grant_for(root)], 10).unwrap();
-        let matched_paths: Vec<String> = matches
-            .iter()
-            .map(|entry| {
-                entry
-                    .path
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    // Normalize Windows `\` to `/` (no-op on Unix).
-                    .replace('\\', "/")
-            })
-            .collect();
-
-        assert_eq!(
-            matched_paths,
-            vec![
-                ".clai/memory/checkpoints/restart.md",
-                ".clai/memory/status.md"
-            ]
-        );
-        assert!(!truncated);
-    }
-
-    #[test]
-    fn fs_glob_rejects_absolute_patterns_outside_allowed_grants() {
-        let temp = tempdir().unwrap();
-        let root = temp.path();
-
-        // `/etc/...` is not absolute on Windows (no drive), so use a
-        // platform-absolute pattern that cannot intersect the temp grant.
-        let outside_pattern = if cfg!(windows) {
-            "C:/Windows/System32/**/*.conf"
-        } else {
-            "/etc/**/*.conf"
-        };
-        let error = glob_allowed_paths(outside_pattern, &[grant_for(root)], 10).unwrap_err();
-
-        assert!(error.contains("outside the agent's allowed filesystem grants"));
+        let missing = temp.path().join("future-cache");
+        let error = canonicalize_requested_path(&missing.display().to_string()).unwrap_err();
+        assert!(error.contains("requires an existing path"), "{error}");
+        assert!(error.contains("existing parent directory"), "{error}");
     }
 
     #[test]
@@ -3399,10 +2377,9 @@ mod tests {
     }
 
     // Scratch space lives at `<container>/.scratch/<id>` precisely so the
-    // container mask that already hides sibling workspaces hides it too — on
-    // this in-process `fs_*` surface as well as in the sandbox. An earlier
-    // revision put scratch under the OS cache dir, where a broad $HOME grant
-    // let any agent read every workspace's temp files through fs_read/fs_list.
+    // container mask that already hides sibling workspaces hides it from the
+    // shell sandbox too. An earlier revision put scratch under the OS cache
+    // directory, where a broad $HOME grant exposed every workspace's temp data.
     #[test]
     fn home_grant_does_not_authorize_another_workspaces_scratch() {
         let mask = Path::new("/home/u/.clai/workspaces");
@@ -3413,8 +2390,8 @@ mod tests {
     }
 
     // ...and not even its own: the agent reaches its scratch at /tmp inside the
-    // sandbox, never by host path, so the fs_* tools have no reason to expose
-    // it and the mask covers the whole `.scratch` subtree uniformly.
+    // sandbox, never by host path, so the mask covers the whole `.scratch`
+    // subtree uniformly.
     #[test]
     fn home_grant_does_not_authorize_its_own_scratch_by_host_path() {
         let mask = Path::new("/home/u/.clai/workspaces");
@@ -3441,58 +2418,6 @@ mod tests {
         // ...and the one that does contain it is masked away.
         assert!(scratch.starts_with(home));
         assert!(grant_masked_for_candidate(home, scratch, Some(mask)));
-    }
-
-    // The glob walker skips exactly one directory: the sandbox scratch
-    // container. Both directions matter — skipping too little re-exposes other
-    // workspaces' temp files (which the mask denies to fs_read/fs_list, so
-    // enumerating their paths here would be inconsistent) and makes every glob
-    // walk persistent build caches; skipping too much silently drops a user's
-    // own directory from results.
-    #[test]
-    fn glob_skips_only_the_real_scratch_container() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-
-        assert!(is_sandbox_scratch_dir(
-            Path::new("/home/u/.clai/workspaces/.scratch"),
-            Some(mask)
-        ));
-    }
-
-    #[test]
-    fn glob_does_not_skip_a_user_directory_named_scratch() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-
-        // Ordinary user content that merely shares the name.
-        assert!(!is_sandbox_scratch_dir(
-            Path::new("/home/u/projects/.scratch"),
-            Some(mask)
-        ));
-        // Inside the agent's own workspace, not beside it.
-        assert!(!is_sandbox_scratch_dir(
-            Path::new("/home/u/.clai/workspaces/own/.scratch"),
-            Some(mask)
-        ));
-        // Nested deeper than the container's direct child.
-        assert!(!is_sandbox_scratch_dir(
-            Path::new("/home/u/.clai/workspaces/.scratch/ws-0/inner"),
-            Some(mask)
-        ));
-    }
-
-    #[test]
-    fn glob_skips_nothing_without_a_container_mask() {
-        assert!(!is_sandbox_scratch_dir(
-            Path::new("/home/u/.clai/workspaces/.scratch"),
-            None
-        ));
-    }
-
-    #[test]
-    fn no_mask_blocks_nothing() {
-        let home = Path::new("/home/u");
-        let any = Path::new("/home/u/.clai/workspaces/other/x");
-        assert!(!grant_masked_for_candidate(home, any, None));
     }
 
     fn restricted_execution_config(

@@ -8,7 +8,23 @@
   ],
   "default_execution": {
     "shell": {
-      "mode": "restricted"
+      "mode": "restricted",
+      "allowedCommandPrefixes": [
+        "pwd",
+        "ls",
+        "find",
+        "rg",
+        "grep",
+        "cat",
+        "head",
+        "tail",
+        "mkdir",
+        "cp",
+        "mv",
+        "touch",
+        "tee",
+        "printf"
+      ]
     },
     "filesystem": {
       "extraPaths": []

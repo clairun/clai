@@ -1895,6 +1895,12 @@ const AgentSection = ({
           <option value="restricted">Restricted (allow/block lists)</option>
           <option value="full">Full</option>
         </select>
+        <span className={styles.hint}>
+          Agents use the shell for local file operations, so Off leaves the agent with no way to read
+          or write files — charts and conversation history still work. Under Restricted, a command
+          outside the allowed list stops for your approval, so an allowed list with nothing that
+          writes leaves the agent able to read but not save.
+        </span>
       </div>
 
       {shellMode === 'restricted' && (
