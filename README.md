@@ -32,7 +32,7 @@ conversation with a **main agent** — a configurable LLM that owns the
 workspace's provider, tools, skills, and permissions. The main agent can:
 
 - **Chat** with you in a surface that stays front and center
-- **Use tools** through attached MCP servers and a local filesystem/shell sandbox
+- **Use tools** through attached MCP servers and a local shell sandbox
 - **Delegate** to helper agents in the same workspace, each with their own
   skills, tools, and execution policy
 - **Persist context** — memories and artifacts it writes are inspectable from
@@ -55,8 +55,9 @@ flagged, and selecting a card slides in a live chat preview.
 - **MCP-native tools** — Configure MCP servers once in Settings, then attach
   them per workspace or per agent. HTTP and stdio transports.
 - **Local execution sandbox** — Per-agent filesystem grants and three shell
-  modes: *Off*, *Restricted* (only allowed command prefixes — `kubectl get`
-  permits `kubectl get pods` but not `kubectl delete`), and *Full*.
+  modes: *Off* (no generic local file access), *Restricted* (only allowed
+  command prefixes — `kubectl get` permits `kubectl get pods` but not
+  `kubectl delete`), and *Full*.
 - **Default skills + templates** — CLAI registers the read-only
   `clairun/clai-skills` repository by default and ships agent templates
   (`code-reviewer`, `sow-tracker`) ready to drop in.
@@ -72,8 +73,7 @@ flagged, and selecting a card slides in a live chat preview.
 > run through bubblewrap. On macOS, shell commands run through Seatbelt via
 > `sandbox-exec`. On platforms without a backend, shell execution is labeled as
 > a host shell. The allow/block lists still control *which commands* an agent can
-> run; filesystem grants control what sandboxed shell commands and built-in
-> `fs_*` tools can access.
+> run; filesystem grants control what sandboxed shell commands can access.
 
 ## Install
 
@@ -161,7 +161,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - **Frontend** — React + Tauri; a chat-first workspace with a drawer for
   agents / tasks / memories / artifacts and slide-out transcript and file panels.
 - **Runtime** — Each workspace owns one or more agent rows and a persistent
-  session. Built-in tools (filesystem, inter-agent calls, task management) plus
+  session. Built-in tools (shell execution, inter-agent calls, task management) plus
   MCP tools, gated by each agent's policy.
 - **Scheduler** — Periodic workspaces run from the agent runner, emitting the
   same streaming events as interactive chat.

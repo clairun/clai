@@ -175,12 +175,12 @@ pub(crate) fn build_system_prompt(
         "## Tool Usage Guidelines\n\
          - First inspect what is available in this session and choose the smallest set of tools needed.\n\
          - Use the configured MCP tools available in this session for domain-specific work.\n\
-         - Use exposed CLAI tools such as `fs_list`, `fs_read`, `fs_write`, `fs_glob`, and `bash_exec` only when those local execution capabilities are available in this session.\n\
+         - Use `bash_exec` for local filesystem inspection and changes when shell access is available in this session.\n\
          - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
          - Evaluate whether prior tool outputs are still fresh enough for the current decision. When information can expire or change over time (for example issues, alerts, metrics, repo state, or external system status), re-run the relevant tools if freshness matters.\n\
          - Chat is the default output channel. Use normal assistant replies for status, findings, and conclusions.\n\
-         - When looking for code, files, or prior work, ALWAYS search your workspace first — `fs_glob`/`fs_list` from the workspace root, or a `bash_exec` search scoped to it — before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n\
-         - Durable outputs belong in the workspace: write them there with `fs_write` so they persist after the run as user-visible artifacts.\n\
+         - When looking for code, files, or prior work, ALWAYS search your workspace first with `bash_exec` before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n\
+         - Durable outputs belong in the workspace: write them there with `bash_exec` so they persist after the run as user-visible artifacts.\n\
          - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n\
          - Chat is the default output channel for status, findings, and conclusions.\n",
     );
@@ -293,7 +293,7 @@ pub(crate) fn build_system_prompt(
         ));
         prompt.push_str(
             "Your assistant text is visible to the user in chat. Treat chat as the primary way to communicate progress and outcomes.\n\
-             Save durable outputs as files in the workspace (via `fs_write`) so they surface as artifacts.\n\
+             Save durable outputs as files in the workspace (via `bash_exec`) so they surface as artifacts.\n\
              For routine scheduled passes, a concise chat update is often sufficient.\n\
              Prefer updating existing visuals over recreating duplicate panels when the topic is unchanged.\n",
         );
@@ -324,7 +324,7 @@ pub(crate) fn build_system_prompt(
             "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
         );
         prompt.push_str(
-            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec with `fs_write` or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `fs_write` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
+            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec directly with `bash_exec` or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `bash_exec` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
         );
         prompt.push_str(
             "- Make the chart worth looking at — aim for what an analyst would publish, not the default output. Give it a `title` whose `subtitle` states the finding and the units; sort categorical axes by value, not alphabetically. Numeric categories such as hour, age and rank must remain numeric: for CSV data, declare them in `data.format.parse`; otherwise provide an explicit domain order matching the source values, because nominal/ordinal CSV fields sort as strings by default (0, 1, 10, 11, …). Pick the mark that answers the question — a `rect` heatmap for a value across two keys, layered `rule` + `point` to compare two measures per category, `stack: \"center\"` area for composition over time, log or sqrt scales for values spanning orders of magnitude — and let `transform` (`fold`, `window`, `regression`, `joinaggregate`, `timeUnit`) shape the data instead of pre-chewing it. CLAI supplies the theme, quiet axes and tooltips, plus clickable categorical legends and a pan/zoom button on eligible unit or flat layered charts. Spend your effort on the encoding; add an explicit `tooltip` array only to choose which fields show. Specs with authored parameters keep control of their own interactions; set `usermeta.clai.interactions` to false to disable automatic interactions, or add native Vega-Lite parameters for linked brushing or composed views. One hard rule: declare a selection `param` inside a single unit view — one mark — and read it from the other views with `{\"filter\": {\"param\": …}}`, `scale.domain.param` or `condition.param`. Vega-Lite copies a param down into every unit view in its scope, so a param placed on a `layer` of two or more marks (directly, or above one through a concat/facet/repeat) validates and then fails to render with `Duplicate signal name`.\n",
@@ -410,7 +410,7 @@ pub(crate) fn build_system_prompt(
 
         prompt.push_str(
             "\n## Filesystem boundary\n\
-             The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. The `fs_*` tools enforce this in-process. On Linux and macOS, `bash_exec` also runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms where the shell sandbox is not implemented yet, `bash_exec` is labeled as a host shell and this paragraph remains the authorization boundary.\n\
+             The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms where the shell sandbox is not implemented yet, `bash_exec` is labeled as a host shell and this paragraph remains the authorization boundary.\n\
              - Do not `cd`, redirect to, or pass paths outside the listed grants — not even via subshells, heredocs, scripts, or absolute paths.\n\
              - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
              - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
@@ -662,13 +662,13 @@ mod tests {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
         };
-        // The tool is the only sanctioned chart path; fs_write is named as
+        // The tool is the only sanctioned chart path; bash_exec is named as
         // the anti-pattern so the model does not route around validation.
         assert!(text.contains("Choose a chart proactively"));
         assert!(text.contains("materially easier to understand than prose or a short table"));
         assert!(text.contains("Skip charts for a single fact"));
         assert!(text.contains("`create_vega_chart` tool"));
-        assert!(text.contains("never write a Vega-Lite spec with `fs_write`"));
+        assert!(text.contains("never write a Vega-Lite spec directly with `bash_exec`"));
         // The model chooses an organized path and receives a portable embed.
         assert!(text.contains("complete workspace-relative `.vl.json` path"));
         assert!(text.contains("instead of defaulting to a shared charts directory"));
@@ -866,7 +866,7 @@ mod tests {
     fn build_system_prompt_omits_interactive_reliability_guidance_without_blocking_tool() {
         let context = SessionContext::default();
         let tools = [crate::assistant::types::ToolDefinition {
-            name: "fs_read".to_string(),
+            name: "non_interactive_tool".to_string(),
             description: "desc".to_string(),
             input_schema: serde_json::json!({}),
         }];

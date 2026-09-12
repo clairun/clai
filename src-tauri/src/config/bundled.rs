@@ -330,5 +330,28 @@ mod tests {
         assert!(templates
             .iter()
             .all(|template| !template.default_skill_slugs.is_empty()));
+        let sow = templates
+            .iter()
+            .find(|template| template.id == "sow-tracker")
+            .unwrap();
+        assert!(sow
+            .default_execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"printf".to_string()));
+        let reviewer = templates
+            .iter()
+            .find(|template| template.id == "code-reviewer")
+            .unwrap();
+        assert!(reviewer
+            .default_execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cat".to_string()));
+        assert!(!reviewer
+            .default_execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"mv".to_string()));
     }
 }

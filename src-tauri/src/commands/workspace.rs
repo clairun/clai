@@ -1181,7 +1181,7 @@ pub(crate) fn resolve_workspace_descriptor(
         selected_mcp_server_ids,
         disabled_mcp_server_ids,
         execution,
-        tool_scopes: vec!["fs".to_string(), "web".to_string()],
+        tool_scopes: vec!["web".to_string()],
         automation_name: manager.map(|agent| agent.name.clone()),
     })
 }

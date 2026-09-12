@@ -1895,6 +1895,9 @@ const AgentSection = ({
           <option value="restricted">Restricted (allow/block lists)</option>
           <option value="full">Full</option>
         </select>
+        <span className={styles.hint}>
+          Agents use the shell for local file operations; Off disables generic local file access.
+        </span>
       </div>
 
       {shellMode === 'restricted' && (

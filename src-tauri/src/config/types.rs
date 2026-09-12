@@ -29,9 +29,10 @@ fn default_restricted_shell_blocklist() -> Vec<String> {
     ]
 }
 
-/// Built-in command prefixes for Restricted shell mode. These are inspection
-/// defaults, not a guarantee that every flag combination is non-mutating; the
-/// filesystem sandbox and blocklist still define the hard safety boundary.
+/// Built-in command prefixes for Restricted shell mode. These cover routine
+/// workspace inspection and edits, but are not a guarantee that every flag
+/// combination is non-mutating; the filesystem sandbox and blocklist still
+/// define the hard safety boundary.
 pub fn standard_restricted_shell_allowlist() -> Vec<String> {
     vec![
         "pwd".to_string(),
@@ -39,13 +40,31 @@ pub fn standard_restricted_shell_allowlist() -> Vec<String> {
         "ls".to_string(),
         "rg".to_string(),
         "grep".to_string(),
+        "find".to_string(),
+        "cat".to_string(),
         "head".to_string(),
         "tail".to_string(),
+        "sort".to_string(),
+        "cut".to_string(),
+        "tr".to_string(),
+        "diff".to_string(),
         "wc".to_string(),
         "file".to_string(),
         "stat".to_string(),
         "du".to_string(),
         "df".to_string(),
+        // Generic filesystem work now goes through bash_exec. These commands
+        // cover normal workspace edits; the OS sandbox remains the filesystem
+        // boundary and the destructive-command blocklist still applies.
+        "mkdir".to_string(),
+        "cp".to_string(),
+        "mv".to_string(),
+        "touch".to_string(),
+        "ln".to_string(),
+        "tee".to_string(),
+        "sed".to_string(),
+        "printf".to_string(),
+        "echo".to_string(),
         "date".to_string(),
         "whoami".to_string(),
         "uname".to_string(),
@@ -594,7 +613,6 @@ impl AgentConfig {
     /// Returns the static list of required built-in tool namespaces.
     pub fn required_tools(&self) -> Vec<&'static str> {
         let mut tools = vec!["dashboard", "tabs"];
-        tools.push("fs");
         if !matches!(self.execution.shell.mode, ShellAccessMode::Off) {
             tools.push("bash");
         }
@@ -823,8 +841,7 @@ mod tests {
 
         assert!(tools.contains(&"dashboard"));
         assert!(tools.contains(&"tabs"));
-        assert!(tools.contains(&"fs"));
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools, vec!["dashboard", "tabs"]);
     }
 
     #[test]
@@ -834,7 +851,6 @@ mod tests {
 
         let tools = agent.required_tools();
 
-        assert!(tools.contains(&"fs"));
         assert!(tools.contains(&"bash"));
     }
 

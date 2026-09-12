@@ -9,7 +9,7 @@ use super::ToolExecutionContext;
 /// Execute a tool by name with the given parameters.
 /// Returns the tool result as JSON, or an error string.
 ///
-/// Tool names use `_` as the separator (`fs_list`, `bash_exec`,
+/// Tool names use `_` as the separator (`fs_request_grant`, `bash_exec`,
 /// `workspace_listAgents`) to satisfy OpenAI's stricter function-name
 /// regex (`^[a-zA-Z][a-zA-Z0-9_-]*$`). Legacy conversation history may
 /// still carry the old dotted form (`fs.list`); we canonicalize on
@@ -36,12 +36,13 @@ pub async fn execute_tool(
     let name_for_dispatch = canonical.as_str();
     validate_builtin_params(name_for_dispatch, &params)?;
     match name_for_dispatch {
-        name if name.starts_with("fs_")
-            || name.starts_with("bash_")
-            || name.starts_with("web_") =>
-        {
-            local::execute_local_tool(deps, context, name, params).await
+        "fs_request_grant" | "bash_exec" | "web_search" | "web_fetch" => {
+            local::execute_local_tool(deps, context, name_for_dispatch, params).await
         }
+        "fs_list" | "fs_glob" | "fs_read" | "fs_write" => Err(
+            "CLAI's fs_list, fs_glob, fs_read, and fs_write tools were removed. Use bash_exec for filesystem operations."
+                .to_string(),
+        ),
         name if name.starts_with("agent_") => Err(
             "Global agent tools are no longer available. Use workspace-local task delegation instead."
                 .to_string(),

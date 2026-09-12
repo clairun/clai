@@ -12,6 +12,34 @@ use crate::config::{
 };
 
 const WORKSPACE_CONFIG_VERSION: u32 = 1;
+const LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST: &[&str] = &[
+    "pwd",
+    "cd",
+    "ls",
+    "rg",
+    "grep",
+    "head",
+    "tail",
+    "wc",
+    "file",
+    "stat",
+    "du",
+    "df",
+    "date",
+    "whoami",
+    "uname",
+    "which",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git rev-parse",
+    "git ls-files",
+    "git grep",
+    "git blame",
+    "git branch --show-current",
+    "git remote -v",
+];
 
 #[derive(Debug)]
 pub enum WorkspaceConfigError {
@@ -364,6 +392,7 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
     let mut config: WorkspaceConfig = serde_json::from_str(&contents)
         .map_err(|source| WorkspaceConfigError::Parse { path, source })?;
     prune_legacy_mcp_refs(&mut config);
+    migrate_inspection_only_shell_allowlist(&mut config);
     Ok(config)
 }
 
@@ -375,6 +404,24 @@ fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
         agent
             .selected_mcp_servers
             .retain(|mcp_ref| !mcp_ref.id.is_empty());
+    }
+}
+
+/// Agents created before generic file operations moved to `bash_exec` carry an
+/// exact copy of the old inspection-only defaults. Upgrade only that untouched
+/// default; any customized allowlist remains the user's policy.
+fn migrate_inspection_only_shell_allowlist(config: &mut WorkspaceConfig) {
+    for agent in &mut config.agents {
+        let is_legacy_default = agent
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .iter()
+            .map(String::as_str)
+            .eq(LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST.iter().copied());
+        if is_legacy_default {
+            agent.execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
+        }
     }
 }
 
@@ -717,6 +764,41 @@ mod attach_provider_tests {
             .shell
             .allowed_command_prefixes
             .contains(&"rg".to_string()));
+        assert!(manager
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cat".to_string()));
+        assert!(manager
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"mkdir".to_string()));
+    }
+
+    #[test]
+    fn load_upgrades_only_the_old_default_shell_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = workspace();
+        config.agents[0].execution.shell.allowed_command_prefixes =
+            LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST
+                .iter()
+                .map(|command| (*command).to_string())
+                .collect();
+        save(tmp.path(), &config).unwrap();
+
+        let loaded = load(tmp.path()).unwrap();
+        let allowed = &loaded.agents[0].execution.shell.allowed_command_prefixes;
+        assert!(allowed.contains(&"cat".to_string()));
+        assert!(allowed.contains(&"mkdir".to_string()));
+
+        config.agents[0].execution.shell.allowed_command_prefixes = vec!["custom-tool".to_string()];
+        save(tmp.path(), &config).unwrap();
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(
+            loaded.agents[0].execution.shell.allowed_command_prefixes,
+            vec!["custom-tool"]
+        );
     }
 
     // -------------------------------------------------------------------

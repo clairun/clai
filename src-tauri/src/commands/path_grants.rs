@@ -17,7 +17,7 @@
 //!    agent's `execution.filesystem.extra_paths` in the DB, *then*
 //!    delivered through the oneshot. The agent resumes; its
 //!    `filesystem_grants()` will pick up the persisted grant on the next
-//!    `fs_*` call, and the current run can also see it through the
+//!    `bash_exec` call, and the current run can also see it through the
 //!    session-scoped grant container the tool maintains.
 //!
 //! Sequencing rationale: persist before deliver so a crash between user

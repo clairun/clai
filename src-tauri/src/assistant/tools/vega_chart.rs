@@ -7,7 +7,7 @@
 //! the frontend renders as an interactive chart (`VegaChart`: chat, `.md` reports via
 //! `![title](/reports/x.vl.json)`, and the artifacts panel).
 //!
-//! Why a tool instead of `fs_write`: a spec written blind renders as an
+//! Why a tool instead of writing through `bash_exec`: a spec written blind renders as an
 //! error card the model never sees. Validating here turns that into a tool
 //! error listing the offending JSON paths, so the model repairs the spec in
 //! the same turn. The schema is the compact copy of
@@ -372,7 +372,7 @@ fn spec_warnings(spec: &serde_json::Value) -> Vec<String> {
     let rows = max_inline_rows(spec);
     if rows > INLINE_ROWS_WARNING_THRESHOLD {
         warnings.push(format!(
-            "data.values inlines {rows} rows; write the data to a CSV or JSON file in the workspace (fs_write) and reference it with data.url instead (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`)"
+            "data.values inlines {rows} rows; write the data to a CSV or JSON file in the workspace with bash_exec and reference it with data.url instead (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`)"
         ));
     }
     warnings
@@ -399,12 +399,11 @@ fn max_inline_rows(value: &serde_json::Value) -> usize {
 /// in `.vl.json` (the extension is what routes the file to the chart viewer
 /// and the chart image-link renderer).
 ///
-/// Deliberately narrower than `local::resolve_allowed_path` (the `fs_*`
-/// policy, which also admits granted paths outside the workspace): a chart
-/// only renders when the frontend can read it through the workspace file
-/// endpoints, so any destination outside the workspace would be a broken
-/// chart, and `..` is rejected rather than normalized away so the model
-/// learns the rule instead of landing somewhere it did not intend.
+/// Deliberately limited to the workspace even though `bash_exec` may receive
+/// grants outside it: a chart only renders when the frontend can read it
+/// through the workspace file endpoints. Any destination outside the workspace
+/// would be broken, and `..` is rejected rather than normalized away so the
+/// model learns the rule instead of landing somewhere it did not intend.
 pub fn spec_relative_path(input: &str) -> Result<PathBuf, String> {
     // Backslashes are separators on every platform here: on Windows the
     // model may type them, on Unix a `charts\\x.vl.json` file is never wanted.
