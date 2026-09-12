@@ -26,13 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allowlist now includes what the removed tools used to do (`mkdir`, `cp`,
   `mv`, `touch`, `tee`, `sed`, and friends), and new agents default to the
   restricted tier, since the shell is now also the filesystem.
-- **Existing agents are migrated once, conservatively.** A workspace still on
-  config v1 has two agent shapes upgraded to the new default allowlist: one
-  that is an exact copy of the old inspection-only default, and one that is
-  `Restricted` with an empty allowlist (the shape the old bundled templates
-  persisted, which otherwise stops on an approval prompt for every command).
-  A hand-edited allowlist is left exactly as it is — such an agent keeps a
-  read-only command set until you widen it by hand.
+- **Existing agents are left alone.** There is no config migration: an agent
+  you already configured keeps exactly the allowlist you gave it. The first
+  time it needs `mkdir` or `tee`, Restricted mode asks, and "Always allow"
+  widens the list — so the commands arrive when they are actually used, by
+  your decision, instead of being written into your config on upgrade.
 - **Prompt guidance follows real capability.** An agent with no shell, or with
   an allowlist containing no command that writes a file, is no longer told to
   keep memory files, save durable outputs, or write companion data files for

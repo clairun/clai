@@ -11,36 +11,7 @@ use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
 };
 
-const WORKSPACE_CONFIG_VERSION: u32 = 2;
-const LEGACY_WORKSPACE_CONFIG_VERSION: u32 = 1;
-const LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST: &[&str] = &[
-    "pwd",
-    "cd",
-    "ls",
-    "rg",
-    "grep",
-    "head",
-    "tail",
-    "wc",
-    "file",
-    "stat",
-    "du",
-    "df",
-    "date",
-    "whoami",
-    "uname",
-    "which",
-    "git status",
-    "git diff",
-    "git log",
-    "git show",
-    "git rev-parse",
-    "git ls-files",
-    "git grep",
-    "git blame",
-    "git branch --show-current",
-    "git remote -v",
-];
+const WORKSPACE_CONFIG_VERSION: u32 = 1;
 
 #[derive(Debug)]
 pub enum WorkspaceConfigError {
@@ -242,7 +213,7 @@ pub struct WorkspaceConfig {
 }
 
 fn default_workspace_config_version() -> u32 {
-    LEGACY_WORKSPACE_CONFIG_VERSION
+    WORKSPACE_CONFIG_VERSION
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,16 +368,6 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
     let mut config: WorkspaceConfig = serde_json::from_str(&contents)
         .map_err(|source| WorkspaceConfigError::Parse { path, source })?;
     prune_legacy_mcp_refs(&mut config);
-    if config.version < WORKSPACE_CONFIG_VERSION {
-        migrate_bash_only_filesystem_tools(&mut config);
-        config.version = WORKSPACE_CONFIG_VERSION;
-        // Deliberately in memory only. Saving from `load` would be a
-        // read-modify-write outside `UPDATE_LOCK`, the exact shape `update`
-        // below forbids, and it would race every concurrent loader at startup.
-        // The bumped version reaches disk with the next `update`, which writes
-        // under the lock; until then the migration simply re-runs on load,
-        // which is idempotent.
-    }
     Ok(config)
 }
 
@@ -418,49 +379,6 @@ fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
         agent
             .selected_mcp_servers
             .retain(|mcp_ref| !mcp_ref.id.is_empty());
-    }
-}
-
-/// Version-2 migration for moving generic file operations to `bash_exec`.
-///
-/// Two shapes are upgraded, both of which mean "this agent did its file work
-/// through the `fs_*` tools that no longer exist":
-/// 1. an allowlist that is still an exact copy of the old inspection-only
-///    default, and
-/// 2. `Restricted` with an *empty* allowlist, which is what the old bundled
-///    templates persisted and which otherwise means "stop and ask before every
-///    single command" — a scheduled run would park on an approval card.
-///
-/// Anything else is the user's own policy and is left alone. That is a
-/// deliberate contract with a sharp edge: an allowlist edited even slightly
-/// away from the old default is preserved verbatim, so such an agent keeps a
-/// read-only command set and can no longer write files. It says so rather than
-/// failing silently — `ShellCapabilityConfig::can_write_files` withholds the
-/// write guidance and the prompt lists the allowlist — but the user has to
-/// widen it by hand.
-fn migrate_bash_only_filesystem_tools(config: &mut WorkspaceConfig) {
-    for agent in &mut config.agents {
-        let is_legacy_default = agent
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .iter()
-            .map(String::as_str)
-            .eq(LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST.iter().copied());
-        if is_legacy_default {
-            agent.execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
-            continue;
-        }
-
-        // Keyed on the configuration itself, not on the template that produced
-        // it: a bundled skill slug gets renamed upstream sooner or later, and a
-        // migration that silently stops matching is worse than no migration.
-        let prompts_for_every_command =
-            matches!(agent.execution.shell.mode, ShellAccessMode::Restricted)
-                && agent.execution.shell.allowed_command_prefixes.is_empty();
-        if prompts_for_every_command {
-            agent.execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
-        }
     }
 }
 
@@ -828,99 +746,6 @@ mod attach_provider_tests {
             .shell
             .allowed_command_prefixes
             .contains(&"mkdir".to_string()));
-    }
-
-    #[test]
-    fn load_upgrades_only_the_old_default_shell_allowlist() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut config = workspace();
-        config.version = LEGACY_WORKSPACE_CONFIG_VERSION;
-        // Spelled out rather than built from the const: the fixture is the
-        // shape that exists on real disks today, so the test must fail if the
-        // const ever drifts away from it.
-        config.agents[0].execution.shell.allowed_command_prefixes = [
-            "pwd",
-            "cd",
-            "ls",
-            "rg",
-            "grep",
-            "head",
-            "tail",
-            "wc",
-            "file",
-            "stat",
-            "du",
-            "df",
-            "date",
-            "whoami",
-            "uname",
-            "which",
-            "git status",
-            "git diff",
-            "git log",
-            "git show",
-            "git rev-parse",
-            "git ls-files",
-            "git grep",
-            "git blame",
-            "git branch --show-current",
-            "git remote -v",
-        ]
-        .iter()
-        .map(|command| (*command).to_string())
-        .collect();
-        save(tmp.path(), &config).unwrap();
-
-        let loaded = load(tmp.path()).unwrap();
-        assert_eq!(loaded.version, WORKSPACE_CONFIG_VERSION);
-        let allowed = &loaded.agents[0].execution.shell.allowed_command_prefixes;
-        assert!(allowed.contains(&"cat".to_string()));
-        assert!(allowed.contains(&"mkdir".to_string()));
-
-        config.version = WORKSPACE_CONFIG_VERSION;
-        config.agents[0].execution.shell.allowed_command_prefixes = vec!["custom-tool".to_string()];
-        save(tmp.path(), &config).unwrap();
-        let loaded = load(tmp.path()).unwrap();
-        assert_eq!(
-            loaded.agents[0].execution.shell.allowed_command_prefixes,
-            vec!["custom-tool"]
-        );
-    }
-
-    #[test]
-    fn load_upgrades_a_restricted_agent_with_an_empty_allowlist() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut config = workspace();
-        config.version = LEGACY_WORKSPACE_CONFIG_VERSION;
-        config.agents[0].execution.shell.mode = ShellAccessMode::Restricted;
-        config.agents[0]
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .clear();
-        save(tmp.path(), &config).unwrap();
-
-        let loaded = load(tmp.path()).unwrap();
-        let allowed = &loaded.agents[0].execution.shell.allowed_command_prefixes;
-        assert!(allowed.contains(&"cat".to_string()));
-        assert!(allowed.contains(&"printf".to_string()));
-
-        assert_eq!(loaded.version, WORKSPACE_CONFIG_VERSION);
-        // The bump is in memory only — `load` must not write outside the update
-        // lock — so the next save is what persists it, and a later narrowing is
-        // then preserved rather than re-migrated.
-        let mut narrowed = loaded;
-        narrowed.agents[0]
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .clear();
-        save(tmp.path(), &narrowed).unwrap();
-        assert!(load(tmp.path()).unwrap().agents[0]
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .is_empty());
     }
 
     // -------------------------------------------------------------------
