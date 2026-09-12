@@ -3,9 +3,9 @@
 //!
 //! The model hands over a Vega-Lite spec (or names an existing `.vl.json`
 //! file); the tool validates it against the Vega-Lite JSON schema and, when
-//! valid, stores it in the workspace as a `.vl.json` artifact the frontend
-//! renders as an interactive chart (`VegaChart`: chat, `.md` reports via
-//! `![title](charts/x.vl.json)`, and the artifacts panel).
+//! valid, stores it at the requested workspace path as a `.vl.json` artifact
+//! the frontend renders as an interactive chart (`VegaChart`: chat, `.md` reports via
+//! `![title](/reports/x.vl.json)`, and the artifacts panel).
 //!
 //! Why a tool instead of `fs_write`: a spec written blind renders as an
 //! error card the model never sees. Validating here turns that into a tool
@@ -25,8 +25,6 @@ use serde::Deserialize;
 
 use super::ToolExecutionContext;
 
-/// Directory (relative to the workspace root) inline specs are saved to.
-pub const CHARTS_DIR: &str = "charts";
 /// `$schema` written into a saved spec that has none; also the version the
 /// renderer (`vega-lite` npm package) and the vendored schema implement.
 const VEGA_LITE_SCHEMA_URL: &str = "https://vega.github.io/schema/vega-lite/v6.json";
@@ -44,7 +42,6 @@ const INLINE_ROWS_WARNING_THRESHOLD: usize = 50;
 /// How many schema violations are reported. The deepest ones are kept; the
 /// rest is noise from the other branches of the top-level `anyOf`.
 const MAX_REPORTED_VIOLATIONS: usize = 8;
-const MAX_SLUG_CHARS: usize = 60;
 
 static VEGA_LITE_SCHEMA_JSON: &str = include_str!("../../../embedded/vega-lite-schema.json");
 
@@ -56,10 +53,9 @@ pub struct CreateVegaChartParams {
     /// sometimes stringify nested objects).
     #[serde(default)]
     pub spec: Option<serde_json::Value>,
-    /// Workspace-relative `.vl.json` path: the destination when `spec` is
-    /// given, the file to validate otherwise.
-    #[serde(default)]
-    pub path: Option<String>,
+    /// Full workspace-relative `.vl.json` path: the destination when `spec`
+    /// is given, the file to validate otherwise.
+    pub path: String,
     /// Show the chart inline in the chat as this call's result card
     /// (default true). `false` for charts that only belong in a report.
     #[serde(default = "default_display")]
@@ -84,12 +80,9 @@ pub async fn execute(
         return Err("`title` must not be empty".to_string());
     }
 
-    let outcome = match (params.spec, params.path) {
-        (Some(spec), path) => {
-            let relative = match path {
-                Some(path) => spec_relative_path(&path)?,
-                None => Path::new(CHARTS_DIR).join(format!("{}{}", slugify(title), SPEC_EXTENSION)),
-            };
+    let relative = spec_relative_path(&params.path)?;
+    let outcome = match params.spec {
+        Some(spec) => {
             let mut spec = parse_spec_value(spec)?;
             validate_spec(&spec)?;
             let warnings = spec_warnings(&spec);
@@ -101,19 +94,12 @@ pub async fn execute(
             write_spec(&workspace_root, &relative, &spec)?;
             (relative, warnings, "written")
         }
-        (None, Some(path)) => {
-            let relative = spec_relative_path(&path)?;
+        None => {
             let absolute = resolve_spec_for_read(&workspace_root, &relative)?;
             let text = read_spec_file(&absolute, &relative)?;
             let spec = parse_spec_text(&text)?;
             validate_spec(&spec)?;
             (relative, spec_warnings(&spec), "validated")
-        }
-        (None, None) => {
-            return Err(
-                "Provide `spec` (a Vega-Lite spec to validate and save) or `path` (an existing .vl.json file to validate)"
-                    .to_string(),
-            )
         }
     };
 
@@ -140,10 +126,13 @@ pub async fn execute(
     Ok(result)
 }
 
-/// Alt text for the embed snippet: brackets are escaped so an unbalanced
-/// `[` or `]` in the title cannot break the image syntax.
+/// Alt text for the embed snippet: backslashes are escaped first so they
+/// cannot consume an escaped bracket or the closing bracket itself.
 fn markdown_alt_text(title: &str) -> String {
-    title.replace('[', "\\[").replace(']', "\\]")
+    title
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
 }
 
 /// Accept the spec as an object or as a string containing JSON.
@@ -429,6 +418,18 @@ pub fn spec_relative_path(input: &str) -> Result<PathBuf, String> {
             "`path` must not contain whitespace (got `{trimmed}`): the embed snippet `![title](/{trimmed})` would not parse as markdown; use `-` instead"
         ));
     }
+    if trimmed.contains(['?', '#']) {
+        return Err(format!(
+            "`path` must not contain `?` or `#` (got `{trimmed}`): those characters are interpreted as URL query or fragment delimiters; use `-` instead"
+        ));
+    }
+    if let Some(character) = trimmed.chars().find(|character| {
+        !character.is_ascii_alphanumeric() && !matches!(character, '/' | '.' | '_' | '-')
+    }) {
+        return Err(format!(
+            "`path` contains unsupported character `{character}` (got `{trimmed}`): use only ASCII letters, digits, `/`, `.`, `_`, and `-` so the returned markdown refers to the exact file"
+        ));
+    }
     if !trimmed.to_ascii_lowercase().ends_with(SPEC_EXTENSION) {
         return Err(format!(
             "`path` must end in `{SPEC_EXTENSION}` (got `{trimmed}`): that extension is what makes CLAI render the file as a chart"
@@ -453,7 +454,7 @@ pub fn spec_relative_path(input: &str) -> Result<PathBuf, String> {
     Ok(relative)
 }
 
-/// `charts/x.vl.json` with `/` separators on every platform; this string is
+/// A workspace path with `/` separators on every platform; this string is
 /// what the model pastes into markdown.
 fn relative_path_string(relative: &Path) -> String {
     relative
@@ -461,35 +462,6 @@ fn relative_path_string(relative: &Path) -> String {
         .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
-}
-
-/// File-name slug of a chart title: lowercase, runs of anything that is not
-/// a letter or digit collapse to one `-`, trimmed and capped. Two charts with
-/// the same title map to the same file, so re-creating a chart updates it
-/// rather than accumulating copies.
-pub fn slugify(title: &str) -> String {
-    let mut slug = String::new();
-    let mut pending_dash = false;
-    for ch in title.chars() {
-        if ch.is_alphanumeric() {
-            if pending_dash && !slug.is_empty() {
-                slug.push('-');
-            }
-            pending_dash = false;
-            slug.extend(ch.to_lowercase());
-        } else {
-            pending_dash = true;
-        }
-        if slug.chars().count() >= MAX_SLUG_CHARS {
-            break;
-        }
-    }
-    let slug = slug.trim_end_matches('-').to_string();
-    if slug.is_empty() {
-        "chart".to_string()
-    } else {
-        slug
-    }
 }
 
 fn write_spec(
@@ -810,18 +782,10 @@ mod tests {
     }
 
     #[test]
-    fn slugifies_titles_into_stable_file_names() {
-        assert_eq!(slugify("Q3 Revenue by Region"), "q3-revenue-by-region");
-        assert_eq!(slugify("  ***  "), "chart");
-        assert_eq!(slugify("CPU % (last 24h)"), "cpu-last-24h");
-        assert_eq!(slugify("Ventas – España"), "ventas-españa");
-        assert!(slugify(&"x".repeat(200)).chars().count() <= MAX_SLUG_CHARS);
-    }
-
-    #[test]
-    fn embed_snippet_escapes_brackets_in_the_title() {
+    fn embed_snippet_escapes_markdown_punctuation_in_the_title() {
         assert_eq!(markdown_alt_text("Sales [Q3]"), "Sales \\[Q3\\]");
         assert_eq!(markdown_alt_text("Sales [Q3"), "Sales \\[Q3");
+        assert_eq!(markdown_alt_text("Sales \\"), "Sales \\\\");
         assert_eq!(markdown_alt_text("plain"), "plain");
     }
 
@@ -854,11 +818,28 @@ mod tests {
         assert!(spec_relative_path("reports/my chart.vl.json")
             .unwrap_err()
             .contains("whitespace"));
+        for path in [
+            "reports/q3?draft/chart.vl.json",
+            "reports/q3#draft/chart.vl.json",
+        ] {
+            assert!(spec_relative_path(path)
+                .unwrap_err()
+                .contains("query or fragment"));
+        }
+        for path in [
+            "reports/aéb.vl.json",
+            "reports/100%.vl.json",
+            "reports/chart(1).vl.json",
+        ] {
+            assert!(spec_relative_path(path)
+                .unwrap_err()
+                .contains("unsupported character"));
+        }
         assert!(spec_relative_path("   ").is_err());
     }
 
     #[tokio::test]
-    async fn writes_a_valid_inline_spec_under_charts_and_returns_the_markdown() {
+    async fn writes_a_valid_inline_spec_at_the_requested_path_and_returns_the_markdown() {
         let dir = tempfile::tempdir().unwrap();
         let context = context_for(Some(dir.path().to_path_buf()));
         let result = execute(
@@ -867,24 +848,24 @@ mod tests {
                 title: "Q3 Revenue by Region".to_string(),
                 display: true,
                 spec: Some(bar_spec()),
-                path: None,
+                path: "reports/q3/revenue-by-region.vl.json".to_string(),
             },
         )
         .await
         .unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(result["action"], "written");
-        assert_eq!(result["path"], "charts/q3-revenue-by-region.vl.json");
+        assert_eq!(result["path"], "reports/q3/revenue-by-region.vl.json");
         // Root-anchored so it renders from a report in any subdirectory.
         assert_eq!(
             result["markdown"],
-            "![Q3 Revenue by Region](/charts/q3-revenue-by-region.vl.json)"
+            "![Q3 Revenue by Region](/reports/q3/revenue-by-region.vl.json)"
         );
         assert_eq!(result["display"], true);
         assert!(result.get("warnings").is_none());
 
         let written: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("charts/q3-revenue-by-region.vl.json"))
+            &std::fs::read_to_string(dir.path().join("reports/q3/revenue-by-region.vl.json"))
                 .unwrap(),
         )
         .unwrap();
@@ -910,7 +891,7 @@ mod tests {
                 title: "Existing".to_string(),
                 display: true,
                 spec: None,
-                path: Some("charts/existing.vl.json".to_string()),
+                path: "charts/existing.vl.json".to_string(),
             },
         )
         .await
@@ -923,7 +904,7 @@ mod tests {
                 title: "New".to_string(),
                 display: true,
                 spec: Some(bar_spec()),
-                path: Some("charts/new.vl.json".to_string()),
+                path: "charts/new.vl.json".to_string(),
             },
         )
         .await
@@ -947,7 +928,7 @@ mod tests {
                 title: "Linked".to_string(),
                 display: true,
                 spec: Some(bar_spec()),
-                path: Some("reports/linked.vl.json".to_string()),
+                path: "reports/linked.vl.json".to_string(),
             },
         )
         .await
@@ -972,7 +953,7 @@ mod tests {
                 title: "Latency".to_string(),
                 display: false,
                 spec: Some(serde_json::Value::String(bar_spec().to_string())),
-                path: Some("reports/latency.vl.json".to_string()),
+                path: "reports/latency.vl.json".to_string(),
             },
         )
         .await
@@ -994,13 +975,13 @@ mod tests {
                 title: "Broken".to_string(),
                 display: true,
                 spec: Some(spec),
-                path: None,
+                path: "reports/broken.vl.json".to_string(),
             },
         )
         .await
         .unwrap_err();
         assert!(error.contains("/mark"), "{error}");
-        assert!(!dir.path().join("charts").exists());
+        assert!(!dir.path().join("reports").exists());
     }
 
     #[tokio::test]
@@ -1018,7 +999,7 @@ mod tests {
                 title: "Existing".to_string(),
                 display: true,
                 spec: None,
-                path: Some("charts/existing.vl.json".to_string()),
+                path: "charts/existing.vl.json".to_string(),
             },
         )
         .await
@@ -1033,7 +1014,7 @@ mod tests {
                 title: "Missing".to_string(),
                 display: true,
                 spec: None,
-                path: Some("charts/missing.vl.json".to_string()),
+                path: "charts/missing.vl.json".to_string(),
             },
         )
         .await
@@ -1065,7 +1046,7 @@ mod tests {
                 title: "Big".to_string(),
                 display: true,
                 spec: Some(spec),
-                path: None,
+                path: "analysis/big.vl.json".to_string(),
             },
         )
         .await
@@ -1076,7 +1057,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requires_a_workspace_a_title_and_one_of_spec_or_path() {
+    async fn requires_a_workspace_a_title_and_a_valid_path() {
         let no_workspace = context_for(None);
         let error = execute(
             &no_workspace,
@@ -1084,7 +1065,7 @@ mod tests {
                 title: "t".to_string(),
                 display: true,
                 spec: Some(bar_spec()),
-                path: None,
+                path: "analysis/chart.vl.json".to_string(),
             },
         )
         .await
@@ -1102,7 +1083,7 @@ mod tests {
                 title: "  ".to_string(),
                 display: true,
                 spec: Some(bar_spec()),
-                path: None,
+                path: "analysis/chart.vl.json".to_string(),
             },
         )
         .await
@@ -1115,14 +1096,11 @@ mod tests {
                 title: "t".to_string(),
                 display: true,
                 spec: None,
-                path: None,
+                path: "   ".to_string(),
             },
         )
         .await
         .unwrap_err();
-        assert!(
-            error.contains("`spec`") && error.contains("`path`"),
-            "{error}"
-        );
+        assert!(error.contains("`path` must not be empty"), "{error}");
     }
 }
