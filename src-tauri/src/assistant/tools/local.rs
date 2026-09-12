@@ -1123,10 +1123,13 @@ fn canonicalize_requested_path(input: &str) -> Result<PathBuf, String> {
             input
         ));
     }
-    // Try to canonicalize (resolve symlinks). If the path doesn't exist
-    // yet, fall back to the normalized form — the user can still grant
-    // access to a not-yet-existing path (e.g. a future cache dir).
-    Ok(std::fs::canonicalize(&expanded).unwrap_or_else(|_| normalize_path(expanded)))
+    std::fs::canonicalize(&expanded).map_err(|error| {
+        format!(
+            "fs_request_grant requires an existing path because the shell sandbox cannot bind a nonexistent target: {}. Request an existing parent directory instead ({})",
+            expanded.display(),
+            error
+        )
+    })
 }
 
 fn path_already_covered(
@@ -2067,15 +2070,9 @@ mod tests {
             std::env::set_var("HOME", temp.path());
         }
 
-        let resolved = canonicalize_requested_path("~/some/subpath").unwrap();
-        // The "~/some/subpath" target does not exist, so the product returns
-        // the normalized (non-canonicalized) form. Compare structurally:
-        // `canonicalize` would add a Windows `\\?\` verbatim prefix and resolve
-        // the macOS `/var`->`/private/var` symlink, both of which break a naive
-        // prefix match. Component-based checks are separator-agnostic.
+        let resolved = canonicalize_requested_path("~").unwrap();
         assert!(resolved.is_absolute());
-        assert!(resolved.starts_with(temp.path()));
-        assert!(resolved.ends_with(std::path::Path::new("some").join("subpath")));
+        assert_eq!(resolved, temp.path().canonicalize().unwrap());
 
         unsafe {
             match prev {
@@ -2083,6 +2080,15 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
         }
+    }
+
+    #[test]
+    fn canonicalize_rejects_nonexistent_grant_target() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("future-cache");
+        let error = canonicalize_requested_path(&missing.display().to_string()).unwrap_err();
+        assert!(error.contains("requires an existing path"), "{error}");
+        assert!(error.contains("existing parent directory"), "{error}");
     }
 
     #[test]

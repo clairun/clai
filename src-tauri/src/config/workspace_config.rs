@@ -11,7 +11,8 @@ use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
 };
 
-const WORKSPACE_CONFIG_VERSION: u32 = 1;
+const WORKSPACE_CONFIG_VERSION: u32 = 2;
+const LEGACY_WORKSPACE_CONFIG_VERSION: u32 = 1;
 const LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST: &[&str] = &[
     "pwd",
     "cd",
@@ -241,7 +242,7 @@ pub struct WorkspaceConfig {
 }
 
 fn default_workspace_config_version() -> u32 {
-    WORKSPACE_CONFIG_VERSION
+    LEGACY_WORKSPACE_CONFIG_VERSION
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -347,6 +348,11 @@ pub fn default_agent_execution() -> ExecutionCapabilityConfig {
         });
     }
     execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
+    // Generic file operations run through `bash_exec`, so a shell-off agent has
+    // no filesystem at all — it cannot read its own memory or write an artifact.
+    // Start every new agent on the restricted tier (allowlisted commands inside
+    // the sandbox); the user can still set it back to off in agent settings.
+    execution.shell.mode = ShellAccessMode::Restricted;
     execution
 }
 
@@ -357,7 +363,6 @@ impl WorkspaceAgent {
         // bash_exec with the default blocklist) and web access by default. The
         // user can still tighten either in agent settings.
         let mut execution = default_agent_execution();
-        execution.shell.mode = ShellAccessMode::Restricted;
         execution.web.enabled = true;
         Self {
             id,
@@ -392,7 +397,10 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
     let mut config: WorkspaceConfig = serde_json::from_str(&contents)
         .map_err(|source| WorkspaceConfigError::Parse { path, source })?;
     prune_legacy_mcp_refs(&mut config);
-    migrate_inspection_only_shell_allowlist(&mut config);
+    if config.version < 2 {
+        migrate_bash_only_filesystem_tools(&mut config);
+        config.version = 2;
+    }
     Ok(config)
 }
 
@@ -407,10 +415,11 @@ fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
     }
 }
 
-/// Agents created before generic file operations moved to `bash_exec` carry an
-/// exact copy of the old inspection-only defaults. Upgrade only that untouched
-/// default; any customized allowlist remains the user's policy.
-fn migrate_inspection_only_shell_allowlist(config: &mut WorkspaceConfig) {
+/// Version-2 migration for moving generic file operations to `bash_exec`.
+/// Untouched manager defaults gain routine file commands. Existing bundled SOW
+/// trackers had an empty shell allowlist because they previously used the
+/// operational `fs_*` tools, so recognize them by their bundled skill.
+fn migrate_bash_only_filesystem_tools(config: &mut WorkspaceConfig) {
     for agent in &mut config.agents {
         let is_legacy_default = agent
             .execution
@@ -420,6 +429,19 @@ fn migrate_inspection_only_shell_allowlist(config: &mut WorkspaceConfig) {
             .map(String::as_str)
             .eq(LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST.iter().copied());
         if is_legacy_default {
+            agent.execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
+            continue;
+        }
+
+        let is_legacy_sow_tracker =
+            matches!(agent.execution.shell.mode, ShellAccessMode::Restricted)
+                && agent.execution.shell.allowed_command_prefixes.is_empty()
+                && agent.selected_skills.iter().any(|skill| match skill {
+                    SkillRef::Bundled { slug }
+                    | SkillRef::Personal { slug }
+                    | SkillRef::Remote { slug, .. } => slug == "sow-workflow",
+                });
+        if is_legacy_sow_tracker {
             agent.execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
         }
     }
@@ -755,6 +777,21 @@ mod attach_provider_tests {
     }
 
     #[test]
+    fn new_agents_default_to_a_shell_because_the_shell_is_the_filesystem() {
+        // Generic file operations run through `bash_exec`. A shell-off agent
+        // therefore cannot read its own memory or write an artifact, so a
+        // brand-new agent must not start there.
+        let execution = default_agent_execution();
+        assert_eq!(execution.shell.mode, ShellAccessMode::Restricted);
+        assert!(execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cat".to_string()));
+        // Members stay off the network until the user opts in.
+        assert!(!execution.web.enabled);
+    }
+
+    #[test]
     fn new_manager_defaults_to_restricted_shell_and_web_enabled() {
         let manager = WorkspaceAgent::new_manager("mgr".to_string(), 1);
         assert_eq!(manager.execution.shell.mode, ShellAccessMode::Restricted);
@@ -780,18 +817,50 @@ mod attach_provider_tests {
     fn load_upgrades_only_the_old_default_shell_allowlist() {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = workspace();
-        config.agents[0].execution.shell.allowed_command_prefixes =
-            LEGACY_INSPECTION_ONLY_SHELL_ALLOWLIST
-                .iter()
-                .map(|command| (*command).to_string())
-                .collect();
+        config.version = LEGACY_WORKSPACE_CONFIG_VERSION;
+        // Spelled out rather than built from the const: the fixture is the
+        // shape that exists on real disks today, so the test must fail if the
+        // const ever drifts away from it.
+        config.agents[0].execution.shell.allowed_command_prefixes = [
+            "pwd",
+            "cd",
+            "ls",
+            "rg",
+            "grep",
+            "head",
+            "tail",
+            "wc",
+            "file",
+            "stat",
+            "du",
+            "df",
+            "date",
+            "whoami",
+            "uname",
+            "which",
+            "git status",
+            "git diff",
+            "git log",
+            "git show",
+            "git rev-parse",
+            "git ls-files",
+            "git grep",
+            "git blame",
+            "git branch --show-current",
+            "git remote -v",
+        ]
+        .iter()
+        .map(|command| (*command).to_string())
+        .collect();
         save(tmp.path(), &config).unwrap();
 
         let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.version, WORKSPACE_CONFIG_VERSION);
         let allowed = &loaded.agents[0].execution.shell.allowed_command_prefixes;
         assert!(allowed.contains(&"cat".to_string()));
         assert!(allowed.contains(&"mkdir".to_string()));
 
+        config.version = WORKSPACE_CONFIG_VERSION;
         config.agents[0].execution.shell.allowed_command_prefixes = vec!["custom-tool".to_string()];
         save(tmp.path(), &config).unwrap();
         let loaded = load(tmp.path()).unwrap();
@@ -799,6 +868,28 @@ mod attach_provider_tests {
             loaded.agents[0].execution.shell.allowed_command_prefixes,
             vec!["custom-tool"]
         );
+    }
+
+    #[test]
+    fn load_upgrades_existing_sow_tracker_with_empty_shell_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = workspace();
+        config.version = LEGACY_WORKSPACE_CONFIG_VERSION;
+        config.agents[0].execution.shell.mode = ShellAccessMode::Restricted;
+        config.agents[0]
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .clear();
+        config.agents[0].selected_skills = vec![SkillRef::Bundled {
+            slug: "sow-workflow".to_string(),
+        }];
+        save(tmp.path(), &config).unwrap();
+
+        let loaded = load(tmp.path()).unwrap();
+        let allowed = &loaded.agents[0].execution.shell.allowed_command_prefixes;
+        assert!(allowed.contains(&"cat".to_string()));
+        assert!(allowed.contains(&"printf".to_string()));
     }
 
     // -------------------------------------------------------------------

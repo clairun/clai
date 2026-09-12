@@ -23,14 +23,17 @@ pub fn available_tools(
     }
 
     if context.agent_workspace_id.is_some() {
-        tools.push(fs_request_grant_def());
         tools.push(history_query_def());
         tools.push(create_vega_chart_def());
     }
 
+    // `bash_exec` is the only consumer of a path grant, so with the shell off
+    // there is nothing for `fs_request_grant` to unlock: offering it would only
+    // invite the agent to ask the user for access it still cannot use.
     if context.agent_workspace_id.is_some()
         && !matches!(context.execution.shell.mode, ShellAccessMode::Off)
     {
+        tools.push(fs_request_grant_def());
         tools.push(bash_exec_def());
     }
 
@@ -144,7 +147,7 @@ fn ask_user_def() -> ToolDefinition {
 fn fs_request_grant_def() -> ToolDefinition {
     ToolDefinition {
         name: "fs_request_grant".to_string(),
-        description: "Request the user's approval to extend this agent's filesystem grants. Use BEFORE attempting work that needs paths outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI). Request the narrowest path that satisfies the task. The user can approve (once or always), narrow the path, downgrade the access, or deny. If granted `once`, the access lasts the rest of this run. If granted `always`, the grant persists to agent settings. If the path is already covered by existing grants, the tool returns immediately without prompting.".to_string(),
+        description: "Request the user's approval to extend this agent's filesystem grants. Use BEFORE attempting work that needs paths outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI). The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. Request the narrowest path that satisfies the task. The user can approve (once or always), narrow the path, downgrade the access, or deny. If granted `once`, the access lasts the rest of this run. If granted `always`, the grant persists to agent settings. If the path is already covered by existing grants, the tool returns immediately without prompting.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -321,14 +324,21 @@ mod tests {
         };
 
         let shell_off = names(&context);
-        assert!(shell_off.contains(&"fs_request_grant".to_string()));
         assert!(!shell_off.contains(&"bash_exec".to_string()));
+        // `bash_exec` is the only consumer of a path grant, so a shell-off
+        // agent has nothing to unlock with one.
+        assert!(!shell_off.contains(&"fs_request_grant".to_string()));
         for retired in ["fs_list", "fs_glob", "fs_read", "fs_write"] {
             assert!(!shell_off.contains(&retired.to_string()));
         }
+        // Tools that carry their own filesystem access survive shell-off.
+        assert!(shell_off.contains(&"create_vega_chart".to_string()));
+        assert!(shell_off.contains(&"history_query".to_string()));
 
         context.execution.shell.mode = ShellAccessMode::Restricted;
-        assert!(names(&context).contains(&"bash_exec".to_string()));
+        let shell_on = names(&context);
+        assert!(shell_on.contains(&"bash_exec".to_string()));
+        assert!(shell_on.contains(&"fs_request_grant".to_string()));
     }
 
     #[test]
