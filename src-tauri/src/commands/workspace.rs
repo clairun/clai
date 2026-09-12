@@ -1802,15 +1802,84 @@ fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathB
     Ok(resolved)
 }
 
+/// Resolve a workspace write target, which may not exist yet.
+///
+/// Containment is enforced the same way as in [`resolve_workspace_file_path`]
+/// and [`resolve_deletable_path`], but validation must create nothing: the
+/// target's nearest *existing* ancestor is canonicalized and has to stay
+/// inside the canonical workspace root, while the components below it do not
+/// exist yet and therefore cannot be symlinks. Without that, an intermediate
+/// component that is a symlink to a directory outside the workspace passed the
+/// lexical guard and `workspace_write_file` created or overwrote a foreign
+/// file (after `create_dir_all`ing a foreign parent).
+///
+/// A final component that is itself an existing symlink is canonicalized too
+/// and must resolve inside the root — writing through an in-root symlink keeps
+/// working, while a dangling one is refused, since `fs::write` would follow it
+/// to a destination that cannot be checked.
 fn resolve_workspace_file_target(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let root = root.canonicalize().map_err(|error| {
+        format!(
+            "Failed to resolve workspace root {}: {error}",
+            root.display()
+        )
+    })?;
     let candidate = normalize_path(root.join(relative_path));
-    if !candidate.starts_with(root) {
+    if !candidate.starts_with(&root) {
         return Err(format!(
             "Path {} is outside the workspace root",
             candidate.display()
         ));
     }
-    Ok(candidate)
+    if candidate == root {
+        return Err("Cannot write to the workspace root.".to_string());
+    }
+
+    let outside = || format!("Path {} is outside the workspace root", candidate.display());
+    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut ancestor = candidate.parent().ok_or_else(outside)?;
+    let canonical_ancestor = loop {
+        if ancestor.symlink_metadata().is_ok() {
+            break ancestor
+                .canonicalize()
+                .map_err(|error| format!("Failed to resolve {}: {error}", candidate.display()))?;
+        }
+        missing.push(ancestor.file_name().ok_or_else(outside)?);
+        ancestor = ancestor.parent().ok_or_else(outside)?;
+    };
+    if !canonical_ancestor.starts_with(&root) {
+        return Err(format!(
+            "Path {} resolves outside the workspace root",
+            candidate.display()
+        ));
+    }
+
+    let mut target = canonical_ancestor;
+    for name in missing.iter().rev() {
+        target.push(name);
+    }
+    target.push(candidate.file_name().ok_or_else(outside)?);
+
+    if target
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        let resolved = target.canonicalize().map_err(|error| {
+            format!(
+                "Path {} resolves outside the workspace root: {error}",
+                candidate.display()
+            )
+        })?;
+        if !resolved.starts_with(&root) {
+            return Err(format!(
+                "Path {} resolves outside the workspace root",
+                candidate.display()
+            ));
+        }
+    }
+
+    Ok(target)
 }
 
 // ===============================================================================
@@ -5117,6 +5186,99 @@ mod tests {
                 .join("real/data.json")
                 .canonicalize()
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn workspace_write_targets_allow_new_paths_without_creating_them() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+
+        // Neither `a` nor `a/b` exists yet: validating the target must create
+        // nothing, yet the deep path must still resolve and be writable.
+        let target = resolve_workspace_file_target(&root, "a/b/c.md").unwrap();
+        assert_eq!(target, root.join("a/b/c.md"));
+        assert!(!root.join("a").exists(), "validation must not create dirs");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(&target, "written").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("a/b/c.md")).unwrap(),
+            "written"
+        );
+
+        // An existing file resolves to itself; the root itself is not a file.
+        write_file(&root.join("notes/todo.md"), "hi");
+        assert_eq!(
+            resolve_workspace_file_target(&root, "notes/todo.md").unwrap(),
+            root.join("notes/todo.md")
+        );
+        let error = resolve_workspace_file_target(&root, "").unwrap_err();
+        assert!(
+            error.contains("Cannot write to the workspace root"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_write_targets_reject_symlinks_that_escape_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.json");
+        write_file(&victim, "precious");
+        symlink(outside.path(), workspace.path().join("linked-data")).unwrap();
+
+        // Intermediate component leaving the root: overwriting an existing
+        // foreign file and creating a new one are both refused.
+        for path in ["linked-data/victim.json", "linked-data/fresh.json"] {
+            let error = resolve_workspace_file_target(workspace.path(), path).unwrap_err();
+            assert!(
+                error.contains("resolves outside the workspace root"),
+                "{path}: {error}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert!(!outside.path().join("fresh.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_write_targets_guard_a_symlinked_final_component() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.json");
+        write_file(&victim, "precious");
+
+        // The target itself is a symlink pointing out of the workspace.
+        symlink(&victim, root.join("linked-file.json")).unwrap();
+        let error = resolve_workspace_file_target(&root, "linked-file.json").unwrap_err();
+        assert!(
+            error.contains("resolves outside the workspace root"),
+            "{error}"
+        );
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+
+        // Dangling symlink out of the root: `fs::write` would follow it and
+        // create the foreign file, so it is refused too.
+        symlink(outside.path().join("new.json"), root.join("dangling.json")).unwrap();
+        let error = resolve_workspace_file_target(&root, "dangling.json").unwrap_err();
+        assert!(
+            error.contains("resolves outside the workspace root"),
+            "{error}"
+        );
+        assert!(!outside.path().join("new.json").exists());
+
+        // A symlink that resolves inside the root stays writable.
+        write_file(&root.join("real/data.json"), "inside");
+        symlink(root.join("real"), root.join("linked-inside")).unwrap();
+        assert_eq!(
+            resolve_workspace_file_target(&root, "linked-inside/data.json").unwrap(),
+            root.join("real/data.json")
         );
     }
 
