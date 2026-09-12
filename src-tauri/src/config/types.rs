@@ -29,17 +29,19 @@ fn default_restricted_shell_blocklist() -> Vec<String> {
     ]
 }
 
+/// The subset of `standard_restricted_shell_allowlist` that creates or modifies
+/// a file. Used by `ShellCapabilityConfig::can_write_files`; see the note there
+/// about why an incomplete list is the safe direction. Nothing on the default
+/// blocklist belongs here — `dd` would be a false positive in exactly the
+/// direction that note promises to avoid.
+const FILE_WRITING_COMMANDS: &[&str] = &[
+    "mkdir", "cp", "mv", "touch", "tee", "printf", "sed", "ln", "truncate",
+];
+
 /// Built-in command prefixes for Restricted shell mode. These cover routine
 /// workspace inspection and edits, but are not a guarantee that every flag
 /// combination is non-mutating; the filesystem sandbox and blocklist still
 /// define the hard safety boundary.
-/// Commands in our own restricted defaults that create or modify a file.
-/// Used by `ShellCapabilityConfig::can_write_files`; see the note there about
-/// why an incomplete list is the safe direction.
-const FILE_WRITING_COMMANDS: &[&str] = &[
-    "mkdir", "cp", "mv", "touch", "tee", "printf", "sed", "ln", "dd", "truncate",
-];
-
 pub fn standard_restricted_shell_allowlist() -> Vec<String> {
     vec![
         "pwd".to_string(),

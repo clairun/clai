@@ -1897,9 +1897,9 @@ const AgentSection = ({
         </select>
         <span className={styles.hint}>
           Agents use the shell for local file operations, so Off leaves the agent with no way to read
-          or write files — charts and conversation history still work. Under Restricted, only allowed
-          commands run unattended: without one that writes (mkdir, cp, mv, touch, tee, printf, sed)
-          the agent can read but not save anything.
+          or write files — charts and conversation history still work. Under Restricted, a command
+          outside the allowed list stops for your approval, so an allowed list with nothing that
+          writes leaves the agent able to read but not save.
         </span>
       </div>
 

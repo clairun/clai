@@ -400,18 +400,12 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
     if config.version < WORKSPACE_CONFIG_VERSION {
         migrate_bash_only_filesystem_tools(&mut config);
         config.version = WORKSPACE_CONFIG_VERSION;
-        // Write the upgrade back so it happens once. Left unpersisted, the file
-        // stays at version 1 and every load re-applies the migration, which
-        // would silently undo a user who deliberately restored the old list.
-        // Best-effort: a read-only or racing workspace still loads, it just
-        // migrates again next time.
-        if let Err(error) = save(root, &config) {
-            tracing::warn!(
-                "failed to persist workspace config migration to v{}: {}",
-                WORKSPACE_CONFIG_VERSION,
-                error
-            );
-        }
+        // Deliberately in memory only. Saving from `load` would be a
+        // read-modify-write outside `UPDATE_LOCK`, the exact shape `update`
+        // below forbids, and it would race every concurrent loader at startup.
+        // The bumped version reaches disk with the next `update`, which writes
+        // under the lock; until then the migration simply re-runs on load,
+        // which is idempotent.
     }
     Ok(config)
 }
@@ -911,12 +905,10 @@ mod attach_provider_tests {
         assert!(allowed.contains(&"cat".to_string()));
         assert!(allowed.contains(&"printf".to_string()));
 
-        // The upgrade is persisted, so it cannot re-apply over a later edit.
-        let on_disk: WorkspaceConfig =
-            serde_json::from_str(&std::fs::read_to_string(config_path(tmp.path())).unwrap())
-                .unwrap();
-        assert_eq!(on_disk.version, WORKSPACE_CONFIG_VERSION);
-
+        assert_eq!(loaded.version, WORKSPACE_CONFIG_VERSION);
+        // The bump is in memory only — `load` must not write outside the update
+        // lock — so the next save is what persists it, and a later narrowing is
+        // then preserved rather than re-migrated.
         let mut narrowed = loaded;
         narrowed.agents[0]
             .execution

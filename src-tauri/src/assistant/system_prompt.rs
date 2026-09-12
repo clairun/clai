@@ -185,9 +185,11 @@ pub(crate) fn build_system_prompt(
          - First inspect what is available in this session and choose the smallest set of tools needed.\n\
          - Use the configured MCP tools available in this session for domain-specific work.\n",
     );
-    if shell_enabled {
+    if can_write_files {
         prompt
             .push_str("         - Use `bash_exec` for local filesystem inspection and changes.\n");
+    } else if shell_enabled {
+        prompt.push_str("         - Use `bash_exec` for local filesystem inspection.\n");
     }
     prompt.push_str(
         "         - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
@@ -347,7 +349,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str("\n## Local Execution Capabilities\n");
         if shell_enabled && !can_write_files {
             prompt.push_str(&format!(
-                "- Your workspace (id `{workspace_id}`) is your default shell working directory (run `pwd` for its path) and holds this workspace's artifacts, which you can read. Your command allowlist contains nothing that writes a file, so treat the whole filesystem as read-only: put your results in chat instead of trying to save them, and say so plainly if a request needs a file written.\n",
+                "- Your workspace (id `{workspace_id}`) is your default shell working directory (run `pwd` for its path) and holds this workspace's artifacts, which you can read. Your command allowlist contains no command that writes a file, so any write you attempt through `bash_exec` stops and waits for the user to approve that command — which an unattended run has nobody to answer. Put your results in chat, save charts with `create_vega_chart` (it writes its own file and needs no shell), and say plainly when a request needs a file you cannot write.\n",
             ));
         } else if shell_enabled {
             prompt.push_str(&format!(
@@ -390,7 +392,7 @@ pub(crate) fn build_system_prompt(
         }
 
         if shell_enabled {
-            push_filesystem_boundary(&mut prompt);
+            push_filesystem_boundary(&mut prompt, can_write_files);
         }
         // The memory protocol is all reads and writes of `.clai/memory/` files.
         if can_write_files {
@@ -511,7 +513,7 @@ fn push_shell_capability_lines(
 /// The authorization boundary and the git/SSH etiquette that goes with it.
 /// Both describe how to behave *while running commands*, so they are
 /// omitted for agents without a shell.
-fn push_filesystem_boundary(prompt: &mut String) {
+fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool) {
     prompt.push_str(
         "\n## Filesystem boundary\n\
          The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms where the shell sandbox is not implemented yet, `bash_exec` is labeled as a host shell and this paragraph remains the authorization boundary.\n\
@@ -519,9 +521,15 @@ fn push_filesystem_boundary(prompt: &mut String) {
          - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
          - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
          - If `fs_request_grant` is denied, do not retry the same path. Either request a narrower path, ask the user via `ask_user`, or stop and explain what was blocked.\n\
-         - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n\
-         - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n\
-         - Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
+         - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n",
+    );
+    if can_write_files {
+        prompt.push_str(
+            "         - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n",
+        );
+    }
+    prompt.push_str(
+        "         - Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
     );
 
     // Git/SSH etiquette guard. The agent shouldn't rewrite commit authorship
@@ -910,6 +918,9 @@ mod tests {
 
         let context = SessionContext {
             agent_workspace_id: Some("agent-123".to_string()),
+            // An automation, so the "save durable outputs as files" line is
+            // reachable — otherwise reverting its gate survives this test.
+            automation_name: Some("Nightly review".to_string()),
             execution,
             ..Default::default()
         };
@@ -920,10 +931,16 @@ mod tests {
             other => panic!("expected text content, got {:?}", other),
         };
 
+        assert!(text.contains("This session belongs to the automation"));
         assert!(!text.contains("## Agent Memory"));
         assert!(!text.contains("Durable outputs belong in the workspace"));
         assert!(!text.contains("Save durable outputs as files"));
-        assert!(text.contains("treat the whole filesystem as read-only"));
+        assert!(!text.contains("Default your writes to the workspace"));
+        assert!(!text.contains("inspection and changes"));
+        assert!(text.contains("no command that writes a file"));
+        // Approval-blocked, not denied, and charts are still writable.
+        assert!(text.contains("waits for the user to approve"));
+        assert!(text.contains("save charts with `create_vega_chart`"));
         // It still has a shell, so the boundary and the search guidance apply.
         assert!(text.contains("## Filesystem boundary"));
         assert!(text.contains("ALWAYS search your workspace first"));
