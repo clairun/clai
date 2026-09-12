@@ -27,7 +27,7 @@ use ts_rs::TS;
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
 const MAX_ENTRY_COUNT: usize = 500;
-const MAX_FILE_CONTENT_BYTES: usize = 200_000;
+pub(crate) const MAX_FILE_CONTENT_BYTES: usize = 200_000;
 
 /// Upper bound on a single resource inlined into an HTML preview bundle.
 /// Larger assets (e.g. multi-megabyte videos) are left as broken links
@@ -559,6 +559,12 @@ fn viewer_for_path(path: &Path) -> String {
 
     if ext == "html" || ext == "htm" {
         return "html".to_string();
+    }
+
+    // Vega-Lite specs are JSON, but the frontend renders them as charts
+    // (see `VegaChart`); checked before the generic JSON branch.
+    if file_name.ends_with(".vl.json") {
+        return "vega-lite".to_string();
     }
 
     if ext == "json" {
@@ -1768,20 +1774,32 @@ fn desired_workspace_context(
 }
 
 fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    let root = root.canonicalize().map_err(|error| {
+        format!(
+            "Failed to resolve workspace root {}: {error}",
+            root.display()
+        )
+    })?;
     let candidate = normalize_path(root.join(relative_path));
-    if !candidate.starts_with(root) {
+    if !candidate.starts_with(&root) {
         return Err(format!(
             "Path {} is outside the workspace root",
             candidate.display()
         ));
     }
-    if !candidate.exists() {
-        return Err(format!("File not found: {}", candidate.display()));
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|_| format!("File not found: {}", candidate.display()))?;
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "Path {} resolves outside the workspace root",
+            candidate.display()
+        ));
     }
-    if !candidate.is_file() {
-        return Err(format!("Not a file: {}", candidate.display()));
+    if !resolved.is_file() {
+        return Err(format!("Not a file: {}", resolved.display()));
     }
-    Ok(candidate)
+    Ok(resolved)
 }
 
 fn resolve_workspace_file_target(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
@@ -4728,6 +4746,16 @@ mod tests {
     }
 
     #[test]
+    fn viewer_for_path_routes_vega_lite_specs_to_the_chart_viewer() {
+        use std::path::Path;
+        assert_eq!(viewer_for_path(Path::new("charts/q3.vl.json")), "vega-lite");
+        assert_eq!(viewer_for_path(Path::new("Q3.VL.JSON")), "vega-lite");
+        // Only the `.vl.json` double extension is a chart; plain JSON is unchanged.
+        assert_eq!(viewer_for_path(Path::new("charts/q3.json")), "json");
+        assert_eq!(viewer_for_path(Path::new("vl.json")), "json");
+    }
+
+    #[test]
     fn copy_artifact_handles_files_dirs_collisions_and_skips() {
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
@@ -5052,6 +5080,46 @@ mod tests {
         assert_eq!(workspace_config::enabled_mcp_ids(refs), vec!["srv-a"]);
         assert_eq!(workspace_config::disabled_mcp_ids(refs), vec!["srv-b"]);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_file_reads_reject_symlinks_that_escape_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        write_file(&outside.path().join("secret.json"), "classified");
+        symlink(outside.path(), workspace.path().join("linked-data")).unwrap();
+        symlink(
+            outside.path().join("secret.json"),
+            workspace.path().join("linked-file.json"),
+        )
+        .unwrap();
+
+        for path in ["linked-data/secret.json", "linked-file.json"] {
+            let error = resolve_workspace_file_path(workspace.path(), path).unwrap_err();
+            assert!(
+                error.contains("resolves outside the workspace root"),
+                "{error}"
+            );
+        }
+
+        write_file(&workspace.path().join("real/data.json"), "inside");
+        symlink(
+            workspace.path().join("real"),
+            workspace.path().join("linked-inside"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_workspace_file_path(workspace.path(), "linked-inside/data.json").unwrap(),
+            workspace
+                .path()
+                .join("real/data.json")
+                .canonicalize()
+                .unwrap()
+        );
+    }
+
     // ---------------------------------------------------------------------
     // artifact_tree_stats
     // ---------------------------------------------------------------------

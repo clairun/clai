@@ -29,11 +29,28 @@ vi.mock('../common/VirtualizedList', () => ({
 // MarkdownMessage / StreamingMarkdown render markdown via heavy deps
 // (react-markdown, prism). For these tests we only care that the text
 // reaches the DOM, so render it plainly.
-vi.mock('../Chat/MarkdownMessage', () => ({
-  default: ({ content }: { content: string }) => <div data-testid="markdown">{content}</div>,
-}));
+vi.mock('../Chat/MarkdownMessage', async () => {
+  const { useWorkspaceFileLocation } = await import('../Chat/WorkspaceFileContext');
+  const MarkdownMock = ({ content }: { content: string }) => {
+    // Expose the workspace location markdown would resolve relative links
+    // (`.vl.json` charts, `data.url`) against.
+    const location = useWorkspaceFileLocation();
+    return (
+      <div data-testid="markdown" data-workspace={location?.workspaceId ?? ''} data-base={location?.basePath ?? ''}>
+        {content}
+      </div>
+    );
+  };
+  return { default: MarkdownMock };
+});
 vi.mock('../Chat/StreamingMarkdown', () => ({
   default: ({ content }: { content: string }) => <div data-testid="streaming">{content}</div>,
+}));
+// VegaChart pulls in vega-embed; the list only needs to hand it the path.
+vi.mock('../Chat/VegaChart', () => ({
+  default: ({ specPath }: { specPath?: string }) => (
+    <div data-testid="vega-chart" data-spec-path={specPath ?? ''} />
+  ),
 }));
 
 // ImageAttachment loads bytes from the workspace image store; stub the fetch
@@ -103,6 +120,58 @@ describe('ChatMessageList', () => {
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
     // cleanToolName strips the mcp.<id>. prefix.
     expect(screen.getByText('get_metric_data')).toBeInTheDocument();
+  });
+
+  const chartCall = (over: Partial<ToolInvocation>): [AssistantMessage[], ToolInvocation[]] => [
+    [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'create_vega_chart', arguments: {} },
+        ],
+      }),
+    ],
+    [
+      {
+        id: 'tc-1',
+        runId: 'r-1',
+        sessionId: 'sess-1',
+        toolName: 'create_vega_chart',
+        params: { title: 'Q3 Revenue', spec: {} },
+        status: 'completed',
+        result: { ok: true, path: 'charts/q3-revenue.vl.json', display: true },
+        error: null,
+        startedAt: 0n,
+        completedAt: 1n,
+        ...over,
+      },
+    ],
+  ];
+
+  it('renders the chart a completed create_vega_chart call produced, under its row', () => {
+    const [messages, toolCalls] = chartCall({});
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.getByText('Chart')).toBeInTheDocument();
+    expect(screen.getByText('Q3 Revenue')).toBeInTheDocument();
+    expect(screen.getByTestId('vega-chart')).toHaveAttribute('data-spec-path', 'charts/q3-revenue.vl.json');
+  });
+
+  it('renders no chart for a failed call or one with display:false', () => {
+    const [failedMessages, failedCalls] = chartCall({
+      status: 'failed',
+      result: null,
+      error: 'The spec is not a valid Vega-Lite chart',
+    });
+    const { unmount } = render(<ChatMessageList messages={failedMessages} toolCalls={failedCalls} />);
+    expect(screen.queryByTestId('vega-chart')).toBeNull();
+    unmount();
+
+    const [hiddenMessages, hiddenCalls] = chartCall({
+      result: { ok: true, path: 'charts/q3-revenue.vl.json', display: false },
+    });
+    render(<ChatMessageList messages={hiddenMessages} toolCalls={hiddenCalls} />);
+    expect(screen.queryByTestId('vega-chart')).toBeNull();
   });
 
   it('renders a collapsed thinking block', () => {
@@ -177,6 +246,90 @@ describe('ChatMessageList', () => {
     expect(screen.queryByText('tool_1')).toBeNull();
     expect(screen.getByText('tool_2')).toBeInTheDocument();
     expect(screen.getByText('tool_5')).toBeInTheDocument();
+  });
+
+  // A tool group where call `chartIndex` is a completed create_vega_chart;
+  // every other call is a plain tool_N.
+  const toolGroupWithChart = (
+    count: number,
+    chartIndex: number,
+    display = true
+  ): { messages: AssistantMessage[]; toolCalls: ToolInvocation[] } => {
+    const { messages, toolCalls } = toolGroup(count);
+    const part = messages[0]?.content[chartIndex] as { tool_name: string };
+    part.tool_name = 'create_vega_chart';
+    return {
+      messages,
+      toolCalls: toolCalls.map((tc, i) =>
+        i === chartIndex
+          ? {
+              ...tc,
+              toolName: 'create_vega_chart',
+              params: { title: 'Q3 Revenue', spec: {} },
+              result: { ok: true, path: 'charts/q3-revenue.vl.json', display },
+            }
+          : tc
+      ),
+    };
+  };
+
+  it('never collapses a displayed chart row; plain runs on each side collapse on their own', () => {
+    // 7 plain, chart, 6 plain → "Show 3 earlier" + 4 rows, chart, "Show 2 earlier" + 4 rows.
+    const { messages, toolCalls } = toolGroupWithChart(14, 7);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.getByTestId('vega-chart')).toHaveAttribute('data-spec-path', 'charts/q3-revenue.vl.json');
+    expect(screen.getByText('Show 3 earlier calls')).toBeInTheDocument();
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+    expect(screen.queryByText('tool_2')).toBeNull();
+    expect(screen.getByText('tool_3')).toBeInTheDocument();
+    expect(screen.getByText('tool_6')).toBeInTheDocument();
+    expect(screen.queryByText('tool_9')).toBeNull();
+    expect(screen.getByText('tool_10')).toBeInTheDocument();
+    expect(screen.getByText('tool_13')).toBeInTheDocument();
+
+    // Each run toggles on its own: expanding the first leaves the second collapsed.
+    fireEvent.click(screen.getByText('Show 3 earlier calls'));
+    expect(screen.getByText('tool_0')).toBeInTheDocument();
+    expect(screen.queryByText('tool_9')).toBeNull();
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+  });
+
+  it('renders adjacent chart rows back to back with no empty run between them', () => {
+    const { messages, toolCalls } = toolGroupWithChart(2, 0);
+    const second = toolCalls[1];
+    if (!second) throw new Error('expected two tool calls');
+    (messages[0]?.content[1] as { tool_name: string }).tool_name = 'create_vega_chart';
+    toolCalls[1] = {
+      ...second,
+      toolName: 'create_vega_chart',
+      params: { title: 'Second', spec: {} },
+      result: { ok: true, path: 'charts/second.vl.json', display: true },
+    };
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    const charts = screen.getAllByTestId('vega-chart');
+    expect(charts.map((el) => el.getAttribute('data-spec-path'))).toEqual([
+      'charts/q3-revenue.vl.json',
+      'charts/second.vl.json',
+    ]);
+    expect(screen.queryByText(/earlier/)).toBeNull();
+  });
+
+  it('keeps a trailing chart row visible even when the run before it overflows', () => {
+    const { messages, toolCalls } = toolGroupWithChart(6, 5);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.getByTestId('vega-chart')).toBeInTheDocument();
+    // 5 plain rows before the chart → 1 hidden.
+    expect(screen.getByText('Show 1 earlier call')).toBeInTheDocument();
+    expect(screen.queryByText('tool_0')).toBeNull();
+    expect(screen.getByText('tool_4')).toBeInTheDocument();
+  });
+
+  it('collapses a display:false chart call like any other row', () => {
+    const { messages, toolCalls } = toolGroupWithChart(6, 0, false);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
+    expect(screen.queryByTestId('vega-chart')).toBeNull();
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+    expect(screen.queryByText('Q3 Revenue')).toBeNull();
   });
 
   it('shows a bash row summary (verb, command, exit code) without expanding', () => {
@@ -348,6 +501,24 @@ describe('ChatMessageList', () => {
     // Image-only message is not hidden, and the thumbnail loads from the store.
     const img = await screen.findByAltText('shot.png');
     expect(img).toHaveAttribute('src', 'data:image/png;base64,QUJD');
+  });
+
+  it('provides the workspace (root-relative) to markdown so chart links resolve', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'See ![Q3](charts/q3.vl.json)' }] }),
+    ];
+    render(<ChatMessageList messages={messages} workspaceId="ws-1" userLabel="You" />);
+    const markdown = screen.getByTestId('markdown');
+    expect(markdown.dataset.workspace).toBe('ws-1');
+    expect(markdown.dataset.base).toBe('');
+  });
+
+  it('provides no workspace location when workspaceId is absent', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'hello' }] }),
+    ];
+    render(<ChatMessageList messages={messages} userLabel="You" />);
+    expect(screen.getByTestId('markdown').dataset.workspace).toBe('');
   });
 
   it('hides image parts when no workspaceId is provided', () => {

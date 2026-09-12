@@ -320,6 +320,15 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(&format!(
             "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
         ));
+        prompt.push_str(
+            "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
+        );
+        prompt.push_str(
+            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never write a Vega-Lite spec with `fs_write` or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`). Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `fs_write` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
+        );
+        prompt.push_str(
+            "- Make the chart worth looking at — aim for what an analyst would publish, not the default output. Give it a `title` whose `subtitle` states the finding and the units; sort categorical axes by value, not alphabetically. Numeric categories such as hour, age and rank must remain numeric: for CSV data, declare them in `data.format.parse`; otherwise provide an explicit domain order matching the source values, because nominal/ordinal CSV fields sort as strings by default (0, 1, 10, 11, …). Pick the mark that answers the question — a `rect` heatmap for a value across two keys, layered `rule` + `point` to compare two measures per category, `stack: \"center\"` area for composition over time, log or sqrt scales for values spanning orders of magnitude — and let `transform` (`fold`, `window`, `regression`, `joinaggregate`, `timeUnit`) shape the data instead of pre-chewing it. CLAI supplies the theme, quiet axes and tooltips, plus clickable categorical legends and a pan/zoom button on eligible unit or flat layered charts. Spend your effort on the encoding; add an explicit `tooltip` array only to choose which fields show. Specs with authored parameters keep control of their own interactions; set `usermeta.clai.interactions` to false to disable automatic interactions, or add native Vega-Lite parameters for linked brushing or composed views. One hard rule: declare a selection `param` inside a single unit view — one mark — and read it from the other views with `{\"filter\": {\"param\": …}}`, `scale.domain.param` or `condition.param`. Vega-Lite copies a param down into every unit view in its scope, so a param placed on a `layer` of two or more marks (directly, or above one through a concat/facet/repeat) validates and then fails to render with `Duplicate signal name`.\n",
+        );
 
         if context.execution.filesystem.extra_paths.is_empty() {
             prompt.push_str("- Additional path grants: none\n");
@@ -639,6 +648,59 @@ mod tests {
         assert!(text.contains("ask them for its workspace id"));
         // Memory is surfaced to the user in the app.
         assert!(text.contains("**Memory** view"));
+    }
+
+    #[test]
+    fn build_system_prompt_routes_charts_through_create_vega_chart() {
+        let context = SessionContext {
+            agent_workspace_id: Some("ws-abc".to_string()),
+            execution: ExecutionCapabilityConfig::default(),
+            ..Default::default()
+        };
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+        // The tool is the only sanctioned chart path; fs_write is named as
+        // the anti-pattern so the model does not route around validation.
+        assert!(text.contains("Choose a chart proactively"));
+        assert!(text.contains("materially easier to understand than prose or a short table"));
+        assert!(text.contains("Skip charts for a single fact"));
+        assert!(text.contains("`create_vega_chart` tool"));
+        assert!(text.contains("never write a Vega-Lite spec with `fs_write`"));
+        // The model chooses an organized path and receives a portable embed.
+        assert!(text.contains("complete workspace-relative `.vl.json` path"));
+        assert!(text.contains("instead of defaulting to a shared charts directory"));
+        assert!(text.contains("avoid cache, dependency, and build-output directories"));
+        assert!(text.contains("Reuse an existing chart's exact path"));
+        assert!(text.contains("![title](/reports/q3/revenue.vl.json)"));
+        assert!(!text.contains("charts/<slug>.vl.json"));
+        // Large tables go to a workspace file referenced by data.url.
+        assert!(text.contains("`data.url`"));
+        // The quality bar, and the param-placement rule behind the one
+        // failure mode the schema cannot catch (`Duplicate signal name`).
+        assert!(text.contains("aim for what an analyst would publish"));
+        assert!(text.contains("nominal/ordinal CSV fields sort as strings by default"));
+        assert!(text.contains("declare a selection `param` inside a single unit view"));
+        assert!(text.contains("Duplicate signal name"));
+        // Stated by scope, not by container: a param above a multi-child
+        // layer collides through a concat/facet/repeat parent too, while a
+        // concat of plain unit views is fine (both measured).
+        assert!(text.contains("through a concat/facet/repeat"));
+
+        // Without a workspace there is no tool and no guidance.
+        let plain = build_system_prompt(
+            &SessionContext::default(),
+            None,
+            &[],
+            &RunTrigger::UserMessage,
+        );
+        let plain_text = match &plain.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+        assert!(!plain_text.contains("create_vega_chart"));
     }
 
     #[test]

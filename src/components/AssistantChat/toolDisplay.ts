@@ -205,6 +205,8 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
       return { verb: 'Fetch', arg: get('url') };
     case 'ask_user':
       return { verb: 'Ask', arg: get('question') };
+    case 'create_vega_chart':
+      return { verb: 'Chart', arg: get('title') || get('path') };
     default:
       return { verb: name || 'tool', arg: firstScalarParam(obj) };
   }
@@ -275,9 +277,30 @@ export const summarizeToolResult = (
       return { text: 'fetched', tone: 'neutral' };
     case 'ask_user':
       return obj && typeof obj.answer === 'string' ? { text: 'answered', tone: 'neutral' } : null;
+    case 'create_vega_chart':
+      return typeof obj?.path === 'string' ? { text: obj.path, tone: 'neutral' } : null;
     default:
       return null;
   }
+};
+
+/**
+ * Workspace-relative path of the chart a completed `create_vega_chart` call
+ * asked to show inline (`display` defaults to true), or null when the row has
+ * no chart to render: another tool, still running, failed, validation error,
+ * or `display: false` (a chart meant only for a report).
+ */
+export const inlineChartPath = (
+  toolName: string,
+  result: unknown,
+  error: string | null | undefined,
+  status: string,
+): string | null => {
+  if (cleanToolName(toolName || '') !== 'create_vega_chart') return null;
+  if (error || status !== 'completed') return null;
+  const obj = asPayloadObject(result);
+  if (!obj || obj.ok !== true || typeof obj.path !== 'string' || !obj.path) return null;
+  return obj.display === false ? null : obj.path;
 };
 
 /**

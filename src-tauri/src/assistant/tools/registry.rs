@@ -29,6 +29,7 @@ pub fn available_tools(
         tools.push(fs_write_def());
         tools.push(fs_request_grant_def());
         tools.push(history_query_def());
+        tools.push(create_vega_chart_def());
     }
 
     if context.agent_workspace_id.is_some()
@@ -116,6 +117,7 @@ fn all_builtin_defs() -> Vec<ToolDefinition> {
         web_search_def(),
         web_fetch_def(),
         history_query_def(),
+        create_vega_chart_def(),
     ]
 }
 
@@ -241,6 +243,24 @@ fn history_query_def() -> ToolDefinition {
                 "maxRows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 100, max 1000). Page larger result sets with LIMIT/OFFSET." }
             },
             "required": ["sql"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn create_vega_chart_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "create_vega_chart".to_string(),
+        description: "Create a chart. This is the ONLY way to produce a chart: never write a Vega-Lite spec with fs_write or paste one into chat. The spec is validated against the Vega-Lite v6 JSON schema; on failure the error lists the violations with their JSON paths so you can fix the spec and call again. Provide the complete workspace-relative `.vl.json` `path` on every call: with `spec`, the validated chart is saved there; without `spec`, the existing chart there is validated. Choose a path that keeps the chart with its related task or document instead of defaulting to a shared charts directory; avoid cache, dependency, and build-output directories hidden from workspace artifacts. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The tool returns `{ok, path, markdown}`. The saved file renders as an interactive chart in the chat (when `display` is true), in the artifacts panel when stored in a visible artifact directory, and inside markdown documents via `![title](/reports/q3/chart.vl.json)` (leading `/` = workspace root, so it works from a report in any folder) — paste the returned `markdown` into reports. One chart per call. Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace and reference it with `data.url` (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`) instead of inlining `data.values`.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "Chart title used for the result and markdown alt text." },
+                "spec": { "type": ["object", "string"], "description": "A Vega-Lite v6 spec as a JSON object (a JSON string is also accepted). Omit `$schema` or set it to https://vega.github.io/schema/vega-lite/v6.json." },
+                "path": { "type": "string", "description": "Complete workspace-relative `.vl.json` path using ASCII letters, digits, `/`, `.`, `_`, and `-`. Choose a visible artifact location near related artifacts or documents, avoid cache/dependency/build-output directories, and reuse an existing chart's exact path when updating it. This is where `spec` is saved, or — when `spec` is omitted — the existing file to validate." },
+                "display": { "type": "boolean", "description": "Render the chart inline in the chat as this call's result (default true). Set false for charts that only belong in a report." }
+            },
+            "required": ["title", "path"],
             "additionalProperties": false
         }),
     }
@@ -393,5 +413,22 @@ mod tests {
                 def.name
             );
         }
+    }
+
+    #[test]
+    fn create_vega_chart_requires_the_model_to_choose_a_path() {
+        let compiled = builtin_param_validator("create_vega_chart").unwrap();
+        let without_path = serde_json::json!({
+            "title": "Revenue",
+            "spec": {"mark": "bar"}
+        });
+        assert!(!compiled.validator.is_valid(&without_path));
+
+        let with_path = serde_json::json!({
+            "title": "Revenue",
+            "path": "reports/q3/revenue.vl.json",
+            "spec": {"mark": "bar"}
+        });
+        assert!(compiled.validator.is_valid(&with_path));
     }
 }

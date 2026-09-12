@@ -6,6 +6,7 @@ pub mod posix_shell;
 pub mod prefix_detector;
 pub mod registry;
 pub mod router;
+pub mod vega_chart;
 pub mod workspace_tasks;
 
 pub use registry::available_tools;
