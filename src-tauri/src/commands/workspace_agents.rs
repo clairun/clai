@@ -94,18 +94,52 @@ pub async fn workspace_agent_default_execution() -> Result<ExecutionCapabilityCo
     Ok(workspace_config::default_agent_execution())
 }
 
+/// The agent as *stored*, for the settings form — deliberately not the resolved
+/// one.
+///
+/// A resolved agent carries the workspace and assignment context appended to its
+/// instructions. Handing that to the editor would save it back as the agent's
+/// own instructions, and the next resolution would append the same context
+/// again, growing the prompt on every save.
 #[tauri::command]
 pub async fn workspace_get_agent(
     workspace_id: String,
     agent_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<WorkspaceAgentDetail>, String> {
-    let (config, roster) = state.resolve_workspace_roster(&workspace_id)?;
-    let app_config = app_config(state.inner())?;
-    Ok(roster
+    stored_agent_detail(state.inner(), &workspace_id, &agent_id)
+}
+
+fn stored_agent_detail(
+    state: &AppState,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Result<Option<WorkspaceAgentDetail>, String> {
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
+    let app_config = app_config(state)?;
+
+    if let Some(main) = config.main_agent.as_ref().filter(|a| a.id == agent_id) {
+        return Ok(Some(detail_from_agent(&app_config, &config, main)));
+    }
+
+    // A teammate's stored behavior lives in the library. It is shown here
+    // read-only; edits go through the library or the assignment's overlays.
+    let Some(assignment) = config.assignment(agent_id) else {
+        return Ok(None);
+    };
+    Ok(app_config
+        .agent_definitions
         .iter()
-        .find(|resolved| resolved.agent.id == agent_id)
-        .map(|resolved| detail_from_agent(&app_config, &config, &resolved.agent)))
+        .find(|definition| definition.id == assignment.agent_definition_id)
+        .map(|definition| {
+            let mut agent = definition.behavior.clone();
+            agent.id = assignment.id.clone();
+            agent.enabled = agent.enabled && assignment.enabled && !definition.archived;
+            detail_from_agent(&app_config, &config, &agent)
+        }))
 }
 
 #[tauri::command]
@@ -316,5 +350,66 @@ pub(crate) fn detail_from_agent(
         is_default: workspace.main_agent_id() == agent.id,
         created_at: agent.created_at,
         updated_at: agent.updated_at,
+    }
+}
+
+#[cfg(test)]
+mod stored_agent_tests {
+    //! The settings form must round-trip what is *stored*. Handing it a
+    //! resolved agent is how prompts grow a duplicated copy of the workspace
+    //! context on every save.
+
+    use super::*;
+    use crate::commands::path_grants::approval_destination_tests::*;
+
+    #[test]
+    fn the_form_never_sees_context_that_resolution_adds() {
+        let fixture = Fixture::new();
+        fixture
+            .state
+            .update_workspace_config(WORKSPACE_ID, |config| {
+                config.context = "House rules".to_string();
+                let main = config.main_agent.as_mut().expect("main");
+                main.description = "Own instructions".to_string();
+                Ok(())
+            })
+            .expect("seed context");
+
+        let detail = stored_agent_detail(&fixture.state, WORKSPACE_ID, MAIN_ID)
+            .expect("lookup")
+            .expect("main detail");
+
+        assert_eq!(detail.description, "Own instructions");
+        assert!(detail.is_default);
+
+        // The same agent, resolved for a turn, does carry the overlay — the
+        // difference between the two paths is the point.
+        let resolved = fixture
+            .state
+            .resolve_workspace_agent(WORKSPACE_ID, MAIN_ID)
+            .expect("resolve")
+            .expect("resolved main");
+        assert!(resolved.agent.description.contains("House rules"));
+    }
+
+    #[test]
+    fn a_teammates_form_shows_the_shared_behavior_under_its_local_id() {
+        let fixture = Fixture::new();
+
+        let detail = stored_agent_detail(&fixture.state, WORKSPACE_ID, ASSIGNMENT_ID)
+            .expect("lookup")
+            .expect("assignment detail");
+
+        assert_eq!(detail.id, ASSIGNMENT_ID, "addressed by the local identity");
+        assert_eq!(detail.name, "Reviewer", "behavior comes from the library");
+        assert!(!detail.is_default);
+    }
+
+    #[test]
+    fn an_unknown_id_is_absent_rather_than_an_error() {
+        let fixture = Fixture::new();
+        assert!(stored_agent_detail(&fixture.state, WORKSPACE_ID, "nobody")
+            .expect("lookup")
+            .is_none());
     }
 }

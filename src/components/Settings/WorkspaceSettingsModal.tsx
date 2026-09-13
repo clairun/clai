@@ -33,7 +33,7 @@ import styles from './WorkspaceSettingsModal.module.css';
 // here rather than dragging the full config module into the FE types.
 // ──────────────────────────────────────────────────────────────────────────
 
-type SectionKind = 'general' | 'schedule' | 'team' | 'agent' | 'new-agent';
+type SectionKind = 'general' | 'schedule' | 'team' | 'agent' | 'new-main' | 'new-agent';
 interface Selection {
   kind: SectionKind;
   agentId?: string | null;
@@ -560,6 +560,22 @@ const WorkspaceSettingsModal = ({
         />
       );
     }
+    // A workspace whose Main could not be recovered from a pre-library config
+    // has no agent row to edit. Without this the settings modal would offer no
+    // way back to a working workspace at all.
+    if (sel.kind === 'new-main') {
+      return (
+        <AgentSection
+          ref={setSectionRef('new-main')}
+          workspaceId={workspaceId}
+          agentId={null}
+          snapshot={snapshot}
+          deps={deps}
+          saving={saving}
+          onDirtyChange={getDirtyCallback('new-main')}
+        />
+      );
+    }
     if (sel.kind === 'new-agent') {
       return <AssignmentSection workspaceId={workspaceId} onChanged={onChanged} />;
     }
@@ -618,6 +634,15 @@ const WorkspaceSettingsModal = ({
 
             <div className={styles.sidebarGroup}>
               <h3 className={styles.sidebarGroupTitle}>Agents</h3>
+              {!snapshot?.defaultWorkspaceAgentId && (
+                <NavItem
+                  active={selection.kind === 'new-main'}
+                  dirty={!!dirty['new-main']}
+                  onClick={() => navigateTo({ kind: 'new-main' })}
+                >
+                  Main — set up
+                </NavItem>
+              )}
               {sortedAgents.map((agent) => (
                 <NavItem
                   key={agent.id}
