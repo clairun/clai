@@ -2221,6 +2221,43 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_container_reached_through_a_symlink_still_masks_the_home_grant() {
+        // `<home>/.clai -> <home>/state/clai`, so the container the backends
+        // mask is spelled one way in the config and another on disk. A sibling
+        // workspace granted under its resolved name is only outside the `$HOME`
+        // grant's reach if the mask is resolved too — bwrap's tmpfs lands on the
+        // resolved directory, and dropping the grant would leave nothing to
+        // re-expose the sibling over it.
+        let (_base_dir, home) = canonical_tempdir();
+        let real = home.join("state").join("clai").join("workspaces");
+        let workspace = home.join(".clai").join("workspaces").join("ws");
+        let sibling = real.join("other");
+        for dir in [&real.join("ws"), &sibling] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink(home.join("state").join("clai"), home.join(".clai")).unwrap();
+
+        let folded = drop_redundant_read_grants(
+            vec![
+                grant_for(&workspace),
+                grant_for(&home),
+                ResolvedGrant {
+                    root: sibling.clone(),
+                    access: AccessKind::ReadOnly,
+                },
+            ],
+            Some(&home),
+        );
+
+        assert!(
+            folded.iter().any(|grant| grant.root == sibling),
+            "the mask hides the container by its resolved name too; got {:?}",
+            roots(&folded)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_symlink_into_the_masked_container_is_not_covered_by_the_home_grant() {
         // `<home>/shortcut -> <home>/.clai/workspaces/other` spells a sibling
         // workspace from outside the masked container, so the lexical view sees
