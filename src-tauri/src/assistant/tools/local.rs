@@ -2085,6 +2085,32 @@ mod tests {
     }
 
     #[test]
+    fn a_write_grant_on_the_container_covers_a_sibling_read_grant() {
+        // A grant rooted *at* the container authorizes what's inside it — the
+        // mask only blocks broader ancestors like `$HOME` — so the sibling's
+        // read grant states access the agent already has and folds away. What
+        // makes that safe is the Linux backend binding a container grant on
+        // top of the container tmpfs; see
+        // `sandbox::linux_bwrap::tests::an_explicit_container_grant_is_re_exposed_over_the_mask`.
+        let folded = drop_redundant_read_grants(
+            vec![
+                write_grant("/home/me/.clai/workspaces/mine"),
+                write_grant("/home/me/.clai/workspaces"),
+                read_grant("/home/me/.clai/workspaces/other"),
+            ],
+            Some(Path::new("/home/me")),
+        );
+
+        assert_eq!(
+            roots(&folded),
+            vec![
+                ("/home/me/.clai/workspaces/mine", true),
+                ("/home/me/.clai/workspaces", true),
+            ]
+        );
+    }
+
+    #[test]
     fn a_sibling_read_grant_is_untouched() {
         let folded = drop_redundant_read_grants(
             vec![write_grant("/srv/data"), read_grant("/srv/database")],

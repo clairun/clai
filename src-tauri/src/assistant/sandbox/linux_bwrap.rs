@@ -474,10 +474,12 @@ fn append_workspace_and_grants(args: &mut Vec<OsString>, command: &SandboxComman
     // them shallowest-first. The workspace, being deeper than its ancestor
     // grant, ends up bound last and its RW wins.
     //
-    // Sort is stable: when two paths have equal depth (siblings), they don't
-    // overlap and emit order is irrelevant. We push the workspace first so an
-    // exact-duplicate grant gets dropped by the dedup below and the workspace's
-    // RW access wins.
+    // Sort is stable: two *different* paths of equal depth don't overlap, so
+    // their emit order is irrelevant. The one pair that can share a path is the
+    // container mask and an explicit grant on the container itself, and
+    // `MountOp::depth_tie_break` orders that pair explicitly. We push the
+    // workspace first so an exact-duplicate grant gets dropped by the dedup
+    // below and the workspace's RW access wins.
     // The bool is `lenient`: false for the workspace root (a missing workspace
     // is fatal), true for grants (a missing/invisible grant is skipped via
     // *-bind-try rather than aborting the whole sandbox).
@@ -500,6 +502,13 @@ fn append_workspace_and_grants(args: &mut Vec<OsString>, command: &SandboxComman
     // depth-sort below emits the tmpfs first and the workspace bind (and any
     // explicitly-granted sibling, which is also deeper) lands on top of it —
     // re-exposing exactly what's allowed. See `profile::workspace_mask`.
+    //
+    // A grant *on* the container is the one path that ties with the tmpfs on
+    // depth, and it must win: `tools::local` treats a grant rooted at or below
+    // the container as authorizing what's inside it (masking only blocks
+    // broader ancestors like `$HOME`), and folds nested read-only grants away
+    // because that grant already covers them. Hiding it here would revoke a
+    // sibling the user explicitly granted, with no way to re-approve it.
     let home = command.profile.env.home().map(Path::new);
     if let Some(mask) =
         crate::assistant::sandbox::profile::workspace_mask(&command.profile.workspace_root, home)
@@ -507,7 +516,7 @@ fn append_workspace_and_grants(args: &mut Vec<OsString>, command: &SandboxComman
         ops.push((mask, MountOp::Tmpfs));
     }
 
-    ops.sort_by_key(|(path, _)| path_depth(path));
+    ops.sort_by_key(|(path, op)| (path_depth(path), op.depth_tie_break()));
 
     for (path, op) in ops {
         match op {
@@ -525,6 +534,19 @@ enum MountOp {
     Bind(SandboxPathAccess, bool),
     /// `--tmpfs`: overlay an empty tmpfs to hide a subtree.
     Tmpfs,
+}
+
+impl MountOp {
+    /// Tie-break for two ops at the same depth. Only the container mask and a
+    /// grant on the container itself can collide, and the tmpfs goes first so
+    /// the grant lands on top of the empty overlay instead of being erased by
+    /// it. Binds keep their relative order — the sort is stable.
+    fn depth_tie_break(&self) -> u8 {
+        match self {
+            MountOp::Tmpfs => 0,
+            MountOp::Bind(..) => 1,
+        }
+    }
 }
 
 /// Emit a single bind. `lenient` selects bwrap's `*-bind-try` variant, which
@@ -778,6 +800,74 @@ mod tests {
         assert!(
             tmpfs_idx < ws_bind_idx,
             "tmpfs over the container must precede the workspace bind; got {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_container_grant_is_re_exposed_over_the_mask() {
+        // A grant on the workspace container itself ties with the container
+        // tmpfs on depth. The grant must be emitted last, so everything the
+        // user explicitly granted inside the container stays reachable.
+        //
+        // This is what makes `tools::local`'s grant fold safe: given
+        // `~/.clai/workspaces` RW plus a sibling workspace RO, the fold drops
+        // the sibling as already-covered. If the tmpfs erased the container
+        // bind, that sibling would be silently revoked — and session grants go
+        // through the same fold, so re-approving it could not win it back.
+        let home = tempfile::tempdir().unwrap();
+        let container = home.path().join(".clai").join("workspaces");
+        let workspace = container.join("ws-abc");
+        let sibling = container.join("ws-other");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let mut command = sample_command();
+        command.cwd = workspace.clone();
+        command.profile.workspace_root = workspace.clone();
+        command.profile.env = SandboxEnv::filtered_from_iter(
+            [("PATH", "/usr/bin:/bin")],
+            home.path(),
+            SandboxSessionBusMode::Deny,
+        );
+        command.profile.path_grants = vec![
+            SandboxPathGrant {
+                host_path: home.path().to_path_buf(),
+                access: SandboxPathAccess::ReadOnly,
+            },
+            SandboxPathGrant {
+                host_path: container.clone(),
+                access: SandboxPathAccess::ReadWrite,
+            },
+        ];
+
+        let args = bwrap_args(&command).unwrap();
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        let home_str = home.path().to_string_lossy().into_owned();
+        let container_str = container.to_string_lossy().into_owned();
+        let home_bind_idx = rendered
+            .windows(3)
+            .position(|w| w[0] == "--ro-bind-try" && w[1] == home_str && w[2] == home_str)
+            .unwrap_or_else(|| panic!("home should be bound read-only; got {rendered:?}"));
+        let tmpfs_idx = rendered
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1] == container_str)
+            .unwrap_or_else(|| panic!("container should be masked with --tmpfs; got {rendered:?}"));
+        let container_bind_idx = rendered
+            .windows(3)
+            .position(|w| w[0] == "--bind-try" && w[1] == container_str && w[2] == container_str)
+            .unwrap_or_else(|| panic!("granted container should be bound; got {rendered:?}"));
+
+        assert!(
+            home_bind_idx < tmpfs_idx,
+            "the broad home bind must stay under the mask; got {rendered:?}"
+        );
+        assert!(
+            tmpfs_idx < container_bind_idx,
+            "the explicit container grant must be bound on top of the mask; got {rendered:?}"
         );
     }
 
