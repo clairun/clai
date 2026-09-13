@@ -469,6 +469,10 @@ fn task_session_context(
     workspace_id: &str,
     target_config: &AgentConfig,
 ) -> SessionContext {
+    // The worker's tools are its own. This used to prefer the caller's session
+    // MCP selection when it had one, which handed a delegated agent servers its
+    // own settings never granted — a task inherits its workspace and the
+    // instructions it was given, not the caller's capabilities.
     let mcp_server_ids = target_config.selected_mcp_server_ids.clone();
 
     SessionContext {

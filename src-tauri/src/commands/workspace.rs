@@ -1040,6 +1040,9 @@ fn should_skip_fork_copy_path(relative_path: &Path) -> bool {
     let name = second.to_string_lossy();
     name == "config.json"
         || name == "config.json.tmp"
+        // The copy of the pre-agent-library config belongs to the workspace
+        // that was migrated, not to a fork of it.
+        || name == workspace_config::LEGACY_BACKUP_FILE
         || name.starts_with("data.sqlite")
         || name == "images"
 }

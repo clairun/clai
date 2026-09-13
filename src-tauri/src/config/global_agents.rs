@@ -166,11 +166,12 @@ fn append_context(agent: &mut WorkspaceAgent, heading: &str, context: &str) {
     agent.description.push_str(context);
 }
 
-/// Combine two grant lists so the highest access for a path wins.
+/// Combine two grant lists, keeping one entry per path at the highest access.
 ///
-/// Grants are additive by design: a workspace-wide read grant must not narrow a
-/// write grant the agent already has, and appending both entries would leave
-/// the outcome to whichever the sandbox backend happens to apply last.
+/// This settles the *same* path appearing twice — a workspace read grant on a
+/// path the agent may already write. Overlapping but unequal paths are a
+/// different question, answered where the effective list is composed against
+/// the workspace mask: see `assistant::tools::local::drop_redundant_read_grants`.
 fn merge_grants(
     base: &[FilesystemPathGrant],
     extra: &[FilesystemPathGrant],

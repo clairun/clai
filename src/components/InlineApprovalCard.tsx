@@ -303,9 +303,10 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
           const cardState = perCardState[req.requestId] || {};
           const isSubmitting = submittingId === req.requestId;
           const isCollapsed = collapsedIds.has(req.requestId);
-          // Non-empty only for a shared teammate assigned elsewhere: its
-          // allowances are stored on the shared definition, so "always" reaches
-          // those workspaces too.
+          // A shared teammate keeps its command decisions on its library
+          // definition, so "always" applies wherever that agent works — here,
+          // in the workspaces listed, and in any that add it later.
+          const isSharedAgent = req.persistsToSharedAgent;
           const sharedReach = req.alsoAffectsWorkspaces || [];
           return (
             <article
@@ -340,12 +341,11 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                 <div className={styles.cardBody}>
               <pre className={styles.command}>{req.command}</pre>
               <section className={styles.segments}>
-                {sharedReach.length > 0 && (
-                  // This teammate's allowances live on its shared definition, so
-                  // an "always" here is an "always" everywhere it works.
+                {isSharedAgent && (
                   <p className={styles.segmentsLabel}>
-                    Allowing this permanently also allows it for this agent in:{' '}
-                    {sharedReach.join(', ')}.
+                    {sharedReach.length > 0
+                      ? `An "always" decision is saved on this shared agent, so it also applies to it in: ${sharedReach.join(', ')}.`
+                      : 'An "always" decision is saved on this shared agent, so it applies wherever this agent is added.'}
                   </p>
                 )}
                 <p className={styles.segmentsLabel}>
@@ -407,11 +407,11 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                             className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
                             onClick={() => handleSegmentDecision(req, idx, 'allowAlways')}
                             disabled={isSubmitting}
-                            title={sharedReach.length > 0
-                              ? `Saved on this shared agent, so it also applies in: ${sharedReach.join(', ')}`
-                              : "Saved on this agent, in this workspace"}
+                            title={isSharedAgent
+                              ? 'Saved on the shared agent, so it applies wherever this agent works'
+                              : 'Saved on this workspace\'s own agent'}
                           >
-                            {sharedReach.length > 0
+                            {isSharedAgent
                               ? 'Always allow (every workspace)'
                               : 'Always allow (this agent)'}
                           </button>
@@ -421,9 +421,11 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                           className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
                           onClick={() => handleSegmentDecision(req, idx, 'denyAlways')}
                           disabled={isSubmitting}
-                          title="Block the prefix in .clai/permissions.json for this agent"
+                          title={isSharedAgent
+                            ? 'Saved on the shared agent, so it applies wherever this agent works'
+                            : 'Saved on this workspace\'s own agent'}
                         >
-                          Always deny (this agent)
+                          {isSharedAgent ? 'Always deny (every workspace)' : 'Always deny (this agent)'}
                         </button>
                         <button
                           type="button"

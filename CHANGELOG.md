@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A delegated task no longer inherits the caller's MCP servers.** Task setup
+  preferred the caller's session selection when it had one, handing a worker
+  servers its own settings never granted. It resolves its own tools now.
 - **A read-only grant can no longer take away write access it sits inside.**
   Grants compose additively, but the backends disagreed about a nested pair:
   Linux binds shallowest-first so a read-only `/srv/data/docs` under a
@@ -42,10 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **An "always allow" for a shared agent says so.** The approval card names the
-  other workspaces the allowance would reach and reads "Always allow (every
-  workspace)" when the agent is shared, because a command allowlist skips the
-  prompt entirely next time.
+- **An "always" decision for a shared agent says so.** Allow and deny both save
+  on the shared definition, so the approval card now reads "(every workspace)"
+  for a teammate and names the workspaces it reaches — a command allowlist skips
+  the prompt entirely next time, so the scope has to be visible while deciding.
 - **Agent templates are gone.** The two embedded templates and their
   `agent_templates_list` command are removed; a shared agent created once in the
   library is the reusable thing they were approximating. Bundled skills are

@@ -307,6 +307,15 @@ fn apply_assignment_edit(
     else {
         return Err(format!("Workspace agent assignment not found: {}", edit.id));
     };
+    // The form replaces the whole overlay, so a save built on a stale copy
+    // would silently drop anything written since — most likely a path grant the
+    // agent asked for while the pane sat open.
+    if current.updated_at > edit.updated_at {
+        return Err(
+            "This teammate's workspace settings changed while you were editing. Reload before saving."
+                .to_string(),
+        );
+    }
     if current.agent_definition_id != edit.agent_definition_id {
         return Err(
             "An assignment cannot be pointed at a different shared agent. Remove it and add the other one."
@@ -535,6 +544,16 @@ mod tests {
         assert_eq!(saved.context, "API crate only");
         assert_eq!(saved.filesystem_grants.len(), 1);
         assert_eq!(saved.updated_at, 50);
+
+        let stale = WorkspaceAssignment {
+            context: "written against an older copy".to_string(),
+            updated_at: 10,
+            ..workspace.assignments[0].clone()
+        };
+        let error = apply_assignment_edit(&mut workspace, &stale, 70)
+            .expect_err("a save built on a stale copy is refused, not merged blindly");
+        assert!(error.contains("Reload"), "{error}");
+        assert_eq!(workspace.assignments[0].context, "API crate only");
 
         let repointed = WorkspaceAssignment {
             agent_definition_id: "def-2".to_string(),

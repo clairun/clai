@@ -273,22 +273,35 @@ fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant
         }
     }
 
-    Ok(drop_reads_inside_writes(grants))
+    let home = real_host_home();
+    Ok(drop_redundant_read_grants(grants, home.as_deref()))
 }
 
-/// Remove read-only grants that lie inside a read-write grant.
+/// Remove read-only grants that a read-write grant already covers.
 ///
 /// Grants are additive: the highest access applicable to a path wins. A
 /// read-only entry under a read-write one states access the agent already has,
 /// so keeping it changes nothing it is allowed to do — but it does change what
-/// the backends produce. Linux binds shallowest-first precisely so the deeper
-/// mount wins, which turns the nested read-only entry into a *revocation* of
-/// write on that subtree; macOS keeps two independent allow lists and ignores
-/// it. One rule, applied here, is what keeps the two platforms honest about the
-/// same configuration — and the workspace root is in this list as read-write,
-/// so it also stops a read-only grant inside the workspace from making the
-/// agent a reader in its own directory.
-fn drop_reads_inside_writes(grants: Vec<ResolvedGrant>) -> Vec<ResolvedGrant> {
+/// the backends produce. Linux binds shallowest-first so the deeper mount wins,
+/// which turns the nested read-only entry into a *revocation* of write on that
+/// subtree; macOS keeps two independent allow lists and ignores it. Folding
+/// here, where the effective list is composed, is what keeps one configuration
+/// meaning one thing on both platforms — including inside the workspace root,
+/// which is read-write and must not be shadowed by a read-only grant under it.
+///
+/// "Covers" is the same question `resolve_allowed_cwd` asks, mask and all: a
+/// broad `$HOME` grant does **not** authorize paths inside the workspace
+/// container, so a read-only grant on a sibling workspace is the only thing
+/// exposing it and must survive. Dropping it would revoke access the user
+/// explicitly granted, and — because session grants are folded too — leave the
+/// agent unable to win it back by approving the request again.
+fn drop_redundant_read_grants(
+    grants: Vec<ResolvedGrant>,
+    home: Option<&Path>,
+) -> Vec<ResolvedGrant> {
+    let mask = grants.first().and_then(|workspace| {
+        crate::assistant::sandbox::profile::workspace_mask(&workspace.root, home)
+    });
     let write_roots: Vec<PathBuf> = grants
         .iter()
         .filter(|grant| grant.access == AccessKind::ReadWrite)
@@ -298,7 +311,10 @@ fn drop_reads_inside_writes(grants: Vec<ResolvedGrant>) -> Vec<ResolvedGrant> {
         .into_iter()
         .filter(|grant| {
             grant.access == AccessKind::ReadWrite
-                || !write_roots.iter().any(|root| grant.root.starts_with(root))
+                || !write_roots.iter().any(|root| {
+                    grant.root.starts_with(root)
+                        && !grant_masked_for_candidate(root, &grant.root, mask.as_deref())
+                })
         })
         .collect()
 }
@@ -929,26 +945,16 @@ async fn await_user_permission(
     let workspace_id = context.workspace_id.clone();
     let agent_id = context.automation_id.clone();
 
-    // A teammate's "always allow" is saved on its shared definition, so name the
-    // other workspaces it would reach before the user commits to it.
-    let also_affects_workspaces = match (workspace_id.as_deref(), agent_id.as_deref()) {
-        (Some(workspace), Some(agent)) => {
-            crate::commands::permissions::shared_allowance_reach(&app_state, workspace, agent)
-        }
-        _ => Vec::new(),
-    };
-
-    let request = PermissionRequest {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        workspace_id: workspace_id.clone(),
+    // The constructor resolves where an "always" decision would be saved — in
+    // this workspace for its Main, or on a shared definition in force wherever
+    // that teammate works.
+    let request = PermissionRequest::for_agent(
+        &app_state,
+        workspace_id.clone(),
         agent_id,
-        // Agent display name isn't on the runtime context; the frontend
-        // resolves it from agent_id via existing workspace queries.
-        agent_name: None,
-        command: command.to_string(),
-        segments: segments.clone(),
-        also_affects_workspaces,
-    };
+        command.to_string(),
+        segments.clone(),
+    );
     let request_id = request.request_id.clone();
 
     // Supersede: if a previous request for this exact run + command is
@@ -1920,16 +1926,90 @@ mod tests {
             .collect()
     }
 
+    fn context_with_grants(
+        workspace_root: &std::path::Path,
+        extra_paths: Vec<FilesystemPathGrant>,
+    ) -> ToolExecutionContext {
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.filesystem.extra_paths = extra_paths;
+        ToolExecutionContext {
+            session_id: "session".to_string(),
+            run_id: "run".to_string(),
+            tool_call_id: None,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            workspace_id: Some("ws".to_string()),
+            space_id: None,
+            room_id: None,
+            mcp_server_ids: Vec::new(),
+            agent_workspace_id: None,
+            workspace_root: Some(workspace_root.to_path_buf()),
+            automation_id: Some("agent".to_string()),
+            workspace_agents: Vec::new(),
+            inter_agent_call_depth: None,
+            execution,
+            notices: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_allowed_command_prefixes: std::sync::Arc::new(
+                std::sync::Mutex::new(Vec::new()),
+            ),
+            session_blocked_command_prefixes: std::sync::Arc::new(
+                std::sync::Mutex::new(Vec::new()),
+            ),
+        }
+    }
+
+    #[test]
+    fn the_effective_grant_list_an_agent_runs_with_has_the_fold_applied() {
+        // The fold lives at the end of `filesystem_grants`, which is what both
+        // sandbox backends and the cwd check read; asserting the helper alone
+        // would survive deleting the call.
+        let workspace = tempdir().unwrap();
+        let context = context_with_grants(
+            workspace.path(),
+            vec![
+                FilesystemPathGrant {
+                    path: workspace.path().join("docs").display().to_string(),
+                    access: FilesystemPathAccess::ReadOnly,
+                    origin: None,
+                },
+                FilesystemPathGrant {
+                    path: "/opt/tools".to_string(),
+                    access: FilesystemPathAccess::ReadOnly,
+                    origin: None,
+                },
+            ],
+        );
+
+        let grants = filesystem_grants(&context).expect("grants");
+
+        assert!(
+            grants
+                .iter()
+                .all(|grant| grant.root != workspace.path().join("docs")),
+            "a read grant inside the read-write workspace root would make the \
+             agent a reader in its own directory on Linux"
+        );
+        assert!(grants
+            .iter()
+            .any(|grant| grant.root == PathBuf::from("/opt/tools")));
+        assert!(grants
+            .iter()
+            .any(|grant| grant.root == workspace.path() && grant.access == AccessKind::ReadWrite));
+    }
+
     #[test]
     fn a_read_grant_inside_a_write_grant_cannot_take_write_access_away() {
         // Linux binds shallowest-first so the deeper mount wins; without this
         // fold, the nested read-only entry would revoke write on `docs` there
         // while macOS's independent allow lists kept it.
-        let folded = drop_reads_inside_writes(vec![
-            write_grant("/srv/data"),
-            read_grant("/srv/data/docs"),
-            read_grant("/opt/tools"),
-        ]);
+        let folded = drop_redundant_read_grants(
+            vec![
+                write_grant("/srv/data"),
+                read_grant("/srv/data/docs"),
+                read_grant("/opt/tools"),
+            ],
+            None,
+        );
 
         assert_eq!(
             roots(&folded),
@@ -1939,10 +2019,10 @@ mod tests {
 
     #[test]
     fn a_write_grant_inside_a_read_grant_survives_because_it_widens_access() {
-        let folded = drop_reads_inside_writes(vec![
-            read_grant("/srv/data"),
-            write_grant("/srv/data/scratch"),
-        ]);
+        let folded = drop_redundant_read_grants(
+            vec![read_grant("/srv/data"), write_grant("/srv/data/scratch")],
+            None,
+        );
 
         assert_eq!(
             roots(&folded),
@@ -1951,9 +2031,58 @@ mod tests {
     }
 
     #[test]
+    fn an_explicitly_granted_sibling_workspace_survives_a_broad_home_write_grant() {
+        // `$HOME` read-write does not authorize paths inside the workspace
+        // container — the mask is what stops one workspace reading another —
+        // so the sibling's own read grant is not redundant, and dropping it
+        // would revoke access the user deliberately configured.
+        let folded = drop_redundant_read_grants(
+            vec![
+                write_grant("/home/me/.clai/workspaces/mine"),
+                write_grant("/home/me"),
+                read_grant("/home/me/.clai/workspaces/other"),
+            ],
+            Some(Path::new("/home/me")),
+        );
+
+        assert_eq!(
+            roots(&folded),
+            vec![
+                ("/home/me/.clai/workspaces/mine", true),
+                ("/home/me", true),
+                ("/home/me/.clai/workspaces/other", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_read_grant_inside_a_granted_sibling_workspace_is_still_redundant() {
+        // Here the write grant is rooted *at* the sibling, past the mask, so it
+        // really does cover the nested read grant.
+        let folded = drop_redundant_read_grants(
+            vec![
+                write_grant("/home/me/.clai/workspaces/mine"),
+                write_grant("/home/me/.clai/workspaces/other"),
+                read_grant("/home/me/.clai/workspaces/other/notes"),
+            ],
+            Some(Path::new("/home/me")),
+        );
+
+        assert_eq!(
+            roots(&folded),
+            vec![
+                ("/home/me/.clai/workspaces/mine", true),
+                ("/home/me/.clai/workspaces/other", true),
+            ]
+        );
+    }
+
+    #[test]
     fn a_sibling_read_grant_is_untouched() {
-        let folded =
-            drop_reads_inside_writes(vec![write_grant("/srv/data"), read_grant("/srv/database")]);
+        let folded = drop_redundant_read_grants(
+            vec![write_grant("/srv/data"), read_grant("/srv/database")],
+            None,
+        );
 
         assert_eq!(
             roots(&folded),

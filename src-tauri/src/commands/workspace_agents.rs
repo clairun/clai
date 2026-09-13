@@ -285,7 +285,6 @@ pub async fn workspace_set_agent_enabled(
     request: WorkspaceAgentEnabledRequest,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceAgentDetail, String> {
-    let app_config = app_config(state.inner())?;
     let now = now_millis();
     let workspace_id = request.workspace_id.clone();
     let agent_id = request.agent_id.clone();
@@ -316,12 +315,8 @@ pub async fn workspace_set_agent_enabled(
         Ok(())
     })?;
 
-    let (config, roster) = state.resolve_workspace_roster(&workspace_id)?;
-    let saved = roster
-        .iter()
-        .find(|resolved| resolved.agent.id == agent_id)
-        .ok_or_else(|| format!("Workspace agent not found after toggle: {}", agent_id))?;
-    Ok(detail_from_agent(&app_config, &config, &saved.agent))
+    stored_agent_detail(state.inner(), &workspace_id, &agent_id)?
+        .ok_or_else(|| format!("Workspace agent not found after toggle: {}", agent_id))
 }
 
 fn app_config(state: &AppState) -> Result<AppConfig, String> {

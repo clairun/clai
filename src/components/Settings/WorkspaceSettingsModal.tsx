@@ -1665,14 +1665,16 @@ export const AgentSection = ({
   return (
     <div className={styles.sectionRoot}>
       <h3 className={styles.sectionTitle}>
-        {isCreate ? 'Add agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
+        {isCreate ? 'Set up the main agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
       </h3>
       <p className={styles.sectionDescription}>
-        {isManager
-          ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
-          : isCreate
-            ? 'Sub-agents are invoked by the main agent via delegation.'
-            : 'Sub-agent — invoked by the main agent via delegation.'}
+        {/* Creating an agent here means configuring this workspace's own Main.
+            Teammates come from the shared library and are added under Team. */}
+        {isCreate
+          ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; teammates are added from the shared agent library under Team."
+          : isManager
+            ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
+            : 'Teammate — invoked by the main agent via delegation.'}
       </p>
 
       {/* Name (hidden for manager — its name is "Main" by convention) */}

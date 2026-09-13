@@ -217,13 +217,19 @@ export type PathGrantRequest = { requestId: string, workspaceId: string | null, 
 
 export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, 
 /**
- * Workspaces an "always allow" would take effect in, beyond this one.
+ * True when an "always" decision is saved on a shared agent definition
+ * rather than in this workspace.
  *
- * Empty for the Main, whose allowances are its own. For a shared teammate
- * it lists every *other* workspace that has it on its team, because the
- * allowance is saved on the shared definition: an allowlist entry bypasses
- * this prompt entirely next time, so the blast radius has to be visible at
- * the moment of consent rather than discoverable afterwards.
+ * A command allowlist entry skips this prompt entirely next time, so where
+ * the decision lands has to be visible while the user is deciding — and
+ * for a shared teammate it lands on the definition, in force wherever that
+ * agent works, including workspaces that assign it later.
+ */
+persistsToSharedAgent: boolean, 
+/**
+ * The other workspaces that decision reaches today. Empty when the agent
+ * is this workspace's Main, or when nobody else has the teammate on their
+ * team yet.
  */
 alsoAffectsWorkspaces: Array<string>, };
 

@@ -649,6 +649,11 @@ fn back_up_legacy_config(path: &Path) {
     let Ok(contents) = fs::read_to_string(path) else {
         return;
     };
+    // Cheap first: every config this build writes contains the key, so the
+    // common case costs a substring scan rather than a JSON parse.
+    if contents.contains("\"mainAgent\"") {
+        return;
+    }
     let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents) else {
         return;
     };
