@@ -1964,6 +1964,9 @@ mod tests {
         // sandbox backends and the cwd check read; asserting the helper alone
         // would survive deleting the call.
         let workspace = tempdir().unwrap();
+        // A second real directory, so the assertions hold on every platform's
+        // path syntax rather than on a hard-coded POSIX path.
+        let elsewhere = tempdir().unwrap();
         let context = context_with_grants(
             workspace.path(),
             vec![
@@ -1973,7 +1976,7 @@ mod tests {
                     origin: None,
                 },
                 FilesystemPathGrant {
-                    path: "/opt/tools".to_string(),
+                    path: elsewhere.path().display().to_string(),
                     access: FilesystemPathAccess::ReadOnly,
                     origin: None,
                 },
@@ -1985,16 +1988,20 @@ mod tests {
         assert!(
             grants
                 .iter()
-                .all(|grant| grant.root != workspace.path().join("docs")),
+                .all(|grant| grant.root.file_name() != Some(std::ffi::OsStr::new("docs"))),
             "a read grant inside the read-write workspace root would make the \
              agent a reader in its own directory on Linux"
         );
-        assert!(grants
-            .iter()
-            .any(|grant| grant.root == std::path::Path::new("/opt/tools")));
-        assert!(grants
-            .iter()
-            .any(|grant| grant.root == workspace.path() && grant.access == AccessKind::ReadWrite));
+        assert!(
+            grants
+                .iter()
+                .any(|grant| grant.root.file_name() == elsewhere.path().file_name()),
+            "a read grant outside every write grant is untouched"
+        );
+        assert!(grants.iter().any(
+            |grant| grant.root.file_name() == workspace.path().file_name()
+                && grant.access == AccessKind::ReadWrite
+        ));
     }
 
     #[test]
