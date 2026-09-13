@@ -1991,7 +1991,7 @@ mod tests {
         );
         assert!(grants
             .iter()
-            .any(|grant| grant.root == PathBuf::from("/opt/tools")));
+            .any(|grant| grant.root == std::path::Path::new("/opt/tools")));
         assert!(grants
             .iter()
             .any(|grant| grant.root == workspace.path() && grant.access == AccessKind::ReadWrite));
