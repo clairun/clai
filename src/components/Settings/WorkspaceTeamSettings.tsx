@@ -220,10 +220,13 @@ export const AssignmentSection = ({
   workspaceId,
   agentId,
   onChanged,
+  onUnassigned,
 }: {
   workspaceId: string;
   agentId?: string;
   onChanged?: () => void;
+  /** Called after a successful unassign so the modal can leave the dead row. */
+  onUnassigned?: (workspaceAgentId: string) => void;
 }) => {
   const [definitions, setDefinitions] = useState<AgentDefinitionDetail[]>([]);
   const [assignments, setAssignments] = useState<WorkspaceAssignmentPayload[]>([]);
@@ -309,11 +312,15 @@ export const AssignmentSection = ({
     try {
       await workspaceDeleteAgent(workspaceId, agentId);
       onChanged?.();
+      // The row this section was editing is gone; the modal navigates away
+      // rather than leaving a pane of disabled controls on a dead id.
+      onUnassigned?.(agentId);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
       setBusy(false);
     }
-  }, [workspaceId, agentId, onChanged]);
+  }, [workspaceId, agentId, onChanged, onUnassigned]);
 
   if (loading) return <div className={styles.sectionRoot}>Loading…</div>;
 

@@ -222,15 +222,13 @@ pub async fn workspace_assign_agent(
     definition_id: String,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let exists = state
+    let definitions = state
         .config_manager
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .get()
-        .agent_definitions
-        .iter()
-        .any(|definition| definition.id == definition_id && !definition.archived);
-    if !exists {
+        .agent_definitions;
+    if !is_assignable(&definitions, &definition_id) {
         return Err("This shared agent is not available to assign.".to_string());
     }
 
@@ -240,6 +238,14 @@ pub async fn workspace_assign_agent(
         add_assignment(config, &id, &definition_id, now)
     })?;
     Ok(id)
+}
+
+/// Whether a definition may join a team: it has to exist, and an archived one
+/// is kept for history rather than offered for new work.
+fn is_assignable(definitions: &[AgentDefinition], definition_id: &str) -> bool {
+    definitions
+        .iter()
+        .any(|definition| definition.id == definition_id && !definition.archived)
 }
 
 /// Put a definition on a workspace's team.
@@ -474,6 +480,26 @@ mod tests {
         };
         assert!(upsert_definition(&mut config, &ghost, 1).is_err());
         assert!(config.agent_definitions.is_empty());
+    }
+
+    #[test]
+    fn an_archived_or_unknown_definition_cannot_join_a_team() {
+        let mut config = AppConfig::default();
+        let id = upsert_definition(&mut config, &save_request("Reviewer"), 1).expect("create");
+        assert!(is_assignable(&config.agent_definitions, &id));
+        assert!(!is_assignable(&config.agent_definitions, "nobody"));
+
+        let archived = AgentDefinitionSaveRequest {
+            id: Some(id.clone()),
+            expected_revision: Some(1),
+            archived: true,
+            ..save_request("Reviewer")
+        };
+        upsert_definition(&mut config, &archived, 2).expect("archive");
+        assert!(
+            !is_assignable(&config.agent_definitions, &id),
+            "an archived agent stays readable for history but takes no new work"
+        );
     }
 
     #[test]

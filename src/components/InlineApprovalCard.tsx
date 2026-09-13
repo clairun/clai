@@ -303,6 +303,10 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
           const cardState = perCardState[req.requestId] || {};
           const isSubmitting = submittingId === req.requestId;
           const isCollapsed = collapsedIds.has(req.requestId);
+          // Non-empty only for a shared teammate assigned elsewhere: its
+          // allowances are stored on the shared definition, so "always" reaches
+          // those workspaces too.
+          const sharedReach = req.alsoAffectsWorkspaces || [];
           return (
             <article
               key={req.requestId}
@@ -336,6 +340,14 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                 <div className={styles.cardBody}>
               <pre className={styles.command}>{req.command}</pre>
               <section className={styles.segments}>
+                {sharedReach.length > 0 && (
+                  // This teammate's allowances live on its shared definition, so
+                  // an "always" here is an "always" everywhere it works.
+                  <p className={styles.segmentsLabel}>
+                    Allowing this permanently also allows it for this agent in:{' '}
+                    {sharedReach.join(', ')}.
+                  </p>
+                )}
                 <p className={styles.segmentsLabel}>
                   {req.segments.length === 1
                     ? 'Choose how to handle this command:'
@@ -395,9 +407,13 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                             className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
                             onClick={() => handleSegmentDecision(req, idx, 'allowAlways')}
                             disabled={isSubmitting}
-                            title="Save the prefix to .clai/permissions.json for this agent"
+                            title={sharedReach.length > 0
+                              ? `Saved on this shared agent, so it also applies in: ${sharedReach.join(', ')}`
+                              : "Saved on this agent, in this workspace"}
                           >
-                            Always allow (this agent)
+                            {sharedReach.length > 0
+                              ? 'Always allow (every workspace)'
+                              : 'Always allow (this agent)'}
                           </button>
                         )}
                         <button

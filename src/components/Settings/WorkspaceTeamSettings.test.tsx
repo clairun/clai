@@ -135,6 +135,23 @@ describe('AssignmentSection editor', () => {
     }));
   });
 
+  it('hands the modal back control after unassigning instead of sitting on a dead row', async () => {
+    const user = userEvent.setup();
+    const onUnassigned = vi.fn();
+    render(
+      <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
+    );
+    await screen.findByText('Reviewer');
+
+    await user.click(screen.getByRole('button', { name: 'Remove from workspace' }));
+
+    await waitFor(() => expect(onUnassigned).toHaveBeenCalledWith('assign-1'));
+    expect(mockInvoke).toHaveBeenCalledWith('workspace_delete_agent', {
+      workspaceId: WORKSPACE,
+      agentId: 'assign-1',
+    });
+  });
+
   it('names the callable id and says where shared behavior is edited', async () => {
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
     await screen.findByText('Reviewer');

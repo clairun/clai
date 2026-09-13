@@ -24,8 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   judgement is about this machine and this project — approving it in one
   workspace never widens access in another.
 
+- **The pre-library config is kept.** The first save after upgrading copies the
+  old `config.json` to `config.pre-agent-library.json` in the same folder, once.
+  Teammates from the flat `agents` array are not migrated — a shared agent is a
+  deliberate act — so the file you need in order to re-create them stays
+  readable instead of being overwritten by the first workspace you open.
+
+### Fixed
+
+- **A read-only grant can no longer take away write access it sits inside.**
+  Grants compose additively, but the backends disagreed about a nested pair:
+  Linux binds shallowest-first so a read-only `/srv/data/docs` under a
+  read-write `/srv/data` revoked write on `docs`, while macOS kept it. The
+  nested read-only entry is now dropped before the profile is built, on every
+  platform — including inside the workspace root, which is read-write by
+  definition.
+
 ### Changed
 
+- **An "always allow" for a shared agent says so.** The approval card names the
+  other workspaces the allowance would reach and reads "Always allow (every
+  workspace)" when the agent is shared, because a command allowlist skips the
+  prompt entirely next time.
 - **Agent templates are gone.** The two embedded templates and their
   `agent_templates_list` command are removed; a shared agent created once in the
   library is the reusable thing they were approximating. Bundled skills are

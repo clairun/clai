@@ -215,7 +215,17 @@ access: FilesystemPathAccess, } | { "kind": "allowAlways", path: string, access:
 
 export type PathGrantRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, requestedPath: string, requestedAccess: FilesystemPathAccess, reason: string, };
 
-export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, };
+export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, 
+/**
+ * Workspaces an "always allow" would take effect in, beyond this one.
+ *
+ * Empty for the Main, whose allowances are its own. For a shared teammate
+ * it lists every *other* workspace that has it on its team, because the
+ * allowance is saved on the shared definition: an allowlist entry bypasses
+ * this prompt entirely next time, so the blast radius has to be visible at
+ * the moment of consent rather than discoverable afterwards.
+ */
+alsoAffectsWorkspaces: Array<string>, };
 
 export type PermissionScope = "agent";
 

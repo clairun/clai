@@ -273,7 +273,34 @@ fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant
         }
     }
 
-    Ok(grants)
+    Ok(drop_reads_inside_writes(grants))
+}
+
+/// Remove read-only grants that lie inside a read-write grant.
+///
+/// Grants are additive: the highest access applicable to a path wins. A
+/// read-only entry under a read-write one states access the agent already has,
+/// so keeping it changes nothing it is allowed to do — but it does change what
+/// the backends produce. Linux binds shallowest-first precisely so the deeper
+/// mount wins, which turns the nested read-only entry into a *revocation* of
+/// write on that subtree; macOS keeps two independent allow lists and ignores
+/// it. One rule, applied here, is what keeps the two platforms honest about the
+/// same configuration — and the workspace root is in this list as read-write,
+/// so it also stops a read-only grant inside the workspace from making the
+/// agent a reader in its own directory.
+fn drop_reads_inside_writes(grants: Vec<ResolvedGrant>) -> Vec<ResolvedGrant> {
+    let write_roots: Vec<PathBuf> = grants
+        .iter()
+        .filter(|grant| grant.access == AccessKind::ReadWrite)
+        .map(|grant| grant.root.clone())
+        .collect();
+    grants
+        .into_iter()
+        .filter(|grant| {
+            grant.access == AccessKind::ReadWrite
+                || !write_roots.iter().any(|root| grant.root.starts_with(root))
+        })
+        .collect()
 }
 
 fn resolve_grant(grant: &FilesystemPathGrant) -> Result<ResolvedGrant, String> {
@@ -902,6 +929,15 @@ async fn await_user_permission(
     let workspace_id = context.workspace_id.clone();
     let agent_id = context.automation_id.clone();
 
+    // A teammate's "always allow" is saved on its shared definition, so name the
+    // other workspaces it would reach before the user commits to it.
+    let also_affects_workspaces = match (workspace_id.as_deref(), agent_id.as_deref()) {
+        (Some(workspace), Some(agent)) => {
+            crate::commands::permissions::shared_allowance_reach(&app_state, workspace, agent)
+        }
+        _ => Vec::new(),
+    };
+
     let request = PermissionRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         workspace_id: workspace_id.clone(),
@@ -911,6 +947,7 @@ async fn await_user_permission(
         agent_name: None,
         command: command.to_string(),
         segments: segments.clone(),
+        also_affects_workspaces,
     };
     let request_id = request.request_id.clone();
 
@@ -1855,6 +1892,74 @@ mod tests {
             root: path.to_path_buf(),
             access: AccessKind::ReadWrite,
         }
+    }
+
+    fn read_grant(path: &str) -> ResolvedGrant {
+        ResolvedGrant {
+            root: PathBuf::from(path),
+            access: AccessKind::ReadOnly,
+        }
+    }
+
+    fn write_grant(path: &str) -> ResolvedGrant {
+        ResolvedGrant {
+            root: PathBuf::from(path),
+            access: AccessKind::ReadWrite,
+        }
+    }
+
+    fn roots(grants: &[ResolvedGrant]) -> Vec<(&str, bool)> {
+        grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.root.to_str().unwrap(),
+                    grant.access == AccessKind::ReadWrite,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_read_grant_inside_a_write_grant_cannot_take_write_access_away() {
+        // Linux binds shallowest-first so the deeper mount wins; without this
+        // fold, the nested read-only entry would revoke write on `docs` there
+        // while macOS's independent allow lists kept it.
+        let folded = drop_reads_inside_writes(vec![
+            write_grant("/srv/data"),
+            read_grant("/srv/data/docs"),
+            read_grant("/opt/tools"),
+        ]);
+
+        assert_eq!(
+            roots(&folded),
+            vec![("/srv/data", true), ("/opt/tools", false)]
+        );
+    }
+
+    #[test]
+    fn a_write_grant_inside_a_read_grant_survives_because_it_widens_access() {
+        let folded = drop_reads_inside_writes(vec![
+            read_grant("/srv/data"),
+            write_grant("/srv/data/scratch"),
+        ]);
+
+        assert_eq!(
+            roots(&folded),
+            vec![("/srv/data", false), ("/srv/data/scratch", true)]
+        );
+    }
+
+    #[test]
+    fn a_sibling_read_grant_is_untouched() {
+        let folded =
+            drop_reads_inside_writes(vec![write_grant("/srv/data"), read_grant("/srv/database")]);
+
+        assert_eq!(
+            roots(&folded),
+            vec![("/srv/data", true), ("/srv/database", false)],
+            "a shared prefix is not containment"
+        );
     }
 
     // ------------------------------------------------------------------

@@ -48,8 +48,11 @@ pub const PERMISSION_RESOLVED_EVENT: &str = "permissions://resolved";
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub enum PermissionScope {
-    /// Persist for this workspace agent only, in
-    /// `WorkspaceConfig.agents[].execution.shell`.
+    /// Persist on the agent. Where that lands depends on which agent: the
+    /// workspace's Main keeps it in its own config, while a shared teammate
+    /// keeps it on its library definition, so the allowance travels with the
+    /// agent to every workspace that assigned it. `PermissionRequest`
+    /// carries the destination so the prompt can say which one is happening.
     Agent,
     // Workspace,  // deferred: requires workspace_id plumbing through
     //             // AgentConfig / SessionContext (runner.rs currently
@@ -86,6 +89,46 @@ pub struct PermissionRequest {
     pub agent_name: Option<String>,
     pub command: String,
     pub segments: Vec<SegmentApproval>,
+    /// Workspaces an "always allow" would take effect in, beyond this one.
+    ///
+    /// Empty for the Main, whose allowances are its own. For a shared teammate
+    /// it lists every *other* workspace that has it on its team, because the
+    /// allowance is saved on the shared definition: an allowlist entry bypasses
+    /// this prompt entirely next time, so the blast radius has to be visible at
+    /// the moment of consent rather than discoverable afterwards.
+    #[serde(default)]
+    pub also_affects_workspaces: Vec<String>,
+}
+
+/// The other workspaces an "always" decision for this agent would reach.
+///
+/// Returns empty for a Main (local by definition) and for an agent whose
+/// definition is assigned nowhere else.
+pub fn shared_allowance_reach(state: &AppState, workspace_id: &str, agent_id: &str) -> Vec<String> {
+    let Some(root) = state.workspace_root(workspace_id) else {
+        return Vec::new();
+    };
+    let Ok(workspace) = workspace_config::load(&root) else {
+        return Vec::new();
+    };
+    let Some(assignment) = workspace.assignment(agent_id) else {
+        return Vec::new();
+    };
+    let Ok(index) = state.workspace_index.read() else {
+        return Vec::new();
+    };
+    index
+        .locators_sorted()
+        .iter()
+        .filter(|locator| locator.id != workspace_id)
+        .filter_map(|locator| workspace_config::load(&locator.root_path).ok())
+        .filter(|other| {
+            other.assignments.iter().any(|other_assignment| {
+                other_assignment.agent_definition_id == assignment.agent_definition_id
+            })
+        })
+        .map(|other| other.title)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -689,6 +732,7 @@ mod tests {
 
     fn fake_request(workspace_id: Option<&str>) -> PermissionRequest {
         PermissionRequest {
+            also_affects_workspaces: Vec::new(),
             request_id: uuid::Uuid::new_v4().to_string(),
             workspace_id: workspace_id.map(str::to_string),
             agent_id: None,
@@ -922,6 +966,25 @@ mod approval_routing_tests {
                 .all(|prefix| prefix != "cargo test"),
             "another workspace's Main is a different agent"
         );
+    }
+
+    #[test]
+    fn the_prompt_names_the_other_workspaces_a_shared_allowance_would_reach() {
+        let fixture = Fixture::new();
+
+        let reach = shared_allowance_reach(&fixture.state, WORKSPACE_ID, ASSIGNMENT_ID);
+        assert_eq!(
+            reach.len(),
+            1,
+            "the same teammate is on the second workspace's team: {:?}",
+            reach
+        );
+
+        assert!(
+            shared_allowance_reach(&fixture.state, WORKSPACE_ID, MAIN_ID).is_empty(),
+            "a Main's allowance is its own, and the prompt must not claim otherwise"
+        );
+        assert!(shared_allowance_reach(&fixture.state, WORKSPACE_ID, "nobody").is_empty());
     }
 
     #[test]

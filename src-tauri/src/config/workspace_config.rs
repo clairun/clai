@@ -11,7 +11,12 @@ use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
 };
 
-const WORKSPACE_CONFIG_VERSION: u32 = 1;
+/// Bumped to 2 when teammates moved to the app-level library: a config written
+/// by this build has a `mainAgent` and assignments where an older build expects
+/// an `agents` array and a `defaultAgentId`. The number is the signal a
+/// downgraded build needs to say "this file is newer than me" rather than read
+/// it as an empty workspace.
+const WORKSPACE_CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum WorkspaceConfigError {
@@ -374,7 +379,9 @@ impl From<WorkspaceConfig> for WorkspaceConfigFile {
         let main_agent =
             Some(serde_json::to_value(&config.main_agent).unwrap_or(serde_json::Value::Null));
         Self {
-            version: config.version,
+            // Every file this writes has the current shape, so it declares the
+            // current version regardless of what the loaded one claimed.
+            version: WORKSPACE_CONFIG_VERSION,
             id: config.id,
             title: config.title,
             created_at: config.created_at,
@@ -582,8 +589,12 @@ fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
     }
 }
 
+/// Filename of the one-time copy taken before a pre-library config is rewritten.
+pub const LEGACY_BACKUP_FILE: &str = "config.pre-agent-library.json";
+
 pub fn save(root: &Path, config: &WorkspaceConfig) -> Result<(), WorkspaceConfigError> {
     let path = config_path(root);
+    back_up_legacy_config(&path);
     let parent = path.parent().unwrap_or(root);
     fs::create_dir_all(parent).map_err(|source| WorkspaceConfigError::Io {
         operation: "create directory",
@@ -616,6 +627,56 @@ pub fn save(root: &Path, config: &WorkspaceConfig) -> Result<(), WorkspaceConfig
         source,
     })?;
     Ok(())
+}
+
+/// Copy a pre-agent-library config aside, once, before anything overwrites it.
+///
+/// The current format stores one `mainAgent`; the teammates that used to live in
+/// the flat `agents` array are not migrated, because a shared definition is a
+/// deliberate act and guessing one from an old row would hand a stranger's
+/// instructions and grants to a live agent. But the first save — which can be as
+/// innocent as opening the workspace — rewrites the file, and the user cannot
+/// re-create by hand what they can no longer read. This keeps the original
+/// exactly once, next to the config.
+///
+/// Best effort: a failure here must never stop a workspace from saving. The
+/// backup is a courtesy, not a transaction.
+fn back_up_legacy_config(path: &Path) {
+    let backup = path.with_file_name(LEGACY_BACKUP_FILE);
+    if backup.exists() {
+        return;
+    }
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return;
+    };
+    // Only a config that still has the old shape is worth keeping: a
+    // `mainAgent` key means this file was already written by a current build.
+    if existing.get("mainAgent").is_some() {
+        return;
+    }
+    let legacy_agents = existing
+        .get("agents")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    if legacy_agents == 0 {
+        return;
+    }
+    if let Err(error) = fs::write(&backup, &contents) {
+        tracing::warn!(
+            path = %backup.display(),
+            "Could not keep a copy of the pre-agent-library config: {}",
+            error
+        );
+        return;
+    }
+    tracing::info!(
+        path = %backup.display(),
+        agents = legacy_agents,
+        "Kept a copy of the pre-agent-library workspace config before rewriting it"
+    );
 }
 
 /// Process-wide lock serializing read-modify-write cycles on workspace
@@ -1477,6 +1538,54 @@ mod main_agent_recovery_tests {
         config.main_agent = None;
         save(tmp.path(), &config).expect("save cleared");
         assert!(load(tmp.path()).expect("reload").main_agent.is_none());
+    }
+
+    #[test]
+    fn the_first_write_keeps_a_copy_of_the_pre_library_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = config_path(tmp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = legacy_config(
+            "main-1",
+            serde_json::json!([{
+                "id": "mate-1",
+                "name": "Reviewer",
+                "description": "review the API crate",
+                "enabled": true,
+                "createdAt": 1,
+                "updatedAt": 1
+            }]),
+        );
+        fs::write(&path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        // Opening a workspace is enough to rewrite the file; the teammate the
+        // user is asked to re-create must still be readable afterwards.
+        let config = load(tmp.path()).expect("load");
+        save(tmp.path(), &config).expect("save");
+
+        let backup = path.with_file_name(LEGACY_BACKUP_FILE);
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup).expect("backup exists")).unwrap();
+        assert_eq!(kept["agents"][1]["id"], "mate-1");
+        assert_eq!(kept["agents"][1]["description"], "review the API crate");
+
+        // A later save must not overwrite the copy with the already-migrated file.
+        save(tmp.path(), &config).expect("second save");
+        let still: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup).unwrap()).unwrap();
+        assert_eq!(still["agents"][1]["id"], "mate-1");
+    }
+
+    #[test]
+    fn a_config_without_legacy_agents_is_not_backed_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = WorkspaceConfig::new("ws".to_string(), "T".to_string(), 1, "main".to_string());
+        save(tmp.path(), &config).unwrap();
+        save(tmp.path(), &config).unwrap();
+
+        assert!(!config_path(tmp.path())
+            .with_file_name(LEGACY_BACKUP_FILE)
+            .exists());
     }
 
     #[test]

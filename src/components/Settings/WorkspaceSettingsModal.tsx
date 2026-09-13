@@ -543,6 +543,10 @@ const WorkspaceSettingsModal = ({
             workspaceId={workspaceId}
             agentId={sel.agentId ?? undefined}
             onChanged={onChanged}
+            onUnassigned={(removed) => {
+              handleAgentDeleted(removed);
+              navigateTo({ kind: 'team' });
+            }}
           />
         );
       }

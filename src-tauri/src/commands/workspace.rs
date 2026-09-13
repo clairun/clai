@@ -1137,7 +1137,13 @@ pub(crate) fn resolve_workspace_descriptor(
 ) -> Result<WorkspaceDescriptor, String> {
     let workspace_id = resolve_workspace_id(state, workspace_id)?;
     let (root_path, config) = load_workspace_config_for_id(state, &workspace_id)?;
-    let manager = config.main_agent.as_ref();
+    // Resolved, not stored: a workspace conversation runs under the same
+    // project context and grants as every other agent here.
+    let (config, roster) = state.resolve_roster_for(config)?;
+    let manager = roster
+        .iter()
+        .find(|resolved| matches!(resolved.source, AgentSource::Main))
+        .map(|resolved| &resolved.agent);
     let mut execution = manager
         .map(|agent| agent.execution.clone())
         .unwrap_or_default();
