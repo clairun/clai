@@ -4522,6 +4522,11 @@ mod tests {
         assert!(should_skip_fork_copy_path(Path::new(
             ".clai/data.sqlite-wal"
         )));
+        // The copy of the pre-agent-library config records what the *source*
+        // workspace had before migrating; a fork never had those agents.
+        assert!(should_skip_fork_copy_path(Path::new(
+            ".clai/config.pre-agent-library.json"
+        )));
         // Unrelated top-level children of `.clai/` are still copied
         // (e.g. user-installed skills, terminals, agent templates).
         assert!(!should_skip_fork_copy_path(Path::new(".clai/skills")));
