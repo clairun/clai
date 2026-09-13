@@ -362,7 +362,7 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { spaceId: string | null, roomId: string | null, workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
+export type SessionContext = { workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
 /**
  * The CLI provider that owns `cli_session_id`. A session id is
  * provider-specific (Claude generates its own UUID; Codex returns a

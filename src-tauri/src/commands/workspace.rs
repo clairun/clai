@@ -1726,8 +1726,6 @@ fn desired_workspace_context(
         .or_else(|| workspace_manager.map(|agent| agent.name.clone()));
 
     SessionContext {
-        space_id: existing_session.and_then(|session| session.context.space_id.clone()),
-        room_id: existing_session.and_then(|session| session.context.room_id.clone()),
         workspace_id: Some(descriptor.workspace_id.clone()),
         tool_scopes: descriptor.tool_scopes.clone(),
         mcp_server_ids,
@@ -1866,7 +1864,7 @@ pub async fn workspace_get_snapshot(
         .unwrap_or_default();
     let next_run_in_seconds = match default_workspace_agent_id.as_deref() {
         Some(manager_id) if schedule.wants_countdown() => {
-            let instance_id = AgentInstance::workspace_instance_id(manager_id);
+            let instance_id = AgentInstance::instance_id_for(manager_id);
             let scheduler = state.scheduler.lock().await;
             scheduler
                 .get_instance(&instance_id)

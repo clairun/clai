@@ -415,8 +415,6 @@ async fn execute_bound_tool(
         tool_call_id: None,
         cancel_token: binding.cancel_token.clone(),
         workspace_id: session.context.workspace_id.clone(),
-        space_id: session.context.space_id.clone(),
-        room_id: session.context.room_id.clone(),
         mcp_server_ids: session.context.mcp_server_ids.clone(),
         agent_workspace_id: session.context.agent_workspace_id.clone(),
         workspace_root,

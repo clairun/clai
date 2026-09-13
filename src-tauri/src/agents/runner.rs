@@ -224,25 +224,16 @@ async fn run_next_agent(
     tracing::info!(instance_id = %instance_id, "Running agent");
 
     // Get the instance details
-    let (agent_id, space_id, room_id) = {
+    let agent_id = {
         let sched = scheduler.lock().await;
         let instance = sched
             .get_instance(&instance_id)
             .ok_or_else(|| RunnerError::InstanceNotFound(instance_id.clone()))?;
 
-        (
-            instance.agent_id.clone(),
-            instance.space_id.clone(),
-            instance.room_id.clone(),
-        )
+        instance.agent_id.clone()
     };
 
-    tracing::debug!(
-        agent_id = %agent_id,
-        space_id = %space_id,
-        room_id = %room_id,
-        "Got agent instance"
-    );
+    tracing::debug!(agent_id = %agent_id, "Got agent instance");
 
     let agent_config = load_workspace_agent_as_config(state.inner(), &agent_id)?
         .ok_or_else(|| RunnerError::AgentNotFound(agent_id.clone()))?;
@@ -255,8 +246,6 @@ async fn run_next_agent(
     if !agent_config.enabled {
         tracing::info!(
             agent_id = %agent_id,
-            space_id = %space_id,
-            room_id = %room_id,
             "Automation is no longer enabled, removing instance"
         );
 
@@ -298,14 +287,8 @@ async fn run_next_agent(
 
     let connections = resolve_agent_connections(state.inner(), &agent_config)?;
 
-    let session = ensure_workspace_manager_session(
-        app_handle,
-        &workspace_pool,
-        &agent_config,
-        &space_id,
-        &room_id,
-    )
-    .await?;
+    let session =
+        ensure_workspace_manager_session(app_handle, &workspace_pool, &agent_config).await?;
 
     let result =
         run_scheduled_agent_with_fallback(app_handle, &workspace_pool, &session, &connections)
@@ -472,24 +455,11 @@ impl std::error::Error for RunnerError {}
 ///   call frame; outside one it's already `None`, and overwriting an
 ///   in-flight value here would be a data race anyway (this function is
 ///   called between turns, never during one).
-#[allow(clippy::too_many_arguments)]
 async fn ensure_workspace_manager_session(
     app_handle: &AppHandle,
     pool: &DbPool,
     agent_config: &crate::config::AgentConfig,
-    space_id: &str,
-    room_id: &str,
 ) -> Result<crate::assistant::types::AssistantSession, RunnerError> {
-    let session_space_id = if space_id.is_empty() {
-        None
-    } else {
-        Some(space_id.to_string())
-    };
-    let session_room_id = if room_id.is_empty() {
-        None
-    } else {
-        Some(room_id.to_string())
-    };
     let state = app_handle.state::<AppState>();
 
     // Load the workspace's agent roster so the manager session knows
@@ -516,8 +486,6 @@ async fn ensure_workspace_manager_session(
             })
     };
     let desired_context = SessionContext {
-        space_id: session_space_id.clone(),
-        room_id: session_room_id.clone(),
         workspace_id: Some(agent_config.workspace_id.clone()),
         tool_scopes: agent_config
             .required_tools()

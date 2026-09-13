@@ -476,8 +476,6 @@ fn task_session_context(
     let mcp_server_ids = target_config.selected_mcp_server_ids.clone();
 
     SessionContext {
-        space_id: context.space_id.clone(),
-        room_id: context.room_id.clone(),
         workspace_id: Some(workspace_id.to_string()),
         tool_scopes: target_config
             .required_tools()

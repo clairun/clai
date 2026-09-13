@@ -1963,8 +1963,6 @@ mod tests {
             tool_call_id: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             workspace_id: Some("ws".to_string()),
-            space_id: None,
-            room_id: None,
             mcp_server_ids: Vec::new(),
             agent_workspace_id: None,
             workspace_root: Some(workspace_root.to_path_buf()),

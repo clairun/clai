@@ -253,7 +253,7 @@ pub(crate) fn build_system_prompt(
         );
     }
 
-    if context.space_id.is_some() || !context.mcp_server_ids.is_empty() {
+    if !context.mcp_server_ids.is_empty() {
         prompt.push_str(
             "- This tab already carries session-specific context and capabilities. \
              Use the MCP tools attached to this session when they are relevant.\n",
