@@ -310,15 +310,10 @@ fn drop_redundant_read_grants(
     home: Option<&Path>,
 ) -> Vec<ResolvedGrant> {
     let canonical = canonical_grant_roots(&grants);
-    let mask = grants.first().and_then(|workspace| {
-        crate::assistant::sandbox::profile::workspace_mask(&workspace.root, home)
-    });
-    let canonical_home = home.map(|home| {
-        resolve_symlinks_through_existing_ancestor(home).unwrap_or_else(|_| home.to_path_buf())
-    });
-    let canonical_mask = canonical.first().and_then(|workspace| {
-        crate::assistant::sandbox::profile::workspace_mask(workspace, canonical_home.as_deref())
-    });
+    let (mask, canonical_mask) = grants
+        .first()
+        .map(|workspace| workspace_masks(&workspace.root, home))
+        .unwrap_or((None, None));
     let write_roots: Vec<(PathBuf, PathBuf)> = grants
         .iter()
         .zip(canonical.iter())
@@ -521,9 +516,6 @@ fn resolve_allowed_cwd_with_home(
         )
     })?;
     let grant_roots = canonical_grant_roots(grants);
-    let home = home.map(|home| {
-        resolve_symlinks_through_existing_ancestor(home).unwrap_or_else(|_| home.to_path_buf())
-    });
 
     // Workspace isolation: an agent reaches its own workspace and HOME, but not
     // sibling workspaces — even though they sit under the same HOME grant. The
@@ -531,11 +523,13 @@ fn resolve_allowed_cwd_with_home(
     // workspace root; its parent holds all workspaces). A grant that's only a
     // *broad ancestor* of that container (e.g. `$HOME`) does not authorize a
     // path inside it; only a grant rooted at-or-below the container does (the
-    // own workspace, or another workspace the user explicitly granted). See
-    // `sandbox::profile::workspace_mask`.
-    let mask = grant_roots.first().and_then(|workspace_root| {
-        crate::assistant::sandbox::profile::workspace_mask(workspace_root, home.as_deref())
-    });
+    // own workspace, or another workspace the user explicitly granted). The
+    // candidate is symlink-resolved, so the resolved spelling of the mask is
+    // the one to compare it against. See `sandbox::profile::workspace_mask`.
+    let (_, mask) = grants
+        .first()
+        .map(|workspace| workspace_masks(&workspace.root, home))
+        .unwrap_or((None, None));
 
     let allowed = grant_roots
         .iter()
@@ -548,6 +542,28 @@ fn resolve_allowed_cwd_with_home(
     }
 
     Ok(requested)
+}
+
+/// The workspace container the sandbox backends mask, in the two spellings the
+/// grant fold and the cwd check compare against: the configured one, which is
+/// what the backends write into the profile, and the symlink-resolved one,
+/// which is what the kernel ends up enforcing.
+///
+/// Both come from the *configured* workspace root and HOME, exactly as the
+/// backends derive the mask (`profile::workspace_mask`, then
+/// `canonicalize` in seatbelt); only the result is resolved. Resolving the
+/// workspace root first and taking *its* parent would name a different
+/// directory whenever the workspace entry is itself a symlink — masking a
+/// directory no backend masks, and so revoking write access the grants give.
+fn workspace_masks(
+    workspace_root: &Path,
+    home: Option<&Path>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let lexical = crate::assistant::sandbox::profile::workspace_mask(workspace_root, home);
+    let canonical = lexical.as_deref().map(|mask| {
+        resolve_symlinks_through_existing_ancestor(mask).unwrap_or_else(|_| mask.to_path_buf())
+    });
+    (lexical, canonical)
 }
 
 /// True when `grant_root` authorizes `path`: it contains it, and the workspace
@@ -2167,6 +2183,57 @@ mod tests {
         );
         resolve_allowed_cwd_with_home(link.to_str().unwrap(), &folded, None)
             .expect("the granted path must still resolve as a shell cwd");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_workspace_masks_its_container_not_its_target_s_parent() {
+        // The workspace entry is a symlink: `<home>/.clai/workspaces/ws` points
+        // at `<home>/projects/ws`. The container the backends mask is still
+        // `<home>/.clai/workspaces`. Deriving the mask from the *resolved*
+        // workspace instead would mask `<home>/projects`, so the read grant on
+        // `projects/notes` would look unauthorized by the read-write `$HOME`
+        // grant, survive the fold, and land as a read-only bind under a
+        // read-write one — revoking write access the user granted.
+        let (_base_dir, home) = canonical_tempdir();
+        let container = home.join(".clai").join("workspaces");
+        let notes = home.join("projects").join("notes");
+        let target = home.join("projects").join("ws");
+        let sibling = container.join("other");
+        for dir in [&container, &notes, &target, &sibling] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let workspace = container.join("ws");
+        std::os::unix::fs::symlink(&target, &workspace).unwrap();
+
+        let folded = drop_redundant_read_grants(
+            vec![
+                grant_for(&workspace),
+                grant_for(&home),
+                ResolvedGrant {
+                    root: notes.clone(),
+                    access: AccessKind::ReadOnly,
+                },
+                ResolvedGrant {
+                    root: sibling.clone(),
+                    access: AccessKind::ReadOnly,
+                },
+            ],
+            Some(&home),
+        );
+
+        assert!(
+            !folded.iter().any(|grant| grant.root == notes),
+            "$HOME covers projects/notes, so a read-only bind there only revokes write; got {:?}",
+            roots(&folded)
+        );
+        assert!(
+            folded.iter().any(|grant| grant.root == sibling),
+            "the masked container still hides sibling workspaces from the $HOME grant; got {:?}",
+            roots(&folded)
+        );
+        resolve_allowed_cwd_with_home(notes.to_str().unwrap(), &folded, Some(&home))
+            .expect("$HOME must still authorize a directory beside the workspace target");
     }
 
     #[test]
