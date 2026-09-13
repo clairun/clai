@@ -41,7 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-write `/srv/data` revoked write on `docs`, while macOS kept it. The
   nested read-only entry is now dropped before the profile is built, on every
   platform — including inside the workspace root, which is read-write by
-  definition.
+  definition. A workspace you granted explicitly is no longer swallowed by the
+  mask that hides the others: on Linux it is now mounted after that mask rather
+  than before it, so the grant survives, as it already did on macOS.
 
 ### Changed
 

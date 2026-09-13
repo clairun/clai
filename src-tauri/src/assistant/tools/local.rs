@@ -549,8 +549,8 @@ fn resolve_allowed_cwd_with_home(
 /// what the backends write into the profile, and the symlink-resolved one,
 /// which is what the kernel ends up enforcing.
 ///
-/// Both come from the *configured* workspace root and HOME, exactly as the
-/// backends derive the mask (`profile::workspace_mask`, then
+/// Both come from the *configured* workspace root and HOME — the spellings the
+/// backends themselves derive the mask from (`profile::workspace_mask`, then
 /// `canonicalize` in seatbelt); only the result is resolved. Resolving the
 /// workspace root first and taking *its* parent would name a different
 /// directory whenever the workspace entry is itself a symlink — masking a
@@ -1230,11 +1230,7 @@ fn path_already_covered(
         crate::assistant::sandbox::profile::workspace_mask(&ws.root, real_host_home().as_deref())
     });
     grants.iter().any(|grant| {
-        let covers_path = path == grant.root || path.starts_with(&grant.root);
-        if !covers_path {
-            return false;
-        }
-        if grant_masked_for_candidate(&grant.root, path, mask.as_deref()) {
+        if !grant_authorizes(&grant.root, path, mask.as_deref()) {
             return false;
         }
         match (grant.access, required) {
@@ -2183,6 +2179,82 @@ mod tests {
         );
         resolve_allowed_cwd_with_home(link.to_str().unwrap(), &folded, None)
             .expect("the granted path must still resolve as a shell cwd");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_grant_resolving_into_the_write_grant_survives_under_its_own_name() {
+        // `link -> data/sub` lands inside the read-write `data` grant, so the
+        // canonical view alone would call the read grant redundant. But the
+        // backends bind what was configured, and nothing binds `link`: the
+        // agent reaches its target only through the grant on the link itself.
+        // Only the lexical half of the rule sees that.
+        let (_base_dir, base) = canonical_tempdir();
+        let workspace = base.join("ws");
+        let data = base.join("data");
+        let sub = data.join("sub");
+        let elsewhere = base.join("elsewhere");
+        for dir in [&workspace, &sub, &elsewhere] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let link = elsewhere.join("link");
+        std::os::unix::fs::symlink(&sub, &link).unwrap();
+
+        let folded = drop_redundant_read_grants(
+            vec![
+                grant_for(&workspace),
+                grant_for(&data),
+                ResolvedGrant {
+                    root: link.clone(),
+                    access: AccessKind::ReadOnly,
+                },
+            ],
+            None,
+        );
+
+        assert!(
+            folded.iter().any(|grant| grant.root == link),
+            "nothing else is bound at the link's own name; got {:?}",
+            roots(&folded)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_into_the_masked_container_is_not_covered_by_the_home_grant() {
+        // `<home>/shortcut -> <home>/.clai/workspaces/other` spells a sibling
+        // workspace from outside the masked container, so the lexical view sees
+        // an ordinary path under the read-write `$HOME` grant. The mask applies
+        // where the path resolves, which is the whole point of asking the
+        // canonical view too: drop this grant and the sibling the user granted
+        // becomes unreachable, since the mask hides the container it lives in.
+        let (_base_dir, home) = canonical_tempdir();
+        let container = home.join(".clai").join("workspaces");
+        let workspace = container.join("ws");
+        let sibling = container.join("other");
+        for dir in [&workspace, &sibling] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let shortcut = home.join("shortcut");
+        std::os::unix::fs::symlink(&sibling, &shortcut).unwrap();
+
+        let folded = drop_redundant_read_grants(
+            vec![
+                grant_for(&workspace),
+                grant_for(&home),
+                ResolvedGrant {
+                    root: shortcut.clone(),
+                    access: AccessKind::ReadOnly,
+                },
+            ],
+            Some(&home),
+        );
+
+        assert!(
+            folded.iter().any(|grant| grant.root == shortcut),
+            "the $HOME grant does not authorize what the mask hides; got {:?}",
+            roots(&folded)
+        );
     }
 
     #[cfg(unix)]
