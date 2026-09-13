@@ -427,8 +427,36 @@ pub fn persist_decisions_to_agent(
         return Ok(());
     }
 
+    // A teammate's command allowances belong to its shared definition: the user
+    // is saying "this reviewer may run `cargo test`", not "…but only in this
+    // project", and re-approving the same command in every workspace is the
+    // annoyance the agent library exists to remove. Path grants go the other
+    // way (see `path_grants::persist_grant_to_agent`) because a path is about
+    // this machine and this project, not about the teammate.
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let workspace = workspace_config::load(&root).map_err(|e| e.to_string())?;
+    if let Some(assignment) = workspace.assignment(agent_id) {
+        return crate::commands::global_agents::update_definition(
+            state,
+            &assignment.agent_definition_id,
+            |definition| {
+                if apply_decisions_to_shell_policy(&mut definition.behavior, decisions) {
+                    definition.revision += 1;
+                    definition.behavior.updated_at = chrono::Utc::now().timestamp_millis();
+                }
+            },
+        );
+    }
+
+    // The Main has no shared definition, so its decisions stay in the workspace.
     state.update_workspace_config(workspace_id, |config| {
-        let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
+        let Some(agent) = config
+            .main_agent
+            .as_mut()
+            .filter(|agent| agent.id == agent_id)
+        else {
             return Err(format!("Workspace agent not found: {}", agent_id));
         };
         if apply_decisions_to_shell_policy(agent, decisions) {
@@ -802,5 +830,112 @@ mod tests {
             rx.await.is_err(),
             "purge drops the sender after cancellation"
         );
+    }
+}
+
+#[cfg(test)]
+mod approval_routing_tests {
+    //! A command allowance follows the teammate; a workspace's Main keeps its
+    //! own.
+
+    use super::*;
+    use crate::commands::path_grants::approval_destination_tests::*;
+
+    fn allow(prefix: &str) -> SegmentDecision {
+        SegmentDecision::AllowAlways {
+            scope: PermissionScope::Agent,
+            prefix: prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_teammates_always_allow_is_saved_on_the_shared_definition() {
+        let fixture = Fixture::new();
+
+        persist_decisions_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            ASSIGNMENT_ID,
+            &[allow("cargo test")],
+        )
+        .expect("persist");
+
+        let definition = fixture.definition();
+        assert!(definition
+            .behavior
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cargo test".to_string()));
+        assert_eq!(
+            definition.revision, 2,
+            "the shared edit is a new revision, so a stale form cannot revert it"
+        );
+        assert!(
+            fixture
+                .config()
+                .main_agent
+                .expect("main")
+                .execution
+                .shell
+                .allowed_command_prefixes
+                .iter()
+                .all(|prefix| prefix != "cargo test"),
+            "the workspace Main does not inherit a teammate's allowance"
+        );
+    }
+
+    #[test]
+    fn the_mains_always_allow_stays_in_its_workspace() {
+        let fixture = Fixture::new();
+
+        persist_decisions_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            MAIN_ID,
+            &[allow("cargo test")],
+        )
+        .expect("persist");
+
+        assert!(fixture
+            .config()
+            .main_agent
+            .expect("main")
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cargo test".to_string()));
+        assert_eq!(
+            fixture.definition().revision,
+            1,
+            "no shared definition was touched"
+        );
+        assert!(
+            fixture
+                .other_config()
+                .main_agent
+                .expect("other main")
+                .execution
+                .shell
+                .allowed_command_prefixes
+                .iter()
+                .all(|prefix| prefix != "cargo test"),
+            "another workspace's Main is a different agent"
+        );
+    }
+
+    #[test]
+    fn once_only_decisions_persist_nothing() {
+        let fixture = Fixture::new();
+
+        persist_decisions_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            ASSIGNMENT_ID,
+            &[SegmentDecision::AllowOnce],
+        )
+        .expect("persist");
+
+        assert_eq!(fixture.definition().revision, 1);
     }
 }

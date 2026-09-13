@@ -7,7 +7,8 @@ use crate::assistant::types::{
     AssistantMessage, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
     SessionContext, SessionKind,
 };
-use crate::config::{workspace_config, AgentConfig, AppConfig, WorkspaceAgent, WorkspaceConfig};
+use crate::config::global_agents::{AgentSource, ResolvedAgent};
+use crate::config::{workspace_config, AgentConfig, AppConfig, WorkspaceConfig};
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -468,11 +469,7 @@ fn task_session_context(
     workspace_id: &str,
     target_config: &AgentConfig,
 ) -> SessionContext {
-    let mcp_server_ids = if context.mcp_server_ids.is_empty() {
-        target_config.selected_mcp_server_ids.clone()
-    } else {
-        context.mcp_server_ids.clone()
-    };
+    let mcp_server_ids = target_config.selected_mcp_server_ids.clone();
 
     SessionContext {
         space_id: context.space_id.clone(),
@@ -547,25 +544,12 @@ fn load_workspace_agent_rows(
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .get();
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    let mut rows: Vec<_> = config
-        .agents
+    let (config, roster) = state.resolve_workspace_roster(workspace_id)?;
+    let mut rows: Vec<_> = roster
         .iter()
-        .map(|agent| workspace_agent_row_from_config(&app_config, &config, agent))
+        .map(|resolved| workspace_agent_row_from_config(&app_config, &config, resolved))
         .collect();
-    rows.sort_by_key(|row| {
-        (
-            if row.id == config.default_agent_id {
-                0
-            } else {
-                1
-            },
-            row.id.clone(),
-        )
-    });
+    rows.sort_by_key(|row| (if row.role == "manager" { 0 } else { 1 }, row.id.clone()));
     Ok(rows)
 }
 
@@ -653,14 +637,20 @@ fn find_workspace_agent_for_definition(
 fn workspace_agent_row_from_config(
     app_config: &AppConfig,
     workspace: &WorkspaceConfig,
-    agent: &WorkspaceAgent,
+    resolved: &ResolvedAgent,
 ) -> WorkspaceAgentRow {
+    let agent = &resolved.agent;
     WorkspaceAgentRow {
         id: agent.id.clone(),
         workspace_id: workspace.id.clone(),
-        agent_definition_id: agent.id.clone(),
+        // The shared definition for a teammate, the local id for the Main.
+        // Callers address agents by the local id; this is provenance only.
+        agent_definition_id: resolved
+            .definition_id()
+            .unwrap_or(agent.id.as_str())
+            .to_string(),
         display_name: None,
-        role: if workspace.default_agent_id == agent.id {
+        role: if matches!(resolved.source, AgentSource::Main) {
             "manager".to_string()
         } else {
             "member".to_string()

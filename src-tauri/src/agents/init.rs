@@ -76,12 +76,10 @@ pub fn apply_workspace_schedule(
     sched: &mut crate::agents::scheduler::Scheduler,
     config: &crate::config::WorkspaceConfig,
 ) {
-    // The workspace schedule fires the workspace's default (manager) agent.
-    let Some(agent) = config
-        .agents
-        .iter()
-        .find(|agent| agent.id == config.default_agent_id)
-    else {
+    // The workspace schedule fires the workspace's own Main agent. A shared
+    // definition never becomes a scheduler key: the same teammate assigned in
+    // five workspaces would collide on one instance.
+    let Some(agent) = config.main_agent.as_ref() else {
         return;
     };
 

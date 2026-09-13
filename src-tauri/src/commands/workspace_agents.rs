@@ -1,9 +1,11 @@
-//! Workspace-scoped agent CRUD commands.
+//! Workspace-scoped agent commands.
 //!
-//! Agents live inside `<workspace>/.clai/config.json`. The command payloads
-//! intentionally preserve the previous SQLite-backed wire shape.
-
-use std::path::PathBuf;
+//! A workspace owns exactly one agent outright: its Main, stored in
+//! `<workspace>/.clai/config.json` and editable here. Teammates are app-level
+//! definitions ([`crate::commands::global_agents`]) made callable by an
+//! assignment; the only parts of them a workspace may change are the local
+//! overlays, which is why the update path below refuses an assignment id
+//! instead of writing a copy of shared behavior into the workspace file.
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -98,13 +100,12 @@ pub async fn workspace_get_agent(
     agent_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<WorkspaceAgentDetail>, String> {
-    let (_root, config) = load_workspace_config(state.inner(), &workspace_id)?;
+    let (config, roster) = state.resolve_workspace_roster(&workspace_id)?;
     let app_config = app_config(state.inner())?;
-    Ok(config
-        .agents
+    Ok(roster
         .iter()
-        .find(|agent| agent.id == agent_id)
-        .map(|agent| detail_from_agent(&app_config, &config, agent)))
+        .find(|resolved| resolved.agent.id == agent_id)
+        .map(|resolved| detail_from_agent(&app_config, &config, &resolved.agent)))
 }
 
 #[tauri::command]
@@ -140,18 +141,23 @@ pub async fn workspace_create_agent(
         updated_at: now,
     };
     let ((), config) = state.update_workspace_config(&request.workspace_id, |config| {
-        if config.agents.iter().any(|agent| agent.id == id) {
-            return Err(format!("Workspace agent already exists: {}", id));
+        // Creating an agent means setting up this workspace's Main. Teammates
+        // are assigned from the library, never created here, so a workspace
+        // that already has a Main has nothing left to create.
+        if let Some(existing) = config.main_agent.as_ref() {
+            return Err(format!(
+                "This workspace already has a Main agent ({}). Assign teammates from the agent library instead.",
+                existing.id
+            ));
         }
         config.updated_at = now;
-        config.agents.push(agent);
+        config.main_agent = Some(agent);
         Ok(())
     })?;
 
     let saved = config
-        .agents
-        .iter()
-        .find(|agent| agent.id == id)
+        .main_agent
+        .as_ref()
         .ok_or_else(|| "Workspace agent disappeared between write and read-back".to_string())?;
     Ok(detail_from_agent(&app_config, &config, saved))
 }
@@ -166,10 +172,16 @@ pub async fn workspace_update_agent(
     let agent_id = request.agent_id.clone();
     let workspace_id = request.workspace_id.clone();
     let ((), config) = state.update_workspace_config(&workspace_id, |config| {
+        if config.assignment(&request.agent_id).is_some() {
+            return Err(
+                "This teammate's behavior is shared. Edit it in the agent library, or change its local context and access in the workspace team settings."
+                    .to_string(),
+            );
+        }
         let Some(agent) = config
-            .agents
-            .iter_mut()
-            .find(|agent| agent.id == request.agent_id)
+            .main_agent
+            .as_mut()
+            .filter(|agent| agent.id == request.agent_id)
         else {
             return Err(format!("Workspace agent not found: {}", request.agent_id));
         };
@@ -193,9 +205,9 @@ pub async fn workspace_update_agent(
     })?;
 
     let saved = config
-        .agents
-        .iter()
-        .find(|agent| agent.id == agent_id)
+        .main_agent
+        .as_ref()
+        .filter(|agent| agent.id == agent_id)
         .ok_or_else(|| format!("Workspace agent not found after update: {}", agent_id))?;
     Ok(detail_from_agent(&app_config, &config, saved))
 }
@@ -207,17 +219,25 @@ pub async fn workspace_delete_agent(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.update_workspace_config(&workspace_id, |config| {
-        if config.default_agent_id == agent_id {
+        if config.main_agent_id() == agent_id {
             return Err(
-                "Cannot delete the workspace's manager agent. Designate a different manager first."
+                "Cannot delete the workspace's Main agent. Every workspace has exactly one."
                     .to_string(),
             );
         }
 
-        let before = config.agents.len();
-        config.agents.retain(|agent| agent.id != agent_id);
-        if config.agents.len() == before {
-            return Err(format!("Workspace agent not found: {}", agent_id));
+        // Unassigning drops the local identity and its local overlays. The
+        // shared definition — and every other workspace using it — is
+        // untouched.
+        let before = config.assignments.len();
+        config
+            .assignments
+            .retain(|assignment| assignment.id != agent_id);
+        if config.assignments.len() == before {
+            return Err(format!(
+                "Workspace agent assignment not found: {}",
+                agent_id
+            ));
         }
 
         config.updated_at = now_millis();
@@ -233,13 +253,28 @@ pub async fn workspace_set_agent_enabled(
 ) -> Result<WorkspaceAgentDetail, String> {
     let app_config = app_config(state.inner())?;
     let now = now_millis();
-    let ((), config) = state.update_workspace_config(&request.workspace_id, |config| {
-        let Some(agent) = config
-            .agents
+    let workspace_id = request.workspace_id.clone();
+    let agent_id = request.agent_id.clone();
+    state.update_workspace_config(&workspace_id, |config| {
+        // Enabling is local for both kinds: an assignment carries its own
+        // switch precisely so one workspace can park a teammate without
+        // disabling it everywhere else.
+        if let Some(assignment) = config
+            .assignments
             .iter_mut()
-            .find(|agent| agent.id == request.agent_id)
+            .find(|assignment| assignment.id == agent_id)
+        {
+            assignment.enabled = request.enabled;
+            assignment.updated_at = now;
+            config.updated_at = now;
+            return Ok(());
+        }
+        let Some(agent) = config
+            .main_agent
+            .as_mut()
+            .filter(|agent| agent.id == agent_id)
         else {
-            return Err(format!("Workspace agent not found: {}", request.agent_id));
+            return Err(format!("Workspace agent not found: {}", agent_id));
         };
         agent.enabled = request.enabled;
         agent.updated_at = now;
@@ -247,28 +282,12 @@ pub async fn workspace_set_agent_enabled(
         Ok(())
     })?;
 
-    let saved = config
-        .agents
+    let (config, roster) = state.resolve_workspace_roster(&workspace_id)?;
+    let saved = roster
         .iter()
-        .find(|agent| agent.id == request.agent_id)
-        .ok_or_else(|| {
-            format!(
-                "Workspace agent not found after toggle: {}",
-                request.agent_id
-            )
-        })?;
-    Ok(detail_from_agent(&app_config, &config, saved))
-}
-
-fn load_workspace_config(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<(PathBuf, WorkspaceConfig), String> {
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    Ok((root, config))
+        .find(|resolved| resolved.agent.id == agent_id)
+        .ok_or_else(|| format!("Workspace agent not found after toggle: {}", agent_id))?;
+    Ok(detail_from_agent(&app_config, &config, &saved.agent))
 }
 
 fn app_config(state: &AppState) -> Result<AppConfig, String> {
@@ -294,7 +313,7 @@ pub(crate) fn detail_from_agent(
         provider_connection_ids: agent.provider_connection_ids.clone(),
         execution: agent.execution.clone(),
         enabled: agent.enabled,
-        is_default: workspace.default_agent_id == agent.id,
+        is_default: workspace.main_agent_id() == agent.id,
         created_at: agent.created_at,
         updated_at: agent.updated_at,
     }

@@ -70,17 +70,21 @@ fn load_workspace_agent_as_config(
         .locators_sorted();
 
     for locator in locators {
-        let config = workspace_config::load(&locator.root_path).map_err(|e| {
+        let (config, roster) = state.resolve_workspace_roster(&locator.id).map_err(|e| {
             RunnerError::AssistantPersistence(format!("Failed to load workspace config: {}", e))
         })?;
-        if let Some(agent) = config.agents.iter().find(|agent| agent.id == id) {
+        if let Some(agent) = roster
+            .iter()
+            .map(|resolved| &resolved.agent)
+            .find(|agent| agent.id == id)
+        {
             let created_at = chrono::DateTime::from_timestamp_millis(agent.created_at)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_default();
             let updated_at = chrono::DateTime::from_timestamp_millis(agent.updated_at)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_default();
-            let is_manager = agent.id == config.default_agent_id;
+            let is_manager = agent.id == config.main_agent_id();
             return Ok(Some(AgentConfig {
                 id: agent.id.clone(),
                 workspace_id: config.id,

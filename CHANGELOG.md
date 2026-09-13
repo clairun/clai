@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agents are shared across workspaces.** Settings gains an *Agents* tab: a
+  library of teammate definitions — instructions, skills, providers, MCP
+  selection, shell policy — that any workspace can add to its team. One edit
+  reaches every workspace using that agent, from its next turn. Each workspace
+  still owns its *Main* agent outright, along with its history, schedule,
+  memory and files, and adds the strictly local parts of a teammate itself:
+  whether it is enabled here, the context it works under, and the paths it may
+  touch. A workspace-level *Team* section carries project context and the
+  grants every agent here receives.
+- **Approvals are saved where they belong.** An "always allow" for a command is
+  saved on the shared agent, because the judgement is about the agent. A path
+  grant approved during a run is saved on the local assignment, because the
+  judgement is about this machine and this project — approving it in one
+  workspace never widens access in another.
+
+### Changed
+
+- **Agent templates are gone.** The two embedded templates and their
+  `agent_templates_list` command are removed; a shared agent created once in the
+  library is the reusable thing they were approximating. Bundled skills are
+  unaffected. This also retires the `sow-tracker` template, which had been
+  requesting a skill that no longer exists.
+- **A workspace config now stores a `mainAgent` and its assignments** instead of
+  a flat `agents` array with a `defaultAgentId` pointer. Configs written before
+  this recover exactly the agent that pointer selected, keeping its id, policy
+  and history; other agents in the old list are ignored, and shared teammates
+  are re-created deliberately. An ambiguous or unreadable selection leaves the
+  workspace in its normal setup state with files and history intact.
+- **`workspace_set_default_agent` is removed.** A workspace has one Main and it
+  is edited in place; pointing it at a shared teammate would have dragged that
+  teammate's other workspaces along.
+
 ### Code quality
 
 - **The Rust crate now has a lint policy.** `Cargo.toml` carries an explicit

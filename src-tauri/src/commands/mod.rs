@@ -3,10 +3,10 @@
 //! This module exposes Rust functionality to the JavaScript frontend.
 //! Each submodule contains related commands grouped by functionality.
 
-pub mod agent_templates;
 pub mod app_info;
 pub mod app_updates;
 pub mod assistant;
+pub mod global_agents;
 pub mod mcp_servers;
 pub mod path_grants;
 pub mod permissions;

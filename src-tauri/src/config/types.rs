@@ -709,6 +709,8 @@ fn default_workspace_dirs() -> Vec<PathBuf> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
+    #[serde(default)]
+    pub agent_definitions: Vec<super::global_agents::AgentDefinition>,
     #[serde(default = "default_app_config_version")]
     pub version: u32,
 
@@ -748,6 +750,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            agent_definitions: Vec::new(),
             version: default_app_config_version(),
             workspace_dirs: default_workspace_dirs(),
             ai_provider: None,
