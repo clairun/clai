@@ -829,46 +829,56 @@ mod tests {
             home.path(),
             SandboxSessionBusMode::Deny,
         );
-        command.profile.path_grants = vec![
-            SandboxPathGrant {
-                host_path: home.path().to_path_buf(),
-                access: SandboxPathAccess::ReadOnly,
-            },
-            SandboxPathGrant {
-                host_path: container.clone(),
-                access: SandboxPathAccess::ReadWrite,
-            },
-        ];
-
-        let args = bwrap_args(&command).unwrap();
-        let rendered: Vec<String> = args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-
         let home_str = home.path().to_string_lossy().into_owned();
         let container_str = container.to_string_lossy().into_owned();
-        let home_bind_idx = rendered
-            .windows(3)
-            .position(|w| w[0] == "--ro-bind-try" && w[1] == home_str && w[2] == home_str)
-            .unwrap_or_else(|| panic!("home should be bound read-only; got {rendered:?}"));
-        let tmpfs_idx = rendered
-            .windows(2)
-            .position(|w| w[0] == "--tmpfs" && w[1] == container_str)
-            .unwrap_or_else(|| panic!("container should be masked with --tmpfs; got {rendered:?}"));
-        let container_bind_idx = rendered
-            .windows(3)
-            .position(|w| w[0] == "--bind-try" && w[1] == container_str && w[2] == container_str)
-            .unwrap_or_else(|| panic!("granted container should be bound; got {rendered:?}"));
 
-        assert!(
-            home_bind_idx < tmpfs_idx,
-            "the broad home bind must stay under the mask; got {rendered:?}"
-        );
-        assert!(
-            tmpfs_idx < container_bind_idx,
-            "the explicit container grant must be bound on top of the mask; got {rendered:?}"
-        );
+        // Both access levels: a read-only container grant is just as explicit,
+        // and just as revoked if the mask lands on top of it.
+        for (access, flag) in [
+            (SandboxPathAccess::ReadWrite, "--bind-try"),
+            (SandboxPathAccess::ReadOnly, "--ro-bind-try"),
+        ] {
+            command.profile.path_grants = vec![
+                SandboxPathGrant {
+                    host_path: home.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                },
+                SandboxPathGrant {
+                    host_path: container.clone(),
+                    access,
+                },
+            ];
+
+            let args = bwrap_args(&command).unwrap();
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+
+            let home_bind_idx = rendered
+                .windows(3)
+                .position(|w| w[0] == "--ro-bind-try" && w[1] == home_str && w[2] == home_str)
+                .unwrap_or_else(|| panic!("home should be bound read-only; got {rendered:?}"));
+            let tmpfs_idx = rendered
+                .windows(2)
+                .position(|w| w[0] == "--tmpfs" && w[1] == container_str)
+                .unwrap_or_else(|| {
+                    panic!("container should be masked with --tmpfs; got {rendered:?}")
+                });
+            let container_bind_idx = rendered
+                .windows(3)
+                .position(|w| w[0] == flag && w[1] == container_str && w[2] == container_str)
+                .unwrap_or_else(|| panic!("granted container should be bound; got {rendered:?}"));
+
+            assert!(
+                home_bind_idx < tmpfs_idx,
+                "the broad home bind must stay under the mask; got {rendered:?}"
+            );
+            assert!(
+                tmpfs_idx < container_bind_idx,
+                "the {flag} container grant must be bound on top of the mask; got {rendered:?}"
+            );
+        }
     }
 
     #[test]

@@ -289,33 +289,53 @@ fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant
 /// meaning one thing on both platforms — including inside the workspace root,
 /// which is read-write and must not be shadowed by a read-only grant under it.
 ///
-/// "Covers" is the same question `resolve_allowed_cwd` asks, mask and all: a
-/// broad `$HOME` grant does **not** authorize paths inside the workspace
-/// container, so a read-only grant on a sibling workspace is the only thing
-/// exposing it and must survive. Dropping it would revoke access the user
-/// explicitly granted, and — because session grants are folded too — leave the
-/// agent unable to win it back by approving the request again.
+/// "Covers" is the same question `resolve_allowed_cwd` asks, and it is asked
+/// twice — once on the configured spelling, which is what the backends bind,
+/// and once on the symlink-resolved one, which is what the agent actually
+/// reaches. A read grant is redundant only if both agree, because either view
+/// alone drops grants that are the sole route to their target:
+///
+/// - Lexically, a broad `$HOME` grant contains a sibling workspace, but the
+///   container mask means it does not *authorize* it; the sibling's own read
+///   grant is what exposes it.
+/// - Canonically, `own/link -> /mnt/data` resolves outside the read-write
+///   workspace that lexically contains it, so the workspace grant reaches
+///   nothing there.
+///
+/// Dropping either would revoke access the user explicitly granted — and
+/// because session grants are folded too, leave the agent unable to win it back
+/// by approving the request again.
 fn drop_redundant_read_grants(
     grants: Vec<ResolvedGrant>,
     home: Option<&Path>,
 ) -> Vec<ResolvedGrant> {
+    let canonical = canonical_grant_roots(&grants);
     let mask = grants.first().and_then(|workspace| {
         crate::assistant::sandbox::profile::workspace_mask(&workspace.root, home)
     });
-    let write_roots: Vec<PathBuf> = grants
+    let canonical_home = home.map(|home| {
+        resolve_symlinks_through_existing_ancestor(home).unwrap_or_else(|_| home.to_path_buf())
+    });
+    let canonical_mask = canonical.first().and_then(|workspace| {
+        crate::assistant::sandbox::profile::workspace_mask(workspace, canonical_home.as_deref())
+    });
+    let write_roots: Vec<(PathBuf, PathBuf)> = grants
         .iter()
-        .filter(|grant| grant.access == AccessKind::ReadWrite)
-        .map(|grant| grant.root.clone())
+        .zip(canonical.iter())
+        .filter(|(grant, _)| grant.access == AccessKind::ReadWrite)
+        .map(|(grant, canonical)| (grant.root.clone(), canonical.clone()))
         .collect();
     grants
         .into_iter()
-        .filter(|grant| {
+        .zip(canonical)
+        .filter(|(grant, canonical)| {
             grant.access == AccessKind::ReadWrite
-                || !write_roots.iter().any(|root| {
-                    grant.root.starts_with(root)
-                        && !grant_masked_for_candidate(root, &grant.root, mask.as_deref())
+                || !write_roots.iter().any(|(root, canonical_root)| {
+                    grant_authorizes(root, &grant.root, mask.as_deref())
+                        && grant_authorizes(canonical_root, canonical, canonical_mask.as_deref())
                 })
         })
+        .map(|(grant, _)| grant)
         .collect()
 }
 
@@ -517,10 +537,9 @@ fn resolve_allowed_cwd_with_home(
         crate::assistant::sandbox::profile::workspace_mask(workspace_root, home.as_deref())
     });
 
-    let allowed = grant_roots.iter().any(|root| {
-        candidate.starts_with(root)
-            && !grant_masked_for_candidate(root, &candidate, mask.as_deref())
-    });
+    let allowed = grant_roots
+        .iter()
+        .any(|root| grant_authorizes(root, &candidate, mask.as_deref()));
     if !allowed {
         return Err(format!(
             "Path {} is outside the agent's allowed filesystem grants",
@@ -529,6 +548,12 @@ fn resolve_allowed_cwd_with_home(
     }
 
     Ok(requested)
+}
+
+/// True when `grant_root` authorizes `path`: it contains it, and the workspace
+/// mask doesn't stand between them.
+fn grant_authorizes(grant_root: &Path, path: &Path, mask: Option<&Path>) -> bool {
+    path.starts_with(grant_root) && !grant_masked_for_candidate(grant_root, path, mask)
 }
 
 /// True when `grant_root` is only a broad *ancestor* of the masked workspace
@@ -2108,6 +2133,42 @@ mod tests {
                 ("/home/me/.clai/workspaces", true),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_grant_pointing_out_of_the_write_grant_through_a_symlink_survives() {
+        // Lexical containment is not coverage: `own/link` sits inside the
+        // read-write workspace but resolves outside it, so the workspace grant
+        // does not authorize what the user granted. `resolve_allowed_cwd`
+        // canonicalizes before asking, and the fold has to ask the same
+        // question or it revokes the only grant that reaches the target.
+        let (_base_dir, base) = canonical_tempdir();
+        let workspace = base.join("own");
+        let outside = base.join("outside");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let link = workspace.join("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let folded = drop_redundant_read_grants(
+            vec![
+                grant_for(&workspace),
+                ResolvedGrant {
+                    root: link.clone(),
+                    access: AccessKind::ReadOnly,
+                },
+            ],
+            None,
+        );
+
+        assert!(
+            folded.iter().any(|grant| grant.root == link),
+            "the symlinked grant is the only thing reaching its target; got {:?}",
+            roots(&folded)
+        );
+        resolve_allowed_cwd_with_home(link.to_str().unwrap(), &folded, None)
+            .expect("the granted path must still resolve as a shell cwd");
     }
 
     #[test]
