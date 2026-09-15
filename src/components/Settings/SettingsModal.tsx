@@ -6,8 +6,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom';
-// AgentsSettings was the global-agent CRUD; agents are workspace-local now
-// and edited inside each workspace, not from the global Settings modal.
+import AgentLibrarySettings from './AgentLibrarySettings';
 import AssistantProviderSettings from './AssistantProviderSettings';
 import McpServersSettings from './McpServersSettings';
 import SkillsSettings from './SkillsSettings';
@@ -27,7 +26,14 @@ const ProviderIcon = () => (
   </svg>
 );
 
-// AgentsIcon removed alongside the global Agents tab.
+const AgentsIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="9" cy="8" r="3" />
+    <path d="M3 20a6 6 0 0 1 12 0" />
+    <path d="M16 5a3 3 0 0 1 0 6" />
+    <path d="M18 20a6 6 0 0 0-3-5.2" />
+  </svg>
+);
 
 const PlugIcon = () => (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -81,10 +87,11 @@ const CloseIcon = () => (
   </svg>
 );
 
-// Global settings tabs only — agents are workspace-local and edited inside
-// the workspace settings, not here.
+// App-level settings. The Agents tab owns shared teammate definitions; a
+// workspace's own Main agent is edited in that workspace's settings.
 const TABS = {
   PROVIDER: 'provider',
+  AGENTS: 'agents',
   SKILLS: 'skills',
   MCP_SERVERS: 'mcp_servers',
   APPLICATIONS: 'applications',
@@ -167,6 +174,8 @@ const SettingsModal = ({
     switch (activeTab) {
       case TABS.PROVIDER:
         return <AssistantProviderSettings initialAction={initialProviderAction} />;
+      case TABS.AGENTS:
+        return <AgentLibrarySettings />;
       case TABS.SKILLS:
         return <SkillsSettings />;
       case TABS.MCP_SERVERS:
@@ -202,6 +211,13 @@ const SettingsModal = ({
             >
               <ProviderIcon />
               <span>AI Provider</span>
+            </button>
+            <button
+              className={`${styles.navItem} ${activeTab === TABS.AGENTS ? styles.active : ''}`}
+              onClick={() => setActiveTab(TABS.AGENTS)}
+            >
+              <AgentsIcon />
+              <span>Agents</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.SKILLS ? styles.active : ''}`}

@@ -48,6 +48,7 @@ use tokio::sync::Mutex as AsyncMutex;
 #[doc(hidden)]
 pub use commands::workspace::workspace_agent_runtime_description;
 #[doc(hidden)]
+pub use config::global_agents::{AgentDefinition, AgentSource, ResolvedAgent};
 pub use config::{workspace_config, AppConfig, ConfigManager, SkillSourceConfig, WorkspaceConfig};
 #[doc(hidden)]
 pub use workspace_index::WorkspaceIndex;
@@ -109,6 +110,56 @@ impl AppState {
             terminals: commands::terminal::TerminalRegistry::new(),
             app_updates: commands::app_updates::AppUpdateRuntime::new(),
         })
+    }
+
+    /// The workspace's stored configuration plus the roster it currently
+    /// resolves to.
+    ///
+    /// Every entry point that needs to know which agents exist — chat, task
+    /// delegation, the scheduler, the settings UI — must resolve here rather
+    /// than read agents out of the workspace file, which holds only the Main
+    /// and the assignments. Shared edits therefore take effect on the next
+    /// resolution, i.e. the next turn.
+    pub fn resolve_workspace_roster(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(WorkspaceConfig, Vec<ResolvedAgent>), String> {
+        let root = self
+            .workspace_root(workspace_id)
+            .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+        let workspace = workspace_config::load(&root).map_err(|e| e.to_string())?;
+        self.resolve_roster_for(workspace)
+    }
+
+    /// Resolve a roster from a config the caller already loaded (a locator
+    /// walk, or the config a mutation just wrote back).
+    ///
+    /// A failure to read the catalog is reported, not swallowed: resolving
+    /// against a default config would silently produce a workspace whose
+    /// teammates had all disappeared.
+    pub fn resolve_roster_for(
+        &self,
+        workspace: WorkspaceConfig,
+    ) -> Result<(WorkspaceConfig, Vec<ResolvedAgent>), String> {
+        let app = self
+            .config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?
+            .get();
+        let roster = crate::config::global_agents::resolve_roster(&workspace, &app);
+        Ok((workspace, roster))
+    }
+
+    /// Resolve one local agent id (the Main's, or an assignment's).
+    pub fn resolve_workspace_agent(
+        &self,
+        workspace_id: &str,
+        workspace_agent_id: &str,
+    ) -> Result<Option<ResolvedAgent>, String> {
+        let (_, roster) = self.resolve_workspace_roster(workspace_id)?;
+        Ok(roster
+            .into_iter()
+            .find(|resolved| resolved.agent.id == workspace_agent_id))
     }
 
     pub fn workspace_root(&self, workspace_id: &str) -> Option<PathBuf> {
@@ -399,8 +450,13 @@ pub fn run() {
             commands::assistant::assistant_submit_user_input,
             commands::assistant::assistant_retry_run,
             commands::assistant::assistant_cancel_run,
-            // Bundled agent templates (read-only).
-            commands::agent_templates::agent_templates_list,
+            // App-level agent library and workspace assignments.
+            commands::global_agents::agent_definitions_list,
+            commands::global_agents::agent_definition_save,
+            commands::global_agents::workspace_assign_agent,
+            commands::global_agents::workspace_configure_assignment,
+            commands::global_agents::workspace_team_policy,
+            commands::global_agents::workspace_save_team_policy,
             // MCP server commands
             commands::mcp_servers::get_mcp_servers,
             commands::mcp_servers::get_mcp_server,
@@ -465,7 +521,6 @@ pub fn run() {
             commands::workspace::workspace_update_session_mcp,
             commands::workspace::workspace_set_provider,
             commands::workspace::workspace_list_agents,
-            commands::workspace::workspace_set_default_agent,
             commands::workspace::workspace_acknowledge_task,
             commands::workspace::workspace_create,
             commands::workspace::workspace_fork,

@@ -11,7 +11,12 @@ use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
 };
 
-const WORKSPACE_CONFIG_VERSION: u32 = 1;
+/// Bumped to 2 when teammates moved to the app-level library: a config written
+/// by this build has a `mainAgent` and assignments where an older build expects
+/// an `agents` array and a `defaultAgentId`. The number is the signal a
+/// downgraded build needs to say "this file is newer than me" rather than read
+/// it as an empty workspace.
+const WORKSPACE_CONFIG_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub enum WorkspaceConfigError {
@@ -179,8 +184,19 @@ impl WorkspaceSchedule {
     }
 }
 
+/// A workspace's own configuration, as the rest of the app works with it.
+///
+/// The workspace owns exactly two kinds of agent state: its local Main agent —
+/// editable here and nowhere else — and the [`WorkspaceAssignment`]s that point
+/// at app-level teammate definitions. Shared teammate behavior is never copied
+/// into this file; the roster the runtime executes against is built on demand by
+/// [`crate::config::global_agents::resolve_roster`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(
+    rename_all = "camelCase",
+    from = "WorkspaceConfigFile",
+    into = "WorkspaceConfigFile"
+)]
 pub struct WorkspaceConfig {
     #[serde(default = "default_workspace_config_version")]
     pub version: u32,
@@ -205,11 +221,184 @@ pub struct WorkspaceConfig {
     pub starred_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_provider_connection_id: Option<String>,
-    pub default_agent_id: String,
     #[serde(default)]
     pub schedule: WorkspaceSchedule,
+    /// The workspace's own Main agent — the one the schedule runs and the user
+    /// chats with. `None` means this workspace has no usable agent (never set
+    /// up, or a legacy Main that could not be recovered): every execution entry
+    /// point reports the setup state instead of guessing a replacement.
     #[serde(default)]
-    pub agents: Vec<WorkspaceAgent>,
+    pub main_agent: Option<WorkspaceAgent>,
+    /// Local identities for the app-level teammate definitions assigned here.
+    #[serde(default)]
+    pub assignments: Vec<WorkspaceAssignment>,
+    /// Project context shared by every agent working in this workspace.
+    #[serde(default)]
+    pub context: String,
+    /// Filesystem grants every agent in this workspace receives, on top of its
+    /// own. Workspace-wide access is configured here, deliberately, rather than
+    /// accumulated from in-run approvals.
+    #[serde(default)]
+    pub filesystem_grants: Vec<FilesystemPathGrant>,
+}
+
+/// A teammate definition made callable inside one workspace.
+///
+/// The assignment is the local, tool-addressable identity (`workspaceAgentId`);
+/// the behavior stays in the app-level definition so one edit reaches every
+/// workspace using it. Only the strictly local overlays live here: whether the
+/// teammate is enabled, the extra context that specializes it for this project,
+/// and the path grants approved for it in this workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAssignment {
+    pub id: String,
+    pub agent_definition_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub context: String,
+    #[serde(default)]
+    pub filesystem_grants: Vec<FilesystemPathGrant>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// The on-disk shape of `config.json`.
+///
+/// It exists to keep one piece of history out of the rest of the app: configs
+/// written before the agent library stored a flat `agents` array with a
+/// `defaultAgentId` pointer. Reading is tolerant of that shape (see
+/// [`recover_legacy_main`]); writing only ever produces the current one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceConfigFile {
+    #[serde(default = "default_workspace_config_version")]
+    version: u32,
+    id: String,
+    title: String,
+    created_at: i64,
+    updated_at: i64,
+    #[serde(default)]
+    last_run_completed_at: i64,
+    #[serde(default)]
+    last_opened_at: i64,
+    #[serde(default)]
+    starred_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preferred_provider_connection_id: Option<String>,
+    #[serde(default)]
+    schedule: WorkspaceSchedule,
+    /// Legacy selector for the Main agent inside `agents`. Read for recovery,
+    /// never written again.
+    #[serde(default, skip_serializing)]
+    default_agent_id: String,
+    /// Legacy flat agent list. Kept as raw JSON so one malformed teammate
+    /// cannot stop the workspace — or its Main — from loading. Never written.
+    #[serde(default, skip_serializing)]
+    agents: Vec<serde_json::Value>,
+    /// `None` = the key is absent, i.e. a config written before the agent
+    /// library, which is the only case that may recover a legacy Main.
+    /// `Some(Null)` = deliberately unconfigured, and must stay that way.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    main_agent: Option<serde_json::Value>,
+    #[serde(default)]
+    assignments: Vec<WorkspaceAssignment>,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    filesystem_grants: Vec<FilesystemPathGrant>,
+}
+
+/// Distinguishes an absent key from an explicit `null`: serde only calls a
+/// field's `deserialize_with` when the key is present, so absence falls through
+/// to `Default` (`None`) while `null` arrives here and becomes `Some(Null)`.
+fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
+/// Recover the Main from a pre-library config: exactly the agent the workspace
+/// had selected as its default, with its id and local policy intact.
+///
+/// Everything else in `agents` was a teammate, and teammates are now app-level
+/// definitions the user re-creates deliberately — guessing one by position or
+/// name would silently hand a stranger's instructions and grants to a live
+/// agent. An absent selector, no match, an ambiguous match, or an unparsable
+/// entry all mean "unconfigured": the workspace opens in its setup state with
+/// its files and history intact.
+fn recover_legacy_main(
+    agents: &[serde_json::Value],
+    default_agent_id: &str,
+) -> Option<WorkspaceAgent> {
+    if default_agent_id.is_empty() {
+        return None;
+    }
+    let mut selected = agents.iter().filter(|agent| {
+        agent.get("id").and_then(serde_json::Value::as_str) == Some(default_agent_id)
+    });
+    let main = selected.next()?;
+    if selected.next().is_some() {
+        return None;
+    }
+    serde_json::from_value(main.clone()).ok()
+}
+
+impl From<WorkspaceConfigFile> for WorkspaceConfig {
+    fn from(file: WorkspaceConfigFile) -> Self {
+        let main_agent = match file.main_agent {
+            // Current format. An unparsable value is a configuration error, not
+            // an invitation to resurrect a legacy agent behind the user's back.
+            Some(value) => serde_json::from_value::<WorkspaceAgent>(value).ok(),
+            None => recover_legacy_main(&file.agents, &file.default_agent_id),
+        };
+        Self {
+            version: file.version,
+            id: file.id,
+            title: file.title,
+            created_at: file.created_at,
+            updated_at: file.updated_at,
+            last_run_completed_at: file.last_run_completed_at,
+            last_opened_at: file.last_opened_at,
+            starred_at: file.starred_at,
+            preferred_provider_connection_id: file.preferred_provider_connection_id,
+            schedule: file.schedule,
+            main_agent,
+            assignments: file.assignments,
+            context: file.context,
+            filesystem_grants: file.filesystem_grants,
+        }
+    }
+}
+
+impl From<WorkspaceConfig> for WorkspaceConfigFile {
+    fn from(config: WorkspaceConfig) -> Self {
+        // `Some(Null)` rather than `None`: the next load must read a written
+        // "no Main" as deliberate instead of retrying legacy recovery.
+        let main_agent =
+            Some(serde_json::to_value(&config.main_agent).unwrap_or(serde_json::Value::Null));
+        Self {
+            // Every file this writes has the current shape, so it declares the
+            // current version regardless of what the loaded one claimed.
+            version: WORKSPACE_CONFIG_VERSION,
+            id: config.id,
+            title: config.title,
+            created_at: config.created_at,
+            updated_at: config.updated_at,
+            last_run_completed_at: config.last_run_completed_at,
+            last_opened_at: config.last_opened_at,
+            starred_at: config.starred_at,
+            preferred_provider_connection_id: config.preferred_provider_connection_id,
+            schedule: config.schedule,
+            default_agent_id: String::new(),
+            agents: Vec::new(),
+            main_agent,
+            assignments: config.assignments,
+            context: config.context,
+            filesystem_grants: config.filesystem_grants,
+        }
+    }
 }
 
 fn default_workspace_config_version() -> u32 {
@@ -274,10 +463,30 @@ impl WorkspaceConfig {
             last_opened_at: 0,
             starred_at: 0,
             preferred_provider_connection_id: None,
-            default_agent_id: manager_id.clone(),
             schedule: WorkspaceSchedule::default(),
-            agents: vec![WorkspaceAgent::new_manager(manager_id, now)],
+            main_agent: Some(WorkspaceAgent::new_manager(manager_id, now)),
+            assignments: Vec::new(),
+            context: String::new(),
+            filesystem_grants: Vec::new(),
         }
+    }
+
+    /// Id of this workspace's Main agent, or `""` when it has none. Callers
+    /// that need to *execute* should match on [`Self::main_agent`] instead: an
+    /// empty id matches no agent, which is the intended setup-state behavior
+    /// for comparisons like "is this row the Main?".
+    pub fn main_agent_id(&self) -> &str {
+        self.main_agent
+            .as_ref()
+            .map_or("", |agent| agent.id.as_str())
+    }
+
+    /// The assignment carrying this local agent id, if any. Assignment ids and
+    /// the Main's id share one namespace: both are `workspaceAgentId`s.
+    pub fn assignment(&self, workspace_agent_id: &str) -> Option<&WorkspaceAssignment> {
+        self.assignments
+            .iter()
+            .find(|assignment| assignment.id == workspace_agent_id)
     }
 
     /// Attach the first enabled provider connection as this workspace's
@@ -294,10 +503,9 @@ impl WorkspaceConfig {
             return;
         };
         self.preferred_provider_connection_id = Some(first.id.clone());
-        let default_agent_id = self.default_agent_id.clone();
-        if let Some(manager) = self.agents.iter_mut().find(|a| a.id == default_agent_id) {
-            manager.provider_connection_ids = vec![first.id.clone()];
-            manager.updated_at = now;
+        if let Some(main) = self.main_agent.as_mut() {
+            main.provider_connection_ids = vec![first.id.clone()];
+            main.updated_at = now;
         }
         self.updated_at = now;
     }
@@ -375,15 +583,18 @@ pub fn load(root: &Path) -> Result<WorkspaceConfig, WorkspaceConfigError> {
 /// by name; those refs are removed on load (the next save persists the
 /// removal) and the user re-attaches the server from the UI.
 fn prune_legacy_mcp_refs(config: &mut WorkspaceConfig) {
-    for agent in &mut config.agents {
-        agent
-            .selected_mcp_servers
+    if let Some(main) = config.main_agent.as_mut() {
+        main.selected_mcp_servers
             .retain(|mcp_ref| !mcp_ref.id.is_empty());
     }
 }
 
+/// Filename of the one-time copy taken before a pre-library config is rewritten.
+pub const LEGACY_BACKUP_FILE: &str = "config.pre-agent-library.json";
+
 pub fn save(root: &Path, config: &WorkspaceConfig) -> Result<(), WorkspaceConfigError> {
     let path = config_path(root);
+    back_up_legacy_config(&path);
     let parent = path.parent().unwrap_or(root);
     fs::create_dir_all(parent).map_err(|source| WorkspaceConfigError::Io {
         operation: "create directory",
@@ -416,6 +627,61 @@ pub fn save(root: &Path, config: &WorkspaceConfig) -> Result<(), WorkspaceConfig
         source,
     })?;
     Ok(())
+}
+
+/// Copy a pre-agent-library config aside, once, before anything overwrites it.
+///
+/// The current format stores one `mainAgent`; the teammates that used to live in
+/// the flat `agents` array are not migrated, because a shared definition is a
+/// deliberate act and guessing one from an old row would hand a stranger's
+/// instructions and grants to a live agent. But the first save — which can be as
+/// innocent as opening the workspace — rewrites the file, and the user cannot
+/// re-create by hand what they can no longer read. This keeps the original
+/// exactly once, next to the config.
+///
+/// Best effort: a failure here must never stop a workspace from saving. The
+/// backup is a courtesy, not a transaction.
+fn back_up_legacy_config(path: &Path) {
+    let backup = path.with_file_name(LEGACY_BACKUP_FILE);
+    if backup.exists() {
+        return;
+    }
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+    // Cheap first: every config this build writes contains the key, so the
+    // common case costs a substring scan rather than a JSON parse.
+    if contents.contains("\"mainAgent\"") {
+        return;
+    }
+    let Ok(existing) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return;
+    };
+    // Only a config that still has the old shape is worth keeping: a
+    // `mainAgent` key means this file was already written by a current build.
+    if existing.get("mainAgent").is_some() {
+        return;
+    }
+    let legacy_agents = existing
+        .get("agents")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    if legacy_agents == 0 {
+        return;
+    }
+    if let Err(error) = fs::write(&backup, &contents) {
+        tracing::warn!(
+            path = %backup.display(),
+            "Could not keep a copy of the pre-agent-library config: {}",
+            error
+        );
+        return;
+    }
+    tracing::info!(
+        path = %backup.display(),
+        agents = legacy_agents,
+        "Kept a copy of the pre-agent-library workspace config before rewriting it"
+    );
 }
 
 /// Process-wide lock serializing read-modify-write cycles on workspace
@@ -683,7 +949,7 @@ mod attach_provider_tests {
             config.preferred_provider_connection_id.as_deref(),
             Some("a")
         );
-        let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
+        let manager = config.main_agent.as_ref().expect("main agent");
         assert_eq!(manager.provider_connection_ids, vec!["a".to_string()]);
         assert_eq!(manager.updated_at, 42);
     }
@@ -697,7 +963,7 @@ mod attach_provider_tests {
             config.preferred_provider_connection_id.as_deref(),
             Some("b")
         );
-        let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
+        let manager = config.main_agent.as_ref().expect("main agent");
         assert_eq!(manager.provider_connection_ids, vec!["b".to_string()]);
     }
 
@@ -707,7 +973,7 @@ mod attach_provider_tests {
         config.attach_default_provider(&[connection("a", false)], 9);
 
         assert!(config.preferred_provider_connection_id.is_none());
-        let manager = config.agents.iter().find(|a| a.id == "mgr").unwrap();
+        let manager = config.main_agent.as_ref().expect("main agent");
         assert!(manager.provider_connection_ids.is_empty());
     }
 
@@ -767,7 +1033,7 @@ mod attach_provider_tests {
         // Legacy workspace-level key: serde ignores it and the next save
         // drops it — parsing must not fail.
         raw["disabledMcpServers"] = serde_json::json!([{ "id": "srv-1" }]);
-        raw["agents"][0]["selectedMcpServers"] = serde_json::json!([
+        raw["mainAgent"]["selectedMcpServers"] = serde_json::json!([
             { "name": "legacy-by-name" },
             { "id": "srv-2" },
             { "id": "srv-3", "disabled": true }
@@ -776,7 +1042,7 @@ mod attach_provider_tests {
 
         let loaded = load(tmp.path()).unwrap();
         assert_eq!(
-            loaded.agents[0].selected_mcp_servers,
+            loaded.main_agent.expect("main agent").selected_mcp_servers,
             vec![
                 McpRef {
                     id: "srv-2".to_string(),
@@ -1102,5 +1368,264 @@ mod attach_provider_tests {
 
         assert_eq!(result.unwrap_err(), "index lock poisoned");
         assert_eq!(load(tmp.path()).unwrap().title, "Renamed");
+    }
+}
+
+#[cfg(test)]
+mod main_agent_recovery_tests {
+    //! The one migration this feature performs: a config written before the
+    //! agent library has its Main recovered, and nothing else.
+
+    use super::*;
+
+    fn legacy_config(main_id: &str, extra_agents: serde_json::Value) -> serde_json::Value {
+        let mut agents = vec![serde_json::json!({
+            "id": main_id,
+            "name": "Manager",
+            "description": "legacy instructions",
+            "enabled": true,
+            "selectedSkills": [],
+            "selectedMcpServers": [{ "id": "srv-1" }],
+            "providerConnectionIds": ["conn-1"],
+            "execution": { "shell": { "mode": "full" } },
+            "createdAt": 5,
+            "updatedAt": 6
+        })];
+        if let serde_json::Value::Array(extra) = extra_agents {
+            agents.extend(extra);
+        }
+        serde_json::json!({
+            "version": 1,
+            "id": "ws",
+            "title": "Legacy",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "defaultAgentId": main_id,
+            "agents": agents,
+        })
+    }
+
+    fn parse(value: serde_json::Value) -> WorkspaceConfig {
+        serde_json::from_value(value).expect("workspace config parses")
+    }
+
+    #[test]
+    fn recovers_exactly_the_agent_the_legacy_default_pointer_selected() {
+        let config = parse(legacy_config(
+            "main-1",
+            serde_json::json!([{
+                "id": "mate-1",
+                "name": "Reviewer",
+                "description": "",
+                "enabled": true,
+                "createdAt": 1,
+                "updatedAt": 1
+            }]),
+        ));
+
+        let main = config.main_agent.expect("recovered main");
+        assert_eq!(
+            main.id, "main-1",
+            "the Main keeps its id, so history resolves"
+        );
+        assert_eq!(main.description, "legacy instructions");
+        assert_eq!(main.execution.shell.mode, ShellAccessMode::Full);
+        assert_eq!(main.provider_connection_ids, vec!["conn-1".to_string()]);
+        assert!(
+            config.assignments.is_empty(),
+            "legacy teammates are not turned into assignments"
+        );
+    }
+
+    #[test]
+    fn a_malformed_legacy_teammate_does_not_block_main_recovery() {
+        let config = parse(legacy_config(
+            "main-1",
+            serde_json::json!([{ "id": "mate-1", "name": 42 }]),
+        ));
+        assert_eq!(config.main_agent.expect("recovered main").id, "main-1");
+    }
+
+    #[test]
+    fn an_explicit_null_main_stays_unconfigured() {
+        let mut value = legacy_config("main-1", serde_json::json!([]));
+        value["mainAgent"] = serde_json::Value::Null;
+        let config = parse(value);
+        assert!(
+            config.main_agent.is_none(),
+            "a deliberately cleared Main must never resurrect a legacy agent"
+        );
+    }
+
+    #[test]
+    fn a_present_main_wins_over_the_legacy_fields() {
+        let mut value = legacy_config("main-1", serde_json::json!([]));
+        value["mainAgent"] = serde_json::json!({
+            "id": "new-main",
+            "name": "Main",
+            "description": "current",
+            "enabled": true,
+            "createdAt": 9,
+            "updatedAt": 9
+        });
+        let config = parse(value);
+        assert_eq!(config.main_agent.expect("main").id, "new-main");
+    }
+
+    #[test]
+    fn an_unparsable_main_is_unconfigured_rather_than_falling_back() {
+        let mut value = legacy_config("main-1", serde_json::json!([]));
+        value["mainAgent"] = serde_json::json!({ "id": "broken", "name": 7 });
+        let config = parse(value);
+        assert!(config.main_agent.is_none());
+    }
+
+    #[test]
+    fn an_absent_ambiguous_or_unmatched_selector_leaves_the_main_unconfigured() {
+        let mut missing_selector = legacy_config("main-1", serde_json::json!([]));
+        missing_selector["defaultAgentId"] = serde_json::json!("");
+        assert!(parse(missing_selector).main_agent.is_none());
+
+        let mut unmatched = legacy_config("main-1", serde_json::json!([]));
+        unmatched["defaultAgentId"] = serde_json::json!("nobody");
+        assert!(parse(unmatched).main_agent.is_none());
+
+        let duplicated = legacy_config(
+            "main-1",
+            serde_json::json!([{
+                "id": "main-1",
+                "name": "Impostor",
+                "description": "",
+                "enabled": true,
+                "createdAt": 1,
+                "updatedAt": 1
+            }]),
+        );
+        assert!(
+            parse(duplicated).main_agent.is_none(),
+            "two agents claiming the same id is not a recovery, it is a choice we must not make"
+        );
+    }
+
+    #[test]
+    fn saving_drops_the_legacy_fields_and_a_reload_cannot_resurrect_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = config_path(tmp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string(&legacy_config(
+                "main-1",
+                serde_json::json!([{
+                    "id": "mate-1",
+                    "name": "Reviewer",
+                    "description": "",
+                    "enabled": true,
+                    "createdAt": 1,
+                    "updatedAt": 1
+                }]),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut config = load(tmp.path()).expect("legacy load");
+        assert_eq!(config.main_agent.as_ref().expect("main").id, "main-1");
+
+        save(tmp.path(), &config).expect("save");
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(written.get("agents").is_none(), "the legacy list is gone");
+        assert!(written.get("defaultAgentId").is_none());
+        assert_eq!(written["mainAgent"]["id"], "main-1");
+
+        // Clearing the Main and saving must stick across a reload.
+        config.main_agent = None;
+        save(tmp.path(), &config).expect("save cleared");
+        assert!(load(tmp.path()).expect("reload").main_agent.is_none());
+    }
+
+    #[test]
+    fn the_first_write_keeps_a_copy_of_the_pre_library_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = config_path(tmp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy = legacy_config(
+            "main-1",
+            serde_json::json!([{
+                "id": "mate-1",
+                "name": "Reviewer",
+                "description": "review the API crate",
+                "enabled": true,
+                "createdAt": 1,
+                "updatedAt": 1
+            }]),
+        );
+        fs::write(&path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        // Opening a workspace is enough to rewrite the file; the teammate the
+        // user is asked to re-create must still be readable afterwards.
+        let config = load(tmp.path()).expect("load");
+        save(tmp.path(), &config).expect("save");
+
+        let backup = path.with_file_name(LEGACY_BACKUP_FILE);
+        let kept: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup).expect("backup exists")).unwrap();
+        assert_eq!(kept["agents"][1]["id"], "mate-1");
+        assert_eq!(kept["agents"][1]["description"], "review the API crate");
+
+        // A later save must not overwrite the copy with the already-migrated file.
+        save(tmp.path(), &config).expect("second save");
+        let still: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup).unwrap()).unwrap();
+        assert_eq!(still["agents"][1]["id"], "mate-1");
+    }
+
+    #[test]
+    fn a_config_without_legacy_agents_is_not_backed_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = WorkspaceConfig::new("ws".to_string(), "T".to_string(), 1, "main".to_string());
+        save(tmp.path(), &config).unwrap();
+        save(tmp.path(), &config).unwrap();
+
+        assert!(!config_path(tmp.path())
+            .with_file_name(LEGACY_BACKUP_FILE)
+            .exists());
+    }
+
+    #[test]
+    fn assignments_and_workspace_policy_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config =
+            WorkspaceConfig::new("ws".to_string(), "T".to_string(), 1, "main".to_string());
+        config.assignments.push(WorkspaceAssignment {
+            id: "assign-1".to_string(),
+            agent_definition_id: "def-1".to_string(),
+            enabled: false,
+            context: "review only".to_string(),
+            filesystem_grants: vec![FilesystemPathGrant {
+                path: "/srv/data".to_string(),
+                access: FilesystemPathAccess::ReadWrite,
+                origin: None,
+            }],
+            created_at: 3,
+            updated_at: 4,
+        });
+        config.context = "house rules".to_string();
+        config.filesystem_grants = vec![FilesystemPathGrant {
+            path: "/opt/tools".to_string(),
+            access: FilesystemPathAccess::ReadOnly,
+            origin: None,
+        }];
+        save(tmp.path(), &config).unwrap();
+
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.assignments.len(), 1);
+        assert_eq!(loaded.assignments[0].agent_definition_id, "def-1");
+        assert!(!loaded.assignments[0].enabled);
+        assert_eq!(loaded.assignments[0].filesystem_grants[0].path, "/srv/data");
+        assert_eq!(loaded.context, "house rules");
+        assert_eq!(loaded.filesystem_grants[0].path, "/opt/tools");
+        assert_eq!(loaded.main_agent_id(), "main");
     }
 }

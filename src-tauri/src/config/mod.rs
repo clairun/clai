@@ -4,14 +4,15 @@
 //! to a JSON file in the platform-specific config directory.
 
 pub mod bundled;
+pub mod global_agents;
 pub mod types;
 pub mod workspace_config;
 
 pub use types::{
     AgentConfig, AiProvider, AppConfig, ClaiConfig, ExecutionCapabilityConfig,
-    FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, McpEnvVar, McpServerAuth,
-    McpServerConfig, McpServerTransport, SandboxNetworkConfig, SandboxSessionBusConfig,
-    ShellAccessMode, SkillSourceConfig, SkillSourceKind,
+    FilesystemCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, McpEnvVar,
+    McpServerAuth, McpServerConfig, McpServerTransport, SandboxNetworkConfig,
+    SandboxSessionBusConfig, ShellAccessMode, SkillSourceConfig, SkillSourceKind,
 };
 pub use workspace_config::{WorkspaceAgent, WorkspaceConfig};
 

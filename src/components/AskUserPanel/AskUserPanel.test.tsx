@@ -16,8 +16,6 @@ const SESSION: AssistantSession = {
   kind: 'interactive',
   title: 'Test',
   context: {
-    spaceId: null,
-    roomId: null,
     workspaceId: 'ws-1',
     toolScopes: [],
     mcpServerIds: [],

@@ -49,6 +49,58 @@ const fireResolved = (requestId: string) => {
   handler({ payload: { requestId } });
 };
 
+describe('InlineApprovalCard — where an "always" decision is saved', () => {
+  // A command allowlist skips this prompt entirely next time, so the card has
+  // to say whether the decision stays here or follows a shared agent into
+  // every workspace that uses it.
+  it('says "every workspace" for a shared agent, and names the ones it reaches', async () => {
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+
+    fireRequest({
+      ...SINGLE_SEGMENT_REQUEST,
+      persistsToSharedAgent: true,
+      alsoAffectsWorkspaces: ['Docs', 'Infra'],
+    });
+
+    expect(await screen.findByRole('button', { name: 'Always allow (every workspace)' }))
+      .toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Always deny (every workspace)' })).toBeInTheDocument();
+    expect(screen.getByText(/also applies to it in: Docs, Infra/)).toBeInTheDocument();
+  });
+
+  it('still says "every workspace" for a shared agent nobody else has added yet', async () => {
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+
+    fireRequest({
+      ...SINGLE_SEGMENT_REQUEST,
+      persistsToSharedAgent: true,
+      alsoAffectsWorkspaces: [],
+    });
+
+    expect(await screen.findByRole('button', { name: 'Always allow (every workspace)' }))
+      .toBeInTheDocument();
+    expect(screen.getByText(/applies wherever this agent is added/)).toBeInTheDocument();
+  });
+
+  it('keeps the local wording for a workspace\'s own main agent', async () => {
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+
+    fireRequest({
+      ...SINGLE_SEGMENT_REQUEST,
+      persistsToSharedAgent: false,
+      alsoAffectsWorkspaces: [],
+    });
+
+    expect(await screen.findByRole('button', { name: 'Always allow (this agent)' }))
+      .toBeInTheDocument();
+    expect(screen.queryByText(/every workspace/)).toBeNull();
+    expect(screen.queryByText(/shared agent/)).toBeNull();
+  });
+});
+
 describe('InlineApprovalCard', () => {
   it('renders nothing until a request for this workspace arrives', () => {
     const { container } = render(<InlineApprovalCard workspaceId="ws-1" />);

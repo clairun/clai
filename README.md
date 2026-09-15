@@ -58,9 +58,12 @@ flagged, and selecting a card slides in a live chat preview.
   modes: *Off* (no generic local file access), *Restricted* (only allowed
   command prefixes — `kubectl get` permits `kubectl get pods` but not
   `kubectl delete`), and *Full*.
-- **Default skills + templates** — CLAI registers the read-only
-  `clairun/clai-skills` repository by default and ships agent templates
-  (`code-reviewer`, `sow-tracker`) ready to drop in.
+- **A shared agent library** — Teammates are defined once in Settings →
+  *Agents* and added to the workspaces that need them. Editing one reaches every
+  workspace using it; each workspace still owns its own main agent, history and
+  schedule.
+- **Default skills** — CLAI registers the read-only `clairun/clai-skills`
+  repository by default.
 - **Inspectable tasks** — Delegated work streams a live transcript: the
   helper agent's full conversation, tool calls, and verdict.
 - **Memory & artifacts** — Agents persist findings to the workspace directory;
@@ -121,8 +124,9 @@ the opt-outs.)
 3. **Create a workspace** — From the Fleet view. Open its settings (gear icon
    in the header) to attach a provider, MCP servers, and skills.
 4. **Chat** with the main agent.
-5. **Add helper agents (optional)** — From the *Agents* drawer, pick a
-   template or build one from scratch; the main agent can then delegate to it.
+5. **Add helper agents (optional)** — Define them once in Settings → *Agents*,
+   then add them to a workspace's team from its settings; the main agent can
+   then delegate to them.
 6. **Make it periodic (optional)** — Toggle *Schedule* to run the main agent
    on an interval.
 
@@ -160,14 +164,15 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 - **Frontend** — React + Tauri; a chat-first workspace with a drawer for
   agents / tasks / memories / artifacts and slide-out transcript and file panels.
-- **Runtime** — Each workspace owns one or more agent rows and a persistent
-  session. Built-in tools (shell execution, inter-agent calls, task management) plus
-  MCP tools, gated by each agent's policy.
+- **Runtime** — Each workspace owns its main agent, its assignments of shared
+  agents, and a persistent session. Built-in tools (shell execution, inter-agent
+  calls, task management) plus MCP tools, gated by each agent's policy. An agent
+  is resolved fresh at the start of every turn, so a shared edit lands on the
+  next turn and never mid-tool-sequence.
 - **Scheduler** — Periodic workspaces run from the agent runner, emitting the
   same streaming events as interactive chat.
-- **Skills + templates** — Skills are discovered from read-only local or git
-  sources. The app-managed default source is `clairun/clai-skills`; agent
-  templates are embedded via `include_dir!`.
+- **Skills** — Discovered from read-only local or git sources. The app-managed
+  default source is `clairun/clai-skills`.
 
 ## License
 

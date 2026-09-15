@@ -76,12 +76,10 @@ pub fn apply_workspace_schedule(
     sched: &mut crate::agents::scheduler::Scheduler,
     config: &crate::config::WorkspaceConfig,
 ) {
-    // The workspace schedule fires the workspace's default (manager) agent.
-    let Some(agent) = config
-        .agents
-        .iter()
-        .find(|agent| agent.id == config.default_agent_id)
-    else {
+    // The workspace schedule fires the workspace's own Main agent. A shared
+    // definition never becomes a scheduler key: the same teammate assigned in
+    // five workspaces would collide on one instance.
+    let Some(agent) = config.main_agent.as_ref() else {
         return;
     };
 
@@ -105,7 +103,7 @@ pub fn apply_workspace_schedule(
     sched.register_definition(definition);
 
     if agent.enabled {
-        let instance_id = sched.create_instance(&agent.id, "", "");
+        let instance_id = sched.create_instance(&agent.id);
         // Paused workspaces still get an instance (so pause/resume can flip
         // it without re-registering), but the instance starts disabled so
         // the runner skips it until resumed.
@@ -142,13 +140,14 @@ pub async fn clear_all_instances(scheduler: &SharedScheduler) {
 #[allow(dead_code)]
 pub async fn create_instance_for_agent(scheduler: &SharedScheduler, agent_id: &str) {
     let mut scheduler = scheduler.lock().await;
-    scheduler.create_instance(agent_id, "", "");
+    scheduler.create_instance(agent_id);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agents::create_shared_scheduler;
+    use crate::agents::types::AgentInstance;
 
     fn create_test_agent_config() -> AgentConfig {
         AgentConfig::new(
@@ -185,8 +184,7 @@ mod tests {
         {
             let s = scheduler.lock().await;
             assert_eq!(s.instance_count(), 1);
-            let instance_id = format!("{}::", agent.id);
-            let instance = s.get_instance(&instance_id);
+            let instance = s.get_instance(&AgentInstance::instance_id_for(&agent.id));
             assert!(instance.is_some());
         }
 
