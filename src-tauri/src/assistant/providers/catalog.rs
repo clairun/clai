@@ -208,10 +208,18 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         base_url_locked: true,
         requires_api_key: true,
         logo_asset: "provider-catalog/anthropic.svg".to_string(),
+        // The current Anthropic lineup, by alias. Despite
+        // `models_endpoint_style: Standard`, nothing probes the live endpoint
+        // on its own: this is the *default* model quick-pick for every
+        // Anthropic connection, on create and on edit alike, and it is
+        // replaced only once the user presses "Load models"
+        // (`AssistantProviderSettings.tsx`, `quickPickModels`). A retired id
+        // here is therefore offered to every user, not only keyless ones.
+        // Source: https://platform.claude.com/docs/en/about-claude/model-deprecations
         curated_models: [
             "claude-fable-5-1",
-            "claude-sonnet-4-5",
-            "claude-opus-4-1",
+            "claude-sonnet-5",
+            "claude-opus-5",
             "claude-haiku-4-5",
         ]
         .iter()
@@ -392,6 +400,72 @@ mod tests {
                 ids.iter().any(|id| id.contains(family)),
                 "curated fallback is missing the {family} family: {ids:?}"
             );
+        }
+    }
+
+    /// Model ids Anthropic has already retired, in the forms a caller might
+    /// plausibly have typed or copied: each dated snapshot, plus the aliases
+    /// Anthropic published for it. Not an exhaustive list of every id ever
+    /// issued — Bedrock and Vertex spellings are omitted because this catalog
+    /// entry is `base_url_locked` to `https://api.anthropic.com`.
+    ///
+    /// Matched by equality, never by prefix: `claude-opus-4-8` and
+    /// `claude-sonnet-4-6` are active and both have a retired id as a prefix.
+    ///
+    /// Dates from
+    /// <https://platform.claude.com/docs/en/about-claude/model-deprecations>,
+    /// checked 2026-09-15.
+    const RETIRED_ANTHROPIC_MODEL_IDS: &[&str] = &[
+        "claude-opus-4-1",
+        "claude-opus-4-1-20250805",
+        "claude-opus-4",
+        "claude-opus-4-0",
+        "claude-opus-4-20250514",
+        "claude-sonnet-4",
+        "claude-sonnet-4-0",
+        "claude-sonnet-4-20250514",
+        "claude-3-7-sonnet",
+        "claude-3-7-sonnet-latest",
+        "claude-3-7-sonnet-20250219",
+        "claude-3-5-sonnet",
+        "claude-3-5-sonnet-latest",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-sonnet-20240620",
+        "claude-3-5-haiku",
+        "claude-3-5-haiku-latest",
+        "claude-3-5-haiku-20241022",
+        "claude-3-haiku",
+        "claude-3-haiku-20240307",
+    ];
+
+    /// A revert guard, not a staleness detector. It fails if someone puts a
+    /// *known* retired id back into a curated list; it cannot notice a model
+    /// retiring in the future, because the list above only changes when a
+    /// human edits it. The nearest such date is `claude-haiku-4-5`, curated
+    /// above and retiring no sooner than 2026-10-15. Closing that hole would
+    /// need a live call to Anthropic, which needs a key the app does not have
+    /// at catalog-build time — so a hand-maintained list is the honest answer.
+    #[test]
+    fn curated_anthropic_ids_are_not_on_the_known_retired_list() {
+        let anthropic_entries = catalog_entries()
+            .into_iter()
+            .filter(|e| e.protocol_id == "anthropic")
+            .collect::<Vec<_>>();
+        // Name the entry this exists for, so narrowing the filter cannot make
+        // the test pass by checking nothing.
+        assert!(
+            anthropic_entries.iter().any(|e| e.id == "anthropic"),
+            "the Anthropic brand entry is not in the checked set"
+        );
+        for e in anthropic_entries {
+            for m in &e.curated_models {
+                assert!(
+                    !RETIRED_ANTHROPIC_MODEL_IDS.contains(&m.id.as_str()),
+                    "{} curates retired model {}",
+                    e.id,
+                    m.id
+                );
+            }
         }
     }
 
