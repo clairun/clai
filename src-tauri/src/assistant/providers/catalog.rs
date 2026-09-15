@@ -208,10 +208,15 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         base_url_locked: true,
         requires_api_key: true,
         logo_asset: "provider-catalog/anthropic.svg".to_string(),
-        curated_models: ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"]
-            .iter()
-            .map(|m| model(m))
-            .collect(),
+        curated_models: [
+            "claude-fable-5-1",
+            "claude-sonnet-4-5",
+            "claude-opus-4-1",
+            "claude-haiku-4-5",
+        ]
+        .iter()
+        .map(|m| model(m))
+        .collect(),
         docs_url: Some("https://console.anthropic.com/settings/keys".to_string()),
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
@@ -375,6 +380,18 @@ mod tests {
             let e = get_entry(id).expect("entry present");
             assert!(!e.requires_api_key, "{id} should be keyless");
             assert!(!e.base_url_locked, "{id} base_url should be editable");
+        }
+    }
+
+    #[test]
+    fn anthropic_curates_one_model_per_live_claude_family() {
+        let e = get_entry("anthropic").expect("anthropic present");
+        let ids: Vec<&str> = e.curated_models.iter().map(|m| m.id.as_str()).collect();
+        for family in ["fable", "sonnet", "opus", "haiku"] {
+            assert!(
+                ids.iter().any(|id| id.contains(family)),
+                "curated fallback is missing the {family} family: {ids:?}"
+            );
         }
     }
 

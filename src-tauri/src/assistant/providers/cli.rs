@@ -728,6 +728,12 @@ pub fn models_for_provider(provider_id: &str) -> Option<Vec<ModelInfo>> {
     let models = match provider_id {
         CLAUDE_CODE_PROVIDER_ID => vec![
             ModelInfo {
+                id: "fable".to_string(),
+                display_name: "Fable".to_string(),
+                supports_tools: true,
+                supports_images: true,
+            },
+            ModelInfo {
                 id: "sonnet".to_string(),
                 display_name: "Sonnet".to_string(),
                 supports_tools: true,
@@ -823,6 +829,16 @@ mod tests {
             max_output_tokens: Some(128),
             images: Default::default(),
         }
+    }
+
+    #[test]
+    fn claude_code_offers_an_alias_per_claude_family() {
+        let ids: Vec<String> = models_for_provider(CLAUDE_CODE_PROVIDER_ID)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, ["fable", "sonnet", "opus", "haiku"]);
     }
 
     #[test]
