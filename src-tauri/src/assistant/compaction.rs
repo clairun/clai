@@ -785,7 +785,7 @@ fn provider_error_message(error: ProviderError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::{ContentPart, MessageRole};
+    use crate::assistant::types::{CompactionStatus, ContentPart, MessageRole};
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
@@ -830,6 +830,51 @@ mod tests {
                 completed_at: None,
             }],
         )
+    }
+
+    /// A stored compaction summary: an ordinary message carrying the metadata
+    /// marker `is_compaction_summary_message` keys off. `body` is the summary
+    /// text, which some callers size against a budget.
+    fn summary_msg(id: &str, body: &str) -> AssistantMessage {
+        let mut message = msg(id, MessageRole::System, vec![text(body)]);
+        message.provider_metadata = Some(serde_json::json!({
+            "source": COMPACTION_METADATA_SOURCE,
+        }));
+        message
+    }
+
+    /// A completed compaction pointing at a summary message and an inclusive
+    /// boundary. Both ids are `Option` in the row: `source_to_message_id` is
+    /// bound at insert by `create_compaction`, but `summary_message_id` is not
+    /// known until `complete_compaction`, and both columns are
+    /// `ON DELETE SET NULL` on `assistant_messages`. Every caller here sets
+    /// them explicitly, since a row with either missing is not a row this
+    /// function is ever handed -- see the fallback test for why.
+    fn completed_compaction(
+        summary_message_id: Option<&str>,
+        source_to_message_id: Option<&str>,
+    ) -> AssistantCompaction {
+        AssistantCompaction {
+            id: "c1".to_string(),
+            session_id: "s".to_string(),
+            trigger: CompactionTrigger::Automatic,
+            strategy: CompactionStrategy::LocalSummary,
+            status: CompactionStatus::Completed,
+            source_from_message_id: None,
+            source_to_message_id: source_to_message_id.map(str::to_string),
+            summary_message_id: summary_message_id.map(str::to_string),
+            created_run_id: None,
+            protocol_id: "p".to_string(),
+            model_id: "m".to_string(),
+            input_message_count: 0,
+            created_at: 0,
+            completed_at: Some(1),
+            error: None,
+        }
+    }
+
+    fn ids(messages: &[AssistantMessage]) -> Vec<&str> {
+        messages.iter().map(|message| message.id.as_str()).collect()
     }
 
     /// `n` alternating user/assistant text messages, none of them tool-related.
@@ -911,16 +956,10 @@ mod tests {
             "the history on its own is under budget"
         );
 
-        let mut summary = msg(
+        let summary = summary_msg(
             "summary",
-            MessageRole::System,
-            vec![text(&summary_message_text(
-                &"x".repeat(SUMMARY_MESSAGE_MAX_CHARS),
-            ))],
+            &summary_message_text(&"x".repeat(SUMMARY_MESSAGE_MAX_CHARS)),
         );
-        summary.provider_metadata = Some(serde_json::json!({
-            "source": COMPACTION_METADATA_SOURCE,
-        }));
         view.insert(0, summary);
 
         assert!(
@@ -937,14 +976,7 @@ mod tests {
             "f",
             MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES - 1,
         );
-        let mut summary = msg(
-            "summary",
-            MessageRole::System,
-            vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))],
-        );
-        summary.provider_metadata = Some(serde_json::json!({
-            "source": COMPACTION_METADATA_SOURCE,
-        }));
+        let summary = summary_msg("summary", &"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS));
         view.insert(0, summary);
 
         assert!(!should_auto_compact(&view, &[]));
@@ -1314,6 +1346,211 @@ mod tests {
             attempt,
             CompactionAttempt::Failed("first".to_string()),
             "the earliest failure is the one that let the context grow"
+        );
+    }
+
+    /// `provider_history_messages_with_compaction` is where a compaction row
+    /// stops being bookkeeping and becomes an actual truncation of what the
+    /// provider sees. Everything below fixes one property of that translation.
+    ///
+    /// The shape production always produces: the summary message is *appended*
+    /// when the compaction completes, so it sits at the very end of the stored
+    /// history while the boundary it replaces points at an older message.
+    #[test]
+    fn the_summary_replaces_the_history_up_to_the_boundary() {
+        let mut messages = filler("f", 6);
+        messages.push(summary_msg("sum", "the story so far"));
+        let compaction = completed_compaction(Some("sum"), Some("f3"));
+
+        let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+
+        assert_eq!(
+            ids(&view),
+            vec!["sum", "f4", "f5"],
+            "the summary leads, then only the messages after the boundary"
+        );
+    }
+
+    /// The boundary is inclusive: `source_to_message_id` names the last message
+    /// the summary covers, so that message is gone from the view too. Off by one
+    /// here would replay a message the summary already describes.
+    #[test]
+    fn the_boundary_message_is_itself_compacted_away() {
+        let mut messages = filler("f", 4);
+        messages.push(summary_msg("sum", "s"));
+        let compaction = completed_compaction(Some("sum"), Some("f3"));
+
+        let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+
+        assert_eq!(
+            ids(&view),
+            vec!["sum"],
+            "f3 is the boundary, so nothing of the original history survives"
+        );
+    }
+
+    /// The summary is emitted from the front of the view, not from its position
+    /// in the stored history. It is always appended *after* its own boundary, so
+    /// it always falls inside the would-be retained tail; here the conversation
+    /// then continued, so there are messages on both sides of it.
+    ///
+    /// Note the tail filter excludes it twice over -- by id and by metadata
+    /// marker -- and the marker alone is sufficient, because the one site that
+    /// writes a summary message (`compact_session_history`) always sets it. A
+    /// mutation sweep cannot kill the id half; it is redundant defence, not
+    /// tested behaviour.
+    #[test]
+    fn the_summary_is_not_duplicated_when_it_sits_inside_the_retained_tail() {
+        let mut messages = filler("f", 4);
+        messages.push(summary_msg("sum", "s"));
+        messages.extend(filler("g", 2));
+        let compaction = completed_compaction(Some("sum"), Some("f1"));
+
+        let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+
+        assert_eq!(
+            ids(&view),
+            vec!["sum", "f2", "f3", "g0", "g1"],
+            "the summary appears exactly once, at the front"
+        );
+    }
+
+    /// An orphan summary can outlive the compaction that wrote it, and it lands
+    /// *after* the boundary of the last one that completed.
+    ///
+    /// `compact_session_history` writes the summary message before it calls
+    /// `complete_compaction`, and the two are not atomic. If the second call
+    /// fails -- or the process dies between them -- the marked summary is
+    /// durable while its row is left `running` forever: nothing writes
+    /// `CompactionStatus::Failed` and nothing reaps a stale `running` row.
+    /// `latest_completed_compaction` then keeps returning the *previous*
+    /// compaction, whose boundary is older than that orphan -- so the orphan
+    /// falls inside the retained tail, where only the metadata filter catches
+    /// it. Replaying it would hand the provider two abridgements of the same
+    /// history, the stale one presented as current.
+    #[test]
+    fn an_orphan_summary_in_the_retained_tail_is_dropped() {
+        let mut messages = filler("f", 3);
+        // The completed compaction: covers f0..=f2, its summary appended after.
+        messages.push(summary_msg("s1", "first pass"));
+        messages.extend(filler("g", 2));
+        // A second compaction got this far and then failed to complete.
+        messages.push(summary_msg("s2", "never completed"));
+        let compaction = completed_compaction(Some("s1"), Some("f2"));
+
+        let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+
+        assert_eq!(
+            ids(&view),
+            vec!["s1", "g0", "g1"],
+            "the orphan summary is not replayed as if it were current"
+        );
+    }
+
+    /// With no completed compaction the history passes through untouched -- but
+    /// still without summary messages. A summary message can outlive every
+    /// completed row: it is written before `complete_compaction` runs, and a
+    /// `running` row is never returned by `latest_completed_compaction` and is
+    /// never reaped, so the first compaction of a session can leave a summary
+    /// behind with nothing completed at all. Replaying it alongside the full
+    /// history it abridges would be contradictory.
+    #[test]
+    fn without_a_compaction_the_history_passes_through_minus_any_summary() {
+        let mut messages = filler("f", 3);
+        messages.insert(2, summary_msg("sum", "orphan"));
+
+        let view = provider_history_messages_with_compaction(&messages, None);
+
+        assert_eq!(ids(&view), vec!["f0", "f1", "f2"]);
+    }
+
+    /// The four ways a compaction row can fail to describe a usable truncation.
+    /// All of them must fall back to the untruncated history: sending the
+    /// summary without the tail, or the tail without its prefix, would silently
+    /// drop conversation the provider needs.
+    ///
+    /// **None of the four is reachable today**, and that is the point of the
+    /// test. Both callers get their row from `latest_completed_compaction`
+    /// (`repository.rs`), whose `WHERE` adds `summary_message_id IS NOT NULL`
+    /// and `source_to_message_id IS NOT NULL` -- so the NULL rows are filtered
+    /// out upstream. Nor can an id dangle: both columns are
+    /// `ON DELETE SET NULL` and the pool enables `foreign_keys`, so deleting a
+    /// referenced message *nulls* the column, which that same filter then
+    /// excludes.
+    ///
+    /// The guards are therefore one half of an invariant whose other half is a
+    /// `WHERE` clause in another file. This pins the half that lives here, so
+    /// that relaxing the query does not silently turn a partial row into a
+    /// partial truncation.
+    ///
+    /// All four guards return the *same expression*, so this asserts one
+    /// behaviour four ways rather than four behaviours; it is a table because
+    /// the four entry conditions are what differ, and any of them growing its
+    /// own branch is exactly what should break here.
+    #[test]
+    fn a_compaction_that_cannot_be_applied_falls_back_to_the_full_history() {
+        let mut messages = filler("f", 4);
+        messages.push(summary_msg("sum", "s"));
+        let full = vec!["f0", "f1", "f2", "f3"];
+
+        for (case, compaction) in [
+            (
+                "no summary message id",
+                completed_compaction(None, Some("f1")),
+            ),
+            ("no boundary id", completed_compaction(Some("sum"), None)),
+            (
+                "summary message deleted",
+                completed_compaction(Some("gone"), Some("f1")),
+            ),
+            (
+                "boundary message deleted",
+                completed_compaction(Some("sum"), Some("gone")),
+            ),
+        ] {
+            let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+            assert_eq!(
+                ids(&view),
+                full,
+                "{case}: an unusable compaction must not truncate anything"
+            );
+        }
+    }
+
+    /// The summary is looked up in the message list, so the view carries the
+    /// summary's real content rather than a placeholder rebuilt from the row --
+    /// the row stores no text at all.
+    #[test]
+    fn the_view_carries_the_stored_summary_text() {
+        let mut messages = filler("f", 3);
+        messages.push(summary_msg("sum", "the actual summary body"));
+        let compaction = completed_compaction(Some("sum"), Some("f1"));
+
+        let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+
+        assert_eq!(content_text(&view[0].content), "the actual summary body");
+        assert!(
+            is_compaction_summary_message(&view[0]),
+            "the summary keeps its metadata marker, which the next compaction keys off"
+        );
+    }
+
+    /// A tool group straddling the boundary is the case `select_compaction_window`
+    /// exists to prevent, but the view function does not re-check it: it cuts
+    /// exactly where the row says. This pins that division of responsibility, so
+    /// a future change that moves the retreat logic here has to update the test.
+    #[test]
+    fn the_view_cuts_exactly_where_the_row_says_even_mid_tool_group() {
+        let mut messages = tool_group("t", 2);
+        messages.push(summary_msg("sum", "s"));
+        let compaction = completed_compaction(Some("sum"), Some("tasst"));
+
+        let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+
+        assert_eq!(
+            ids(&view),
+            vec!["sum", "tres0", "tres1"],
+            "the results outlive the assistant message that issued them"
         );
     }
 }
