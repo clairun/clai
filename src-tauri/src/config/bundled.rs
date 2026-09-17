@@ -2,21 +2,14 @@
 //!
 //! The default skills are loaded from the CLAI skills repository, not embedded
 //! in the app binary. The `bundled:<slug>` workspace ref name is retained as a
-//! compatibility contract for existing workspace configs and agent templates.
+//! compatibility contract for existing workspace configs.
 //!
-//! Bundled agent-template ids and default skill slugs are stable public
-//! references. Do not rename them across releases without adding an alias or
-//! explicit migration for existing configs.
+//! Default skill slugs are stable public references. Do not rename them across
+//! releases without adding an alias or explicit migration for existing configs.
 
 use std::path::{Path, PathBuf};
 
-use include_dir::{include_dir, Dir, DirEntry};
-use serde::{Deserialize, Serialize};
-
-use super::{ClaiConfig, ExecutionCapabilityConfig, SkillSourceConfig, SkillSourceKind};
-
-static BUNDLED_AGENT_TEMPLATES: Dir<'_> =
-    include_dir!("$CARGO_MANIFEST_DIR/embedded/agent-templates");
+use super::{ClaiConfig, SkillSourceConfig, SkillSourceKind};
 
 pub const DEFAULT_SKILL_SOURCE_NAME: &str = "CLAI Skills";
 pub const DEFAULT_SKILL_SOURCE_URI: &str = "https://github.com/clairun/clai-skills.git";
@@ -54,50 +47,6 @@ pub fn ensure_bundled_skill_source(config: &mut ClaiConfig) -> bool {
         &default_skill_source_cache_root(),
         &bundled_skills_root(),
     )
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BundledAgentTemplate {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub default_skill_slugs: Vec<String>,
-    #[serde(default)]
-    pub default_execution: ExecutionCapabilityConfig,
-}
-
-pub fn load_bundled_agent_templates() -> Result<Vec<BundledAgentTemplate>, String> {
-    let mut templates = Vec::new();
-    for entry in BUNDLED_AGENT_TEMPLATES.entries() {
-        let DirEntry::File(file) = entry else {
-            continue;
-        };
-        if file.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let contents = file
-            .contents_utf8()
-            .ok_or_else(|| format!("Bundled template is not UTF-8: {}", file.path().display()))?;
-        let template: BundledAgentTemplate = serde_json::from_str(contents).map_err(|error| {
-            format!(
-                "Failed to parse bundled template {}: {}",
-                file.path().display(),
-                error
-            )
-        })?;
-        templates.push(template);
-    }
-    templates.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(templates)
-}
-
-pub fn resolve_bundled_skill_id(slug: &str, config: &ClaiConfig) -> Option<String> {
-    config
-        .skill_sources
-        .iter()
-        .find(|source| is_bundled_source(source))
-        .map(|source| format!("{}:{}", source.id, slug))
 }
 
 fn ensure_bundled_skill_source_at(
@@ -299,59 +248,5 @@ mod tests {
 
         assert_eq!(config.skill_sources.len(), 1);
         assert_eq!(config.skill_sources[0].id, source_id);
-    }
-
-    #[test]
-    fn resolve_bundled_skill_id_uses_config_source_id() {
-        let mut config = ClaiConfig::default();
-        config.skill_sources.push(SkillSourceConfig::new_git(
-            DEFAULT_SKILL_SOURCE_NAME.to_string(),
-            DEFAULT_SKILL_SOURCE_URI.to_string(),
-            None,
-            Some("/tmp/clai-skills".to_string()),
-        ));
-
-        let source_id = config.skill_sources[0].id.clone();
-        assert_eq!(
-            resolve_bundled_skill_id("iterative-review", &config),
-            Some(format!("{}:iterative-review", source_id))
-        );
-    }
-
-    #[test]
-    fn load_bundled_agent_templates_returns_expected_templates() {
-        let templates = load_bundled_agent_templates().unwrap();
-        let ids: Vec<_> = templates
-            .iter()
-            .map(|template| template.id.as_str())
-            .collect();
-
-        assert_eq!(ids, vec!["code-reviewer", "sow-tracker"]);
-        assert!(templates
-            .iter()
-            .all(|template| !template.default_skill_slugs.is_empty()));
-        let sow = templates
-            .iter()
-            .find(|template| template.id == "sow-tracker")
-            .unwrap();
-        assert!(sow
-            .default_execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"printf".to_string()));
-        let reviewer = templates
-            .iter()
-            .find(|template| template.id == "code-reviewer")
-            .unwrap();
-        assert!(reviewer
-            .default_execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"cat".to_string()));
-        assert!(!reviewer
-            .default_execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"mv".to_string()));
     }
 }

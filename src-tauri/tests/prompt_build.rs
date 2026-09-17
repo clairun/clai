@@ -85,9 +85,9 @@ impl PromptBuildFixture {
             agent_id.clone(),
         );
         let manager = workspace_config
-            .agents
-            .iter_mut()
-            .find(|agent| agent.id == agent_id)
+            .main_agent
+            .as_mut()
+            .filter(|agent| agent.id == agent_id)
             .expect("manager agent");
         manager.description = agent_description.to_string();
         manager.selected_skills = selected_skills;

@@ -108,17 +108,122 @@ export const getProviderModels = async (providerType: string): Promise<unknown> 
 };
 
 // ============================================================================
-// Agent Management
+// Shared agent library (app-level definitions)
 // ============================================================================
 
-// Legacy global-agent CRUD removed — agents are workspace-local now.
-// Use the workspace_* wrappers below.
+/** One workspace that has a shared definition on its team. */
+export interface AssignedWorkspace {
+  workspaceId: string;
+  title: string;
+  workspaceAgentId: string;
+  enabled: boolean;
+}
 
-export const getAgentTemplates = async (): Promise<unknown> => {
+export interface AgentDefinitionDetail {
+  id: string;
+  revision: number;
+  archived: boolean;
+  name: string;
+  description: string;
+  selectedSkillIds: string[];
+  selectedMcpServerIds: string[];
+  providerConnectionIds: string[];
+  execution: unknown;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+  assignedWorkspaces: AssignedWorkspace[];
+}
+
+/** A workspace-local grant, as stored on an assignment or the workspace. */
+export interface PathGrantPayload {
+  path: string;
+  access: string;
+  origin?: unknown;
+}
+
+export interface WorkspaceAssignmentPayload {
+  id: string;
+  agentDefinitionId: string;
+  enabled: boolean;
+  context: string;
+  filesystemGrants: PathGrantPayload[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceTeamPolicy {
+  context: string;
+  filesystemGrants: PathGrantPayload[];
+  assignments: WorkspaceAssignmentPayload[];
+}
+
+export const listAgentDefinitions = async (): Promise<AgentDefinitionDetail[]> => {
   try {
-    return await invoke('agent_templates_list');
+    return await invoke('agent_definitions_list');
   } catch (error) {
-    return handleApiError(error, 'Failed to get agent templates');
+    return handleApiError(error, 'Failed to load the agent library');
+  }
+};
+
+/**
+ * Create or update a shared definition. `expectedRevision` must be the
+ * revision the form was loaded from; the backend rejects a stale save rather
+ * than overwriting a newer edit.
+ */
+export const saveAgentDefinition = async (request: unknown): Promise<string> => {
+  try {
+    return await invoke('agent_definition_save', { request });
+  } catch (error) {
+    return handleApiError(error, 'Failed to save the shared agent');
+  }
+};
+
+export const assignWorkspaceAgent = async (
+  workspaceId: string,
+  definitionId: string
+): Promise<string> => {
+  try {
+    return await invoke('workspace_assign_agent', { workspaceId, definitionId });
+  } catch (error) {
+    return handleApiError(error, 'Failed to add the agent to this workspace');
+  }
+};
+
+export const configureWorkspaceAssignment = async (
+  workspaceId: string,
+  assignment: WorkspaceAssignmentPayload
+): Promise<void> => {
+  try {
+    return await invoke('workspace_configure_assignment', { workspaceId, assignment });
+  } catch (error) {
+    return handleApiError(error, 'Failed to save the assignment');
+  }
+};
+
+export const getWorkspaceTeamPolicy = async (
+  workspaceId: string
+): Promise<WorkspaceTeamPolicy> => {
+  try {
+    return await invoke('workspace_team_policy', { workspaceId });
+  } catch (error) {
+    return handleApiError(error, 'Failed to load workspace team settings');
+  }
+};
+
+export const saveWorkspaceTeamPolicy = async (
+  workspaceId: string,
+  context: string,
+  filesystemGrants: PathGrantPayload[]
+): Promise<void> => {
+  try {
+    return await invoke('workspace_save_team_policy', {
+      workspaceId,
+      context,
+      filesystemGrants,
+    });
+  } catch (error) {
+    return handleApiError(error, 'Failed to save workspace team settings');
   }
 };
 

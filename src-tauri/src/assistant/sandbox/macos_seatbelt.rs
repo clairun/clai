@@ -34,7 +34,7 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
     let (private_tmp, ephemeral) = match command.profile.scratch_tmp.clone() {
         Some(scratch) => (scratch, false),
         None => (
-            create_private_tmp_dir(&command.profile.workspace_root)?,
+            create_private_tmp_dir(&command.profile.filesystem.workspace_root)?,
             true,
         ),
     };
@@ -100,10 +100,10 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
 }
 
 fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
-    if !command.profile.workspace_root.is_dir() {
+    if !command.profile.filesystem.workspace_root.is_dir() {
         return Err(format!(
             "Sandbox workspace does not exist or is not a directory: {}",
-            command.profile.workspace_root.display()
+            command.profile.filesystem.workspace_root.display()
         ));
     }
 
@@ -120,7 +120,7 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
 /// host namespace under Flatpak; macOS has no such split, so a plain
 /// in-process probe is correct).
 fn prune_missing_grants(command: &mut SandboxCommand) {
-    command.profile.path_grants.retain(|grant| {
+    command.profile.filesystem.path_grants.retain(|grant| {
         let exists = grant.host_path.exists();
         if !exists {
             tracing::warn!(
@@ -198,9 +198,9 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
 
     add_default_filters(&mut read_filters, &mut write_filters, &mut metadata_filters)?;
 
-    let workspace = canonicalize_existing(&command.profile.workspace_root)?;
-    add_dir_filter(&mut read_filters, &mut metadata_filters, &workspace)?;
-    add_dir_filter(&mut write_filters, &mut metadata_filters, &workspace)?;
+    let workspace = &command.profile.filesystem.workspace_root;
+    add_dir_filter(&mut read_filters, &mut metadata_filters, workspace)?;
+    add_dir_filter(&mut write_filters, &mut metadata_filters, workspace)?;
 
     // Lenient, mirroring the Linux `--bind-try`: the temp dir is resolved when
     // the profile is built, and a hard error here would abort the whole command
@@ -213,7 +213,7 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
         add_dir_filter(&mut write_filters, &mut metadata_filters, &tmp)?;
     }
 
-    for grant in &command.profile.path_grants {
+    for grant in &command.profile.filesystem.path_grants {
         add_grant_filters(
             &mut read_filters,
             &mut write_filters,
@@ -248,27 +248,18 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
 /// Metadata is intentionally left allowed so path traversal into the
 /// re-exposed workspace still works. See `profile::workspace_mask`.
 fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Result<(), String> {
-    let home = command.profile.env.home().map(Path::new);
-    let Some(mask) =
-        crate::assistant::sandbox::profile::workspace_mask(&command.profile.workspace_root, home)
-    else {
+    let Some(mask) = command.profile.filesystem.mask.as_deref() else {
         return Ok(());
     };
-    // The container may not exist yet; if we can't canonicalize it there's
-    // nothing to hide.
-    let Ok(mask) = canonicalize_existing(&mask) else {
-        return Ok(());
-    };
-
     profile.push_str("(deny file-read* file-write*\n  (subpath \"");
-    profile.push_str(&path_literal(&mask)?);
+    profile.push_str(&path_literal(mask)?);
     profile.push_str("\")\n)\n");
 
     let mut read = Vec::new();
     let mut write = Vec::new();
-    let workspace = canonicalize_existing(&command.profile.workspace_root)?;
-    read.push(path_literal(&workspace)?);
-    write.push(path_literal(&workspace)?);
+    let workspace = &command.profile.filesystem.workspace_root;
+    read.push(path_literal(workspace)?);
+    write.push(path_literal(workspace)?);
 
     // The command's own PERSISTENT scratch dir. On Linux scratch is reached at
     // /tmp — a separate mount point — so the container tmpfs never affects its
@@ -287,22 +278,23 @@ fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Resu
     // scratch stays denied.
     if let Some(scratch) = command.profile.scratch_tmp.as_deref() {
         if let Ok(scratch) = canonicalize_existing(scratch) {
-            if scratch.starts_with(&mask) {
+            if scratch.starts_with(mask) {
                 read.push(path_literal(&scratch)?);
                 write.push(path_literal(&scratch)?);
             }
         }
     }
-    for grant in &command.profile.path_grants {
-        let Ok(path) = canonicalize_existing(&grant.host_path) else {
-            continue;
-        };
-        if !path.starts_with(&mask) {
+    for grant in &command.profile.filesystem.path_grants {
+        let path = &grant.host_path;
+        if !path.exists() {
             continue;
         }
-        read.push(path_literal(&path)?);
+        if !path.starts_with(mask) {
+            continue;
+        }
+        read.push(path_literal(path)?);
         if grant.access == SandboxPathAccess::ReadWrite {
-            write.push(path_literal(&path)?);
+            write.push(path_literal(path)?);
         }
     }
     append_subpath_allow(profile, "file-read*", &read);
@@ -380,18 +372,19 @@ fn add_grant_filters(
     // construction (or a caller that skipped the prune): skipping the filter
     // only removes access, matching the lenient `*-bind-try` semantics of the
     // Linux backend, whereas erroring would abort the whole command.
-    let Ok(path) = canonicalize_existing(&grant.host_path) else {
+    let path = &grant.host_path;
+    if !path.exists() {
         return Ok(());
-    };
+    }
     if path.is_dir() {
-        add_dir_filter(read_filters, metadata_filters, &path)?;
+        add_dir_filter(read_filters, metadata_filters, path)?;
         if grant.access == SandboxPathAccess::ReadWrite {
-            add_dir_filter(write_filters, metadata_filters, &path)?;
+            add_dir_filter(write_filters, metadata_filters, path)?;
         }
     } else {
-        add_literal_filter(read_filters, metadata_filters, &path)?;
+        add_literal_filter(read_filters, metadata_filters, path)?;
         if grant.access == SandboxPathAccess::ReadWrite {
-            add_literal_filter(write_filters, metadata_filters, &path)?;
+            add_literal_filter(write_filters, metadata_filters, path)?;
         }
     }
     Ok(())
@@ -557,18 +550,18 @@ mod tests {
             cwd: workspace.to_path_buf(),
             timeout_ms: 1_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.to_path_buf(),
-                path_grants: vec![],
-                network: SandboxNetworkMode::Host,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+            profile: SandboxProfile::for_test(
+                workspace.to_path_buf(),
+                vec![],
+                SandboxNetworkMode::Host,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     workspace,
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         }
     }
 
@@ -602,18 +595,24 @@ mod tests {
         let private_tmp = tempfile::tempdir_in(&workspace).unwrap();
 
         let mut command = sample_command(&workspace);
-        command.profile.workspace_root = workspace.clone();
+        command.profile.filesystem.workspace_root = workspace.clone();
         command.cwd = workspace.clone();
         command.profile.env = SandboxEnv::filtered_from_iter(
             [("PATH", "/usr/bin:/bin")],
             home.path(),
             SandboxSessionBusMode::Deny,
         );
-        command.profile.path_grants = vec![SandboxPathGrant {
+        command.profile.filesystem.path_grants = vec![SandboxPathGrant {
             host_path: home.path().to_path_buf(),
             access: SandboxPathAccess::ReadOnly,
         }];
 
+        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
+            &command.profile.filesystem.workspace_root,
+            &command.profile.filesystem.path_grants,
+            command.profile.env.home().map(Path::new),
+        )
+        .unwrap();
         let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
 
         let container_c =
@@ -658,16 +657,21 @@ mod tests {
         let read_only = tempfile::tempdir().unwrap();
         let read_write = tempfile::tempdir().unwrap();
         let mut command = sample_command(workspace.path());
-        command.profile.path_grants = vec![
-            SandboxPathGrant {
-                host_path: read_only.path().to_path_buf(),
-                access: SandboxPathAccess::ReadOnly,
-            },
-            SandboxPathGrant {
-                host_path: read_write.path().to_path_buf(),
-                access: SandboxPathAccess::ReadWrite,
-            },
-        ];
+        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
+            workspace.path(),
+            &[
+                SandboxPathGrant {
+                    host_path: read_only.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                },
+                SandboxPathGrant {
+                    host_path: read_write.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadWrite,
+                },
+            ],
+            None,
+        )
+        .unwrap();
 
         let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
         let ro_path = escape_sbpl_string(
@@ -706,7 +710,7 @@ mod tests {
             access: SandboxPathAccess::ReadWrite,
         };
         let mut command = sample_command(workspace.path());
-        command.profile.path_grants = vec![
+        command.profile.filesystem.path_grants = vec![
             SandboxPathGrant {
                 host_path: vanished_path(),
                 access: SandboxPathAccess::ReadOnly,
@@ -717,7 +721,7 @@ mod tests {
         prune_missing_grants(&mut command);
 
         assert_eq!(
-            command.profile.path_grants,
+            command.profile.filesystem.path_grants,
             vec![live_grant],
             "stale grant should be pruned, live grant kept"
         );
@@ -731,7 +735,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let private_tmp = tempfile::tempdir_in(workspace.path()).unwrap();
         let mut command = sample_command(workspace.path());
-        command.profile.path_grants = vec![SandboxPathGrant {
+        command.profile.filesystem.path_grants = vec![SandboxPathGrant {
             host_path: vanished_path(),
             access: SandboxPathAccess::ReadOnly,
         }];
@@ -807,7 +811,7 @@ mod tests {
         std::fs::create_dir_all(&theirs).unwrap();
 
         let mut command = sample_command(&workspace);
-        command.profile.workspace_root = workspace.clone();
+        command.profile.filesystem.workspace_root = workspace.clone();
         command.cwd = workspace;
         command.profile.scratch_tmp = Some(mine.clone());
         command.profile.env = SandboxEnv::filtered_from_iter(
@@ -815,11 +819,17 @@ mod tests {
             home.path(),
             SandboxSessionBusMode::Deny,
         );
-        command.profile.path_grants = vec![SandboxPathGrant {
+        command.profile.filesystem.path_grants = vec![SandboxPathGrant {
             host_path: home.path().to_path_buf(),
             access: SandboxPathAccess::ReadOnly,
         }];
 
+        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
+            &command.profile.filesystem.workspace_root,
+            &command.profile.filesystem.path_grants,
+            command.profile.env.home().map(Path::new),
+        )
+        .unwrap();
         let profile = seatbelt_profile(&command, &mine).unwrap();
 
         let container_c =
@@ -865,7 +875,7 @@ mod tests {
         let private_tmp = tempfile::tempdir_in(&workspace).unwrap();
 
         let mut command = sample_command(&workspace);
-        command.profile.workspace_root = workspace.clone();
+        command.profile.filesystem.workspace_root = workspace.clone();
         command.cwd = workspace.clone();
         command.profile.scratch_tmp = None;
         command.profile.env = SandboxEnv::filtered_from_iter(
@@ -873,11 +883,17 @@ mod tests {
             home.path(),
             SandboxSessionBusMode::Deny,
         );
-        command.profile.path_grants = vec![SandboxPathGrant {
+        command.profile.filesystem.path_grants = vec![SandboxPathGrant {
             host_path: home.path().to_path_buf(),
             access: SandboxPathAccess::ReadOnly,
         }];
 
+        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
+            &command.profile.filesystem.workspace_root,
+            &command.profile.filesystem.path_grants,
+            command.profile.env.home().map(Path::new),
+        )
+        .unwrap();
         let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
 
         let container_c =

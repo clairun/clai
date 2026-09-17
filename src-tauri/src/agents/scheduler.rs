@@ -93,19 +93,13 @@ impl Scheduler {
         self.definitions.remove(agent_id)
     }
 
-    /// Creates and registers an agent instance for a space/room.
+    /// Creates and registers an instance of an agent.
     ///
-    /// Returns `None` if:
-    /// - The agent definition doesn't exist
-    /// - An instance already exists for this agent/space/room combination
-    pub fn create_instance(
-        &mut self,
-        agent_id: &str,
-        space_id: impl Into<String>,
-        room_id: impl Into<String>,
-    ) -> Option<String> {
+    /// Returns `None` if the agent definition doesn't exist. An agent has at
+    /// most one instance, so registering one twice keeps the first.
+    pub fn create_instance(&mut self, agent_id: &str) -> Option<String> {
         let definition = self.definitions.get(agent_id)?;
-        let instance = AgentInstance::new(definition, space_id.into(), room_id.into());
+        let instance = AgentInstance::new(definition);
         let instance_id = instance.instance_id.clone();
 
         // Don't overwrite existing instances
@@ -130,11 +124,14 @@ impl Scheduler {
     ///
     /// Returns the number of instances removed.
     pub fn remove_instances_for_agent(&mut self, agent_id: &str) -> usize {
+        // Match on the instance's own `agent_id` rather than on the shape of
+        // the key: this survives the key format changing, which the old
+        // `"{agent_id}:"` prefix test did not.
         let to_remove: Vec<String> = self
             .instances
-            .keys()
-            .filter(|id| id.starts_with(&format!("{}:", agent_id)))
-            .cloned()
+            .values()
+            .filter(|instance| instance.agent_id == agent_id)
+            .map(|instance| instance.instance_id.clone())
             .collect();
 
         let count = to_remove.len();
@@ -303,14 +300,6 @@ impl Scheduler {
         false
     }
 
-    /// Gets all instances for a space.
-    pub fn get_instances_for_space(&self, space_id: &str) -> Vec<&AgentInstance> {
-        self.instances
-            .values()
-            .filter(|i| i.space_id == space_id)
-            .collect()
-    }
-
     /// Gets the count of all registered instances.
     pub fn instance_count(&self) -> usize {
         self.instances.len()
@@ -380,7 +369,11 @@ mod tests {
     use super::*;
 
     fn create_test_definition() -> AgentDefinition {
-        AgentDefinition::new("test-agent", "Test Agent").with_description("A test agent")
+        definition_named("test-agent")
+    }
+
+    fn definition_named(id: &str) -> AgentDefinition {
+        AgentDefinition::new(id, "Test Agent").with_description("A test agent")
     }
 
     #[test]
@@ -398,16 +391,13 @@ mod tests {
 
         scheduler.register_definition(create_test_definition());
 
-        let instance_id = scheduler
-            .create_instance("test-agent", "space1", "room1")
-            .unwrap();
+        let instance_id = scheduler.create_instance("test-agent").unwrap();
 
-        assert_eq!(instance_id, "test-agent:space1:room1");
+        assert_eq!(instance_id, "test-agent");
         assert_eq!(scheduler.instance_count(), 1);
 
         let instance = scheduler.get_instance(&instance_id).unwrap();
-        assert_eq!(instance.space_id, "space1");
-        assert_eq!(instance.room_id, "room1");
+        assert_eq!(instance.agent_id, "test-agent");
     }
 
     #[test]
@@ -428,11 +418,11 @@ mod tests {
         let mut scheduler = Scheduler::new();
 
         scheduler.register_definition(create_test_definition());
-        scheduler.create_instance("test-agent", "space1", "room1");
+        scheduler.create_instance("test-agent");
 
         // First call should return the instance
         let next = scheduler.next_ready();
-        assert_eq!(next, Some("test-agent:space1:room1".to_string()));
+        assert_eq!(next, Some("test-agent".to_string()));
 
         // Second call should return None (agent is running)
         let next = scheduler.next_ready();
@@ -440,7 +430,7 @@ mod tests {
 
         // After completion, should be scheduled for later (not immediately ready)
         let target = chrono::Utc::now().timestamp_millis() + 60_000;
-        scheduler.complete_agent("test-agent:space1:room1", true, target);
+        scheduler.complete_agent("test-agent", true, target);
         let next = scheduler.next_ready();
         assert!(next.is_none()); // Scheduled for 60 seconds later
     }
@@ -450,8 +440,9 @@ mod tests {
         let mut scheduler = Scheduler::new();
 
         scheduler.register_definition(create_test_definition());
-        scheduler.create_instance("test-agent", "space1", "room1");
-        scheduler.create_instance("test-agent", "space2", "room1");
+        scheduler.register_definition(definition_named("other-agent"));
+        scheduler.create_instance("test-agent");
+        scheduler.create_instance("other-agent");
 
         // First should succeed
         let first = scheduler.next_ready();
@@ -476,12 +467,9 @@ mod tests {
         // resume each instance's individual enabled/disabled state is intact.
         let mut scheduler = Scheduler::new();
         scheduler.register_definition(create_test_definition());
-        let a = scheduler
-            .create_instance("test-agent", "space1", "room1")
-            .unwrap();
-        let b = scheduler
-            .create_instance("test-agent", "space2", "room1")
-            .unwrap();
+        scheduler.register_definition(definition_named("other-agent"));
+        let a = scheduler.create_instance("test-agent").unwrap();
+        let b = scheduler.create_instance("other-agent").unwrap();
 
         // B is individually paused (per-workspace), A is active.
         scheduler.set_instance_enabled(&b, false);
@@ -502,7 +490,7 @@ mod tests {
         let mut scheduler = Scheduler::new();
 
         scheduler.register_definition(create_test_definition());
-        scheduler.create_instance("test-agent", "space1", "room1");
+        scheduler.create_instance("test-agent");
 
         scheduler.pause("Maintenance".to_string());
 
@@ -520,9 +508,7 @@ mod tests {
         let mut scheduler = Scheduler::new();
 
         scheduler.register_definition(create_test_definition());
-        let instance_id = scheduler
-            .create_instance("test-agent", "space1", "room1")
-            .unwrap();
+        let instance_id = scheduler.create_instance("test-agent").unwrap();
 
         assert_eq!(scheduler.instance_count(), 1);
 
@@ -535,17 +521,17 @@ mod tests {
         let mut scheduler = Scheduler::new();
 
         scheduler.register_definition(create_test_definition());
-        scheduler.create_instance("test-agent", "space1", "room1");
+        scheduler.create_instance("test-agent");
 
         // Disable the instance
-        scheduler.set_instance_enabled("test-agent:space1:room1", false);
+        scheduler.set_instance_enabled("test-agent", false);
 
         // Should not be ready
         let next = scheduler.next_ready();
         assert!(next.is_none());
 
         // Re-enable
-        scheduler.set_instance_enabled("test-agent:space1:room1", true);
+        scheduler.set_instance_enabled("test-agent", true);
 
         // Should be ready now
         let next = scheduler.next_ready();
@@ -560,7 +546,7 @@ mod tests {
     fn set_instance_next_run_at_future_target_defers_readiness() {
         let mut scheduler = Scheduler::new();
         scheduler.register_definition(create_test_definition());
-        let instance_id = scheduler.create_instance("test-agent", "", "").unwrap();
+        let instance_id = scheduler.create_instance("test-agent").unwrap();
 
         // Target 1 hour in the future — instance should not be ready.
         let future = chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000;
@@ -573,7 +559,7 @@ mod tests {
     fn set_instance_next_run_at_past_target_clears_to_ready_now() {
         let mut scheduler = Scheduler::new();
         scheduler.register_definition(create_test_definition());
-        let instance_id = scheduler.create_instance("test-agent", "", "").unwrap();
+        let instance_id = scheduler.create_instance("test-agent").unwrap();
 
         // Mark instance not-ready first by giving it a far-future anchor.
         let future = chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000;
@@ -592,7 +578,7 @@ mod tests {
     fn set_instance_next_run_at_none_clears_to_ready_now() {
         let mut scheduler = Scheduler::new();
         scheduler.register_definition(create_test_definition());
-        let instance_id = scheduler.create_instance("test-agent", "", "").unwrap();
+        let instance_id = scheduler.create_instance("test-agent").unwrap();
 
         // Park far in the future, then clear with None.
         let future = chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000;
@@ -611,9 +597,7 @@ mod tests {
     fn defer_running_instance_releases_slot_and_stays_ready_now() {
         let mut scheduler = Scheduler::new();
         scheduler.register_definition(create_test_definition());
-        let id = scheduler
-            .create_instance("test-agent", "space1", "room1")
-            .unwrap();
+        let id = scheduler.create_instance("test-agent").unwrap();
 
         // Claim the instance (simulates a due tick).
         assert_eq!(scheduler.next_ready(), Some(id.clone()));
@@ -632,9 +616,7 @@ mod tests {
     fn defer_running_instance_preserves_manual_run_pending() {
         let mut scheduler = Scheduler::new();
         scheduler.register_definition(create_test_definition());
-        let id = scheduler
-            .create_instance("test-agent", "space1", "room1")
-            .unwrap();
+        let id = scheduler.create_instance("test-agent").unwrap();
 
         // Pause the schedule, then queue a one-shot manual run.
         scheduler.set_instance_enabled(&id, false);

@@ -1,15 +1,17 @@
+use crate::assistant::sandbox::filesystem::{
+    agent_path_string, resolve_existing, EffectiveFilesystemPolicy,
+};
 use futures::StreamExt;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tokio::time::Duration;
 
 use crate::assistant::sandbox::{
-    run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxPathAccess,
-    SandboxPathGrant, SandboxProfile, SandboxSessionBusMode,
+    run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
+    SandboxSessionBusMode,
 };
 use crate::assistant::types::RunNoticeKind;
 use crate::config::{
@@ -76,18 +78,6 @@ struct WebFetchParams {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccessKind {
-    ReadOnly,
-    ReadWrite,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedGrant {
-    root: PathBuf,
-    access: AccessKind,
-}
-
 pub async fn execute_local_tool(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
@@ -128,7 +118,8 @@ async fn execute_bash_exec(
         return Err("Shell access is disabled for this agent".to_string());
     }
 
-    let cwd = resolve_shell_cwd(context, params.cwd.as_deref())?;
+    let filesystem = filesystem_policy(context)?;
+    let cwd = filesystem.authorize_cwd(params.cwd.as_deref().unwrap_or("."))?;
     let workspace_root = ensure_workspace_root(context)?;
 
     let run_allowed = context.session_allowed_command_prefixes_snapshot();
@@ -187,7 +178,7 @@ async fn execute_bash_exec(
         cwd,
         timeout_ms,
         max_output_chars: output_limit,
-        profile: sandbox_profile(context, workspace_root)?,
+        profile: sandbox_profile(context, workspace_root, filesystem),
     })
     .await
     .inspect_err(|error| {
@@ -243,47 +234,15 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
     }
 }
 
-fn filesystem_grants(context: &ToolExecutionContext) -> Result<Vec<ResolvedGrant>, String> {
-    let mut grants = vec![ResolvedGrant {
-        root: ensure_workspace_root(context)?,
-        access: AccessKind::ReadWrite,
-    }];
-
-    for grant in &context.execution.filesystem.extra_paths {
-        let resolved = resolve_grant(grant)?;
-        if !grants
-            .iter()
-            .any(|existing| existing.root == resolved.root && existing.access == resolved.access)
-        {
-            grants.push(resolved);
-        }
-    }
-
-    // Run-scoped grants accepted via the fs_request_grant modal. These come
-    // last so the dedup above doesn't drop them in favour of weaker durable
-    // entries — but path resolution still goes through the same helper so
-    // a session grant on `~/.cargo` lands in the same shape as a durable one.
-    for grant in context.session_grants_snapshot() {
-        let resolved = resolve_grant(&grant)?;
-        if !grants
-            .iter()
-            .any(|existing| existing.root == resolved.root && existing.access == resolved.access)
-        {
-            grants.push(resolved);
-        }
-    }
-
-    Ok(grants)
-}
-
-fn resolve_grant(grant: &FilesystemPathGrant) -> Result<ResolvedGrant, String> {
-    Ok(ResolvedGrant {
-        root: resolve_configured_path(&grant.path)?,
-        access: match grant.access {
-            FilesystemPathAccess::ReadOnly => AccessKind::ReadOnly,
-            FilesystemPathAccess::ReadWrite => AccessKind::ReadWrite,
-        },
-    })
+fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
+    let workspace = ensure_workspace_root(context)?;
+    let mut grants = context.execution.filesystem.extra_paths.clone();
+    grants.extend(context.session_grants_snapshot());
+    EffectiveFilesystemPolicy::from_config(
+        &workspace,
+        &grants,
+        crate::paths::real_home().as_deref(),
+    )
 }
 
 fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
@@ -307,43 +266,11 @@ fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, Stri
     Ok(workspace_root)
 }
 
-fn resolve_shell_cwd(
-    context: &ToolExecutionContext,
-    requested_cwd: Option<&str>,
-) -> Result<PathBuf, String> {
-    let agent_workspace = ensure_workspace_root(context)?;
-    let base = requested_cwd.unwrap_or(".");
-
-    let cwd = if base == "." {
-        agent_workspace
-    } else {
-        // The sandbox binds grants at their configured (lexical) paths, so the
-        // cwd stays lexical; containment is still checked on the resolved form.
-        let grants = filesystem_grants(context)?;
-        resolve_allowed_cwd(base, &grants)?
-    };
-
-    Ok(cwd)
-}
-
 fn sandbox_profile(
     context: &ToolExecutionContext,
     workspace_root: PathBuf,
-) -> Result<SandboxProfile, String> {
-    let mut path_grants = Vec::new();
-    for grant in filesystem_grants(context)? {
-        if grant.root == workspace_root {
-            continue;
-        }
-        path_grants.push(SandboxPathGrant {
-            host_path: grant.root,
-            access: match grant.access {
-                AccessKind::ReadOnly => SandboxPathAccess::ReadOnly,
-                AccessKind::ReadWrite => SandboxPathAccess::ReadWrite,
-            },
-        });
-    }
-
+    filesystem: EffectiveFilesystemPolicy,
+) -> SandboxProfile {
     let network = match context.execution.sandbox.network {
         SandboxNetworkConfig::Enabled => SandboxNetworkMode::Host,
         SandboxNetworkConfig::Disabled => SandboxNetworkMode::Disabled,
@@ -354,214 +281,18 @@ fn sandbox_profile(
         SandboxSessionBusConfig::Allow => SandboxSessionBusMode::Allow,
     };
 
-    // HOME env points at the user's real $HOME so `~/.foo` resolves the
-    // same way the user's own shell does. The user's `extra_paths` config
-    // is the source of truth for what's actually visible: a new agent's
-    // defaults include `$HOME` (RO) as a normal entry, and the user can
-    // remove it from agent settings if they want a fully-isolated agent.
-    // If host HOME is unset (rare service contexts), fall back to the
-    // workspace so the env still has a valid HOME.
-    let env_home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.clone());
+    let scratch_tmp = crate::assistant::sandbox::session_scratch(&workspace_root);
 
-    // Persistent per-workspace temp space, reset on this workspace's first
-    // sandboxed command of the app session. `None` (the workspace container
-    // can't be masked, or the directory couldn't be created) degrades to the
-    // old ephemeral behaviour rather than failing the command — scratch is an
-    // optimisation. Only the sandboxed backends consume it; on platforms that
-    // run commands unsandboxed there is nothing to bind it into, so don't
-    // create a directory that could never be used.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let scratch_tmp = crate::assistant::sandbox::scratch::ensure_session_scratch(
-        &workspace_root,
-        Some(env_home.as_path()),
-    );
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let scratch_tmp = None;
-
-    Ok(SandboxProfile {
-        env: SandboxEnv::filtered_from_current(&env_home, session_bus),
-        workspace_root,
-        path_grants,
+    let env_home = filesystem
+        .home
+        .as_deref()
+        .unwrap_or(&filesystem.workspace_root);
+    SandboxProfile {
+        env: SandboxEnv::filtered_from_current(env_home, session_bus),
+        filesystem,
         network,
         session_bus,
         scratch_tmp,
-    })
-}
-
-/// The user's real home directory, resolved once. Inside Flatpak this is the
-/// host home (resolved via a host-spawn).
-fn real_host_home() -> Option<PathBuf> {
-    static HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
-    HOME.get_or_init(|| crate::providers::get_home_dir().map(PathBuf::from))
-        .clone()
-}
-
-/// Resolve `path` through symlinks so a requested shell working directory is
-/// checked by where it actually lands, not by its spelling.
-///
-/// The nearest existing ancestor (or the path itself) is canonicalized and the
-/// not-yet-existing tail is re-appended unchanged; nothing is created. An
-/// existing component that cannot be resolved (for example, a dangling
-/// symlink) is refused. If nothing along the path exists, no symlink can be
-/// involved and the path is returned as is.
-fn resolve_symlinks_through_existing_ancestor(path: &Path) -> std::io::Result<PathBuf> {
-    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut ancestor = path;
-    loop {
-        if fs::symlink_metadata(ancestor).is_ok() {
-            let mut resolved = ancestor.canonicalize()?;
-            for name in missing.iter().rev() {
-                resolved.push(name);
-            }
-            return Ok(resolved);
-        }
-        let (Some(name), Some(parent)) = (ancestor.file_name(), ancestor.parent()) else {
-            return Ok(path.to_path_buf());
-        };
-        missing.push(name);
-        ancestor = parent;
-    }
-}
-
-/// Grant roots in the same symlink-resolved form as the candidate. A root
-/// that cannot be resolved (it may not exist yet) keeps its configured form.
-fn canonical_grant_roots(grants: &[ResolvedGrant]) -> Vec<PathBuf> {
-    grants
-        .iter()
-        .map(|grant| {
-            resolve_symlinks_through_existing_ancestor(&grant.root)
-                .unwrap_or_else(|_| grant.root.clone())
-        })
-        .collect()
-}
-
-fn resolve_allowed_cwd(path: &str, grants: &[ResolvedGrant]) -> Result<PathBuf, String> {
-    resolve_allowed_cwd_with_home(path, grants, real_host_home().as_deref())
-}
-
-/// Validate a shell working directory against symlink-resolved grants, then
-/// return the lexical path because sandbox backends bind configured paths at
-/// those names.
-fn resolve_allowed_cwd_with_home(
-    path: &str,
-    grants: &[ResolvedGrant],
-    home: Option<&Path>,
-) -> Result<PathBuf, String> {
-    let requested = resolve_candidate_path(path, grants)?;
-    let candidate = resolve_symlinks_through_existing_ancestor(&requested).map_err(|e| {
-        format!(
-            "Path {} resolves outside the agent's allowed filesystem grants: {}",
-            requested.display(),
-            e
-        )
-    })?;
-    let grant_roots = canonical_grant_roots(grants);
-    let home = home.map(|home| {
-        resolve_symlinks_through_existing_ancestor(home).unwrap_or_else(|_| home.to_path_buf())
-    });
-
-    // Workspace isolation: an agent reaches its own workspace and HOME, but not
-    // sibling workspaces — even though they sit under the same HOME grant. The
-    // mask is the workspace container (`grants[0]` is always the agent's own
-    // workspace root; its parent holds all workspaces). A grant that's only a
-    // *broad ancestor* of that container (e.g. `$HOME`) does not authorize a
-    // path inside it; only a grant rooted at-or-below the container does (the
-    // own workspace, or another workspace the user explicitly granted). See
-    // `sandbox::profile::workspace_mask`.
-    let mask = grant_roots.first().and_then(|workspace_root| {
-        crate::assistant::sandbox::profile::workspace_mask(workspace_root, home.as_deref())
-    });
-
-    let allowed = grant_roots.iter().any(|root| {
-        candidate.starts_with(root)
-            && !grant_masked_for_candidate(root, &candidate, mask.as_deref())
-    });
-    if !allowed {
-        return Err(format!(
-            "Path {} is outside the agent's allowed filesystem grants",
-            requested.display()
-        ));
-    }
-
-    Ok(requested)
-}
-
-/// True when `grant_root` is only a broad *ancestor* of the masked workspace
-/// container and `candidate` lies inside that container — i.e. this grant must
-/// not authorize the path (it would otherwise expose sibling workspaces via a
-/// `$HOME`-style grant). A grant rooted at-or-below the container (the agent's
-/// own workspace, or an explicitly-granted sibling) is not blocked.
-fn grant_masked_for_candidate(grant_root: &Path, candidate: &Path, mask: Option<&Path>) -> bool {
-    match mask {
-        Some(mask) => {
-            candidate.starts_with(mask) && mask.starts_with(grant_root) && mask != grant_root
-        }
-        None => false,
-    }
-}
-
-fn resolve_candidate_path(path: &str, grants: &[ResolvedGrant]) -> Result<PathBuf, String> {
-    let raw = Path::new(path);
-    if raw.is_absolute() {
-        return Ok(normalize_path(raw.to_path_buf()));
-    }
-
-    if let Some(base) = grants.first() {
-        return Ok(normalize_path(base.root.join(raw)));
-    }
-
-    Err("No filesystem grants are configured for this agent".to_string())
-}
-
-fn resolve_configured_path(path: &str) -> Result<PathBuf, String> {
-    let raw = Path::new(path);
-    if raw.is_absolute() {
-        Ok(normalize_path(raw.to_path_buf()))
-    } else {
-        let cwd = std::env::current_dir()
-            .map_err(|e| format!("Failed to resolve current directory: {}", e))?;
-        Ok(normalize_path(cwd.join(raw)))
-    }
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-/// Render a path for agent-facing tool output.
-///
-/// On Windows the agent's `bash_exec` runs inside Git Bash, where `\` is an
-/// escape character, so paths handed to the model must use `/` to round-trip
-/// back into shell commands. We also strip the `\\?\` verbatim prefix that
-/// `std::fs::canonicalize` adds, leaving clean `C:/Users/...` paths that Git
-/// Bash accepts.
-///
-/// On Unix the path is returned verbatim: `\` is a legal byte in a filename,
-/// so rewriting it would corrupt names.
-fn agent_path_string(path: &Path) -> String {
-    #[cfg(windows)]
-    {
-        let s = path.to_string_lossy();
-        let trimmed = s.strip_prefix(r"\\?\").unwrap_or(s.as_ref());
-        trimmed.replace('\\', "/")
-    }
-    #[cfg(not(windows))]
-    {
-        path.display().to_string()
     }
 }
 
@@ -902,16 +633,16 @@ async fn await_user_permission(
     let workspace_id = context.workspace_id.clone();
     let agent_id = context.automation_id.clone();
 
-    let request = PermissionRequest {
-        request_id: uuid::Uuid::new_v4().to_string(),
-        workspace_id: workspace_id.clone(),
+    // The constructor resolves where an "always" decision would be saved — in
+    // this workspace for its Main, or on a shared definition in force wherever
+    // that teammate works.
+    let request = PermissionRequest::for_agent(
+        &app_state,
+        workspace_id.clone(),
         agent_id,
-        // Agent display name isn't on the runtime context; the frontend
-        // resolves it from agent_id via existing workspace queries.
-        agent_name: None,
-        command: command.to_string(),
-        segments: segments.clone(),
-    };
+        command.to_string(),
+        segments.clone(),
+    );
     let request_id = request.request_id.clone();
 
     // Supersede: if a previous request for this exact run + command is
@@ -1026,15 +757,16 @@ async fn execute_fs_request_grant(
     context: &ToolExecutionContext,
     params: FsRequestGrantParams,
 ) -> Result<serde_json::Value, String> {
-    let canonical = canonicalize_requested_path(&params.path)?;
+    let canonical =
+        canonicalize_requested_path(&params.path, crate::paths::real_home().as_deref())?;
     let canonical_str = agent_path_string(&canonical);
 
     // If the path is already covered (by extra_paths, the preset, or an
     // earlier session grant), short-circuit — no user prompt, just say yes.
     // This keeps repeated requests cheap and avoids modal spam when the LLM
     // forgets it already has the grant.
-    let existing_grants = filesystem_grants(context)?;
-    if path_already_covered(&existing_grants, &canonical, params.access) {
+    let filesystem = filesystem_policy(context)?;
+    if filesystem.covers(&canonical, params.access) {
         return Ok(serde_json::json!({
             "granted": true,
             "path": canonical_str,
@@ -1101,19 +833,22 @@ async fn execute_fs_request_grant(
     }
 }
 
-fn canonicalize_requested_path(input: &str) -> Result<PathBuf, String> {
+/// Turn the agent's requested path into the identity the compiled policy
+/// reasons about. `~` expands to the host home (not the process `HOME`, which
+/// differs under Flatpak) and resolution goes through
+/// [`resolve_existing`], the same resolver `EffectiveFilesystemPolicy::compile`
+/// uses, so coverage checks and the persisted grant agree with enforcement.
+fn canonicalize_requested_path(input: &str, home: Option<&Path>) -> Result<PathBuf, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("fs_request_grant requires a non-empty path".to_string());
     }
     let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| "Cannot expand ~ in path: HOME is unset".to_string())?;
-        PathBuf::from(home).join(rest)
+        home.ok_or_else(|| "Cannot expand ~ in path: home directory is unknown".to_string())?
+            .join(rest)
     } else if trimmed == "~" {
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| "Cannot expand ~ in path: HOME is unset".to_string())?;
-        PathBuf::from(home)
+        home.ok_or_else(|| "Cannot expand ~ in path: home directory is unknown".to_string())?
+            .to_path_buf()
     } else {
         PathBuf::from(trimmed)
     };
@@ -1123,41 +858,12 @@ fn canonicalize_requested_path(input: &str) -> Result<PathBuf, String> {
             input
         ));
     }
-    std::fs::canonicalize(&expanded).map_err(|error| {
+    resolve_existing(&expanded).map_err(|error| {
         format!(
             "fs_request_grant requires an existing path because the shell sandbox cannot bind a nonexistent target: {}. Request an existing parent directory instead ({})",
             expanded.display(),
             error
         )
-    })
-}
-
-fn path_already_covered(
-    grants: &[ResolvedGrant],
-    path: &Path,
-    required: FilesystemPathAccess,
-) -> bool {
-    // Same workspace-isolation mask as `resolve_allowed_path`: a broad ancestor
-    // grant (e.g. `$HOME`) does NOT cover a path inside the masked workspace
-    // container. Without this, `fs_request_grant` would short-circuit a sibling
-    // workspace as "already-granted" even though it's isolated and unreachable —
-    // so the request must instead fall through to a real user prompt.
-    let mask = grants.first().and_then(|ws| {
-        crate::assistant::sandbox::profile::workspace_mask(&ws.root, real_host_home().as_deref())
-    });
-    grants.iter().any(|grant| {
-        let covers_path = path == grant.root || path.starts_with(&grant.root);
-        if !covers_path {
-            return false;
-        }
-        if grant_masked_for_candidate(&grant.root, path, mask.as_deref()) {
-            return false;
-        }
-        match (grant.access, required) {
-            (AccessKind::ReadWrite, _) => true,
-            (AccessKind::ReadOnly, FilesystemPathAccess::ReadOnly) => true,
-            (AccessKind::ReadOnly, FilesystemPathAccess::ReadWrite) => false,
-        }
     })
 }
 
@@ -1850,199 +1556,75 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn grant_for(path: &Path) -> ResolvedGrant {
-        ResolvedGrant {
-            root: path.to_path_buf(),
-            access: AccessKind::ReadWrite,
+    fn context_with_grants(
+        workspace_root: &std::path::Path,
+        extra_paths: Vec<FilesystemPathGrant>,
+    ) -> ToolExecutionContext {
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.filesystem.extra_paths = extra_paths;
+        ToolExecutionContext {
+            session_id: "session".to_string(),
+            run_id: "run".to_string(),
+            tool_call_id: None,
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+            workspace_id: Some("ws".to_string()),
+            mcp_server_ids: Vec::new(),
+            agent_workspace_id: None,
+            workspace_root: Some(workspace_root.to_path_buf()),
+            automation_id: Some("agent".to_string()),
+            workspace_agents: Vec::new(),
+            inter_agent_call_depth: None,
+            execution,
+            notices: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            session_allowed_command_prefixes: std::sync::Arc::new(
+                std::sync::Mutex::new(Vec::new()),
+            ),
+            session_blocked_command_prefixes: std::sync::Arc::new(
+                std::sync::Mutex::new(Vec::new()),
+            ),
         }
     }
 
-    // ------------------------------------------------------------------
-    // path_already_covered short-circuit predicate
-    // ------------------------------------------------------------------
-
     #[test]
-    fn path_already_covered_recognises_exact_match() {
-        let grants = vec![ResolvedGrant {
-            root: PathBuf::from("/a/b"),
-            access: AccessKind::ReadOnly,
-        }];
-        assert!(path_already_covered(
-            &grants,
-            Path::new("/a/b"),
+    fn execution_context_compiles_configured_and_session_grants() {
+        let workspace = tempdir().unwrap();
+        let external = tempdir().unwrap();
+        let context = context_with_grants(
+            workspace.path(),
+            vec![FilesystemPathGrant {
+                path: workspace.path().join("docs").display().to_string(),
+                access: FilesystemPathAccess::ReadOnly,
+                origin: None,
+            }],
+        );
+        context
+            .session_grants
+            .lock()
+            .unwrap()
+            .push(FilesystemPathGrant {
+                path: external.path().display().to_string(),
+                access: FilesystemPathAccess::ReadOnly,
+                origin: None,
+            });
+        let policy = filesystem_policy(&context).unwrap();
+        assert_eq!(
+            policy.workspace_root,
+            workspace.path().canonicalize().unwrap()
+        );
+        assert_eq!(policy.path_grants.len(), 1);
+        assert!(policy.covers(
+            &external.path().canonicalize().unwrap(),
             FilesystemPathAccess::ReadOnly
         ));
-    }
-
-    #[test]
-    fn path_already_covered_recognises_descendant() {
-        let grants = vec![ResolvedGrant {
-            root: PathBuf::from("/a"),
-            access: AccessKind::ReadOnly,
-        }];
-        assert!(path_already_covered(
-            &grants,
-            Path::new("/a/b/c"),
-            FilesystemPathAccess::ReadOnly
-        ));
-    }
-
-    #[test]
-    fn path_already_covered_excludes_masked_sibling_workspace() {
-        // Regression: fs_request_grant must NOT report a sibling workspace as
-        // "already-granted" just because $HOME contains it — the mask makes it
-        // unreachable, so the request has to fall through to a real prompt.
-        let Some(home) = real_host_home() else {
-            return; // no home (rare); nothing to assert
-        };
-        let own = home.join(".clai/workspaces/own");
-        let grants = vec![
-            ResolvedGrant {
-                root: own.clone(),
-                access: AccessKind::ReadWrite,
-            },
-            ResolvedGrant {
-                root: home.clone(),
-                access: AccessKind::ReadOnly,
-            },
-        ];
-
-        // A sibling workspace under $HOME is masked → not covered.
-        let sibling = home.join(".clai/workspaces/other/file.txt");
-        assert!(!path_already_covered(
-            &grants,
-            &sibling,
-            FilesystemPathAccess::ReadOnly
-        ));
-        // The agent's own workspace IS covered.
-        assert!(path_already_covered(
-            &grants,
-            &own.join("notes.md"),
+        assert!(!policy.covers(
+            &external.path().canonicalize().unwrap(),
             FilesystemPathAccess::ReadWrite
         ));
-        // A non-workspace home path is still covered by the $HOME grant.
-        assert!(path_already_covered(
-            &grants,
-            &home.join(".gitconfig"),
-            FilesystemPathAccess::ReadOnly
-        ));
-    }
-
-    #[test]
-    fn path_already_covered_requires_rw_for_rw_request() {
-        let grants = vec![ResolvedGrant {
-            root: PathBuf::from("/a"),
-            access: AccessKind::ReadOnly,
-        }];
-        assert!(!path_already_covered(
-            &grants,
-            Path::new("/a/b"),
+        assert!(policy.covers(
+            &policy.workspace_root.join("docs"),
             FilesystemPathAccess::ReadWrite
         ));
-    }
-
-    #[test]
-    fn path_already_covered_rw_grant_satisfies_ro_request() {
-        let grants = vec![ResolvedGrant {
-            root: PathBuf::from("/a"),
-            access: AccessKind::ReadWrite,
-        }];
-        assert!(path_already_covered(
-            &grants,
-            Path::new("/a/b"),
-            FilesystemPathAccess::ReadOnly
-        ));
-    }
-
-    // ------------------------------------------------------------------
-    // resolve_allowed_cwd — lexical cwd, resolved containment
-    // ------------------------------------------------------------------
-
-    const OUTSIDE_GRANTS: &str = "outside the agent's allowed filesystem grants";
-
-    fn ro_grant_for(path: &Path) -> ResolvedGrant {
-        ResolvedGrant {
-            root: path.to_path_buf(),
-            access: AccessKind::ReadOnly,
-        }
-    }
-
-    fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
-        let dir = tempdir().unwrap();
-        let path = dir.path().canonicalize().unwrap();
-        (dir, path)
-    }
-
-    #[test]
-    fn cwd_outside_all_grants_is_rejected() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let (_outside_dir, outside) = canonical_tempdir();
-        let error = resolve_allowed_cwd(outside.to_str().unwrap(), &[grant_for(&ws)]).unwrap_err();
-        assert!(error.contains(OUTSIDE_GRANTS), "{error}");
-    }
-
-    #[test]
-    fn read_only_grant_can_be_used_as_a_shell_cwd() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let (_read_dir, read_dir) = canonical_tempdir();
-        let addressed = read_dir.join("nested");
-        fs::create_dir(&addressed).unwrap();
-        let resolved = resolve_allowed_cwd(
-            addressed.to_str().unwrap(),
-            &[grant_for(&ws), ro_grant_for(&read_dir)],
-        )
-        .unwrap();
-        assert_eq!(resolved, addressed);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_cwd_escaping_all_grants_is_refused() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        let (_outside_dir, outside) = canonical_tempdir();
-        std::os::unix::fs::symlink(&outside, ws.join("link")).unwrap();
-
-        let error = resolve_allowed_cwd("link", &[grant_for(&ws)]).unwrap_err();
-        assert!(error.contains(OUTSIDE_GRANTS), "{error}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn in_grant_symlinked_cwd_keeps_the_addressed_path() {
-        let (_ws_dir, ws) = canonical_tempdir();
-        fs::create_dir(ws.join("real")).unwrap();
-        std::os::unix::fs::symlink(ws.join("real"), ws.join("alias")).unwrap();
-
-        let resolved = resolve_allowed_cwd("alias", &[grant_for(&ws)]).unwrap();
-        assert_eq!(resolved, ws.join("alias"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_cwd_to_sibling_workspace_is_masked_under_home_grant() {
-        let (_home_dir, home) = canonical_tempdir();
-        let own = home.join(".clai/workspaces/own");
-        let other = home.join(".clai/workspaces/other");
-        fs::create_dir_all(&own).unwrap();
-        fs::create_dir_all(&other).unwrap();
-        std::os::unix::fs::symlink(&other, own.join("link")).unwrap();
-        let grants = vec![grant_for(&own), ro_grant_for(&home)];
-
-        let error = resolve_allowed_cwd_with_home("link", &grants, Some(&home)).unwrap_err();
-        assert!(error.contains(OUTSIDE_GRANTS), "{error}");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_grant_root_still_authorizes_a_shell_cwd() {
-        let (_base_dir, base) = canonical_tempdir();
-        let real = base.join("real");
-        fs::create_dir(&real).unwrap();
-        let link_root = base.join("link-root");
-        std::os::unix::fs::symlink(&real, &link_root).unwrap();
-
-        let resolved = resolve_allowed_cwd(".", &[grant_for(&link_root)]).unwrap();
-        assert_eq!(resolved, link_root);
     }
 
     // ------------------------------------------------------------------
@@ -2051,41 +1633,53 @@ mod tests {
 
     #[test]
     fn canonicalize_rejects_empty_path() {
-        let err = canonicalize_requested_path("   ").unwrap_err();
+        let err = canonicalize_requested_path("   ", None).unwrap_err();
         assert!(err.contains("non-empty"));
     }
 
     #[test]
     fn canonicalize_rejects_relative_paths() {
-        let err = canonicalize_requested_path("relative/path").unwrap_err();
+        let err = canonicalize_requested_path("relative/path", None).unwrap_err();
         assert!(err.contains("absolute"));
     }
 
     #[test]
-    fn canonicalize_expands_tilde_with_real_home() {
+    fn canonicalize_expands_tilde_with_supplied_home() {
         let temp = tempdir().unwrap();
-        let prev = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", temp.path());
-        }
+        let nested = temp.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
 
-        let resolved = canonicalize_requested_path("~").unwrap();
-        assert!(resolved.is_absolute());
+        let resolved = canonicalize_requested_path("~", Some(temp.path())).unwrap();
         assert_eq!(resolved, temp.path().canonicalize().unwrap());
 
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+        let resolved = canonicalize_requested_path("~/nested", Some(temp.path())).unwrap();
+        assert_eq!(resolved, nested.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn canonicalize_rejects_tilde_without_known_home() {
+        let err = canonicalize_requested_path("~/anything", None).unwrap_err();
+        assert!(err.contains("home directory is unknown"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_resolves_symlinked_request_to_its_target() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = temp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let resolved = canonicalize_requested_path(&link.display().to_string(), None).unwrap();
+        assert_eq!(resolved, target.canonicalize().unwrap());
     }
 
     #[test]
     fn canonicalize_rejects_nonexistent_grant_target() {
         let temp = tempdir().unwrap();
         let missing = temp.path().join("future-cache");
-        let error = canonicalize_requested_path(&missing.display().to_string()).unwrap_err();
+        let error = canonicalize_requested_path(&missing.display().to_string(), None).unwrap_err();
         assert!(error.contains("requires an existing path"), "{error}");
         assert!(error.contains("existing parent directory"), "{error}");
     }
@@ -2336,88 +1930,6 @@ mod tests {
 
     use crate::config::types::ShellCapabilityConfig;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
-
-    // Workspace isolation: `grant_masked_for_candidate` is the core decision
-    // for whether a grant authorizes a path under the masked workspace
-    // container. mask = `~/u/.clai/workspaces`, own ws = `…/workspaces/own`.
-    #[test]
-    fn home_grant_does_not_authorize_a_sibling_workspace() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-        let home = Path::new("/home/u");
-        let sibling = Path::new("/home/u/.clai/workspaces/other/secret.txt");
-        assert!(grant_masked_for_candidate(home, sibling, Some(mask)));
-    }
-
-    #[test]
-    fn own_workspace_grant_authorizes_its_own_files() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-        let own = Path::new("/home/u/.clai/workspaces/own");
-        let file = Path::new("/home/u/.clai/workspaces/own/notes.md");
-        assert!(!grant_masked_for_candidate(own, file, Some(mask)));
-    }
-
-    #[test]
-    fn home_grant_still_authorizes_non_workspace_home_paths() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-        let home = Path::new("/home/u");
-        let gitconfig = Path::new("/home/u/.gitconfig");
-        // Not under the container → mask doesn't block the HOME grant.
-        assert!(!grant_masked_for_candidate(home, gitconfig, Some(mask)));
-    }
-
-    #[test]
-    fn explicit_sibling_grant_authorizes_that_sibling() {
-        // The "unless the user grants it" escape hatch: a grant rooted at the
-        // sibling workspace is not blocked by the mask.
-        let mask = Path::new("/home/u/.clai/workspaces");
-        let other = Path::new("/home/u/.clai/workspaces/other");
-        let file = Path::new("/home/u/.clai/workspaces/other/shared.txt");
-        assert!(!grant_masked_for_candidate(other, file, Some(mask)));
-    }
-
-    // Scratch space lives at `<container>/.scratch/<id>` precisely so the
-    // container mask that already hides sibling workspaces hides it from the
-    // shell sandbox too. An earlier revision put scratch under the OS cache
-    // directory, where a broad $HOME grant exposed every workspace's temp data.
-    #[test]
-    fn home_grant_does_not_authorize_another_workspaces_scratch() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-        let home = Path::new("/home/u");
-        let other_scratch =
-            Path::new("/home/u/.clai/workspaces/.scratch/other-1111111111111111/secret.txt");
-        assert!(grant_masked_for_candidate(home, other_scratch, Some(mask)));
-    }
-
-    // ...and not even its own: the agent reaches its scratch at /tmp inside the
-    // sandbox, never by host path, so the mask covers the whole `.scratch`
-    // subtree uniformly.
-    #[test]
-    fn home_grant_does_not_authorize_its_own_scratch_by_host_path() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-        let home = Path::new("/home/u");
-        let own_scratch = Path::new("/home/u/.clai/workspaces/.scratch/own-0000000000000000/cache");
-        assert!(grant_masked_for_candidate(home, own_scratch, Some(mask)));
-    }
-
-    // With the DEFAULT grant set — own workspace plus a broad $HOME — no grant
-    // authorizes a scratch path: the workspace grant is rooted at a SIBLING of
-    // `.scratch` so the candidate filter drops it, and the $HOME grant is
-    // dropped by the container mask. Both halves must hold; either one alone
-    // would leave the path reachable.
-    #[test]
-    fn no_default_grant_authorizes_a_scratch_path() {
-        let mask = Path::new("/home/u/.clai/workspaces");
-        let home = Path::new("/home/u");
-        let own = Path::new("/home/u/.clai/workspaces/own");
-        let scratch = Path::new("/home/u/.clai/workspaces/.scratch/own-0000000000000000/cache");
-
-        // `resolve_allowed_path` only considers grants containing the
-        // candidate; the workspace grant does not.
-        assert!(!scratch.starts_with(own));
-        // ...and the one that does contain it is masked away.
-        assert!(scratch.starts_with(home));
-        assert!(grant_masked_for_candidate(home, scratch, Some(mask)));
-    }
 
     fn restricted_execution_config(
         allowed: &[&str],

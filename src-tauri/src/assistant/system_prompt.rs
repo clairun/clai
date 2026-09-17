@@ -57,6 +57,7 @@ pub(crate) fn build_system_prompt(
     agent_description: Option<&str>,
     tool_defs: &[crate::assistant::types::ToolDefinition],
     trigger: &RunTrigger,
+    workspace_root: Option<&std::path::Path>,
 ) -> ProviderInputMessage {
     let tool_names: Vec<&str> = tool_defs.iter().map(|t| t.name.as_str()).collect();
     // `bash_exec` is the only tool that reads or writes arbitrary files, and in
@@ -253,7 +254,7 @@ pub(crate) fn build_system_prompt(
         );
     }
 
-    if context.space_id.is_some() || !context.mcp_server_ids.is_empty() {
+    if !context.mcp_server_ids.is_empty() {
         prompt.push_str(
             "- This tab already carries session-specific context and capabilities. \
              Use the MCP tools attached to this session when they are relevant.\n",
@@ -388,7 +389,7 @@ pub(crate) fn build_system_prompt(
         );
 
         if shell_enabled {
-            push_shell_capability_lines(&mut prompt, context);
+            push_shell_capability_lines(&mut prompt, context, workspace_root);
         } else {
             prompt.push_str(
                 "- Shell mode: off — no `bash_exec` and no filesystem tools. Do not plan work that depends on reading or writing files; say plainly that you lack the access if a request needs it. `create_vega_chart` still saves charts for you, and `history_query` still reads this workspace's conversation record.\n",
@@ -437,18 +438,48 @@ pub(crate) fn build_system_prompt(
 fn push_shell_capability_lines(
     prompt: &mut String,
     context: &crate::assistant::types::SessionContext,
+    workspace_root: Option<&std::path::Path>,
 ) {
-    if context.execution.filesystem.extra_paths.is_empty() {
-        prompt.push_str("- Additional path grants: none\n");
-    } else {
-        prompt.push_str("- Additional path grants:\n");
-        for grant in &context.execution.filesystem.extra_paths {
-            let access = match grant.access {
-                crate::config::FilesystemPathAccess::ReadOnly => "read_only",
-                crate::config::FilesystemPathAccess::ReadWrite => "read_write",
-            };
-            prompt.push_str(&format!("  - `{}` ({})\n", grant.path, access));
+    use crate::assistant::sandbox::{
+        filesystem::{agent_path_string, EffectiveFilesystemPolicy},
+        SandboxPathAccess,
+    };
+    let home = crate::paths::real_home();
+    let policy = workspace_root.map(|root| {
+        EffectiveFilesystemPolicy::from_config(
+            root,
+            &context.execution.filesystem.extra_paths,
+            home.as_deref(),
+        )
+    });
+    match policy {
+        Some(Ok(policy)) => {
+            prompt.push_str(&format!(
+                "- Shell workspace path: `{}`\n",
+                agent_path_string(&policy.workspace_root)
+            ));
+            if policy.path_grants.is_empty() {
+                prompt.push_str("- Additional path grants: none\n");
+            } else {
+                prompt.push_str("- Additional path grants:\n");
+                for grant in &policy.path_grants {
+                    let access = match grant.access {
+                        SandboxPathAccess::ReadOnly => "read_only",
+                        SandboxPathAccess::ReadWrite => "read_write",
+                    };
+                    prompt.push_str(&format!(
+                        "  - `{}` ({})\n",
+                        agent_path_string(&grant.host_path),
+                        access
+                    ));
+                }
+            }
         }
+        Some(Err(error)) => prompt.push_str(&format!(
+            "- Filesystem policy unavailable; shell execution will refuse this configuration: {}\n",
+            error
+        )),
+        None => prompt.push_str("- Filesystem policy unavailable: no workspace is attached.\n"),
     }
 
     let shell_mode = match context.execution.shell.mode {
@@ -665,6 +696,21 @@ mod tests {
         }
     }
 
+    fn build_system_prompt(
+        context: &SessionContext,
+        description: Option<&str>,
+        tools: &[crate::assistant::types::ToolDefinition],
+        trigger: &RunTrigger,
+    ) -> ProviderInputMessage {
+        super::build_system_prompt(
+            context,
+            description,
+            tools,
+            trigger,
+            Some(std::path::Path::new("/clai-test-workspace")),
+        )
+    }
+
     #[test]
     fn build_system_prompt_includes_agent_memory_guidance_for_automations() {
         let context = SessionContext {
@@ -855,6 +901,50 @@ mod tests {
         assert!(text.contains("Keep queries narrow"));
         // Memory stays the first stop; the DB is the verbatim fallback.
         assert!(text.contains("check memory files first"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_grants_are_advertised_under_the_name_the_sandbox_mounts() {
+        // A grant configured on a symlink is bound at its target, and the
+        // link's own name need not exist inside the sandbox. Printing the
+        // configured spelling sends the agent to a `cd` that cannot work.
+        let base = tempfile::tempdir().unwrap();
+        let base = base.path().canonicalize().unwrap();
+        let target = base.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut execution = ExecutionCapabilityConfig {
+            shell: crate::config::types::ShellCapabilityConfig {
+                mode: crate::config::ShellAccessMode::Full,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        execution.filesystem.extra_paths = vec![crate::config::FilesystemPathGrant {
+            path: link.display().to_string(),
+            access: crate::config::FilesystemPathAccess::ReadOnly,
+            origin: None,
+        }];
+        let context = SessionContext {
+            agent_workspace_id: Some("agent-123".to_string()),
+            execution,
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(
+            text.contains(&format!("- `{}` (read_only)", target.display())),
+            "the grant list must name the mount; got:\n{text}"
+        );
+        assert!(!text.contains(&format!("- `{}`", link.display())));
     }
 
     #[test]

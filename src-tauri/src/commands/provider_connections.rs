@@ -391,14 +391,31 @@ pub async fn provider_connection_delete(
         let Ok(config) = crate::config::workspace_config::load(&locator.root_path) else {
             continue;
         };
-        for agent in config.agents {
-            if agent
+        if let Some(agent) = config.main_agent.filter(|agent| {
+            agent
                 .provider_connection_ids
                 .iter()
                 .any(|value| value == &id)
-            {
-                dependents.push(agent.name);
-            }
+        }) {
+            dependents.push(agent.name);
+        }
+    }
+    // Shared teammates depend on connections too, and they are not reachable
+    // from any single workspace.
+    let definitions = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?
+        .get()
+        .agent_definitions;
+    for definition in definitions {
+        if definition
+            .behavior
+            .provider_connection_ids
+            .iter()
+            .any(|value| value == &id)
+        {
+            dependents.push(definition.behavior.name);
         }
     }
 

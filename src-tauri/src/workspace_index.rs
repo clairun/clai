@@ -147,7 +147,7 @@ impl WorkspaceIndex {
             last_run_completed_at: config.last_run_completed_at,
             last_opened_at: config.last_opened_at,
             starred_at: config.starred_at,
-            default_agent_id: config.default_agent_id.clone(),
+            default_agent_id: config.main_agent_id().to_string(),
             schedule: config.schedule.surface(),
         });
     }

@@ -13,7 +13,6 @@ use crate::assistant::types::{
     AssistantRun, AssistantSession, CompactionTrigger, ContentPart, RunStatus, RunTrigger,
     SessionContext, SessionKind, ToolInvocation,
 };
-use crate::config::workspace_config;
 use crate::db::DbPool;
 use crate::AppState;
 use std::collections::HashSet;
@@ -150,15 +149,12 @@ fn fresh_execution_for_session(
     let Some(workspace_id) = workspace_id else {
         return Ok(None);
     };
-    let Some(root) = state.workspace_root(workspace_id) else {
+    if state.workspace_root(workspace_id).is_none() {
         return Ok(None);
-    };
-    let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    Ok(config
-        .agents
-        .iter()
-        .find(|agent| agent.id == agent_id)
-        .map(|agent| agent.execution.clone())
+    }
+    Ok(state
+        .resolve_workspace_agent(workspace_id, agent_id)?
+        .map(|resolved| resolved.agent.execution)
         .filter(|execution| execution != &session.context.execution))
 }
 

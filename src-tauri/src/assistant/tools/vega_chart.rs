@@ -615,8 +615,6 @@ mod tests {
             tool_call_id: None,
             cancel_token: Default::default(),
             workspace_id: None,
-            space_id: None,
-            room_id: None,
             mcp_server_ids: vec![],
             agent_workspace_id: workspace_root.as_ref().map(|_| "ws".to_string()),
             workspace_root,

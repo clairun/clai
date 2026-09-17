@@ -215,7 +215,23 @@ access: FilesystemPathAccess, } | { "kind": "allowAlways", path: string, access:
 
 export type PathGrantRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, requestedPath: string, requestedAccess: FilesystemPathAccess, reason: string, };
 
-export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, };
+export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, 
+/**
+ * True when an "always" decision is saved on a shared agent definition
+ * rather than in this workspace.
+ *
+ * A command allowlist entry skips this prompt entirely next time, so where
+ * the decision lands has to be visible while the user is deciding — and
+ * for a shared teammate it lands on the definition, in force wherever that
+ * agent works, including workspaces that assign it later.
+ */
+persistsToSharedAgent: boolean, 
+/**
+ * The other workspaces that decision reaches today. Empty when the agent
+ * is this workspace's Main, or when nobody else has the teammate on their
+ * team yet.
+ */
+alsoAffectsWorkspaces: Array<string>, };
 
 export type PermissionScope = "agent";
 
@@ -346,7 +362,7 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { spaceId: string | null, roomId: string | null, workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
+export type SessionContext = { workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
 /**
  * The CLI provider that owns `cli_session_id`. A session id is
  * provider-specific (Claude generates its own UUID; Codex returns a

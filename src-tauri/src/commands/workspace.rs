@@ -9,9 +9,11 @@ use crate::assistant::types::{
     AssistantMessage, AssistantRun, AssistantSession, ContentPart, SessionContext, SessionKind,
     ToolInvocation, WorkspaceAgentSummary,
 };
+use crate::config::global_agents::{AgentSource, ResolvedAgent};
+use crate::config::workspace_config::WorkspaceAssignment;
 use crate::config::{
-    workspace_config, AgentConfig, AppConfig, ExecutionCapabilityConfig, WorkspaceAgent,
-    WorkspaceConfig,
+    workspace_config, AgentConfig, AppConfig, ExecutionCapabilityConfig,
+    FilesystemCapabilityConfig, FilesystemPathGrant, GrantOrigin, WorkspaceAgent, WorkspaceConfig,
 };
 use crate::db::DbPool;
 use crate::workspace_index::{WorkspaceIndex, WorkspaceLocator};
@@ -21,6 +23,8 @@ use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+use crate::assistant::sandbox::filesystem::normalize_path;
 use std::sync::RwLock;
 use tauri::{AppHandle, State};
 use ts_rs::TS;
@@ -503,22 +507,6 @@ fn load_workspace_config_for_id(
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
     let config = workspace_config::load(&root).map_err(|e| e.to_string())?;
     Ok((root, config))
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
 }
 
 // ===============================================================================
@@ -1038,6 +1026,9 @@ fn should_skip_fork_copy_path(relative_path: &Path) -> bool {
     let name = second.to_string_lossy();
     name == "config.json"
         || name == "config.json.tmp"
+        // The copy of the pre-agent-library config belongs to the workspace
+        // that was migrated, not to a fork of it.
+        || name == workspace_config::LEGACY_BACKUP_FILE
         || name.starts_with("data.sqlite")
         || name == "images"
 }
@@ -1135,10 +1126,13 @@ pub(crate) fn resolve_workspace_descriptor(
 ) -> Result<WorkspaceDescriptor, String> {
     let workspace_id = resolve_workspace_id(state, workspace_id)?;
     let (root_path, config) = load_workspace_config_for_id(state, &workspace_id)?;
-    let manager = config
-        .agents
+    // Resolved, not stored: a workspace conversation runs under the same
+    // project context and grants as every other agent here.
+    let (config, roster) = state.resolve_roster_for(config)?;
+    let manager = roster
         .iter()
-        .find(|agent| agent.id == config.default_agent_id);
+        .find(|resolved| matches!(resolved.source, AgentSource::Main))
+        .map(|resolved| &resolved.agent);
     let mut execution = manager
         .map(|agent| agent.execution.clone())
         .unwrap_or_default();
@@ -1256,9 +1250,10 @@ pub fn workspace_agent_runtime_description(
     workspace_id: &str,
     agent_id: &str,
 ) -> Option<String> {
-    let root = state.workspace_root(workspace_id)?;
-    let workspace_cfg = workspace_config::load(&root).ok()?;
-    let agent = workspace_cfg.agents.iter().find(|a| a.id == agent_id)?;
+    let agent = &state
+        .resolve_workspace_agent(workspace_id, agent_id)
+        .ok()??
+        .agent;
     let app_cfg = state.config_manager.lock().ok()?.get();
     let selected_skill_ids = workspace_config::refs_to_skill_ids(&app_cfg, &agent.selected_skills);
     Some(crate::config::compose_agent_instructions(
@@ -1273,31 +1268,7 @@ fn workspace_default_agent_id(
     workspace_id: &str,
 ) -> Result<Option<String>, String> {
     let (_root, config) = load_workspace_config_for_id(state, workspace_id)?;
-    Ok(Some(config.default_agent_id))
-}
-
-fn set_workspace_default_agent_id(
-    state: &AppState,
-    workspace_id: &str,
-    workspace_agent_id: &str,
-) -> Result<(), String> {
-    state
-        .update_workspace_config(workspace_id, |config| {
-            if !config
-                .agents
-                .iter()
-                .any(|agent| agent.id == workspace_agent_id)
-            {
-                return Err(format!(
-                    "Workspace agent assignment not found: {}",
-                    workspace_agent_id
-                ));
-            }
-            config.default_agent_id = workspace_agent_id.to_string();
-            config.updated_at = now_millis();
-            Ok(())
-        })
-        .map(|_| ())
+    Ok(config.main_agent.as_ref().map(|agent| agent.id.clone()))
 }
 
 fn load_workspace_agent_rows(
@@ -1305,36 +1276,30 @@ fn load_workspace_agent_rows(
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
     let app_config = app_config(state)?;
-    let (_root, config) = load_workspace_config_for_id(state, workspace_id)?;
-    let mut rows: Vec<_> = config
-        .agents
+    let (config, roster) = state.resolve_workspace_roster(workspace_id)?;
+    let mut rows: Vec<_> = roster
         .iter()
-        .map(|agent| workspace_agent_row_from_config(&app_config, &config, agent))
+        .map(|resolved| workspace_agent_row_from_config(&app_config, &config, resolved))
         .collect();
-    rows.sort_by_key(|row| {
-        (
-            if row.id == config.default_agent_id {
-                0
-            } else {
-                1
-            },
-            row.created_at,
-        )
-    });
+    rows.sort_by_key(|row| (if row.role == "manager" { 0 } else { 1 }, row.created_at));
     Ok(rows)
 }
 
 fn workspace_agent_row_from_config(
     app_config: &AppConfig,
     workspace: &WorkspaceConfig,
-    agent: &WorkspaceAgent,
+    resolved: &ResolvedAgent,
 ) -> WorkspaceAgentRow {
+    let agent = &resolved.agent;
     WorkspaceAgentRow {
         id: agent.id.clone(),
         workspace_id: workspace.id.clone(),
-        agent_definition_id: agent.id.clone(),
+        agent_definition_id: resolved
+            .definition_id()
+            .unwrap_or(agent.id.as_str())
+            .to_string(),
         display_name: None,
-        role: if workspace.default_agent_id == agent.id {
+        role: if matches!(resolved.source, AgentSource::Main) {
             "manager".to_string()
         } else {
             "member".to_string()
@@ -1589,7 +1554,7 @@ fn resolve_workspace_manager_agent(
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
     let workspace = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    let default_id = Some(workspace.default_agent_id.clone());
+    let default_id = workspace.main_agent.as_ref().map(|agent| agent.id.clone());
     let rows = load_workspace_agent_rows(state, workspace_id)?;
 
     let manager_row = if let Some(default_id) = default_id.as_deref() {
@@ -1747,8 +1712,6 @@ fn desired_workspace_context(
         .or_else(|| workspace_manager.map(|agent| agent.name.clone()));
 
     SessionContext {
-        space_id: existing_session.and_then(|session| session.context.space_id.clone()),
-        room_id: existing_session.and_then(|session| session.context.room_id.clone()),
         workspace_id: Some(descriptor.workspace_id.clone()),
         tool_scopes: descriptor.tool_scopes.clone(),
         mcp_server_ids,
@@ -1887,7 +1850,7 @@ pub async fn workspace_get_snapshot(
         .unwrap_or_default();
     let next_run_in_seconds = match default_workspace_agent_id.as_deref() {
         Some(manager_id) if schedule.wants_countdown() => {
-            let instance_id = AgentInstance::workspace_instance_id(manager_id);
+            let instance_id = AgentInstance::instance_id_for(manager_id);
             let scheduler = state.scheduler.lock().await;
             scheduler
                 .get_instance(&instance_id)
@@ -3099,9 +3062,9 @@ pub async fn workspace_update_session_mcp(
             let now = chrono::Utc::now().timestamp_millis();
             if let Some(manager_id) = manager_id.as_deref() {
                 if let Some(agent) = config
-                    .agents
-                    .iter_mut()
-                    .find(|agent| agent.id == manager_id)
+                    .main_agent
+                    .as_mut()
+                    .filter(|agent| agent.id == manager_id)
                 {
                     agent.selected_mcp_servers = enabled_mcp_ids
                         .iter()
@@ -3137,12 +3100,7 @@ pub async fn workspace_set_provider(
     let now = chrono::Utc::now().timestamp_millis();
     state.update_workspace_config(&workspace_id, |config| {
         config.preferred_provider_connection_id = Some(provider_connection_id.clone());
-        let default_agent_id = config.default_agent_id.clone();
-        if let Some(manager) = config
-            .agents
-            .iter_mut()
-            .find(|agent| agent.id == default_agent_id)
-        {
+        if let Some(manager) = config.main_agent.as_mut() {
             manager.provider_connection_ids = vec![provider_connection_id];
             manager.updated_at = now;
         }
@@ -3167,19 +3125,9 @@ pub async fn workspace_list_agents(
     Ok(agents)
 }
 
-// workspace_assign_agent / workspace_unassign_agent: removed.
-// Agents are workspace-local now; use the workspace-scoped CRUD in
-// `commands::workspace_agents` (workspace_create_agent / workspace_delete_agent).
-
-#[tauri::command]
-pub async fn workspace_set_default_agent(
-    workspace_id: String,
-    workspace_agent_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    set_workspace_default_agent_id(state.inner(), &workspace_id, &workspace_agent_id)
-}
+// workspace_set_default_agent: removed. A workspace has exactly one Main, and
+// it is edited in place — a shared teammate cannot become one workspace's Main
+// without dragging its other workspaces along.
 
 #[tauri::command]
 pub async fn workspace_acknowledge_task(
@@ -3333,6 +3281,33 @@ pub async fn workspace_create(
 // Fork — agent re-id, schedule reset, durable copy
 // ===============================================================================
 
+/// The grants a fork may inherit.
+///
+/// Two kinds are deliberately dropped. In-run approvals are exceptions the user
+/// granted to one agent, in one workspace, for one job — re-granting them
+/// silently in a new workspace would widen access nobody asked to widen. Paths
+/// inside the source workspace root are equally wrong: the fork has its own
+/// root, and inheriting the old one would leave it reading the workspace it was
+/// copied from.
+fn forkable_grants(grants: &[FilesystemPathGrant], source_root: &Path) -> Vec<FilesystemPathGrant> {
+    use crate::assistant::sandbox::filesystem::{resolve, resolve_configured_path};
+    let Ok(source_identity) = resolve(source_root) else {
+        return Vec::new();
+    };
+    grants
+        .iter()
+        .filter(|grant| !matches!(grant.origin, Some(GrantOrigin::Approval { .. })))
+        .filter(|grant| {
+            let Ok(configured) = resolve_configured_path(&grant.path) else {
+                return false;
+            };
+            !configured.starts_with(source_root)
+                && resolve(&configured).is_ok_and(|path| !path.starts_with(&source_identity))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Fork a workspace into a brand-new workspace.
 ///
 /// Copies the durable setup and files: agents (with fresh ids), skills, MCP
@@ -3351,30 +3326,40 @@ pub async fn workspace_fork(
     let now = now_millis();
     let new_id = uuid::Uuid::new_v4().to_string();
 
-    // Regenerate every (workspace-local) agent id and remember old→new so we
-    // can remap the default-agent pointer. Everything else on the agent —
-    // skills, MCP, providers, execution — is copied as-is via `..agent`.
-    let mut id_map: HashMap<String, String> = HashMap::new();
-    let agents: Vec<WorkspaceAgent> = source_config
-        .agents
+    // The Main is copied — behavior and policy — under a fresh local id, so the
+    // fork's history and the source's can never be confused for each other.
+    let main_agent = source_config
+        .main_agent
+        .as_ref()
+        .map(|agent| WorkspaceAgent {
+            id: uuid::Uuid::new_v4().to_string(),
+            created_at: now,
+            updated_at: now,
+            execution: ExecutionCapabilityConfig {
+                filesystem: FilesystemCapabilityConfig {
+                    extra_paths: forkable_grants(
+                        &agent.execution.filesystem.extra_paths,
+                        &source_root,
+                    ),
+                },
+                ..agent.execution.clone()
+            },
+            ..agent.clone()
+        });
+
+    // Teammates are shared definitions: the fork re-assigns the same ones under
+    // fresh local identities instead of copying anybody's behavior.
+    let assignments: Vec<WorkspaceAssignment> = source_config
+        .assignments
         .iter()
-        .map(|agent| {
-            let cloned_id = uuid::Uuid::new_v4().to_string();
-            id_map.insert(agent.id.clone(), cloned_id.clone());
-            WorkspaceAgent {
-                id: cloned_id,
-                created_at: now,
-                updated_at: now,
-                ..agent.clone()
-            }
+        .map(|assignment| WorkspaceAssignment {
+            id: uuid::Uuid::new_v4().to_string(),
+            filesystem_grants: forkable_grants(&assignment.filesystem_grants, &source_root),
+            created_at: now,
+            updated_at: now,
+            ..assignment.clone()
         })
         .collect();
-
-    let default_agent_id = id_map
-        .get(&source_config.default_agent_id)
-        .cloned()
-        .or_else(|| agents.first().map(|a| a.id.clone()))
-        .ok_or_else(|| "Source workspace has no agents to fork".to_string())?;
 
     // Preserve the cadence but never auto-run a fresh fork.
     let mut schedule = source_config.schedule.clone();
@@ -3403,9 +3388,10 @@ pub async fn workspace_fork(
         // A star marks the SOURCE workspace as important; the fork starts
         // life unstarred like any other new workspace.
         starred_at: 0,
-        default_agent_id,
         schedule,
-        agents,
+        main_agent,
+        assignments,
+        filesystem_grants: forkable_grants(&source_config.filesystem_grants, &source_root),
         // Carries version + preferred_provider_connection_id (+ any future
         // top-level config fields) over unchanged.
         ..source_config.clone()
@@ -3443,7 +3429,7 @@ pub async fn workspace_fork(
     tracing::info!(
         source_workspace_id = %source_id,
         workspace_id = %new_id,
-        agents = forked.agents.len(),
+        assignments = forked.assignments.len(),
         title = %fork_title,
         "Forked workspace into a new workspace"
     );
@@ -3533,12 +3519,11 @@ pub async fn workspace_run_now(
 ) -> Result<(), String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
     let (_root, config) = load_workspace_config_for_id(state.inner(), &workspace_id)?;
-    let manager_id = config.default_agent_id.clone();
     let manager = config
-        .agents
-        .iter()
-        .find(|agent| agent.id == manager_id)
+        .main_agent
+        .as_ref()
         .ok_or_else(|| "Manager agent not found.".to_string())?;
+    let manager_id = manager.id.clone();
 
     // The scheduler only registers agents whose schedule is enabled. An
     // explicit enabled/disabled check up front gives a clearer error than
@@ -3939,7 +3924,13 @@ pub async fn workspace_delete(
     // disk cleanup to proceed, we just can't precisely purge scheduler
     // state for an unknowable agent set.
     let agent_ids: Vec<String> = workspace_config::load(&locator.root_path)
-        .map(|cfg| cfg.agents.iter().map(|a| a.id.clone()).collect())
+        .map(|cfg| {
+            cfg.main_agent
+                .iter()
+                .map(|agent| agent.id.clone())
+                .chain(cfg.assignments.iter().map(|a| a.id.clone()))
+                .collect()
+        })
         .unwrap_or_default();
 
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
@@ -4206,6 +4197,34 @@ mod tests {
             created_at: 0,
             updated_at,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fork_grants_exclude_resolved_source_paths_and_unresolvable_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let other = root.join("other");
+        fs::create_dir_all(source.join("docs")).unwrap();
+        fs::create_dir(&other).unwrap();
+        let source_alias = root.join("source-alias");
+        let doc_alias = root.join("doc-alias");
+        let stale = root.join("stale");
+        std::os::unix::fs::symlink(&source, &source_alias).unwrap();
+        std::os::unix::fs::symlink(source.join("docs"), &doc_alias).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), &stale).unwrap();
+        let grants =
+            [&source, &source_alias, &doc_alias, &stale, &other].map(|path| FilesystemPathGrant {
+                path: path.display().to_string(),
+                access: crate::config::FilesystemPathAccess::ReadWrite,
+                origin: None,
+            });
+        assert_eq!(forkable_grants(&grants, &source), vec![grants[4].clone()]);
+        assert_eq!(
+            forkable_grants(&grants, &source_alias),
+            vec![grants[4].clone()]
+        );
     }
 
     // A workspace that ever ran `go build` carries a module cache whose
@@ -4524,6 +4543,11 @@ mod tests {
         assert!(should_skip_fork_copy_path(Path::new(".clai/data.sqlite")));
         assert!(should_skip_fork_copy_path(Path::new(
             ".clai/data.sqlite-wal"
+        )));
+        // The copy of the pre-agent-library config records what the *source*
+        // workspace had before migrating; a fork never had those agents.
+        assert!(should_skip_fork_copy_path(Path::new(
+            ".clai/config.pre-agent-library.json"
         )));
         // Unrelated top-level children of `.clai/` are still copied
         // (e.g. user-installed skills, terminals, agent templates).
@@ -5017,7 +5041,11 @@ mod tests {
             1,
             MGR.to_string(),
         );
-        config.agents[0].selected_mcp_servers = vec![
+        config
+            .main_agent
+            .as_mut()
+            .expect("main agent")
+            .selected_mcp_servers = vec![
             workspace_config::McpRef {
                 id: "srv-a".to_string(),
                 disabled: false,
@@ -5028,11 +5056,11 @@ mod tests {
             },
         ];
         let json = serde_json::to_value(&config).unwrap();
-        assert!(json["agents"][0]["selectedMcpServers"][0]
+        assert!(json["mainAgent"]["selectedMcpServers"][0]
             .get("disabled")
             .is_none());
         let back: workspace_config::WorkspaceConfig = serde_json::from_value(json).unwrap();
-        let refs = &back.agents[0].selected_mcp_servers;
+        let refs = &back.main_agent.expect("main agent").selected_mcp_servers;
         assert_eq!(workspace_config::enabled_mcp_ids(refs), vec!["srv-a"]);
         assert_eq!(workspace_config::disabled_mcp_ids(refs), vec!["srv-b"]);
     }
