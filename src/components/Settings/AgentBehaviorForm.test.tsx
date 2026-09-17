@@ -81,6 +81,11 @@ describe('AgentBehaviorForm', () => {
 
     await userEvent.type(screen.getByLabelText('Description'), ' carefully  ');
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+    // Reverting the edit reports clean again: the comparison is symmetric.
+    await userEvent.clear(screen.getByLabelText('Description'));
+    await userEvent.type(screen.getByLabelText('Description'), 'Reviews diffs');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+    await userEvent.type(screen.getByLabelText('Description'), ' carefully  ');
 
     let result: { ok: boolean; error?: string } | undefined;
     await act(async () => { result = await ref.current!.submit(); });
@@ -101,10 +106,13 @@ describe('AgentBehaviorForm', () => {
       },
       enabled: true,
     });
+    // The saved values become the new baseline — reported without the host
+    // re-rendering the form (`saving` stays false throughout this test).
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
   it('create flow waits for the backend defaults, validates, then sends the pre-populated grant', async () => {
-    const { ref, rerender } = renderForm({ deps: { ...DEPS, defaultExecution: undefined } });
+    const { ref, rerender, onDirtyChange } = renderForm({ deps: { ...DEPS, defaultExecution: undefined } });
     expect(screen.getByText('Loading…')).toBeInTheDocument();
 
     rerender(
@@ -115,6 +123,7 @@ describe('AgentBehaviorForm', () => {
         snapshot={null}
         deps={{ ...DEPS, defaultExecution: { filesystem: { extraPaths: [HOME_GRANT] } } }}
         saving={false}
+        onDirtyChange={onDirtyChange}
       />
     );
     expect(await screen.findByText('Set up the main agent')).toBeInTheDocument();
@@ -135,18 +144,27 @@ describe('AgentBehaviorForm', () => {
     await act(async () => { await ref.current!.submit(); });
     expect(api.workspaceCreateAgent).toHaveBeenCalledTimes(1);
     const request = api.workspaceCreateAgent.mock.calls[0]![0] as {
-      name: string; providerConnectionIds: string[]; execution: { filesystem: { extraPaths: unknown[] }; shell: { mode: string } };
+      name: string;
+      providerConnectionIds: string[];
+      execution: { filesystem: { extraPaths: unknown[] }; shell: { mode: string; blockedCommandPrefixes: string[] } };
     };
     expect(request.name).toBe('Scout');
     expect(request.providerConnectionIds).toEqual(['conn-b']);
     expect(request.execution.filesystem.extraPaths).toEqual([HOME_GRANT]);
     expect(request.execution.shell.mode).toBe('off');
+    // The destructive-command block list is the local default, not something the host supplies.
+    expect(request.execution.shell.blockedCommandPrefixes).toEqual([
+      'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
+    ]);
     expect(api.workspaceUpdateAgent).not.toHaveBeenCalled();
+    // A created agent is clean: a second Save after a sibling section failed
+    // must not create it again.
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
   it('routes saves through saveBehavior when a host supplies one and hides Delete', async () => {
     const saveBehavior = vi.fn().mockResolvedValue(undefined);
-    const { ref } = renderForm({ agentId: 'def-1', initialAgent: REVIEWER, saveBehavior });
+    const { ref, onDirtyChange } = renderForm({ agentId: 'def-1', initialAgent: REVIEWER, saveBehavior });
 
     await screen.findByDisplayValue('Reviewer');
     expect(api.workspaceGetAgent).not.toHaveBeenCalled();
@@ -158,6 +176,7 @@ describe('AgentBehaviorForm', () => {
 
     expect(saveBehavior).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'ws-1', name: 'Auditor', enabled: true }));
     expect(api.workspaceUpdateAgent).not.toHaveBeenCalled();
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
   it('keeps the Main agent nameless, always enabled and undeletable', async () => {

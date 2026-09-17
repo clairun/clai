@@ -283,8 +283,10 @@ export const AgentBehaviorForm = ({
   // Baseline payload captured at load time. The Save button compares
   // current form state against this to decide whether anything is pending.
   // Updated after a successful save so Save re-disables until the user
-  // edits again.
-  const baselinePayloadRef = useRef<string | null>(null);
+  // edits again. State, not a ref: writing the new baseline after a save
+  // must itself re-render the form so `isDirty` flips and is reported to
+  // the host, whether or not the host re-renders us for its own reasons.
+  const [baselinePayload, setBaselinePayload] = useState<string | null>(null);
 
   // Load the agent for the edit flow.
   useEffect(() => {
@@ -350,7 +352,7 @@ export const AgentBehaviorForm = ({
     // Capture the baseline that matches the values we just loaded into
     // form state. Built from the same normalized `execution` so the
     // representation matches what `currentPayload` will produce.
-    baselinePayloadRef.current = serializeAgentPayload({
+    setBaselinePayload(serializeAgentPayload({
       name: agent.name,
       description: agent.description,
       selectedSkillIds: agent.selectedSkillIds,
@@ -363,7 +365,7 @@ export const AgentBehaviorForm = ({
       blockedCommands: execution.shell.blockedCommandPrefixes,
       webEnabled: execution.web.enabled,
       enabled: agent.enabled !== false,
-    });
+    }));
   }, [agent]);
 
   const enabledProviderConnections = useMemo(
@@ -407,17 +409,7 @@ export const AgentBehaviorForm = ({
 
   // True when the form has changed from the loaded (or freshly created)
   // baseline. Drives the Save button's enabled state.
-  // `baselinePayloadRef` is a load/save snapshot, not a measurement
-  // cache: it is written once on agent load and once after a successful
-  // save (see the load effect above and the save handler below). It
-  // intentionally lives in a ref so that a re-render triggered by an
-  // edit does not produce a fresh baseline. Reading it here is the only
-  // way to derive isDirty in render without a state mirror and the
-  // accompanying render-stale flash.
-  // eslint-disable-next-line react-hooks/refs -- see justification above
-  const isDirty = baselinePayloadRef.current !== null
-    // eslint-disable-next-line react-hooks/refs -- see justification above
-    && baselinePayloadRef.current !== currentPayload;
+  const isDirty = baselinePayload !== null && baselinePayload !== currentPayload;
 
   const handleAddAllowedCommand = () => {
     const prefix = allowedCommandDraft.trim();
@@ -468,7 +460,6 @@ export const AgentBehaviorForm = ({
   // the sidebar dot indicators reflect current state.
   const onDirtyChangeRef = useRef(onDirtyChange);
   useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
-  // eslint-disable-next-line react-hooks/refs
   useEffect(() => { onDirtyChangeRef.current?.(isDirty); }, [isDirty]);
 
   useImperativeHandle(ref, () => ({
@@ -501,7 +492,7 @@ export const AgentBehaviorForm = ({
       try {
         if (saveBehavior) {
           await saveBehavior({ workspaceId, name: trimmedName, description: description.trim(), selectedSkillIds, selectedMcpServerIds, providerConnectionIds, execution, enabled });
-          baselinePayloadRef.current = currentPayload;
+          setBaselinePayload(currentPayload);
         } else if (isCreate) {
           await workspaceCreateAgent({
             workspaceId,
@@ -513,6 +504,10 @@ export const AgentBehaviorForm = ({
             execution,
             enabled,
           });
+          // Clean too: if another section fails afterwards the modal stays
+          // open, and a still-dirty create section would create the agent
+          // a second time on the next Save.
+          setBaselinePayload(currentPayload);
         } else {
           await workspaceUpdateAgent({
             workspaceId,
@@ -528,7 +523,11 @@ export const AgentBehaviorForm = ({
           // Mark form clean: the values we just persisted are now the
           // baseline. isDirty flips false and reports up so the sidebar
           // dot clears even though the modal will close on full success.
-          baselinePayloadRef.current = currentPayload;
+          // The baseline is the *form's* serialisation, not the request's:
+          // for Main the request forces `enabled: true` and a fixed name
+          // while the form keeps the loaded values, and dirtiness is only
+          // ever form-vs-baseline, so the two may legitimately differ.
+          setBaselinePayload(currentPayload);
         }
         setError(null);
         return { ok: true };
