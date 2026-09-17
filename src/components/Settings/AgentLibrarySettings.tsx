@@ -19,13 +19,12 @@ import {
   type AgentDefinitionDetail,
 } from '../../api/client';
 import { assistantClient } from '../../assistant';
-import {
-  AgentSection,
+import AgentBehaviorForm, {
   type AgentBehaviorPayload,
   type AgentDetail,
-  type ModalDeps,
-  type SectionHandle,
-} from './WorkspaceSettingsModal';
+  type AgentFormDeps,
+} from './AgentBehaviorForm';
+import type { SectionHandle } from './sectionHandle';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
 import styles from './AgentLibrarySettings.module.css';
@@ -39,7 +38,7 @@ type Selected = { kind: 'new' } | { kind: 'definition'; id: string };
 const AgentLibrarySettings = () => {
   const [definitions, setDefinitions] = useState<AgentDefinitionDetail[]>([]);
   const [selected, setSelected] = useState<Selected>({ kind: 'new' });
-  const [deps, setDeps] = useState<ModalDeps>({
+  const [deps, setDeps] = useState<AgentFormDeps>({
     mcpServers: [],
     skills: [],
     providerConnections: [],
@@ -75,7 +74,7 @@ const AgentLibrarySettings = () => {
         skills: skills.status === 'fulfilled' ? skills.value || [] : [],
         providerConnections: connections.status === 'fulfilled' ? connections.value || [] : [],
         defaultExecution: defaults.status === 'fulfilled' ? defaults.value || null : null,
-      } as ModalDeps);
+      } as AgentFormDeps);
       await reload();
     })();
     return () => {
@@ -227,7 +226,7 @@ const AgentLibrarySettings = () => {
         </div>
 
         <div className={styles.editor}>
-          <AgentSection
+          <AgentBehaviorForm
             // Remount per selection: the form mirrors its agent into local
             // state at load time, so switching agents must start it over.
             key={current?.id || 'new'}
