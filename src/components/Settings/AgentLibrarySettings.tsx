@@ -21,10 +21,13 @@ import {
 import { assistantClient } from '../../assistant';
 import {
   AgentSection,
+  type AgentBehaviorPayload,
   type AgentDetail,
   type ModalDeps,
   type SectionHandle,
 } from './WorkspaceSettingsModal';
+import AgentAvatar from '../Agents/AgentAvatar';
+import { identityFor } from '../Agents/agentIdentity';
 import styles from './AgentLibrarySettings.module.css';
 
 const errText = (err: unknown, fallback: string): string =>
@@ -88,7 +91,7 @@ const AgentLibrarySettings = () => {
   // The form speaks the workspace-agent shape; the library adds identity and
   // the revision the edit started from.
   const save = useCallback(
-    async (payload: Record<string, unknown>, archived: boolean) => {
+    async (payload: AgentBehaviorPayload, archived: boolean) => {
       const id = await saveAgentDefinition({
         id: current?.id,
         expectedRevision: current?.revision,
@@ -100,6 +103,7 @@ const AgentLibrarySettings = () => {
         execution: payload.execution,
         enabled: payload.enabled,
         archived,
+        // No `avatar`: the backend keeps the stored face when a save omits it.
       });
       await reload();
       setSelected({ kind: 'definition', id });
@@ -193,9 +197,16 @@ const AgentLibrarySettings = () => {
               }`}
               onClick={() => setSelected({ kind: 'definition', id: definition.id })}
             >
-              <span>
-                {definition.name}
-                {definition.archived ? ' (archived)' : ''}
+              <span className={styles.listItemTitle}>
+                <AgentAvatar
+                  identity={identityFor({ id: definition.id, avatar: definition.avatar })}
+                  size={20}
+                  activity={definition.archived ? 'disabled' : 'none'}
+                />
+                <span>
+                  {definition.name}
+                  {definition.archived ? ' (archived)' : ''}
+                </span>
               </span>
               <span className={styles.listItemMeta}>
                 {definition.assignedWorkspaces.length === 0

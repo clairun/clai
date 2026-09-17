@@ -25,6 +25,8 @@ import IntervalSelect from './IntervalSelect';
 import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
 import SkillPicker from './SkillPicker';
 import type { ProviderConnection, ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
+import AgentAvatar from '../Agents/AgentAvatar';
+import { identityFor } from '../Agents/agentIdentity';
 import styles from './WorkspaceSettingsModal.module.css';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -83,6 +85,18 @@ interface SkillRef extends NamedRef {
   sourceId?: string | null;
   sourceName?: string | null;
 }
+/** What the behaviour form submits. The library saves it as a shared definition. */
+export interface AgentBehaviorPayload {
+  workspaceId: string;
+  name: string;
+  description: string;
+  selectedSkillIds: string[];
+  selectedMcpServerIds: string[];
+  providerConnectionIds: string[];
+  execution: ExecutionConfig;
+  enabled: boolean;
+}
+
 // Agent detail loaded from workspaceGetAgent (untyped command).
 export interface AgentDetail {
   id: string;
@@ -654,6 +668,12 @@ const WorkspaceSettingsModal = ({
                   dirty={!!dirty[`agent:${agent.id}`]}
                   onClick={() => navigateTo({ kind: 'agent', agentId: agent.id })}
                 >
+                  <AgentAvatar
+                    identity={identityFor(agent)}
+                    size={16}
+                    activity={agent.enabled ? 'none' : 'disabled'}
+                    className={styles.navItemAvatar}
+                  />
                   {agent.isDefault ? 'Main' : (agent.displayName || agent.agentName || 'Untitled')}
                 </NavItem>
               ))}
@@ -1336,7 +1356,7 @@ export const AgentSection = ({
   agentId: string | null;
   snapshot: WorkspaceSnapshot | null;
   initialAgent?: AgentDetail;
-  saveBehavior?: (payload: Record<string, unknown>) => Promise<void>;
+  saveBehavior?: (payload: AgentBehaviorPayload) => Promise<void>;
   deps: ModalDeps;
   saving: boolean;
   onDirtyChange?: (isDirty: boolean) => void;

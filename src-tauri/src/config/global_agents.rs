@@ -145,6 +145,7 @@ fn unavailable_agent(assignment: &super::workspace_config::WorkspaceAssignment) 
         selected_mcp_servers: Vec::new(),
         provider_connection_ids: Vec::new(),
         execution: super::ExecutionCapabilityConfig::default(),
+        avatar: None,
         created_at: assignment.created_at,
         updated_at: assignment.updated_at,
     }

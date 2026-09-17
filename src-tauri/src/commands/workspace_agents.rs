@@ -171,6 +171,9 @@ pub async fn workspace_create_agent(
         selected_mcp_servers: workspace_config::mcp_ids_to_refs(&request.selected_mcp_server_ids),
         provider_connection_ids: request.provider_connection_ids,
         execution,
+        // The Main always wears the same fixed face; only shared definitions
+        // carry one.
+        avatar: None,
         created_at: now,
         updated_at: now,
     };

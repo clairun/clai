@@ -420,8 +420,26 @@ pub struct WorkspaceAgent {
     pub provider_connection_ids: Vec<String>,
     #[serde(default)]
     pub execution: ExecutionCapabilityConfig,
+    /// The procedurally drawn face, picked by the user from a row of
+    /// candidates when the agent is created. Absent for agents saved before
+    /// faces existed; the UI then derives a face from the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A picked face: the seed and the generator version it was picked against.
+/// The two always travel together — a seed rendered by a different generator
+/// version is a different face. The version is recorded from day one (it
+/// cannot be back-filled) so a future redrawn generator can keep rendering
+/// old seeds with the old parts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct AgentAvatarRef {
+    pub seed: String,
+    pub generator_version: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -552,6 +570,7 @@ impl WorkspaceAgent {
             selected_mcp_servers: Vec::new(),
             provider_connection_ids: Vec::new(),
             execution,
+            avatar: None,
             created_at: now,
             updated_at: now,
         }

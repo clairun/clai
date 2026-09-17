@@ -1,0 +1,68 @@
+/*
+ * Agent face with an optional status ring. The ring is a ::before pseudo
+ * element sitting 3px outside the face so the SVG itself never changes size.
+ * Containers that clip overflow must leave that room or pass `activity="none"`.
+ *
+ *   none      no ring
+ *   idle      hairline in the agent's own hue
+ *   running   accent-green arc that rotates (keyframes defined in this file:
+ *             CSS Modules scope @keyframes per file, see scripts/check-css-animations.mjs)
+ *   attention amber, static
+ *   disabled  no ring, face dimmed and desaturated
+ */
+.avatar {
+  --agent-avatar-size: 32px;
+  --agent-ring-color: var(--color-border-medium);
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  width: var(--agent-avatar-size);
+  height: var(--agent-avatar-size);
+  border-radius: 50%;
+  line-height: 0;
+  vertical-align: middle;
+}
+
+.avatar > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+}
+
+.ring::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1.5px solid var(--agent-ring-color);
+  pointer-events: none;
+}
+
+.running::before {
+  border-color: transparent;
+  background: conic-gradient(from 0deg, var(--color-healthy) 0 25%, transparent 25% 100%);
+  /* Punch the middle out so only a 2px arc remains. */
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2.5px),
+    #000 calc(100% - 2px)
+  );
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
+  animation: agentAvatarSpin 1.4s linear infinite;
+}
+
+.attention::before {
+  border-color: var(--color-warning, #f5a524);
+}
+
+.disabled {
+  opacity: 0.5;
+  filter: saturate(0.4);
+}
+
+@keyframes agentAvatarSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}

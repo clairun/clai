@@ -122,6 +122,10 @@
   white-space: nowrap;
 }
 
+.navItemAvatar {
+  margin-right: 8px;
+}
+
 .navItemDirtyDot {
   width: 6px;
   height: 6px;

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::config::global_agents::AgentDefinition;
-use crate::config::workspace_config::{self, WorkspaceAssignment};
+use crate::config::workspace_config::{self, AgentAvatarRef, WorkspaceAssignment};
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathGrant, WorkspaceAgent, WorkspaceConfig,
 };
@@ -46,6 +46,7 @@ pub struct AgentDefinitionDetail {
     pub provider_connection_ids: Vec<String>,
     pub execution: ExecutionCapabilityConfig,
     pub enabled: bool,
+    pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
     pub updated_at: i64,
     pub assigned_workspaces: Vec<AssignedWorkspace>,
@@ -77,6 +78,10 @@ pub struct AgentDefinitionSaveRequest {
     pub enabled: bool,
     #[serde(default)]
     pub archived: bool,
+    /// Absent means "keep the stored face": the behaviour form does not carry
+    /// it, only the face picker does.
+    #[serde(default)]
+    pub avatar: Option<AgentAvatarRef>,
 }
 
 fn default_true() -> bool {
@@ -183,6 +188,16 @@ fn upsert_definition(
         return Err("This agent changed somewhere else. Reload it before saving.".to_string());
     }
 
+    if matches!(&request.avatar, Some(avatar) if avatar.seed.trim().is_empty()) {
+        return Err("The agent's face needs a seed.".to_string());
+    }
+    // Most saves come from the behaviour form, which does not carry the face:
+    // absent means "keep what is stored".
+    let avatar = request
+        .avatar
+        .clone()
+        .or_else(|| previous.and_then(|definition| definition.behavior.avatar.clone()));
+
     let definition = AgentDefinition {
         id: id.clone(),
         revision: previous.map_or(1, |definition| definition.revision + 1),
@@ -203,6 +218,7 @@ fn upsert_definition(
             ),
             provider_connection_ids: request.provider_connection_ids.clone(),
             execution: request.execution.clone(),
+            avatar,
             created_at: previous.map_or(now, |definition| definition.behavior.created_at),
             updated_at: now,
         },
@@ -414,6 +430,7 @@ fn detail_from_definition(
         provider_connection_ids: behavior.provider_connection_ids.clone(),
         execution: behavior.execution.clone(),
         enabled: behavior.enabled,
+        avatar: behavior.avatar.clone(),
         created_at: behavior.created_at,
         updated_at: behavior.updated_at,
         assigned_workspaces,
@@ -437,7 +454,80 @@ mod tests {
             execution: ExecutionCapabilityConfig::default(),
             enabled: true,
             archived: false,
+            avatar: None,
         }
+    }
+
+    fn face(seed: &str) -> AgentAvatarRef {
+        AgentAvatarRef {
+            seed: seed.to_string(),
+            generator_version: 1,
+        }
+    }
+
+    #[test]
+    fn the_picked_face_is_stored_and_survives_edits() {
+        let mut config = AppConfig::default();
+        let request = AgentDefinitionSaveRequest {
+            avatar: Some(face("nonce-3")),
+            ..save_request("Reviewer")
+        };
+        let id = upsert_definition(&mut config, &request, 100).expect("create");
+        assert_eq!(
+            config.agent_definitions[0].behavior.avatar,
+            Some(face("nonce-3"))
+        );
+
+        let detail = detail_from_definition(&config, &config.agent_definitions[0], Vec::new());
+        assert_eq!(detail.avatar, Some(face("nonce-3")));
+
+        // The behaviour form does not know about faces: an edit that omits the
+        // face keeps the stored one.
+        let edit = AgentDefinitionSaveRequest {
+            id: Some(id.clone()),
+            expected_revision: Some(1),
+            avatar: None,
+            ..save_request("Reviewer, sharpened")
+        };
+        upsert_definition(&mut config, &edit, 200).expect("edit");
+        let behavior = &config.agent_definitions[0].behavior;
+        assert_eq!(behavior.name, "Reviewer, sharpened");
+        assert_eq!(behavior.avatar, Some(face("nonce-3")));
+
+        // A new pick replaces it.
+        let repick = AgentDefinitionSaveRequest {
+            id: Some(id.clone()),
+            expected_revision: Some(2),
+            avatar: Some(face("nonce-9")),
+            ..save_request("Reviewer")
+        };
+        upsert_definition(&mut config, &repick, 300).expect("repick");
+        assert_eq!(
+            config.agent_definitions[0].behavior.avatar,
+            Some(face("nonce-9"))
+        );
+    }
+
+    #[test]
+    fn a_face_with_a_blank_seed_is_refused() {
+        let mut config = AppConfig::default();
+        let request = AgentDefinitionSaveRequest {
+            avatar: Some(face("   ")),
+            ..save_request("Reviewer")
+        };
+        let error = upsert_definition(&mut config, &request, 100).expect_err("blank seed");
+        assert!(error.contains("seed"), "{error}");
+        assert!(config.agent_definitions.is_empty());
+    }
+
+    #[test]
+    fn agents_saved_before_faces_existed_still_load() {
+        let json = r#"{"id":"a","name":"Old","description":"","enabled":true,"createdAt":1,"updatedAt":1}"#;
+        let agent: WorkspaceAgent = serde_json::from_str(json).expect("legacy agent");
+        assert_eq!(agent.avatar, None);
+        // And the absent face is not written back as `null`.
+        let out = serde_json::to_string(&agent).expect("serialize");
+        assert!(!out.contains("avatar"), "{out}");
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::assistant::types::{
     ToolInvocation, WorkspaceAgentSummary,
 };
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
-use crate::config::workspace_config::WorkspaceAssignment;
+use crate::config::workspace_config::{AgentAvatarRef, WorkspaceAssignment};
 use crate::config::{
     workspace_config, AgentConfig, AppConfig, ExecutionCapabilityConfig,
     FilesystemCapabilityConfig, FilesystemPathGrant, GrantOrigin, WorkspaceAgent, WorkspaceConfig,
@@ -316,6 +316,10 @@ pub struct WorkspaceAgentResponse {
     #[serde(default)]
     #[ts(type = "unknown")]
     pub execution: ExecutionCapabilityConfig,
+    /// The picked face, from the shared definition. `None` for the Main
+    /// (fixed face) and for definitions saved before faces existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -458,6 +462,7 @@ struct WorkspaceAgentRow {
     selected_mcp_server_ids: Vec<String>,
     provider_connection_ids: Vec<String>,
     execution: ExecutionCapabilityConfig,
+    avatar: Option<AgentAvatarRef>,
     created_at: i64,
     updated_at: i64,
 }
@@ -1311,6 +1316,7 @@ fn workspace_agent_row_from_config(
         selected_mcp_server_ids: workspace_config::enabled_mcp_ids(&agent.selected_mcp_servers),
         provider_connection_ids: agent.provider_connection_ids.clone(),
         execution: agent.execution.clone(),
+        avatar: agent.avatar.clone(),
         created_at: agent.created_at,
         updated_at: agent.updated_at,
     }
@@ -1357,6 +1363,7 @@ fn workspace_agent_response_from_row(
         skill_ids: row.selected_skill_ids,
         selected_mcp_server_ids: row.selected_mcp_server_ids,
         execution: row.execution,
+        avatar: row.avatar,
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
