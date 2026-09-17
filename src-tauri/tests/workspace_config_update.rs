@@ -85,7 +85,7 @@ fn update_by_id_writes_disk_and_refreshes_the_index() {
         .update_workspace_config(WORKSPACE_ID, |config| {
             config.title = "Renamed".to_string();
             config.updated_at = 1_700_000_001_000;
-            Ok(config.agents.len())
+            Ok(config.main_agent.iter().count())
         })
         .expect("update");
 

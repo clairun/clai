@@ -13,8 +13,6 @@ use crate::db::test_support::{insert_task, workspace_pool};
 
 fn sample_context() -> SessionContext {
     SessionContext {
-        space_id: None,
-        room_id: None,
         workspace_id: Some("ws-1".to_string()),
         tool_scopes: vec![],
         mcp_server_ids: vec![],

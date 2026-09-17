@@ -140,10 +140,6 @@ pub struct WorkspaceAgentSummary {
 #[ts(export, export_to = "bindings.ts")]
 pub struct SessionContext {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub space_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub room_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub tool_scopes: Vec<String>,

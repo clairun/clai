@@ -48,8 +48,11 @@ pub const PERMISSION_RESOLVED_EVENT: &str = "permissions://resolved";
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub enum PermissionScope {
-    /// Persist for this workspace agent only, in
-    /// `WorkspaceConfig.agents[].execution.shell`.
+    /// Persist on the agent. Where that lands depends on which agent: the
+    /// workspace's Main keeps it in its own config, while a shared teammate
+    /// keeps it on its library definition, so the allowance travels with the
+    /// agent to every workspace that assigned it. `PermissionRequest`
+    /// carries the destination so the prompt can say which one is happening.
     Agent,
     // Workspace,  // deferred: requires workspace_id plumbing through
     //             // AgentConfig / SessionContext (runner.rs currently
@@ -86,6 +89,89 @@ pub struct PermissionRequest {
     pub agent_name: Option<String>,
     pub command: String,
     pub segments: Vec<SegmentApproval>,
+    /// True when an "always" decision is saved on a shared agent definition
+    /// rather than in this workspace.
+    ///
+    /// A command allowlist entry skips this prompt entirely next time, so where
+    /// the decision lands has to be visible while the user is deciding — and
+    /// for a shared teammate it lands on the definition, in force wherever that
+    /// agent works, including workspaces that assign it later.
+    #[serde(default)]
+    pub persists_to_shared_agent: bool,
+    /// The other workspaces that decision reaches today. Empty when the agent
+    /// is this workspace's Main, or when nobody else has the teammate on their
+    /// team yet.
+    #[serde(default)]
+    pub also_affects_workspaces: Vec<String>,
+}
+
+impl PermissionRequest {
+    /// Build the request an agent waits on, resolving where an "always"
+    /// decision would be saved.
+    ///
+    /// The destination is derived here rather than passed in, so no call site
+    /// can ask for consent without stating its scope.
+    pub fn for_agent(
+        state: &AppState,
+        workspace_id: Option<String>,
+        agent_id: Option<String>,
+        command: String,
+        segments: Vec<SegmentApproval>,
+    ) -> Self {
+        let reach = match (workspace_id.as_deref(), agent_id.as_deref()) {
+            (Some(workspace), Some(agent)) => shared_allowance_reach(state, workspace, agent),
+            _ => None,
+        };
+        Self {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            workspace_id,
+            agent_id,
+            // Agent display name isn't on the runtime context; the frontend
+            // resolves it from agent_id via existing workspace queries.
+            agent_name: None,
+            command,
+            segments,
+            persists_to_shared_agent: reach.is_some(),
+            also_affects_workspaces: reach.unwrap_or_default(),
+        }
+    }
+}
+
+/// Where an "always" decision for this agent is saved, and what else it reaches.
+///
+/// `None` means the workspace's own Main: its decisions stay local. `Some(list)`
+/// means a shared definition, with the list naming the *other* workspaces that
+/// have the same teammate on their team right now — possibly empty, which is
+/// still a shared save.
+pub fn shared_allowance_reach(
+    state: &AppState,
+    workspace_id: &str,
+    agent_id: &str,
+) -> Option<Vec<String>> {
+    let root = state.workspace_root(workspace_id)?;
+    let workspace = workspace_config::load(&root).ok()?;
+    let definition_id = workspace.assignment(agent_id)?.agent_definition_id.clone();
+    // Copy the locators out before touching the disk: holding the index lock
+    // across a read of every workspace config blocks unrelated work for as long
+    // as that takes.
+    let locators = match state.workspace_index.read() {
+        Ok(index) => index.locators_sorted(),
+        Err(_) => return Some(Vec::new()),
+    };
+    Some(
+        locators
+            .iter()
+            .filter(|locator| locator.id != workspace_id)
+            .filter_map(|locator| workspace_config::load(&locator.root_path).ok())
+            .filter(|other| {
+                other
+                    .assignments
+                    .iter()
+                    .any(|assignment| assignment.agent_definition_id == definition_id)
+            })
+            .map(|other| other.title)
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
@@ -427,8 +513,36 @@ pub fn persist_decisions_to_agent(
         return Ok(());
     }
 
+    // A teammate's command allowances belong to its shared definition: the user
+    // is saying "this reviewer may run `cargo test`", not "…but only in this
+    // project", and re-approving the same command in every workspace is the
+    // annoyance the agent library exists to remove. Path grants go the other
+    // way (see `path_grants::persist_grant_to_agent`) because a path is about
+    // this machine and this project, not about the teammate.
+    let root = state
+        .workspace_root(workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    let workspace = workspace_config::load(&root).map_err(|e| e.to_string())?;
+    if let Some(assignment) = workspace.assignment(agent_id) {
+        return crate::commands::global_agents::update_definition(
+            state,
+            &assignment.agent_definition_id,
+            |definition| {
+                if apply_decisions_to_shell_policy(&mut definition.behavior, decisions) {
+                    definition.revision += 1;
+                    definition.behavior.updated_at = chrono::Utc::now().timestamp_millis();
+                }
+            },
+        );
+    }
+
+    // The Main has no shared definition, so its decisions stay in the workspace.
     state.update_workspace_config(workspace_id, |config| {
-        let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
+        let Some(agent) = config
+            .main_agent
+            .as_mut()
+            .filter(|agent| agent.id == agent_id)
+        else {
             return Err(format!("Workspace agent not found: {}", agent_id));
         };
         if apply_decisions_to_shell_policy(agent, decisions) {
@@ -661,6 +775,8 @@ mod tests {
 
     fn fake_request(workspace_id: Option<&str>) -> PermissionRequest {
         PermissionRequest {
+            persists_to_shared_agent: false,
+            also_affects_workspaces: Vec::new(),
             request_id: uuid::Uuid::new_v4().to_string(),
             workspace_id: workspace_id.map(str::to_string),
             agent_id: None,
@@ -802,5 +918,183 @@ mod tests {
             rx.await.is_err(),
             "purge drops the sender after cancellation"
         );
+    }
+}
+
+#[cfg(test)]
+mod approval_routing_tests {
+    //! A command allowance follows the teammate; a workspace's Main keeps its
+    //! own.
+
+    use super::*;
+    use crate::commands::path_grants::approval_destination_tests::*;
+
+    fn allow(prefix: &str) -> SegmentDecision {
+        SegmentDecision::AllowAlways {
+            scope: PermissionScope::Agent,
+            prefix: prefix.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_teammates_always_allow_is_saved_on_the_shared_definition() {
+        let fixture = Fixture::new();
+
+        persist_decisions_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            ASSIGNMENT_ID,
+            &[allow("cargo test")],
+        )
+        .expect("persist");
+
+        let definition = fixture.definition();
+        assert!(definition
+            .behavior
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cargo test".to_string()));
+        assert_eq!(
+            definition.revision, 2,
+            "the shared edit is a new revision, so a stale form cannot revert it"
+        );
+        assert!(
+            fixture
+                .config()
+                .main_agent
+                .expect("main")
+                .execution
+                .shell
+                .allowed_command_prefixes
+                .iter()
+                .all(|prefix| prefix != "cargo test"),
+            "the workspace Main does not inherit a teammate's allowance"
+        );
+    }
+
+    #[test]
+    fn the_mains_always_allow_stays_in_its_workspace() {
+        let fixture = Fixture::new();
+
+        persist_decisions_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            MAIN_ID,
+            &[allow("cargo test")],
+        )
+        .expect("persist");
+
+        assert!(fixture
+            .config()
+            .main_agent
+            .expect("main")
+            .execution
+            .shell
+            .allowed_command_prefixes
+            .contains(&"cargo test".to_string()));
+        assert_eq!(
+            fixture.definition().revision,
+            1,
+            "no shared definition was touched"
+        );
+        assert!(
+            fixture
+                .other_config()
+                .main_agent
+                .expect("other main")
+                .execution
+                .shell
+                .allowed_command_prefixes
+                .iter()
+                .all(|prefix| prefix != "cargo test"),
+            "another workspace's Main is a different agent"
+        );
+    }
+
+    #[test]
+    fn the_prompt_states_where_an_always_decision_is_saved() {
+        let fixture = Fixture::new();
+
+        let teammate = PermissionRequest::for_agent(
+            &fixture.state,
+            Some(WORKSPACE_ID.to_string()),
+            Some(ASSIGNMENT_ID.to_string()),
+            "cargo test".to_string(),
+            Vec::new(),
+        );
+        assert!(
+            teammate.persists_to_shared_agent,
+            "a teammate's allowance is saved on the shared definition"
+        );
+        assert_eq!(
+            teammate.also_affects_workspaces.len(),
+            1,
+            "the second workspace has the same teammate: {:?}",
+            teammate.also_affects_workspaces
+        );
+
+        let main = PermissionRequest::for_agent(
+            &fixture.state,
+            Some(WORKSPACE_ID.to_string()),
+            Some(MAIN_ID.to_string()),
+            "cargo test".to_string(),
+            Vec::new(),
+        );
+        assert!(
+            !main.persists_to_shared_agent,
+            "a Main's allowance is its own, and the prompt must not claim otherwise"
+        );
+        assert!(main.also_affects_workspaces.is_empty());
+
+        let unknown = PermissionRequest::for_agent(
+            &fixture.state,
+            Some(WORKSPACE_ID.to_string()),
+            Some("nobody".to_string()),
+            "cargo test".to_string(),
+            Vec::new(),
+        );
+        assert!(!unknown.persists_to_shared_agent);
+    }
+
+    #[test]
+    fn a_teammate_assigned_nowhere_else_still_saves_to_the_shared_agent() {
+        let fixture = Fixture::new();
+        // With the teammate removed from the second workspace the reach list is
+        // empty — but the decision still lands on the definition, and every
+        // workspace that assigns it later inherits it.
+        fixture
+            .state
+            .update_workspace_config(OTHER_WORKSPACE_ID, |config| {
+                config.assignments.clear();
+                Ok(())
+            })
+            .expect("unassign elsewhere");
+
+        let request = PermissionRequest::for_agent(
+            &fixture.state,
+            Some(WORKSPACE_ID.to_string()),
+            Some(ASSIGNMENT_ID.to_string()),
+            "cargo test".to_string(),
+            Vec::new(),
+        );
+
+        assert!(request.persists_to_shared_agent);
+        assert!(request.also_affects_workspaces.is_empty());
+    }
+
+    #[test]
+    fn once_only_decisions_persist_nothing() {
+        let fixture = Fixture::new();
+
+        persist_decisions_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            ASSIGNMENT_ID,
+            &[SegmentDecision::AllowOnce],
+        )
+        .expect("persist");
+
+        assert_eq!(fixture.definition().revision, 1);
     }
 }

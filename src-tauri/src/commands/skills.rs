@@ -22,10 +22,12 @@ use crate::AppState;
 const GIT_SYNC_TIMEOUT: Duration = Duration::from_secs(120);
 const GIT_SYNC_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Removes all workspace-local skill references that belong to the given source.
+/// Removes every skill reference that belongs to the given source, from the
+/// shared agent library as well as from each workspace's Main.
 ///
-/// Walks every workspace config and rewrites each agent's `selected_skills`
-/// with the source's skills removed.
+/// Both stores have to be swept: a shared teammate that keeps a reference to a
+/// deleted source would carry the dangling skill into every workspace that
+/// assigned it.
 fn sweep_workspace_agent_skill_ids(state: &AppState, source_id: &str) -> Result<(), String> {
     let prefix = format!("{}:", source_id);
     let app_config = state
@@ -46,21 +48,8 @@ fn sweep_workspace_agent_skill_ids(state: &AppState, source_id: &str) -> Result<
         state.update_workspace_config_at(&locator.root_path, |config| {
             let mut changed = false;
             let now = chrono::Utc::now().timestamp_millis();
-            for agent in &mut config.agents {
-                let ids = crate::config::workspace_config::refs_to_skill_ids(
-                    &app_config,
-                    &agent.selected_skills,
-                );
-                if ids.iter().any(|skill_id| skill_id.starts_with(&prefix)) {
-                    let filtered: Vec<String> = ids
-                        .into_iter()
-                        .filter(|skill_id| !skill_id.starts_with(&prefix))
-                        .collect();
-                    agent.selected_skills =
-                        crate::config::workspace_config::skill_ids_to_refs(&app_config, &filtered);
-                    agent.updated_at = now;
-                    changed = true;
-                }
+            if let Some(agent) = config.main_agent.as_mut() {
+                changed = drop_skills_with_prefix(&app_config, agent, &prefix, now);
             }
             if changed {
                 config.updated_at = now;
@@ -69,7 +58,46 @@ fn sweep_workspace_agent_skill_ids(state: &AppState, source_id: &str) -> Result<
         })?;
     }
 
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    manager
+        .update(|config| {
+            let now = chrono::Utc::now().timestamp_millis();
+            let snapshot = config.clone();
+            for definition in &mut config.agent_definitions {
+                if drop_skills_with_prefix(&snapshot, &mut definition.behavior, &prefix, now) {
+                    definition.revision += 1;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
     Ok(())
+}
+
+/// Rewrites one agent's skill selection without the source's skills. Returns
+/// whether anything was removed.
+fn drop_skills_with_prefix(
+    app_config: &crate::config::AppConfig,
+    agent: &mut crate::config::WorkspaceAgent,
+    prefix: &str,
+    now: i64,
+) -> bool {
+    let ids =
+        crate::config::workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills);
+    if !ids.iter().any(|skill_id| skill_id.starts_with(prefix)) {
+        return false;
+    }
+    let filtered: Vec<String> = ids
+        .into_iter()
+        .filter(|skill_id| !skill_id.starts_with(prefix))
+        .collect();
+    agent.selected_skills =
+        crate::config::workspace_config::skill_ids_to_refs(app_config, &filtered);
+    agent.updated_at = now;
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]

@@ -205,13 +205,6 @@ export async function listWorkspaceAgents(workspaceId: string): Promise<Workspac
 // workspace-local; use workspaceCreateAgent / workspaceDeleteAgent from
 // `../api/client.js` instead.
 
-export async function setWorkspaceDefaultAgent(
-  workspaceId: string,
-  workspaceAgentId: string
-): Promise<void> {
-  return invoke('workspace_set_default_agent', { workspaceId, workspaceAgentId });
-}
-
 export async function acknowledgeWorkspaceTask(workspaceId: string, taskId: string): Promise<void> {
   return invoke('workspace_acknowledge_task', {
     request: { workspaceId, taskId },

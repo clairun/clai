@@ -30,8 +30,7 @@ const ENV_DENY_EXACT: &[&str] = &[
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SandboxProfile {
-    pub workspace_root: PathBuf,
-    pub path_grants: Vec<SandboxPathGrant>,
+    pub filesystem: super::filesystem::EffectiveFilesystemPolicy,
     pub network: SandboxNetworkMode,
     pub session_bus: SandboxSessionBusMode,
     pub env: SandboxEnv,
@@ -139,8 +138,8 @@ impl SandboxEnv {
 /// `~/.clai/workspaces`). We mask this container so an agent can't reach
 /// sibling workspaces through a broad grant (like `$HOME`), while its own
 /// workspace is re-exposed by the workspace bind/allow that runs after the
-/// mask. Both the bwrap and seatbelt backends derive the mask from here so the
-/// policy is identical.
+/// mask. The filesystem compiler resolves this configured container once for
+/// both backends. Scratch allocation also uses the configured container.
 ///
 /// Returns `None` (no masking) when:
 /// - the workspace root has no parent (pathological), or
@@ -165,6 +164,32 @@ fn is_allowed_env_key(key: &str) -> bool {
 
 fn is_denied_env_key(key: &str) -> bool {
     ENV_DENY_EXACT.contains(&key)
+}
+
+#[cfg(all(test, target_family = "unix"))]
+impl SandboxProfile {
+    pub(crate) fn for_test(
+        workspace_root: PathBuf,
+        path_grants: Vec<SandboxPathGrant>,
+        network: SandboxNetworkMode,
+        session_bus: SandboxSessionBusMode,
+        env: SandboxEnv,
+        scratch_tmp: Option<PathBuf>,
+    ) -> Self {
+        let filesystem = super::filesystem::EffectiveFilesystemPolicy::compile(
+            &workspace_root,
+            &path_grants,
+            env.home().map(Path::new),
+        )
+        .unwrap();
+        Self {
+            filesystem,
+            network,
+            session_bus,
+            env,
+            scratch_tmp,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3240,11 +3240,20 @@ fn system_prompt_text(
 ) -> String {
     let tool_defs = crate::assistant::tools::available_tools(&session.context, &[]);
     let description = live_agent_description(app, &session.context);
+    let workspace_root = session
+        .context
+        .agent_workspace_id
+        .as_deref()
+        .and_then(|id| {
+            app.try_state::<crate::AppState>()
+                .and_then(|state| state.workspace_root(id))
+        });
     provider_message_text(&build_system_prompt(
         &session.context,
         description.as_deref(),
         &tool_defs,
         trigger,
+        workspace_root.as_deref(),
     ))
 }
 

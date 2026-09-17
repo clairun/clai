@@ -10,8 +10,9 @@ fn default_true() -> bool {
     true
 }
 
-/// Removes the given MCP server id from every workspace config's MCP refs
-/// (each agent's `selected_mcp_servers`, disabled refs included).
+/// Removes the given MCP server id from every agent that selected it: each
+/// workspace's Main, and every definition in the shared agent library
+/// (disabled refs included).
 fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<(), String> {
     let locators = state
         .workspace_index
@@ -26,15 +27,8 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
         state.update_workspace_config_at(&locator.root_path, |config| {
             let mut changed = false;
             let now = chrono::Utc::now().timestamp_millis();
-            for agent in &mut config.agents {
-                let before = agent.selected_mcp_servers.len();
-                agent
-                    .selected_mcp_servers
-                    .retain(|mcp_ref| mcp_ref.id != server_id);
-                if agent.selected_mcp_servers.len() != before {
-                    agent.updated_at = now;
-                    changed = true;
-                }
+            if let Some(agent) = config.main_agent.as_mut() {
+                changed = drop_mcp_ref(agent, server_id, now);
             }
             if changed {
                 config.updated_at = now;
@@ -43,7 +37,35 @@ fn sweep_workspace_agent_mcp_ids(state: &AppState, server_id: &str) -> Result<()
         })?;
     }
 
+    let manager = state
+        .config_manager
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+    manager
+        .update(|config| {
+            let now = chrono::Utc::now().timestamp_millis();
+            for definition in &mut config.agent_definitions {
+                if drop_mcp_ref(&mut definition.behavior, server_id, now) {
+                    definition.revision += 1;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
     Ok(())
+}
+
+/// Drops one server from an agent's MCP selection. Returns whether it was there.
+fn drop_mcp_ref(agent: &mut crate::config::WorkspaceAgent, server_id: &str, now: i64) -> bool {
+    let before = agent.selected_mcp_servers.len();
+    agent
+        .selected_mcp_servers
+        .retain(|mcp_ref| mcp_ref.id != server_id);
+    if agent.selected_mcp_servers.len() == before {
+        return false;
+    }
+    agent.updated_at = now;
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]
@@ -1073,7 +1095,7 @@ mod tests {
             let agent_id = format!("agent-{}", n);
             let mut config =
                 WorkspaceConfig::new(id.to_string(), format!("W{}", n), 1_000, agent_id);
-            let agent = config.agents.first_mut().unwrap();
+            let agent = config.main_agent.as_mut().expect("main agent");
             agent.selected_mcp_servers = if n == 2 {
                 vec![McpRef {
                     id: "keeper".to_string(),
@@ -1109,7 +1131,7 @@ mod tests {
 
         for (n, root) in roots.iter().enumerate() {
             let swept = workspace_config::load(root).unwrap();
-            let refs = &swept.agents.first().unwrap().selected_mcp_servers;
+            let refs = &swept.main_agent.expect("main agent").selected_mcp_servers;
             assert_eq!(
                 refs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
                 vec!["keeper"],

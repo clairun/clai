@@ -11,7 +11,6 @@ import React, { useState, useEffect, useCallback, useImperativeHandle, useMemo, 
 import ReactDOM from 'react-dom';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  getAgentTemplates,
   getMcpServers,
   getSkills,
   workspaceAgentDefaultExecution,
@@ -23,6 +22,7 @@ import {
 import { assistantClient } from '../../assistant';
 import { setWorkspaceTitle } from '../../workspace/client';
 import IntervalSelect from './IntervalSelect';
+import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
 import SkillPicker from './SkillPicker';
 import type { ProviderConnection, ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
 import styles from './WorkspaceSettingsModal.module.css';
@@ -33,7 +33,7 @@ import styles from './WorkspaceSettingsModal.module.css';
 // here rather than dragging the full config module into the FE types.
 // ──────────────────────────────────────────────────────────────────────────
 
-type SectionKind = 'general' | 'schedule' | 'agent' | 'new-agent';
+type SectionKind = 'general' | 'schedule' | 'team' | 'agent' | 'new-main' | 'new-agent';
 interface Selection {
   kind: SectionKind;
   agentId?: string | null;
@@ -43,7 +43,7 @@ interface SectionResult {
   ok: boolean;
   error?: string;
 }
-interface SectionHandle {
+export interface SectionHandle {
   validate: () => SectionResult;
   submit: () => Promise<SectionResult>;
 }
@@ -83,15 +83,8 @@ interface SkillRef extends NamedRef {
   sourceId?: string | null;
   sourceName?: string | null;
 }
-interface AgentTemplate {
-  id: string;
-  name: string;
-  description?: string | null;
-  defaultSkillIds?: string[];
-  defaultExecution?: Partial<ExecutionConfig>;
-}
 // Agent detail loaded from workspaceGetAgent (untyped command).
-interface AgentDetail {
+export interface AgentDetail {
   id: string;
   name?: string;
   description?: string;
@@ -103,11 +96,10 @@ interface AgentDetail {
   execution?: Partial<ExecutionConfig>;
 }
 
-interface ModalDeps {
+export interface ModalDeps {
   mcpServers: NamedRef[];
   skills: SkillRef[];
   providerConnections: ProviderConnection[];
-  agentTemplates: AgentTemplate[];
   defaultExecution: Partial<ExecutionConfig> | null | undefined;
 }
 
@@ -289,7 +281,6 @@ const WorkspaceSettingsModal = ({
     mcpServers: [],
     skills: [],
     providerConnections: [],
-    agentTemplates: [],
     // Backend-provided defaults for a brand-new agent (includes `$HOME`
     // RO). `undefined` while the fetch is in flight; `null` if it failed
     // (AgentSection falls back to the local empty execution). The create
@@ -385,11 +376,10 @@ const WorkspaceSettingsModal = ({
     if (!isOpen) return undefined;
     let cancelled = false;
     (async () => {
-      const [servers, skills, connections, templates, defaults] = await Promise.allSettled([
+      const [servers, skills, connections, defaults] = await Promise.allSettled([
         getMcpServers(),
         getSkills(),
         assistantClient.listProviderConnections(),
-        getAgentTemplates(),
         workspaceAgentDefaultExecution(),
       ]);
       if (cancelled) return;
@@ -397,7 +387,6 @@ const WorkspaceSettingsModal = ({
         mcpServers: servers.status === 'fulfilled' ? (servers.value || []) : [],
         skills: skills.status === 'fulfilled' ? (skills.value || []) : [],
         providerConnections: connections.status === 'fulfilled' ? (connections.value || []) : [],
-        agentTemplates: templates.status === 'fulfilled' ? ((templates.value || []) as AgentTemplate[]) : [],
         defaultExecution: defaults.status === 'fulfilled' ? (defaults.value || null) : null,
       });
     })();
@@ -546,6 +535,22 @@ const WorkspaceSettingsModal = ({
     }
     if (sel.kind === 'agent') {
       const key = `agent:${sel.agentId}`;
+      // Only the Main is edited here. A teammate's behavior belongs to its
+      // shared definition, so its row opens the local-overlay editor instead.
+      if (sel.agentId !== snapshot?.defaultWorkspaceAgentId) {
+        return (
+          <AssignmentSection
+            workspaceId={workspaceId}
+            agentId={sel.agentId ?? undefined}
+            onChanged={onChanged}
+            onUnassigned={(removed) => {
+              handleAgentDeleted(removed);
+              navigateTo({ kind: 'team' });
+            }}
+          />
+        );
+      }
+
       return (
         <AgentSection
           ref={setSectionRef(key)}
@@ -559,18 +564,27 @@ const WorkspaceSettingsModal = ({
         />
       );
     }
-    if (sel.kind === 'new-agent') {
+    // A workspace whose Main could not be recovered from a pre-library config
+    // has no agent row to edit. Without this the settings modal would offer no
+    // way back to a working workspace at all.
+    if (sel.kind === 'new-main') {
       return (
         <AgentSection
-          ref={setSectionRef('new-agent')}
+          ref={setSectionRef('new-main')}
           workspaceId={workspaceId}
           agentId={null}
           snapshot={snapshot}
           deps={deps}
           saving={saving}
-          onDirtyChange={getDirtyCallback('new-agent')}
+          onDirtyChange={getDirtyCallback('new-main')}
         />
       );
+    }
+    if (sel.kind === 'new-agent') {
+      return <AssignmentSection workspaceId={workspaceId} onChanged={onChanged} />;
+    }
+    if (sel.kind === 'team') {
+      return <TeamPolicySection workspaceId={workspaceId} onChanged={onChanged} />;
     }
     return null;
   };
@@ -613,10 +627,26 @@ const WorkspaceSettingsModal = ({
               >
                 Schedule
               </NavItem>
+              <NavItem
+                active={selection.kind === 'team'}
+                dirty={!!dirty.team}
+                onClick={() => navigateTo({ kind: 'team' })}
+              >
+                Team
+              </NavItem>
             </div>
 
             <div className={styles.sidebarGroup}>
               <h3 className={styles.sidebarGroupTitle}>Agents</h3>
+              {!snapshot?.defaultWorkspaceAgentId && (
+                <NavItem
+                  active={selection.kind === 'new-main'}
+                  dirty={!!dirty['new-main']}
+                  onClick={() => navigateTo({ kind: 'new-main' })}
+                >
+                  Main — set up
+                </NavItem>
+              )}
               {sortedAgents.map((agent) => (
                 <NavItem
                   key={agent.id}
@@ -633,7 +663,7 @@ const WorkspaceSettingsModal = ({
                 dirty={!!dirty['new-agent']}
                 onClick={() => navigateTo({ kind: 'new-agent' })}
               >
-                + Add agent
+                + Add teammate
               </NavItem>
             </div>
           </aside>
@@ -1289,10 +1319,12 @@ const ScheduleSection = ({
 // Agent section (manager + sub-agent + new)
 // ──────────────────────────────────────────────────────────────────────────
 
-const AgentSection = ({
+export const AgentSection = ({
   ref,
   workspaceId,
   agentId,             // string for edit; null for create
+  initialAgent,
+  saveBehavior,
   snapshot: _snapshot, // unused; kept in signature for future use (e.g., showing peer agents)
   deps,
   saving,              // global save in flight — disables inputs
@@ -1303,6 +1335,8 @@ const AgentSection = ({
   workspaceId: string;
   agentId: string | null;
   snapshot: WorkspaceSnapshot | null;
+  initialAgent?: AgentDetail;
+  saveBehavior?: (payload: Record<string, unknown>) => Promise<void>;
   deps: ModalDeps;
   saving: boolean;
   onDirtyChange?: (isDirty: boolean) => void;
@@ -1323,7 +1357,7 @@ const AgentSection = ({
   // — populated once `deps.defaultExecution` arrives).
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const isManager = agent?.isDefault === true;
-  const canDelete = !isCreate && !isManager;
+  const canDelete = !saveBehavior && !isCreate && !isManager;
 
   // Form state
   const [name, setName] = useState('');
@@ -1343,7 +1377,6 @@ const AgentSection = ({
   const [blockedCommandDraft, setBlockedCommandDraft] = useState('');
   const [webEnabled, setWebEnabled] = useState(false);
   const [enabled, setEnabled] = useState(true);
-  const [selectedTemplateId, setSelectedTemplateId] = useState('');
 
   // Track which agentId we last fetched, so the effect doesn't refetch on
   // every re-render. setting key={agentId} on the parent already remounts
@@ -1363,7 +1396,7 @@ const AgentSection = ({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    workspaceGetAgent(workspaceId, agentId)
+    (initialAgent ? Promise.resolve(initialAgent) : workspaceGetAgent(workspaceId, agentId))
       .then((detail) => {
         if (cancelled || !detail) return;
         lastFetchedId.current = agentId;
@@ -1377,7 +1410,7 @@ const AgentSection = ({
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [workspaceId, agentId, isCreate]);
+  }, [workspaceId, agentId, isCreate, initialAgent]);
 
   // Initialize the blank draft for create flow once the backend's
   // default-execution fetch has resolved (success or failure). Doing this
@@ -1416,7 +1449,6 @@ const AgentSection = ({
     setBlockedCommandDraft('');
     setWebEnabled(execution.web.enabled);
     setEnabled(agent.enabled !== false);
-    setSelectedTemplateId('');
 
     // Capture the baseline that matches the values we just loaded into
     // form state. Built from the same normalized `execution` so the
@@ -1452,11 +1484,6 @@ const AgentSection = ({
     // eslint-disable-next-line react-hooks/set-state-in-effect -- Auto-selects the first available provider connection when the list changes; the lint cannot model a "keep current if still valid, otherwise default" derivation.
     setProviderConnectionDraft(availableProviderConnections[0]?.id || '');
   }, [availableProviderConnections, providerConnectionDraft]);
-
-  const selectedTemplate = useMemo(
-    () => (deps?.agentTemplates || []).find((t) => t.id === selectedTemplateId) || null,
-    [deps?.agentTemplates, selectedTemplateId]
-  );
 
   // Canonical form payload, used to detect pending changes.
   const currentPayload = useMemo(
@@ -1494,22 +1521,6 @@ const AgentSection = ({
   const isDirty = baselinePayloadRef.current !== null
     // eslint-disable-next-line react-hooks/refs -- see justification above
     && baselinePayloadRef.current !== currentPayload;
-
-  const handleApplyTemplate = useCallback(() => {
-    if (!selectedTemplate) return;
-    setName(selectedTemplate.name || '');
-    setDescription(selectedTemplate.description || '');
-    setSelectedSkillIds(selectedTemplate.defaultSkillIds || []);
-    const execution = normalizeExecution(
-      selectedTemplate.defaultExecution || deps?.defaultExecution || defaultExecution()
-    );
-    setExtraPathGrants(execution.filesystem.extraPaths);
-    setSessionBusAllowed(execution.sandbox.sessionBus === 'allow');
-    setShellMode(execution.shell.mode);
-    setAllowedCommands(execution.shell.allowedCommandPrefixes);
-    setBlockedCommands(execution.shell.blockedCommandPrefixes);
-    setWebEnabled(execution.web.enabled);
-  }, [selectedTemplate, deps?.defaultExecution]);
 
   const handleAddAllowedCommand = () => {
     const prefix = allowedCommandDraft.trim();
@@ -1591,7 +1602,10 @@ const AgentSection = ({
         web: { enabled: webEnabled },
       };
       try {
-        if (isCreate) {
+        if (saveBehavior) {
+          await saveBehavior({ workspaceId, name: trimmedName, description: description.trim(), selectedSkillIds, selectedMcpServerIds, providerConnectionIds, execution, enabled });
+          baselinePayloadRef.current = currentPayload;
+        } else if (isCreate) {
           await workspaceCreateAgent({
             workspaceId,
             name: trimmedName,
@@ -1651,43 +1665,17 @@ const AgentSection = ({
   return (
     <div className={styles.sectionRoot}>
       <h3 className={styles.sectionTitle}>
-        {isCreate ? 'Add agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
+        {isCreate ? 'Set up the main agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
       </h3>
       <p className={styles.sectionDescription}>
-        {isManager
-          ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
-          : isCreate
-            ? 'Sub-agents are invoked by the main agent via delegation.'
-            : 'Sub-agent — invoked by the main agent via delegation.'}
+        {/* Creating an agent here means configuring this workspace's own Main.
+            Teammates come from the shared library and are added under Team. */}
+        {isCreate
+          ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; teammates are added from the shared agent library under Team."
+          : isManager
+            ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
+            : 'Teammate — invoked by the main agent via delegation.'}
       </p>
-
-      {/* Template picker (create only) */}
-      {isCreate && (deps?.agentTemplates || []).length > 0 && (
-        <div className={styles.field}>
-          <label className={styles.label}>Start from template</label>
-          <div className={styles.listInputRow}>
-            <select
-              className={styles.select}
-              value={selectedTemplateId}
-              onChange={(e) => setSelectedTemplateId(e.target.value)}
-              disabled={busy}
-            >
-              <option value="">(no template)</option>
-              {(deps.agentTemplates || []).map((tpl) => (
-                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className={styles.addButton}
-              onClick={handleApplyTemplate}
-              disabled={!selectedTemplate || saving}
-            >
-              Apply
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Name (hidden for manager — its name is "Main" by convention) */}
       {!isManager && (

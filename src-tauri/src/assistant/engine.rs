@@ -169,6 +169,7 @@ pub async fn run_session_turn(
         agent_description.as_deref(),
         &tool_defs,
         &input.trigger,
+        workspace_root.as_deref(),
     );
 
     // Persist the trigger message as a run boundary marker so the LLM can see
@@ -629,8 +630,6 @@ pub async fn run_session_turn(
                 tool_call_id: Some(tc.tool_call_id.clone()),
                 cancel_token: input.cancel_token.clone(),
                 workspace_id: session.context.workspace_id.clone(),
-                space_id: session.context.space_id.clone(),
-                room_id: session.context.room_id.clone(),
                 mcp_server_ids: session.context.mcp_server_ids.clone(),
                 agent_workspace_id: session.context.agent_workspace_id.clone(),
                 workspace_root: workspace_root.clone(),
@@ -688,8 +687,6 @@ pub async fn run_session_turn(
         tool_call_id: None,
         cancel_token: input.cancel_token.clone(),
         workspace_id: session.context.workspace_id.clone(),
-        space_id: session.context.space_id.clone(),
-        room_id: session.context.room_id.clone(),
         mcp_server_ids: session.context.mcp_server_ids.clone(),
         agent_workspace_id: session.context.agent_workspace_id.clone(),
         workspace_root: workspace_root.clone(),

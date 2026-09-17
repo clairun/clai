@@ -414,11 +414,17 @@ fn validate_decision_against_request(
     Ok(decision)
 }
 
-/// Reads the agent's execution config, appends a new `FilesystemPathGrant`
-/// to `filesystem.extra_paths` (or upgrades an existing entry's access if
-/// the path already exists at a weaker level), tags it with
-/// `GrantOrigin::Approval`, and writes the JSON back. Idempotent: a second
-/// approval for the same path+access pair is a no-op.
+/// Persists an approved path grant on the agent that asked for it, in the
+/// workspace where it asked.
+///
+/// Both kinds of agent persist locally, and deliberately so. A teammate's
+/// shared definition travels to every workspace that assigned it, so writing an
+/// in-run approval there would silently widen access in projects the user was
+/// not looking at; the assignment is the local record that keeps the grant
+/// where it was granted. The Main has no shared definition at all.
+///
+/// Idempotent: re-approving the same path at the same access rewrites identical
+/// content, and a read-only approval never narrows an existing write grant.
 fn persist_grant_to_agent(
     state: &AppState,
     workspace_id: &str,
@@ -430,49 +436,68 @@ fn persist_grant_to_agent(
     // Atomic RMW (see `AppState::update_workspace_config`): grant approvals
     // can land while the runner persists a run completion to the same file.
     state.update_workspace_config(workspace_id, |config| {
-        let Some(agent) = config.agents.iter_mut().find(|agent| agent.id == agent_id) else {
+        let now = chrono::Utc::now().timestamp_millis();
+        let origin = GrantOrigin::Approval {
+            reason: reason.to_string(),
+            granted_at_unix_ms: now,
+        };
+
+        if let Some(assignment) = config
+            .assignments
+            .iter_mut()
+            .find(|assignment| assignment.id == agent_id)
+        {
+            upsert_grant(&mut assignment.filesystem_grants, path, access, origin);
+            assignment.updated_at = now;
+            config.updated_at = now;
+            return Ok(());
+        }
+
+        let Some(agent) = config
+            .main_agent
+            .as_mut()
+            .filter(|agent| agent.id == agent_id)
+        else {
             return Err(format!(
                 "Cannot persist path grant: workspace agent not found for id `{}`",
                 agent_id
             ));
         };
 
-        let execution = &mut agent.execution;
-
-        if let Some(existing) = execution
-            .filesystem
-            .extra_paths
-            .iter_mut()
-            .find(|g| g.path == path)
-        {
-            let upgrades = matches!(existing.access, FilesystemPathAccess::ReadOnly)
-                && matches!(access, FilesystemPathAccess::ReadWrite);
-            if !upgrades && existing.access == access {
-                // Idempotent re-approval — rewriting the same content is
-                // harmless, so no special no-op path.
-                return Ok(());
-            }
-            existing.access = access;
-            existing.origin = Some(GrantOrigin::Approval {
-                reason: reason.to_string(),
-                granted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-            });
-        } else {
-            execution.filesystem.extra_paths.push(FilesystemPathGrant {
-                path: path.to_string(),
-                access,
-                origin: Some(GrantOrigin::Approval {
-                    reason: reason.to_string(),
-                    granted_at_unix_ms: chrono::Utc::now().timestamp_millis(),
-                }),
-            });
-        }
-
-        agent.updated_at = chrono::Utc::now().timestamp_millis();
-        config.updated_at = agent.updated_at;
+        upsert_grant(
+            &mut agent.execution.filesystem.extra_paths,
+            path,
+            access,
+            origin,
+        );
+        agent.updated_at = now;
+        config.updated_at = now;
         Ok(())
     })?;
     Ok(())
+}
+
+/// Add a grant, or raise an existing one for the same path to read-write.
+/// Never lowers access: an approval is additive, and a later read-only request
+/// for a path the agent may already write is not a revocation.
+fn upsert_grant(
+    grants: &mut Vec<FilesystemPathGrant>,
+    path: &str,
+    access: FilesystemPathAccess,
+    origin: GrantOrigin,
+) {
+    if let Some(existing) = grants.iter_mut().find(|grant| grant.path == path) {
+        if matches!(existing.access, FilesystemPathAccess::ReadOnly) {
+            existing.access = access;
+            existing.origin = Some(origin);
+        }
+        return;
+    }
+    grants.push(FilesystemPathGrant {
+        path: path.to_string(),
+        access,
+        origin: Some(origin),
+    });
 }
 
 pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pending_count: u32) {
@@ -499,34 +524,6 @@ pub fn emit_path_grant_resolved(app: &tauri::AppHandle, request_id: &str) {
 /// Helper for tools that need to enrich the request id on outbound logs.
 pub fn new_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
-}
-
-/// Predicate exposed for `fs_request_grant` so the tool can short-circuit
-/// when a path is already covered by existing grants (preset or extra_paths)
-/// without bothering the user.
-pub fn path_is_covered(
-    grants: &[FilesystemPathGrant],
-    path: &std::path::Path,
-    required_access: FilesystemPathAccess,
-) -> bool {
-    grants.iter().any(|grant| {
-        if !path_starts_with_or_equals(path, std::path::Path::new(&grant.path)) {
-            return false;
-        }
-        access_satisfies(grant.access, required_access)
-    })
-}
-
-fn path_starts_with_or_equals(candidate: &std::path::Path, root: &std::path::Path) -> bool {
-    candidate == root || candidate.starts_with(root)
-}
-
-fn access_satisfies(grant: FilesystemPathAccess, required: FilesystemPathAccess) -> bool {
-    match (grant, required) {
-        (FilesystemPathAccess::ReadWrite, _) => true,
-        (FilesystemPathAccess::ReadOnly, FilesystemPathAccess::ReadOnly) => true,
-        (FilesystemPathAccess::ReadOnly, FilesystemPathAccess::ReadWrite) => false,
-    }
 }
 
 #[cfg(test)]
@@ -611,76 +608,6 @@ mod tests {
         assert!(matches!(
             validate_decision_against_request(&request, PathGrantDecision::Deny).unwrap(),
             PathGrantDecision::Deny
-        ));
-    }
-
-    #[test]
-    fn path_is_covered_recognises_exact_match() {
-        let grants = vec![FilesystemPathGrant {
-            path: "/a/b".to_string(),
-            access: FilesystemPathAccess::ReadOnly,
-            origin: None,
-        }];
-        assert!(path_is_covered(
-            &grants,
-            std::path::Path::new("/a/b"),
-            FilesystemPathAccess::ReadOnly,
-        ));
-    }
-
-    #[test]
-    fn path_is_covered_recognises_descendant_coverage() {
-        let grants = vec![FilesystemPathGrant {
-            path: "/a".to_string(),
-            access: FilesystemPathAccess::ReadOnly,
-            origin: None,
-        }];
-        assert!(path_is_covered(
-            &grants,
-            std::path::Path::new("/a/b/c"),
-            FilesystemPathAccess::ReadOnly,
-        ));
-    }
-
-    #[test]
-    fn path_is_covered_rejects_unrelated_path() {
-        let grants = vec![FilesystemPathGrant {
-            path: "/a".to_string(),
-            access: FilesystemPathAccess::ReadOnly,
-            origin: None,
-        }];
-        assert!(!path_is_covered(
-            &grants,
-            std::path::Path::new("/b"),
-            FilesystemPathAccess::ReadOnly,
-        ));
-    }
-
-    #[test]
-    fn path_is_covered_requires_rw_when_writing() {
-        let grants = vec![FilesystemPathGrant {
-            path: "/a".to_string(),
-            access: FilesystemPathAccess::ReadOnly,
-            origin: None,
-        }];
-        assert!(!path_is_covered(
-            &grants,
-            std::path::Path::new("/a/b"),
-            FilesystemPathAccess::ReadWrite,
-        ));
-    }
-
-    #[test]
-    fn path_is_covered_rw_grant_satisfies_ro_request() {
-        let grants = vec![FilesystemPathGrant {
-            path: "/a".to_string(),
-            access: FilesystemPathAccess::ReadWrite,
-            origin: None,
-        }];
-        assert!(path_is_covered(
-            &grants,
-            std::path::Path::new("/a/b"),
-            FilesystemPathAccess::ReadOnly,
         ));
     }
 
@@ -809,5 +736,221 @@ mod tests {
             rx.await.is_err(),
             "purge drops the sender after cancellation"
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod approval_destination_tests {
+    //! Where an approval is saved decides who inherits it later, so the
+    //! destination is asserted per agent kind rather than assumed.
+
+    use crate::config::global_agents::AgentDefinition;
+    use crate::config::workspace_config::{self, WorkspaceAssignment};
+    use crate::config::WorkspaceConfig;
+    use crate::{AppConfig, AppState, ConfigManager, WorkspaceIndex};
+
+    pub(crate) const WORKSPACE_ID: &str = "11111111-1111-4111-8111-111111111111";
+    pub(crate) const OTHER_WORKSPACE_ID: &str = "44444444-4444-4444-8444-444444444444";
+    pub(crate) const MAIN_ID: &str = "22222222-2222-4222-8222-222222222222";
+    pub(crate) const ASSIGNMENT_ID: &str = "33333333-3333-4333-8333-333333333333";
+    pub(crate) const DEFINITION_ID: &str = "def-1";
+
+    pub(crate) struct Fixture {
+        pub(crate) _temp: tempfile::TempDir,
+        pub(crate) state: AppState,
+        pub(crate) root: std::path::PathBuf,
+        pub(crate) other_root: std::path::PathBuf,
+    }
+
+    impl Fixture {
+        /// Two workspaces assign the same shared reviewer, so a change meant to
+        /// stay local can be caught leaking into the other one.
+        pub(crate) fn new() -> Self {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let parent = temp.path().join("workspaces");
+            let mut index = WorkspaceIndex::default();
+
+            let mut roots = Vec::new();
+            for (workspace_id, assignment_id) in [
+                (WORKSPACE_ID, ASSIGNMENT_ID),
+                (OTHER_WORKSPACE_ID, "55555555-5555-4555-8555-555555555555"),
+            ] {
+                let root = parent.join(workspace_id);
+                let mut config = WorkspaceConfig::new(
+                    workspace_id.to_string(),
+                    "W".to_string(),
+                    1_000,
+                    MAIN_ID.to_string(),
+                );
+                config.assignments.push(WorkspaceAssignment {
+                    id: assignment_id.to_string(),
+                    agent_definition_id: DEFINITION_ID.to_string(),
+                    enabled: true,
+                    context: String::new(),
+                    filesystem_grants: Vec::new(),
+                    created_at: 1_000,
+                    updated_at: 1_000,
+                });
+                workspace_config::save(&root, &config).expect("seed workspace");
+                index.insert_config(root.clone(), &config);
+                roots.push(root);
+            }
+
+            let mut behavior =
+                crate::config::WorkspaceAgent::new_manager(DEFINITION_ID.to_string(), 1_000);
+            behavior.name = "Reviewer".to_string();
+            let app_config = AppConfig {
+                workspace_dirs: vec![parent],
+                agent_definitions: vec![AgentDefinition {
+                    id: DEFINITION_ID.to_string(),
+                    revision: 1,
+                    archived: false,
+                    behavior,
+                }],
+                ..AppConfig::default()
+            };
+            let config_manager =
+                ConfigManager::new_for_tests(app_config, temp.path().join("config.json"));
+            let state = AppState::new_for_tests(config_manager, index).expect("app state");
+
+            Self {
+                _temp: temp,
+                state,
+                root: roots[0].clone(),
+                other_root: roots[1].clone(),
+            }
+        }
+
+        pub(crate) fn config(&self) -> WorkspaceConfig {
+            workspace_config::load(&self.root).expect("load workspace config")
+        }
+
+        pub(crate) fn other_config(&self) -> WorkspaceConfig {
+            workspace_config::load(&self.other_root).expect("load other workspace config")
+        }
+
+        pub(crate) fn definition(&self) -> AgentDefinition {
+            self.state
+                .config_manager
+                .lock()
+                .expect("config lock")
+                .get()
+                .agent_definitions
+                .into_iter()
+                .find(|definition| definition.id == DEFINITION_ID)
+                .expect("definition")
+        }
+    }
+}
+
+#[cfg(test)]
+mod grant_persistence_tests {
+    use super::approval_destination_tests::*;
+    use super::*;
+
+    #[test]
+    fn a_teammates_approved_path_stays_in_the_workspace_that_approved_it() {
+        let fixture = Fixture::new();
+
+        persist_grant_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            ASSIGNMENT_ID,
+            "/srv/data",
+            FilesystemPathAccess::ReadWrite,
+            "needs the dataset",
+        )
+        .expect("persist");
+
+        let assignment = &fixture.config().assignments[0];
+        assert_eq!(assignment.filesystem_grants.len(), 1);
+        assert_eq!(assignment.filesystem_grants[0].path, "/srv/data");
+        assert!(matches!(
+            assignment.filesystem_grants[0].origin,
+            Some(GrantOrigin::Approval { .. })
+        ));
+        assert!(
+            fixture
+                .definition()
+                .behavior
+                .execution
+                .filesystem
+                .extra_paths
+                .iter()
+                .all(|grant| grant.path != "/srv/data"),
+            "a path approved here must not follow the teammate into other projects"
+        );
+        assert!(
+            fixture.other_config().assignments[0]
+                .filesystem_grants
+                .is_empty(),
+            "the same teammate elsewhere gains nothing"
+        );
+    }
+
+    #[test]
+    fn the_mains_approved_path_lands_on_the_main() {
+        let fixture = Fixture::new();
+
+        persist_grant_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            MAIN_ID,
+            "/srv/data",
+            FilesystemPathAccess::ReadOnly,
+            "read the dataset",
+        )
+        .expect("persist");
+
+        let config = fixture.config();
+        let main = config.main_agent.expect("main agent");
+        assert!(main
+            .execution
+            .filesystem
+            .extra_paths
+            .iter()
+            .any(|grant| grant.path == "/srv/data"));
+        assert!(config.assignments[0].filesystem_grants.is_empty());
+    }
+
+    #[test]
+    fn a_later_read_only_approval_never_takes_write_access_away() {
+        let fixture = Fixture::new();
+        let write_then_read = [
+            FilesystemPathAccess::ReadWrite,
+            FilesystemPathAccess::ReadOnly,
+        ];
+
+        for access in write_then_read {
+            persist_grant_to_agent(
+                &fixture.state,
+                WORKSPACE_ID,
+                ASSIGNMENT_ID,
+                "/srv/data",
+                access,
+                "dataset",
+            )
+            .expect("persist");
+        }
+
+        let grants = fixture.config().assignments[0].filesystem_grants.clone();
+        assert_eq!(grants.len(), 1, "re-approval updates rather than appends");
+        assert_eq!(grants[0].access, FilesystemPathAccess::ReadWrite);
+    }
+
+    #[test]
+    fn an_unknown_agent_id_is_an_error_rather_than_a_silent_no_op() {
+        let fixture = Fixture::new();
+
+        let error = persist_grant_to_agent(
+            &fixture.state,
+            WORKSPACE_ID,
+            "nobody",
+            "/srv/data",
+            FilesystemPathAccess::ReadOnly,
+            "dataset",
+        )
+        .expect_err("unknown agent");
+        assert!(error.contains("not found"), "{error}");
     }
 }

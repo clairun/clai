@@ -11,7 +11,12 @@ use std::sync::OnceLock;
 /// `--filesystem=home`. Falls back to `dirs::home_dir()` if resolution
 /// fails, so a missing host-spawn permission degrades to isolated-but-
 /// working rather than broken.
-fn real_home() -> Option<PathBuf> {
+///
+/// This is also the home the shell filesystem policy is compiled against
+/// (`EffectiveFilesystemPolicy::from_config`) and the base for `~` in
+/// `fs_request_grant`. Use it instead of `providers::get_home_dir` so every
+/// caller shares one cached host lookup and one answer.
+pub(crate) fn real_home() -> Option<PathBuf> {
     if crate::providers::is_flatpak() {
         static REAL_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
         return REAL_HOME

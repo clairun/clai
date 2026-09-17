@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use tokio::process::Command;
 
+use super::filesystem::normalize_path;
 use super::runner::{prepare_stdio, run_spawned_child};
 use super::{
     SandboxCommand, SandboxCommandOutput, SandboxNetworkMode, SandboxPathAccess,
@@ -240,10 +241,10 @@ fn append_tmp_env(args: &mut Vec<OsString>, command: &SandboxCommand) {
 }
 
 fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
-    if !command.profile.workspace_root.exists() {
+    if !command.profile.filesystem.workspace_root.exists() {
         return Err(format!(
             "Sandbox workspace does not exist: {}",
-            command.profile.workspace_root.display()
+            command.profile.filesystem.workspace_root.display()
         ));
     }
 
@@ -273,8 +274,8 @@ fn validate_profile_paths(command: &SandboxCommand) -> Result<(), String> {
 /// Flatpak we probe on the host with `flatpak-spawn --host test -e`.
 async fn prune_missing_grants(command: &mut SandboxCommand) {
     let in_flatpak = crate::providers::is_flatpak();
-    let mut kept = Vec::with_capacity(command.profile.path_grants.len());
-    for grant in command.profile.path_grants.drain(..) {
+    let mut kept = Vec::with_capacity(command.profile.filesystem.path_grants.len());
+    for grant in command.profile.filesystem.path_grants.drain(..) {
         let exists = if in_flatpak {
             host_path_exists(&grant.host_path).await
         } else {
@@ -291,7 +292,7 @@ async fn prune_missing_grants(command: &mut SandboxCommand) {
             );
         }
     }
-    command.profile.path_grants = kept;
+    command.profile.filesystem.path_grants = kept;
 }
 
 /// Probe path existence on the *host* via `flatpak-spawn --host test -e`.
@@ -466,65 +467,20 @@ fn resolve_session_bus_socket(in_flatpak: bool) -> Option<PathBuf> {
 }
 
 fn append_workspace_and_grants(args: &mut Vec<OsString>, command: &SandboxCommand) {
-    // Bind-mounts have last-writer-wins semantics over their subtree: a later
-    // shallower bind overlays earlier deeper binds at any nested path. To make
-    // the workspace's read-write access survive even when a configured grant is
-    // an ancestor of the workspace (e.g. workspace under /home/me with a
-    // separate /home/me read-only grant), merge workspace + grants and emit
-    // them shallowest-first. The workspace, being deeper than its ancestor
-    // grant, ends up bound last and its RW wins.
-    //
-    // Sort is stable: when two paths have equal depth (siblings), they don't
-    // overlap and emit order is irrelevant. We push the workspace first so an
-    // exact-duplicate grant gets dropped by the dedup below and the workspace's
-    // RW access wins.
-    // The bool is `lenient`: false for the workspace root (a missing workspace
-    // is fatal), true for grants (a missing/invisible grant is skipped via
-    // *-bind-try rather than aborting the whole sandbox).
-    let mut ops: Vec<(PathBuf, MountOp)> =
-        Vec::with_capacity(command.profile.path_grants.len() + 2);
-    ops.push((
-        command.profile.workspace_root.clone(),
-        MountOp::Bind(SandboxPathAccess::ReadWrite, false),
-    ));
-    for grant in &command.profile.path_grants {
-        if grant.host_path == command.profile.workspace_root {
-            continue;
-        }
-        ops.push((grant.host_path.clone(), MountOp::Bind(grant.access, true)));
-    }
-
-    // Workspace isolation: overlay an empty tmpfs on the workspace *container*
-    // (e.g. `~/.clai/workspaces`) so a broad `$HOME` bind can't expose sibling
-    // workspaces. The container is shallower than the workspace root, so the
-    // depth-sort below emits the tmpfs first and the workspace bind (and any
-    // explicitly-granted sibling, which is also deeper) lands on top of it —
-    // re-exposing exactly what's allowed. See `profile::workspace_mask`.
-    let home = command.profile.env.home().map(Path::new);
-    if let Some(mask) =
-        crate::assistant::sandbox::profile::workspace_mask(&command.profile.workspace_root, home)
-    {
-        ops.push((mask, MountOp::Tmpfs));
-    }
-
-    ops.sort_by_key(|(path, _)| path_depth(path));
-
-    for (path, op) in ops {
-        match op {
-            MountOp::Bind(access, lenient) => append_bind(args, access, &path, &path, lenient),
-            MountOp::Tmpfs => {
+    use super::filesystem::FilesystemOperation;
+    for operation in command.profile.filesystem.operations() {
+        match operation {
+            FilesystemOperation::Expose {
+                path,
+                access,
+                required,
+            } => append_bind(args, access, path, path, !required),
+            FilesystemOperation::Mask(path) => {
                 args.push(os("--tmpfs"));
-                args.push(path.into_os_string());
+                args.push(path.as_os_str().to_owned());
             }
         }
     }
-}
-
-enum MountOp {
-    /// `--bind`/`--ro-bind` (or the `*-try` lenient variant).
-    Bind(SandboxPathAccess, bool),
-    /// `--tmpfs`: overlay an empty tmpfs to hide a subtree.
-    Tmpfs,
 }
 
 /// Emit a single bind. `lenient` selects bwrap's `*-bind-try` variant, which
@@ -643,28 +599,6 @@ fn path_is_covered_by_system_bind(path: &Path) -> bool {
     .any(|root| path == root || path.starts_with(root))
 }
 
-fn path_depth(path: &Path) -> usize {
-    path.components()
-        .filter(|component| matches!(component, Component::Normal(_)))
-        .count()
-}
-
-fn normalize_path(path: PathBuf) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(Path::new("/")),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
 fn classify_bwrap_failure(stderr: &str) -> String {
     let lower = stderr.to_ascii_lowercase();
     if lower.contains("operation not permitted")
@@ -697,18 +631,18 @@ mod tests {
             cwd: workspace.clone(),
             timeout_ms: 1_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.clone(),
-                path_grants: vec![],
-                network: SandboxNetworkMode::Host,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+            profile: SandboxProfile::for_test(
+                workspace.clone(),
+                vec![],
+                SandboxNetworkMode::Host,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     &workspace,
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         }
     }
 
@@ -748,17 +682,23 @@ mod tests {
 
         let mut command = sample_command();
         command.cwd = workspace.clone();
-        command.profile.workspace_root = workspace.clone();
+        command.profile.filesystem.workspace_root = workspace.clone();
         command.profile.env = SandboxEnv::filtered_from_iter(
             [("PATH", "/usr/bin:/bin")],
             home.path(),
             SandboxSessionBusMode::Deny,
         );
-        command.profile.path_grants = vec![SandboxPathGrant {
+        command.profile.filesystem.path_grants = vec![SandboxPathGrant {
             host_path: home.path().to_path_buf(),
             access: SandboxPathAccess::ReadOnly,
         }];
 
+        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
+            &command.profile.filesystem.workspace_root,
+            &command.profile.filesystem.path_grants,
+            command.profile.env.home().map(Path::new),
+        )
+        .unwrap();
         let args = bwrap_args(&command).unwrap();
         let rendered: Vec<String> = args
             .iter()
@@ -779,6 +719,91 @@ mod tests {
             tmpfs_idx < ws_bind_idx,
             "tmpfs over the container must precede the workspace bind; got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn an_explicit_container_grant_is_re_exposed_over_the_mask() {
+        // A grant on the workspace container itself ties with the container
+        // tmpfs on depth. The grant must be emitted last, so everything the
+        // user explicitly granted inside the container stays reachable.
+        //
+        // This is what makes `tools::local`'s grant fold safe: given
+        // `~/.clai/workspaces` RW plus a sibling workspace RO, the fold drops
+        // the sibling as already-covered. If the tmpfs erased the container
+        // bind, that sibling would be silently revoked — and session grants go
+        // through the same fold, so re-approving it could not win it back.
+        let home = tempfile::tempdir().unwrap();
+        let container = home.path().join(".clai").join("workspaces");
+        let workspace = container.join("ws-abc");
+        let sibling = container.join("ws-other");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let mut command = sample_command();
+        command.cwd = workspace.clone();
+        command.profile.filesystem.workspace_root = workspace.clone();
+        command.profile.env = SandboxEnv::filtered_from_iter(
+            [("PATH", "/usr/bin:/bin")],
+            home.path(),
+            SandboxSessionBusMode::Deny,
+        );
+        let home_str = home.path().to_string_lossy().into_owned();
+        let container_str = container.to_string_lossy().into_owned();
+
+        // Both access levels: a read-only container grant is just as explicit,
+        // and just as revoked if the mask lands on top of it.
+        for (access, flag) in [
+            (SandboxPathAccess::ReadWrite, "--bind-try"),
+            (SandboxPathAccess::ReadOnly, "--ro-bind-try"),
+        ] {
+            command.profile.filesystem.path_grants = vec![
+                SandboxPathGrant {
+                    host_path: home.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                },
+                SandboxPathGrant {
+                    host_path: container.clone(),
+                    access,
+                },
+            ];
+
+            command.profile.filesystem =
+                super::super::filesystem::EffectiveFilesystemPolicy::compile(
+                    &command.profile.filesystem.workspace_root,
+                    &command.profile.filesystem.path_grants,
+                    command.profile.env.home().map(Path::new),
+                )
+                .unwrap();
+            let args = bwrap_args(&command).unwrap();
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+
+            let home_bind_idx = rendered
+                .windows(3)
+                .position(|w| w[0] == "--ro-bind-try" && w[1] == home_str && w[2] == home_str)
+                .unwrap_or_else(|| panic!("home should be bound read-only; got {rendered:?}"));
+            let tmpfs_idx = rendered
+                .windows(2)
+                .position(|w| w[0] == "--tmpfs" && w[1] == container_str)
+                .unwrap_or_else(|| {
+                    panic!("container should be masked with --tmpfs; got {rendered:?}")
+                });
+            let container_bind_idx = rendered
+                .windows(3)
+                .position(|w| w[0] == flag && w[1] == container_str && w[2] == container_str)
+                .unwrap_or_else(|| panic!("granted container should be bound; got {rendered:?}"));
+
+            assert!(
+                home_bind_idx < tmpfs_idx,
+                "the broad home bind must stay under the mask; got {rendered:?}"
+            );
+            assert!(
+                tmpfs_idx < container_bind_idx,
+                "the {flag} container grant must be bound on top of the mask; got {rendered:?}"
+            );
+        }
     }
 
     #[test]
@@ -1149,18 +1174,18 @@ mod tests {
             cwd: workspace.path().to_path_buf(),
             timeout_ms: 5_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.path().to_path_buf(),
-                path_grants: vec![],
-                network: SandboxNetworkMode::Disabled,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+            profile: SandboxProfile::for_test(
+                workspace.path().to_path_buf(),
+                vec![],
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         };
 
         let output = match run(command).await {
@@ -1192,21 +1217,21 @@ mod tests {
             cwd: workspace.clone(),
             timeout_ms: 1_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.clone(),
-                path_grants: vec![SandboxPathGrant {
+            profile: SandboxProfile::for_test(
+                workspace.clone(),
+                vec![SandboxPathGrant {
                     host_path: ancestor,
                     access: SandboxPathAccess::ReadOnly,
                 }],
-                network: SandboxNetworkMode::Host,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+                SandboxNetworkMode::Host,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     &workspace,
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         };
 
         // Build args under a workspace_root that doesn't exist on the host:
@@ -1260,21 +1285,21 @@ mod tests {
             cwd: workspace.path().to_path_buf(),
             timeout_ms: 1_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.path().to_path_buf(),
-                path_grants: vec![SandboxPathGrant {
+            profile: SandboxProfile::for_test(
+                workspace.path().to_path_buf(),
+                vec![SandboxPathGrant {
                     host_path: stale.clone(),
                     access: SandboxPathAccess::ReadOnly,
                 }],
-                network: SandboxNetworkMode::Host,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+                SandboxNetworkMode::Host,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         };
 
         let mut args: Vec<OsString> = Vec::new();
@@ -1329,30 +1354,30 @@ mod tests {
             cwd: workspace.path().to_path_buf(),
             timeout_ms: 1_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.path().to_path_buf(),
-                path_grants: vec![
+            profile: SandboxProfile::for_test(
+                workspace.path().to_path_buf(),
+                vec![
                     SandboxPathGrant {
                         host_path: vanished_path(),
                         access: SandboxPathAccess::ReadOnly,
                     },
                     live_grant.clone(),
                 ],
-                network: SandboxNetworkMode::Host,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+                SandboxNetworkMode::Host,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         };
 
         prune_missing_grants(&mut command).await;
 
         assert_eq!(
-            command.profile.path_grants,
+            command.profile.filesystem.path_grants,
             vec![live_grant],
             "stale grant should be pruned, live grant kept"
         );
@@ -1369,21 +1394,21 @@ mod tests {
             cwd: workspace.path().to_path_buf(),
             timeout_ms: 5_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.path().to_path_buf(),
-                path_grants: vec![SandboxPathGrant {
+            profile: SandboxProfile::for_test(
+                workspace.path().to_path_buf(),
+                vec![SandboxPathGrant {
                     host_path: vanished_path(),
                     access: SandboxPathAccess::ReadOnly,
                 }],
-                network: SandboxNetworkMode::Disabled,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     workspace.path(),
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         };
 
         let output = match run(command).await {
@@ -1421,21 +1446,21 @@ mod tests {
             cwd: workspace.clone(),
             timeout_ms: 5_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.clone(),
-                path_grants: vec![SandboxPathGrant {
+            profile: SandboxProfile::for_test(
+                workspace.clone(),
+                vec![SandboxPathGrant {
                     host_path: ancestor.path().to_path_buf(),
                     access: SandboxPathAccess::ReadOnly,
                 }],
-                network: SandboxNetworkMode::Disabled,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     &workspace,
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: None,
-            },
+                None,
+            ),
         };
 
         let output = match run(command).await {
@@ -1510,23 +1535,31 @@ mod tests {
     }
 
     fn tmp_profile(workspace: &Path, scratch: Option<PathBuf>) -> SandboxCommand {
+        tmp_profile_with_grants(workspace, scratch, vec![])
+    }
+
+    fn tmp_profile_with_grants(
+        workspace: &Path,
+        scratch: Option<PathBuf>,
+        path_grants: Vec<SandboxPathGrant>,
+    ) -> SandboxCommand {
         SandboxCommand {
             argv: vec![os("/bin/sh"), os("-lc"), os("pwd")],
             cwd: workspace.to_path_buf(),
             timeout_ms: 1_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.to_path_buf(),
-                path_grants: vec![],
-                network: SandboxNetworkMode::Disabled,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+            profile: SandboxProfile::for_test(
+                workspace.to_path_buf(),
+                path_grants,
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     workspace,
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: scratch,
-            },
+                scratch,
+            ),
         }
     }
 
@@ -1625,14 +1658,14 @@ mod tests {
     #[test]
     fn an_explicit_tmp_grant_is_emitted_after_the_scratch_bind() {
         let workspace = tempfile::tempdir().unwrap();
-        let mut command = tmp_profile(
+        let command = tmp_profile_with_grants(
             workspace.path(),
             Some(PathBuf::from("/home/me/.cache/clai/sandbox-tmp/live/ws-0")),
+            vec![SandboxPathGrant {
+                host_path: PathBuf::from("/tmp"),
+                access: SandboxPathAccess::ReadWrite,
+            }],
         );
-        command.profile.path_grants = vec![SandboxPathGrant {
-            host_path: PathBuf::from("/tmp"),
-            access: SandboxPathAccess::ReadWrite,
-        }];
 
         let args = bwrap_args(&command).expect("args");
         let rendered = rendered(&args);
@@ -1720,18 +1753,18 @@ mod tests {
             cwd: workspace.to_path_buf(),
             timeout_ms: 10_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.to_path_buf(),
-                path_grants: vec![],
-                network: SandboxNetworkMode::Disabled,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+            profile: SandboxProfile::for_test(
+                workspace.to_path_buf(),
+                vec![],
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     workspace,
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: scratch,
-            },
+                scratch,
+            ),
         }
     }
     /// Isolation regression. Scratch lives at `<container>/.scratch/<id>`,
@@ -1761,21 +1794,21 @@ mod tests {
             cwd: workspace.clone(),
             timeout_ms: 10_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.clone(),
-                path_grants: vec![SandboxPathGrant {
+            profile: SandboxProfile::for_test(
+                workspace.clone(),
+                vec![SandboxPathGrant {
                     host_path: home.path().to_path_buf(),
                     access: SandboxPathAccess::ReadOnly,
                 }],
-                network: SandboxNetworkMode::Disabled,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     home.path(),
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: Some(mine.clone()),
-            },
+                Some(mine.clone()),
+            ),
         };
 
         let output = match run(command).await {
@@ -1816,21 +1849,21 @@ mod tests {
             cwd: workspace.clone(),
             timeout_ms: 10_000,
             max_output_chars: 1_000,
-            profile: SandboxProfile {
-                workspace_root: workspace.clone(),
-                path_grants: vec![SandboxPathGrant {
+            profile: SandboxProfile::for_test(
+                workspace.clone(),
+                vec![SandboxPathGrant {
                     host_path: home.path().to_path_buf(),
                     access: SandboxPathAccess::ReadOnly,
                 }],
-                network: SandboxNetworkMode::Disabled,
-                session_bus: SandboxSessionBusMode::Deny,
-                env: SandboxEnv::filtered_from_iter(
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
                     home.path(),
                     SandboxSessionBusMode::Deny,
                 ),
-                scratch_tmp: Some(mine.clone()),
-            },
+                Some(mine.clone()),
+            ),
         };
 
         let output = match run(command).await {
@@ -1848,6 +1881,177 @@ mod tests {
         assert!(
             mine.join("canary").exists(),
             "write did not reach the host scratch dir"
+        );
+    }
+
+    struct SymlinkFixture {
+        _temp: tempfile::TempDir,
+        home: PathBuf,
+        workspace: PathBuf,
+        sibling: PathBuf,
+        readonly: PathBuf,
+    }
+    fn symlink_fixture(layout: &str) -> SymlinkFixture {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let real_home = base.join("real-home");
+        std::fs::create_dir_all(&real_home).unwrap();
+        let home = if layout == "home" {
+            let alias = base.join("home");
+            symlink(&real_home, &alias).unwrap();
+            alias
+        } else {
+            real_home.clone()
+        };
+        if layout == "ancestor" {
+            std::fs::create_dir_all(real_home.join("state/clai")).unwrap();
+            symlink(real_home.join("state/clai"), home.join(".clai")).unwrap();
+        }
+        if layout == "container" {
+            std::fs::create_dir_all(home.join(".clai")).unwrap();
+            std::fs::create_dir_all(real_home.join("store")).unwrap();
+            symlink(real_home.join("store"), home.join(".clai/workspaces")).unwrap();
+        }
+        let container = home.join(".clai/workspaces");
+        std::fs::create_dir_all(&container).unwrap();
+        let workspace = container.join("own");
+        if layout == "workspace" {
+            std::fs::create_dir_all(real_home.join("projects/own")).unwrap();
+            symlink(real_home.join("projects/own"), &workspace).unwrap();
+        }
+        std::fs::create_dir_all(workspace.join("docs")).unwrap();
+        let sibling = container.join("other");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("data.sqlite"), "SIBLING").unwrap();
+        std::fs::write(real_home.join("marker"), "HOME").unwrap();
+        let readonly = real_home.join("readonly");
+        std::fs::create_dir_all(&readonly).unwrap();
+        SymlinkFixture {
+            _temp: temp,
+            home,
+            workspace,
+            sibling,
+            readonly,
+        }
+    }
+
+    // Exercise the production compiler AND argument builder, not a handwritten
+    // imitation of bwrap's mounts. Each layout failed a different old heuristic.
+    #[tokio::test]
+    async fn compiled_filesystem_contract_holds_across_symlink_layouts() {
+        for layout in ["home", "ancestor", "container", "workspace"] {
+            for broad_home in [false, true] {
+                for expose_sibling in [false, true] {
+                    check_symlink_contract(layout, broad_home, expose_sibling).await;
+                }
+            }
+        }
+    }
+
+    const CONTRACT_SCRIPT: &str = r#"
+                set -eu
+                printf writable > probe
+                if [ "$3" = yes ]; then test "$(cat "$1/data.sqlite")" = SIBLING; else test ! -r "$1/data.sqlite"; fi
+                if [ "$4" = yes ]; then test "$(cat "$HOME/marker")" = HOME; fi
+                if (printf forbidden > "$2/probe") 2>/dev/null; then exit 41; fi
+                echo contract-ok
+            "#;
+
+    async fn check_symlink_contract(layout: &str, broad_home: bool, expose_sibling: bool) {
+        use super::super::filesystem::EffectiveFilesystemPolicy;
+        use crate::config::FilesystemPathAccess;
+        let fixture = symlink_fixture(layout);
+        let SymlinkFixture {
+            ref home,
+            ref workspace,
+            ref sibling,
+            ref readonly,
+            ..
+        } = fixture;
+        let mut grants = vec![
+            SandboxPathGrant {
+                host_path: workspace.join("docs"),
+                access: SandboxPathAccess::ReadOnly,
+            },
+            SandboxPathGrant {
+                host_path: readonly.clone(),
+                access: SandboxPathAccess::ReadOnly,
+            },
+        ];
+        if broad_home {
+            grants.push(SandboxPathGrant {
+                host_path: home.clone(),
+                access: SandboxPathAccess::ReadOnly,
+            });
+        }
+        if expose_sibling {
+            grants.push(SandboxPathGrant {
+                host_path: sibling.clone(),
+                access: SandboxPathAccess::ReadOnly,
+            });
+        }
+        let filesystem =
+            EffectiveFilesystemPolicy::compile(workspace, &grants, Some(home)).unwrap();
+        let resolved_sibling = sibling.canonicalize().unwrap();
+        assert!(filesystem.covers(
+            &workspace.canonicalize().unwrap().join("docs"),
+            FilesystemPathAccess::ReadWrite
+        ));
+        assert_eq!(
+            filesystem.covers(&resolved_sibling, FilesystemPathAccess::ReadOnly),
+            expose_sibling
+        );
+        assert!(!filesystem.covers(readonly, FilesystemPathAccess::ReadWrite));
+        let cwd = filesystem
+            .authorize_cwd(workspace.join("docs").to_str().unwrap())
+            .unwrap();
+        let env = SandboxEnv::filtered_from_iter(
+            [("PATH", "/usr/bin:/bin")],
+            filesystem.home.as_deref().unwrap(),
+            SandboxSessionBusMode::Deny,
+        );
+        let command = SandboxCommand {
+            argv: vec![
+                os("/bin/sh"),
+                os("-c"),
+                os(CONTRACT_SCRIPT),
+                os("contract"),
+                resolved_sibling.into_os_string(),
+                readonly.clone().into_os_string(),
+                os(if expose_sibling { "yes" } else { "no" }),
+                os(if broad_home { "yes" } else { "no" }),
+            ],
+            cwd,
+            timeout_ms: 5_000,
+            max_output_chars: 2_000,
+            profile: SandboxProfile {
+                filesystem,
+                env,
+                network: SandboxNetworkMode::Disabled,
+                session_bus: SandboxSessionBusMode::Deny,
+                scratch_tmp: None,
+            },
+        };
+        let output = match run(command).await {
+            Ok(output) => output,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                eprintln!("contract probe unavailable: {error}");
+                return;
+            }
+            Err(error) => {
+                panic!("{layout}, home={broad_home}, sibling={expose_sibling}: {error}")
+            }
+        };
+        assert!(
+            output.success,
+            "{layout}, home={broad_home}, sibling={expose_sibling}: {}",
+            output.stderr
+        );
+        assert!(output.stdout.contains("contract-ok"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("docs/probe")).unwrap(),
+            "writable"
         );
     }
 }

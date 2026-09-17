@@ -135,7 +135,6 @@ iana-time-zone = "0.1"
 
 # Platform-specific directories (config, data, cache)
 dirs = "5"
-include_dir = "0.7"
 
 # MCP (Model Context Protocol) server
 # For AI CLI tool integration (Claude Code, Gemini CLI, etc.)
