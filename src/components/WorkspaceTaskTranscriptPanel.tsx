@@ -218,6 +218,11 @@ export default function WorkspaceTaskTranscriptPanel({
               hasOlderMessages={hasOlderMessages}
               isLoadingOlderMessages={isLoadingOlderMessages}
               onLoadOlderMessages={handleLoadOlderMessages}
+              // A sub-agent can delegate further; its task cards get faces
+              // from the same crew. No open handler: this panel already is a
+              // task's log, and swapping the task under the reader would lose
+              // their place.
+              taskRoster={roster}
             />
           </div>
         )}

@@ -119,40 +119,27 @@
 }
 
 .status {
-  flex-shrink: 0;
-  padding: 2px 7px;
-  border-radius: var(--radius-full);
-  background: var(--color-overlay-06);
-  color: var(--color-text-secondary);
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  composes: pill from './taskStatus.module.css';
 }
 
 .status_completed {
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-  color: var(--color-accent);
+  composes: pill_completed from './taskStatus.module.css';
 }
 
 .status_running {
-  background: var(--color-primary-alpha-08);
-  color: var(--color-primary);
+  composes: pill_running from './taskStatus.module.css';
 }
 
 .status_queued {
-  background: var(--color-overlay-06);
-  color: var(--color-text-tertiary);
+  composes: pill_queued from './taskStatus.module.css';
 }
 
 .status_failed {
-  background: color-mix(in srgb, var(--color-critical) 10%, transparent);
-  color: var(--color-critical);
+  composes: pill_failed from './taskStatus.module.css';
 }
 
 .status_blocked {
-  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
-  color: var(--color-warning);
+  composes: pill_blocked from './taskStatus.module.css';
 }
 
 .meta {

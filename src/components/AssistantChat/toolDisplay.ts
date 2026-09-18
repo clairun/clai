@@ -12,6 +12,13 @@
  * sends.
  */
 
+/**
+ * Task statuses that mean "not finished". Mirrors `isTaskActive` in
+ * `utils/taskDisplay`, which types its argument as a `WorkspaceTaskResponse`
+ * field — this module reads raw, unvalidated tool payloads instead.
+ */
+const ACTIVE_TASK_STATUSES: ReadonlySet<string> = new Set(['queued', 'running']);
+
 /** Result/summary tone — drives colour on the row summary. */
 export type ResultTone = 'neutral' | 'error';
 
@@ -301,6 +308,93 @@ export const inlineChartPath = (
   const obj = asPayloadObject(result);
   if (!obj || obj.ok !== true || typeof obj.path !== 'string' || !obj.path) return null;
   return obj.display === false ? null : obj.path;
+};
+
+/**
+ * A workspace task, frozen exactly as `workspace_assignTask` /
+ * `workspace_getTaskResult` answered. The chat draws it as a card instead of a
+ * one-line row.
+ *
+ * Frozen on purpose: the card never follows the task's live status. The tasks
+ * drawer is where "what is happening now" lives; the chat is a log of what the
+ * agent saw when it looked. That also keeps every card a pure function of its
+ * tool call, so a snapshot poll re-renders nothing here.
+ */
+export interface TaskCallCard {
+  /** Which call drew it: the hand-off, or a look at how it is going. */
+  kind: 'assign' | 'poll';
+  /**
+   * `full` gets its own block outside the collapsing run: the hand-off and
+   * every terminal answer. `slim` is a one-liner that collapses with the other
+   * rows — a poll that found the task still queued or running, of which a
+   * waiting agent produces many.
+   */
+  variant: 'full' | 'slim';
+  taskId: string;
+  title: string;
+  /** What the task was asked to do. Empty on a poll of a task assigned earlier. */
+  instructions: string;
+  /** Task status at the moment of the call, not now. */
+  status: string;
+  assignedToWorkspaceAgentId: string;
+  assignedAgentDefinitionId: string;
+  /** The task's own error, else its result summary; '' while it has neither. */
+  detail: string;
+  /** `detail` is the task's error rather than its summary. */
+  detailIsError: boolean;
+}
+
+const stringField = (obj: Record<string, unknown>, key: string): string =>
+  typeof obj[key] === 'string' ? obj[key] : '';
+
+/**
+ * The task card a completed workspace-task call should render, or null to keep
+ * the plain row: another tool, still running, or a call that failed — a failed
+ * call has no task, and its error message is the whole story.
+ *
+ * Malformed payloads fall back to the row too: without an id, a title and an
+ * assignee there is no card to draw and no task to open.
+ */
+export const inlineTaskCard = (
+  toolName: string,
+  result: unknown,
+  error: string | null | undefined,
+  callStatus: string,
+): TaskCallCard | null => {
+  const name = cleanToolName(toolName || '');
+  const kind =
+    name === 'workspace_assignTask' ? 'assign' : name === 'workspace_getTaskResult' ? 'poll' : null;
+  if (!kind) return null;
+  if (error || callStatus !== 'completed') return null;
+
+  const payload = asPayloadObject(result);
+  if (!payload || payload.ok !== true) return null;
+  // The task is a nested plain object, never an MCP envelope of its own, so it
+  // reads with the params coercion rather than the payload one.
+  const task = asParamsObject(payload.task);
+  if (!task) return null;
+
+  const taskId = stringField(task, 'id');
+  const title = stringField(task, 'title');
+  const status = stringField(task, 'status');
+  const assignedToWorkspaceAgentId = stringField(task, 'assignedToWorkspaceAgentId');
+  if (!taskId || !title || !status || !assignedToWorkspaceAgentId) return null;
+
+  const taskError = stringField(task, 'error').trim();
+  const detail = taskError || stringField(task, 'resultSummary').trim();
+
+  return {
+    kind,
+    variant: kind === 'assign' || !ACTIVE_TASK_STATUSES.has(status) ? 'full' : 'slim',
+    taskId,
+    title,
+    instructions: stringField(task, 'instructions').trim(),
+    status,
+    assignedToWorkspaceAgentId,
+    assignedAgentDefinitionId: stringField(task, 'assignedAgentDefinitionId'),
+    detail,
+    detailIsError: !!taskError,
+  };
 };
 
 /**

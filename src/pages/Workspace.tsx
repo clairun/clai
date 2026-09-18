@@ -34,6 +34,7 @@ import type {
   AssistantMessage,
   AssistantRun,
   ToolInvocation,
+  WorkspaceAgentResponse,
   WorkspaceDirEntry,
   WorkspaceFileEntry,
   WorkspaceSnapshot,
@@ -95,6 +96,8 @@ const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_QUEUED_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
+const EMPTY_TASKS: readonly WorkspaceTaskResponse[] = [];
 
 const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
@@ -1414,6 +1417,10 @@ interface ChatFirstLayoutProps {
   hasOlderMessages: boolean;
   isLoadingOlderMessages: boolean;
   onLoadOlderMessages: () => void;
+  // Crew and open-task handler for the chat's delegated-task cards. Both must
+  // keep a stable identity across snapshot polls; see `chatRoster` below.
+  taskRoster: readonly WorkspaceAgentResponse[];
+  onOpenTask: (taskId: string) => void;
 }
 
 const ChatFirstLayout = ({
@@ -1432,6 +1439,8 @@ const ChatFirstLayout = ({
   hasOlderMessages,
   isLoadingOlderMessages,
   onLoadOlderMessages,
+  taskRoster,
+  onOpenTask,
 }: ChatFirstLayoutProps) => {
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
@@ -1512,6 +1521,8 @@ const ChatFirstLayout = ({
             hasOlderMessages={hasOlderMessages}
             isLoadingOlderMessages={isLoadingOlderMessages}
             onLoadOlderMessages={onLoadOlderMessages}
+            taskRoster={taskRoster}
+            onOpenTask={onOpenTask}
           />
           <AskUserPanel sessionId={sessionId} />
           <InlineApprovalCard workspaceId={workspaceId} />
@@ -2177,6 +2188,54 @@ const Workspace = () => {
   }, [loadSnapshot, snapshot, workspaceId]);
 
   const tasks = snapshot?.tasks || [];
+
+  // The chat's delegated-task cards are frozen at the moment of their tool
+  // call — the tasks drawer owns what is happening now. So the chat gets no
+  // live task data: handing it a fresh array every 5s poll would repaint
+  // cards that cannot change.
+  //
+  // The roster it does need (faces, names) is memoized on what those cards
+  // draw, so an unchanged crew keeps one reference across polls; the tasks a
+  // click has to resolve are read from a ref instead of a prop.
+  const rosterKey = (snapshot?.assignedAgents || [])
+    .map((agent) =>
+      [
+        agent.id,
+        agent.isDefault ? '1' : '0',
+        agent.displayName,
+        agent.avatar?.seed ?? '',
+        agent.avatar?.generatorVersion ?? '',
+      ].join(':')
+    )
+    .join('|');
+  const chatRoster = useMemo(
+    () => snapshot?.assignedAgents || EMPTY_ROSTER,
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the crew's *content*: a poll that rebuilt the same faces must not hand the chat a new reference.
+    [rosterKey]
+  );
+
+  const tasksRef = useRef<readonly WorkspaceTaskResponse[]>(EMPTY_TASKS);
+  useEffect(() => {
+    tasksRef.current = snapshot?.tasks || EMPTY_TASKS;
+  }, [snapshot]);
+
+  const openTaskById = useCallback(
+    (taskId: string) => {
+      // A task that has dropped out of the snapshot's 50 most recent has no
+      // row left to open; the drawer is still where it would live, so land
+      // the user there rather than doing nothing under their click.
+      const task = tasksRef.current.find((entry) => entry.id === taskId) ?? null;
+      patchWorkspaceUi({
+        activePanel: 'tasks',
+        previewEntry: null,
+        viewingTask: task,
+        // Same invariant `setActivePanel` keeps: the crew picker belongs to
+        // the agents drawer and must not survive a switch away from it.
+        crewPickerOpen: false,
+      });
+    },
+    [patchWorkspaceUi]
+  );
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
   // `snapshot.runs` is sorted newest-first by the backend; pick the first
@@ -2361,6 +2420,8 @@ const Workspace = () => {
             hasOlderMessages={hasOlderMessages}
             isLoadingOlderMessages={isLoadingOlderMessages}
             onLoadOlderMessages={handleLoadOlderMessages}
+            taskRoster={chatRoster}
+            onOpenTask={openTaskById}
           />
         </div>
 
