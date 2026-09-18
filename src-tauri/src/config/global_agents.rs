@@ -139,7 +139,7 @@ fn unavailable_agent(assignment: &super::workspace_config::WorkspaceAssignment) 
     WorkspaceAgent {
         id: assignment.id.clone(),
         name: "Unavailable agent".to_string(),
-        description: "This teammate's shared definition no longer exists. Re-create it in the agent library, or remove the assignment.".to_string(),
+        description: "This agent's shared definition no longer exists. Re-create it in the agent library, or remove the assignment.".to_string(),
         enabled: false,
         selected_skills: Vec::new(),
         selected_mcp_servers: Vec::new(),

@@ -17,7 +17,8 @@ export interface AgentGalleryProps {
   onCreate: () => void;
   /** Card to focus once, e.g. the agent just created. */
   focusId?: string | null;
-  disabled?: boolean;
+  /** Cards cannot be opened (the library is known stale); creating is unaffected. */
+  cardsDisabled?: boolean;
 }
 
 /** Live agents by name, archived after them, only those matching the query. */
@@ -56,7 +57,7 @@ const AgentGallery = ({
   onOpen,
   onCreate,
   focusId = null,
-  disabled = false,
+  cardsDisabled = false,
 }: AgentGalleryProps) => {
   const [query, setQuery] = useState('');
   const ordered = useMemo(() => galleryOrder(definitions, query), [definitions, query]);
@@ -76,7 +77,7 @@ const AgentGallery = ({
             turn.
           </p>
         </div>
-        <button type="button" className={styles.create} onClick={onCreate} disabled={disabled}>
+        <button type="button" className={styles.create} onClick={onCreate}>
           + Create agent
         </button>
       </div>
@@ -101,7 +102,7 @@ const AgentGallery = ({
               ref={definition.id === focusId ? focusRef : undefined}
               className={`${styles.card} ${definition.archived ? styles.cardArchived : ''}`}
               onClick={() => onOpen(definition.id)}
-              disabled={disabled}
+              disabled={cardsDisabled}
             >
               <AgentAvatar
                 identity={identityFor({ id: definition.id, avatar: definition.avatar })}

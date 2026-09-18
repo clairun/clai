@@ -6,7 +6,7 @@
  */
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import AgentAvatar from './AgentAvatar';
-import { activityFromTasks, identityFor, type AgentActivity } from './agentIdentity';
+import { agentActivity, identityFor, type AgentActivity } from './agentIdentity';
 import styles from './AgentFacepile.module.css';
 
 export interface AgentFacepileProps {
@@ -32,10 +32,7 @@ export const facepileOrder = (
   tasks: readonly WorkspaceTaskResponse[]
 ): { agent: WorkspaceAgentResponse; activity: AgentActivity }[] =>
   agents
-    .map((agent) => ({
-      agent,
-      activity: agent.enabled ? activityFromTasks(agent.id, tasks) : ('disabled' as const),
-    }))
+    .map((agent) => ({ agent, activity: agentActivity(agent, tasks) }))
     .sort((a, b) => {
       if (a.agent.isDefault !== b.agent.isDefault) return a.agent.isDefault ? -1 : 1;
       return RANK[a.activity] - RANK[b.activity];

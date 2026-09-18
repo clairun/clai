@@ -20,7 +20,6 @@ import {
   type WorkspaceAssignmentPayload,
 } from '../../api/client';
 import AgentCardPicker from '../Agents/AgentCardPicker';
-import { openGlobalSettings } from '../../utils/globalSettings';
 import styles from './WorkspaceSettingsModal.module.css';
 
 /** Editable list of path grants, shared by the assignment and policy forms. */
@@ -343,7 +342,9 @@ export const AssignmentSection = ({
           definitions={definitions}
           assignedDefinitionIds={assignments.map((item) => item.agentDefinitionId)}
           onChanged={handleCrewChanged}
-          onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
+          // No create link here on purpose: the global Settings modal would open
+          // underneath this one (see the z-index of both modals). The copy
+          // points at Settings → Agents instead.
           disabled={busy}
         />
       </div>

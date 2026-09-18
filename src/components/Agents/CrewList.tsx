@@ -13,7 +13,7 @@ import { openGlobalSettings } from '../../utils/globalSettings';
 import { isTaskActive } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import AgentCardPicker from './AgentCardPicker';
-import { activityFromTasks, identityFor, type AgentActivity } from './agentIdentity';
+import { agentActivity, identityFor, type AgentActivity } from './agentIdentity';
 import styles from './CrewList.module.css';
 
 export interface CrewListProps {
@@ -49,16 +49,16 @@ export interface CrewStatus {
 }
 
 /**
- * What a row shows about an agent. The ring follows `activityFromTasks` —
- * the same rule the header facepile draws — so the two can never disagree;
- * this only adds the wording.
+ * What a row shows about an agent. The ring follows `agentActivity` — the
+ * same rule the header facepile draws — so the two can never disagree; this
+ * only adds the wording.
  */
 export const crewStatus = (
   agent: Pick<WorkspaceAgentResponse, 'id' | 'enabled'>,
   tasks: readonly WorkspaceTaskResponse[]
 ): CrewStatus => {
-  if (!agent.enabled) return { activity: 'disabled', line: 'Disabled in this workspace' };
-  const activity = activityFromTasks(agent.id, tasks);
+  const activity = agentActivity(agent, tasks);
+  if (activity === 'disabled') return { activity, line: 'Disabled in this workspace' };
   if (activity === 'running') {
     const running = tasks.filter(
       (task) => task.assignedToWorkspaceAgentId === agent.id && isTaskActive(task)
@@ -83,9 +83,8 @@ const CrewList = ({
 }: CrewListProps) => {
   const crew = useMemo(() => sortCrew(agents), [agents]);
   const showPicker = manageable && pickerOpen;
-  // The Main working alone gets an invitation instead of one row and a lot of
-  // nothing; the picker itself still opens only through the parent's flag.
-  const mainAlone = manageable && crew.length > 0 && crew.every((agent) => agent.isDefault);
+  // Nobody to delegate to yet: no crew at all, or the Main by itself.
+  const inviteToAdd = manageable && !pickerOpen && crew.every((agent) => agent.isDefault);
 
   const [library, setLibrary] = useState<AgentDefinitionDetail[] | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
@@ -175,14 +174,12 @@ const CrewList = ({
         </ul>
       )}
 
-      {manageable && crew.length === 0 && (
-        <p className={styles.invitationText}>No agents here yet.</p>
-      )}
-
-      {mainAlone && !pickerOpen && (
+      {inviteToAdd && (
         <div className={styles.invitation}>
           <p className={styles.invitationText}>
-            Main works alone here. Add an agent from the library, or create one.
+            {crew.length === 0
+              ? 'No agents here yet. Add one from the library, or create one.'
+              : 'Main works alone here. Add an agent from the library, or create one.'}
           </p>
           <button type="button" className={styles.action} onClick={onOpenPicker} disabled={!!busy}>
             Add to crew

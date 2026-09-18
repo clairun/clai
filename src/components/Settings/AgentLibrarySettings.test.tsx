@@ -259,6 +259,8 @@ describe('AgentLibrarySettings', () => {
     expect(screen.queryByTestId('behavior-form')).toBeNull();
     // The cards are stale (revision 3 while the backend is at 4): not clickable until Retry.
     expect(screen.getByRole('button', { name: /^Reviewer/ })).toBeDisabled();
+    // Creating depends on nothing stale.
+    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeEnabled();
 
     api.listAgentDefinitions.mockResolvedValue([{ ...REVIEWER, revision: 4 }]);
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));

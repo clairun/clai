@@ -193,6 +193,27 @@ describe('TaskList', () => {
     expect(screen.getByText('No delegated tasks yet.')).toBeInTheDocument();
   });
 
+  it('disables every Mark reviewed while one acknowledge is in flight', async () => {
+    const user = userEvent.setup();
+    let release: () => void = () => {};
+    api.acknowledgeWorkspaceTask.mockImplementation(
+      () => new Promise<void>((resolve) => (release = resolve))
+    );
+    const second = task({ id: 't-fail', title: 'Failed one', status: 'failed' });
+    render(<TaskList {...props} tasks={[WRITE_TASK, second]} />);
+
+    const [first, other] = screen.getAllByRole('button', { name: 'Mark reviewed' }) as [
+      HTMLElement,
+      HTMLElement,
+    ];
+    await user.click(first);
+    expect(first).toBeDisabled();
+    // A click here would otherwise be dropped silently by the busy guard.
+    expect(other).toBeDisabled();
+    release();
+    await waitFor(() => expect(other).toBeEnabled());
+  });
+
   it('acknowledges a blocked task once and reloads, and offers the log when there is a session', async () => {
     const user = userEvent.setup();
     const onChanged = vi.fn();

@@ -151,6 +151,12 @@ export const taskIdentity = (task: TaskLike, roster: readonly AgentLike[]): Agen
   };
 };
 
+/** The ring an agent's face draws: disabled beats everything, then what its tasks say. */
+export const agentActivity = (
+  agent: { id: string; enabled: boolean },
+  tasks: readonly TaskActivitySource[]
+): AgentActivity => (agent.enabled ? activityFromTasks(agent.id, tasks) : 'disabled');
+
 export type TaskActivitySource = Pick<
   WorkspaceTaskResponse,
   'assignedToWorkspaceAgentId' | 'status' | 'attentionAcknowledgedAt' | 'userResponseAt'

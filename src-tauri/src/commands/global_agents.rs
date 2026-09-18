@@ -333,7 +333,7 @@ fn apply_assignment_edit(
     // agent asked for while the pane sat open.
     if current.updated_at > edit.updated_at {
         return Err(
-            "This teammate's workspace settings changed while you were editing. Reload before saving."
+            "This agent's workspace settings changed while you were editing. Reload before saving."
                 .to_string(),
         );
     }

@@ -209,13 +209,14 @@ describe('CrewList', () => {
     expect(onOpenPicker).toHaveBeenCalledTimes(1);
   });
 
-  it('shows no invitation for an empty crew (no Main yet) or once the picker is open', () => {
+  it('invites the user to add agents to an empty crew too, and hides the invitation once the picker is open', () => {
     const { rerender } = render(<CrewList {...baseProps} agents={[]} tasks={[]} />);
-    expect(screen.queryByText(/Main works alone/)).toBeNull();
-    // Not a blank panel either.
-    expect(screen.getByText('No agents here yet.')).toBeInTheDocument();
+    expect(
+      screen.getByText('No agents here yet. Add one from the library, or create one.')
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add to crew' })).toBeInTheDocument();
     rerender(<CrewList {...baseProps} pickerOpen agents={[MAIN]} tasks={[]} />);
-    expect(screen.queryByText(/Main works alone/)).toBeNull();
+    expect(screen.queryByText(/works alone|No agents here/)).toBeNull();
     expect(screen.getByTestId('crew-picker')).toBeInTheDocument();
   });
 
@@ -250,6 +251,8 @@ describe('CrewList', () => {
     expect(screen.queryByRole('listitem', { name: 'Add Reviewer to the crew' })).toBeNull();
     // Rows and cards are both list items; the rows are the <li>s.
     expect(rows()).toHaveLength(2);
+    // The rows already say who is on the crew; the picker does not repeat them.
+    expect(screen.queryByText('Already on this crew')).toBeNull();
   });
 
   it('deep-links "Create a new agent" into Settings → Agents', async () => {

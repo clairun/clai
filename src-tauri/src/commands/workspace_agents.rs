@@ -183,7 +183,7 @@ pub async fn workspace_create_agent(
         // that already has a Main has nothing left to create.
         if let Some(existing) = config.main_agent.as_ref() {
             return Err(format!(
-                "This workspace already has a Main agent ({}). Assign teammates from the agent library instead.",
+                "This workspace already has a Main agent ({}). Add agents from the library instead.",
                 existing.id
             ));
         }
@@ -211,7 +211,7 @@ pub async fn workspace_update_agent(
     let ((), config) = state.update_workspace_config(&workspace_id, |config| {
         if config.assignment(&request.agent_id).is_some() {
             return Err(
-                "This teammate's behavior is shared. Edit it in the agent library, or change its local context and access in the workspace team settings."
+                "This agent's behavior is shared. Edit it in the agent library, or change its local context and access in the workspace's Team settings."
                     .to_string(),
             );
         }

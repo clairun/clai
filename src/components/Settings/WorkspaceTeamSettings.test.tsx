@@ -151,14 +151,17 @@ describe('AssignmentSection picker', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Writer joined the crew.');
   });
 
-  it('links to the library from the picker', async () => {
-    const user = userEvent.setup();
-    const opened = vi.fn();
-    window.addEventListener('open-global-settings', opened);
+  it('points at Settings → Agents instead of a link the modal could not show', async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'agent_definitions_list') return Promise.resolve(DEFINITIONS.filter((d) => d.id === 'def-review'));
+      if (cmd === 'workspace_team_policy') return Promise.resolve(policy);
+      return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
+    });
     render(<AssignmentSection workspaceId={WORKSPACE} />);
-    await user.click(await screen.findByRole('button', { name: 'Create a new agent →' }));
-    expect(opened).toHaveBeenCalledTimes(1);
-    window.removeEventListener('open-global-settings', opened);
+    expect(
+      await screen.findByText('Every agent in the library is already on this crew. Create one in Settings → Agents.')
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create a new agent →' })).toBeNull();
   });
 });
 

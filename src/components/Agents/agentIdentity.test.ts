@@ -184,6 +184,13 @@ describe('activityFromTasks', () => {
     expect(
       activityFromTasks('wa-1', [task({ status: 'blocked' }), task({ status: 'queued' })])
     ).toBe('running');
+    // Order must not matter: running wins even when attention was seen first.
+    expect(
+      activityFromTasks('wa-1', [task({ status: 'queued' }), task({ status: 'blocked' })])
+    ).toBe('running');
+    expect(
+      activityFromTasks('wa-1', [task({ status: 'running' }), task({ status: 'failed' })])
+    ).toBe('running');
   });
 
   it('asks for attention on an unacknowledged blocked or failed task only', () => {
