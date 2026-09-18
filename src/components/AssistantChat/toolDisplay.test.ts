@@ -379,14 +379,31 @@ describe('inlineTaskCard', () => {
     });
   });
 
-  it('keeps a poll of a still-running task slim', () => {
+  it('keeps a poll of an unfinished task slim, queued as well as running', () => {
+    // A worker that has not been picked up yet answers `queued`, and a wait is
+    // mostly these: they collapse with the run instead of each drawing a card.
+    for (const status of ['running', 'queued']) {
+      expect(
+        inlineTaskCard('workspace_getTaskResult', task({ status }), null, 'completed')
+      ).toMatchObject({ kind: 'poll', variant: 'slim', status });
+    }
+  });
+
+  it('clamps what a card renders, so a whole brief is not a whole DOM node', () => {
+    const long = 'x'.repeat(400);
     const card = inlineTaskCard(
       'workspace_getTaskResult',
-      task({ status: 'running' }),
+      task({ status: 'completed', instructions: long, resultSummary: long, title: long }),
       null,
       'completed'
     );
-    expect(card).toMatchObject({ kind: 'poll', variant: 'slim', status: 'running' });
+    expect(card?.instructions).toHaveLength(301);
+    expect(card?.instructions.endsWith('…')).toBe(true);
+    expect(card?.detail).toHaveLength(301);
+    expect(card?.title).toHaveLength(301);
+    // Anything that already fits is left exactly as it came.
+    const short = inlineTaskCard('workspace_assignTask', task(), null, 'completed');
+    expect(short?.instructions).toBe('Review the branch end to end.');
   });
 
   it('gives every terminal status a full card', () => {

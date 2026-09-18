@@ -10,7 +10,7 @@ import CrewList from '../components/Agents/CrewList';
 import TaskList from '../components/Agents/TaskList';
 import AgentFacepile from '../components/Agents/AgentFacepile';
 import { useStableRoster } from '../components/Agents/useStableRoster';
-import { useOpenTask } from './useOpenTask';
+import { useOpenTask, type TaskView } from './useOpenTask';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
@@ -2205,25 +2205,27 @@ const Workspace = () => {
     tasksRef.current = snapshot?.tasks || EMPTY_TASKS;
   }, [snapshot]);
 
-  // Which panel is open, as the late half of an open-a-task click sees it.
-  const activePanelRef = useRef(activePanel);
-  useEffect(() => {
-    activePanelRef.current = activePanel;
-  }, [activePanel]);
-
   const loadedTasks = useCallback(() => tasksRef.current, []);
   const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
-  const isTasksPanelOpen = useCallback(() => activePanelRef.current === 'tasks', []);
-  const setViewingTask = useCallback(
-    (task: WorkspaceTaskResponse | null) => patchWorkspaceUi({ viewingTask: task }),
-    [patchWorkspaceUi]
+  // One updater, reading and writing this workspace's own view in a single
+  // functional update: an answer that arrives late decides against the view it
+  // will actually land in, not against a copy that may have moved on.
+  const updateViewingTask = useCallback(
+    (update: (current: TaskView) => { viewingTask: WorkspaceTaskResponse | null } | null) => {
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        const patch = update(current);
+        if (!patch) return prev;
+        return { ...prev, [workspaceId]: { ...current, ...patch } };
+      });
+    },
+    [workspaceId]
   );
   const openTaskById = useOpenTask({
     workspaceId,
     loadedTasks,
     showTasksPanel,
-    isTasksPanelOpen,
-    setViewingTask,
+    updateViewingTask,
   });
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.

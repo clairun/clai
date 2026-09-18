@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import TaskCard, { cardActivity } from './TaskCard';
@@ -145,10 +145,14 @@ describe('TaskCard', () => {
         roster={roster}
       />
     );
-    const detail = screen.getByText('panicked at line 9');
-    // The class list is hashed by CSS modules; the error variant adds a second.
-    expect(detail.className.split(' ').length).toBeGreaterThan(1);
+    // CSS modules hash the class but keep the name readable, so the tone is
+    // checkable: the class list of a plain summary must not carry it.
+    expect(screen.getByText('panicked at line 9').className).toMatch(/detailError/);
     expect(screen.getByText('Failed')).toBeInTheDocument();
+
+    cleanup();
+    render(<TaskCard card={card({ detail: 'all good', detailIsError: false })} roster={roster} />);
+    expect(screen.getByText('all good').className).not.toMatch(/detailError/);
   });
 
   it('keeps the whole card readable as the button name', () => {

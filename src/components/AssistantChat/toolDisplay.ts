@@ -348,6 +348,16 @@ const stringField = (obj: Record<string, unknown>, key: string): string =>
   typeof obj[key] === 'string' ? obj[key] : '';
 
 /**
+ * A card shows three clamped lines, but the text behind them is unbounded: a
+ * task's instructions are a whole brief and its summary is a whole report.
+ * Cutting at the source keeps the DOM — and the button's spoken name — the
+ * size of what is actually shown.
+ */
+const CARD_TEXT_LIMIT = 300;
+const clampCardText = (value: string): string =>
+  value.length > CARD_TEXT_LIMIT ? `${value.slice(0, CARD_TEXT_LIMIT).trimEnd()}…` : value;
+
+/**
  * The task card a completed workspace-task call should render, or null to keep
  * the plain row: another tool, still running, or a call that failed — a failed
  * call has no task, and its error message is the whole story.
@@ -387,12 +397,12 @@ export const inlineTaskCard = (
     kind,
     variant: kind === 'assign' || !ACTIVE_TASK_STATUSES.has(status) ? 'full' : 'slim',
     taskId,
-    title,
-    instructions: stringField(task, 'instructions').trim(),
+    title: clampCardText(title),
+    instructions: clampCardText(stringField(task, 'instructions').trim()),
     status,
     assignedToWorkspaceAgentId,
     assignedAgentDefinitionId: stringField(task, 'assignedAgentDefinitionId'),
-    detail,
+    detail: clampCardText(detail),
     detailIsError: !!taskError,
   };
 };

@@ -30,10 +30,11 @@ export interface TaskCardProps {
  * The ring the face wears, from the status alone.
  *
  * Never the spinning `running` ring, however fresh the status looks: a card is
- * frozen at the moment of its call, and an assignment is always captured as
- * `queued`, so that ring would spin forever on every hand-off ever made — a
- * claim about right now that the card cannot support, at the cost of an
- * endless animation per card. Live progress belongs to the tasks drawer.
+ * frozen at the moment of its call, and a hand-off is answered the instant the
+ * row is stamped — almost always `queued` — so that ring would spin forever on
+ * hand-offs made weeks ago, a claim about right now that the card cannot
+ * support, at the cost of an endless animation per card. Live progress belongs
+ * to the tasks drawer.
  *
  * A stop that is not a clean finish still earns the static attention ring.
  * `TaskList.taskActivity` can ask whether such a task was since reviewed; a

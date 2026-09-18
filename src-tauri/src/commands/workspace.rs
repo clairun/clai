@@ -3204,8 +3204,9 @@ pub async fn workspace_acknowledge_task(
 
 /// Fetch a single task by id. The snapshot's task list is capped, so a
 /// workspace with hundreds of tasks can still be asked for an older one by id.
-/// A task that no longer exists is `Ok(None)`, not an error — the caller
-/// renders a "no longer available" notice for it.
+/// A task that no longer exists is `Ok(None)`, not an error: the caller is a
+/// click on a chat card, and a task deleted since leaves the reader on the
+/// drawer's list rather than on an error.
 #[tauri::command]
 pub async fn workspace_task_by_id(
     request: WorkspaceTaskActionRequest,
