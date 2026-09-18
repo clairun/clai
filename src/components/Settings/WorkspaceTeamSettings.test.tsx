@@ -143,7 +143,7 @@ describe('AssignmentSection editor', () => {
     );
     await screen.findByText('Reviewer');
 
-    await user.click(screen.getByRole('button', { name: 'Remove from workspace' }));
+    await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
 
     await waitFor(() => expect(onUnassigned).toHaveBeenCalledWith('assign-1'));
     expect(mockInvoke).toHaveBeenCalledWith('workspace_delete_agent', {

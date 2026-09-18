@@ -1,13 +1,14 @@
 /**
  * "Add to crew": the library as cards, one click per agent. Assigning is
  * local to the workspace and reversible, so there is no confirm step — the
- * card leaves the row and an Undo appears in its place for a moment.
+ * card leaves the row and an Undo appears in its place until the crew moves
+ * on.
  *
  * The parent hands in what it already knows (the library and who is on the
  * crew) and reloads after `onChanged`; this component only owns the two calls
  * that change the crew and the transient state around them.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   assignWorkspaceAgent,
   workspaceDeleteAgent,
@@ -24,10 +25,10 @@ export interface AgentCardPickerProps {
   assignedDefinitionIds: readonly string[];
   /** After an assign or an undo went through; the parent refreshes its roster. */
   onChanged?: () => void | Promise<void>;
-  /** Shown as the escape hatch when the library has nothing left, or always as a link. */
+  /** Offered as a link when given; otherwise the copy points at Settings → Agents. */
   onCreateAgent?: () => void;
   disabled?: boolean;
-  /** One sentence for the empty roster; default copy explains the split. */
+  /** The sentence above the cards. */
   intro?: string;
 }
 
@@ -54,9 +55,20 @@ export const availableDefinitions = (
 ): AgentDefinitionDetail[] =>
   definitions.filter((item) => !item.archived && !assignedDefinitionIds.includes(item.id));
 
+/** Why there is nothing to pick, with the way out when no link is offered. */
+export const emptyCopy = (libraryEmpty: boolean, hasCreateLink: boolean): string => {
+  const reason = libraryEmpty
+    ? 'The library is empty.'
+    : 'Every agent in the library is already on this crew.';
+  return hasCreateLink ? reason : `${reason} Create one in Settings → Agents.`;
+};
+
 interface Added {
   workspaceAgentId: string;
+  definitionId: string;
   name: string;
+  /** Set once the parent's roster has shown the agent; after that, its leaving ends the Undo. */
+  seenOnCrew: boolean;
 }
 
 const AgentCardPicker = ({
@@ -75,6 +87,17 @@ const AgentCardPicker = ({
   const available = availableDefinitions(definitions, assignedDefinitionIds);
   const onCrew = definitions.filter((item) => assignedDefinitionIds.includes(item.id));
 
+  // The Undo is for the assign just made. Once the roster has shown the agent
+  // and it leaves again by any other route (the row's Remove, another
+  // window), the offer is stale and goes away instead of failing later.
+  const addedOnCrew = added !== null && assignedDefinitionIds.includes(added.definitionId);
+  useEffect(() => {
+    if (!added) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reconciling the Undo offer with the roster the parent hands down; fires only on the two transitions described above.
+    if (addedOnCrew && !added.seenOnCrew) setAdded({ ...added, seenOnCrew: true });
+    else if (!addedOnCrew && added.seenOnCrew) setAdded(null);
+  }, [added, addedOnCrew]);
+
   const assign = useCallback(
     async (definition: AgentDefinitionDetail) => {
       if (busy) return;
@@ -82,7 +105,14 @@ const AgentCardPicker = ({
       setError(null);
       try {
         const workspaceAgentId = await assignWorkspaceAgent(workspaceId, definition.id);
-        setAdded({ workspaceAgentId, name: definition.name });
+        setAdded({
+          workspaceAgentId,
+          definitionId: definition.id,
+          name: definition.name,
+          seenOnCrew: false,
+        });
+        // Held busy until the parent has reloaded: a second assign against the
+        // old roster would be refused by the backend as a duplicate.
         await onChanged?.();
       } catch (err) {
         setError(errText(err, 'Failed to add the agent.'));
@@ -156,11 +186,7 @@ const AgentCardPicker = ({
           ))}
         </div>
       ) : (
-        <p className={styles.empty}>
-          {definitions.length === 0
-            ? 'The library is empty.'
-            : 'Every agent in the library is already on this crew.'}
-        </p>
+        <p className={styles.empty}>{emptyCopy(definitions.length === 0, !!onCreateAgent)}</p>
       )}
 
       <div className={styles.footer}>

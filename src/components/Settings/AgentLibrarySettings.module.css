@@ -5,12 +5,29 @@
 }
 
 .errorBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 12px 16px;
   background: var(--color-critical-alpha-10, rgba(220, 38, 38, 0.1));
   border: 1px solid var(--color-critical-alpha-30, rgba(220, 38, 38, 0.3));
   border-radius: 8px;
   color: var(--color-critical, #dc2626);
   font-size: 13px;
+}
+
+.retry {
+  appearance: none;
+  flex-shrink: 0;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  cursor: pointer;
 }
 
 .missing {

@@ -1,6 +1,12 @@
 import { useMemo, type CSSProperties } from 'react';
-import { useAppTheme } from '../Chat/useAppTheme';
-import { identityRingColor, moodFor, renderIdentity, type AgentActivity, type AgentIdentity } from './agentIdentity';
+import { useAppTheme } from '../../hooks/useAppTheme';
+import {
+  identityRingColor,
+  moodFor,
+  renderIdentity,
+  type AgentActivity,
+  type AgentIdentity,
+} from './agentIdentity';
 import styles from './AgentAvatar.module.css';
 
 export interface AgentAvatarProps {
@@ -24,18 +30,24 @@ const RINGED: ReadonlySet<AgentActivity> = new Set(['idle', 'running', 'attentio
  * typically build `identity` inline, so the memos key on its primitive
  * fields, not on the object.
  */
-const AgentAvatar = ({ identity, size = 32, activity = 'none', label, className }: AgentAvatarProps) => {
+const AgentAvatar = ({
+  identity,
+  size = 32,
+  activity = 'none',
+  label,
+  className,
+}: AgentAvatarProps) => {
   const theme = useAppTheme();
   const mood = moodFor(activity);
   const { seed, hue, generatorVersion } = identity;
 
   const svg = useMemo(
     () => renderIdentity({ seed, hue, generatorVersion }, { size, theme, mood }),
-    [seed, hue, generatorVersion, size, theme, mood],
+    [seed, hue, generatorVersion, size, theme, mood]
   );
   const ringColor = useMemo(
     () => identityRingColor({ seed, hue, generatorVersion }, theme),
-    [seed, hue, generatorVersion, theme],
+    [seed, hue, generatorVersion, theme]
   );
 
   const classes = [

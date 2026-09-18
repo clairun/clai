@@ -72,7 +72,8 @@ const AgentGallery = ({
         <div className={styles.headerText}>
           <h3 className={styles.title}>Agents</h3>
           <p className={styles.description}>
-            Crew you can put on any workspace. Edits reach every workspace on its next turn.
+            Agents you can put on any workspace's crew. Edits reach every workspace on its next
+            turn.
           </p>
         </div>
         <button type="button" className={styles.create} onClick={onCreate} disabled={disabled}>

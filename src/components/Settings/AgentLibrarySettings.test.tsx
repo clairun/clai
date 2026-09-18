@@ -248,6 +248,22 @@ describe('AgentLibrarySettings', () => {
     expect(await screen.findByRole('button', { name: 'Restore' })).toBeInTheDocument();
   });
 
+  it('falls back to the gallery with a Retry when the reload after a save fails', async () => {
+    await openReviewer();
+    api.listAgentDefinitions.mockRejectedValueOnce(new Error('library offline'));
+    await userEvent.click(screen.getByRole('button', { name: 'Save agent' }));
+
+    // Not left in an editor whose expectedRevision is now stale.
+    expect(await screen.findByRole('alert')).toHaveTextContent('library offline');
+    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
+    expect(screen.queryByTestId('behavior-form')).toBeNull();
+
+    api.listAgentDefinitions.mockResolvedValue([{ ...REVIEWER, revision: 4 }]);
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(screen.getByRole('button', { name: /^Reviewer/ })).toBeInTheDocument();
+  });
+
   it('explains an agent that vanished from the library instead of a blank editor', async () => {
     await openReviewer();
     api.listAgentDefinitions.mockResolvedValue([]);

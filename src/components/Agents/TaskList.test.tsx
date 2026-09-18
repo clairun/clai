@@ -37,7 +37,8 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   createdByDisplayName: 'Manager',
   assignedToWorkspaceAgentId: 'wa-review',
   assignedAgentDefinitionId: 'def-review',
-  assignedAgentDisplayName: 'Reviewer',
+  // Recorded at hand-off; the roster's current name wins over it on screen.
+  assignedAgentDisplayName: 'Reviewer (old name)',
   title: 'Task',
   instructions: 'Do it',
   status: 'completed',
@@ -178,6 +179,11 @@ describe('TaskList', () => {
     rerender(<TaskList {...props} tasks={[REVIEW_TASK, USER_TASK]} />);
     expect(screen.getAllByRole('listitem')).toHaveLength(2);
     expect(screen.queryByRole('group', { name: 'Filter by agent' })).toBeNull();
+
+    // …and stays showing all when that agent's task comes back: the pick was forgotten.
+    rerender(<TaskList {...props} tasks={[REVIEW_TASK, WRITE_TASK, USER_TASK]} />);
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    expect(screen.queryByRole('button', { pressed: true })).toBeNull();
   });
 
   it('hides the filter row with a single agent and explains an empty filtered list', () => {

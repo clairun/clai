@@ -5,7 +5,7 @@ import { readWorkspaceFileBase64 } from '../../workspace/client';
 import { openExternal } from '../../utils/openExternal';
 import { base64ToText, isWorkspaceRelativeHref, resolveWorkspacePath } from '../../utils/htmlBundle';
 import { useWorkspaceFileLocation, type WorkspaceFileLocation } from './WorkspaceFileContext';
-import { useAppTheme } from './useAppTheme';
+import { useAppTheme } from '../../hooks/useAppTheme';
 import { buildVegaConfig, readChartThemeTokens } from './vegaTheme';
 import { withChartInteractions } from './vegaInteractions';
 import styles from './VegaChart.module.css';

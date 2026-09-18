@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { ResolvedTheme } from '../../theme';
+import type { ResolvedTheme } from '../theme';
 
 const resolveAppTheme = (): ResolvedTheme =>
   document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';

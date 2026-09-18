@@ -29,7 +29,6 @@ export const TASK_STATUS_LABEL: Record<string, string> = {
   completed: 'Completed',
   failed: 'Failed',
   blocked: 'Blocked',
-  cancelled: 'Cancelled',
 };
 
 export const taskStatusLabel = (status: string): string => TASK_STATUS_LABEL[status] || status;

@@ -2,16 +2,18 @@
  * The workspace's crew, as the Agents drawer shows it: the Main pinned first,
  * then every agent added from the library. Each row leads with the agent's
  * face, whose ring says what it is doing right now — derived from the task
- * list, not from any stored state. "+ Add" unfolds the card picker inside the
- * drawer so nobody has to round-trip through the settings modal.
+ * list, not from any stored state. "+ Add" in the drawer header unfolds the
+ * card picker inside the drawer so nobody has to round-trip through the
+ * settings modal; the parent owns that flag because the drawer widens with it.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listAgentDefinitions, type AgentDefinitionDetail } from '../../api/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
+import { isTaskActive, isTaskAttention } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import AgentCardPicker from './AgentCardPicker';
-import { activityFromTasks, identityFor, type AgentActivity } from './agentIdentity';
+import { identityFor, type AgentActivity } from './agentIdentity';
 import styles from './CrewList.module.css';
 
 export interface CrewListProps {
@@ -23,8 +25,9 @@ export interface CrewListProps {
   /** The parent's in-flight action id (e.g. `remove:<id>`), if any. */
   busy?: string;
   error?: string;
-  /** Whether the picker is unfolded; the parent owns it because the drawer widens with it. */
+  /** Whether the picker is unfolded. One owner: the parent, which also widens the drawer. */
   pickerOpen: boolean;
+  onOpenPicker: () => void;
   onOpenEdit: (workspaceAgentId: string) => void;
   onRemove: (workspaceAgentId: string) => void;
   /** After the crew changed through the picker; the parent reloads its snapshot. */
@@ -38,29 +41,34 @@ const errText = (err: unknown, fallback: string): string =>
 export const sortCrew = (agents: readonly WorkspaceAgentResponse[]): WorkspaceAgentResponse[] =>
   [...agents].sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
 
-/** The row's activity: disabled beats everything, then what the tasks say. */
-export const crewActivity = (
+export interface CrewStatus {
+  /** What the ring draws. Disabled beats everything, then running, then attention. */
+  activity: AgentActivity;
+  /** One line about it, or `null` when there is nothing to say. */
+  line: string | null;
+}
+
+/** One walk over the tasks for what a row shows about an agent. */
+export const crewStatus = (
   agent: Pick<WorkspaceAgentResponse, 'id' | 'enabled'>,
   tasks: readonly WorkspaceTaskResponse[]
-): AgentActivity => (agent.enabled ? activityFromTasks(agent.id, tasks) : 'disabled');
-
-/** One line about what the agent is doing, or `null` when there is nothing to say. */
-export const liveLine = (
-  agentId: string,
-  tasks: readonly WorkspaceTaskResponse[]
-): string | null => {
-  const mine = tasks.filter((task) => task.assignedToWorkspaceAgentId === agentId);
-  const running = mine.filter(
-    (task) => task.status === 'running' || task.status === 'queued'
-  ).length;
-  if (running > 0) return running === 1 ? '1 task running' : `${running} tasks running`;
-  const attention = mine.some(
-    (task) =>
-      (task.status === 'blocked' || task.status === 'failed') &&
-      !task.attentionAcknowledgedAt &&
-      !task.userResponseAt
-  );
-  return attention ? 'Needs your review' : null;
+): CrewStatus => {
+  if (!agent.enabled) return { activity: 'disabled', line: 'Disabled in this workspace' };
+  let running = 0;
+  let attention = false;
+  for (const task of tasks) {
+    if (task.assignedToWorkspaceAgentId !== agent.id) continue;
+    if (isTaskActive(task)) running += 1;
+    else if (isTaskAttention(task)) attention = true;
+  }
+  if (running > 0) {
+    return {
+      activity: 'running',
+      line: running === 1 ? '1 task running' : `${running} tasks running`,
+    };
+  }
+  if (attention) return { activity: 'attention', line: 'Needs your review' };
+  return { activity: 'idle', line: null };
 };
 
 const CrewList = ({
@@ -71,15 +79,16 @@ const CrewList = ({
   busy = '',
   error = '',
   pickerOpen,
+  onOpenPicker,
   onOpenEdit,
   onRemove,
   onChanged,
 }: CrewListProps) => {
   const crew = useMemo(() => sortCrew(agents), [agents]);
-  // The Main working alone is the one time the picker opens by itself: the
-  // drawer would otherwise be one row and a lot of nothing.
-  const mainAlone = manageable && crew.every((agent) => agent.isDefault);
-  const showPicker = manageable && (pickerOpen || mainAlone);
+  const showPicker = manageable && pickerOpen;
+  // The Main working alone gets an invitation instead of one row and a lot of
+  // nothing; the picker itself still opens only through the parent's flag.
+  const mainAlone = manageable && crew.length > 0 && crew.every((agent) => agent.isDefault);
 
   const [library, setLibrary] = useState<AgentDefinitionDetail[] | null>(null);
   const [libraryError, setLibraryError] = useState<string | null>(null);
@@ -118,8 +127,7 @@ const CrewList = ({
       {crew.length > 0 && (
         <ul className={styles.list}>
           {crew.map((agent) => {
-            const activity = crewActivity(agent, tasks);
-            const live = agent.enabled ? liveLine(agent.id, tasks) : 'Disabled in this workspace';
+            const { activity, line } = crewStatus(agent, tasks);
             const name = agent.isDefault
               ? 'Main'
               : agent.displayName || agent.agentName || 'Untitled';
@@ -132,12 +140,12 @@ const CrewList = ({
                 <div className={styles.identity}>
                   <div className={styles.nameRow}>
                     <span className={styles.name}>{name}</span>
-                    {!agent.isDefault && <span className={styles.role}>crew</span>}
+                    {!agent.isDefault && <span className={styles.role}>shared</span>}
                   </div>
                   {description && <p className={styles.description}>{description}</p>}
-                  {live && (
+                  {line && (
                     <span className={styles.live} data-activity={activity}>
-                      {live}
+                      {line}
                     </span>
                   )}
                 </div>
@@ -170,6 +178,17 @@ const CrewList = ({
         </ul>
       )}
 
+      {mainAlone && !pickerOpen && (
+        <div className={styles.invitation}>
+          <p className={styles.invitationText}>
+            Main works alone here. Add crew from the library, or create one.
+          </p>
+          <button type="button" className={styles.action} onClick={onOpenPicker} disabled={!!busy}>
+            Add to crew
+          </button>
+        </div>
+      )}
+
       {showPicker && (
         <div className={styles.picker} data-testid="crew-picker">
           <h3 className={styles.pickerTitle}>Add to crew</h3>
@@ -185,11 +204,6 @@ const CrewList = ({
               onChanged={handleCrewChanged}
               onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
               disabled={!!busy}
-              intro={
-                mainAlone
-                  ? 'Main works alone here. Add crew from the library, or create one.'
-                  : 'Pick from the library. Behaviour stays shared; this workspace decides context and paths.'
-              }
             />
           )}
         </div>

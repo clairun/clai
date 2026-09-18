@@ -189,7 +189,7 @@ describe('activityFromTasks', () => {
   it('asks for attention on an unacknowledged blocked or failed task only', () => {
     expect(activityFromTasks('wa-1', [task({ status: 'failed' })])).toBe('attention');
     expect(
-      activityFromTasks('wa-1', [task({ status: 'blocked', attentionAcknowledgedAt: 5 })])
+      activityFromTasks('wa-1', [task({ status: 'blocked', attentionAcknowledgedAt: 5n })])
     ).toBe('idle');
     expect(activityFromTasks('wa-1', [task({ status: 'blocked', userResponseAt: 5n })])).toBe(
       'idle'

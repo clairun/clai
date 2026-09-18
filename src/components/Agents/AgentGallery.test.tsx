@@ -90,7 +90,18 @@ describe('AgentGallery', () => {
     expect(screen.getByText('No agent matches that search.')).toBeInTheDocument();
   });
 
-  it('focuses the card asked for', () => {
+  it('focuses the card asked for, wherever it sorts', () => {
+    // Reviewer sorts first, Writer last: the ref must follow the id, not the position.
+    const { unmount } = render(
+      <AgentGallery
+        definitions={[WRITER, REVIEWER]}
+        onOpen={vi.fn()}
+        onCreate={vi.fn()}
+        focusId="def-review"
+      />
+    );
+    expect(screen.getByRole('button', { name: /^Reviewer/ })).toHaveFocus();
+    unmount();
     render(
       <AgentGallery
         definitions={[WRITER, REVIEWER]}

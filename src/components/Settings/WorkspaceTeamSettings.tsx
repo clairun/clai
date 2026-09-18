@@ -1,11 +1,11 @@
 /**
  * Workspace team settings.
  *
- * The split mirrors the backend: a teammate's behavior — instructions, skills,
- * providers, MCP, shell policy — belongs to the shared definition and is edited
- * once, in Settings → Agents. What lives here is only what one project may
- * decide on its own: whether a teammate is on, the context it works under, and
- * the paths it may touch in this workspace.
+ * The split mirrors the backend: a crew member's behavior — instructions,
+ * skills, providers, MCP, shell policy — belongs to the shared definition and
+ * is edited once, in Settings → Agents. What lives here is only what one
+ * project may decide on its own: whether an agent is on, the context it works
+ * under, and the paths it may touch in this workspace.
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -162,7 +162,7 @@ export const TeamPolicySection = ({
       <h4 className={styles.sectionTitle}>Project context</h4>
       <p className={styles.sectionDescription}>
         Added to the instructions of every agent working in this workspace — the Main and each
-        teammate. Use it for what is true of the project, not of any one agent.
+        crew member. Use it for what is true of the project, not of any one agent.
       </p>
       <div className={styles.field}>
         <label className={styles.label} htmlFor="workspace-context">
@@ -213,8 +213,8 @@ export const TeamPolicySection = ({
 };
 
 /**
- * Either the editor for one assigned teammate (`agentId` given), or the picker
- * that adds one from the shared library.
+ * Either the editor for one crew member (`agentId` given), or the picker that
+ * adds one from the shared library.
  */
 export const AssignmentSection = ({
   workspaceId,
@@ -322,8 +322,9 @@ export const AssignmentSection = ({
       <div>
         <h4 className={styles.sectionTitle}>Add to crew</h4>
         <p className={styles.sectionDescription}>
-          Crew come from the shared agent library (Settings → Agents). Adding one here makes it
-          callable in this workspace; its behavior stays shared with every other workspace using it.
+          Crew members come from the shared agent library (Settings → Agents). Adding one here
+          makes it callable in this workspace; its behavior stays shared with every other workspace
+          using it.
         </p>
         {error && (
           <div className={styles.errorBanner} role="alert">
@@ -336,14 +337,13 @@ export const AssignmentSection = ({
           assignedDefinitionIds={assignments.map((item) => item.agentDefinitionId)}
           onChanged={handleCrewChanged}
           disabled={busy}
-          intro="One click adds the agent. Behaviour stays shared; this workspace decides context and paths."
         />
       </div>
     );
   }
 
   if (!assignment) {
-    return <div className={styles.errorBanner}>This teammate is no longer on the workspace team.</div>;
+    return <div className={styles.errorBanner}>This agent is no longer on the crew.</div>;
   }
 
   return (
@@ -351,8 +351,8 @@ export const AssignmentSection = ({
       <h4 className={styles.sectionTitle}>{definition?.name || 'Unavailable agent'}</h4>
       <p className={styles.sectionDescription}>
         {definition
-          ? 'Shared teammate. Instructions, skills, providers, MCP and shell policy are edited once in Settings → Agents and apply in every workspace that uses this agent, from its next turn.'
-          : 'This assignment points at a shared agent that no longer exists. Re-create it in Settings → Agents, or remove it from the team.'}
+          ? 'Shared agent. Instructions, skills, providers, MCP and shell policy are edited once in Settings → Agents and apply in every workspace that uses this agent, from its next turn.'
+          : 'This assignment points at a shared agent that no longer exists. Re-create it in Settings → Agents, or remove it from the crew.'}
       </p>
       <p className={styles.sectionDescription}>
         Callable id: <code>{assignment.id}</code>
@@ -380,7 +380,7 @@ export const AssignmentSection = ({
           value={context}
           onChange={(e) => setContext(e.target.value)}
           rows={5}
-          placeholder="What this teammate should know about its job here."
+          placeholder="What this agent should know about its job here."
           disabled={busy}
         />
       </div>
@@ -404,7 +404,7 @@ export const AssignmentSection = ({
           {busy ? 'Saving…' : 'Save'}
         </button>
         <button type="button" className={styles.dangerButton} onClick={handleUnassign} disabled={busy}>
-          Remove from workspace
+          Remove from crew
         </button>
       </div>
     </div>

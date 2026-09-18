@@ -1,5 +1,5 @@
 import React, { memo, useEffect, useState } from 'react';
-import { useAppTheme } from './useAppTheme';
+import { useAppTheme } from '../../hooks/useAppTheme';
 import styles from './MermaidDiagram.module.css';
 
 /**

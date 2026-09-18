@@ -45,12 +45,15 @@ const AgentLibrarySettings = () => {
   });
   const [error, setError] = useState<string | null>(null);
 
-  const reload = useCallback(async () => {
+  /** Re-reads the library; `false` when it could not, with the error shown. */
+  const reload = useCallback(async (): Promise<boolean> => {
     try {
       setDefinitions(await listAgentDefinitions());
       setError(null);
+      return true;
     } catch (err) {
       setError(errText(err, 'Failed to load the agent library.'));
+      return false;
     }
   }, []);
 
@@ -80,11 +83,13 @@ const AgentLibrarySettings = () => {
   const backToGallery = useCallback(() => setView({ kind: 'gallery', focusId: null }), []);
 
   // A create lands back in the gallery with the new card focused; an edit
-  // stays open on the (reloaded) agent.
+  // stays open on the reloaded agent. If the reload failed the editor would
+  // keep a stale revision and every later save would be refused, so it goes
+  // back to the gallery too, where the error and Retry are.
   const handleSaved = useCallback(
     async (id: string, created: boolean) => {
-      await reload();
-      if (created) setView({ kind: 'gallery', focusId: id });
+      const fresh = await reload();
+      if (created || !fresh) setView({ kind: 'gallery', focusId: id });
       else setView({ kind: 'edit', id });
     },
     [reload]
@@ -97,7 +102,10 @@ const AgentLibrarySettings = () => {
     <div className={styles.container}>
       {error && (
         <div className={styles.errorBanner} role="alert">
-          {error}
+          <span>{error}</span>
+          <button type="button" className={styles.retry} onClick={() => void reload()}>
+            Retry
+          </button>
         </div>
       )}
 

@@ -10,7 +10,8 @@
  * app's primary indigo, in every workspace. One face users learn once means
  * "the main of this workspace" wherever it shows up.
  */
-import type { AgentAvatarRef } from '../../generated/bindings';
+import type { AgentAvatarRef, WorkspaceTaskResponse } from '../../generated/bindings';
+import { isTaskActive, isTaskAttention } from '../../utils/taskDisplay';
 import {
   GENERATOR_VERSION,
   HUES,
@@ -150,27 +151,25 @@ export const taskIdentity = (task: TaskLike, roster: readonly AgentLike[]): Agen
   };
 };
 
-/** Which activity to draw for `agentId` given the tasks currently on the workspace. */
+export type TaskActivitySource = Pick<
+  WorkspaceTaskResponse,
+  'assignedToWorkspaceAgentId' | 'status' | 'attentionAcknowledgedAt' | 'userResponseAt'
+>;
+
+/**
+ * Which activity to draw for `agentId` given the tasks the snapshot carries.
+ * Running beats attention. The snapshot holds the most recently updated
+ * tasks, so the ring reflects recent activity, not the full history.
+ */
 export const activityFromTasks = (
   agentId: string,
-  tasks: readonly {
-    assignedToWorkspaceAgentId: string;
-    status: string;
-    attentionAcknowledgedAt?: bigint | number | null;
-    userResponseAt?: bigint | number | null;
-  }[]
+  tasks: readonly TaskActivitySource[]
 ): Exclude<AgentActivity, 'disabled' | 'none'> => {
   let activity: 'idle' | 'running' | 'attention' = 'idle';
   for (const task of tasks) {
     if (task.assignedToWorkspaceAgentId !== agentId) continue;
-    if (task.status === 'running' || task.status === 'queued') return 'running';
-    if (
-      (task.status === 'blocked' || task.status === 'failed') &&
-      !task.attentionAcknowledgedAt &&
-      !task.userResponseAt
-    ) {
-      activity = 'attention';
-    }
+    if (isTaskActive(task)) return 'running';
+    if (isTaskAttention(task)) activity = 'attention';
   }
   return activity;
 };

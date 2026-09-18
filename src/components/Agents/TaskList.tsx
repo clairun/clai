@@ -4,7 +4,7 @@
  * pill stays for colour-blind readers and for text search. A face row on top
  * narrows the list to one or more agents while the drawer is open.
  */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { acknowledgeWorkspaceTask } from '../../workspace/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import {
@@ -83,6 +83,14 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
   );
   const visible =
     active.size === 0 ? tasks : tasks.filter((task) => active.has(task.assignedToWorkspaceAgentId));
+
+  // Forget a pick once its face has left the row; otherwise the filter would
+  // spring back on its own the next time that agent gets a task.
+  useEffect(() => {
+    if (active.size === selectedAgents.size) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reconciling state with data that arrived by props; only fires when a selected face actually disappeared.
+    setSelectedAgents(active);
+  }, [active, selectedAgents]);
 
   const toggleAgent = useCallback((agentId: string) => {
     setSelectedAgents((prev) => {

@@ -35,7 +35,6 @@ import type {
   AssistantRun,
   ToolInvocation,
   WorkspaceDirEntry,
-  WorkspaceAgentResponse,
   WorkspaceFileEntry,
   WorkspaceSnapshot,
   WorkspaceTaskResponse,
@@ -95,7 +94,6 @@ const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_QUEUED_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
-const EMPTY_AGENTS: WorkspaceAgentResponse[] = [];
 
 const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
@@ -103,10 +101,7 @@ const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   viewingTask: null,
   crewPickerOpen: false,
 };
-type SettingsSelection =
-  | { kind: 'general' }
-  | { kind: 'agent'; agentId: string }
-  | { kind: 'new-agent' };
+type SettingsSelection = { kind: 'general' } | { kind: 'agent'; agentId: string };
 type SnapshotOptions = Parameters<typeof getWorkspaceSnapshot>[1];
 type VirtualizedListProps<T> = {
   items: T[];
@@ -1382,7 +1377,7 @@ const WorkspaceHeader = ({
           true,
           0,
           assignedAgentCount > 0 ? (
-            <AgentFacepile agents={snapshot?.assignedAgents || EMPTY_AGENTS} tasks={snapshot?.tasks || []} />
+            <AgentFacepile agents={snapshot?.assignedAgents || []} tasks={snapshot?.tasks || []} />
           ) : null
         )}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
@@ -1675,8 +1670,8 @@ const Workspace = () => {
 
   // ── Workspace Settings modal (replaces the legacy AgentFormModal
   //    workspace-mode hack). Selection drives which section/agent the
-  //    modal opens to: gear icon -> General, drawer Edit -> agent:<id>,
-  //    drawer "+ Add" -> new-agent. ────────────────────────────────────
+  //    modal opens to: gear icon -> General, drawer Edit -> agent:<id>.
+  //    Adding to the crew happens in the drawer itself (CrewList). ───────
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSelection, setSettingsSelection] = useState<SettingsSelection>({
     kind: 'general',
@@ -1902,12 +1897,18 @@ const Workspace = () => {
     [openSettings]
   );
 
-  const toggleCrewPicker = useCallback(() => {
-    setUiByWorkspace((prev) => {
-      const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
-      return { ...prev, [workspaceId]: { ...current, crewPickerOpen: !current.crewPickerOpen } };
-    });
-  }, [workspaceId]);
+  const setCrewPickerOpen = useCallback(
+    (open: boolean | ((current: boolean) => boolean)) => {
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        const next = typeof open === 'function' ? open(current.crewPickerOpen) : open;
+        return { ...prev, [workspaceId]: { ...current, crewPickerOpen: next } };
+      });
+    },
+    [workspaceId]
+  );
+  const toggleCrewPicker = useCallback(() => setCrewPickerOpen((open) => !open), [setCrewPickerOpen]);
+  const openCrewPicker = useCallback(() => setCrewPickerOpen(true), [setCrewPickerOpen]);
 
   const handleSettingsClose = useCallback(() => {
     setSettingsOpen(false);
@@ -2377,7 +2378,7 @@ const Workspace = () => {
         {snapshot && activePanel === 'tasks' && viewingTask && (
           <WorkspaceTaskTranscriptPanel
             task={viewingTask}
-            roster={snapshot?.assignedAgents ?? EMPTY_AGENTS}
+            roster={snapshot.assignedAgents}
             onClose={closeTaskTranscript}
           />
         )}
@@ -2591,6 +2592,7 @@ const Workspace = () => {
                   busy={agentBusy}
                   error={agentError}
                   pickerOpen={crewPickerOpen}
+                  onOpenPicker={openCrewPicker}
                   onOpenEdit={openAgentEdit}
                   onRemove={handleAgentRemove}
                   onChanged={() => loadSnapshot(false)}
