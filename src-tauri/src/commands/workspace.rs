@@ -6076,17 +6076,90 @@ mod tests {
         assert!(missing.is_none());
     }
 
+    /// The shared `insert_task` fixture writes one id into both agent columns,
+    /// which cannot tell the assignee apart from the definition it fell back
+    /// to. These tests need distinct ids, so they write their own row.
+    async fn insert_task_with_agents(
+        pool: &DbPool,
+        id: &str,
+        created_by: Option<&str>,
+        assigned_to: &str,
+        definition_id: &str,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO workspace_tasks
+                (id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
+                 assigned_agent_definition_id, title, instructions, status, error,
+                 session_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'Title', 'Do it', 'failed', 'boom', NULL, 1, 1)
+            "#,
+        )
+        .bind(id)
+        .bind(created_by)
+        .bind(assigned_to)
+        .bind(definition_id)
+        .execute(pool)
+        .await
+        .expect("failed to insert workspace_tasks row");
+    }
+
     #[tokio::test]
     async fn load_workspace_task_response_falls_back_to_definition_id_for_unknown_agent() {
         let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        crate::db::test_support::insert_task(&pool, "task-1", "failed", None, Some("boom")).await;
+        insert_task_with_agents(&pool, "task-1", None, "wa-gone", "rust-expert").await;
 
         let task = load_workspace_task_response(&pool, WS, "task-1", &agent_names(&[]))
             .await
             .expect("query failed")
             .expect("task-1 should exist");
 
-        assert_eq!(task.assigned_agent_display_name, "agent-1");
+        assert_eq!(task.assigned_to_workspace_agent_id, "wa-gone");
+        assert_eq!(task.assigned_agent_display_name, "rust-expert");
         assert_eq!(task.error, Some("boom".to_string()));
+    }
+
+    #[tokio::test]
+    async fn load_workspace_task_response_names_the_creator_only_while_it_is_on_the_roster() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        insert_task_with_agents(
+            &pool,
+            "task-known",
+            Some("wa-manager"),
+            "wa-1",
+            "rust-expert",
+        )
+        .await;
+        insert_task_with_agents(
+            &pool,
+            "task-gone",
+            Some("wa-removed"),
+            "wa-1",
+            "rust-expert",
+        )
+        .await;
+        let names = agent_names(&[("wa-manager", "Manager"), ("wa-1", "Rust")]);
+
+        let known = load_workspace_task_response(&pool, WS, "task-known", &names)
+            .await
+            .expect("query failed")
+            .expect("task-known should exist");
+        assert_eq!(
+            known.created_by_workspace_agent_id,
+            Some("wa-manager".to_string())
+        );
+        assert_eq!(known.created_by_display_name, Some("Manager".to_string()));
+
+        // A creator off the roster keeps its raw id but gets no name: unlike
+        // the assignee, there is no definition id to fall back to.
+        let gone = load_workspace_task_response(&pool, WS, "task-gone", &names)
+            .await
+            .expect("query failed")
+            .expect("task-gone should exist");
+        assert_eq!(
+            gone.created_by_workspace_agent_id,
+            Some("wa-removed".to_string())
+        );
+        assert_eq!(gone.created_by_display_name, None);
     }
 }
