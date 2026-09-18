@@ -3,6 +3,7 @@ import {
   GENERATOR_VERSION,
   MAIN_AVATAR_HUE,
   MAIN_AVATAR_SEED,
+  activityFromTasks,
   avatarRefFor,
   candidateSeeds,
   freshNonce,
@@ -12,6 +13,7 @@ import {
   mainIdentity,
   moodFor,
   renderIdentity,
+  taskIdentity,
 } from './agentIdentity';
 import { HUES, agentAvatar, hueIndexFor } from './avatarGenerator';
 
@@ -39,17 +41,24 @@ describe('identityFor', () => {
   });
 
   it('keeps the picked generator version; derived faces use the current one', () => {
-    expect(identityFor({ id: 'l', avatar: { seed: 's', generatorVersion: 7 } }).generatorVersion).toBe(7);
+    expect(
+      identityFor({ id: 'l', avatar: { seed: 's', generatorVersion: 7 } }).generatorVersion
+    ).toBe(7);
     expect(identityFor({ id: 'l' }).generatorVersion).toBe(GENERATOR_VERSION);
     expect(identityFor({ id: 'l', avatar: null }).generatorVersion).toBe(GENERATOR_VERSION);
   });
 
   it('a non-Main identity never carries a hue override', () => {
-    expect(identityFor({ id: 'l', avatar: { seed: 's', generatorVersion: 1 } }).hue).toBeUndefined();
+    expect(
+      identityFor({ id: 'l', avatar: { seed: 's', generatorVersion: 1 } }).hue
+    ).toBeUndefined();
   });
 
   it('avatarRefFor stamps the current generator version on a picked seed', () => {
-    expect(avatarRefFor('nonce-3')).toEqual({ seed: 'nonce-3', generatorVersion: GENERATOR_VERSION });
+    expect(avatarRefFor('nonce-3')).toEqual({
+      seed: 'nonce-3',
+      generatorVersion: GENERATOR_VERSION,
+    });
     expect(identityFor({ id: 'l', avatar: avatarRefFor('nonce-3') }).seed).toBe('nonce-3');
   });
 });
@@ -71,7 +80,7 @@ describe('identityHue / identityRingColor / renderIdentity', () => {
     const id = identityFor({ id: 'l', avatar: avatarRefFor('Code Reviewer') });
     expect(renderIdentity(id, { size: 20 })).toBe(agentAvatar('Code Reviewer', { size: 20 }));
     expect(renderIdentity(mainIdentity())).toBe(
-      agentAvatar(MAIN_AVATAR_SEED, { hue: MAIN_AVATAR_HUE }),
+      agentAvatar(MAIN_AVATAR_SEED, { hue: MAIN_AVATAR_HUE })
     );
   });
 });
@@ -112,5 +121,78 @@ describe('moodFor', () => {
     expect(moodFor('disabled')).toBe('idle');
     expect(moodFor('none')).toBe('neutral');
     expect(moodFor(undefined)).toBe('neutral');
+  });
+});
+
+describe('taskIdentity', () => {
+  const roster = [
+    { id: 'wa-main', agentDefinitionId: 'def-main', isDefault: true, avatar: null },
+    {
+      id: 'wa-review',
+      agentDefinitionId: 'def-review',
+      isDefault: false,
+      avatar: { seed: 'picked-face', generatorVersion: GENERATOR_VERSION },
+    },
+  ];
+
+  it('uses the roster entry, so the Main and picked faces win', () => {
+    expect(
+      taskIdentity(
+        { assignedToWorkspaceAgentId: 'wa-main', assignedAgentDefinitionId: 'def-main' },
+        roster
+      )
+    ).toEqual(mainIdentity());
+    expect(
+      taskIdentity(
+        { assignedToWorkspaceAgentId: 'wa-review', assignedAgentDefinitionId: 'def-review' },
+        roster
+      ).seed
+    ).toBe('picked-face');
+  });
+
+  it('falls back to the definition id, then the local id, when the agent left the crew', () => {
+    expect(
+      taskIdentity(
+        { assignedToWorkspaceAgentId: 'wa-gone', assignedAgentDefinitionId: 'def-gone' },
+        roster
+      )
+    ).toEqual({ seed: 'def-gone', generatorVersion: GENERATOR_VERSION });
+    expect(
+      taskIdentity({ assignedToWorkspaceAgentId: 'wa-gone', assignedAgentDefinitionId: '' }, roster)
+        .seed
+    ).toBe('wa-gone');
+  });
+});
+
+describe('activityFromTasks', () => {
+  const task = (over: Partial<Parameters<typeof activityFromTasks>[1][number]>) => ({
+    assignedToWorkspaceAgentId: 'wa-1',
+    status: 'completed',
+    attentionAcknowledgedAt: null,
+    userResponseAt: null,
+    ...over,
+  });
+
+  it('is idle with no tasks of its own', () => {
+    expect(activityFromTasks('wa-1', [])).toBe('idle');
+    expect(
+      activityFromTasks('wa-1', [task({ assignedToWorkspaceAgentId: 'wa-2', status: 'running' })])
+    ).toBe('idle');
+  });
+
+  it('runs when any task is queued or running, even with attention pending elsewhere', () => {
+    expect(
+      activityFromTasks('wa-1', [task({ status: 'blocked' }), task({ status: 'queued' })])
+    ).toBe('running');
+  });
+
+  it('asks for attention on an unacknowledged blocked or failed task only', () => {
+    expect(activityFromTasks('wa-1', [task({ status: 'failed' })])).toBe('attention');
+    expect(
+      activityFromTasks('wa-1', [task({ status: 'blocked', attentionAcknowledgedAt: 5 })])
+    ).toBe('idle');
+    expect(activityFromTasks('wa-1', [task({ status: 'blocked', userResponseAt: 5n })])).toBe(
+      'idle'
+    );
   });
 });

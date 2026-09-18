@@ -77,7 +77,7 @@ export const identityRingColor = (identity: AgentIdentity, theme: AvatarTheme): 
 
 export const renderIdentity = (
   identity: AgentIdentity,
-  options: Omit<AvatarOptions, 'hue' | 'version'> = {},
+  options: Omit<AvatarOptions, 'hue' | 'version'> = {}
 ): string =>
   agentAvatar(identity.seed, {
     ...options,
@@ -126,4 +126,51 @@ export const moodFor = (activity: AgentActivity | undefined): AvatarMood => {
     default:
       return 'neutral';
   }
+};
+
+/** The fields of `WorkspaceTaskResponse` a task's face is resolved from. */
+export interface TaskLike {
+  assignedToWorkspaceAgentId: string;
+  assignedAgentDefinitionId: string;
+}
+
+/**
+ * The face of the agent a task was handed to. The roster wins (it knows the
+ * Main and any picked face); a task whose agent has since left the crew falls
+ * back to the definition id and then the local id — the same seeds
+ * `identityFor` would have used, so the face does not change when the agent
+ * goes.
+ */
+export const taskIdentity = (task: TaskLike, roster: readonly AgentLike[]): AgentIdentity => {
+  const agent = roster.find((entry) => entry.id === task.assignedToWorkspaceAgentId);
+  if (agent) return identityFor(agent);
+  return {
+    seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId,
+    generatorVersion: GENERATOR_VERSION,
+  };
+};
+
+/** Which activity to draw for `agentId` given the tasks currently on the workspace. */
+export const activityFromTasks = (
+  agentId: string,
+  tasks: readonly {
+    assignedToWorkspaceAgentId: string;
+    status: string;
+    attentionAcknowledgedAt?: bigint | number | null;
+    userResponseAt?: bigint | number | null;
+  }[]
+): Exclude<AgentActivity, 'disabled' | 'none'> => {
+  let activity: 'idle' | 'running' | 'attention' = 'idle';
+  for (const task of tasks) {
+    if (task.assignedToWorkspaceAgentId !== agentId) continue;
+    if (task.status === 'running' || task.status === 'queued') return 'running';
+    if (
+      (task.status === 'blocked' || task.status === 'failed') &&
+      !task.attentionAcknowledgedAt &&
+      !task.userResponseAt
+    ) {
+      activity = 'attention';
+    }
+  }
+  return activity;
 };

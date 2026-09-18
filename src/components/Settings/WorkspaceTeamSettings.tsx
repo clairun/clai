@@ -10,7 +10,6 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
 import {
-  assignWorkspaceAgent,
   configureWorkspaceAssignment,
   getWorkspaceTeamPolicy,
   listAgentDefinitions,
@@ -20,6 +19,7 @@ import {
   type PathGrantPayload,
   type WorkspaceAssignmentPayload,
 } from '../../api/client';
+import AgentCardPicker from '../Agents/AgentCardPicker';
 import styles from './WorkspaceSettingsModal.module.css';
 
 /** Editable list of path grants, shared by the assignment and policy forms. */
@@ -239,7 +239,6 @@ export const AssignmentSection = ({
   const [enabled, setEnabled] = useState(true);
   const [context, setContext] = useState('');
   const [grants, setGrants] = useState<PathGrantPayload[]>([]);
-  const [pick, setPick] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -269,21 +268,12 @@ export const AssignmentSection = ({
   const assignment = assignments.find((item) => item.id === agentId);
   const definition = definitions.find((item) => item.id === assignment?.agentDefinitionId);
 
-  const handleAssign = useCallback(async () => {
-    if (!pick) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await assignWorkspaceAgent(workspaceId, pick);
-      setPick('');
-      setReloadToken((token) => token + 1);
-      onChanged?.();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [workspaceId, pick, onChanged]);
+  // The picker assigns on its own; this section only has to reload the
+  // roster it shows and tell the modal.
+  const handleCrewChanged = useCallback(() => {
+    setReloadToken((token) => token + 1);
+    onChanged?.();
+  }, [onChanged]);
 
   const handleSave = useCallback(async () => {
     if (!assignment) return;
@@ -328,14 +318,11 @@ export const AssignmentSection = ({
   // already assigned. Assigning the same one twice would produce two local ids
   // with identical behavior and no way to tell them apart.
   if (!agentId) {
-    const available = definitions.filter(
-      (item) => !item.archived && !assignments.some((a) => a.agentDefinitionId === item.id)
-    );
     return (
       <div>
-        <h4 className={styles.sectionTitle}>Add a teammate</h4>
+        <h4 className={styles.sectionTitle}>Add to crew</h4>
         <p className={styles.sectionDescription}>
-          Teammates come from the shared agent library (Settings → Agents). Adding one here makes it
+          Crew come from the shared agent library (Settings → Agents). Adding one here makes it
           callable in this workspace; its behavior stays shared with every other workspace using it.
         </p>
         {error && (
@@ -343,36 +330,14 @@ export const AssignmentSection = ({
             {error}
           </div>
         )}
-        {available.length === 0 ? (
-          <p className={styles.sectionDescription}>
-            No shared agents left to add. Create one in Settings → Agents.
-          </p>
-        ) : (
-          <div className={styles.listInputRow}>
-            <select
-              className={styles.select}
-              value={pick}
-              onChange={(e) => setPick(e.target.value)}
-              disabled={busy}
-              aria-label="Shared agent"
-            >
-              <option value="">Choose a shared agent…</option>
-              {available.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className={styles.addButton}
-              onClick={handleAssign}
-              disabled={busy || !pick}
-            >
-              Add
-            </button>
-          </div>
-        )}
+        <AgentCardPicker
+          workspaceId={workspaceId}
+          definitions={definitions}
+          assignedDefinitionIds={assignments.map((item) => item.agentDefinitionId)}
+          onChanged={handleCrewChanged}
+          disabled={busy}
+          intro="One click adds the agent. Behaviour stays shared; this workspace decides context and paths."
+        />
       </div>
     );
   }

@@ -89,25 +89,21 @@ beforeEach(() => {
 describe('AssignmentSection picker', () => {
   it('offers only shared agents this workspace can still add', async () => {
     render(<AssignmentSection workspaceId={WORKSPACE} />);
-    const picker = await screen.findByLabelText('Shared agent');
+    expect(await screen.findByRole('listitem', { name: 'Add Writer to the crew' })).toBeInTheDocument();
 
-    const options = Array.from(picker.querySelectorAll('option')).map((o) => o.textContent);
-    expect(options).toContain('Writer');
     // Already on the team — a second assignment of the same definition would
     // create two identical rows the roster cannot tell apart.
-    expect(options).not.toContain('Reviewer');
+    expect(screen.queryByRole('listitem', { name: /Reviewer/ })).toBeNull();
     // Archived definitions are kept for history, not for new work.
-    expect(options).not.toContain('Retired');
+    expect(screen.queryByRole('listitem', { name: /Retired/ })).toBeNull();
   });
 
-  it('adds the chosen agent to this workspace', async () => {
+  it('adds the chosen agent to this workspace on one click', async () => {
     const user = userEvent.setup();
     const onChanged = vi.fn();
     render(<AssignmentSection workspaceId={WORKSPACE} onChanged={onChanged} />);
-    const picker = await screen.findByLabelText('Shared agent');
 
-    await user.selectOptions(picker, 'def-writer');
-    await user.click(screen.getByRole('button', { name: 'Add' }));
+    await user.click(await screen.findByRole('listitem', { name: 'Add Writer to the crew' }));
 
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith('workspace_assign_agent', {
@@ -116,6 +112,10 @@ describe('AssignmentSection picker', () => {
       })
     );
     expect(onChanged).toHaveBeenCalled();
+    // The section reloads its own roster so the card does not linger.
+    await waitFor(() =>
+      expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'workspace_team_policy').length).toBe(2)
+    );
   });
 });
 

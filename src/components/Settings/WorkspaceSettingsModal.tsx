@@ -479,7 +479,7 @@ const WorkspaceSettingsModal = ({
                 dirty={!!dirty['new-agent']}
                 onClick={() => navigateTo({ kind: 'new-agent' })}
               >
-                + Add teammate
+                + Add to crew
               </NavItem>
             </div>
           </aside>
