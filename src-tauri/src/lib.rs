@@ -522,6 +522,7 @@ pub fn run() {
             commands::workspace::workspace_set_provider,
             commands::workspace::workspace_list_agents,
             commands::workspace::workspace_acknowledge_task,
+            commands::workspace::workspace_task_by_id,
             commands::workspace::workspace_create,
             commands::workspace::workspace_fork,
             commands::workspace::workspace_list,

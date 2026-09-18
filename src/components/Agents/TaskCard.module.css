@@ -19,8 +19,8 @@
   font: inherit;
   text-align: left;
   color: var(--color-text-secondary);
-  /* The card's size never depends on anything outside it, so the virtualizer
-     can skip its subtree while it is off screen. */
+  /* Nothing inside a card affects the layout around it, so a repaint of one
+     card cannot dirty the transcript's layout. */
   contain: layout paint style;
 }
 
@@ -42,6 +42,9 @@
 }
 
 .main {
+  /* Spans, not divs: a card is a <button>, whose content model is phrasing
+     content only. Each one declares the box it actually draws. */
+  display: block;
   flex: 1;
   min-width: 0;
 }
@@ -69,6 +72,7 @@
 }
 
 .title {
+  display: block;
   margin-top: 2px;
   font-size: 12.5px;
   font-weight: 700;
@@ -77,7 +81,7 @@
 }
 
 .detail {
-  margin: 4px 0 0;
+  margin-top: 4px;
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--color-text-secondary);

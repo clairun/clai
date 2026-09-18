@@ -12,6 +12,7 @@ import { taskIdentity } from './Agents/agentIdentity';
 import { taskStatusLabel } from '../utils/taskDisplay';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
 
+const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
@@ -26,7 +27,8 @@ interface WorkspaceTaskTranscriptPanelProps {
 
 export default function WorkspaceTaskTranscriptPanel({
   task,
-  roster = [],
+  // A constant, not a fresh `[]` per render: the cards below memoize on it.
+  roster = EMPTY_ROSTER,
   onClose,
 }: WorkspaceTaskTranscriptPanelProps) {
   const sessionId = task?.sessionId || null;

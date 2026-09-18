@@ -332,7 +332,7 @@ export interface TaskCallCard {
   variant: 'full' | 'slim';
   taskId: string;
   title: string;
-  /** What the task was asked to do. Empty on a poll of a task assigned earlier. */
+  /** What the task was asked to do; '' if the payload carried no instructions. */
   instructions: string;
   /** Task status at the moment of the call, not now. */
   status: string;

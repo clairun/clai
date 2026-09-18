@@ -9,6 +9,7 @@ import WorkspaceFilePreviewPanel from '../components/WorkspaceFilePreviewPanel';
 import CrewList from '../components/Agents/CrewList';
 import TaskList from '../components/Agents/TaskList';
 import AgentFacepile from '../components/Agents/AgentFacepile';
+import { useStableRoster } from '../components/Agents/useStableRoster';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
@@ -19,6 +20,7 @@ import VirtualizedList from '../components/common/VirtualizedList';
 import {
   getOrCreateWorkspaceSession,
   getWorkspaceSnapshot,
+  getWorkspaceTask,
   importWorkspaceFiles,
   listWorkspaceDir,
   markWorkspaceOpened,
@@ -96,7 +98,6 @@ const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_QUEUED_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
-const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 const EMPTY_TASKS: readonly WorkspaceTaskResponse[] = [];
 
 const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
@@ -2194,47 +2195,43 @@ const Workspace = () => {
   // live task data: handing it a fresh array every 5s poll would repaint
   // cards that cannot change.
   //
-  // The roster it does need (faces, names) is memoized on what those cards
-  // draw, so an unchanged crew keeps one reference across polls; the tasks a
-  // click has to resolve are read from a ref instead of a prop.
-  const rosterKey = (snapshot?.assignedAgents || [])
-    .map((agent) =>
-      [
-        agent.id,
-        agent.isDefault ? '1' : '0',
-        agent.displayName,
-        agent.avatar?.seed ?? '',
-        agent.avatar?.generatorVersion ?? '',
-      ].join(':')
-    )
-    .join('|');
-  const chatRoster = useMemo(
-    () => snapshot?.assignedAgents || EMPTY_ROSTER,
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the crew's *content*: a poll that rebuilt the same faces must not hand the chat a new reference.
-    [rosterKey]
-  );
+  // The roster it does need (faces, names) keeps one reference across polls
+  // that changed nothing about a face — see `useStableRoster` — and the tasks
+  // a click has to resolve are read from a ref instead of a prop.
+  const chatRoster = useStableRoster(snapshot?.assignedAgents);
 
   const tasksRef = useRef<readonly WorkspaceTaskResponse[]>(EMPTY_TASKS);
   useEffect(() => {
     tasksRef.current = snapshot?.tasks || EMPTY_TASKS;
   }, [snapshot]);
 
+  // Which open-a-task click is the current one. A reader who clicks a second
+  // card while the first is still loading must land on the second.
+  const openTaskRequestRef = useRef(0);
+
   const openTaskById = useCallback(
     (taskId: string) => {
-      // A task that has dropped out of the snapshot's 50 most recent has no
-      // row left to open; the drawer is still where it would live, so land
-      // the user there rather than doing nothing under their click.
-      const task = tasksRef.current.find((entry) => entry.id === taskId) ?? null;
-      patchWorkspaceUi({
-        activePanel: 'tasks',
-        previewEntry: null,
-        viewingTask: task,
-        // Same invariant `setActivePanel` keeps: the crew picker belongs to
-        // the agents drawer and must not survive a switch away from it.
-        crewPickerOpen: false,
-      });
+      const requestId = ++openTaskRequestRef.current;
+      // The snapshot only carries the 50 most recently touched tasks, so a card
+      // pointing further back finds nothing here. Open the drawer immediately
+      // either way — the click must never look ignored — and let the fetch fill
+      // the transcript in when it lands.
+      const known = tasksRef.current.find((entry) => entry.id === taskId) ?? null;
+      setActivePanel('tasks');
+      patchWorkspaceUi({ previewEntry: null, viewingTask: known });
+      if (known) return;
+      getWorkspaceTask(workspaceId, taskId)
+        .then((task) => {
+          if (requestId !== openTaskRequestRef.current) return;
+          // Null means the task is gone from the database, not merely old; the
+          // drawer's list is then the honest answer to the click.
+          if (task) patchWorkspaceUi({ viewingTask: task });
+        })
+        .catch((err) => {
+          console.error('[Workspace] Failed to load task for a chat card:', err);
+        });
     },
-    [patchWorkspaceUi]
+    [patchWorkspaceUi, setActivePanel, workspaceId]
   );
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
@@ -2439,7 +2436,7 @@ const Workspace = () => {
         {snapshot && activePanel === 'tasks' && viewingTask && (
           <WorkspaceTaskTranscriptPanel
             task={viewingTask}
-            roster={snapshot.assignedAgents}
+            roster={chatRoster}
             onClose={closeTaskTranscript}
           />
         )}

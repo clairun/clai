@@ -72,23 +72,23 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
         label={name}
         className={styles.face}
       />
-      <div className={styles.main}>
-        <div className={styles.head}>
+      <span className={styles.main}>
+        <span className={styles.head}>
           <span className={styles.who}>
             {card.kind === 'assign' && <span className={styles.lead}>Delegated to </span>}
             {name}
           </span>
           <span className={pillClass}>{label}</span>
-        </div>
-        <div className={styles.title}>{card.title}</div>
+        </span>
+        <span className={styles.title}>{card.title}</span>
         {card.detail ? (
-          <p className={`${styles.detail} ${card.detailIsError ? styles.detailError : ''}`}>
+          <span className={`${styles.detail} ${card.detailIsError ? styles.detailError : ''}`}>
             {card.detail}
-          </p>
+          </span>
         ) : (
-          card.instructions && <p className={styles.detail}>{card.instructions}</p>
+          card.instructions && <span className={styles.detail}>{card.instructions}</span>
         )}
-      </div>
+      </span>
     </>
   );
 

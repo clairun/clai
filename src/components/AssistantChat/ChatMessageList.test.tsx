@@ -274,6 +274,34 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('Found 3 issues.')).toBeInTheDocument();
   });
 
+  it('keeps every card in the order its call was made', () => {
+    // A card leaves the run it was found in; it must re-enter the transcript
+    // where it happened. An answer printed above the polls it followed would
+    // read as if the task finished before it was waited on.
+    const { messages, toolCalls } = taskCalls([
+      { tool: 'workspace_assignTask', result: taskPayload() },
+      { tool: 'workspace_getTaskResult', result: taskPayload({ status: 'running' }) },
+      {
+        tool: 'workspace_getTaskResult',
+        result: taskPayload({ status: 'completed', resultSummary: 'Found 3 issues.' }),
+      },
+      { tool: 'workspace_assignTask', result: taskPayload({ id: 'task-10', title: 'Round 4 review' }) },
+    ]);
+    const { container } = render(
+      <ChatMessageList messages={messages} toolCalls={toolCalls} taskRoster={[]} />
+    );
+    const text = container.textContent ?? '';
+    const at = (needle: string) => {
+      const index = text.indexOf(needle);
+      expect(index, `${needle} is missing`).toBeGreaterThan(-1);
+      return index;
+    };
+    // hand-off → the slim poll in its run → the answer → the next hand-off.
+    expect(at('Round 3 review')).toBeLessThan(at('Running'));
+    expect(at('Running')).toBeLessThan(at('Found 3 issues.'));
+    expect(at('Found 3 issues.')).toBeLessThan(at('Round 4 review'));
+  });
+
   it('renders a collapsed thinking block', () => {
     const messages: AssistantMessage[] = [
       msg({

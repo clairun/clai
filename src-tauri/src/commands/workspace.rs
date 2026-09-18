@@ -1404,26 +1404,10 @@ fn list_workspace_agent_responses(
     Ok((responses, default_workspace_agent_id))
 }
 
-async fn list_workspace_task_responses(
-    pool: &DbPool,
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Vec<WorkspaceTaskResponse>, String> {
-    let agent_rows = load_workspace_agent_rows(state, workspace_id).unwrap_or_default();
-    let agent_names: HashMap<String, String> = agent_rows
-        .iter()
-        .map(|agent| {
-            let name = agent
-                .display_name
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| agent.name.clone());
-            (agent.id.clone(), name)
-        })
-        .collect();
-    let rows = sqlx::query(
-        r#"
-        SELECT
+/// Columns every `workspace_tasks` → [`WorkspaceTaskResponse`] query selects.
+/// Written once so the list query and the single-task lookup cannot drift into
+/// selecting different sets while sharing one row mapper.
+const WORKSPACE_TASK_COLUMNS: &str = "
             task.id,
             task.created_by_workspace_agent_id,
             task.assigned_to_workspace_agent_id,
@@ -1440,59 +1424,111 @@ async fn list_workspace_task_responses(
             task.completed_at,
             task.attention_acknowledged_at,
             task.user_response,
-            task.user_response_at
+            task.user_response_at";
+
+fn workspace_task_response_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+    workspace_id: &str,
+    agent_names: &HashMap<String, String>,
+) -> WorkspaceTaskResponse {
+    let assigned_agent_definition_id: String = row.get("assigned_agent_definition_id");
+    let assigned_agent_id: String = row.get("assigned_to_workspace_agent_id");
+    // An agent removed from the roster leaves its tasks behind: fall back to the
+    // definition id so the row still renders with something identifying.
+    let assigned_agent_display_name = agent_names
+        .get(&assigned_agent_id)
+        .cloned()
+        .unwrap_or_else(|| assigned_agent_definition_id.clone());
+    let created_by_workspace_agent_id: Option<String> = row.get("created_by_workspace_agent_id");
+    let created_by_display_name = created_by_workspace_agent_id
+        .as_ref()
+        .and_then(|id| agent_names.get(id).cloned());
+
+    WorkspaceTaskResponse {
+        id: row.get("id"),
+        workspace_id: workspace_id.to_string(),
+        created_by_workspace_agent_id,
+        created_by_display_name,
+        assigned_to_workspace_agent_id: assigned_agent_id,
+        assigned_agent_definition_id,
+        assigned_agent_display_name,
+        title: row.get("title"),
+        instructions: row.get("instructions"),
+        status: row.get("status"),
+        result_summary: row.get("result_summary"),
+        error: row.get("error"),
+        session_id: row.get("session_id"),
+        run_id: row.get("run_id"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        completed_at: row.get("completed_at"),
+        attention_acknowledged_at: row.get("attention_acknowledged_at"),
+        user_response: row.get("user_response"),
+        user_response_at: row.get("user_response_at"),
+    }
+}
+
+/// Workspace-agent id → display name, for resolving the assignee and creator
+/// names a task response carries. Roster failures degrade to raw ids rather
+/// than failing the task read.
+fn workspace_agent_display_names(state: &AppState, workspace_id: &str) -> HashMap<String, String> {
+    load_workspace_agent_rows(state, workspace_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|agent| {
+            let name = agent
+                .display_name
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(agent.name);
+            (agent.id, name)
+        })
+        .collect()
+}
+
+async fn load_workspace_task_response(
+    pool: &DbPool,
+    workspace_id: &str,
+    task_id: &str,
+    agent_names: &HashMap<String, String>,
+) -> Result<Option<WorkspaceTaskResponse>, String> {
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT {}
+        FROM workspace_tasks task
+        WHERE task.id = ?
+        "#,
+        WORKSPACE_TASK_COLUMNS
+    ))
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load workspace task: {}", e))?;
+
+    Ok(row.map(|row| workspace_task_response_from_row(&row, workspace_id, agent_names)))
+}
+
+async fn list_workspace_task_responses(
+    pool: &DbPool,
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<Vec<WorkspaceTaskResponse>, String> {
+    let agent_names = workspace_agent_display_names(state, workspace_id);
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT {}
         FROM workspace_tasks task
         ORDER BY task.updated_at DESC, task.created_at DESC
         LIMIT 50
         "#,
-    )
+        WORKSPACE_TASK_COLUMNS
+    ))
     .fetch_all(pool)
     .await
     .map_err(|e| format!("Failed to load workspace tasks: {}", e))?;
 
-    // task list no longer joins with a global agent catalog; the workspace_tasks
-    // SELECT above pulls the assigned agent's display name directly via JOIN
-    // with workspace_agents (assigned_display_name).
-    let _ = state;
-
     Ok(rows
         .into_iter()
-        .map(|row| {
-            let assigned_agent_definition_id: String = row.get("assigned_agent_definition_id");
-            let assigned_agent_id: String = row.get("assigned_to_workspace_agent_id");
-            let assigned_agent_display_name = agent_names
-                .get(&assigned_agent_id)
-                .cloned()
-                .unwrap_or_else(|| assigned_agent_definition_id.clone());
-            let created_by_workspace_agent_id: Option<String> =
-                row.get("created_by_workspace_agent_id");
-            let created_by_display_name = created_by_workspace_agent_id
-                .as_ref()
-                .and_then(|id| agent_names.get(id).cloned());
-
-            WorkspaceTaskResponse {
-                id: row.get("id"),
-                workspace_id: workspace_id.to_string(),
-                created_by_workspace_agent_id,
-                created_by_display_name,
-                assigned_to_workspace_agent_id: assigned_agent_id,
-                assigned_agent_definition_id,
-                assigned_agent_display_name,
-                title: row.get("title"),
-                instructions: row.get("instructions"),
-                status: row.get("status"),
-                result_summary: row.get("result_summary"),
-                error: row.get("error"),
-                session_id: row.get("session_id"),
-                run_id: row.get("run_id"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-                completed_at: row.get("completed_at"),
-                attention_acknowledged_at: row.get("attention_acknowledged_at"),
-                user_response: row.get("user_response"),
-                user_response_at: row.get("user_response_at"),
-            }
-        })
+        .map(|row| workspace_task_response_from_row(&row, workspace_id, &agent_names))
         .collect())
 }
 
@@ -3164,6 +3200,21 @@ pub async fn workspace_acknowledge_task(
     }
 
     Ok(())
+}
+
+/// Fetch a single task by id. The snapshot's task list is capped, so a
+/// workspace with hundreds of tasks can still be asked for an older one by id.
+/// A task that no longer exists is `Ok(None)`, not an error — the caller
+/// renders a "no longer available" notice for it.
+#[tauri::command]
+pub async fn workspace_task_by_id(
+    request: WorkspaceTaskActionRequest,
+    state: State<'_, AppState>,
+) -> Result<Option<WorkspaceTaskResponse>, String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
+    let pool = state.workspace_db(&workspace_id).await?;
+    let agent_names = workspace_agent_display_names(state.inner(), &workspace_id);
+    load_workspace_task_response(&pool, &workspace_id, &request.task_id, &agent_names).await
 }
 
 // =============================================================================
@@ -5971,5 +6022,70 @@ mod tests {
             image_media_type_from_extension(Path::new("/w/no-ext")),
             None
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Single-task lookup (`workspace_task_by_id`)
+    //
+    // The `#[tauri::command]` wrapper needs a `State<AppState>`, which this
+    // module has no fixture for; these drive the query + mapper it delegates
+    // to, against the real migrated schema.
+    // -----------------------------------------------------------------------
+
+    fn agent_names(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn load_workspace_task_response_returns_existing_task_with_session_id() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        crate::db::test_support::insert_task(&pool, "task-1", "completed", Some("sess-1"), None)
+            .await;
+
+        let task =
+            load_workspace_task_response(&pool, WS, "task-1", &agent_names(&[("agent-1", "Rust")]))
+                .await
+                .expect("query failed")
+                .expect("task-1 should exist");
+
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.workspace_id, WS);
+        assert_eq!(task.session_id, Some("sess-1".to_string()));
+        assert_eq!(task.status, "completed");
+        assert_eq!(task.title, "Title");
+        assert_eq!(task.instructions, "Do it");
+        assert_eq!(task.assigned_to_workspace_agent_id, "agent-1");
+        assert_eq!(task.assigned_agent_display_name, "Rust");
+        assert_eq!(task.created_by_workspace_agent_id, None);
+        assert_eq!(task.error, None);
+    }
+
+    #[tokio::test]
+    async fn load_workspace_task_response_returns_none_for_unknown_id() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        crate::db::test_support::insert_task(&pool, "task-1", "completed", None, None).await;
+
+        let missing = load_workspace_task_response(&pool, WS, "task-404", &agent_names(&[]))
+            .await
+            .expect("a missing task is not an error");
+
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_workspace_task_response_falls_back_to_definition_id_for_unknown_agent() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        crate::db::test_support::insert_task(&pool, "task-1", "failed", None, Some("boom")).await;
+
+        let task = load_workspace_task_response(&pool, WS, "task-1", &agent_names(&[]))
+            .await
+            .expect("query failed")
+            .expect("task-1 should exist");
+
+        assert_eq!(task.assigned_agent_display_name, "agent-1");
+        assert_eq!(task.error, Some("boom".to_string()));
     }
 }
