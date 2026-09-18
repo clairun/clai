@@ -7,6 +7,8 @@ import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModa
 import WorkspaceTaskTranscriptPanel from '../components/WorkspaceTaskTranscriptPanel';
 import WorkspaceFilePreviewPanel from '../components/WorkspaceFilePreviewPanel';
 import CrewList from '../components/Agents/CrewList';
+import TaskList from '../components/Agents/TaskList';
+import AgentFacepile from '../components/Agents/AgentFacepile';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
@@ -15,7 +17,6 @@ import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import VirtualizedList from '../components/common/VirtualizedList';
 import {
-  acknowledgeWorkspaceTask,
   getOrCreateWorkspaceSession,
   getWorkspaceSnapshot,
   importWorkspaceFiles,
@@ -34,11 +35,19 @@ import type {
   AssistantRun,
   ToolInvocation,
   WorkspaceDirEntry,
+  WorkspaceAgentResponse,
   WorkspaceFileEntry,
   WorkspaceSnapshot,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
+import {
+  formatRelativeTime,
+  isTaskAttention,
+  taskStatusLabel,
+  toNumber,
+  type NumericTimestamp,
+} from '../utils/taskDisplay';
 import { shouldCancelRunOnKey } from '../utils/cancelRunHotkey';
 import { fixedRightAlignedMenuStyle, sameFloatingMenuStyle } from '../utils/floatingMenu';
 import styles from './Workspace.module.css';
@@ -64,7 +73,6 @@ const ARTIFACT_ADD_MENU_GAP = 4;
 const ARTIFACT_ADD_MENU_MARGIN = 8;
 const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 
-type NumericTimestamp = number | bigint | null | undefined;
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry };
 type ArtifactImportKind = 'files' | 'folders';
@@ -87,6 +95,7 @@ const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_QUEUED_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_AGENTS: WorkspaceAgentResponse[] = [];
 
 const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
@@ -113,11 +122,6 @@ const WorkspaceVirtualizedList = VirtualizedList as <T>(
   props: VirtualizedListProps<T>
 ) => React.ReactElement | null;
 
-const toNumber = (value: NumericTimestamp): number | null => {
-  if (value === null || value === undefined) return null;
-  return typeof value === 'bigint' ? Number(value) : value;
-};
-
 const errorMessage = (error: unknown, fallback: string): string => {
   if (typeof error === 'string') return error;
   if (error instanceof Error && error.message) return error.message;
@@ -141,17 +145,6 @@ const formatTimestamp = (timestamp: NumericTimestamp): string => {
     hour: '2-digit',
     minute: '2-digit',
   });
-};
-
-const formatRelativeTime = (timestamp: NumericTimestamp): string => {
-  const value = toNumber(timestamp);
-  if (!value) return 'Never';
-  const diffMs = Date.now() - value;
-  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-  return `${Math.floor(diffSec / 86400)}d ago`;
 };
 
 const formatNextRun = (seconds: number | bigint | null | undefined): string | null => {
@@ -217,132 +210,7 @@ const RUN_STATUS_LABEL: Partial<Record<AssistantRun['status'], string>> = {
   cancelled: 'Cancelled',
 };
 
-const TASK_STATUS_LABEL: Record<string, string> = {
-  queued: 'Queued',
-  running: 'Running',
-  completed: 'Completed',
-  failed: 'Failed',
-  blocked: 'Blocked',
-};
-
 const ACTIVE_RUN_STATUSES: AssistantRun['status'][] = ['queued', 'running', 'waiting_for_tool'];
-
-const isTaskAttention = (task: WorkspaceTaskResponse): boolean =>
-  (task.status === 'blocked' || task.status === 'failed') &&
-  !task.attentionAcknowledgedAt &&
-  !task.userResponseAt;
-
-interface WorkspaceTasksPanelProps {
-  workspaceId: string;
-  tasks: WorkspaceTaskResponse[];
-  onChanged: () => void | Promise<void>;
-  onViewTask?: (task: WorkspaceTaskResponse) => void;
-}
-
-const WorkspaceTasksPanel = ({
-  workspaceId,
-  tasks,
-  onChanged,
-  onViewTask,
-}: WorkspaceTasksPanelProps) => {
-  const visibleTasks = tasks || [];
-  const [busyTaskId, setBusyTaskId] = useState('');
-  const [error, setError] = useState('');
-
-  const handleAcknowledge = useCallback(
-    async (taskId: string) => {
-      if (busyTaskId) return;
-      setBusyTaskId(taskId);
-      setError('');
-      try {
-        await acknowledgeWorkspaceTask(workspaceId, taskId);
-        await onChanged();
-      } catch (err) {
-        setError(errorMessage(err, 'Failed to acknowledge task.'));
-      } finally {
-        setBusyTaskId('');
-      }
-    },
-    [busyTaskId, onChanged, workspaceId]
-  );
-
-  return (
-    <section className={styles.taskActivity} aria-label="Workspace task activity">
-      <div className={styles.taskActivityHeader}>
-        <div className={styles.agentRosterTitleBlock}>
-          <h2 className={styles.agentRosterTitle}>Task Activity</h2>
-          <span className={styles.agentRosterMeta}>{visibleTasks.length} recent</span>
-        </div>
-      </div>
-
-      {error && <div className={styles.agentRosterError}>{error}</div>}
-
-      {visibleTasks.length > 0 ? (
-        <div className={styles.taskList}>
-          {visibleTasks.map((task) => {
-            const statusLabel = TASK_STATUS_LABEL[task.status] || task.status;
-            const detail = task.error || task.resultSummary || task.instructions;
-            const needsAttention = isTaskAttention(task);
-            return (
-              <div key={task.id} className={styles.taskItem}>
-                <div className={styles.taskMain}>
-                  <div className={styles.taskTitleRow}>
-                    <span className={styles.taskTitle}>{task.title}</span>
-                    <span
-                      className={`${styles.taskStatus} ${styles[`taskStatus_${task.status}`] || ''}`}
-                    >
-                      {statusLabel}
-                    </span>
-                  </div>
-                  <div className={styles.taskMeta}>
-                    <span>{task.assignedAgentDisplayName}</span>
-                    <span className={styles.metricSeparator}>{'\u00B7'}</span>
-                    <span>{formatRelativeTime(task.updatedAt)}</span>
-                  </div>
-                  {detail && <p className={styles.taskSummary}>{detail}</p>}
-                  {needsAttention && (
-                    <div className={styles.taskActions}>
-                      <button
-                        type="button"
-                        className={styles.taskAction}
-                        onClick={() => handleAcknowledge(task.id)}
-                        disabled={busyTaskId === task.id}
-                      >
-                        Mark reviewed
-                      </button>
-                      {task.sessionId && (
-                        <button
-                          type="button"
-                          className={styles.taskAction}
-                          onClick={() => onViewTask?.(task)}
-                        >
-                          View log
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  {!needsAttention && task.sessionId && (
-                    <div className={styles.taskActions}>
-                      <button
-                        type="button"
-                        className={styles.taskAction}
-                        onClick={() => onViewTask?.(task)}
-                      >
-                        View log
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className={styles.agentRosterEmpty}>No delegated tasks yet.</div>
-      )}
-    </section>
-  );
-};
 
 interface WorkspaceFileEntryListProps {
   entries: WorkspaceFileEntry[];
@@ -1177,7 +1045,7 @@ const WorkspaceAttentionBanner = ({ tasks }: { tasks: WorkspaceTaskResponse[] })
   }
 
   const primary = attentionTasks[0]!;
-  const statusLabel = TASK_STATUS_LABEL[primary.status] || primary.status;
+  const statusLabel = taskStatusLabel(primary.status);
   const detail = primary.error || primary.resultSummary || primary.instructions;
 
   return (
@@ -1334,7 +1202,9 @@ const WorkspaceHeader = ({
     count: number | string,
     label: string,
     clickable = true,
-    activeCount = 0
+    activeCount = 0,
+    // Drawn before the count; the agents chip puts its faces here.
+    leading: React.ReactNode = null
   ) => {
     const isActive = activePanel === panel;
     if (!clickable) {
@@ -1351,6 +1221,7 @@ const WorkspaceHeader = ({
         onClick={() => togglePanel(panel)}
         title={activeCount > 0 ? `${activeCount} ${label} in flight` : `Toggle ${label} panel`}
       >
+        {leading}
         {activeCount > 0 && (
           <span
             className={`${styles.statusDot} ${styles.status_running} ${styles.metricLeadingDot}`}
@@ -1504,7 +1375,16 @@ const WorkspaceHeader = ({
         )}
         {renderCounter(null, messageCount, 'msgs', false)}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter('agents', assignedAgentCount, 'agents')}
+        {renderCounter(
+          'agents',
+          assignedAgentCount,
+          'agents',
+          true,
+          0,
+          assignedAgentCount > 0 ? (
+            <AgentFacepile agents={snapshot?.assignedAgents || EMPTY_AGENTS} tasks={snapshot?.tasks || []} />
+          ) : null
+        )}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter('tasks', taskCount, 'tasks', true, activeTaskCount)}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
@@ -2495,7 +2375,11 @@ const Workspace = () => {
         )}
 
         {snapshot && activePanel === 'tasks' && viewingTask && (
-          <WorkspaceTaskTranscriptPanel task={viewingTask} onClose={closeTaskTranscript} />
+          <WorkspaceTaskTranscriptPanel
+            task={viewingTask}
+            roster={snapshot?.assignedAgents ?? EMPTY_AGENTS}
+            onClose={closeTaskTranscript}
+          />
         )}
 
         {snapshot && activePanel && (
@@ -2714,9 +2598,10 @@ const Workspace = () => {
               )}
 
               {activePanel === 'tasks' && (
-                <WorkspaceTasksPanel
+                <TaskList
                   workspaceId={workspaceId}
                   tasks={tasks}
+                  roster={snapshot.assignedAgents}
                   onChanged={() => loadSnapshot(false)}
                   onViewTask={openTaskTranscript}
                 />

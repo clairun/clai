@@ -1,16 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../assistant';
-import type { AssistantMessage, ToolInvocation, WorkspaceTaskResponse } from '../generated/bindings';
+import type {
+  AssistantMessage,
+  ToolInvocation,
+  WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
+} from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
+import AgentAvatar from './Agents/AgentAvatar';
+import { taskIdentity } from './Agents/agentIdentity';
+import { taskStatusLabel } from '../utils/taskDisplay';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
-
-const TASK_STATUS_LABEL: Record<string, string> = {
-  pending: 'Pending',
-  running: 'Running',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-};
 
 const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
@@ -19,11 +19,14 @@ const MESSAGE_PAGE_LIMIT = 100;
 
 interface WorkspaceTaskTranscriptPanelProps {
   task: WorkspaceTaskResponse | null;
+  /** The crew, so the header shows the assignee's face; empty is fine. */
+  roster?: readonly WorkspaceAgentResponse[];
   onClose: () => void;
 }
 
 export default function WorkspaceTaskTranscriptPanel({
   task,
+  roster = [],
   onClose,
 }: WorkspaceTaskTranscriptPanelProps) {
   const sessionId = task?.sessionId || null;
@@ -100,7 +103,7 @@ export default function WorkspaceTaskTranscriptPanel({
 
   if (!task) return null;
 
-  const statusLabel = TASK_STATUS_LABEL[task.status] || task.status;
+  const statusLabel = taskStatusLabel(task.status);
   const statusClass = styles[`status_${task.status}`] || '';
 
   const messages = sessionState?.messages || EMPTY_MESSAGES;
@@ -152,6 +155,7 @@ export default function WorkspaceTaskTranscriptPanel({
     >
       <div className={styles.header}>
         <div className={styles.headerLeft}>
+          <AgentAvatar identity={taskIdentity(task, roster)} size={20} label={task.assignedAgentDisplayName} />
           <span className={styles.title} title={task.title}>{task.title}</span>
           <span className={`${styles.statusPill} ${statusClass}`}>{statusLabel}</span>
         </div>

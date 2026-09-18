@@ -1,0 +1,31 @@
+.pile {
+  --facepile-size: 18px;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+.face {
+  /* A 1.5px gap in the chip's own background separates overlapping faces. */
+  box-shadow: 0 0 0 1.5px var(--color-bg-primary, transparent);
+}
+
+.face + .face,
+.face + .more {
+  margin-left: calc(var(--facepile-size) * -0.3);
+}
+
+.more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--facepile-size);
+  height: var(--facepile-size);
+  border-radius: 50%;
+  background: var(--color-overlay-06, rgba(127, 127, 127, 0.15));
+  color: var(--color-text-secondary);
+  font-size: calc(var(--facepile-size) * 0.5);
+  font-weight: 600;
+  line-height: 1;
+}
