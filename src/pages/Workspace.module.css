@@ -815,14 +815,6 @@
   padding: 0 1px;
 }
 
-/* Narrower screens: drawer becomes a full-overlay so it doesn't get
-   clipped, but still doesn't push the chat. */
-@media (max-width: 900px) {
-  .workspaceDrawer {
-    width: min(360px, 100%);
-  }
-}
-
 /* ── Chat-First Layout (general workspaces) ──────────── */
 
 .chatFirstContent {

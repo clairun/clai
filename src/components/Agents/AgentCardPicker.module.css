@@ -60,8 +60,8 @@
   gap: 8px;
 }
 
-/* `layout="rows"`: one card per line, so a narrow host (the Agents drawer)
-   keeps its width and the cards lie down instead. */
+/* `layout="rows"`: one card per line, for a host too narrow to tile them —
+   the Agents drawer, which is 360px wide whatever the picker is doing. */
 .cardsRows {
   grid-template-columns: 1fr;
 }
@@ -103,19 +103,15 @@
   padding: 10px;
 }
 
-/* The face keeps its size; only the text column gives way. */
-.cardFace {
-  flex: none;
-}
-
 .cardBody {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
   min-width: 0;
-  max-width: 100%;
-  align-self: stretch;
+  /* Full width under the grid card's column flex; inert under `flex: 1`
+     in a row card, where the flex basis wins. */
+  width: 100%;
 }
 
 .cardRow .cardBody {

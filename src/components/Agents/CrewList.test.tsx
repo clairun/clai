@@ -255,7 +255,7 @@ describe('CrewList', () => {
     expect(screen.queryByText('Already on this crew')).toBeNull();
   });
 
-  it('lays the library cards out one per row: the drawer keeps its width', async () => {
+  it('lays the library cards out one per row, to fit the narrow drawer', async () => {
     render(<CrewList {...baseProps} pickerOpen agents={[MAIN]} tasks={[]} />);
     const card = await screen.findByRole('listitem', { name: 'Add Docs to the crew' });
     // The crew <ul> is a list too, so reach the card container through the card.

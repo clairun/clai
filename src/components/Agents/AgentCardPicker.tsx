@@ -188,7 +188,6 @@ const AgentCardPicker = ({
                 // In rows the face sits beside the text, at the size the crew
                 // rows above the picker already use.
                 size={asRows ? 36 : 48}
-                className={styles.cardFace}
               />
               <span className={styles.cardBody}>
                 <span className={styles.cardName}>{definition.name}</span>
