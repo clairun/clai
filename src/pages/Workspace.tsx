@@ -42,6 +42,7 @@ import type {
 import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
 import {
   formatRelativeTime,
+  isTaskActive,
   isTaskAttention,
   taskStatusLabel,
   toNumber,
@@ -1113,18 +1114,14 @@ const WorkspaceHeader = ({
   // Active = a scheduled task is running, or any non-terminal task is in
   // flight on this workspace. Matches Fleet's "isProcessing" check so the
   // Run-now button correctly disables while a run is mid-flight.
-  const hasRunningTask = (snapshot?.tasks || []).some(
-    (task) => task.status === 'running' || task.status === 'queued'
-  );
+  const hasRunningTask = (snapshot?.tasks || []).some(isTaskActive);
   // Manager is invisible to the user — exclude it from the headline count so
   // the chip and the drawer (which already filters !isDefault) agree.
   // Count includes the main (default) agent — the manager is now a
   // first-class entry in the workspace's agent list.
   const assignedAgentCount = (snapshot?.assignedAgents || []).length;
   const taskCount = snapshot?.tasks?.length || 0;
-  const activeTaskCount = (snapshot?.tasks || []).filter(
-    (task) => task.status === 'running' || task.status === 'queued'
-  ).length;
+  const activeTaskCount = (snapshot?.tasks || []).filter(isTaskActive).length;
 
   // Click a counter to open its panel; click again (or click another) to switch.
   // null = no panel open, chat takes the full content area.
@@ -1562,6 +1559,9 @@ const Workspace = () => {
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
+  // Whether the crew can be edited here: agent-kind workspaces and the default
+  // one have a fixed roster. Drives the drawer's "+ Add" and the list alike.
+  const crewManageable = snapshot?.kind !== 'agent' && !isGenericWorkspace;
   // True only during the initial-entry load (loadSnapshot(true)); the periodic
   // poll refreshes without flipping it. Read by the chat panel so the first
   // hydration window renders a loading placeholder instead of the misleading
@@ -2557,9 +2557,7 @@ const Workspace = () => {
                     </button>
                   </>
                 )}
-                {activePanel === 'agents' &&
-                  snapshot?.kind !== 'agent' &&
-                  workspaceId !== DEFAULT_WORKSPACE_ID && (
+                {activePanel === 'agents' && crewManageable && (
                     <button
                       type="button"
                       className={styles.workspaceDrawerAction}
@@ -2588,7 +2586,7 @@ const Workspace = () => {
                   workspaceId={workspaceId}
                   agents={snapshot.assignedAgents}
                   tasks={tasks}
-                  manageable={snapshot.kind !== 'agent' && workspaceId !== DEFAULT_WORKSPACE_ID}
+                  manageable={crewManageable}
                   busy={agentBusy}
                   error={agentError}
                   pickerOpen={crewPickerOpen}

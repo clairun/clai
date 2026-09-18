@@ -10,10 +10,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listAgentDefinitions, type AgentDefinitionDetail } from '../../api/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
-import { isTaskActive, isTaskAttention } from '../../utils/taskDisplay';
+import { isTaskActive } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import AgentCardPicker from './AgentCardPicker';
-import { identityFor, type AgentActivity } from './agentIdentity';
+import { activityFromTasks, identityFor, type AgentActivity } from './agentIdentity';
 import styles from './CrewList.module.css';
 
 export interface CrewListProps {
@@ -48,27 +48,24 @@ export interface CrewStatus {
   line: string | null;
 }
 
-/** One walk over the tasks for what a row shows about an agent. */
+/**
+ * What a row shows about an agent. The ring follows `activityFromTasks` —
+ * the same rule the header facepile draws — so the two can never disagree;
+ * this only adds the wording.
+ */
 export const crewStatus = (
   agent: Pick<WorkspaceAgentResponse, 'id' | 'enabled'>,
   tasks: readonly WorkspaceTaskResponse[]
 ): CrewStatus => {
   if (!agent.enabled) return { activity: 'disabled', line: 'Disabled in this workspace' };
-  let running = 0;
-  let attention = false;
-  for (const task of tasks) {
-    if (task.assignedToWorkspaceAgentId !== agent.id) continue;
-    if (isTaskActive(task)) running += 1;
-    else if (isTaskAttention(task)) attention = true;
+  const activity = activityFromTasks(agent.id, tasks);
+  if (activity === 'running') {
+    const running = tasks.filter(
+      (task) => task.assignedToWorkspaceAgentId === agent.id && isTaskActive(task)
+    ).length;
+    return { activity, line: running === 1 ? '1 task running' : `${running} tasks running` };
   }
-  if (running > 0) {
-    return {
-      activity: 'running',
-      line: running === 1 ? '1 task running' : `${running} tasks running`,
-    };
-  }
-  if (attention) return { activity: 'attention', line: 'Needs your review' };
-  return { activity: 'idle', line: null };
+  return { activity, line: activity === 'attention' ? 'Needs your review' : null };
 };
 
 const CrewList = ({
@@ -178,10 +175,14 @@ const CrewList = ({
         </ul>
       )}
 
+      {manageable && crew.length === 0 && (
+        <p className={styles.invitationText}>No agents here yet.</p>
+      )}
+
       {mainAlone && !pickerOpen && (
         <div className={styles.invitation}>
           <p className={styles.invitationText}>
-            Main works alone here. Add crew from the library, or create one.
+            Main works alone here. Add an agent from the library, or create one.
           </p>
           <button type="button" className={styles.action} onClick={onOpenPicker} disabled={!!busy}>
             Add to crew
@@ -200,9 +201,13 @@ const CrewList = ({
             <AgentCardPicker
               workspaceId={workspaceId}
               definitions={library}
-              assignedDefinitionIds={crew.map((agent) => agent.agentDefinitionId)}
+              // The Main is not a library agent; the rows above already say who is on the crew.
+              assignedDefinitionIds={crew
+                .filter((agent) => !agent.isDefault)
+                .map((agent) => agent.agentDefinitionId)}
               onChanged={handleCrewChanged}
               onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
+              showCrewFaces={false}
               disabled={!!busy}
             />
           )}

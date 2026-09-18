@@ -30,6 +30,8 @@ export interface AgentCardPickerProps {
   disabled?: boolean;
   /** The sentence above the cards. */
   intro?: string;
+  /** The "Already on this crew" face row; off where the crew is already on screen. */
+  showCrewFaces?: boolean;
 }
 
 const errText = (err: unknown, fallback: string): string =>
@@ -78,7 +80,8 @@ const AgentCardPicker = ({
   onChanged,
   onCreateAgent,
   disabled = false,
-  intro = 'Pick from the library. Behaviour stays shared; this workspace decides context and paths.',
+  intro = 'Pick from the library. Behavior stays shared; this workspace decides context and paths.',
+  showCrewFaces = true,
 }: AgentCardPickerProps) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -190,7 +193,7 @@ const AgentCardPicker = ({
       )}
 
       <div className={styles.footer}>
-        {onCrew.length > 0 && (
+        {showCrewFaces && onCrew.length > 0 && (
           <span className={styles.onCrew}>
             <span className={styles.onCrewLabel}>Already on this crew</span>
             <span className={styles.onCrewFaces}>

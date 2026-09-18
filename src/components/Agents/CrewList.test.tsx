@@ -201,7 +201,7 @@ describe('CrewList', () => {
     const onOpenPicker = vi.fn();
     render(<CrewList {...baseProps} onOpenPicker={onOpenPicker} agents={[MAIN]} tasks={[]} />);
     expect(
-      screen.getByText('Main works alone here. Add crew from the library, or create one.')
+      screen.getByText('Main works alone here. Add an agent from the library, or create one.')
     ).toBeInTheDocument();
     expect(screen.queryByTestId('crew-picker')).toBeNull();
 
@@ -212,6 +212,8 @@ describe('CrewList', () => {
   it('shows no invitation for an empty crew (no Main yet) or once the picker is open', () => {
     const { rerender } = render(<CrewList {...baseProps} agents={[]} tasks={[]} />);
     expect(screen.queryByText(/Main works alone/)).toBeNull();
+    // Not a blank panel either.
+    expect(screen.getByText('No agents here yet.')).toBeInTheDocument();
     rerender(<CrewList {...baseProps} pickerOpen agents={[MAIN]} tasks={[]} />);
     expect(screen.queryByText(/Main works alone/)).toBeNull();
     expect(screen.getByTestId('crew-picker')).toBeInTheDocument();

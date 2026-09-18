@@ -20,6 +20,7 @@ import {
   type WorkspaceAssignmentPayload,
 } from '../../api/client';
 import AgentCardPicker from '../Agents/AgentCardPicker';
+import { openGlobalSettings } from '../../utils/globalSettings';
 import styles from './WorkspaceSettingsModal.module.css';
 
 /** Editable list of path grants, shared by the assignment and policy forms. */
@@ -233,7 +234,6 @@ export const AssignmentSection = ({
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
 
   // Local draft for the assignment being edited.
   const [enabled, setEnabled] = useState(true);
@@ -263,17 +263,29 @@ export const AssignmentSection = ({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, agentId, reloadToken]);
+  }, [workspaceId, agentId]);
+
+  // Re-reads the library and the roster without touching the draft being
+  // edited. Awaited by callers that must not act on the old roster.
+  const refresh = useCallback(async () => {
+    try {
+      const [library, policy] = await Promise.all([listAgentDefinitions(), getWorkspaceTeamPolicy(workspaceId)]);
+      setDefinitions(library);
+      setAssignments(policy.assignments || []);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [workspaceId]);
 
   const assignment = assignments.find((item) => item.id === agentId);
   const definition = definitions.find((item) => item.id === assignment?.agentDefinitionId);
 
-  // The picker assigns on its own; this section only has to reload the
-  // roster it shows and tell the modal.
-  const handleCrewChanged = useCallback(() => {
-    setReloadToken((token) => token + 1);
+  // The picker assigns on its own and stays busy until this resolves, so the
+  // roster it filters on is the new one before another card can be clicked.
+  const handleCrewChanged = useCallback(async () => {
+    await refresh();
     onChanged?.();
-  }, [onChanged]);
+  }, [refresh, onChanged]);
 
   const handleSave = useCallback(async () => {
     if (!assignment) return;
@@ -286,14 +298,14 @@ export const AssignmentSection = ({
         context,
         filesystemGrants: grants,
       });
-      setReloadToken((token) => token + 1);
+      await refresh();
       onChanged?.();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
-  }, [workspaceId, assignment, enabled, context, grants, onChanged]);
+  }, [workspaceId, assignment, enabled, context, grants, refresh, onChanged]);
 
   const handleUnassign = useCallback(async () => {
     if (!agentId) return;
@@ -321,11 +333,6 @@ export const AssignmentSection = ({
     return (
       <div>
         <h4 className={styles.sectionTitle}>Add to crew</h4>
-        <p className={styles.sectionDescription}>
-          Crew members come from the shared agent library (Settings → Agents). Adding one here
-          makes it callable in this workspace; its behavior stays shared with every other workspace
-          using it.
-        </p>
         {error && (
           <div className={styles.errorBanner} role="alert">
             {error}
@@ -336,6 +343,7 @@ export const AssignmentSection = ({
           definitions={definitions}
           assignedDefinitionIds={assignments.map((item) => item.agentDefinitionId)}
           onChanged={handleCrewChanged}
+          onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
           disabled={busy}
         />
       </div>

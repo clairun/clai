@@ -117,6 +117,49 @@ describe('AssignmentSection picker', () => {
       expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'workspace_team_policy').length).toBe(2)
     );
   });
+
+  it('keeps the cards disabled until the roster has been re-read after an assign', async () => {
+    const user = userEvent.setup();
+    let releasePolicy: (value: unknown) => void = () => {};
+    let policyCalls = 0;
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'agent_definitions_list') return Promise.resolve(DEFINITIONS);
+      if (cmd === 'workspace_team_policy') {
+        policyCalls += 1;
+        // The first read renders the picker; the second is the refetch after the assign.
+        if (policyCalls === 1) return Promise.resolve(policy);
+        return new Promise((resolve) => {
+          releasePolicy = resolve;
+        });
+      }
+      if (cmd === 'workspace_assign_agent') return Promise.resolve('assign-2');
+      return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
+    });
+    render(<AssignmentSection workspaceId={WORKSPACE} />);
+
+    const writer = await screen.findByRole('listitem', { name: 'Add Writer to the crew' });
+    await user.click(writer);
+    await waitFor(() => expect(policyCalls).toBe(2));
+    // A second click here would ask the backend to assign Writer twice.
+    expect(screen.getByRole('listitem', { name: 'Add Writer to the crew' })).toBeDisabled();
+
+    releasePolicy({
+      ...policy,
+      assignments: [ASSIGNMENT, { ...ASSIGNMENT, id: 'assign-2', agentDefinitionId: 'def-writer' }],
+    });
+    await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Add Writer to the crew' })).toBeNull());
+    expect(screen.getByRole('status')).toHaveTextContent('Writer joined the crew.');
+  });
+
+  it('links to the library from the picker', async () => {
+    const user = userEvent.setup();
+    const opened = vi.fn();
+    window.addEventListener('open-global-settings', opened);
+    render(<AssignmentSection workspaceId={WORKSPACE} />);
+    await user.click(await screen.findByRole('button', { name: 'Create a new agent →' }));
+    expect(opened).toHaveBeenCalledTimes(1);
+    window.removeEventListener('open-global-settings', opened);
+  });
 });
 
 describe('AssignmentSection editor', () => {

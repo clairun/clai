@@ -257,11 +257,13 @@ describe('AgentLibrarySettings', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('library offline');
     expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
     expect(screen.queryByTestId('behavior-form')).toBeNull();
+    // The cards are stale (revision 3 while the backend is at 4): not clickable until Retry.
+    expect(screen.getByRole('button', { name: /^Reviewer/ })).toBeDisabled();
 
     api.listAgentDefinitions.mockResolvedValue([{ ...REVIEWER, revision: 4 }]);
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
-    expect(screen.getByRole('button', { name: /^Reviewer/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Reviewer/ })).toBeEnabled();
   });
 
   it('explains an agent that vanished from the library instead of a blank editor', async () => {

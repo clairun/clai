@@ -207,7 +207,8 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                           type="button"
                           className={styles.action}
                           onClick={() => handleAcknowledge(task.id)}
-                          disabled={busyTaskId === task.id}
+                          // One acknowledge at a time; a click on another row would be dropped silently.
+                          disabled={!!busyTaskId}
                         >
                           Mark reviewed
                         </button>

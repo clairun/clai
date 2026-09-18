@@ -112,6 +112,8 @@ const AgentLibrarySettings = () => {
       {view.kind === 'gallery' && (
         <AgentGallery
           definitions={definitions}
+          // A failed reload leaves stale revisions: opening one would only end in a refused save.
+          disabled={error !== null}
           focusId={view.focusId}
           onOpen={(id) => setView({ kind: 'edit', id })}
           onCreate={() => setView({ kind: 'create' })}

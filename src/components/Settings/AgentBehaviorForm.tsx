@@ -577,9 +577,9 @@ export const AgentBehaviorForm = ({
           </h3>
           <p className={styles.sectionDescription}>
             {/* Creating an agent here means configuring this workspace's own Main.
-                Teammates come from the shared library and are added under Team. */}
+                Crew members come from the shared library and are added from the Agents drawer. */}
             {isCreate
-              ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; teammates are added from the shared agent library under Team."
+              ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; crew members are added from the shared agent library in the Agents drawer."
               : isManager
                 ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
                 : 'Teammate — invoked by the main agent via delegation.'}

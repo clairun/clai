@@ -1,6 +1,6 @@
 /**
- * The agent library as a gallery of cards: crew you can put on any
- * workspace. Click a card to open its editor; the primary button starts a
+ * The agent library as a gallery of cards: agents any workspace can put on
+ * its crew. Click a card to open its editor; the primary button starts a
  * new one. Archived agents sort last and desaturate; a search box narrows
  * the grid by name or description.
  */
