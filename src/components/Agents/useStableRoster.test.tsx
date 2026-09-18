@@ -76,6 +76,22 @@ describe('useStableRoster', () => {
     expect(result.current).toHaveLength(2);
   });
 
+  it('notices the two fields a face falls back on: the id and Main-ness', () => {
+    // `agentIdentity` seeds a generated face from the agent id and labels the
+    // workspace main differently, so neither may be dropped from the key.
+    const { result, rerender } = renderHook(
+      ({ agents }: { agents: WorkspaceAgentResponse[] }) => useStableRoster(agents),
+      { initialProps: { agents: [agent()] } }
+    );
+    const first = result.current;
+    rerender({ agents: [agent({ id: 'wa-other' })] });
+    expect(result.current).not.toBe(first);
+
+    const byId = result.current;
+    rerender({ agents: [agent({ id: 'wa-other', isDefault: true })] });
+    expect(result.current).not.toBe(byId);
+  });
+
   it('holds one empty crew while the snapshot is still loading', () => {
     const { result, rerender } = renderHook(
       ({ agents }: { agents: WorkspaceAgentResponse[] | undefined }) => useStableRoster(agents),

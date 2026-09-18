@@ -10,6 +10,7 @@ import CrewList from '../components/Agents/CrewList';
 import TaskList from '../components/Agents/TaskList';
 import AgentFacepile from '../components/Agents/AgentFacepile';
 import { useStableRoster } from '../components/Agents/useStableRoster';
+import { useOpenTask } from './useOpenTask';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
@@ -20,7 +21,6 @@ import VirtualizedList from '../components/common/VirtualizedList';
 import {
   getOrCreateWorkspaceSession,
   getWorkspaceSnapshot,
-  getWorkspaceTask,
   importWorkspaceFiles,
   listWorkspaceDir,
   markWorkspaceOpened,
@@ -2205,34 +2205,26 @@ const Workspace = () => {
     tasksRef.current = snapshot?.tasks || EMPTY_TASKS;
   }, [snapshot]);
 
-  // Which open-a-task click is the current one. A reader who clicks a second
-  // card while the first is still loading must land on the second.
-  const openTaskRequestRef = useRef(0);
+  // Which panel is open, as the late half of an open-a-task click sees it.
+  const activePanelRef = useRef(activePanel);
+  useEffect(() => {
+    activePanelRef.current = activePanel;
+  }, [activePanel]);
 
-  const openTaskById = useCallback(
-    (taskId: string) => {
-      const requestId = ++openTaskRequestRef.current;
-      // The snapshot only carries the 50 most recently touched tasks, so a card
-      // pointing further back finds nothing here. Open the drawer immediately
-      // either way — the click must never look ignored — and let the fetch fill
-      // the transcript in when it lands.
-      const known = tasksRef.current.find((entry) => entry.id === taskId) ?? null;
-      setActivePanel('tasks');
-      patchWorkspaceUi({ previewEntry: null, viewingTask: known });
-      if (known) return;
-      getWorkspaceTask(workspaceId, taskId)
-        .then((task) => {
-          if (requestId !== openTaskRequestRef.current) return;
-          // Null means the task is gone from the database, not merely old; the
-          // drawer's list is then the honest answer to the click.
-          if (task) patchWorkspaceUi({ viewingTask: task });
-        })
-        .catch((err) => {
-          console.error('[Workspace] Failed to load task for a chat card:', err);
-        });
-    },
-    [patchWorkspaceUi, setActivePanel, workspaceId]
+  const loadedTasks = useCallback(() => tasksRef.current, []);
+  const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
+  const isTasksPanelOpen = useCallback(() => activePanelRef.current === 'tasks', []);
+  const setViewingTask = useCallback(
+    (task: WorkspaceTaskResponse | null) => patchWorkspaceUi({ viewingTask: task }),
+    [patchWorkspaceUi]
   );
+  const openTaskById = useOpenTask({
+    workspaceId,
+    loadedTasks,
+    showTasksPanel,
+    isTasksPanelOpen,
+    setViewingTask,
+  });
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
   // `snapshot.runs` is sorted newest-first by the backend; pick the first

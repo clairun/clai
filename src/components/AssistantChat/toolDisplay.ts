@@ -13,9 +13,9 @@
  */
 
 /**
- * Task statuses that mean "not finished". Mirrors `isTaskActive` in
- * `utils/taskDisplay`, which types its argument as a `WorkspaceTaskResponse`
- * field — this module reads raw, unvalidated tool payloads instead.
+ * Task statuses that mean "not finished". The same rule as `isTaskActive` in
+ * `utils/taskDisplay`, which reads it off a task; here it is read off a raw,
+ * unvalidated tool payload, so any string can arrive.
  */
 const ACTIVE_TASK_STATUSES: ReadonlySet<string> = new Set(['queued', 'running']);
 

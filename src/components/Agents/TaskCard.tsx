@@ -3,10 +3,11 @@
  * asked to do, and how that call answered — instead of an opaque
  * `workspace_assignTask` row. Clicking opens the task's own log.
  *
- * Every value it draws comes from the `TaskCallCard` the tool call returned,
- * frozen at that moment. The card never subscribes to the task and never
- * re-reads it, so a running task does not repaint the chat; the tasks drawer
- * owns "what is happening now".
+ * Every value describing the task comes from the `TaskCallCard` the tool call
+ * returned, frozen at that moment; only the assignee's face and name are read
+ * from the live crew, so a renamed agent is not misattributed. The card never
+ * subscribes to the task and never re-reads it, so a running task does not
+ * repaint the chat; the tasks drawer owns "what is happening now".
  */
 import { memo, useMemo } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
@@ -28,16 +29,19 @@ export interface TaskCardProps {
 /**
  * The ring the face wears, from the status alone.
  *
- * `TaskList.taskActivity` can ask whether a stopped task was reviewed; a tool
- * payload carries no acknowledgement fields, so here every stop that is not a
- * clean finish reads as needing attention. That is the honest reading of a
- * card frozen at the moment of the call.
+ * Never the spinning `running` ring, however fresh the status looks: a card is
+ * frozen at the moment of its call, and an assignment is always captured as
+ * `queued`, so that ring would spin forever on every hand-off ever made — a
+ * claim about right now that the card cannot support, at the cost of an
+ * endless animation per card. Live progress belongs to the tasks drawer.
+ *
+ * A stop that is not a clean finish still earns the static attention ring.
+ * `TaskList.taskActivity` can ask whether such a task was since reviewed; a
+ * tool payload carries no acknowledgement fields, so here it stands as the
+ * call saw it.
  */
-export const cardActivity = (status: string): AgentActivity => {
-  if (status === 'queued' || status === 'running') return 'running';
-  if (status === 'completed') return 'none';
-  return 'attention';
-};
+export const cardActivity = (status: string): AgentActivity =>
+  status === 'failed' || status === 'blocked' ? 'attention' : 'none';
 
 /** Assignee name from the crew; tasks whose agent has left keep a generic one. */
 const assigneeName = (
@@ -102,8 +106,10 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
       type="button"
       className={className}
       onClick={() => onOpen(card.taskId)}
+      // No aria-label: it would replace the card's own text — assignee, title,
+      // status, summary — with a shorter sentence. The tooltip says what the
+      // click does; the content says what it is about.
       title={`Open the log of "${card.title}"`}
-      aria-label={`Open the log of task ${card.title}`}
     >
       {body}
     </button>
