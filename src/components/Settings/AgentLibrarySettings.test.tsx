@@ -72,7 +72,7 @@ const REVIEWER = {
   avatar: { seed: 'stored-face', generatorVersion: GENERATOR_VERSION },
   createdAt: 1,
   updatedAt: 1,
-  assignedWorkspaces: [],
+  assignedWorkspaces: [{ id: 'ws-1', title: 'Backend' }],
 };
 
 const lastSave = () => api.saveAgentDefinition.mock.calls.at(-1)?.[0];
@@ -81,7 +81,13 @@ const lastSave = () => api.saveAgentDefinition.mock.calls.at(-1)?.[0];
 const faceSvg = (identity: ReturnType<typeof identityFor>) =>
   render(<AgentAvatar identity={identity} size={40} />).container.querySelector('svg')!.outerHTML;
 
-describe('AgentLibrarySettings faces', () => {
+const openReviewer = async () => {
+  render(<AgentLibrarySettings />);
+  await userEvent.click(await screen.findByRole('button', { name: /^Reviewer/ }));
+  await screen.findByRole('radio', { name: 'Current face' });
+};
+
+describe('AgentLibrarySettings', () => {
   beforeEach(() => {
     vi.spyOn(crypto, 'randomUUID').mockReturnValue(NONCE);
     api.getMcpServers.mockResolvedValue([]);
@@ -91,28 +97,58 @@ describe('AgentLibrarySettings faces', () => {
     api.saveAgentDefinition.mockResolvedValue('def-1');
   });
 
-  it('a new agent is created with the first candidate face unless another is picked', async () => {
+  it('shows the gallery, then one agent at a time, and comes back', async () => {
     render(<AgentLibrarySettings />);
-    await screen.findByRole('button', { name: /^Reviewer/ });
-    const candidates = candidatesOf({ nonce: NONCE, picked: null });
+    const card = await screen.findByRole('button', { name: /^Reviewer/ });
+    expect(card).toHaveTextContent('On 1 workspace');
+    expect(screen.queryByTestId('behavior-form')).toBeNull();
 
-    expect(screen.getByRole('radio', { name: 'Face 1' })).toBeChecked();
-    await userEvent.click(screen.getByRole('button', { name: 'Create agent' }));
-    await waitFor(() => expect(api.saveAgentDefinition).toHaveBeenCalledTimes(1));
-    expect(lastSave()).toMatchObject({ name: 'Reviewer', avatar: avatarRefFor(candidates[0]!) });
-    expect(lastSave().id).toBeUndefined();
+    await userEvent.click(card);
+    expect(screen.getByRole('heading', { name: 'Reviewer' })).toBeInTheDocument();
+    expect(screen.getByText('Saving changes this agent in: Backend.')).toBeInTheDocument();
+    expect(screen.getByTestId('behavior-form')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '+ Create agent' })).toBeNull();
 
-    // The created agent is open now, so "+ New agent" is a real switch again.
-    await waitFor(() => expect(screen.getByRole('radio', { name: 'Current face' })).toBeChecked());
-    await userEvent.click(screen.getByRole('button', { name: '+ New agent' }));
-    expect(screen.queryByRole('radio', { name: 'Current face' })).toBeNull();
-    expect(screen.getByRole('radio', { name: 'Face 1' })).toBeChecked();
+    await userEvent.click(screen.getByRole('button', { name: '‹ Agents' }));
+    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
+    expect(screen.queryByTestId('behavior-form')).toBeNull();
   });
 
-  it('Shuffle replaces the row and the save follows the face now on screen', async () => {
+  it('creates with the first candidate face and lands on the new card', async () => {
+    api.saveAgentDefinition.mockResolvedValue('def-new');
     render(<AgentLibrarySettings />);
-    await screen.findByRole('button', { name: /^Reviewer/ });
-    const before = faceSvg({ seed: candidatesOf({ nonce: NONCE, picked: null })[0]!, generatorVersion: GENERATOR_VERSION });
+    await userEvent.click(await screen.findByRole('button', { name: '+ Create agent' }));
+    const candidates = candidatesOf({ nonce: NONCE, picked: null });
+
+    expect(screen.getByRole('heading', { name: 'New agent' })).toBeInTheDocument();
+    expect(screen.queryByRole('radio', { name: 'Current face' })).toBeNull();
+    expect(screen.getByRole('radio', { name: 'Face 1' })).toBeChecked();
+
+    api.listAgentDefinitions.mockResolvedValue([
+      REVIEWER,
+      { ...REVIEWER, id: 'def-new', name: 'Newcomer' },
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: 'Create agent' }));
+    await waitFor(() => expect(api.saveAgentDefinition).toHaveBeenCalledTimes(1));
+    expect(lastSave()).toMatchObject({
+      name: 'Reviewer',
+      archived: false,
+      avatar: avatarRefFor(candidates[0]!),
+    });
+    expect(lastSave().id).toBeUndefined();
+    expect(lastSave().expectedRevision).toBeUndefined();
+
+    const newCard = await screen.findByRole('button', { name: /^Newcomer/ });
+    expect(newCard).toHaveFocus();
+  });
+
+  it('Shuffle replaces the row and the create follows the face now on screen', async () => {
+    render(<AgentLibrarySettings />);
+    await userEvent.click(await screen.findByRole('button', { name: '+ Create agent' }));
+    const before = faceSvg({
+      seed: candidatesOf({ nonce: NONCE, picked: null })[0]!,
+      generatorVersion: GENERATOR_VERSION,
+    });
     const shuffled = candidatesOf({ nonce: SECOND_NONCE, picked: null });
     expect(screen.getByRole('radio', { name: 'Face 1' }).innerHTML).toContain(before);
 
@@ -121,7 +157,9 @@ describe('AgentLibrarySettings faces', () => {
     const first = screen.getByRole('radio', { name: 'Face 1' });
     expect(first).toBeChecked();
     expect(first.innerHTML).not.toContain(before);
-    expect(first.innerHTML).toContain(faceSvg({ seed: shuffled[0]!, generatorVersion: GENERATOR_VERSION }));
+    expect(first.innerHTML).toContain(
+      faceSvg({ seed: shuffled[0]!, generatorVersion: GENERATOR_VERSION })
+    );
 
     await userEvent.click(screen.getByRole('button', { name: 'Create agent' }));
     await waitFor(() => expect(api.saveAgentDefinition).toHaveBeenCalledTimes(1));
@@ -129,12 +167,13 @@ describe('AgentLibrarySettings faces', () => {
   });
 
   it('saving an existing agent without touching the row keeps its stored face', async () => {
-    render(<AgentLibrarySettings />);
-    await userEvent.click(await screen.findByRole('button', { name: /^Reviewer/ }));
+    await openReviewer();
     const currentTile = screen.getByRole('radio', { name: 'Current face' });
     expect(currentTile).toBeChecked();
     // The tile shows the face the agent has, not the one its id would hash to.
-    expect(currentTile.innerHTML).toContain(faceSvg(identityFor({ id: 'def-1', avatar: REVIEWER.avatar })));
+    expect(currentTile.innerHTML).toContain(
+      faceSvg(identityFor({ id: 'def-1', avatar: REVIEWER.avatar }))
+    );
     expect(currentTile.innerHTML).not.toContain(faceSvg(identityFor({ id: 'def-1' })));
 
     // Browsing without picking, then saving something else, leaves the row alone.
@@ -145,32 +184,32 @@ describe('AgentLibrarySettings faces', () => {
     await waitFor(() => expect(api.saveAgentDefinition).toHaveBeenCalledTimes(1));
     expect(lastSave()).toMatchObject({ id: 'def-1', expectedRevision: 3 });
     expect(lastSave()).not.toHaveProperty('avatar');
+    // Still editing the same agent, row untouched.
+    expect(screen.getByRole('heading', { name: 'Reviewer' })).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'Current face' })).toBeChecked();
     expect(screen.getByRole('radio', { name: 'Face 1' }).innerHTML).toBe(browsed);
   });
 
   it('a picked candidate replaces the stored face, and the row starts over per agent', async () => {
-    render(<AgentLibrarySettings />);
-    await userEvent.click(await screen.findByRole('button', { name: /^Reviewer/ }));
+    await openReviewer();
     const candidates = candidatesOf({ nonce: NONCE, picked: null });
 
     await userEvent.click(screen.getByRole('radio', { name: 'Face 3' }));
-    // Clicking the agent already open is not a switch: the pick stays.
-    await userEvent.click(screen.getByRole('button', { name: /^Reviewer/ }));
-    expect(screen.getByRole('radio', { name: 'Face 3' })).toBeChecked();
+    const picked = { ...REVIEWER, revision: 4, avatar: avatarRefFor(candidates[2]!) };
+    api.listAgentDefinitions.mockResolvedValue([picked]);
     await userEvent.click(screen.getByRole('button', { name: 'Save agent' }));
     await waitFor(() => expect(api.saveAgentDefinition).toHaveBeenCalledTimes(1));
     expect(lastSave()).toMatchObject({ id: 'def-1', avatar: avatarRefFor(candidates[2]!) });
     // Saved: the row is back on the (now updated) stored face.
     await waitFor(() => expect(screen.getByRole('radio', { name: 'Current face' })).toBeChecked());
-
-    // Clicking the agent already open is not a switch: the pick stays.
-    await userEvent.click(screen.getByRole('radio', { name: 'Face 4' }));
-    await userEvent.click(screen.getByRole('button', { name: /^Reviewer/ }));
-    expect(screen.getByRole('radio', { name: 'Face 4' })).toBeChecked();
+    expect(screen.getByRole('radio', { name: 'Current face' }).innerHTML).toContain(
+      faceSvg(identityFor({ id: 'def-1', avatar: picked.avatar }))
+    );
 
     // Picking for one agent must not leak into the next one opened.
-    await userEvent.click(screen.getByRole('button', { name: '+ New agent' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Face 4' }));
+    await userEvent.click(screen.getByRole('button', { name: '‹ Agents' }));
+    await userEvent.click(screen.getByRole('button', { name: '+ Create agent' }));
     expect(screen.queryByRole('radio', { name: 'Current face' })).toBeNull();
     expect(screen.getByRole('radio', { name: 'Face 1' })).toBeChecked();
   });
@@ -178,19 +217,43 @@ describe('AgentLibrarySettings faces', () => {
   it('a rejected save freezes the row while in flight and then keeps the pick', async () => {
     let reject: (reason: unknown) => void = () => {};
     api.saveAgentDefinition.mockImplementationOnce(
-      () => new Promise((_resolve, rejectSave) => { reject = rejectSave; })
+      () =>
+        new Promise((_resolve, rejectSave) => {
+          reject = rejectSave;
+        })
     );
-    render(<AgentLibrarySettings />);
-    await userEvent.click(await screen.findByRole('button', { name: /^Reviewer/ }));
+    await openReviewer();
     await userEvent.click(screen.getByRole('radio', { name: 'Face 3' }));
     await userEvent.click(screen.getByRole('button', { name: 'Save agent' }));
 
     await waitFor(() => expect(screen.getByRole('radio', { name: 'Face 3' })).toBeDisabled());
     expect(screen.getByRole('button', { name: 'Shuffle' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '‹ Agents' })).toBeDisabled();
 
     reject('This agent changed somewhere else.');
-    expect(await screen.findByRole('alert')).toHaveTextContent('This agent changed somewhere else.');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This agent changed somewhere else.'
+    );
     expect(screen.getByRole('radio', { name: 'Face 3' })).toBeChecked();
     expect(screen.getByRole('radio', { name: 'Face 3' })).toBeEnabled();
+  });
+
+  it('archives from the editor, keeping the revision guard, and stays on the agent', async () => {
+    await openReviewer();
+    api.listAgentDefinitions.mockResolvedValue([{ ...REVIEWER, revision: 4, archived: true }]);
+    await userEvent.click(screen.getByRole('button', { name: 'Archive' }));
+    await waitFor(() => expect(api.saveAgentDefinition).toHaveBeenCalledTimes(1));
+    expect(lastSave()).toMatchObject({ id: 'def-1', expectedRevision: 3, archived: true });
+    expect(lastSave()).not.toHaveProperty('avatar');
+    expect(await screen.findByRole('button', { name: 'Restore' })).toBeInTheDocument();
+  });
+
+  it('explains an agent that vanished from the library instead of a blank editor', async () => {
+    await openReviewer();
+    api.listAgentDefinitions.mockResolvedValue([]);
+    await userEvent.click(screen.getByRole('button', { name: 'Save agent' }));
+    expect(await screen.findByText('This agent is no longer in the library.')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Back to agents' }));
+    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
   });
 });

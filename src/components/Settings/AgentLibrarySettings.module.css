@@ -1,32 +1,7 @@
 .container {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-}
-
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
   gap: 16px;
-}
-
-.headerText {
-  flex: 1;
-}
-
-.title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text-primary, #1a1a1a);
-  margin: 0 0 8px 0;
-}
-
-.description {
-  font-size: 13px;
-  color: var(--color-text-secondary);
-  margin: 0;
-  line-height: 1.5;
 }
 
 .errorBanner {
@@ -34,72 +9,19 @@
   background: var(--color-critical-alpha-10, rgba(220, 38, 38, 0.1));
   border: 1px solid var(--color-critical-alpha-30, rgba(220, 38, 38, 0.3));
   border-radius: 8px;
-  color: var(--color-critical, #DC2626);
+  color: var(--color-critical, #dc2626);
   font-size: 13px;
 }
 
-.layout {
+.missing {
   display: flex;
-  gap: 20px;
+  flex-direction: column;
   align-items: flex-start;
-}
-
-.list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 200px;
-  max-width: 240px;
-}
-
-.listItemTitle {
-  display: flex;
-  align-items: center;
   gap: 8px;
-  min-width: 0;
-}
-
-.listItem {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: none;
-  color: var(--color-text-primary, #1a1a1a);
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.listItem:hover {
-  background: var(--color-surface-hover, rgba(0, 0, 0, 0.04));
-}
-
-.listItemActive {
-  border-color: var(--color-accent, #3b82f6);
-  background: var(--color-surface-hover, rgba(0, 0, 0, 0.04));
-}
-
-.listItemMeta {
-  font-size: 11px;
-  color: var(--color-text-secondary);
-}
-
-.editor {
-  flex: 1;
-  min-width: 0;
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-top: 16px;
-}
-
-.empty {
   font-size: 13px;
   color: var(--color-text-secondary);
+}
+
+.missing p {
+  margin: 0;
 }

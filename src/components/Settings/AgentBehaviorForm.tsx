@@ -227,6 +227,7 @@ export const AgentBehaviorForm = ({
   saving,              // global save in flight — disables inputs
   onDirtyChange,
   onDeleted,
+  showHeading = true,
 }: {
   ref: React.Ref<SectionHandle>;
   workspaceId: string;
@@ -238,6 +239,8 @@ export const AgentBehaviorForm = ({
   saving: boolean;
   onDirtyChange?: (isDirty: boolean) => void;
   onDeleted?: () => void;
+  /** False when the host draws its own title (the library editor does). */
+  showHeading?: boolean;
 }) => {
   const isCreate = !agentId;
   // Set once the create flow has succeeded. Only the submit path looks at
@@ -567,18 +570,22 @@ export const AgentBehaviorForm = ({
 
   return (
     <div className={styles.sectionRoot}>
-      <h3 className={styles.sectionTitle}>
-        {isCreate ? 'Set up the main agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
-      </h3>
-      <p className={styles.sectionDescription}>
-        {/* Creating an agent here means configuring this workspace's own Main.
-            Teammates come from the shared library and are added under Team. */}
-        {isCreate
-          ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; teammates are added from the shared agent library under Team."
-          : isManager
-            ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
-            : 'Teammate — invoked by the main agent via delegation.'}
-      </p>
+      {showHeading && (
+        <>
+          <h3 className={styles.sectionTitle}>
+            {isCreate ? 'Set up the main agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
+          </h3>
+          <p className={styles.sectionDescription}>
+            {/* Creating an agent here means configuring this workspace's own Main.
+                Teammates come from the shared library and are added under Team. */}
+            {isCreate
+              ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; teammates are added from the shared agent library under Team."
+              : isManager
+                ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
+                : 'Teammate — invoked by the main agent via delegation.'}
+          </p>
+        </>
+      )}
 
       {/* Name (hidden for manager — its name is "Main" by convention) */}
       {!isManager && (

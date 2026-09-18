@@ -4,63 +4,39 @@
  * A definition here is behavior without a home: instructions, skills,
  * providers, MCP selection and execution policy, and nothing workspace-shaped —
  * no history, no schedule, no files. It starts working when a workspace puts it
- * on its team, and an edit made here reaches every workspace that did, on their
+ * on its crew, and an edit made here reaches every workspace that did, on their
  * next turn. What stays local to each workspace is its Main agent, edited in
  * that workspace's settings.
+ *
+ * Two screens in one pane, never both: the gallery of cards, or the editor
+ * for one agent (or a new one).
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   getMcpServers,
   getSkills,
   listAgentDefinitions,
-  saveAgentDefinition,
   workspaceAgentDefaultExecution,
   type AgentDefinitionDetail,
 } from '../../api/client';
 import { assistantClient } from '../../assistant';
-import {
-  AgentBehaviorForm,
-  type AgentBehaviorPayload,
-  type AgentDetail,
-  type AgentFormDeps,
-} from './AgentBehaviorForm';
-import type { SectionHandle } from './sectionHandle';
-import AgentAvatar from '../Agents/AgentAvatar';
-import AgentFacePicker, {
-  chosenSeed,
-  freshFaceChoice,
-  type FaceChoice,
-} from '../Agents/AgentFacePicker';
-import { avatarRefFor, identityFor } from '../Agents/agentIdentity';
+import AgentGallery from '../Agents/AgentGallery';
+import AgentEditor from './AgentEditor';
+import type { AgentFormDeps } from './AgentBehaviorForm';
 import styles from './AgentLibrarySettings.module.css';
 
 const errText = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
-/** `null` selection = the "new agent" draft. */
-type Selected = { kind: 'new' } | { kind: 'definition'; id: string };
-
-const selectionKey = (selection: Selected): string =>
-  selection.kind === 'new' ? 'new' : `definition:${selection.id}`;
+type View =
+  | { kind: 'gallery'; focusId: string | null }
+  | { kind: 'edit'; id: string }
+  | { kind: 'create' };
 
 const AgentLibrarySettings = () => {
   const [definitions, setDefinitions] = useState<AgentDefinitionDetail[]>([]);
-  const [selected, setSelected] = useState<Selected>({ kind: 'new' });
-  // The face row belongs to one agent: switching agents starts it over, so a
-  // candidate picked for one is never saved onto another. Clicking the agent
-  // already open is not a switch and keeps the pick. The open key lives in a
-  // ref so two selects in one batch compare against what the first one set,
-  // not against a render that has not happened yet.
-  const [face, setFace] = useState<FaceChoice>(freshFaceChoice);
-  const openKeyRef = useRef(selectionKey({ kind: 'new' }));
-  const select = useCallback((next: Selected) => {
-    const key = selectionKey(next);
-    if (key === openKeyRef.current) return;
-    openKeyRef.current = key;
-    setSelected(next);
-    setFace(freshFaceChoice());
-  }, []);
+  const [view, setView] = useState<View>({ kind: 'gallery', focusId: null });
   const [deps, setDeps] = useState<AgentFormDeps>({
     mcpServers: [],
     skills: [],
@@ -68,17 +44,13 @@ const AgentLibrarySettings = () => {
     defaultExecution: undefined,
   });
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const sectionRef = useRef<SectionHandle | null>(null);
 
   const reload = useCallback(async () => {
     try {
-      const library = await listAgentDefinitions();
-      setDefinitions(library);
-      return library;
+      setDefinitions(await listAgentDefinitions());
+      setError(null);
     } catch (err) {
       setError(errText(err, 'Failed to load the agent library.'));
-      return [];
     }
   }, []);
 
@@ -105,200 +77,62 @@ const AgentLibrarySettings = () => {
     };
   }, [reload]);
 
-  const current =
-    selected.kind === 'definition'
-      ? definitions.find((definition) => definition.id === selected.id)
-      : undefined;
-  const currentIdentity = useMemo(
-    () => (current ? identityFor({ id: current.id, avatar: current.avatar }) : null),
-    [current]
-  );
+  const backToGallery = useCallback(() => setView({ kind: 'gallery', focusId: null }), []);
 
-  // The form speaks the workspace-agent shape; the library adds identity, the
-  // face and the revision the edit started from.
-  const save = useCallback(
-    async (payload: AgentBehaviorPayload, archived: boolean) => {
-      const seed = chosenSeed(face, currentIdentity);
-      const id = await saveAgentDefinition({
-        id: current?.id,
-        expectedRevision: current?.revision,
-        name: payload.name,
-        description: payload.description,
-        selectedSkillIds: payload.selectedSkillIds,
-        selectedMcpServerIds: payload.selectedMcpServerIds,
-        providerConnectionIds: payload.providerConnectionIds,
-        execution: payload.execution,
-        enabled: payload.enabled,
-        archived,
-        // Omitting `avatar` keeps the stored face. A create always carries one.
-        ...(seed === null ? {} : { avatar: avatarRefFor(seed) }),
-      });
+  // A create lands back in the gallery with the new card focused; an edit
+  // stays open on the (reloaded) agent.
+  const handleSaved = useCallback(
+    async (id: string, created: boolean) => {
       await reload();
-      const saved: Selected = { kind: 'definition', id };
-      openKeyRef.current = selectionKey(saved);
-      setSelected(saved);
-      // A saved pick is the stored face now: the row starts over on it. A save
-      // that left the face alone leaves the row alone too.
-      if (seed !== null) setFace(freshFaceChoice());
+      if (created) setView({ kind: 'gallery', focusId: id });
+      else setView({ kind: 'edit', id });
     },
-    [current, currentIdentity, face, reload]
+    [reload]
   );
 
-  const handleSave = useCallback(async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await sectionRef.current?.submit();
-      if (result && !result.ok) setError(result.error ?? 'Failed to save the agent.');
-    } catch (err) {
-      setError(errText(err, 'Failed to save the agent.'));
-    } finally {
-      setSaving(false);
-    }
-  }, []);
-
-  // Archiving keeps history and in-flight runs intact but stops new
-  // assignments and new runs — a shared definition can be referenced from
-  // workspaces the user is not looking at, so deleting it outright would break
-  // them silently.
-  const handleArchiveToggle = useCallback(async () => {
-    if (!current) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await saveAgentDefinition({
-        id: current.id,
-        expectedRevision: current.revision,
-        name: current.name,
-        description: current.description,
-        selectedSkillIds: current.selectedSkillIds,
-        selectedMcpServerIds: current.selectedMcpServerIds,
-        providerConnectionIds: current.providerConnectionIds,
-        execution: current.execution,
-        enabled: current.enabled,
-        archived: !current.archived,
-      });
-      await reload();
-    } catch (err) {
-      setError(errText(err, 'Failed to update the agent.'));
-    } finally {
-      setSaving(false);
-    }
-  }, [current, reload]);
-
-  const initialAgent: AgentDetail | undefined = current
-    ? {
-        id: current.id,
-        name: current.name,
-        description: current.description,
-        enabled: current.enabled,
-        selectedSkillIds: current.selectedSkillIds,
-        selectedMcpServerIds: current.selectedMcpServerIds,
-        providerConnectionIds: current.providerConnectionIds,
-        execution: current.execution as AgentDetail['execution'],
-      }
-    : undefined;
+  const editing =
+    view.kind === 'edit' ? definitions.find((definition) => definition.id === view.id) : undefined;
 
   return (
     <div className={styles.container}>
-      <div className={styles.header}>
-        <div className={styles.headerText}>
-          <h3 className={styles.title}>Agents</h3>
-          <p className={styles.description}>
-            Teammates shared across workspaces. Each workspace adds the ones it needs in its own
-            settings, and keeps its own Main agent there.
-          </p>
-        </div>
-      </div>
-
       {error && (
         <div className={styles.errorBanner} role="alert">
           {error}
         </div>
       )}
 
-      <div className={styles.layout}>
-        <div className={styles.list}>
-          {definitions.map((definition) => (
-            <button
-              key={definition.id}
-              type="button"
-              className={`${styles.listItem} ${
-                selected.kind === 'definition' && selected.id === definition.id
-                  ? styles.listItemActive
-                  : ''
-              }`}
-              onClick={() => select({ kind: 'definition', id: definition.id })}
-            >
-              <span className={styles.listItemTitle}>
-                <AgentAvatar
-                  identity={identityFor({ id: definition.id, avatar: definition.avatar })}
-                  size={20}
-                  activity={definition.archived ? 'disabled' : 'none'}
-                />
-                <span>
-                  {definition.name}
-                  {definition.archived ? ' (archived)' : ''}
-                </span>
-              </span>
-              <span className={styles.listItemMeta}>
-                {definition.assignedWorkspaces.length === 0
-                  ? 'Not on any workspace team'
-                  : `Used in ${definition.assignedWorkspaces.length} workspace${
-                      definition.assignedWorkspaces.length === 1 ? '' : 's'
-                    }`}
-              </span>
-            </button>
-          ))}
-          <button
-            type="button"
-            className={`${styles.listItem} ${selected.kind === 'new' ? styles.listItemActive : ''}`}
-            onClick={() => select({ kind: 'new' })}
-          >
-            + New agent
-          </button>
-        </div>
+      {view.kind === 'gallery' && (
+        <AgentGallery
+          definitions={definitions}
+          focusId={view.focusId}
+          onOpen={(id) => setView({ kind: 'edit', id })}
+          onCreate={() => setView({ kind: 'create' })}
+        />
+      )}
 
-        <div className={styles.editor}>
-          <AgentFacePicker
-            current={currentIdentity}
-            choice={face}
-            onChange={setFace}
-            disabled={saving}
-          />
-          <AgentBehaviorForm
-            // Remount per selection: the form mirrors its agent into local
-            // state at load time, so switching agents must start it over.
-            key={current?.id || 'new'}
-            ref={sectionRef}
-            workspaceId=""
-            agentId={current?.id ?? null}
-            snapshot={null}
-            initialAgent={initialAgent}
-            saveBehavior={(payload) => save(payload, current?.archived ?? false)}
+      {view.kind === 'create' && (
+        <AgentEditor key="create" deps={deps} onBack={backToGallery} onSaved={handleSaved} />
+      )}
+
+      {view.kind === 'edit' &&
+        (editing ? (
+          // Remount per agent: the editor and the form mirror their agent into
+          // local state at mount time.
+          <AgentEditor
+            key={editing.id}
+            definition={editing}
             deps={deps}
-            saving={saving}
+            onBack={backToGallery}
+            onSaved={handleSaved}
           />
-
-          {current && current.assignedWorkspaces.length > 0 && (
-            <p className={styles.description}>
-              Saving changes this agent in:{' '}
-              {current.assignedWorkspaces.map((workspace) => workspace.title).join(', ')}.
-            </p>
-          )}
-
-          <div className={styles.actions}>
-            <button type="button" onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving…' : current ? 'Save agent' : 'Create agent'}
+        ) : (
+          <div className={styles.missing}>
+            <p>This agent is no longer in the library.</p>
+            <button type="button" onClick={backToGallery}>
+              Back to agents
             </button>
-            {current && (
-              <button type="button" onClick={handleArchiveToggle} disabled={saving}>
-                {current.archived ? 'Restore' : 'Archive'}
-              </button>
-            )}
           </div>
-        </div>
-      </div>
+        ))}
     </div>
   );
 };
