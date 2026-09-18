@@ -1,0 +1,162 @@
+/*
+ * Crew rows: face with status ring, name, one-line description, live line.
+ * The ring sits 3px outside the face, so rows leave that room instead of
+ * clipping. No hover motion.
+ */
+.crew {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.error {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-critical) 8%, var(--color-bg-elevated));
+  color: var(--color-critical);
+  font-size: 12px;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-secondary);
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+
+.row + .row {
+  border-top: 1px solid var(--color-border-light);
+}
+
+.row[data-activity='disabled'] .identity {
+  opacity: 0.6;
+}
+
+.identity {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nameRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.role {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-full);
+  padding: 0 6px;
+  line-height: 16px;
+}
+
+.description {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-tertiary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.live {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.live[data-activity='running'] {
+  color: var(--color-healthy);
+}
+
+.live[data-activity='attention'] {
+  color: var(--color-warning, #f5a524);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.action {
+  height: 26px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.action:hover:not(:disabled) {
+  border-color: var(--color-primary-alpha-30);
+  color: var(--color-primary);
+}
+
+.actionDanger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--color-critical) 30%, transparent);
+  color: var(--color-critical);
+}
+
+.action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+}
+
+.pickerTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.loading {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}

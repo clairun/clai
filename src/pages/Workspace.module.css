@@ -679,6 +679,11 @@
   }
 }
 
+/* Room for the "Add to crew" cards while the picker is unfolded. */
+.workspaceDrawerWide {
+  width: 480px;
+}
+
 .workspaceDrawerHeader {
   display: flex;
   align-items: center;
@@ -1119,7 +1124,8 @@
 /* Narrower screens: drawer becomes a full-overlay so it doesn't get
    clipped, but still doesn't push the chat. */
 @media (max-width: 900px) {
-  .workspaceDrawer {
+  .workspaceDrawer,
+  .workspaceDrawerWide {
     width: min(360px, 100%);
   }
 }

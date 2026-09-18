@@ -6,6 +6,7 @@ import { workspaceDeleteAgent } from '../api/client';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
 import WorkspaceTaskTranscriptPanel from '../components/WorkspaceTaskTranscriptPanel';
 import WorkspaceFilePreviewPanel from '../components/WorkspaceFilePreviewPanel';
+import CrewList from '../components/Agents/CrewList';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
@@ -76,6 +77,9 @@ type WorkspaceUiState = {
   activePanel: ActivePanel;
   previewEntry: PreviewEntry | null;
   viewingTask: WorkspaceTaskResponse | null;
+  // The Agents drawer's inline "Add to crew" picker; the drawer widens while
+  // it is open, so the flag lives with the drawer, not inside the list.
+  crewPickerOpen: boolean;
 };
 // Stable fallbacks for store-derived values, so re-renders without session
 // data don't hand new `[]`/`{}` identities to memoized children each time.
@@ -88,6 +92,7 @@ const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
   previewEntry: null,
   viewingTask: null,
+  crewPickerOpen: false,
 };
 type SettingsSelection =
   | { kind: 'general' }
@@ -226,92 +231,6 @@ const isTaskAttention = (task: WorkspaceTaskResponse): boolean =>
   (task.status === 'blocked' || task.status === 'failed') &&
   !task.attentionAcknowledgedAt &&
   !task.userResponseAt;
-
-interface WorkspaceAgentsPanelProps {
-  workspaceId: string;
-  snapshot: WorkspaceSnapshot | null;
-  busy: string;
-  error: string;
-  onOpenEdit: (workspaceAgentId: string) => void;
-  onRemove: (workspaceAgentId: string) => void;
-}
-
-const WorkspaceAgentsPanel = ({
-  workspaceId,
-  snapshot,
-  busy,
-  error,
-  onOpenEdit,
-  onRemove,
-}: WorkspaceAgentsPanelProps) => {
-  const assignedAgents = snapshot?.assignedAgents || [];
-  const isManageable = snapshot?.kind !== 'agent' && workspaceId !== DEFAULT_WORKSPACE_ID;
-
-  // Manager first (rendered as "Main"), then sub-agents. The manager is
-  // always present and not removable; Edit deep-links into the workspace
-  // settings modal just like sub-agents.
-  const sortedAgents = [...assignedAgents].sort((a, b) => {
-    if (a.isDefault === b.isDefault) return 0;
-    return a.isDefault ? -1 : 1;
-  });
-
-  if (!isManageable && sortedAgents.length === 0) {
-    return null;
-  }
-
-  return (
-    <section className={styles.agentRoster} aria-label="Workspace agents">
-      {error && <div className={styles.agentRosterError}>{error}</div>}
-
-      {sortedAgents.length > 0 ? (
-        <div className={styles.agentRosterList}>
-          {sortedAgents.map((agent) => (
-            <div key={agent.id} className={styles.agentRosterItem}>
-              <div className={styles.agentRosterIdentity}>
-                <div className={styles.agentRosterNameRow}>
-                  <span className={styles.agentRosterName}>
-                    {agent.isDefault ? 'Main' : agent.displayName}
-                  </span>
-                </div>
-                {agent.agentDescription && (
-                  <p className={styles.agentRosterDescription}>{agent.agentDescription}</p>
-                )}
-              </div>
-              {isManageable && (
-                <div className={styles.agentRosterActions}>
-                  <button
-                    type="button"
-                    className={styles.agentAction}
-                    onClick={() => onOpenEdit(agent.id)}
-                    disabled={!!busy}
-                  >
-                    Edit
-                  </button>
-                  {!agent.isDefault && (
-                    <button
-                      type="button"
-                      className={styles.agentActionDanger}
-                      onClick={() => onRemove(agent.id)}
-                      disabled={!!busy}
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className={styles.agentRosterEmpty}>
-          The workspace itself is the entry-point agent — its configuration is edited via the gear
-          icon next to the workspace title. Agents added here are optional helpers the workspace can
-          call as tools.
-        </div>
-      )}
-    </section>
-  );
-};
 
 interface WorkspaceTasksPanelProps {
   workspaceId: string;
@@ -1787,7 +1706,7 @@ const Workspace = () => {
   //   - viewingTask:  task object — task transcript log
   // Only one slide-out may be open at a time; opening one clears the other.
   const [uiByWorkspace, setUiByWorkspace] = useState<Record<string, WorkspaceUiState>>({});
-  const { activePanel, previewEntry, viewingTask } =
+  const { activePanel, previewEntry, viewingTask, crewPickerOpen } =
     uiByWorkspace[workspaceId] ?? EMPTY_WORKSPACE_UI;
 
   const patchWorkspaceUi = useCallback(
@@ -1814,6 +1733,7 @@ const Workspace = () => {
             activePanel: next,
             previewEntry: next === 'memories' || next === 'artifacts' ? current.previewEntry : null,
             viewingTask: next === 'tasks' ? current.viewingTask : null,
+            crewPickerOpen: next === 'agents' ? current.crewPickerOpen : false,
           },
         };
       });
@@ -2102,9 +2022,12 @@ const Workspace = () => {
     [openSettings]
   );
 
-  const openMemberCreate = useCallback(() => {
-    openSettings({ kind: 'new-agent' });
-  }, [openSettings]);
+  const toggleCrewPicker = useCallback(() => {
+    setUiByWorkspace((prev) => {
+      const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+      return { ...prev, [workspaceId]: { ...current, crewPickerOpen: !current.crewPickerOpen } };
+    });
+  }, [workspaceId]);
 
   const handleSettingsClose = useCallback(() => {
     setSettingsOpen(false);
@@ -2576,7 +2499,12 @@ const Workspace = () => {
         )}
 
         {snapshot && activePanel && (
-          <aside className={styles.workspaceDrawer} aria-label={`${activePanel} drawer`}>
+          <aside
+            className={`${styles.workspaceDrawer} ${
+              activePanel === 'agents' && crewPickerOpen ? styles.workspaceDrawerWide : ''
+            }`}
+            aria-label={`${activePanel} drawer`}
+          >
             <div className={styles.workspaceDrawerHeader}>
               <span className={styles.workspaceDrawerTitle}>
                 {activePanel.charAt(0).toUpperCase() + activePanel.slice(1)}
@@ -2750,10 +2678,11 @@ const Workspace = () => {
                     <button
                       type="button"
                       className={styles.workspaceDrawerAction}
-                      onClick={openMemberCreate}
+                      onClick={toggleCrewPicker}
                       disabled={!!agentBusy}
+                      aria-expanded={crewPickerOpen}
                     >
-                      + Add Agent
+                      {crewPickerOpen ? 'Done' : '+ Add'}
                     </button>
                   )}
                 <button
@@ -2770,13 +2699,17 @@ const Workspace = () => {
 
             <div className={styles.workspaceDrawerBody}>
               {activePanel === 'agents' && (
-                <WorkspaceAgentsPanel
+                <CrewList
                   workspaceId={workspaceId}
-                  snapshot={snapshot}
+                  agents={snapshot.assignedAgents}
+                  tasks={tasks}
+                  manageable={snapshot.kind !== 'agent' && workspaceId !== DEFAULT_WORKSPACE_ID}
                   busy={agentBusy}
                   error={agentError}
+                  pickerOpen={crewPickerOpen}
                   onOpenEdit={openAgentEdit}
                   onRemove={handleAgentRemove}
+                  onChanged={() => loadSnapshot(false)}
                 />
               )}
 
