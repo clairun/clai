@@ -9,7 +9,7 @@
  * that workspace's settings.
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getMcpServers,
   getSkills,
@@ -27,7 +27,12 @@ import {
 } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
 import AgentAvatar from '../Agents/AgentAvatar';
-import { identityFor } from '../Agents/agentIdentity';
+import AgentFacePicker, {
+  chosenSeed,
+  freshFaceChoice,
+  type FaceChoice,
+} from '../Agents/AgentFacePicker';
+import { avatarRefFor, identityFor } from '../Agents/agentIdentity';
 import styles from './AgentLibrarySettings.module.css';
 
 const errText = (err: unknown, fallback: string): string =>
@@ -36,9 +41,26 @@ const errText = (err: unknown, fallback: string): string =>
 /** `null` selection = the "new agent" draft. */
 type Selected = { kind: 'new' } | { kind: 'definition'; id: string };
 
+const selectionKey = (selection: Selected): string =>
+  selection.kind === 'new' ? 'new' : `definition:${selection.id}`;
+
 const AgentLibrarySettings = () => {
   const [definitions, setDefinitions] = useState<AgentDefinitionDetail[]>([]);
   const [selected, setSelected] = useState<Selected>({ kind: 'new' });
+  // The face row belongs to one agent: switching agents starts it over, so a
+  // candidate picked for one is never saved onto another. Clicking the agent
+  // already open is not a switch and keeps the pick. The open key lives in a
+  // ref so two selects in one batch compare against what the first one set,
+  // not against a render that has not happened yet.
+  const [face, setFace] = useState<FaceChoice>(freshFaceChoice);
+  const openKeyRef = useRef(selectionKey({ kind: 'new' }));
+  const select = useCallback((next: Selected) => {
+    const key = selectionKey(next);
+    if (key === openKeyRef.current) return;
+    openKeyRef.current = key;
+    setSelected(next);
+    setFace(freshFaceChoice());
+  }, []);
   const [deps, setDeps] = useState<AgentFormDeps>({
     mcpServers: [],
     skills: [],
@@ -87,11 +109,16 @@ const AgentLibrarySettings = () => {
     selected.kind === 'definition'
       ? definitions.find((definition) => definition.id === selected.id)
       : undefined;
+  const currentIdentity = useMemo(
+    () => (current ? identityFor({ id: current.id, avatar: current.avatar }) : null),
+    [current]
+  );
 
-  // The form speaks the workspace-agent shape; the library adds identity and
-  // the revision the edit started from.
+  // The form speaks the workspace-agent shape; the library adds identity, the
+  // face and the revision the edit started from.
   const save = useCallback(
     async (payload: AgentBehaviorPayload, archived: boolean) => {
+      const seed = chosenSeed(face, currentIdentity);
       const id = await saveAgentDefinition({
         id: current?.id,
         expectedRevision: current?.revision,
@@ -103,12 +130,18 @@ const AgentLibrarySettings = () => {
         execution: payload.execution,
         enabled: payload.enabled,
         archived,
-        // No `avatar`: the backend keeps the stored face when a save omits it.
+        // Omitting `avatar` keeps the stored face. A create always carries one.
+        ...(seed === null ? {} : { avatar: avatarRefFor(seed) }),
       });
       await reload();
-      setSelected({ kind: 'definition', id });
+      const saved: Selected = { kind: 'definition', id };
+      openKeyRef.current = selectionKey(saved);
+      setSelected(saved);
+      // A saved pick is the stored face now: the row starts over on it. A save
+      // that left the face alone leaves the row alone too.
+      if (seed !== null) setFace(freshFaceChoice());
     },
-    [current, reload]
+    [current, currentIdentity, face, reload]
   );
 
   const handleSave = useCallback(async () => {
@@ -195,7 +228,7 @@ const AgentLibrarySettings = () => {
                   ? styles.listItemActive
                   : ''
               }`}
-              onClick={() => setSelected({ kind: 'definition', id: definition.id })}
+              onClick={() => select({ kind: 'definition', id: definition.id })}
             >
               <span className={styles.listItemTitle}>
                 <AgentAvatar
@@ -220,13 +253,19 @@ const AgentLibrarySettings = () => {
           <button
             type="button"
             className={`${styles.listItem} ${selected.kind === 'new' ? styles.listItemActive : ''}`}
-            onClick={() => setSelected({ kind: 'new' })}
+            onClick={() => select({ kind: 'new' })}
           >
             + New agent
           </button>
         </div>
 
         <div className={styles.editor}>
+          <AgentFacePicker
+            current={currentIdentity}
+            choice={face}
+            onChange={setFace}
+            disabled={saving}
+          />
           <AgentBehaviorForm
             // Remount per selection: the form mirrors its agent into local
             // state at load time, so switching agents must start it over.
