@@ -240,6 +240,12 @@ export const AgentBehaviorForm = ({
   onDeleted?: () => void;
 }) => {
   const isCreate = !agentId;
+  // Set once the create flow has succeeded. Only the submit path looks at
+  // it: if a sibling section fails and the modal stays open, a further
+  // edit + Save must update the agent just made, not create a second one.
+  // Everything rendered still follows `isCreate`, because `agent` is still
+  // the blank draft — not the created agent.
+  const [createdAgentId, setCreatedAgentId] = useState<string | null>(null);
   // Both flows start in a loading state: edit waits on `workspaceGetAgent`,
   // create waits on `deps.defaultExecution` so the form opens with the
   // backend's `$HOME` RO grant pre-populated instead of an empty list.
@@ -290,7 +296,7 @@ export const AgentBehaviorForm = ({
 
   // Load the agent for the edit flow.
   useEffect(() => {
-    if (isCreate) return undefined;
+    if (!agentId) return undefined;
     if (lastFetchedId.current === agentId) return undefined;
     let cancelled = false;
     setLoading(true);
@@ -309,7 +315,7 @@ export const AgentBehaviorForm = ({
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [workspaceId, agentId, isCreate, initialAgent]);
+  }, [workspaceId, agentId, initialAgent]);
 
   // Initialize the blank draft for create flow once the backend's
   // default-execution fetch has resolved (success or failure). Doing this
@@ -493,8 +499,8 @@ export const AgentBehaviorForm = ({
         if (saveBehavior) {
           await saveBehavior({ workspaceId, name: trimmedName, description: description.trim(), selectedSkillIds, selectedMcpServerIds, providerConnectionIds, execution, enabled });
           setBaselinePayload(currentPayload);
-        } else if (isCreate) {
-          await workspaceCreateAgent({
+        } else if (isCreate && createdAgentId === null) {
+          const created = await workspaceCreateAgent({
             workspaceId,
             name: trimmedName,
             description: description.trim(),
@@ -504,14 +510,15 @@ export const AgentBehaviorForm = ({
             execution,
             enabled,
           });
-          // Clean too: if another section fails afterwards the modal stays
-          // open, and a still-dirty create section would create the agent
-          // a second time on the next Save.
+          // Clean, and now editing: if another section fails afterwards the
+          // modal stays open, and the next Save must neither re-create the
+          // agent nor create a second one after further edits.
+          setCreatedAgentId(created.id);
           setBaselinePayload(currentPayload);
         } else {
           await workspaceUpdateAgent({
             workspaceId,
-            agentId: agent?.id,
+            agentId: agent?.id || createdAgentId,
             name: isManager ? (agent?.name || 'Manager') : trimmedName,
             description: description.trim(),
             selectedSkillIds,

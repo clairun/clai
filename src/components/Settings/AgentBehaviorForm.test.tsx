@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { createRef } from 'react';
@@ -63,9 +63,13 @@ const renderForm = (props: Partial<React.ComponentProps<typeof AgentBehaviorForm
 };
 
 describe('AgentBehaviorForm', () => {
+  // The shared setup only clears mocks; `vi.spyOn(window, 'confirm')` must
+  // not outlive a test that fails before restoring it.
+  afterEach(() => { vi.restoreAllMocks(); });
+
   beforeEach(() => {
     api.workspaceGetAgent.mockResolvedValue(REVIEWER);
-    api.workspaceCreateAgent.mockResolvedValue({});
+    api.workspaceCreateAgent.mockResolvedValue({ id: 'agent-new' });
     api.workspaceUpdateAgent.mockResolvedValue({});
   });
 
@@ -160,22 +164,54 @@ describe('AgentBehaviorForm', () => {
     // A created agent is clean: a second Save after a sibling section failed
     // must not create it again.
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+
+    // The form still renders as the create flow — `agent` is the blank draft,
+    // so nothing derived from it (Delete, the Enabled toggle, teammate copy)
+    // may appear for the Main that now exists.
+    expect(screen.getByText('Set up the main agent')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete agent' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Enabled')).not.toBeInTheDocument();
+
+    // …and further edits update the agent the backend returned, they do not
+    // create another one.
+    await userEvent.type(screen.getByLabelText('Description'), 'Finds things');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+    await act(async () => { await ref.current!.submit(); });
+    expect(api.workspaceCreateAgent).toHaveBeenCalledTimes(1);
+    expect(api.workspaceUpdateAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'agent-new', name: 'Scout', description: 'Finds things' })
+    );
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
-  it('disables every control while the host is saving', async () => {
-    renderForm({ agentId: 'agent-1', saving: true });
+  it('freezes every control while a delete is in flight, not only while the host saves', async () => {
+    let finishDelete: () => void = () => {};
+    api.workspaceDeleteAgent.mockReturnValue(new Promise<void>((resolve) => { finishDelete = resolve; }));
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderForm({ agentId: 'agent-1' });
     await screen.findByDisplayValue('Reviewer');
+    // Give the draft-gated Add buttons a draft, so only `busy` can disable them
+    // (the provider-connection draft auto-selects, so that Add is already live).
+    await userEvent.type(screen.getByPlaceholderText('/home/user/project'), '/srv/data');
+    await userEvent.type(screen.getByPlaceholderText('git status'), 'ls');
+    expect(screen.getAllByRole('button', { name: 'Add' }).filter((b) => !(b as HTMLButtonElement).disabled)).toHaveLength(3);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Delete agent' }));
+    expect(await screen.findByRole('button', { name: 'Deleting…' })).toBeDisabled();
     for (const control of [
       screen.getByLabelText(/^Name/),
       screen.getByLabelText('Description'),
-      screen.getByLabelText('Shell access'),
-      screen.getByRole('button', { name: 'Delete agent' }),
+      ...screen.getAllByRole('combobox'),
+      ...screen.getAllByRole('textbox'),
       ...screen.getAllByRole('button', { name: 'Add' }),
       ...screen.getAllByRole('button', { name: /^Remove/ }),
       ...screen.getAllByRole('checkbox'),
     ]) {
       expect(control).toBeDisabled();
     }
+
+    finishDelete();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Delete agent' })).toBeEnabled());
   });
 
   it('deletes only after the user confirms, then tells the host', async () => {
