@@ -11,7 +11,7 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock('../../api/client', () => api);
 
-import AgentBehaviorForm, { type AgentDetail, type AgentFormDeps } from './AgentBehaviorForm';
+import { AgentBehaviorForm, type AgentDetail, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
 import type { ProviderConnection } from '../../generated/bindings';
 
@@ -160,6 +160,41 @@ describe('AgentBehaviorForm', () => {
     // A created agent is clean: a second Save after a sibling section failed
     // must not create it again.
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('disables every control while the host is saving', async () => {
+    renderForm({ agentId: 'agent-1', saving: true });
+    await screen.findByDisplayValue('Reviewer');
+    for (const control of [
+      screen.getByLabelText(/^Name/),
+      screen.getByLabelText('Description'),
+      screen.getByLabelText('Shell access'),
+      screen.getByRole('button', { name: 'Delete agent' }),
+      ...screen.getAllByRole('button', { name: 'Add' }),
+      ...screen.getAllByRole('button', { name: /^Remove/ }),
+      ...screen.getAllByRole('checkbox'),
+    ]) {
+      expect(control).toBeDisabled();
+    }
+  });
+
+  it('deletes only after the user confirms, then tells the host', async () => {
+    const onDeleted = vi.fn();
+    api.workspaceDeleteAgent.mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, 'confirm');
+    renderForm({ agentId: 'agent-1', onDeleted });
+    await screen.findByDisplayValue('Reviewer');
+
+    confirm.mockReturnValueOnce(false);
+    await userEvent.click(screen.getByRole('button', { name: 'Delete agent' }));
+    expect(api.workspaceDeleteAgent).not.toHaveBeenCalled();
+    expect(onDeleted).not.toHaveBeenCalled();
+
+    confirm.mockReturnValueOnce(true);
+    await userEvent.click(screen.getByRole('button', { name: 'Delete agent' }));
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
+    expect(api.workspaceDeleteAgent).toHaveBeenCalledWith('ws-1', 'agent-1');
+    expect(confirm).toHaveBeenCalledWith('Delete agent "Reviewer"? This cannot be undone.');
   });
 
   it('routes saves through saveBehavior when a host supplies one and hides Delete', async () => {

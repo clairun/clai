@@ -698,7 +698,7 @@ export const AgentBehaviorForm = ({
                 if (!providerConnectionDraft) return;
                 setProviderConnectionIds((s) => addUniqueItem(s, providerConnectionDraft));
               }}
-              disabled={!providerConnectionDraft || saving}
+              disabled={!providerConnectionDraft || busy}
             >
               Add
             </button>
@@ -759,7 +759,7 @@ export const AgentBehaviorForm = ({
             type="button"
             className={styles.addButton}
             onClick={handleAddPathGrant}
-            disabled={!extraPathDraft.trim() || saving}
+            disabled={!extraPathDraft.trim() || busy}
           >
             Add
           </button>
@@ -977,5 +977,3 @@ const blankAgentDraft = (defaultExecutionFromBackend?: Partial<ExecutionConfig>)
   execution: defaultExecutionFromBackend || defaultExecution(),
   enabled: true,
 });
-
-export default AgentBehaviorForm;

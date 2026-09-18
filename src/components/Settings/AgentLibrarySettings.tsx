@@ -19,7 +19,8 @@ import {
   type AgentDefinitionDetail,
 } from '../../api/client';
 import { assistantClient } from '../../assistant';
-import AgentBehaviorForm, {
+import {
+  AgentBehaviorForm,
   type AgentBehaviorPayload,
   type AgentDetail,
   type AgentFormDeps,

@@ -15,7 +15,7 @@ import { assistantClient } from '../../assistant';
 import { setWorkspaceTitle } from '../../workspace/client';
 import IntervalSelect from './IntervalSelect';
 import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
-import AgentBehaviorForm, { type AgentFormDeps } from './AgentBehaviorForm';
+import { AgentBehaviorForm, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
 import type { ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
 import AgentAvatar from '../Agents/AgentAvatar';
