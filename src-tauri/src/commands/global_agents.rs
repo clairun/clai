@@ -192,10 +192,15 @@ fn upsert_definition(
         return Err("The agent's face needs a seed.".to_string());
     }
     // Most saves come from the behaviour form, which does not carry the face:
-    // absent means "keep what is stored".
+    // absent means "keep what is stored". A seed is stored trimmed, the same
+    // way it was validated, so the face drawn later hashes the same text.
     let avatar = request
         .avatar
-        .clone()
+        .as_ref()
+        .map(|avatar| AgentAvatarRef {
+            seed: avatar.seed.trim().to_string(),
+            generator_version: avatar.generator_version,
+        })
         .or_else(|| previous.and_then(|definition| definition.behavior.avatar.clone()));
 
     let definition = AgentDefinition {
@@ -505,6 +510,20 @@ mod tests {
         assert_eq!(
             config.agent_definitions[0].behavior.avatar,
             Some(face("nonce-9"))
+        );
+    }
+
+    #[test]
+    fn a_padded_seed_is_stored_trimmed() {
+        let mut config = AppConfig::default();
+        let request = AgentDefinitionSaveRequest {
+            avatar: Some(face("  nonce-5 ")),
+            ..save_request("Reviewer")
+        };
+        upsert_definition(&mut config, &request, 100).expect("padded seed");
+        assert_eq!(
+            config.agent_definitions[0].behavior.avatar,
+            Some(face("nonce-5"))
         );
     }
 
