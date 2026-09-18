@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const api = vi.hoisted(() => ({
@@ -86,6 +86,36 @@ describe('AgentCardPicker', () => {
     expect(screen.queryByRole('listitem', { name: /Reviewer/ })).toBeNull();
     expect(screen.queryByRole('listitem', { name: /Retired/ })).toBeNull();
     expect(screen.getByRole('img', { name: 'Reviewer' })).toBeInTheDocument();
+  });
+
+  it('tiles the cards by default and lays them out one per row on request', () => {
+    const { rerender } = render(
+      <AgentCardPicker workspaceId="ws-1" definitions={LIBRARY} assignedDefinitionIds={[]} />
+    );
+    const face = (card: HTMLElement) => card.querySelector('svg')?.getAttribute('width');
+
+    // Default (what the settings modal gets): the card grid, big faces.
+    expect(screen.getByRole('list').className).not.toMatch(/cardsRows/);
+    const grid = screen.getByRole('listitem', { name: 'Add Writer to the crew' });
+    expect(grid.className).not.toMatch(/cardRow/);
+    expect(face(grid)).toBe('48');
+
+    rerender(
+      <AgentCardPicker
+        workspaceId="ws-1"
+        definitions={LIBRARY}
+        assignedDefinitionIds={[]}
+        layout="rows"
+      />
+    );
+    expect(screen.getByRole('list').className).toMatch(/cardsRows/);
+    const row = screen.getByRole('listitem', { name: 'Add Writer to the crew' });
+    expect(row.className).toMatch(/cardRow/);
+    // The face rhymes with the crew rows above the picker in the drawer.
+    expect(face(row)).toBe('36');
+    // Same button, same contract, whichever way it is laid out.
+    expect(row.tagName).toBe('BUTTON');
+    expect(within(row).getByText('Writes docs')).toBeInTheDocument();
   });
 
   it('assigns on a single click, stays busy until the parent has reloaded, then offers Undo', async () => {

@@ -60,6 +60,12 @@
   gap: 8px;
 }
 
+/* `layout="rows"`: one card per line, so a narrow host (the Agents drawer)
+   keeps its width and the cards lie down instead. */
+.cardsRows {
+  grid-template-columns: 1fr;
+}
+
 .card {
   appearance: none;
   display: flex;
@@ -88,6 +94,33 @@
 .card:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.cardRow {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+}
+
+/* The face keeps its size; only the text column gives way. */
+.cardFace {
+  flex: none;
+}
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  align-self: stretch;
+}
+
+.cardRow .cardBody {
+  flex: 1;
+  gap: 4px;
 }
 
 .cardName {

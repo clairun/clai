@@ -255,6 +255,15 @@ describe('CrewList', () => {
     expect(screen.queryByText('Already on this crew')).toBeNull();
   });
 
+  it('lays the library cards out one per row: the drawer keeps its width', async () => {
+    render(<CrewList {...baseProps} pickerOpen agents={[MAIN]} tasks={[]} />);
+    const card = await screen.findByRole('listitem', { name: 'Add Docs to the crew' });
+    // The crew <ul> is a list too, so reach the card container through the card.
+    expect(card.parentElement?.className).toMatch(/cardsRows/);
+    expect(card.className).toMatch(/cardRow/);
+    expect(card.querySelector('svg')?.getAttribute('width')).toBe('36');
+  });
+
   it('deep-links "Create a new agent" into Settings → Agents', async () => {
     const user = userEvent.setup();
     render(<CrewList {...baseProps} pickerOpen agents={[MAIN]} tasks={[]} />);

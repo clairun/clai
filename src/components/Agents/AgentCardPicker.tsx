@@ -32,6 +32,11 @@ export interface AgentCardPickerProps {
   intro?: string;
   /** The "Already on this crew" face row; off where the crew is already on screen. */
   showCrewFaces?: boolean;
+  /**
+   * How the cards are laid out. `grid` (default) tiles them; `rows` lays each
+   * card down on its own line, for narrow hosts like the Agents drawer.
+   */
+  layout?: 'grid' | 'rows';
 }
 
 const errText = (err: unknown, fallback: string): string =>
@@ -82,6 +87,7 @@ const AgentCardPicker = ({
   disabled = false,
   intro = 'Pick from the library. Behavior stays shared; this workspace decides context and paths.',
   showCrewFaces = true,
+  layout = 'grid',
 }: AgentCardPickerProps) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,6 +148,7 @@ const AgentCardPicker = ({
   }, [busy, added, workspaceId, onChanged]);
 
   const inert = disabled || busy;
+  const asRows = layout === 'rows';
 
   return (
     <div className={styles.picker}>
@@ -165,26 +172,31 @@ const AgentCardPicker = ({
       )}
 
       {available.length > 0 ? (
-        <div className={styles.cards} role="list">
+        <div className={`${styles.cards} ${asRows ? styles.cardsRows : ''}`} role="list">
           {available.map((definition) => (
             <button
               key={definition.id}
               type="button"
               role="listitem"
-              className={styles.card}
+              className={`${styles.card} ${asRows ? styles.cardRow : ''}`}
               onClick={() => assign(definition)}
               disabled={inert}
               aria-label={`Add ${definition.name} to the crew`}
             >
               <AgentAvatar
                 identity={identityFor({ id: definition.id, avatar: definition.avatar })}
-                size={48}
+                // In rows the face sits beside the text, at the size the crew
+                // rows above the picker already use.
+                size={asRows ? 36 : 48}
+                className={styles.cardFace}
               />
-              <span className={styles.cardName}>{definition.name}</span>
-              {definition.description && (
-                <span className={styles.cardDescription}>{definition.description}</span>
-              )}
-              <span className={styles.cardFacts}>{cardFacts(definition)}</span>
+              <span className={styles.cardBody}>
+                <span className={styles.cardName}>{definition.name}</span>
+                {definition.description && (
+                  <span className={styles.cardDescription}>{definition.description}</span>
+                )}
+                <span className={styles.cardFacts}>{cardFacts(definition)}</span>
+              </span>
             </button>
           ))}
         </div>

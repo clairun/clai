@@ -88,8 +88,8 @@ type WorkspaceUiState = {
   activePanel: ActivePanel;
   previewEntry: PreviewEntry | null;
   viewingTask: WorkspaceTaskResponse | null;
-  // The Agents drawer's inline "Add to crew" picker; the drawer widens while
-  // it is open, so the flag lives with the drawer, not inside the list.
+  // The Agents drawer's inline "Add to crew" picker; the drawer header carries
+  // the toggle, so the flag lives with the drawer, not inside the list.
   crewPickerOpen: boolean;
 };
 // Stable fallbacks for store-derived values, so re-renders without session
@@ -2436,12 +2436,7 @@ const Workspace = () => {
         )}
 
         {snapshot && activePanel && (
-          <aside
-            className={`${styles.workspaceDrawer} ${
-              activePanel === 'agents' && crewPickerOpen ? styles.workspaceDrawerWide : ''
-            }`}
-            aria-label={`${activePanel} drawer`}
-          >
+          <aside className={styles.workspaceDrawer} aria-label={`${activePanel} drawer`}>
             <div className={styles.workspaceDrawerHeader}>
               <span className={styles.workspaceDrawerTitle}>
                 {activePanel.charAt(0).toUpperCase() + activePanel.slice(1)}

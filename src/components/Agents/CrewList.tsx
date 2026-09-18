@@ -4,7 +4,8 @@
  * face, whose ring says what it is doing right now — derived from the task
  * list, not from any stored state. "+ Add" in the drawer header unfolds the
  * card picker inside the drawer so nobody has to round-trip through the
- * settings modal; the parent owns that flag because the drawer widens with it.
+ * settings modal; the parent owns that flag because the drawer header — the
+ * parent's own markup — carries the toggle that flips it.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listAgentDefinitions, type AgentDefinitionDetail } from '../../api/client';
@@ -25,7 +26,7 @@ export interface CrewListProps {
   /** The parent's in-flight action id (e.g. `remove:<id>`), if any. */
   busy?: string;
   error?: string;
-  /** Whether the picker is unfolded. One owner: the parent, which also widens the drawer. */
+  /** Whether the picker is unfolded. One owner: the parent, which renders the toggle. */
   pickerOpen: boolean;
   onOpenPicker: () => void;
   onOpenEdit: (workspaceAgentId: string) => void;
@@ -205,6 +206,8 @@ const CrewList = ({
               onChanged={handleCrewChanged}
               onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
               showCrewFaces={false}
+              // The drawer is narrow and keeps its width: one agent per row.
+              layout="rows"
               disabled={!!busy}
             />
           )}
