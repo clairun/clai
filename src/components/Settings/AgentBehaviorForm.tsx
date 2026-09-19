@@ -18,7 +18,7 @@ import {
   workspaceUpdateAgent,
 } from '../../api/client';
 import SkillPicker from './SkillPicker';
-import type { ProviderConnection, WorkspaceSnapshot } from '../../generated/bindings';
+import type { ProviderConnection, WorkspaceDetails } from '../../generated/bindings';
 import type { SectionHandle } from './sectionHandle';
 // Shares the modal's stylesheet on purpose: the form is rendered inside the
 // modal's content pane and must match its fields, toggles and chips exactly.
@@ -222,7 +222,7 @@ export const AgentBehaviorForm = ({
   agentId,             // string for edit; null for create
   initialAgent,
   saveBehavior,
-  snapshot: _snapshot, // unused; kept in signature for future use (e.g., showing peer agents)
+  details: _details,   // unused; kept in signature for future use (e.g., showing peer agents)
   deps,
   saving,              // global save in flight — disables inputs
   onDirtyChange,
@@ -232,7 +232,7 @@ export const AgentBehaviorForm = ({
   ref: React.Ref<SectionHandle>;
   workspaceId: string;
   agentId: string | null;
-  snapshot: WorkspaceSnapshot | null;
+  details: WorkspaceDetails | null;
   initialAgent?: AgentDetail;
   saveBehavior?: (payload: AgentBehaviorPayload) => Promise<void>;
   deps: AgentFormDeps;

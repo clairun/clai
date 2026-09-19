@@ -31,14 +31,14 @@ export interface CrewListProps {
   onOpenPicker: () => void;
   onOpenEdit: (workspaceAgentId: string) => void;
   onRemove: (workspaceAgentId: string) => void;
-  /** After the crew changed through the picker; the parent reloads its snapshot. */
+  /** After the crew changed through the picker; the parent reloads its details. */
   onChanged: () => void | Promise<void>;
 }
 
 const errText = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
-/** Main first, then the rest in the order the snapshot gave them. */
+/** Main first, then the rest in the order the details gave them. */
 export const sortCrew = (agents: readonly WorkspaceAgentResponse[]): WorkspaceAgentResponse[] =>
   [...agents].sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
 

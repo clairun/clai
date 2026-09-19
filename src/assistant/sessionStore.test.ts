@@ -94,7 +94,7 @@ describe('setAskUserPending / clearAskUserPending', () => {
 
 describe('loadSessionData — snapshot refresh preserves in-flight FE state', () => {
   // Regression: ask_user panel was being unmounted within ~5s because
-  // Workspace.jsx polls workspace_get_snapshot every 5s and the wholesale
+  // Workspace.tsx polls workspace_get_details every 5s and the wholesale
   // replacement in loadSessionData was wiping pendingAskUser. Same race
   // existed (and is also fixed) for streaming text/isStreaming.
 

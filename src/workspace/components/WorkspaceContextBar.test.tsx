@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 
 // vi.mock is hoisted; vi.hoisted lets us share the mock fns with assertions.
 const mocks = vi.hoisted(() => ({
-  getWorkspaceSnapshot: vi.fn(),
+  getWorkspaceDetails: vi.fn(),
   updateWorkspaceSessionMcp: vi.fn(),
   setWorkspaceProvider: vi.fn(),
   getMcpServers: vi.fn(),
@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../client', () => ({
-  getWorkspaceSnapshot: mocks.getWorkspaceSnapshot,
+  getWorkspaceDetails: mocks.getWorkspaceDetails,
   updateWorkspaceSessionMcp: mocks.updateWorkspaceSessionMcp,
   setWorkspaceProvider: mocks.setWorkspaceProvider,
 }));
@@ -23,7 +23,7 @@ vi.mock('../../api/client', () => ({
 }));
 
 import WorkspaceContextBar from './WorkspaceContextBar';
-import type { SessionContext, WorkspaceSnapshot } from '../../generated/bindings';
+import type { SessionContext, WorkspaceDetails } from '../../generated/bindings';
 
 const server = (id: string, name: string) => ({
   id,
@@ -35,11 +35,11 @@ const server = (id: string, name: string) => ({
 // Typed against the generated bindings so a backend field rename (e.g.
 // disabledMcpServerIds) fails this test at compile time instead of silently
 // making the mock stale. The config-derived enabled set and the disabled
-// remainder both travel on the snapshot; the session context only matters
+// remainder both travel on the workspace details; the session context only matters
 // as a legacy fallback when the config records nothing.
-const snapshot = (
+const details = (
   context: Partial<SessionContext>,
-  extra: Partial<WorkspaceSnapshot> = {}
+  extra: Partial<WorkspaceDetails> = {}
 ) => ({
   kind: 'general',
   providerConnectionIds: [],
@@ -62,8 +62,8 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
   });
 
   it('persists a disable toggle: enabled list shrinks, disabled list carries the id', async () => {
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({}, { selectedMcpServerIds: ['srv-a', 'srv-b'] })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({}, { selectedMcpServerIds: ['srv-a', 'srv-b'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -77,11 +77,11 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     expect(await screen.findByTitle('Alpha: click to enable')).toBeTruthy();
   });
 
-  it('restores the persisted disabled state from the snapshot', async () => {
+  it('restores the persisted disabled state from the workspace details', async () => {
     // Backend stores enabled and disabled separately; the bar must show the
     // union with the disabled badge toggled off after a restart.
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -90,8 +90,8 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
   });
 
   it('re-enabling persists the id back into the enabled list', async () => {
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -108,8 +108,8 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
   });
 
   it('removing a server also clears it from the disabled list', async () => {
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -130,8 +130,8 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     // Workspace Settings rewrites the manager's selection without touching
     // the session row; the bar must surface the config truth, not the stale
     // session list, or its next persist would overwrite the Settings change.
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({ mcpServerIds: ['srv-a'] }, { selectedMcpServerIds: ['srv-b'] })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({ mcpServerIds: ['srv-a'] }, { selectedMcpServerIds: ['srv-b'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -142,8 +142,8 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
   it('falls back to the session list only for manager-less workspaces', async () => {
     // Without a manager row the config cannot record a selection, so the
     // session's enabled list stays canonical.
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({ mcpServerIds: ['srv-a'] }, { defaultWorkspaceAgentId: null })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({ mcpServerIds: ['srv-a'] }, { defaultWorkspaceAgentId: null })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -154,33 +154,33 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     // Mirrors the backend rule: a manager row with zero MCP refs means zero
     // servers — a Settings remove-all (or a pre-mirror legacy session) must
     // not resurrect the session's stale list.
-    mocks.getWorkspaceSnapshot.mockResolvedValue(snapshot({ mcpServerIds: ['srv-a'] }));
+    mocks.getWorkspaceDetails.mockResolvedValue(details({ mcpServerIds: ['srv-a'] }));
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
     expect(await screen.findByText('Add MCP')).toBeTruthy();
     expect(screen.queryByTitle('Alpha: click to disable')).toBeNull();
   });
 
-  it('refetches the snapshot when workspace settings change', async () => {
+  it('refetches the workspace details when workspace settings change', async () => {
     // The bar is self-loading; a Settings save dispatches
     // workspace-settings-changed so stale local state is replaced before the
     // next persist could overwrite the config.
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({}, { selectedMcpServerIds: ['srv-a'] })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({}, { selectedMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
     expect(await screen.findByTitle('Alpha: click to disable')).toBeTruthy();
 
-    mocks.getWorkspaceSnapshot.mockResolvedValue(snapshot({}, { selectedMcpServerIds: [] }));
+    mocks.getWorkspaceDetails.mockResolvedValue(details({}, { selectedMcpServerIds: [] }));
     window.dispatchEvent(new CustomEvent('workspace-settings-changed'));
 
     await waitFor(() => expect(screen.queryByTitle('Alpha: click to disable')).toBeNull());
   });
 
   it('rolls back the optimistic toggle when the backend rejects the update', async () => {
-    mocks.getWorkspaceSnapshot.mockResolvedValue(
-      snapshot({}, { selectedMcpServerIds: ['srv-a', 'srv-b'] })
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({}, { selectedMcpServerIds: ['srv-a', 'srv-b'] })
     );
     mocks.updateWorkspaceSessionMcp.mockRejectedValue(new Error('db locked'));
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});

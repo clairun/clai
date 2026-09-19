@@ -10,7 +10,7 @@ export interface TaskView {
 
 export interface UseOpenTaskOptions {
   workspaceId: string;
-  /** The tasks already in hand — the snapshot's newest 50 — read at click time. */
+  /** The tasks already in hand — the newest 50 the details carry — read at click time. */
   loadedTasks: () => readonly WorkspaceTaskResponse[];
   /** Bring the tasks drawer forward. Its transcript only mounts while it is. */
   showTasksPanel: () => void;
@@ -29,7 +29,7 @@ export interface UseOpenTaskOptions {
 /**
  * Open the task a chat card names.
  *
- * Two things make this more than a state assignment. The snapshot carries only
+ * Two things make this more than a state assignment. The details carry only
  * the 50 most recently touched tasks, so a card pointing further back has to
  * fetch its own row — and a fetch is slow enough for the reader to have moved
  * on. So the drawer opens at once on what is already known, and the answer is

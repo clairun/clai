@@ -5,13 +5,13 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
-import type { WorkspaceListEntry, WorkspaceSnapshot } from '../generated/bindings';
+import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 
 vi.mock('../workspace/client', () => ({
   listWorkspaces: vi.fn(),
   deleteWorkspace: vi.fn(),
   forkWorkspace: vi.fn(),
-  getWorkspaceSnapshot: vi.fn(),
+  getWorkspaceDetails: vi.fn(),
   runWorkspaceNow: vi.fn(),
   setWorkspaceSchedulePaused: vi.fn(),
   setWorkspaceStarred: vi.fn(),
@@ -58,7 +58,7 @@ const workspaceClient = await import('../workspace/client');
 const listWorkspaces = vi.mocked(workspaceClient.listWorkspaces);
 const deleteWorkspace = vi.mocked(workspaceClient.deleteWorkspace);
 const getSchedulerPaused = vi.mocked(workspaceClient.getSchedulerPaused);
-const getWorkspaceSnapshot = vi.mocked(workspaceClient.getWorkspaceSnapshot);
+const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 
 const entry = (
   id: string,
@@ -266,11 +266,10 @@ describe('FleetLayout workspace deletion', () => {
 });
 
 describe('FleetLayout workspace settings', () => {
-  // The modal reads only workspace metadata, so both payload flags must be
-  // off: with them on, the command ships every message and tool call of the
-  // workspace's session (~100MB on a long-lived workspace) and the await
-  // gates the modal's first paint.
-  const LIGHTWEIGHT = { includeSessionPayload: false, includeFiles: false };
+  // The modal reads only workspace metadata, so the file flag must be off:
+  // with it on, the command walks the whole workspace filesystem and that
+  // await gates the modal's first paint.
+  const METADATA_ONLY = { includeFiles: false };
 
   const openSettings = async (title = 'Alpha') => {
     const row = await screen.findByRole('button', { name: new RegExp(title) });
@@ -280,28 +279,28 @@ describe('FleetLayout workspace settings', () => {
     return screen.findByTestId('settings-modal');
   };
 
-  it('requests a metadata-only snapshot when opening workspace settings', async () => {
+  it('requests metadata-only details when opening workspace settings', async () => {
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
     getSchedulerPaused.mockResolvedValue(false);
-    getWorkspaceSnapshot.mockResolvedValue({ workspaceId: 'a' } as WorkspaceSnapshot);
+    getWorkspaceDetails.mockResolvedValue({ workspaceId: 'a' } as WorkspaceDetails);
 
     renderFleet();
     await openSettings();
 
-    expect(getWorkspaceSnapshot).toHaveBeenCalledWith('a', LIGHTWEIGHT);
+    expect(getWorkspaceDetails).toHaveBeenCalledWith('a', METADATA_ONLY);
   });
 
-  it('requests a metadata-only snapshot when refreshing after a save', async () => {
+  it('requests metadata-only details when refreshing after a save', async () => {
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
     getSchedulerPaused.mockResolvedValue(false);
-    getWorkspaceSnapshot.mockResolvedValue({ workspaceId: 'a' } as WorkspaceSnapshot);
+    getWorkspaceDetails.mockResolvedValue({ workspaceId: 'a' } as WorkspaceDetails);
 
     renderFleet();
     await userEvent.click(await openSettings());
 
-    await waitFor(() => expect(getWorkspaceSnapshot).toHaveBeenCalledTimes(2));
-    for (const call of getWorkspaceSnapshot.mock.calls) {
-      expect(call).toEqual(['a', LIGHTWEIGHT]);
+    await waitFor(() => expect(getWorkspaceDetails).toHaveBeenCalledTimes(2));
+    for (const call of getWorkspaceDetails.mock.calls) {
+      expect(call).toEqual(['a', METADATA_ONLY]);
     }
   });
 });

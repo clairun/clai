@@ -62,7 +62,7 @@ const setup = (
 };
 
 describe('useOpenTask', () => {
-  it('opens a task already in the snapshot without asking the backend', () => {
+  it('opens a task already in the loaded details without asking the backend', () => {
     const known = task('t-1');
     const { open, showTasksPanel, applied, fetchTask } = setup({ loaded: [known] });
 
@@ -74,7 +74,7 @@ describe('useOpenTask', () => {
     expect(fetchTask).not.toHaveBeenCalled();
   });
 
-  it('fetches a task older than the snapshot window, by workspace then id', async () => {
+  it('fetches a task older than the loaded window, by workspace then id', async () => {
     const old = task('t-old');
     const { open, showTasksPanel, applied, fetchTask } = setup({ fetched: old });
 

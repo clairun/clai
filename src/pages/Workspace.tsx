@@ -20,7 +20,7 @@ import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import VirtualizedList from '../components/common/VirtualizedList';
 import {
   getOrCreateWorkspaceSession,
-  getWorkspaceSnapshot,
+  getWorkspaceDetails,
   importWorkspaceFiles,
   listWorkspaceDir,
   markWorkspaceOpened,
@@ -32,7 +32,6 @@ import {
   setWorkspaceSchedulePaused,
   setWorkspaceTitle,
 } from '../workspace/client';
-import type { SnapshotOptions } from '../workspace/client';
 import type {
   AssistantMessage,
   AssistantRun,
@@ -40,7 +39,7 @@ import type {
   WorkspaceAgentResponse,
   WorkspaceDirEntry,
   WorkspaceFileEntry,
-  WorkspaceSnapshot,
+  WorkspaceDetails,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
@@ -59,17 +58,15 @@ import styles from './Workspace.module.css';
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
 const MESSAGE_PAGE_LIMIT = 100;
-// Periodic poll skips the session payload (messages/runs/toolCalls are
-// kept in sync via the assistant event stream) but still re-walks the
-// workspace filesystem so memories created by a running agent surface
+// The workspace page is the one caller that wants the filesystem walk: it
+// re-walks on every poll so memories created by a running agent surface
 // without the user having to re-enter the workspace, and so the artifact
-// count stays current. Artifacts themselves are no longer returned here —
-// the panel lazy-loads each directory level via workspace_list_dir — so the
-// per-tick cost is a memory walk plus a recursive artifact count. Not the
-// same pair as FleetLayout's SETTINGS_SNAPSHOT_OPTIONS, which is lighter
-// still: the settings modal reads header fields only, so it skips the walk.
-const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
-  includeSessionPayload: false,
+// count stays current. Artifact entries themselves are not returned — the
+// panel lazy-loads each directory level via workspace_list_dir — so the
+// per-tick cost is a memory walk plus a recursive artifact count. Unlike
+// FleetLayout's SETTINGS_DETAILS_OPTIONS, which reads header fields only
+// and skips the walk entirely.
+const DETAILS_WITH_FILES = {
   includeFiles: true,
 };
 // Two menu items of 12px text plus vertical padding, 1px gap, wrapper
@@ -160,9 +157,9 @@ const formatNextRun = (seconds: number | bigint | null | undefined): string | nu
   return `In ${Math.floor(value / 86400)}d`;
 };
 
-const formatSchedulePill = (snapshot: WorkspaceSnapshot | null): string | null => {
-  if (!snapshot?.scheduleEnabled) return null;
-  const kind = snapshot.scheduleKind;
+const formatSchedulePill = (details: WorkspaceDetails | null): string | null => {
+  if (!details?.scheduleEnabled) return null;
+  const kind = details.scheduleKind;
   let cadence: string | null = null;
   if (kind?.type === 'interval' && Number(kind.intervalMinutes) > 0) {
     cadence = `every ${Number(kind.intervalMinutes)}m`;
@@ -173,7 +170,7 @@ const formatSchedulePill = (snapshot: WorkspaceSnapshot | null): string | null =
   ) {
     cadence = `cron: ${kind.expression.trim()}`;
   }
-  if (snapshot.schedulePaused) {
+  if (details.schedulePaused) {
     return cadence ? `Paused · ${cadence}` : 'Paused';
   }
   return cadence ? `Periodic · ${cadence}` : 'Periodic';
@@ -606,7 +603,7 @@ interface ArtifactsListProps {
 const ARTIFACT_SEARCH_DEBOUNCE_MS = 250;
 
 // How often the open artifact folders are re-read. Deliberately the same
-// cadence as the snapshot poll so the panel feels equally live.
+// cadence as the workspace details poll so the panel feels equally live.
 //
 // Each pass costs one `readdir` per expanded folder, plus one more per child
 // directory to size it (capped at MAX_CHILD_COUNT entries each). That is
@@ -639,7 +636,7 @@ const formatChildCount = (childCount: number): string =>
   formatCappedCount(childCount, childCount >= MAX_CHILD_COUNT);
 
 // Lazy directory-tree browser. Loads the root level on open and each folder's
-// children on first expand, caching them by path. The 5s snapshot poll surfaces
+// children on first expand, caching them by path. The 5s details poll surfaces
 // new artifacts by bumping `totalCount`, which we use to silently refresh the
 // already-loaded levels so a running agent's output appears without reopening.
 const ArtifactsList = ({
@@ -1071,7 +1068,7 @@ const WorkspaceAttentionBanner = ({ tasks }: { tasks: WorkspaceTaskResponse[] })
  * Compact workspace header with breadcrumb navigation, status, and inline metrics.
  */
 const WorkspaceHeader = ({
-  snapshot,
+  details,
   workspaceId,
   isGenericWorkspace,
   messageCount,
@@ -1090,7 +1087,7 @@ const WorkspaceHeader = ({
   pauseBusy,
   stopBusy,
 }: {
-  snapshot: WorkspaceSnapshot | null;
+  details: WorkspaceDetails | null;
   workspaceId: string;
   isGenericWorkspace: boolean;
   // Total messages in the conversation (including not-yet-loaded history
@@ -1112,23 +1109,23 @@ const WorkspaceHeader = ({
   pauseBusy: boolean;
   stopBusy: boolean;
 }) => {
-  const isAgent = snapshot?.kind === 'agent';
-  const lastRun = getLastRunInfo(snapshot?.runs);
-  const nextRunText = formatNextRun(snapshot?.nextRunInSeconds);
-  const schedulePillText = formatSchedulePill(snapshot);
-  const scheduleEnabled = !!snapshot?.scheduleEnabled;
-  const schedulePaused = !!snapshot?.schedulePaused;
+  const isAgent = details?.kind === 'agent';
+  const lastRun = getLastRunInfo(details?.runs);
+  const nextRunText = formatNextRun(details?.nextRunInSeconds);
+  const schedulePillText = formatSchedulePill(details);
+  const scheduleEnabled = !!details?.scheduleEnabled;
+  const schedulePaused = !!details?.schedulePaused;
   // Active = a scheduled task is running, or any non-terminal task is in
   // flight on this workspace. Matches Fleet's "isProcessing" check so the
   // Run-now button correctly disables while a run is mid-flight.
-  const hasRunningTask = (snapshot?.tasks || []).some(isTaskActive);
+  const hasRunningTask = (details?.tasks || []).some(isTaskActive);
   // Manager is invisible to the user — exclude it from the headline count so
   // the chip and the drawer (which already filters !isDefault) agree.
   // Count includes the main (default) agent — the manager is now a
   // first-class entry in the workspace's agent list.
-  const assignedAgentCount = (snapshot?.assignedAgents || []).length;
-  const taskCount = snapshot?.tasks?.length || 0;
-  const activeTaskCount = (snapshot?.tasks || []).filter(isTaskActive).length;
+  const assignedAgentCount = (details?.assignedAgents || []).length;
+  const taskCount = details?.tasks?.length || 0;
+  const activeTaskCount = (details?.tasks || []).filter(isTaskActive).length;
 
   // Click a counter to open its panel; click again (or click another) to switch.
   // null = no panel open, chat takes the full content area.
@@ -1139,8 +1136,8 @@ const WorkspaceHeader = ({
   // ── Inline title rename ────────────────────────────────────────────
   // Click the title to edit it in place; Enter/blur commits, Escape
   // cancels. The generic workspace has no real title to rename.
-  const currentTitle = snapshot?.title || (isGenericWorkspace ? 'Workspace' : workspaceId);
-  const canEditTitle = !isGenericWorkspace && !!snapshot;
+  const currentTitle = details?.title || (isGenericWorkspace ? 'Workspace' : workspaceId);
+  const canEditTitle = !isGenericWorkspace && !!details;
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [savingTitle, setSavingTitle] = useState(false);
@@ -1159,7 +1156,7 @@ const WorkspaceHeader = ({
   const beginEditTitle = () => {
     if (!canEditTitle) return;
     skipBlurCommitRef.current = false;
-    setDraftTitle(snapshot?.title || '');
+    setDraftTitle(details?.title || '');
     setIsEditingTitle(true);
   };
 
@@ -1177,7 +1174,7 @@ const WorkspaceHeader = ({
     if (savingTitle) return;
     const trimmed = draftTitle.trim();
     // Empty, too long, or unchanged → close without a write.
-    if (!trimmed || trimmed.length > 100 || trimmed === (snapshot?.title || '').trim()) {
+    if (!trimmed || trimmed.length > 100 || trimmed === (details?.title || '').trim()) {
       cancelEditTitle();
       return;
     }
@@ -1381,7 +1378,7 @@ const WorkspaceHeader = ({
           true,
           0,
           assignedAgentCount > 0 ? (
-            <AgentFacepile agents={snapshot?.assignedAgents || []} tasks={snapshot?.tasks || []} />
+            <AgentFacepile agents={details?.assignedAgents || []} tasks={details?.tasks || []} />
           ) : null
         )}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
@@ -1422,7 +1419,7 @@ interface ChatFirstLayoutProps {
   isLoadingOlderMessages: boolean;
   onLoadOlderMessages: () => void;
   // Crew and open-task handler for the chat's delegated-task cards. Both must
-  // keep a stable identity across snapshot polls; see `chatRoster` below.
+  // keep a stable identity across details polls; see `chatRoster` below.
   taskRoster: readonly WorkspaceAgentResponse[];
   onOpenTask: (taskId: string) => void;
 }
@@ -1573,15 +1570,15 @@ const Workspace = () => {
   const { loadWorkspaces } = useOutletContext<FleetOutletContext>() ?? {};
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
-  const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
+  const [details, setDetails] = useState<WorkspaceDetails | null>(null);
   // Whether the crew can be edited here: agent-kind workspaces and the default
   // one have a fixed roster. Drives the drawer's "+ Add" and the list alike.
-  const crewManageable = snapshot?.kind !== 'agent' && !isGenericWorkspace;
-  // True only during the initial-entry load (loadSnapshot(true)); the periodic
+  const crewManageable = details?.kind !== 'agent' && !isGenericWorkspace;
+  // True only during the initial-entry load (loadDetails(true)); the periodic
   // poll refreshes without flipping it. Read by the chat panel so the first
   // hydration window renders a loading placeholder instead of the misleading
-  // "Start a conversation" empty state (the session payload arrives in a
-  // second round-trip after the lightweight snapshot, so messages are briefly
+  // "Start a conversation" empty state (the conversation arrives in a
+  // second round-trip after the details load, so messages are briefly
   // empty even on a conversation that has history).
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1761,14 +1758,14 @@ const Workspace = () => {
   }, [artifactAddMenu, activePanel]);
 
   // The Workspace instance is REUSED across workspace→workspace navigation, so
-  // after the URL changes `snapshot` briefly still holds the PREVIOUS workspace's
-  // data until the new snapshot round-trip resolves. Gate all conversation-derived
-  // state on a snapshot that actually belongs to the current workspace, so the
+  // after the URL changes `details` briefly still holds the PREVIOUS workspace's
+  // data until the new details round-trip resolves. Gate all conversation-derived
+  // state on details that actually belong to the current workspace, so the
   // panel shows the loading placeholder instead of the previous workspace's
   // conversation during the switch.
-  const snapshotReady = snapshot?.workspaceId === workspaceId;
-  const activeSnapshot = snapshotReady ? snapshot : null;
-  const sessionId = activeSnapshot?.session?.id || null;
+  const detailsReady = details?.workspaceId === workspaceId;
+  const activeDetails = detailsReady ? details : null;
+  const sessionId = activeDetails?.session?.id || null;
   // Narrow store subscriptions: each value the page shell renders gets its
   // own selector, so this (very large) component body only re-runs when one
   // of these actually changes. Subscribing to the whole `sessions[sessionId]`
@@ -1776,7 +1773,7 @@ const Workspace = () => {
   // text deltas are deliberately NOT subscribed here — ChatFirstLayout owns
   // that subscription so per-token updates re-render only the chat area.
   // Selectors return raw store references (stable across unrelated
-  // mutations); snapshot fallbacks are applied below.
+  // mutations); fallbacks are applied below.
   const storeMessages = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.messages : undefined
   );
@@ -1806,70 +1803,51 @@ const Workspace = () => {
   );
   const lastLoadedSessionUpdatedAtRef = useRef<NumericTimestamp>(null);
 
-  const loadSnapshot = useCallback(
-    async (showSpinner = false, options: SnapshotOptions | null = null) => {
+  const loadDetails = useCallback(
+    async (showSpinner = false) => {
       if (showSpinner) {
         setIsLoading(true);
       }
 
-      const effectiveOptions = options ?? LIGHTWEIGHT_SNAPSHOT_OPTIONS;
-      const isLightweight = effectiveOptions.includeSessionPayload === false;
-
       try {
-        const nextSnapshot = await getWorkspaceSnapshot(workspaceId, effectiveOptions);
-        setSnapshot((current) => {
-          if (!isLightweight || !current) {
-            return nextSnapshot;
-          }
-
-          // Lightweight refresh: the backend skipped the session payload
-          // (messages/runs/toolCalls live in the assistant event store),
-          // so preserve those from the prior snapshot. Memories and the
-          // artifact count ARE re-fetched so a running agent's writes appear
-          // without the user having to re-enter the workspace (the artifacts
-          // panel itself lazy-loads directory levels on its own).
-          return {
-            ...nextSnapshot,
-            messages: current.messages || [],
-            toolCalls: current.toolCalls || [],
-          };
-        });
+        const nextDetails = await getWorkspaceDetails(workspaceId, DETAILS_WITH_FILES);
+        setDetails(nextDetails);
         setError('');
 
-        if (nextSnapshot?.session) {
+        if (nextDetails?.session) {
           const store = useAssistantStore.getState();
-          store.setActiveSessionForTab(`workspace:${workspaceId}`, nextSnapshot.session.id);
+          store.setActiveSessionForTab(`workspace:${workspaceId}`, nextDetails.session.id);
 
-          const existingSession = store.sessions[nextSnapshot.session.id];
+          const existingSession = store.sessions[nextDetails.session.id];
           const needsInitialHydration = !existingSession;
           const hasUnloadedUpdate =
-            nextSnapshot.session.updatedAt &&
-            lastLoadedSessionUpdatedAtRef.current !== nextSnapshot.session.updatedAt;
+            nextDetails.session.updatedAt &&
+            lastLoadedSessionUpdatedAtRef.current !== nextDetails.session.updatedAt;
           const shouldHydrateSession =
             needsInitialHydration || (hasUnloadedUpdate && !existingSession?.isStreaming);
 
           if (shouldHydrateSession) {
             const [messagePage, runs] = await Promise.all([
               assistantClient.loadSessionMessagesPage({
-                sessionId: nextSnapshot.session.id,
+                sessionId: nextDetails.session.id,
                 limit: MESSAGE_PAGE_LIMIT,
                 includeAncestors: true,
               }),
-              assistantClient.listRuns(nextSnapshot.session.id),
+              assistantClient.listRuns(nextDetails.session.id),
             ]);
 
             store.loadSessionData(
-              nextSnapshot.session.id,
-              nextSnapshot.session,
+              nextDetails.session.id,
+              nextDetails.session,
               messagePage.messages,
               runs,
               messagePage.toolCalls,
-              nextSnapshot.queuedMessageIds || [],
+              nextDetails.queuedMessageIds || [],
               messagePage.nextCursor ?? null,
               messagePage.hasMore,
               messagePage.totalCount
             );
-            lastLoadedSessionUpdatedAtRef.current = nextSnapshot.session.updatedAt || null;
+            lastLoadedSessionUpdatedAtRef.current = nextDetails.session.updatedAt || null;
           }
         }
       } catch (err) {
@@ -1884,19 +1862,19 @@ const Workspace = () => {
   // Delete the file currently open in the preview panel (artifacts only —
   // memory files are protected). Confirmation is the armed two-click on the
   // panel's own delete button. Deletes, closes the panel, and refreshes the
-  // snapshot so the artifact tree/count update promptly.
+  // workspace details so the artifact tree/count update promptly.
   const handlePreviewDelete = useCallback(async () => {
     const entry = previewEntry?.entry;
     if (!entry?.path) return;
     try {
       await deleteWorkspacePath(workspaceId, entry.path);
       patchWorkspaceUi({ previewEntry: null });
-      await loadSnapshot(false);
+      await loadDetails(false);
     } catch (error) {
       console.error(`Failed to delete "${entry.path}":`, error);
       window.alert(`Failed to delete \u201c${entry.name}\u201d: ${String(error)}`);
     }
-  }, [previewEntry, workspaceId, patchWorkspaceUi, loadSnapshot]);
+  }, [previewEntry, workspaceId, patchWorkspaceUi, loadDetails]);
 
   // ── Workspace Settings modal openers ───────────────────────────────────
   const openSettings = useCallback((selection?: SettingsSelection | null) => {
@@ -1930,8 +1908,8 @@ const Workspace = () => {
   }, []);
 
   const handleSettingsChanged = useCallback(async () => {
-    await loadSnapshot(false);
-  }, [loadSnapshot]);
+    await loadDetails(false);
+  }, [loadDetails]);
 
   // Schedule controls — Run / Pause / Resume. Mirror Fleet.jsx so the
   // workspace page can drive the periodic schedule without the user having
@@ -1941,7 +1919,7 @@ const Workspace = () => {
   // Fleet rail so its row updates at once rather than on the next 5s poll.
   const handleTitleSaved = useCallback(
     (title: string) => {
-      setSnapshot((current) => (current ? { ...current, title } : current));
+      setDetails((current) => (current ? { ...current, title } : current));
       void loadWorkspaces?.();
     },
     [loadWorkspaces]
@@ -1953,16 +1931,16 @@ const Workspace = () => {
     try {
       await runWorkspaceNow(workspaceId);
       setError('');
-      await loadSnapshot(false);
+      await loadDetails(false);
     } catch (err) {
       setError(errorMessage(err, 'Failed to start run.'));
     } finally {
       setRunNowBusy(false);
     }
-  }, [loadSnapshot, runNowBusy, workspaceId]);
+  }, [loadDetails, runNowBusy, workspaceId]);
 
   // Track the run id we asked to cancel so the Stop button stays in a
-  // "stopping…" state until the snapshot confirms the run flipped to a
+  // "stopping…" state until the details confirm the run flipped to a
   // terminal state. `assistant_cancel_run` only *signals* the cancel
   // token — the engine flips RunStatus on its next checkpoint — so
   // clearing busy on resolve would re-arm the button while the run is
@@ -1975,13 +1953,13 @@ const Workspace = () => {
       try {
         await assistantClient.cancelRun(runId);
         setError('');
-        await loadSnapshot(false);
+        await loadDetails(false);
       } catch (err) {
         setError(errorMessage(err, 'Failed to stop run.'));
         setCancellingRunId(null);
       }
     },
-    [cancellingRunId, loadSnapshot]
+    [cancellingRunId, loadDetails]
   );
 
   const [pauseBusy, setPauseBusy] = useState(false);
@@ -1989,22 +1967,22 @@ const Workspace = () => {
     async (nextPaused: boolean) => {
       if (pauseBusy) return;
       setPauseBusy(true);
-      // Optimistically flip the snapshot's pause flag so the button swaps
-      // immediately — the next snapshot poll will reconcile if the backend
+      // Optimistically flip the pause flag so the button swaps
+      // immediately — the next details poll will reconcile if the backend
       // disagrees.
-      setSnapshot((current) => (current ? { ...current, schedulePaused: nextPaused } : current));
+      setDetails((current) => (current ? { ...current, schedulePaused: nextPaused } : current));
       try {
         await setWorkspaceSchedulePaused(workspaceId, nextPaused);
         setError('');
-        await loadSnapshot(false);
+        await loadDetails(false);
       } catch (err) {
         setError(errorMessage(err, 'Failed to update pause state.'));
-        setSnapshot((current) => (current ? { ...current, schedulePaused: !nextPaused } : current));
+        setDetails((current) => (current ? { ...current, schedulePaused: !nextPaused } : current));
       } finally {
         setPauseBusy(false);
       }
     },
-    [loadSnapshot, pauseBusy, workspaceId]
+    [loadDetails, pauseBusy, workspaceId]
   );
 
   const handleAgentRemove = useCallback(
@@ -2014,74 +1992,67 @@ const Workspace = () => {
       setAgentError('');
       try {
         await workspaceDeleteAgent(workspaceId, workspaceAgentId);
-        await loadSnapshot(false);
+        await loadDetails(false);
       } catch (err) {
         setAgentError(errorMessage(err, 'Failed to remove agent.'));
       } finally {
         setAgentBusy('');
       }
     },
-    [agentBusy, loadSnapshot, workspaceId]
+    [agentBusy, loadDetails, workspaceId]
   );
 
   useEffect(() => {
     lastLoadedSessionUpdatedAtRef.current = null;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Interval poll on loadSnapshot identity: full reload once, then setInterval for lightweight polls. The pattern cannot be expressed without setState in an effect (refs can't trigger renders).
-    loadSnapshot(true);
-    const interval = window.setInterval(
-      () => loadSnapshot(false, LIGHTWEIGHT_SNAPSHOT_OPTIONS),
-      REFRESH_INTERVAL_MS
-    );
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Interval poll on loadDetails identity: full reload once, then setInterval for the periodic refresh. The pattern cannot be expressed without setState in an effect (refs can't trigger renders).
+    loadDetails(true);
+    const interval = window.setInterval(() => loadDetails(false), REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [loadSnapshot]);
+  }, [loadDetails]);
 
-  const memories = useMemo(() => snapshot?.memories || [], [snapshot?.memories]);
-  // `artifacts` is now intentionally empty in the snapshot — the panel lazy-
-  // loads each directory level on demand. It's kept only so navigatePreviewFile
-  // can still resolve a clicked sibling against any entries it has seen.
-  const artifacts = useMemo(() => snapshot?.artifacts || [], [snapshot?.artifacts]);
-  const artifactCount = Number(snapshot?.artifactCount ?? 0);
-  const artifactCountCapped = snapshot?.artifactCountCapped ?? false;
+  const memories = useMemo(() => details?.memories || [], [details?.memories]);
+  const artifactCount = Number(details?.artifactCount ?? 0);
+  const artifactCountCapped = details?.artifactCountCapped ?? false;
 
   // Open another workspace file in the preview — used when a link inside a
   // previewed file points at a sibling (an index page linking to a report, a
-  // doc linking to another .md). Resolve against the tracked artifact/memory
-  // lists to keep the right kind/label; otherwise synthesize a minimal entry
-  // so any in-root file still opens (the panel derives its viewer from path).
+  // doc linking to another .md). Resolve against the memory list to keep the
+  // right kind/label; otherwise synthesize a minimal entry so any in-root file
+  // still opens (the panel derives its viewer from path). Artifacts have no
+  // list to resolve against — the panel lazy-loads its tree one directory at a
+  // time — so a link to one always takes the synthesized path.
   const navigatePreviewFile = useCallback(
     (path: string) => {
-      const artifactMatch = artifacts.find((item) => item.path === path);
-      const memoryMatch = artifactMatch ? null : memories.find((item) => item.path === path);
+      const memoryMatch = memories.find((item) => item.path === path);
       const kind: PreviewEntry['kind'] = memoryMatch ? 'memory' : 'artifact';
-      const entry: WorkspaceFileEntry = artifactMatch ??
-        memoryMatch ?? {
-          path,
-          relativePath: path,
-          name: path.slice(path.lastIndexOf('/') + 1),
-          viewer: '',
-          size: null,
-          updatedAt: null,
-          preview: null,
-        };
+      const entry: WorkspaceFileEntry = memoryMatch ?? {
+        path,
+        relativePath: path,
+        name: path.slice(path.lastIndexOf('/') + 1),
+        viewer: '',
+        size: null,
+        updatedAt: null,
+        preview: null,
+      };
       patchWorkspaceUi({ previewEntry: { kind, entry }, viewingTask: null });
     },
-    [artifacts, memories, patchWorkspaceUi]
+    [memories, patchWorkspaceUi]
   );
-  const messages = storeMessages || activeSnapshot?.messages || EMPTY_MESSAGES;
+  const messages = storeMessages || EMPTY_MESSAGES;
   // While the initial entry load is in flight and no messages have arrived
   // yet, the conversation is unknown — not provably empty. Suppress the
   // "Start a conversation" empty state until loading settles so an existing
   // conversation doesn't flash the empty placeholder before its history lands.
-  const isHydrating = messages.length === 0 && (isLoading || !snapshotReady);
+  const isHydrating = messages.length === 0 && (isLoading || !detailsReady);
   // Conversation total from the backend page responses (kept live by the
   // store as messages stream in); before the first page load reports it,
   // the loaded window is the best available answer.
   const totalMessageCount = storeTotalMessageCount ?? messages.length;
-  const toolCalls = storeToolCalls || activeSnapshot?.toolCalls || EMPTY_TOOL_CALLS;
-  // Store is the live source once the session is hydrated; the snapshot
-  // covers the first render before hydration.
+  const toolCalls = storeToolCalls || EMPTY_TOOL_CALLS;
+  // Store is the live source once the session is hydrated; the workspace
+  // details cover the first render before hydration.
   const queuedMessageIds =
-    storeQueuedMessageIds ?? activeSnapshot?.queuedMessageIds ?? EMPTY_QUEUED_IDS;
+    storeQueuedMessageIds ?? activeDetails?.queuedMessageIds ?? EMPTY_QUEUED_IDS;
   const handleDeleteQueuedMessage = useCallback(
     (messageId: string) => {
       if (!sessionId) return;
@@ -2148,7 +2119,7 @@ const Workspace = () => {
 
   const forkPromptStartedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (!snapshot || forkPromptStartedRef.current.has(workspaceId)) return;
+    if (!details || forkPromptStartedRef.current.has(workspaceId)) return;
 
     const prompt = takePendingForkPrompt(workspaceId);
     if (!prompt) return;
@@ -2177,7 +2148,7 @@ const Workspace = () => {
         if (result.queued) {
           store.markMessageQueued(binding.session.id, result.message.id);
         }
-        await loadSnapshot(false);
+        await loadDetails(false);
       } catch (err) {
         if (!cancelled) {
           setError(errorMessage(err, 'Failed to start the fork prompt.'));
@@ -2189,9 +2160,9 @@ const Workspace = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadSnapshot, snapshot, workspaceId]);
+  }, [loadDetails, details, workspaceId]);
 
-  const tasks = snapshot?.tasks || [];
+  const tasks = details?.tasks || [];
 
   // The chat's delegated-task cards are frozen at the moment of their tool
   // call — the tasks drawer owns what is happening now. So the chat gets no
@@ -2201,12 +2172,12 @@ const Workspace = () => {
   // The roster it does need (faces, names) keeps one reference across polls
   // that changed nothing about a face — see `useStableRoster` — and the tasks
   // a click has to resolve are read from a ref instead of a prop.
-  const chatRoster = useStableRoster(snapshot?.assignedAgents);
+  const chatRoster = useStableRoster(details?.assignedAgents);
 
   const tasksRef = useRef<readonly WorkspaceTaskResponse[]>(EMPTY_TASKS);
   useEffect(() => {
-    tasksRef.current = snapshot?.tasks || EMPTY_TASKS;
-  }, [snapshot]);
+    tasksRef.current = details?.tasks || EMPTY_TASKS;
+  }, [details]);
 
   const loadedTasks = useCallback(() => tasksRef.current, []);
   const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
@@ -2232,10 +2203,10 @@ const Workspace = () => {
   });
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
-  // `snapshot.runs` is sorted newest-first by the backend; pick the first
+  // `details.runs` is sorted newest-first by the backend; pick the first
   // non-terminal entry so we cancel the most recent activation.
   const activeRun =
-    (snapshot?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
+    (details?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
   // Ctrl+C cancels the in-flight run (terminal-style interrupt). The guard
   // logic lives in shouldCancelRunOnKey so it stays unit-tested: a real text
@@ -2266,7 +2237,7 @@ const Workspace = () => {
   // Surface the most recent run's failure in the chat. Derived from the
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
-  const lastRun = getLastRunInfo(storeRuns || activeSnapshot?.runs);
+  const lastRun = getLastRunInfo(storeRuns || activeDetails?.runs);
   const runError = lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
   const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
   // Tell the backend this workspace is being viewed so the rail clears its
@@ -2286,12 +2257,12 @@ const Workspace = () => {
   // can't clear on the cancel call returning.
   useEffect(() => {
     if (!cancellingRunId) return;
-    const stillActive = (snapshot?.runs || []).some(
+    const stillActive = (details?.runs || []).some(
       (run) => run.id === cancellingRunId && ACTIVE_RUN_STATUSES.includes(run.status)
     );
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Clears the 'stopping…' lock once the cancelled run leaves the active set; the cancel propagation is async (engine checkpoints) so the clear has to observe snapshot.runs in an effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Clears the 'stopping…' lock once the cancelled run leaves the active set; the cancel propagation is async (engine checkpoints) so the clear has to observe details.runs in an effect.
     if (!stillActive) setCancellingRunId(null);
-  }, [snapshot, cancellingRunId]);
+  }, [details, cancellingRunId]);
   const stopBusy = cancellingRunId !== null;
 
   // Drawer header actions for the artifacts panel: hand the workspace
@@ -2349,7 +2320,7 @@ const Workspace = () => {
       } finally {
         if (shouldRefresh) {
           try {
-            await loadSnapshot(false);
+            await loadDetails(false);
           } catch (err) {
             if (!importErrorMessage) setError(errorMessage(err, 'Failed to refresh workspace.'));
           }
@@ -2358,13 +2329,13 @@ const Workspace = () => {
         setArtifactImportBusy(false);
       }
     },
-    [artifactImportBusy, closeArtifactAddMenu, workspaceId, loadSnapshot]
+    [artifactImportBusy, closeArtifactAddMenu, workspaceId, loadDetails]
   );
 
   return (
     <div className={styles.workspacePage}>
       <WorkspaceHeader
-        snapshot={snapshot}
+        details={details}
         workspaceId={workspaceId}
         isGenericWorkspace={isGenericWorkspace}
         messageCount={totalMessageCount}
@@ -2419,7 +2390,7 @@ const Workspace = () => {
           />
         </div>
 
-        {snapshot && activePanel && previewEntry && (
+        {details && activePanel && previewEntry && (
           <WorkspaceFilePreviewPanel
             workspaceId={workspaceId}
             kind={previewEntry.kind}
@@ -2430,7 +2401,7 @@ const Workspace = () => {
           />
         )}
 
-        {snapshot && activePanel === 'tasks' && viewingTask && (
+        {details && activePanel === 'tasks' && viewingTask && (
           <WorkspaceTaskTranscriptPanel
             task={viewingTask}
             roster={chatRoster}
@@ -2438,7 +2409,7 @@ const Workspace = () => {
           />
         )}
 
-        {snapshot && activePanel && (
+        {details && activePanel && (
           <aside className={styles.workspaceDrawer} aria-label={`${activePanel} drawer`}>
             <div className={styles.workspaceDrawerHeader}>
               <span className={styles.workspaceDrawerTitle}>
@@ -2634,7 +2605,7 @@ const Workspace = () => {
               {activePanel === 'agents' && (
                 <CrewList
                   workspaceId={workspaceId}
-                  agents={snapshot.assignedAgents}
+                  agents={details.assignedAgents}
                   tasks={tasks}
                   manageable={crewManageable}
                   busy={agentBusy}
@@ -2643,7 +2614,7 @@ const Workspace = () => {
                   onOpenPicker={openCrewPicker}
                   onOpenEdit={openAgentEdit}
                   onRemove={handleAgentRemove}
-                  onChanged={() => loadSnapshot(false)}
+                  onChanged={() => loadDetails(false)}
                 />
               )}
 
@@ -2651,8 +2622,8 @@ const Workspace = () => {
                 <TaskList
                   workspaceId={workspaceId}
                   tasks={tasks}
-                  roster={snapshot.assignedAgents}
-                  onChanged={() => loadSnapshot(false)}
+                  roster={details.assignedAgents}
+                  onChanged={() => loadDetails(false)}
                   onViewTask={openTaskTranscript}
                 />
               )}
@@ -2670,7 +2641,7 @@ const Workspace = () => {
                   workspaceId={workspaceId}
                   totalCount={artifactCount}
                   totalCountCapped={artifactCountCapped}
-                  latestModifiedAt={Number(snapshot?.artifactLatestModifiedAt ?? 0)}
+                  latestModifiedAt={Number(details?.artifactLatestModifiedAt ?? 0)}
                   onSelect={handleSelectArtifact}
                   onDeleted={handleArtifactDeleted}
                   onMoved={handleArtifactMoved}
@@ -2685,7 +2656,7 @@ const Workspace = () => {
         isOpen={settingsOpen}
         onClose={handleSettingsClose}
         workspaceId={workspaceId}
-        snapshot={snapshot}
+        details={details}
         initialSelection={settingsSelection}
         onChanged={handleSettingsChanged}
       />

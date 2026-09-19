@@ -13,27 +13,27 @@ import type {
   WorkspaceFileContent,
   WorkspaceFileEntry,
   WorkspaceListEntry,
+  WorkspaceDetails,
   WorkspaceSessionBinding,
-  WorkspaceSnapshot,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 
 /**
- * Both flags are required: the backend defaults them off, so an omitted flag
- * would return an empty payload that is indistinguishable from an empty
- * workspace. Making them explicit turns that silent data loss into a compile
- * error.
+ * `includeFiles` is required, not optional: it decides whether the backend
+ * walks the workspace filesystem, and an omitted flag would come back with an
+ * empty file list that is indistinguishable from an empty workspace. Making it
+ * explicit turns that silent data loss into a compile error. The backend
+ * struct has no serde default either, so `{}` fails the call outright.
  */
-export interface SnapshotOptions {
-  includeSessionPayload: boolean;
+export interface WorkspaceDetailsOptions {
   includeFiles: boolean;
 }
 
-export async function getWorkspaceSnapshot(
+export async function getWorkspaceDetails(
   workspaceId: string,
-  options: SnapshotOptions
-): Promise<WorkspaceSnapshot> {
-  return invoke('workspace_get_snapshot', { workspaceId, options });
+  options: WorkspaceDetailsOptions
+): Promise<WorkspaceDetails> {
+  return invoke('workspace_get_details', { workspaceId, options });
 }
 
 export async function getOrCreateWorkspaceSession(
@@ -215,7 +215,7 @@ export async function listWorkspaceAgents(workspaceId: string): Promise<Workspac
 /**
  * One task by id, or null when it no longer exists.
  *
- * The snapshot carries only the 50 most recently touched tasks, so anything a
+ * Workspace details carry only the 50 most recently touched tasks, so anything a
  * chat transcript points at from further back has to be fetched on demand.
  */
 export async function getWorkspaceTask(

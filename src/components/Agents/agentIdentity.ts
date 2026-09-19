@@ -163,8 +163,8 @@ export type TaskActivitySource = Pick<
 >;
 
 /**
- * Which activity to draw for `agentId` given the tasks the snapshot carries.
- * Running beats attention. The snapshot holds the most recently updated
+ * Which activity to draw for `agentId` given the tasks the details carry.
+ * Running beats attention. The details hold the most recently updated
  * tasks, so the ring reflects recent activity, not the full history.
  */
 export const activityFromTasks = (

@@ -174,7 +174,7 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
         ref={sectionRef}
         workspaceId=""
         agentId={definition?.id ?? null}
-        snapshot={null}
+        details={null}
         initialAgent={initialAgent}
         saveBehavior={save}
         deps={deps}

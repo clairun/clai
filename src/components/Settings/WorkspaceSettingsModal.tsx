@@ -17,7 +17,7 @@ import IntervalSelect from './IntervalSelect';
 import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
 import { AgentBehaviorForm, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
-import type { ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
+import type { ScheduleKind, WorkspaceDetails } from '../../generated/bindings';
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
@@ -60,20 +60,20 @@ interface WorkspaceSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   workspaceId: string;
-  snapshot: WorkspaceSnapshot | null;
+  details: WorkspaceDetails | null;
   initialSelection?: Selection | null;
   onChanged?: () => void;
 }
 
 // Keep in sync with WorkspaceContextBar: the self-loading context bar
-// listens for this to refetch its snapshot after a settings save.
+// listens for this to refetch its workspace details after a settings save.
 const WORKSPACE_SETTINGS_CHANGED_EVENT = 'workspace-settings-changed';
 
 const WorkspaceSettingsModal = ({
   isOpen,
   onClose,
   workspaceId,
-  snapshot,
+  details,
   initialSelection,
   onChanged,
 }: WorkspaceSettingsModalProps) => {
@@ -208,7 +208,7 @@ const WorkspaceSettingsModal = ({
 
   // Save flow: validate every dirty section first (atomic gate), then
   // submit them in order. First failure aborts the rest with their drafts
-  // intact. On full success we refresh the parent snapshot and close.
+  // intact. On full success we refresh the parent's details and close.
   const handleSave = useCallback(async () => {
     if (saving) return;
     const dirtyKeys = Object.keys(dirty).filter((k) => dirty[k]);
@@ -276,8 +276,8 @@ const WorkspaceSettingsModal = ({
   }, [handleClose]);
 
   const agents = useMemo(
-    () => snapshot?.assignedAgents || [],
-    [snapshot?.assignedAgents]
+    () => details?.assignedAgents || [],
+    [details?.assignedAgents]
   );
   const sortedAgents = useMemo(() => (
     [...agents].sort((a, b) => (a.isDefault === b.isDefault ? 0 : a.isDefault ? -1 : 1))
@@ -314,7 +314,7 @@ const WorkspaceSettingsModal = ({
         <GeneralSection
           ref={setSectionRef('general')}
           workspaceId={workspaceId}
-          snapshot={snapshot}
+          details={details}
           saving={saving}
           onDirtyChange={getDirtyCallback('general')}
         />
@@ -325,10 +325,10 @@ const WorkspaceSettingsModal = ({
         <ScheduleSection
           ref={setSectionRef('schedule')}
           workspaceId={workspaceId}
-          snapshot={snapshot}
+          details={details}
           saving={saving}
           onDirtyChange={getDirtyCallback('schedule')}
-          onSnapshotRefresh={onChanged}
+          onDetailsRefresh={onChanged}
         />
       );
     }
@@ -336,7 +336,7 @@ const WorkspaceSettingsModal = ({
       const key = `agent:${sel.agentId}`;
       // Only the Main is edited here. A teammate's behavior belongs to its
       // shared definition, so its row opens the local-overlay editor instead.
-      if (sel.agentId !== snapshot?.defaultWorkspaceAgentId) {
+      if (sel.agentId !== details?.defaultWorkspaceAgentId) {
         return (
           <AssignmentSection
             workspaceId={workspaceId}
@@ -355,7 +355,7 @@ const WorkspaceSettingsModal = ({
           ref={setSectionRef(key)}
           workspaceId={workspaceId}
           agentId={sel.agentId ?? null}
-          snapshot={snapshot}
+          details={details}
           deps={deps}
           saving={saving}
           onDirtyChange={getDirtyCallback(key)}
@@ -372,7 +372,7 @@ const WorkspaceSettingsModal = ({
           ref={setSectionRef('new-main')}
           workspaceId={workspaceId}
           agentId={null}
-          snapshot={snapshot}
+          details={details}
           deps={deps}
           saving={saving}
           onDirtyChange={getDirtyCallback('new-main')}
@@ -393,7 +393,7 @@ const WorkspaceSettingsModal = ({
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <header className={styles.header}>
           <h2 className={styles.title}>
-            {snapshot?.title || 'Workspace'} — Settings
+            {details?.title || 'Workspace'} — Settings
           </h2>
           <button
             type="button"
@@ -437,7 +437,7 @@ const WorkspaceSettingsModal = ({
 
             <div className={styles.sidebarGroup}>
               <h3 className={styles.sidebarGroupTitle}>Agents</h3>
-              {!snapshot?.defaultWorkspaceAgentId && (
+              {!details?.defaultWorkspaceAgentId && (
                 <NavItem
                   active={selection.kind === 'new-main'}
                   dirty={!!dirty['new-main']}
@@ -527,20 +527,20 @@ const NavItem = ({ active, dirty, onClick, children, className }: { active: bool
 // Workspace / General
 // ──────────────────────────────────────────────────────────────────────────
 
-const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }: {
+const GeneralSection = ({ ref, workspaceId, details, saving, onDirtyChange }: {
   ref: React.Ref<SectionHandle>;
   workspaceId: string;
-  snapshot: WorkspaceSnapshot | null;
+  details: WorkspaceDetails | null;
   saving: boolean;
   onDirtyChange?: (isDirty: boolean) => void;
 }) => {
-  const [title, setTitle] = useState(snapshot?.title || '');
+  const [title, setTitle] = useState(details?.title || '');
   const [error, setError] = useState<string | null>(null);
   // Brief "Copied!" affordance after the workspace-id chip is clicked.
   // Auto-resets so a second click can confirm again.
   const [idCopied, setIdCopied] = useState(false);
   const handleCopyId = useCallback(async () => {
-    const id = snapshot?.workspaceId;
+    const id = details?.workspaceId;
     if (!id) return;
     try {
       await navigator.clipboard.writeText(id);
@@ -549,18 +549,18 @@ const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }: {
     } catch {
       // Stay silent on failure — the UUID is still selectable as text.
     }
-  }, [snapshot?.workspaceId]);
+  }, [details?.workspaceId]);
 
-  // Resync the draft when the parent snapshot's title changes (e.g., a save
+  // Resync the draft when the parent's details title changes (e.g., a save
   // completed and the parent refetched). The dependency array is the whole
   // protection: a refetch that returns the same title does not re-run this,
   // so an in-flight save's loopback leaves the draft alone. There is no
   // draft-matching guard — a title that genuinely changed (a concurrent
   // rename) does overwrite an unsaved draft.
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate: the draft mirrors the parent snapshot's title, and the `snapshot?.title` dependency is what keeps a same-value refetch from clobbering it.
-  useEffect(() => { setTitle(snapshot?.title || ''); }, [snapshot?.title]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate: the draft mirrors the parent's details title, and the `details?.title` dependency is what keeps a same-value refetch from clobbering it.
+  useEffect(() => { setTitle(details?.title || ''); }, [details?.title]);
 
-  const isDirty = title.trim() !== (snapshot?.title || '').trim();
+  const isDirty = title.trim() !== (details?.title || '').trim();
 
   // Report dirty changes upward without depending on the callback's
   // identity (the modal hands stable callbacks, but ref-storage is a
@@ -625,11 +625,11 @@ const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }: {
             type="button"
             className={`${styles.copyableId} ${idCopied ? styles.copyableIdCopied : ''}`}
             onClick={handleCopyId}
-            disabled={!snapshot?.workspaceId}
+            disabled={!details?.workspaceId}
             title={idCopied ? 'Copied!' : 'Click to copy'}
             aria-label={idCopied ? 'Workspace ID copied' : 'Copy workspace ID'}
           >
-            <code>{snapshot?.workspaceId}</code>
+            <code>{details?.workspaceId}</code>
             {idCopied && <span className={styles.copyableIdBadge}>Copied!</span>}
           </button>
         </span>
@@ -657,9 +657,9 @@ const CRON_PRESETS = [
   { label: 'Monthly', value: '0 0 1 * *' },
 ];
 
-// Narrows to ScheduleKind (not the whole snapshot) so callers can pass
-// `snapshot?.scheduleKind` and the effect's closure matches its deps.
-const initialScheduleKindFromSnapshot = (kind: ScheduleKind | null | undefined): ScheduleKindDraft => {
+// Narrows to ScheduleKind (not the whole details object) so callers can pass
+// `details?.scheduleKind` and the effect's closure matches its deps.
+const initialScheduleKindFromDetails = (kind: ScheduleKind | null | undefined): ScheduleKindDraft => {
   if (kind?.type === 'cron') {
     return { type: 'cron', expression: kind.expression || '', timezone: kind.timezone || '' };
   }
@@ -704,21 +704,21 @@ const formatPreviewRelative = (ms: number): string => {
 const ScheduleSection = ({
   ref,
   workspaceId,
-  snapshot,
+  details,
   saving,
   onDirtyChange,
-  onSnapshotRefresh,
+  onDetailsRefresh,
 }: {
   ref: React.Ref<SectionHandle>;
   workspaceId: string;
-  snapshot: WorkspaceSnapshot | null;
+  details: WorkspaceDetails | null;
   saving: boolean;
   onDirtyChange?: (isDirty: boolean) => void;
-  onSnapshotRefresh?: () => void;
+  onDetailsRefresh?: () => void;
 }) => {
-  const [enabled, setEnabled] = useState(!!snapshot?.scheduleEnabled);
+  const [enabled, setEnabled] = useState(!!details?.scheduleEnabled);
   const [scheduleKind, setScheduleKind] = useState(() =>
-    initialScheduleKindFromSnapshot(snapshot?.scheduleKind)
+    initialScheduleKindFromDetails(details?.scheduleKind)
   );
   // Local busy flag for the imperative-only actions (Pause/Resume, Run
   // now). Save goes through the modal's global flow, so we don't track
@@ -752,12 +752,12 @@ const ScheduleSection = ({
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resyncs schedule state from the snapshot when the parent's enabled flag or kind changes; the lint cannot model a 2-field derived draft that survives an in-flight save's loopback.
-    setEnabled(!!snapshot?.scheduleEnabled);
-    setScheduleKind(initialScheduleKindFromSnapshot(snapshot?.scheduleKind));
-  }, [snapshot?.scheduleEnabled, snapshot?.scheduleKind]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resyncs schedule state from the details when the parent's enabled flag or kind changes; the lint cannot model a 2-field derived draft that survives an in-flight save's loopback.
+    setEnabled(!!details?.scheduleEnabled);
+    setScheduleKind(initialScheduleKindFromDetails(details?.scheduleKind));
+  }, [details?.scheduleEnabled, details?.scheduleKind]);
 
-  const paused = !!snapshot?.schedulePaused;
+  const paused = !!details?.schedulePaused;
 
   // Live preview: every time the user edits the cron expression or
   // timezone, ping the backend for the next 3 fire times so they can
@@ -837,30 +837,30 @@ const ScheduleSection = ({
         workspaceId,
         paused: !paused,
       });
-      onSnapshotRefresh?.();
+      onDetailsRefresh?.();
     } catch (err) {
       setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to update pause state.');
     } finally {
       setLocalBusy(false);
     }
-  }, [paused, workspaceId, onSnapshotRefresh]);
+  }, [paused, workspaceId, onDetailsRefresh]);
 
   const handleRunNow = useCallback(async () => {
     setLocalBusy(true);
     setError(null);
     try {
       await invoke('workspace_run_now', { workspaceId });
-      onSnapshotRefresh?.();
+      onDetailsRefresh?.();
     } catch (err) {
       setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to trigger run.');
     } finally {
       setLocalBusy(false);
     }
-  }, [workspaceId, onSnapshotRefresh]);
+  }, [workspaceId, onDetailsRefresh]);
 
   const isDirty =
-    enabled !== !!snapshot?.scheduleEnabled
-    || JSON.stringify(scheduleKind) !== JSON.stringify(initialScheduleKindFromSnapshot(snapshot?.scheduleKind));
+    enabled !== !!details?.scheduleEnabled
+    || JSON.stringify(scheduleKind) !== JSON.stringify(initialScheduleKindFromDetails(details?.scheduleKind));
 
   const onDirtyChangeRef = useRef(onDirtyChange);
   useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
@@ -1084,7 +1084,7 @@ const ScheduleSection = ({
         </div>
       )}
 
-      {snapshot?.scheduleEnabled && (
+      {details?.scheduleEnabled && (
         <div className={styles.statusBar}>
           <span className={styles.statusBadge}>
             <span
@@ -1107,7 +1107,7 @@ const ScheduleSection = ({
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      {snapshot?.scheduleEnabled && !paused && (
+      {details?.scheduleEnabled && !paused && (
         <div className={styles.actions}>
           <button
             type="button"
