@@ -14,20 +14,10 @@ import type {
   WorkspaceFileEntry,
   WorkspaceListEntry,
   WorkspaceDetails,
+  WorkspaceDetailsOptions,
   WorkspaceSessionBinding,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
-
-/**
- * `includeFiles` is required, not optional: it decides whether the backend
- * walks the workspace filesystem, and an omitted flag would come back with an
- * empty file list that is indistinguishable from an empty workspace. Making it
- * explicit turns that silent data loss into a compile error. The backend
- * struct has no serde default either, so `{}` fails the call outright.
- */
-export interface WorkspaceDetailsOptions {
-  includeFiles: boolean;
-}
 
 export async function getWorkspaceDetails(
   workspaceId: string,

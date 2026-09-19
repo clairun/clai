@@ -266,8 +266,9 @@ pub struct WorkspaceDetails {
 /// A missing flag must fail the call rather than fall back to `false`: the
 /// cheap answer is an empty memory list and a zero artifact count, which no
 /// caller can tell apart from an empty workspace.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct WorkspaceDetailsOptions {
     pub include_files: bool,
 }
@@ -5901,8 +5902,41 @@ mod tests {
         assert_eq!(details.runs.len(), 1);
     }
 
+    /// A workspace whose manager has never been talked to: the details
+    /// command finds no conversation, so it has no session to list runs for.
+    /// The member's session and run are there to keep the empty answer
+    /// honest — it has to come from resolving no manager conversation, not
+    /// from an empty database.
+    #[tokio::test]
+    async fn the_details_command_answers_a_workspace_with_no_conversation() {
+        let workspace = DetailsWorkspace::without_a_manager_conversation().await;
+
+        let details = workspace.details(WITH_FILES).await;
+
+        assert!(
+            details.session.is_none(),
+            "the fixture must resolve no session, or this exercises the other arm"
+        );
+        assert!(details.runs.is_empty());
+        assert!(details.queued_message_ids.is_empty());
+
+        // The rest of the payload is answered in full: a missing conversation
+        // is an empty run list, not a short or failed reply.
+        assert_eq!(details.workspace_id, DETAILS_WORKSPACE_ID);
+        assert_eq!(details.title, "Details");
+        assert_eq!(details.kind, "general");
+        assert_eq!(
+            details.default_workspace_agent_id.as_deref(),
+            Some(DETAILS_MANAGER_ID)
+        );
+        assert!(!details.assigned_agents.is_empty());
+        assert!(!details.memories.is_empty());
+        assert!(details.artifact_count > 0);
+    }
+
     const DETAILS_WORKSPACE_ID: &str = "77777777-7777-4777-8777-777777777777";
     const DETAILS_MANAGER_ID: &str = "88888888-8888-4888-8888-888888888888";
+    const DETAILS_MEMBER_ID: &str = "99999999-9999-4999-8999-999999999999";
 
     /// A workspace on disk (memories, artifacts, `config.json`) plus the
     /// `AppState` and database that [`workspace_details`] resolves it
@@ -5915,7 +5949,18 @@ mod tests {
     }
 
     impl DetailsWorkspace {
+        /// The common case: the manager owns the workspace conversation.
         async fn new() -> Self {
+            Self::with_conversation_owner(DETAILS_MANAGER_ID).await
+        }
+
+        /// Same workspace, but the one session belongs to a member agent, so
+        /// [`find_workspace_session`] resolves nothing for the manager.
+        async fn without_a_manager_conversation() -> Self {
+            Self::with_conversation_owner(DETAILS_MEMBER_ID).await
+        }
+
+        async fn with_conversation_owner(automation_id: &str) -> Self {
             let temp = tempfile::tempdir().expect("temp dir");
             let parent = temp.path().join("workspaces");
             let root = parent.join(DETAILS_WORKSPACE_ID);
@@ -5942,13 +5987,13 @@ mod tests {
                 .workspace_db(DETAILS_WORKSPACE_ID)
                 .await
                 .expect("workspace db");
-            // The manager's own conversation, which is what the details
-            // command resolves to and loads the runs from.
+            // The details command resolves the manager's own conversation and
+            // loads the runs from it; a session owned by anyone else is not it.
             seed_session_with_run(
                 &pool,
                 SessionContext {
                     workspace_id: Some(DETAILS_WORKSPACE_ID.to_string()),
-                    automation_id: Some(DETAILS_MANAGER_ID.to_string()),
+                    automation_id: Some(automation_id.to_string()),
                     ..Default::default()
                 },
             )

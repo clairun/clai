@@ -68,6 +68,13 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
     const badge = await screen.findByTitle('Alpha: click to disable');
+
+    // The bar reads header fields only, so it must never ask for the file
+    // walk: it mounts with the input bar for every workspace and refetches on
+    // every workspace-settings-changed event, which would make a flipped flag
+    // a recursive walk of the workspace root per open and per settings save.
+    expect(mocks.getWorkspaceDetails).toHaveBeenCalledWith('ws-1', { includeFiles: false });
+
     await userEvent.click(badge);
 
     await waitFor(() =>

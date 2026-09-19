@@ -63,9 +63,7 @@ const MESSAGE_PAGE_LIMIT = 100;
 // without the user having to re-enter the workspace, and so the artifact
 // count stays current. Artifact entries themselves are not returned — the
 // panel lazy-loads each directory level via workspace_list_dir — so the
-// per-tick cost is a memory walk plus a recursive artifact count. Unlike
-// FleetLayout's SETTINGS_DETAILS_OPTIONS, which reads header fields only
-// and skips the walk entirely.
+// per-tick cost is a memory walk plus a recursive artifact count.
 const DETAILS_WITH_FILES = {
   includeFiles: true,
 };

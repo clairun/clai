@@ -531,6 +531,17 @@ queuedMessageIds: Array<string>, enabled: boolean | null, scheduleEnabled: boole
 scheduleKind: ScheduleKind | null, nextRunInSeconds: bigint | null, };
 
 /**
+ * The one expensive extra the details payload can carry: `includeFiles`
+ * buys a memory walk plus a recursive artifact count.
+ *
+ * Required, not defaulted, and the whole `options` argument is required too.
+ * A missing flag must fail the call rather than fall back to `false`: the
+ * cheap answer is an empty memory list and a zero artifact count, which no
+ * caller can tell apart from an empty workspace.
+ */
+export type WorkspaceDetailsOptions = { includeFiles: boolean, };
+
+/**
  * One entry in a single directory level of the artifact tree, returned by
  * `workspace_list_dir`. Unlike `WorkspaceFileEntry` (always a file), this can
  * be either a file or a directory; directories carry a shallow `child_count`
