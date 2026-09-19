@@ -5890,16 +5890,19 @@ mod tests {
         assert_eq!(stats.file_count, 1);
     }
 
-    /// The workspace page's 5s poll: the one options pair whose two flags
-    /// differ, so a helper reading its neighbour's flag shows up as a failure
-    /// rather than as an identical result.
-    const FILES_ONLY: &str = r#"{"includeFiles":true}"#;
+    /// The workspace page's 5s poll, spelled the way the page sends it: the
+    /// one options pair whose two flags differ, so a helper reading its
+    /// neighbour's flag shows up as a failure rather than as an identical
+    /// result.
+    const FILES_ONLY: &str = r#"{"includeSessionPayload":false,"includeFiles":true}"#;
 
     /// The mirror of [`FILES_ONLY`], so a crossed flag fails whichever way it
     /// is crossed.
     const PAYLOAD_ONLY: &str = r#"{"includeSessionPayload":true}"#;
 
-    /// The settings modal's call: `workspace_get_snapshot(workspaceId, null)`.
+    /// No caller sends `null` since `options` became required, but the IPC
+    /// layer still has to deserialize it; it is equivalent to the settings
+    /// modal's and the context bar's explicit `{false, false}`.
     const NEITHER: &str = "null";
 
     /// What `workspace_get_snapshot` ends up with for a given `options`
@@ -6121,20 +6124,20 @@ mod tests {
     async fn the_snapshot_command_loads_only_the_sections_its_options_asked_for() {
         let workspace = SnapshotWorkspace::new().await;
 
-        let lightweight = workspace.snapshot(NEITHER).await;
+        let neither = workspace.snapshot(NEITHER).await;
         assert!(
-            lightweight.session.is_some(),
+            neither.session.is_some(),
             "the fixture must resolve a session, or the payload assertions below pass vacuously"
         );
         assert_eq!(
-            lightweight.runs.len(),
+            neither.runs.len(),
             1,
             "runs are cheap and ride along regardless"
         );
-        assert!(lightweight.messages.is_empty(), "messages are opt-in");
-        assert!(lightweight.tool_calls.is_empty(), "tool calls are opt-in");
-        assert!(lightweight.memories.is_empty(), "the memory walk is opt-in");
-        assert_eq!(lightweight.artifact_count, 0, "the artifact walk is opt-in");
+        assert!(neither.messages.is_empty(), "messages are opt-in");
+        assert!(neither.tool_calls.is_empty(), "tool calls are opt-in");
+        assert!(neither.memories.is_empty(), "the memory walk is opt-in");
+        assert_eq!(neither.artifact_count, 0, "the artifact walk is opt-in");
 
         // Both flags on: neither section may switch the other off.
         let full = workspace.snapshot(BOTH).await;
@@ -6143,6 +6146,21 @@ mod tests {
         assert_eq!(full.runs.len(), 1);
         assert!(!full.memories.is_empty(), "the memories were asked for");
         assert!(full.artifact_count > 0, "the artifacts were asked for");
+
+        // The shipped pair, and the only one whose flags differ: a callsite
+        // handed the *other* extra's flag is green on both fixtures above and
+        // fails here, on the poll that pays for the mistake in production.
+        let poll = workspace.snapshot(FILES_ONLY).await;
+        assert!(!poll.memories.is_empty(), "the poll did ask for the files");
+        assert!(poll.artifact_count > 0, "the poll did ask for the files");
+        assert!(
+            poll.messages.is_empty(),
+            "the poll never asked for the payload"
+        );
+        assert!(
+            poll.tool_calls.is_empty(),
+            "the poll never asked for the payload"
+        );
     }
 
     #[test]
