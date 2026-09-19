@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
+import styles from './Workspace.module.css';
 import useAssistantStore from '../assistant/sessionStore';
 import type {
   AssistantMessage,
@@ -27,7 +28,7 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../workspace/client')>()),
   getWorkspaceDetails: vi.fn(),
   markWorkspaceOpened: vi.fn(async () => {}),
-  getOrCreateWorkspaceSession: vi.fn(async () => ({ workspaceId: 'a', sessionId: 's1' })),
+  getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
 }));
 
@@ -42,6 +43,7 @@ vi.mock('../assistant/client', () => ({
 
 const workspaceClient = await import('../workspace/client');
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
+const getOrCreateWorkspaceSession = vi.mocked(workspaceClient.getOrCreateWorkspaceSession);
 // Taken through `vi.mocked` on the real module, so the fixtures below are
 // checked against the command's actual return types: a page missing
 // `toolCalls`/`nextCursor`/`hasMore`/`totalCount` — all four read by
@@ -87,6 +89,19 @@ const userMessage = (sessionId: string, id: string, text: string): AssistantMess
   role: 'user',
   content: [{ type: 'text', text }],
   createdAt: 1n,
+  providerMetadata: null,
+});
+
+// An assistant turn whose text has not been persisted yet: the backend
+// writes the row when the turn opens and flushes its content at end of run,
+// so mid-stream the page carries the message with empty content and the text
+// on screen comes from the delta accumulator.
+const streamingAssistantMessage = (sessionId: string, id: string): AssistantMessage => ({
+  id,
+  sessionId,
+  role: 'assistant',
+  content: [],
+  createdAt: 2n,
   providerMetadata: null,
 });
 
@@ -156,8 +171,16 @@ const renderWorkspace = () =>
   );
 
 beforeEach(() => {
-  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {} });
+  // `streamingText` is reset alongside the sessions because the streaming
+  // test below leaves deltas keyed by `sess-a`, and every other test here
+  // hydrates that same session id — a leftover accumulator would render a
+  // phantom assistant turn in an unrelated test.
+  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingText: {} });
   getWorkspaceDetails.mockImplementation(async (_workspaceId, options) => detailsFor(options));
+  getOrCreateWorkspaceSession.mockResolvedValue({
+    session: sessionFor('a', 10n),
+    providerConnectionId: 'conn-1',
+  });
   loadSessionMessagesPage.mockResolvedValue(messagePage([]));
   listRuns.mockResolvedValue([]);
 });
@@ -199,6 +222,12 @@ describe('Workspace details poll', () => {
     }
     // The walk's result is still rendered after the tick, not just requested.
     expect(screen.getByRole('button', { name: /artifacts/i })).toHaveTextContent('7');
+    // The session is unchanged across both polls, so the page must hydrate it
+    // exactly once. Re-hydrating per tick would re-read a 100-message page,
+    // re-list the runs and hand the chat fresh message identities every five
+    // seconds — the per-poll cost this command's options exist to avoid.
+    expect(loadSessionMessagesPage).toHaveBeenCalledTimes(1);
+    expect(listRuns).toHaveBeenCalledTimes(1);
   });
 
   it('clears a stale error banner once a poll recovers', async () => {
@@ -240,6 +269,25 @@ describe('Workspace session hydration', () => {
     expect(screen.getByRole('button', { name: 'Remove queued message' })).toBeInTheDocument();
   });
 
+  it('invites a workspace with no conversation to start one', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { session: null })
+    );
+
+    renderWorkspace();
+
+    // A freshly created workspace has no session, so there is nothing to
+    // hydrate and nothing to wait for — the page must settle on the invite
+    // rather than the hydration placeholder it shows while history lands.
+    expect(await screen.findByText('Start a conversation')).toBeInTheDocument();
+    expect(screen.queryByText('Loading conversation…')).toBeNull();
+    // Nothing to hydrate: the loader must skip its session half rather than
+    // dereference the absent session and turn a healthy empty workspace into
+    // an error banner.
+    expect(loadSessionMessagesPage).not.toHaveBeenCalled();
+    expect(document.querySelector(`.${styles.errorBanner}`)).toBeNull();
+  });
+
   it('re-hydrates when a background run has advanced the session', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     loadSessionMessagesPage.mockResolvedValue(
@@ -266,6 +314,45 @@ describe('Workspace session hydration', () => {
     });
 
     expect(await screen.findByText('answer from the background run')).toBeInTheDocument();
+  });
+
+  it('leaves a streaming session alone when a poll sees it advance', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([
+        userMessage('sess-a', 'm-1', 'first question'),
+        streamingAssistantMessage('sess-a', 'm-2'),
+      ])
+    );
+    renderWorkspace();
+    expect(await screen.findByText('first question')).toBeInTheDocument();
+
+    // The same call `useAssistantEvents` makes for an assistant delta, which
+    // is what marks the session streaming in the store.
+    act(() => {
+      useAssistantStore.getState().appendDelta('sess-a', 'm-2', 'half an answer so far');
+    });
+    expect(await screen.findByText('half an answer so far')).toBeInTheDocument();
+
+    // The run writing those deltas also bumps the session row, so a poll
+    // landing mid-stream sees an advanced updatedAt every tick. Re-reading
+    // the page now would swap the live conversation for the persisted one —
+    // which does not yet contain the text being streamed — and hand the chat
+    // fresh message identities while it renders.
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { session: sessionFor('a', 20n) })
+    );
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([userMessage('sess-a', 'm-1', 'first question')])
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(loadSessionMessagesPage).toHaveBeenCalledTimes(1);
+    expect(listRuns).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('half an answer so far')).toBeInTheDocument();
   });
 });
 

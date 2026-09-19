@@ -5904,7 +5904,7 @@ mod tests {
 
     /// A workspace whose manager has never been talked to: the details
     /// command finds no conversation, so it has no session to list runs for.
-    /// The member's session and run are there to keep the empty answer
+    /// The other agent's session and run are there to keep the empty answer
     /// honest — it has to come from resolving no manager conversation, not
     /// from an empty database.
     #[tokio::test]
@@ -5936,7 +5936,7 @@ mod tests {
 
     const DETAILS_WORKSPACE_ID: &str = "77777777-7777-4777-8777-777777777777";
     const DETAILS_MANAGER_ID: &str = "88888888-8888-4888-8888-888888888888";
-    const DETAILS_MEMBER_ID: &str = "99999999-9999-4999-8999-999999999999";
+    const DETAILS_OTHER_AGENT_ID: &str = "99999999-9999-4999-8999-999999999999";
 
     /// A workspace on disk (memories, artifacts, `config.json`) plus the
     /// `AppState` and database that [`workspace_details`] resolves it
@@ -5954,10 +5954,12 @@ mod tests {
             Self::with_conversation_owner(DETAILS_MANAGER_ID).await
         }
 
-        /// Same workspace, but the one session belongs to a member agent, so
-        /// [`find_workspace_session`] resolves nothing for the manager.
+        /// Same workspace, but the one session's `automation_id` is not the
+        /// manager's, so [`select_workspace_session`]'s first filter drops it
+        /// and [`find_workspace_session`] resolves nothing. The owner is
+        /// deliberately not on the roster: resolution never reads it.
         async fn without_a_manager_conversation() -> Self {
-            Self::with_conversation_owner(DETAILS_MEMBER_ID).await
+            Self::with_conversation_owner(DETAILS_OTHER_AGENT_ID).await
         }
 
         async fn with_conversation_owner(automation_id: &str) -> Self {
