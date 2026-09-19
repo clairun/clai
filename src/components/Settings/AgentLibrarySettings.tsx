@@ -91,18 +91,17 @@ const AgentLibrarySettings = ({
 
   const backToGallery = useCallback(() => setView({ kind: 'gallery', focusId: null }), []);
 
-  // Consume the deep link once per mount, as soon as the library has been
-  // read — only then can a live agent be told from one that was deleted or
-  // archived out from under the link, which stays on the gallery rather than
-  // opening an editor on a dead id (`AgentEditor` without a definition is the
-  // *create* form, which would be a worse lie). Adjusted during render, the
-  // way SettingsModal re-syncs its tab: it skips the extra commit an effect
-  // would cost, and the gallery never paints on its way to the editor.
+  // Consume the deep link once per mount, as soon as the library has been read
+  // — before that every id looks missing. An id the library does not have
+  // lands on the editor view's own "no longer in the library" screen, which
+  // names the problem; the gallery would just look like the link did nothing.
+  // Adjusted during render, the way SettingsModal re-syncs its tab: it skips
+  // the extra commit an effect would cost, and the gallery never paints on its
+  // way to the editor.
   const [deepLinkDone, setDeepLinkDone] = useState(!initialAgentDefinitionId);
-  if (!deepLinkDone && loaded) {
+  if (!deepLinkDone && loaded && initialAgentDefinitionId) {
     setDeepLinkDone(true);
-    const target = definitions.find((definition) => definition.id === initialAgentDefinitionId);
-    if (target) setView({ kind: 'edit', id: target.id });
+    setView({ kind: 'edit', id: initialAgentDefinitionId });
   }
 
   // A create lands back in the gallery with the new card focused; an edit

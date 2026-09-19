@@ -337,24 +337,24 @@ export const AssignmentSection = ({
     }
   }, [workspaceId, agentId, definition?.name, onChanged, onUnassigned]);
 
-  // Unsaved workspace-local edits: this section keeps its own draft and Save,
-  // so the modal's dirty tracking (which only covers the sections that
-  // register a handle) does not cover it.
-  const draftDirty =
-    !!assignment &&
-    (enabled !== assignment.enabled ||
-      context !== (assignment.context || '') ||
-      JSON.stringify(grants) !== JSON.stringify(assignment.filesystemGrants || []));
-
-  // Opening the shared definition closes this modal (the global one is its
-  // sibling at a lower z-index), so ask before dropping a draft.
+  // The library opens over this modal, which stays open underneath with its
+  // draft intact — nothing to warn about.
   const handleOpenDefinition = useCallback(() => {
     if (!definition) return;
-    if (draftDirty && !window.confirm('You have unsaved changes here. Leave without saving?')) {
-      return;
-    }
     openGlobalSettings({ tab: 'agents', agentDefinitionId: definition.id });
-  }, [definition, draftDirty]);
+  }, [definition]);
+
+  // Whether this agent runs is three switches ANDed together (see
+  // config/global_agents.rs): the checkbox below, the definition's own
+  // Enabled, and the definition not being archived. This pane owns the first
+  // one only, so it says when one of the other two is holding the agent off.
+  const libraryHold = !definition
+    ? null
+    : definition.archived
+      ? 'archived'
+      : definition.enabled
+        ? null
+        : 'disabled';
 
   if (loading) return <div className={styles.sectionRoot}>Loading…</div>;
 
@@ -375,9 +375,9 @@ export const AssignmentSection = ({
           definitions={definitions}
           assignedDefinitionIds={assignments.map((item) => item.agentDefinitionId)}
           onChanged={handleCrewChanged}
-          // Safe now that this modal hands over instead of stacking: it closes
-          // itself when a global-settings open is requested, so the library
-          // opens on top rather than underneath.
+          // The global Settings modal stacks above this one (see the
+          // --z-portal-* scale), so the library opens on top and this modal is
+          // waiting underneath when it closes.
           onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
           disabled={busy}
         />
@@ -403,13 +403,14 @@ export const AssignmentSection = ({
       {definition ? (
         <div className={styles.splitNote}>
           <p>
-            <strong>This workspace decides</strong> whether {definition.name} is on here, the
+            <strong>Set here</strong>: whether {definition.name} is on in this workspace, the
             context it works under, and the paths it may touch — the three things below.
           </p>
           <p>
             <strong>Shared everywhere</strong>: instructions, skills, providers, MCP and shell
             policy. Those belong to the agent&apos;s definition, and an edit there reaches every
-            workspace using it, from its next turn.{' '}
+            workspace using it, from its next turn. A definition that is disabled or archived
+            there stays off in every workspace, including this one.{' '}
             <button type="button" className={styles.linkButton} onClick={handleOpenDefinition}>
               Edit in Settings → Agents
             </button>
@@ -433,9 +434,16 @@ export const AssignmentSection = ({
           <span>Enabled in this workspace</span>
         </label>
         <span className={styles.hint}>
-          Off parks it here: it stays on the crew with the context and grants below, but no agent
-          can delegate to it and it is left out of the roster. Reversible at any time.
+          Off parks it here: it stays on the crew with the context and grants below, and other
+          agents still see it listed, but it does not run and delegating a task to it is refused.
+          Reversible at any time.
         </span>
+        {libraryHold && (
+          <span className={styles.hintWarning}>
+            {definition?.name} is {libraryHold} in the library, so it stays off here whatever this
+            box says — change that on the shared definition.
+          </span>
+        )}
       </div>
 
       <div className={styles.field}>

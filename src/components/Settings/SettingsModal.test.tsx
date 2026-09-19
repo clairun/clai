@@ -21,33 +21,37 @@ vi.mock('./AgentLibrarySettings', () => ({
 
 import SettingsModal, { TABS } from './SettingsModal';
 
+const modal = (props: { isOpen: boolean; initialAgentDefinitionId?: string | null }) => (
+  <SettingsModal
+    isOpen={props.isOpen}
+    onClose={vi.fn()}
+    initialTab={TABS.AGENTS}
+    initialAgentDefinitionId={props.initialAgentDefinitionId}
+  />
+);
+
 describe('SettingsModal agent deep link', () => {
   it('hands the agents tab the definition a deep link named', () => {
-    const { rerender } = render(
-      <SettingsModal
-        isOpen
-        onClose={vi.fn()}
-        initialTab={TABS.AGENTS}
-        initialAgentDefinitionId="def-1"
-      />
-    );
+    render(modal({ isOpen: true, initialAgentDefinitionId: 'def-1' }));
+    expect(screen.getByTestId('library')).toHaveTextContent('def-1');
+  });
+
+  // Every deep link comes from a control this modal's overlay covers, so the
+  // next one can only arrive after a close — which unmounts the tab and lets
+  // the library read the new id. No remount key needed to force it.
+  it('lands a later deep link on a different agent once it has been closed', () => {
+    const { rerender } = render(modal({ isOpen: true, initialAgentDefinitionId: 'def-1' }));
     expect(screen.getByTestId('library')).toHaveTextContent('def-1');
 
-    // A second deep link while the tab is already up must not be swallowed by
-    // the library's mounted state.
-    rerender(
-      <SettingsModal
-        isOpen
-        onClose={vi.fn()}
-        initialTab={TABS.AGENTS}
-        initialAgentDefinitionId="def-2"
-      />
-    );
+    rerender(modal({ isOpen: false, initialAgentDefinitionId: null }));
+    expect(screen.queryByTestId('library')).toBeNull();
+
+    rerender(modal({ isOpen: true, initialAgentDefinitionId: 'def-2' }));
     expect(screen.getByTestId('library')).toHaveTextContent('def-2');
   });
 
   it('opens the plain gallery when no agent was named', () => {
-    render(<SettingsModal isOpen onClose={vi.fn()} initialTab={TABS.AGENTS} />);
+    render(modal({ isOpen: true }));
     expect(screen.getByTestId('library')).toHaveTextContent('gallery');
   });
 });

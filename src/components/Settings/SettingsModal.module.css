@@ -13,7 +13,9 @@
   bottom: 0;
   background: var(--color-overlay-60);
   backdrop-filter: blur(8px);
-  z-index: 10000;
+  /* Above WorkspaceSettingsModal: a crew member links here, and this modal
+     opens over the one that asked for it. */
+  z-index: var(--z-portal-modal-nested);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -4,7 +4,7 @@
  * Main settings modal with sidebar navigation for different settings sections.
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import ReactDOM from 'react-dom';
 import AgentLibrarySettings from './AgentLibrarySettings';
 import AssistantProviderSettings from './AssistantProviderSettings';
@@ -13,6 +13,7 @@ import SkillsSettings from './SkillsSettings';
 import AppearanceSettings from './AppearanceSettings';
 import ApplicationsSettings from './ApplicationsSettings';
 import AboutSettings from './AboutSettings';
+import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import styles from './SettingsModal.module.css';
 
 /**
@@ -140,29 +141,10 @@ const SettingsModal = ({
     }
   }
 
-  // Handle escape key
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-
-    document.addEventListener('keydown', handleEscape);
-    return () => document.removeEventListener('keydown', handleEscape);
-  }, [isOpen, onClose]);
-
-  // Prevent body scroll when modal is open
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = '';
-    }
-    return () => {
-      document.body.style.overflow = '';
-    };
-  }, [isOpen]);
+  // Escape and the body-scroll lock, shared with every other open overlay:
+  // this modal can sit over the workspace Settings modal, and a form modal can
+  // sit over it.
+  useOverlayLayer(isOpen, onClose);
 
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) {
@@ -180,14 +162,10 @@ const SettingsModal = ({
         return <AssistantProviderSettings initialAction={initialProviderAction} />;
       case TABS.AGENTS:
         // The library consumes its initial id once per mount, like the
-        // provider tab's initial action. Keying on the id lets a second deep
-        // link name a different agent while the tab is already on screen.
-        return (
-          <AgentLibrarySettings
-            key={initialAgentDefinitionId ?? 'library'}
-            initialAgentDefinitionId={initialAgentDefinitionId}
-          />
-        );
+        // provider tab's initial action. Every deep link comes from a control
+        // this modal's overlay covers, so a second one can only arrive after
+        // a close, which unmounts the tab.
+        return <AgentLibrarySettings initialAgentDefinitionId={initialAgentDefinitionId} />;
       case TABS.SKILLS:
         return <SkillsSettings />;
       case TABS.MCP_SERVERS:

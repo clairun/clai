@@ -18,7 +18,7 @@ import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
 import { AgentBehaviorForm, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
 import type { ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
-import { OPEN_GLOBAL_SETTINGS_EVENT } from '../../utils/globalSettings';
+import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
 import styles from './WorkspaceSettingsModal.module.css';
@@ -265,36 +265,11 @@ const WorkspaceSettingsModal = ({
     onClose();
   }, [saving, anyDirty, onClose]);
 
-  // A deep link into the global Settings modal (the shared-definition link on
-  // a crew member, the create link in the picker) is a hand-off, not a second
-  // layer: that modal is our sibling at a lower z-index and would open
-  // underneath. We close instead of stacking. `handleClose` keeps its
-  // unsaved-changes prompt; declining it leaves this modal up with the global
-  // one behind, which the host has already opened by the time we run.
-  useEffect(() => {
-    if (!isOpen) return undefined;
-    const onGlobalSettings = () => handleClose();
-    window.addEventListener(OPEN_GLOBAL_SETTINGS_EVENT, onGlobalSettings);
-    return () => window.removeEventListener(OPEN_GLOBAL_SETTINGS_EVENT, onGlobalSettings);
-  }, [isOpen, handleClose]);
-
-  // Escape key
-  useEffect(() => {
-    if (!isOpen) return undefined;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') handleClose(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [isOpen, handleClose]);
-
-  // Prevent body scroll while open
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = '';
-    }
-    return () => { document.body.style.overflow = ''; };
-  }, [isOpen]);
+  // Escape closes this modal only while nothing is stacked over it: the global
+  // Settings modal opens on top of this one and takes the key first. The
+  // body-scroll lock is shared for the same reason — it must outlive the
+  // modal that closes first.
+  useOverlayLayer(isOpen, handleClose);
 
   const handleOverlay = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) handleClose();
@@ -1064,7 +1039,7 @@ const ScheduleSection = ({
                   {' '}
                   <button
                     type="button"
-                    className={styles.tzLink}
+                    className={styles.linkButton}
                     onClick={() =>
                       setScheduleKind((prev) => ({ ...prev, timezone: hostTimezone }))
                     }

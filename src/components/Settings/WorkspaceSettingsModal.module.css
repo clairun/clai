@@ -11,7 +11,7 @@
   inset: 0;
   background: var(--color-overlay-60);
   backdrop-filter: blur(4px);
-  z-index: 10001;
+  z-index: var(--z-portal-modal);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -352,6 +352,16 @@
   font-size: 11px;
   color: var(--color-text-tertiary);
   margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* A hint that contradicts the control above it — something outside this pane
+   is overriding it. Carries its own words, not just the colour. */
+.hintWarning {
+  display: block;
+  font-size: 11px;
+  color: var(--color-warning-dark, #b45309);
+  margin-top: 4px;
   line-height: 1.4;
 }
 
@@ -958,26 +968,6 @@
   font-size: 11px;
   color: var(--color-text-tertiary);
   margin-top: 6px;
-}
-
-.tzLink {
-  appearance: none;
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--color-primary);
-  cursor: pointer;
-  font-size: inherit;
-  font-family: inherit;
-}
-
-.tzLink:hover:not(:disabled) {
-  text-decoration: underline;
-}
-
-.tzLink:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
 }
 
 @keyframes fadeIn {

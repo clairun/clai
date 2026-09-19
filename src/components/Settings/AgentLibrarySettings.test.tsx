@@ -280,15 +280,16 @@ describe('AgentLibrarySettings', () => {
     expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
   });
 
-  it('shows the gallery when the deep link names an agent the library does not have', async () => {
+  it('names the problem when the deep link points at an agent that is gone', async () => {
     render(<AgentLibrarySettings initialAgentDefinitionId="def-deleted" />);
 
-    // An editor with no definition is the create form; the gallery is the
-    // honest landing for a stale link.
-    expect(await screen.findByRole('button', { name: /^Reviewer/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
+    // The editor view's own missing-agent screen, not a silent landing on the
+    // gallery, which would read as a link that did nothing.
+    expect(await screen.findByText('This agent is no longer in the library.')).toBeInTheDocument();
     expect(screen.queryByTestId('behavior-form')).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'New agent' })).toBeNull();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Back to agents' }));
+    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
   });
 
   it('explains an agent that vanished from the library instead of a blank editor', async () => {

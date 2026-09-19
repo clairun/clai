@@ -7,6 +7,7 @@ import {
 } from '../../api/client';
 import type { McpCatalogEntry, McpServerResponse } from '../../generated/bindings';
 import { openExternal } from '../../utils/openExternal';
+import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import styles from './McpServerFormModal.module.css';
 
 interface McpServerFormModalProps {
@@ -324,28 +325,9 @@ const McpServerFormModal = ({
     onClose();
   }, [cancelPendingOAuth, onClose, saving]);
 
-  useEffect(() => {
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && isOpen && !saving) {
-        requestClose();
-      }
-    };
-
-    document.addEventListener('keydown', handleEscape);
-    return () => document.removeEventListener('keydown', handleEscape);
-  }, [isOpen, requestClose, saving]);
-
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = '';
-    }
-
-    return () => {
-      document.body.style.overflow = '';
-    };
-  }, [isOpen]);
+  // Topmost-only Escape: this form opens over SettingsModal, which listens for
+  // the same key. `requestClose` already ignores it mid-save.
+  useOverlayLayer(isOpen, requestClose);
 
   if (!isOpen) {
     return null;

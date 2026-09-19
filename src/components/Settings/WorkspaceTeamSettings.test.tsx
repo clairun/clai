@@ -278,7 +278,9 @@ describe('AssignmentSection editor', () => {
     expect(opened).toEqual([{ tab: 'agents', agentDefinitionId: 'def-review' }]);
   });
 
-  it('asks before leaving an unsaved draft for the shared definition', async () => {
+  // The library opens over this modal instead of replacing it, so an unsaved
+  // draft is still here — and still on screen — when it closes.
+  it('opens the shared definition without prompting over an unsaved draft', async () => {
     const user = userEvent.setup();
     const opened = recordGlobalSettingsOpens();
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
@@ -288,8 +290,37 @@ describe('AssignmentSection editor', () => {
     await user.type(screen.getByLabelText('Context for this workspace'), ' and docs');
     await user.click(screen.getByRole('button', { name: 'Edit in Settings → Agents' }));
 
-    expect(confirm).toHaveBeenCalled();
-    expect(opened).toEqual([]);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(opened).toEqual([{ tab: 'agents', agentDefinitionId: 'def-review' }]);
+    expect(screen.getByLabelText('Context for this workspace')).toHaveValue(
+      'API crate only and docs'
+    );
+  });
+
+  // Enabled here is one of three switches ANDed together; the other two belong
+  // to the definition, and this pane may not claim otherwise.
+  it('says when the library is holding the agent off regardless of this pane', async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'agent_definitions_list')
+        return Promise.resolve([{ ...DEFINITIONS[0], enabled: false }]);
+      if (cmd === 'workspace_team_policy') return Promise.resolve(policy);
+      return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
+    });
+    render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
+    await screen.findByText('Reviewer');
+
+    expect(
+      screen.getByText(/is disabled in the library, so it stays off here/)
+    ).toBeInTheDocument();
+    // The box is still usable: this pane owns its own switch either way.
+    expect(screen.getByRole('checkbox', { name: 'Enabled in this workspace' })).toBeEnabled();
+  });
+
+  it('says nothing about the library when the definition is live', async () => {
+    render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
+    await screen.findByText('Reviewer');
+
+    expect(screen.queryByText(/in the library, so it stays off here/)).toBeNull();
   });
 
   it('explains an assignment whose shared agent is gone instead of rendering a blank form', async () => {
