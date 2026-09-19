@@ -18,14 +18,20 @@ import type {
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 
-interface SnapshotOptions {
-  includeSessionPayload?: boolean;
-  includeFiles?: boolean;
+/**
+ * Both flags are required: the backend defaults them off, so an omitted flag
+ * would return an empty payload that is indistinguishable from an empty
+ * workspace. Making them explicit turns that silent data loss into a compile
+ * error.
+ */
+export interface SnapshotOptions {
+  includeSessionPayload: boolean;
+  includeFiles: boolean;
 }
 
 export async function getWorkspaceSnapshot(
-  workspaceId: string = 'default',
-  options: SnapshotOptions | null = null
+  workspaceId: string,
+  options: SnapshotOptions
 ): Promise<WorkspaceSnapshot> {
   return invoke('workspace_get_snapshot', { workspaceId, options });
 }

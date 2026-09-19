@@ -1805,7 +1805,7 @@ const Workspace = () => {
   const lastLoadedSessionUpdatedAtRef = useRef<NumericTimestamp>(null);
 
   const loadSnapshot = useCallback(
-    async (showSpinner = false, options: SnapshotOptions = null) => {
+    async (showSpinner = false, options: SnapshotOptions | null = null) => {
       if (showSpinner) {
         setIsLoading(true);
       }
