@@ -266,6 +266,14 @@ pub struct WorkspaceSnapshot {
     pub next_run_in_seconds: Option<u64>,
 }
 
+/// The two expensive extras a snapshot can carry, both **opt-in**.
+///
+/// Omitting an option — or the whole `options` argument — asks for the cheap
+/// workspace header only. `includeSessionPayload` buys the session's entire
+/// conversation (every message and tool call, unbounded), `includeFiles` a
+/// memory walk plus a recursive artifact count. Defaulting both off keeps the
+/// most expensive query in the app off every path that never thought to ask
+/// about it.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshotOptions {
@@ -277,11 +285,11 @@ pub struct WorkspaceSnapshotOptions {
 
 impl WorkspaceSnapshotOptions {
     fn include_session_payload(&self) -> bool {
-        self.include_session_payload.unwrap_or(true)
+        self.include_session_payload.unwrap_or(false)
     }
 
     fn include_files(&self) -> bool {
-        self.include_files.unwrap_or(true)
+        self.include_files.unwrap_or(false)
     }
 }
 
@@ -1794,10 +1802,15 @@ fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathB
 
 /// The memory entries and artifact counters a snapshot reports.
 ///
-/// Both are skipped wholesale on a lightweight poll (`includeFiles: false`)
-/// and for a workspace with no filesystem root; spelling that empty result
-/// once here is what keeps the two conditions from drifting apart — they were
-/// two nested `if`s with the same `(vec![], default())` arm written twice.
+/// Both are skipped wholesale for a caller that did not ask for them
+/// (`includeFiles: false` — the settings modal and the context bar; the
+/// workspace page's 5s poll is the caller that *does* ask) and for a
+/// workspace with no filesystem root; spelling that empty result once here is
+/// what keeps the two conditions from drifting apart — they were two nested
+/// `if`s with the same `(vec![], default())` arm written twice.
+///
+/// The whole `options` is passed rather than the one flag it needs, so that
+/// the callsite cannot hand this helper the *other* extra's flag.
 ///
 /// Memories are returned as entries (their panel renders the flat list), so
 /// they are subject to `collect_files`' [`MAX_ENTRY_COUNT`] cap. Artifacts are
@@ -1807,9 +1820,9 @@ fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathB
 /// artifact count is not truncated at 500 the way an entry list would be.
 fn snapshot_files(
     root_path: Option<&Path>,
-    include_files: bool,
+    options: &WorkspaceSnapshotOptions,
 ) -> Result<(Vec<WorkspaceFileEntry>, ArtifactTreeStats), String> {
-    let Some(root_path) = root_path.filter(|_| include_files) else {
+    let Some(root_path) = root_path.filter(|_| options.include_files()) else {
         return Ok((Vec::new(), ArtifactTreeStats::default()));
     };
 
@@ -1823,35 +1836,68 @@ fn snapshot_files(
     Ok((memories, artifact_tree_stats(root_path)))
 }
 
+/// The conversation payload a snapshot reports for `session_id`.
+///
+/// Messages and tool calls are the whole session with no ceiling, so they are
+/// loaded only when [`WorkspaceSnapshotOptions::include_session_payload`] asks
+/// for them. Runs are one small row each and the workspace header reads them
+/// on every poll, so they load either way.
+async fn snapshot_session_payload(
+    pool: &DbPool,
+    session_id: &str,
+    options: &WorkspaceSnapshotOptions,
+) -> Result<
+    (
+        Vec<AssistantMessage>,
+        Vec<AssistantRun>,
+        Vec<ToolInvocation>,
+    ),
+    String,
+> {
+    let runs = repository::list_runs(pool, session_id).await?;
+    if !options.include_session_payload() {
+        return Ok((Vec::new(), runs, Vec::new()));
+    }
+
+    Ok((
+        repository::list_messages(pool, session_id).await?,
+        runs,
+        repository::list_tool_calls(pool, session_id, None).await?,
+    ))
+}
+
 #[tauri::command]
 pub async fn workspace_get_snapshot(
     workspace_id: Option<String>,
     options: Option<WorkspaceSnapshotOptions>,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceSnapshot, String> {
+    workspace_snapshot(state.inner(), workspace_id, options).await
+}
+
+/// The body of [`workspace_get_snapshot`], taking a plain [`AppState`] so the
+/// tests can reach it: the two `options` callsites below decide whether a
+/// snapshot carries the conversation payload and the file walk, and driving
+/// them through the helpers directly would leave this function free to ignore
+/// its own argument.
+async fn workspace_snapshot(
+    state: &AppState,
+    workspace_id: Option<String>,
+    options: Option<WorkspaceSnapshotOptions>,
+) -> Result<WorkspaceSnapshot, String> {
     let options = options.unwrap_or_default();
-    let descriptor = resolve_workspace_descriptor(state.inner(), workspace_id)?;
+    let descriptor = resolve_workspace_descriptor(state, workspace_id)?;
     if let Some(root_path) = &descriptor.root_path {
         ensure_agent_workspace_root(root_path)?;
     }
     let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
 
-    let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
+    let provider_selection = resolve_workspace_provider_selection(state, &descriptor)?;
 
-    let session = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let (messages, runs, tool_calls) = if let Some(session) = &session {
-        let runs = repository::list_runs(&workspace_pool, &session.id).await?;
-        if !options.include_session_payload() {
-            (Vec::new(), runs, Vec::new())
-        } else {
-            (
-                repository::list_messages(&workspace_pool, &session.id).await?,
-                runs,
-                repository::list_tool_calls(&workspace_pool, &session.id, None).await?,
-            )
-        }
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
+    let session = find_workspace_session(&workspace_pool, state, &descriptor).await?;
+    let (messages, runs, tool_calls) = match &session {
+        Some(session) => snapshot_session_payload(&workspace_pool, &session.id, &options).await?,
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
     // Cheap single-table query, so it rides along even on lightweight polls —
     // the "Queued" chips stay accurate without the full session payload.
@@ -1861,15 +1907,13 @@ pub async fn workspace_get_snapshot(
         Vec::new()
     };
 
-    let (memories, artifact_stats) =
-        snapshot_files(descriptor.root_path.as_deref(), options.include_files())?;
+    let (memories, artifact_stats) = snapshot_files(descriptor.root_path.as_deref(), &options)?;
     let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
 
     let (assigned_agents, default_workspace_agent_id) =
-        list_workspace_agent_responses(state.inner(), &descriptor.workspace_id)?;
+        list_workspace_agent_responses(state, &descriptor.workspace_id)?;
     let tasks =
-        list_workspace_task_responses(&workspace_pool, state.inner(), &descriptor.workspace_id)
-            .await?;
+        list_workspace_task_responses(&workspace_pool, state, &descriptor.workspace_id).await?;
 
     // Workspace-level schedule (no longer per-agent). The scheduled tick
     // invokes the default agent.
@@ -4220,6 +4264,7 @@ async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::{MessageRole, RunStatus, RunTrigger, ToolCallStatus};
     use crate::config::workspace_config::ScheduleSurface;
 
     const WS: &str = "ws-1";
@@ -5786,7 +5831,7 @@ mod tests {
         let root = root.path();
         workspace_with_memories(root);
 
-        let (memories, stats) = snapshot_files(Some(root), true).unwrap();
+        let (memories, stats) = snapshot_files(Some(root), &options_from_ipc(FILES_ONLY)).unwrap();
 
         // Newest first — the memory panel renders this order verbatim, so the
         // sort is part of what this function owes its caller.
@@ -5810,14 +5855,14 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_files_skips_both_walks_on_a_lightweight_poll() {
+    fn snapshot_files_skips_both_walks_when_they_were_not_asked_for() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         workspace_with_memories(root);
 
-        // `includeFiles: false` is what the 5s poll sends; neither walk may
-        // run, however much is on disk.
-        let (memories, stats) = snapshot_files(Some(root), false).unwrap();
+        // Neither walk may run for a caller that did not ask, however much is
+        // on disk.
+        let (memories, stats) = snapshot_files(Some(root), &options_from_ipc(NEITHER)).unwrap();
 
         assert!(memories.is_empty());
         assert_eq!(stats, ArtifactTreeStats::default());
@@ -5825,7 +5870,7 @@ mod tests {
 
     #[test]
     fn snapshot_files_returns_empty_for_a_workspace_without_a_root() {
-        let (memories, stats) = snapshot_files(None, true).unwrap();
+        let (memories, stats) = snapshot_files(None, &options_from_ipc(FILES_ONLY)).unwrap();
 
         assert!(memories.is_empty());
         assert_eq!(stats, ArtifactTreeStats::default());
@@ -5839,10 +5884,283 @@ mod tests {
 
         // A fresh workspace has no `.clai/memory` yet. That is not an error,
         // and it must not stop the artifact count from being reported.
-        let (memories, stats) = snapshot_files(Some(root), true).unwrap();
+        let (memories, stats) = snapshot_files(Some(root), &options_from_ipc(FILES_ONLY)).unwrap();
 
         assert!(memories.is_empty());
         assert_eq!(stats.file_count, 1);
+    }
+
+    /// The workspace page's 5s poll, spelled the way the page sends it: the
+    /// one options pair whose two flags differ, so a helper reading its
+    /// neighbour's flag shows up as a failure rather than as an identical
+    /// result.
+    const FILES_ONLY: &str = r#"{"includeSessionPayload":false,"includeFiles":true}"#;
+
+    /// The mirror of [`FILES_ONLY`], so a crossed flag fails whichever way it
+    /// is crossed.
+    const PAYLOAD_ONLY: &str = r#"{"includeSessionPayload":true}"#;
+
+    /// No caller sends `null` since `options` became required, but the IPC
+    /// layer still has to deserialize it; it is equivalent to the settings
+    /// modal's and the context bar's explicit `{false, false}`.
+    const NEITHER: &str = "null";
+
+    /// What `workspace_get_snapshot` ends up with for a given `options`
+    /// argument: the IPC layer hands it `Option<WorkspaceSnapshotOptions>`
+    /// deserialized from JSON, and a missing argument arrives as `null`.
+    fn options_from_ipc(json: &str) -> WorkspaceSnapshotOptions {
+        serde_json::from_str::<Option<WorkspaceSnapshotOptions>>(json)
+            .expect("snapshot options must deserialize")
+            .unwrap_or_default()
+    }
+
+    /// A session with one run, one message and one tool call — enough for the
+    /// payload flag to have something to include or to skip.
+    async fn seed_session_with_payload(pool: &DbPool, context: SessionContext) -> String {
+        let session = repository::create_session(
+            pool,
+            repository::CreateSessionParams {
+                kind: SessionKind::Interactive,
+                title: None,
+                context,
+            },
+        )
+        .await
+        .expect("failed to create session");
+        let run = repository::create_run(
+            pool,
+            repository::CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Completed,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn-1".to_string(),
+                protocol_id: "proto-1".to_string(),
+                model_id: "model-1".to_string(),
+                error: None,
+            },
+        )
+        .await
+        .expect("failed to create run");
+        repository::create_message(
+            pool,
+            repository::CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "hello".to_string(),
+                }],
+                provider_metadata: None,
+            },
+        )
+        .await
+        .expect("failed to create message");
+        repository::create_tool_call(
+            pool,
+            repository::CreateToolCallParams {
+                id: "tool-1".to_string(),
+                run_id: run.id,
+                session_id: session.id.clone(),
+                tool_name: "bash_exec".to_string(),
+                params: serde_json::json!({ "command": "ls" }),
+                status: ToolCallStatus::Completed,
+            },
+        )
+        .await
+        .expect("failed to create tool call");
+
+        session.id
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_asked_for_nothing_carries_neither_the_payload_nor_the_files() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let session_id = seed_session_with_payload(&pool, SessionContext::default()).await;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        workspace_with_memories(root);
+
+        let options = options_from_ipc(NEITHER);
+
+        let (messages, runs, tool_calls) = snapshot_session_payload(&pool, &session_id, &options)
+            .await
+            .unwrap();
+        assert!(messages.is_empty(), "messages are opt-in");
+        assert!(tool_calls.is_empty(), "tool calls are opt-in");
+        assert_eq!(runs.len(), 1, "runs are cheap and ride along regardless");
+
+        let (memories, stats) = snapshot_files(Some(root), &options).unwrap();
+        assert!(memories.is_empty(), "the memory walk is opt-in");
+        assert_eq!(stats, ArtifactTreeStats::default());
+    }
+
+    /// The two halves of one `options` value must not answer each other's
+    /// question: this is the poll that made the original bug expensive, and it
+    /// is asymmetric precisely so that a helper reading the wrong flag fails.
+    #[tokio::test]
+    async fn asking_only_for_the_files_buys_no_conversation() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let session_id = seed_session_with_payload(&pool, SessionContext::default()).await;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        workspace_with_memories(root);
+
+        let options = options_from_ipc(FILES_ONLY);
+
+        let (messages, runs, tool_calls) = snapshot_session_payload(&pool, &session_id, &options)
+            .await
+            .unwrap();
+        assert!(messages.is_empty(), "the poll never asked for the payload");
+        assert!(
+            tool_calls.is_empty(),
+            "the poll never asked for the payload"
+        );
+        assert_eq!(runs.len(), 1);
+
+        let (memories, stats) = snapshot_files(Some(root), &options).unwrap();
+        assert!(!memories.is_empty(), "the poll did ask for the files");
+        assert_eq!(stats.file_count, 2);
+    }
+
+    #[tokio::test]
+    async fn asking_only_for_the_payload_buys_no_file_walk() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let session_id = seed_session_with_payload(&pool, SessionContext::default()).await;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        workspace_with_memories(root);
+
+        let options = options_from_ipc(PAYLOAD_ONLY);
+
+        let (messages, runs, tool_calls) = snapshot_session_payload(&pool, &session_id, &options)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(tool_calls.len(), 1);
+
+        let (memories, stats) = snapshot_files(Some(root), &options).unwrap();
+        assert!(memories.is_empty(), "the memory walk was not asked for");
+        assert_eq!(stats, ArtifactTreeStats::default());
+    }
+
+    /// A caller asking for everything. No shipped caller does today, but it
+    /// is the only fixture that can see a bug making the two flags mutually
+    /// exclusive — each one switching the *other* section off — which the
+    /// asymmetric [`FILES_ONLY`]/[`PAYLOAD_ONLY`] pair cannot.
+    const BOTH: &str = r#"{"includeSessionPayload":true,"includeFiles":true}"#;
+
+    const SNAPSHOT_WORKSPACE_ID: &str = "77777777-7777-4777-8777-777777777777";
+    const SNAPSHOT_MANAGER_ID: &str = "88888888-8888-4888-8888-888888888888";
+
+    /// A workspace on disk (memories, artifacts, `config.json`) plus the
+    /// `AppState` and database that [`workspace_snapshot`] resolves it
+    /// through, so the command body can be called the way the IPC layer calls
+    /// it. The helper-level tests above cannot see the command decide what to
+    /// pass; this can.
+    struct SnapshotWorkspace {
+        _temp: tempfile::TempDir,
+        state: AppState,
+    }
+
+    impl SnapshotWorkspace {
+        async fn new() -> Self {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let parent = temp.path().join("workspaces");
+            let root = parent.join(SNAPSHOT_WORKSPACE_ID);
+            let config = WorkspaceConfig::new(
+                SNAPSHOT_WORKSPACE_ID.to_string(),
+                "Snapshot".to_string(),
+                1_000,
+                SNAPSHOT_MANAGER_ID.to_string(),
+            );
+            workspace_config::save(&root, &config).expect("seed workspace");
+            workspace_with_memories(&root);
+
+            let mut index = WorkspaceIndex::default();
+            index.insert_config(root.clone(), &config);
+            let app_config = AppConfig {
+                workspace_dirs: vec![parent],
+                ..AppConfig::default()
+            };
+            let config_manager =
+                crate::ConfigManager::new_for_tests(app_config, temp.path().join("config.json"));
+            let state = AppState::new_for_tests(config_manager, index).expect("app state");
+
+            let pool = state
+                .workspace_db(SNAPSHOT_WORKSPACE_ID)
+                .await
+                .expect("workspace db");
+            // The manager's own conversation, which is what the snapshot
+            // resolves to and loads the payload from.
+            seed_session_with_payload(
+                &pool,
+                SessionContext {
+                    workspace_id: Some(SNAPSHOT_WORKSPACE_ID.to_string()),
+                    automation_id: Some(SNAPSHOT_MANAGER_ID.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            Self { _temp: temp, state }
+        }
+
+        async fn snapshot(&self, json: &str) -> WorkspaceSnapshot {
+            workspace_snapshot(
+                &self.state,
+                Some(SNAPSHOT_WORKSPACE_ID.to_string()),
+                serde_json::from_str(json).expect("snapshot options must deserialize"),
+            )
+            .await
+            .expect("snapshot")
+        }
+    }
+
+    /// The command's own wiring: both sections are opt-in, and the opting in
+    /// happens at [`workspace_snapshot`]'s two callsites, not in the helpers.
+    /// A callsite that ignores `options` and asks for everything passes every
+    /// helper-level test above and fails here.
+    #[tokio::test]
+    async fn the_snapshot_command_loads_only_the_sections_its_options_asked_for() {
+        let workspace = SnapshotWorkspace::new().await;
+
+        let neither = workspace.snapshot(NEITHER).await;
+        assert!(
+            neither.session.is_some(),
+            "the fixture must resolve a session, or the payload assertions below pass vacuously"
+        );
+        assert_eq!(
+            neither.runs.len(),
+            1,
+            "runs are cheap and ride along regardless"
+        );
+        assert!(neither.messages.is_empty(), "messages are opt-in");
+        assert!(neither.tool_calls.is_empty(), "tool calls are opt-in");
+        assert!(neither.memories.is_empty(), "the memory walk is opt-in");
+        assert_eq!(neither.artifact_count, 0, "the artifact walk is opt-in");
+
+        // Both flags on: neither section may switch the other off.
+        let full = workspace.snapshot(BOTH).await;
+        assert_eq!(full.messages.len(), 1);
+        assert_eq!(full.tool_calls.len(), 1);
+        assert_eq!(full.runs.len(), 1);
+        assert!(!full.memories.is_empty(), "the memories were asked for");
+        assert!(full.artifact_count > 0, "the artifacts were asked for");
+
+        // The shipped pair, and the only one whose flags differ: a callsite
+        // handed the *other* extra's flag is green on both fixtures above and
+        // fails here, on the poll that pays for the mistake in production.
+        let poll = workspace.snapshot(FILES_ONLY).await;
+        assert!(!poll.memories.is_empty(), "the poll did ask for the files");
+        assert!(poll.artifact_count > 0, "the poll did ask for the files");
+        assert!(
+            poll.messages.is_empty(),
+            "the poll never asked for the payload"
+        );
+        assert!(
+            poll.tool_calls.is_empty(),
+            "the poll never asked for the payload"
+        );
     }
 
     #[test]

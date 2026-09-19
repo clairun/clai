@@ -53,6 +53,15 @@ interface PendingDelete {
   title: string;
 }
 
+// The workspace settings modal reads only workspace metadata (title, assigned
+// agents, schedule), so it must never pull the session payload or the
+// filesystem walk: on a workspace with a large history that is ~100MB of JSON
+// awaited before the modal can render.
+const SETTINGS_SNAPSHOT_OPTIONS = {
+  includeSessionPayload: false,
+  includeFiles: false,
+};
+
 /**
  * Unified Fleet/Workspace shell: a persistent (collapsible) workspace
  * rail on the left and the selected workspace's full view in the
@@ -233,7 +242,7 @@ const FleetLayout = () => {
   const handleOpenSettings = useCallback(async (id: string) => {
     if (!id) return;
     try {
-      const snapshot = await getWorkspaceSnapshot(id);
+      const snapshot = await getWorkspaceSnapshot(id, SETTINGS_SNAPSHOT_OPTIONS);
       setSettingsState({ open: true, workspaceId: id, snapshot });
     } catch (err) {
       setError(errText(err, 'Failed to open workspace settings.'));
@@ -248,7 +257,7 @@ const FleetLayout = () => {
     const id = settingsState.workspaceId;
     if (!id) return;
     try {
-      const snapshot = await getWorkspaceSnapshot(id);
+      const snapshot = await getWorkspaceSnapshot(id, SETTINGS_SNAPSHOT_OPTIONS);
       setSettingsState((s) => (s.workspaceId === id ? { ...s, snapshot } : s));
     } catch {
       /* non-fatal — modal stays open with old snapshot */

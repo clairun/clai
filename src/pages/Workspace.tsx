@@ -32,6 +32,7 @@ import {
   setWorkspaceSchedulePaused,
   setWorkspaceTitle,
 } from '../workspace/client';
+import type { SnapshotOptions } from '../workspace/client';
 import type {
   AssistantMessage,
   AssistantRun,
@@ -64,9 +65,12 @@ const MESSAGE_PAGE_LIMIT = 100;
 // without the user having to re-enter the workspace, and so the artifact
 // count stays current. Artifacts themselves are no longer returned here —
 // the panel lazy-loads each directory level via workspace_list_dir — so the
-// per-tick cost is a memory walk plus a recursive artifact count.
+// per-tick cost is a memory walk plus a recursive artifact count. Not the
+// same pair as FleetLayout's SETTINGS_SNAPSHOT_OPTIONS, which is lighter
+// still: the settings modal reads header fields only, so it skips the walk.
 const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
   includeSessionPayload: false,
+  includeFiles: true,
 };
 // Two menu items of 12px text plus vertical padding, 1px gap, wrapper
 // padding, and border measure about 69px. Rounded up so the flip starts
@@ -107,7 +111,6 @@ const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   crewPickerOpen: false,
 };
 type SettingsSelection = { kind: 'general' } | { kind: 'agent'; agentId: string };
-type SnapshotOptions = Parameters<typeof getWorkspaceSnapshot>[1];
 type VirtualizedListProps<T> = {
   items: T[];
   itemKey: (item: T, index: number) => string;
@@ -1804,7 +1807,7 @@ const Workspace = () => {
   const lastLoadedSessionUpdatedAtRef = useRef<NumericTimestamp>(null);
 
   const loadSnapshot = useCallback(
-    async (showSpinner = false, options: SnapshotOptions = null) => {
+    async (showSpinner = false, options: SnapshotOptions | null = null) => {
       if (showSpinner) {
         setIsLoading(true);
       }

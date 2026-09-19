@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
-import type { WorkspaceListEntry } from '../generated/bindings';
+import type { WorkspaceListEntry, WorkspaceSnapshot } from '../generated/bindings';
 
 vi.mock('../workspace/client', () => ({
   listWorkspaces: vi.fn(),
@@ -33,8 +33,16 @@ vi.mock('../components/AppUpdateBadge', () => ({
   default: () => null,
 }));
 
+// Stands in for the real modal so the settings tests can drive the post-save
+// `onChanged` path. Renders nothing while closed, and no `role="dialog"`, so
+// the delete-dialog assertions below stay unambiguous.
 vi.mock('../components/Settings/WorkspaceSettingsModal', () => ({
-  default: () => null,
+  default: ({ isOpen, onChanged }: { isOpen: boolean; onChanged: () => void }) =>
+    isOpen ? (
+      <button type="button" data-testid="settings-modal" onClick={onChanged}>
+        Save settings
+      </button>
+    ) : null,
 }));
 
 vi.mock('../components/Settings', () => ({
@@ -50,6 +58,7 @@ const workspaceClient = await import('../workspace/client');
 const listWorkspaces = vi.mocked(workspaceClient.listWorkspaces);
 const deleteWorkspace = vi.mocked(workspaceClient.deleteWorkspace);
 const getSchedulerPaused = vi.mocked(workspaceClient.getSchedulerPaused);
+const getWorkspaceSnapshot = vi.mocked(workspaceClient.getWorkspaceSnapshot);
 
 const entry = (
   id: string,
@@ -253,5 +262,46 @@ describe('FleetLayout workspace deletion', () => {
 
     const reopened = await openDeleteDialog();
     expect(within(reopened).queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('FleetLayout workspace settings', () => {
+  // The modal reads only workspace metadata, so both payload flags must be
+  // off: with them on, the command ships every message and tool call of the
+  // workspace's session (~100MB on a long-lived workspace) and the await
+  // gates the modal's first paint.
+  const LIGHTWEIGHT = { includeSessionPayload: false, includeFiles: false };
+
+  const openSettings = async (title = 'Alpha') => {
+    const row = await screen.findByRole('button', { name: new RegExp(title) });
+    await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+    const menu = screen.getByRole('menu');
+    await userEvent.click(within(menu).getByRole('menuitem', { name: 'Settings' }));
+    return screen.findByTestId('settings-modal');
+  };
+
+  it('requests a metadata-only snapshot when opening workspace settings', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    getWorkspaceSnapshot.mockResolvedValue({ workspaceId: 'a' } as WorkspaceSnapshot);
+
+    renderFleet();
+    await openSettings();
+
+    expect(getWorkspaceSnapshot).toHaveBeenCalledWith('a', LIGHTWEIGHT);
+  });
+
+  it('requests a metadata-only snapshot when refreshing after a save', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    getWorkspaceSnapshot.mockResolvedValue({ workspaceId: 'a' } as WorkspaceSnapshot);
+
+    renderFleet();
+    await userEvent.click(await openSettings());
+
+    await waitFor(() => expect(getWorkspaceSnapshot).toHaveBeenCalledTimes(2));
+    for (const call of getWorkspaceSnapshot.mock.calls) {
+      expect(call).toEqual(['a', LIGHTWEIGHT]);
+    }
   });
 });

@@ -551,10 +551,13 @@ const GeneralSection = ({ ref, workspaceId, snapshot, saving, onDirtyChange }: {
     }
   }, [snapshot?.workspaceId]);
 
-  // Resync if the parent snapshot changes (e.g., a save just completed and
-  // the parent refetched). Skipped when the local draft already matches
-  // the snapshot so we don't fight an in-flight save's loopback.
-  // eslint-disable-next-line react-hooks/set-state-in-effect -- Resyncs local title from the parent snapshot when it changes (e.g., after a save refetch); the lint cannot model the loopback-avoidance guard the next line adds.
+  // Resync the draft when the parent snapshot's title changes (e.g., a save
+  // completed and the parent refetched). The dependency array is the whole
+  // protection: a refetch that returns the same title does not re-run this,
+  // so an in-flight save's loopback leaves the draft alone. There is no
+  // draft-matching guard — a title that genuinely changed (a concurrent
+  // rename) does overwrite an unsaved draft.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- deliberate: the draft mirrors the parent snapshot's title, and the `snapshot?.title` dependency is what keeps a same-value refetch from clobbering it.
   useEffect(() => { setTitle(snapshot?.title || ''); }, [snapshot?.title]);
 
   const isDirty = title.trim() !== (snapshot?.title || '').trim();
