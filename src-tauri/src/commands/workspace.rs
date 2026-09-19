@@ -1802,10 +1802,12 @@ fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathB
 
 /// The memory entries and artifact counters a snapshot reports.
 ///
-/// Both are skipped wholesale on a lightweight poll (`includeFiles: false`)
-/// and for a workspace with no filesystem root; spelling that empty result
-/// once here is what keeps the two conditions from drifting apart — they were
-/// two nested `if`s with the same `(vec![], default())` arm written twice.
+/// Both are skipped wholesale for a caller that did not ask for them
+/// (`includeFiles: false` — the settings modal and the context bar; the
+/// workspace page's 5s poll is the caller that *does* ask) and for a
+/// workspace with no filesystem root; spelling that empty result once here is
+/// what keeps the two conditions from drifting apart — they were two nested
+/// `if`s with the same `(vec![], default())` arm written twice.
 ///
 /// The whole `options` is passed rather than the one flag it needs, so that
 /// the callsite cannot hand this helper the *other* extra's flag.
@@ -1870,16 +1872,29 @@ pub async fn workspace_get_snapshot(
     options: Option<WorkspaceSnapshotOptions>,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceSnapshot, String> {
+    workspace_snapshot(state.inner(), workspace_id, options).await
+}
+
+/// The body of [`workspace_get_snapshot`], taking a plain [`AppState`] so the
+/// tests can reach it: the two `options` callsites below decide whether a
+/// snapshot carries the conversation payload and the file walk, and driving
+/// them through the helpers directly would leave this function free to ignore
+/// its own argument.
+async fn workspace_snapshot(
+    state: &AppState,
+    workspace_id: Option<String>,
+    options: Option<WorkspaceSnapshotOptions>,
+) -> Result<WorkspaceSnapshot, String> {
     let options = options.unwrap_or_default();
-    let descriptor = resolve_workspace_descriptor(state.inner(), workspace_id)?;
+    let descriptor = resolve_workspace_descriptor(state, workspace_id)?;
     if let Some(root_path) = &descriptor.root_path {
         ensure_agent_workspace_root(root_path)?;
     }
     let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
 
-    let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
+    let provider_selection = resolve_workspace_provider_selection(state, &descriptor)?;
 
-    let session = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
+    let session = find_workspace_session(&workspace_pool, state, &descriptor).await?;
     let (messages, runs, tool_calls) = match &session {
         Some(session) => snapshot_session_payload(&workspace_pool, &session.id, &options).await?,
         None => (Vec::new(), Vec::new(), Vec::new()),
@@ -1896,10 +1911,9 @@ pub async fn workspace_get_snapshot(
     let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
 
     let (assigned_agents, default_workspace_agent_id) =
-        list_workspace_agent_responses(state.inner(), &descriptor.workspace_id)?;
+        list_workspace_agent_responses(state, &descriptor.workspace_id)?;
     let tasks =
-        list_workspace_task_responses(&workspace_pool, state.inner(), &descriptor.workspace_id)
-            .await?;
+        list_workspace_task_responses(&workspace_pool, state, &descriptor.workspace_id).await?;
 
     // Workspace-level schedule (no longer per-agent). The scheduled tick
     // invokes the default agent.
@@ -5899,13 +5913,13 @@ mod tests {
 
     /// A session with one run, one message and one tool call — enough for the
     /// payload flag to have something to include or to skip.
-    async fn seed_session_with_payload(pool: &DbPool) -> String {
+    async fn seed_session_with_payload(pool: &DbPool, context: SessionContext) -> String {
         let session = repository::create_session(
             pool,
             repository::CreateSessionParams {
                 kind: SessionKind::Interactive,
                 title: None,
-                context: SessionContext::default(),
+                context,
             },
         )
         .await
@@ -5957,7 +5971,7 @@ mod tests {
     #[tokio::test]
     async fn a_snapshot_asked_for_nothing_carries_neither_the_payload_nor_the_files() {
         let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        let session_id = seed_session_with_payload(&pool).await;
+        let session_id = seed_session_with_payload(&pool, SessionContext::default()).await;
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         workspace_with_memories(root);
@@ -5982,7 +5996,7 @@ mod tests {
     #[tokio::test]
     async fn asking_only_for_the_files_buys_no_conversation() {
         let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        let session_id = seed_session_with_payload(&pool).await;
+        let session_id = seed_session_with_payload(&pool, SessionContext::default()).await;
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         workspace_with_memories(root);
@@ -6007,7 +6021,7 @@ mod tests {
     #[tokio::test]
     async fn asking_only_for_the_payload_buys_no_file_walk() {
         let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        let session_id = seed_session_with_payload(&pool).await;
+        let session_id = seed_session_with_payload(&pool, SessionContext::default()).await;
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         workspace_with_memories(root);
@@ -6024,6 +6038,111 @@ mod tests {
         let (memories, stats) = snapshot_files(Some(root), &options).unwrap();
         assert!(memories.is_empty(), "the memory walk was not asked for");
         assert_eq!(stats, ArtifactTreeStats::default());
+    }
+
+    /// A caller asking for everything. No shipped caller does today, but it
+    /// is the only fixture that can see a bug making the two flags mutually
+    /// exclusive — each one switching the *other* section off — which the
+    /// asymmetric [`FILES_ONLY`]/[`PAYLOAD_ONLY`] pair cannot.
+    const BOTH: &str = r#"{"includeSessionPayload":true,"includeFiles":true}"#;
+
+    const SNAPSHOT_WORKSPACE_ID: &str = "77777777-7777-4777-8777-777777777777";
+    const SNAPSHOT_MANAGER_ID: &str = "88888888-8888-4888-8888-888888888888";
+
+    /// A workspace on disk (memories, artifacts, `config.json`) plus the
+    /// `AppState` and database that [`workspace_snapshot`] resolves it
+    /// through, so the command body can be called the way the IPC layer calls
+    /// it. The helper-level tests above cannot see the command decide what to
+    /// pass; this can.
+    struct SnapshotWorkspace {
+        _temp: tempfile::TempDir,
+        state: AppState,
+    }
+
+    impl SnapshotWorkspace {
+        async fn new() -> Self {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let parent = temp.path().join("workspaces");
+            let root = parent.join(SNAPSHOT_WORKSPACE_ID);
+            let config = WorkspaceConfig::new(
+                SNAPSHOT_WORKSPACE_ID.to_string(),
+                "Snapshot".to_string(),
+                1_000,
+                SNAPSHOT_MANAGER_ID.to_string(),
+            );
+            workspace_config::save(&root, &config).expect("seed workspace");
+            workspace_with_memories(&root);
+
+            let mut index = WorkspaceIndex::default();
+            index.insert_config(root.clone(), &config);
+            let app_config = AppConfig {
+                workspace_dirs: vec![parent],
+                ..AppConfig::default()
+            };
+            let config_manager =
+                crate::ConfigManager::new_for_tests(app_config, temp.path().join("config.json"));
+            let state = AppState::new_for_tests(config_manager, index).expect("app state");
+
+            let pool = state
+                .workspace_db(SNAPSHOT_WORKSPACE_ID)
+                .await
+                .expect("workspace db");
+            // The manager's own conversation, which is what the snapshot
+            // resolves to and loads the payload from.
+            seed_session_with_payload(
+                &pool,
+                SessionContext {
+                    workspace_id: Some(SNAPSHOT_WORKSPACE_ID.to_string()),
+                    automation_id: Some(SNAPSHOT_MANAGER_ID.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            Self { _temp: temp, state }
+        }
+
+        async fn snapshot(&self, json: &str) -> WorkspaceSnapshot {
+            workspace_snapshot(
+                &self.state,
+                Some(SNAPSHOT_WORKSPACE_ID.to_string()),
+                serde_json::from_str(json).expect("snapshot options must deserialize"),
+            )
+            .await
+            .expect("snapshot")
+        }
+    }
+
+    /// The command's own wiring: both sections are opt-in, and the opting in
+    /// happens at [`workspace_snapshot`]'s two callsites, not in the helpers.
+    /// A callsite that ignores `options` and asks for everything passes every
+    /// helper-level test above and fails here.
+    #[tokio::test]
+    async fn the_snapshot_command_loads_only_the_sections_its_options_asked_for() {
+        let workspace = SnapshotWorkspace::new().await;
+
+        let lightweight = workspace.snapshot(NEITHER).await;
+        assert!(
+            lightweight.session.is_some(),
+            "the fixture must resolve a session, or the payload assertions below pass vacuously"
+        );
+        assert_eq!(
+            lightweight.runs.len(),
+            1,
+            "runs are cheap and ride along regardless"
+        );
+        assert!(lightweight.messages.is_empty(), "messages are opt-in");
+        assert!(lightweight.tool_calls.is_empty(), "tool calls are opt-in");
+        assert!(lightweight.memories.is_empty(), "the memory walk is opt-in");
+        assert_eq!(lightweight.artifact_count, 0, "the artifact walk is opt-in");
+
+        // Both flags on: neither section may switch the other off.
+        let full = workspace.snapshot(BOTH).await;
+        assert_eq!(full.messages.len(), 1);
+        assert_eq!(full.tool_calls.len(), 1);
+        assert_eq!(full.runs.len(), 1);
+        assert!(!full.memories.is_empty(), "the memories were asked for");
+        assert!(full.artifact_count > 0, "the artifacts were asked for");
     }
 
     #[test]
