@@ -15,6 +15,7 @@ import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
+import { mainIdentity } from '../components/Agents/agentIdentity';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import VirtualizedList from '../components/common/VirtualizedList';
@@ -1396,6 +1397,12 @@ const WorkspaceHeader = ({
   );
 };
 
+// The workspace chat is always the Main's session, so its in-flight footer
+// always wears the Main's face. Built once at module scope because the footer
+// is memoized on this prop: a fresh object per render would re-render it on
+// every parent render for the whole of every run.
+const MAIN_IDENTITY = mainIdentity();
+
 // Chat is the workspace's primary surface. Memories, artifacts, tasks, and
 // member agents live in the drawer (toggled from the header counters) and
 // open in modals when inspected — the chat is never hidden.
@@ -1516,6 +1523,7 @@ const ChatFirstLayout = ({
             runError={runError}
             runErrorIsLimit={runErrorIsLimit}
             runStartedAt={runStartedAt}
+            runningIdentity={MAIN_IDENTITY}
             queuedMessageIds={queuedMessageIds}
             onDeleteQueuedMessage={onDeleteQueuedMessage}
             onEditQueuedMessage={onEditQueuedMessage}

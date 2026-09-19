@@ -47,6 +47,30 @@ describe('AgentAvatar', () => {
     expect(el().className).not.toMatch(/ring/);
   });
 
+  it('ring={false} keeps the activity expression but draws no ring', () => {
+    // The chat's in-flight footer needs the running face without the ring,
+    // because the ring spins and that footer may not animate.
+    const { container, rerender } = render(
+      <AgentAvatar identity={reviewer()} activity="running" />
+    );
+    const el = () => container.firstElementChild as HTMLElement;
+    const face = () => container.querySelector('svg')!.outerHTML;
+    const runningFace = face();
+    expect(el().className).toMatch(/ring/);
+    expect(el().className).toMatch(/running/);
+
+    rerender(<AgentAvatar identity={reviewer()} activity="running" ring={false} />);
+    expect(el().className).not.toMatch(/ring/);
+    expect(el().className).not.toMatch(/running/);
+    // Same activity, same drawn face — only the ring is gone.
+    expect(el().dataset.activity).toBe('running');
+    expect(face()).toBe(runningFace);
+
+    // `disabled` never had a ring to drop, and keeps its dimming either way.
+    rerender(<AgentAvatar identity={reviewer()} activity="disabled" ring={false} />);
+    expect(el().className).toMatch(/disabled/);
+  });
+
   it('changes expression with activity but keeps the same body', () => {
     const { container, rerender } = render(<AgentAvatar identity={reviewer()} />);
     const neutral = container.innerHTML;

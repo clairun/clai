@@ -15,11 +15,19 @@ export interface AgentAvatarProps {
   size?: number;
   /**
    * Drives the expression and the status ring. `none` (default) draws no
-   * ring; `disabled` dims the face and draws no ring either.
+   * ring; `disabled` dims the face and draws no ring either. Pass
+   * `ring={false}` to keep the expression without the ring.
    */
   activity?: AgentActivity;
   /** Accessible name; omit when the name is printed next to the face. */
   label?: string;
+  /**
+   * Draw the status ring (default `true`). `false` keeps the expression — and
+   * the dimming for `disabled` — but no ring, for surfaces that must not
+   * animate: the `running` ring spins forever. See `.runningIndicator` in
+   * `AssistantChat.module.css` for what that costs on this stack.
+   */
+  ring?: boolean;
   className?: string;
 }
 
@@ -35,6 +43,7 @@ const AgentAvatar = ({
   size = 32,
   activity = 'none',
   label,
+  ring = true,
   className,
 }: AgentAvatarProps) => {
   const theme = useAppTheme();
@@ -50,11 +59,12 @@ const AgentAvatar = ({
     [seed, hue, generatorVersion, theme]
   );
 
+  const ringed = ring && RINGED.has(activity);
   const classes = [
     styles.avatar,
-    RINGED.has(activity) ? styles.ring : '',
-    activity === 'running' ? styles.running : '',
-    activity === 'attention' ? styles.attention : '',
+    ringed ? styles.ring : '',
+    ringed && activity === 'running' ? styles.running : '',
+    ringed && activity === 'attention' ? styles.attention : '',
     activity === 'disabled' ? styles.disabled : '',
     className ?? '',
   ]

@@ -33,6 +33,8 @@ import {
   type TaskCallCard,
 } from './toolDisplay';
 import TaskCard from '../Agents/TaskCard';
+import AgentAvatar from '../Agents/AgentAvatar';
+import type { AgentIdentity } from '../Agents/agentIdentity';
 import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './taskCardContext';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
@@ -489,23 +491,29 @@ const formatElapsed = (ms: number): string => {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 };
 
+interface RunningIndicatorProps {
+  identity: AgentIdentity;
+  runStartedAt?: number | null;
+}
+
 /**
- * RunningIndicator — the in-flight footer (left-aligned): the Clai mark plus
- * an elapsed timer, so it's clear the run is progressing.
+ * RunningIndicator — the in-flight footer (left-aligned): the face of the
+ * agent whose session this is, wearing its running expression, plus an
+ * elapsed timer, so it's clear whose run is progressing and that it is.
  *
- * The mark does not spin, and nothing else here animates. On this stack (GTK3 +
- * webkit2gtk-4.1) every repaint is a full-window cairo/pixman blit on the CPU,
- * so an indicator costs whatever its update rate is — and as a CSS animation
- * the spin alone was asking for ~56 repaints/sec to turn one 22px icon. The
- * clock's 1s tick carries the same "still alive" meaning for ~1/56th of that,
- * and carries it more honestly: a spinner keeps turning when the backend is
- * wedged, whereas a clock that stops has actually told you something.
+ * Nothing here animates, and nothing should: the face is drawn with
+ * `ring={false}` so the status ring's spin never starts (the repaint budget
+ * this protects is documented on `.runningIndicator` in the stylesheet). The
+ * clock's 1s tick carries the "still alive" meaning for a fraction of the
+ * cost, and carries it more honestly: a spinner keeps turning when the
+ * backend is wedged, whereas a clock that stops has actually told you
+ * something.
  *
  * Naming the in-flight tool here was tried and reverted: whenever it had
  * something to say, the transcript row directly above was already saying it,
  * so the footer read as a duplicated stray line detached from the block.
  */
-const RunningIndicator = memo(({ runStartedAt }: { runStartedAt?: number | null }) => {
+const RunningIndicator = memo(({ identity, runStartedAt }: RunningIndicatorProps) => {
   // Tick once a second to advance the elapsed readout. The footer only mounts
   // while streaming, so the interval is short-lived.
   const [now, setNow] = useState(() => Date.now());
@@ -517,7 +525,7 @@ const RunningIndicator = memo(({ runStartedAt }: { runStartedAt?: number | null 
 
   return (
     <div className={styles.runningIndicator}>
-      <img src="/icon.svg" alt="Clai" className={styles.runningIcon} />
+      <AgentAvatar identity={identity} size={22} activity="running" ring={false} label="Working" />
       {elapsed && <span className={styles.runningMeta}>{elapsed}</span>}
     </div>
   );
@@ -545,6 +553,12 @@ interface ChatMessageListProps {
   // Epoch ms when the in-flight run started, for the running indicator's
   // elapsed-time readout.
   runStartedAt?: number | null;
+  // Whose face the in-flight footer wears. Omit to render no footer at all
+  // while streaming: a task transcript is opened from a card that already
+  // shows the assignee's running face, and its own header repeats it, so a
+  // third marker inside the log is noise. Pass a reference that outlives the
+  // render (a module constant, or a memo) — the footer memoizes on it.
+  runningIdentity?: AgentIdentity | null;
   // Ids of user messages still waiting in the queue (written while a run
   // was active, not yet picked up). Rendered with a "Queued" chip.
   queuedMessageIds?: string[];
@@ -580,6 +594,7 @@ const ChatMessageList = ({
   runError = null,
   runErrorIsLimit = false,
   runStartedAt = null,
+  runningIdentity = null,
   queuedMessageIds,
   onDeleteQueuedMessage,
   onEditQueuedMessage,
@@ -754,7 +769,9 @@ const ChatMessageList = ({
   // show the failure (if any) attached to the turn it belongs to. These are
   // mutually exclusive — a failed run is no longer streaming.
   const footer = isStreaming ? (
-    <RunningIndicator runStartedAt={runStartedAt} />
+    runningIdentity ? (
+      <RunningIndicator identity={runningIdentity} runStartedAt={runStartedAt} />
+    ) : null
   ) : runError ? (
     <div className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner} role="alert">
       <span className={styles.runErrorIcon}>{runErrorIsLimit ? '⏳' : '⚠'}</span>
