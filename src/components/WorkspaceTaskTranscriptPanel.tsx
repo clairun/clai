@@ -8,8 +8,8 @@ import type {
 } from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
 import AgentAvatar from './Agents/AgentAvatar';
-import { taskIdentity } from './Agents/agentIdentity';
-import { taskStatusLabel } from '../utils/taskDisplay';
+import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
+import { isTaskActive, isTaskAttention, taskStatusLabel } from '../utils/taskDisplay';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
 
 const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
@@ -107,6 +107,13 @@ export default function WorkspaceTaskTranscriptPanel({
 
   const statusLabel = taskStatusLabel(task.status);
   const statusClass = styles[`status_${task.status}`] || '';
+  // The header face carries the task's state, so the transcript below doesn't
+  // have to: its running footer is deliberately off (see `runningIdentity`).
+  const headerActivity: AgentActivity = isTaskActive(task)
+    ? 'running'
+    : isTaskAttention(task)
+      ? 'attention'
+      : 'none';
 
   const messages = sessionState?.messages || EMPTY_MESSAGES;
   const toolCalls = sessionState?.toolCalls || EMPTY_TOOL_CALLS;
@@ -157,7 +164,12 @@ export default function WorkspaceTaskTranscriptPanel({
     >
       <div className={styles.header}>
         <div className={styles.headerLeft}>
-          <AgentAvatar identity={taskIdentity(task, roster)} size={20} label={task.assignedAgentDisplayName} />
+          <AgentAvatar
+            identity={taskIdentity(task, roster)}
+            size={20}
+            activity={headerActivity}
+            label={task.assignedAgentDisplayName}
+          />
           <span className={styles.title} title={task.title}>{task.title}</span>
           <span className={`${styles.statusPill} ${statusClass}`}>{statusLabel}</span>
         </div>
@@ -215,7 +227,10 @@ export default function WorkspaceTaskTranscriptPanel({
               toolCalls={toolCalls}
               streamingText={streamingText}
               isStreaming={isStreaming}
-              runStartedAt={sessionState?.runStartedAt ?? null}
+              // No running footer here: the header face above already shows
+              // this agent running, and the store only knows `isStreaming` /
+              // `runStartedAt` for runs it saw start live — a transcript
+              // opened mid-run showed nothing at all, which read as a bug.
               userLabel="Main agent"
               hasOlderMessages={hasOlderMessages}
               isLoadingOlderMessages={isLoadingOlderMessages}

@@ -64,7 +64,12 @@ vi.mock('../../workspace/client', () => ({
 }));
 
 import ChatMessageList from './ChatMessageList';
+import { mainIdentity } from '../Agents/agentIdentity';
 import type { AssistantMessage, ToolInvocation } from '../../generated/bindings';
+
+// Whose face the in-flight footer wears. A module constant, the way call
+// sites are required to pass it (the footer memoizes on the reference).
+const RUNNING_IDENTITY = mainIdentity();
 
 const msg = (
   over: Partial<AssistantMessage> & Pick<AssistantMessage, 'id' | 'role' | 'content'>
@@ -599,12 +604,21 @@ describe('ChatMessageList', () => {
       msg({ id: 'm1', role: 'user', content: [{ type: 'text', text: 'do the thing' }] }),
       msg({ id: 'm2', role: 'assistant', content: [{ type: 'text', text: '' }] }),
     ];
-    const { rerender } = render(<ChatMessageList messages={messages} isStreaming />);
+    const { rerender } = render(
+      <ChatMessageList messages={messages} isStreaming runningIdentity={RUNNING_IDENTITY} />
+    );
     expect(screen.getByTestId('virtual-list').children).toHaveLength(2); // user item + footer
     expect(screen.queryByText('Clai')).toBeNull();
 
     // First streamed delta for the placeholder makes it visible.
-    rerender(<ChatMessageList messages={messages} isStreaming streamingText={{ m2: 'on it' }} />);
+    rerender(
+      <ChatMessageList
+        messages={messages}
+        isStreaming
+        runningIdentity={RUNNING_IDENTITY}
+        streamingText={{ m2: 'on it' }}
+      />
+    );
     expect(screen.getByText('on it')).toBeInTheDocument();
     expect(screen.getByText('Clai')).toBeInTheDocument();
   });
@@ -698,13 +712,43 @@ describe('ChatMessageList', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
-  it('shows an elapsed timer in the running footer', () => {
+  it("shows the running agent's face and an elapsed timer in the running footer", () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'working…' }] }),
+    ];
+    render(
+      <ChatMessageList
+        messages={messages}
+        isStreaming
+        runStartedAt={Date.now() - 8000}
+        runningIdentity={RUNNING_IDENTITY}
+      />
+    );
+    // The face of whoever is running, wearing its running expression…
+    const face = screen.getByRole('img', { name: 'Working' });
+    expect(face.dataset.activity).toBe('running');
+    // …but without the status ring, because that ring spins and this footer
+    // is on screen for the whole of every run (see AssistantChat.module.css).
+    expect(face.className).not.toMatch(/ring/);
+    expect(face.querySelector('svg')).not.toBeNull();
+    // An m:ss timer (~0:08), and no token count.
+    expect(screen.getByText(/^0:0\d$/)).toBeInTheDocument();
+    expect(screen.queryByText(/tokens/)).toBeNull();
+  });
+
+  it('renders no running footer while streaming when no identity is given', () => {
+    // How task transcripts render: the card and the panel header already say
+    // who is running, so the log carries no third marker. The store also only
+    // knows `isStreaming` for runs it saw start live, so a footer here was
+    // present or absent depending on when the panel was opened.
     const messages: AssistantMessage[] = [
       msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'working…' }] }),
     ];
     render(<ChatMessageList messages={messages} isStreaming runStartedAt={Date.now() - 8000} />);
-    // An m:ss timer (~0:08), and no token count.
-    expect(screen.getByText(/^0:0\d$/)).toBeInTheDocument();
-    expect(screen.queryByText(/tokens/)).toBeNull();
+    // The transcript still renders — only the footer is gone.
+    expect(screen.getByText('working…')).toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: 'Working' })).toBeNull();
+    expect(screen.queryByText(/^0:0\d$/)).toBeNull();
+    expect(screen.getByTestId('virtual-list').children).toHaveLength(1);
   });
 });

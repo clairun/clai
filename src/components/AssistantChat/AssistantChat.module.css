@@ -60,7 +60,14 @@
   cursor: default;
 }
 
-/* Running indicator at bottom of chat — left-aligned with the conversation. */
+/* Running indicator at bottom of chat — left-aligned with the conversation.
+   Deliberately static: no `animation` in this block or its children, and none
+   should be added. The face is an AgentAvatar drawn with `ring={false}` for
+   the same reason — its running ring spins. On GTK3 + webkit2gtk-4.1 every
+   repaint is a full-window cairo/pixman blit on the CPU, so a spin that is on
+   screen for the whole of every run cost ~56 repaints/sec (~13% of a core) to
+   turn one 22px mark. The adjacent 1s clock carries the same meaning for
+   ~1 repaint/sec. */
 .runningIndicator {
   display: flex;
   align-items: center;
@@ -69,18 +76,7 @@
   padding: 12px 4px;
 }
 
-/* Deliberately static — no `animation` here, and none should be added. On
-   GTK3 + webkit2gtk-4.1 every repaint is a full-window cairo/pixman blit on
-   the CPU, so a CSS animation on this icon cost ~56 repaints/sec (~13% of a
-   core) to turn a 22px mark. The adjacent 1s clock carries the same meaning
-   for ~1 repaint/sec. */
-.runningIcon {
-  width: 22px;
-  height: 22px;
-  object-fit: contain;
-}
-
-/* Elapsed time + live token count next to the spinner. */
+/* Elapsed time next to the face. */
 .runningMeta {
   font-size: 12px;
   color: var(--color-text-tertiary);
