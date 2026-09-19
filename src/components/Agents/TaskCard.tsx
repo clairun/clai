@@ -57,16 +57,31 @@ const assigneeName = (
 const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
   const name = assigneeName(card, roster);
-  const label = taskStatusLabel(card.status);
-  const pillClass = `${pills.pill} ${pills[`pill_${card.status}`] || ''}`;
   const openable = !!onOpen;
   const slim = card.variant === 'slim';
+
+  /*
+   * No pill on a hand-off. The status a delegation carries is whatever the row
+   * happened to be stamped with before the call returned — `queued`, or
+   * `completed` if the worker won the race — so the pill would report that race
+   * rather than the task, frozen forever. A poll's status is something the
+   * agent actually went and looked at, so that card keeps its pill.
+   *
+   * Every delegation is a full card (`inlineTaskCard` forces `variant: 'full'`
+   * for `kind: 'assign'`), so the slim line below always has one to draw.
+   */
+  const pill =
+    card.kind === 'assign' ? null : (
+      <span className={`${pills.pill} ${pills[`pill_${card.status}`] || ''}`}>
+        {taskStatusLabel(card.status)}
+      </span>
+    );
 
   const body = slim ? (
     <>
       <AgentAvatar identity={identity} size={18} label={name} />
       <span className={styles.slimTitle}>{card.title}</span>
-      <span className={pillClass}>{label}</span>
+      {pill}
     </>
   ) : (
     <>
@@ -83,7 +98,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
             {card.kind === 'assign' && <span className={styles.lead}>Delegated to </span>}
             {name}
           </span>
-          <span className={pillClass}>{label}</span>
+          {pill}
         </span>
         <span className={styles.title}>{card.title}</span>
         {card.detail ? (
@@ -108,8 +123,8 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
       className={className}
       onClick={() => onOpen(card.taskId)}
       // No aria-label: it would replace the card's own text — assignee, title,
-      // status, summary — with a shorter sentence. The tooltip says what the
-      // click does; the content says what it is about.
+      // summary, and a poll's status — with a shorter sentence. The tooltip
+      // says what the click does; the content says what it is about.
       title={`Open the log of "${card.title}"`}
     >
       {body}

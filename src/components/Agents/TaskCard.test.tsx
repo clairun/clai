@@ -43,13 +43,33 @@ const card = (over: Partial<TaskCallCard> = {}): TaskCallCard => ({
 const roster = [agent({})];
 
 describe('TaskCard', () => {
-  it('shows who the task went to, what it is, and where it stood', () => {
+  it('shows who the task went to and what it was asked to do', () => {
     render(<TaskCard card={card()} roster={roster} />);
     expect(screen.getByText('Rust Reviewer')).toBeInTheDocument();
     expect(screen.getByText('Delegated to')).toBeInTheDocument();
     expect(screen.getByText('Round 3 review')).toBeInTheDocument();
-    expect(screen.getByText('Queued')).toBeInTheDocument();
     expect(screen.getByText('Review the branch end to end.')).toBeInTheDocument();
+  });
+
+  it('labels no status on a hand-off, whatever the row was stamped with', () => {
+    // A delegation's status is the call racing the worker — `queued`, or
+    // `completed` if the row was stamped first — so a label there would report
+    // the race, frozen forever. The tasks drawer owns what is happening now.
+    for (const [status, label] of [
+      ['queued', 'Queued'],
+      ['running', 'Running'],
+      ['completed', 'Completed'],
+      ['failed', 'Failed'],
+    ]) {
+      const { container } = render(<TaskCard card={card({ status })} roster={roster} />);
+      expect(container.textContent).not.toContain(label);
+      cleanup();
+    }
+  });
+
+  it('keeps the status on a poll, which went and looked at the task', () => {
+    render(<TaskCard card={card({ kind: 'poll', status: 'completed' })} roster={roster} />);
+    expect(screen.getByText('Completed')).toBeInTheDocument();
   });
 
   it('names the workspace main "Main" whatever the definition calls it', () => {
@@ -141,7 +161,12 @@ describe('TaskCard', () => {
   it('shows a failed task\'s error in the error tone, not as a summary', () => {
     render(
       <TaskCard
-        card={card({ status: 'failed', detail: 'panicked at line 9', detailIsError: true })}
+        card={card({
+          kind: 'poll',
+          status: 'failed',
+          detail: 'panicked at line 9',
+          detailIsError: true,
+        })}
         roster={roster}
       />
     );
@@ -151,14 +176,21 @@ describe('TaskCard', () => {
     expect(screen.getByText('Failed')).toBeInTheDocument();
 
     cleanup();
-    render(<TaskCard card={card({ detail: 'all good', detailIsError: false })} roster={roster} />);
+    render(
+      <TaskCard
+        card={card({ kind: 'poll', detail: 'all good', detailIsError: false })}
+        roster={roster}
+      />
+    );
     expect(screen.getByText('all good').className).not.toMatch(/detailError/);
   });
 
   it('keeps the whole card readable as the button name', () => {
     // An aria-label here would hide the status and the summary from a screen
-    // reader behind a shorter sentence.
-    render(<TaskCard card={card({ status: 'blocked' })} roster={roster} onOpen={vi.fn()} />);
+    // reader behind a shorter sentence. A poll card carries both.
+    render(
+      <TaskCard card={card({ kind: 'poll', status: 'blocked' })} roster={roster} onOpen={vi.fn()} />
+    );
     const button = screen.getByRole('button');
     expect(button).not.toHaveAttribute('aria-label');
     expect(button.textContent).toContain('Rust Reviewer');

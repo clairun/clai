@@ -406,6 +406,15 @@ describe('inlineTaskCard', () => {
     expect(short?.instructions).toBe('Review the branch end to end.');
   });
 
+  it('gives a hand-off a full card whatever status it was stamped with', () => {
+    // TaskCard leans on this: a delegation never collapses into the slim run,
+    // so the full card is the only shape a hand-off ever takes.
+    for (const status of ['queued', 'running', 'completed', 'failed']) {
+      expect(inlineTaskCard('workspace_assignTask', task({ status }), null, 'completed'))
+        .toMatchObject({ kind: 'assign', variant: 'full', status });
+    }
+  });
+
   it('gives every terminal status a full card', () => {
     for (const status of ['completed', 'failed', 'blocked']) {
       expect(inlineTaskCard('workspace_getTaskResult', task({ status }), null, 'completed'))
