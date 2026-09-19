@@ -6,6 +6,7 @@
  * a session opens its log on click, like the chat's task cards.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type React from 'react';
 import { acknowledgeWorkspaceTask } from '../../workspace/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import {
@@ -26,6 +27,16 @@ export interface TaskListProps {
   onChanged: () => void | Promise<void>;
   onViewTask?: (task: WorkspaceTaskResponse) => void;
 }
+
+/**
+ * Whether a click on a row is a click on the row. A control in the row owns
+ * its own click, and a drag that ended with text selected was a copy, not a
+ * click — the summary carries a failed task's error, which has to stay
+ * selectable.
+ */
+const opensTheRow = (event: React.MouseEvent): boolean =>
+  !(event.target as HTMLElement).closest('button, a, input, textarea') &&
+  !window.getSelection()?.toString();
 
 const errorMessage = (error: unknown, fallback: string): string => {
   if (typeof error === 'string') return error;
@@ -180,18 +191,31 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
             const open = onViewTask && task.sessionId ? () => onViewTask(task) : null;
             const openLabel = `Open the log of "${task.title}"`;
             return (
-              <li key={task.id} className={`${styles.task} ${open ? styles.openable : ''}`}>
+              <li
+                key={task.id}
+                className={`${styles.task} ${open ? styles.openable : ''}`}
+                // The row itself is the click target, so the text inside it
+                // stays selectable; "Mark reviewed" keeps its own click
+                // because `opensTheRow` hands a control its click back.
+                onClick={
+                  open
+                    ? (event) => {
+                        if (opensTheRow(event)) open();
+                      }
+                    : undefined
+                }
+              >
                 {open && (
-                  // The row's primary action, laid over the whole row as its
-                  // own button: "Mark reviewed" is a sibling above it, so it
-                  // stays independently clickable and its click cannot reach
-                  // this one. The label names the task, which the row's title
-                  // alone would not carry out of order.
+                  // Keyboard's way into the row, and the name a screen reader
+                  // reads for it: laid over the row so its focus ring outlines
+                  // the whole thing, but transparent to the pointer (see
+                  // `.open`) so it intercepts nothing. The label names the
+                  // task, which the row's title alone would not carry out of
+                  // order.
                   <button
                     type="button"
                     className={styles.open}
                     aria-label={openLabel}
-                    title={openLabel}
                     onClick={open}
                   />
                 )}

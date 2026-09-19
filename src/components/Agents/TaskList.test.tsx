@@ -233,7 +233,10 @@ describe('TaskList', () => {
     render(<TaskList {...props} onViewTask={onViewTask} tasks={[REVIEW_TASK, WRITE_TASK]} />);
 
     const [review, write] = screen.getAllByRole('listitem') as [HTMLElement, HTMLElement];
+    // Keyboard's way in: the named control, activated on its own, opens once
+    // — its click must not also count as a click on the row.
     await user.click(within(review).getByRole('button', { name: 'Open the log of "Review PR"' }));
+    expect(onViewTask).toHaveBeenCalledTimes(1);
     expect(onViewTask).toHaveBeenCalledWith(REVIEW_TASK);
 
     // No session, no transcript: that row is not a click target at all.
@@ -243,6 +246,59 @@ describe('TaskList', () => {
   it('leaves the row inert when nobody is listening for the log', () => {
     render(<TaskList {...props} tasks={[REVIEW_TASK]} />);
     expect(screen.queryByRole('button', { name: /Open the log/ })).toBeNull();
+  });
+
+  it('does not open the row behind a Mark reviewed that is disabled', async () => {
+    const user = userEvent.setup();
+    const onViewTask = vi.fn();
+    api.acknowledgeWorkspaceTask.mockImplementation(() => new Promise<void>(() => {}));
+    const first = task({ id: 't-a', title: 'First', status: 'failed', sessionId: 'sess-a' });
+    const second = task({ id: 't-b', title: 'Second', status: 'failed', sessionId: 'sess-b' });
+    render(<TaskList {...props} onViewTask={onViewTask} tasks={[first, second]} />);
+
+    const [one, two] = screen.getAllByRole('listitem') as [HTMLElement, HTMLElement];
+    await user.click(within(one).getByRole('button', { name: 'Mark reviewed' }));
+    const blocked = within(two).getByRole('button', { name: 'Mark reviewed' });
+    expect(blocked).toBeDisabled();
+
+    // A suppressed click on a disabled control is not a click on the row.
+    await user.click(blocked);
+    expect(onViewTask).not.toHaveBeenCalled();
+  });
+
+  it('opens the log from a click on the row itself, text included', async () => {
+    const user = userEvent.setup();
+    const onViewTask = vi.fn();
+    render(<TaskList {...props} onViewTask={onViewTask} tasks={[REVIEW_TASK]} />);
+
+    // The row's own text is the click target a user aims at.
+    await user.click(screen.getByText('Review PR'));
+    expect(onViewTask).toHaveBeenCalledWith(REVIEW_TASK);
+  });
+
+  it('treats a click that ended a text selection as a copy, not an open', async () => {
+    const user = userEvent.setup();
+    const onViewTask = vi.fn();
+    const failed = task({
+      id: 't-failed',
+      title: 'Failed one',
+      status: 'failed',
+      error: 'panicked at src/lib.rs:12',
+      sessionId: 'sess-3',
+    });
+    const selection = vi
+      .spyOn(window, 'getSelection')
+      .mockReturnValue({ toString: () => 'panicked at src/lib.rs:12' } as unknown as Selection);
+
+    render(<TaskList {...props} onViewTask={onViewTask} tasks={[failed]} />);
+    // Selecting the error is the whole point of the row being selectable:
+    // the drag must not also open the log on mouse-up.
+    await user.click(screen.getByText('panicked at src/lib.rs:12'));
+    expect(onViewTask).not.toHaveBeenCalled();
+
+    selection.mockRestore();
+    await user.click(screen.getByText('panicked at src/lib.rs:12'));
+    expect(onViewTask).toHaveBeenCalledWith(failed);
   });
 
   it('acknowledges from a row that opens, without also opening it', async () => {

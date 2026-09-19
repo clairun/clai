@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 
 // Only the Agents tab is under test; the other panes are heavy modules this
@@ -37,8 +38,8 @@ describe('SettingsModal agent deep link', () => {
   });
 
   // Every deep link comes from a control this modal's overlay covers, so the
-  // next one can only arrive after a close — which unmounts the tab and lets
-  // the library read the new id. No remount key needed to force it.
+  // next one can only arrive after a close. Reopening re-arms the id; no
+  // remount key needed to force the library to read it.
   it('lands a later deep link on a different agent once it has been closed', () => {
     const { rerender } = render(modal({ isOpen: true, initialAgentDefinitionId: 'def-1' }));
     expect(screen.getByTestId('library')).toHaveTextContent('def-1');
@@ -48,6 +49,19 @@ describe('SettingsModal agent deep link', () => {
 
     rerender(modal({ isOpen: true, initialAgentDefinitionId: 'def-2' }));
     expect(screen.getByTestId('library')).toHaveTextContent('def-2');
+  });
+
+  it('forgets the deep link once the user has left the agents tab', async () => {
+    const user = userEvent.setup();
+    render(modal({ isOpen: true, initialAgentDefinitionId: 'def-1' }));
+    expect(screen.getByTestId('library')).toHaveTextContent('def-1');
+
+    // Tabs are a switch: leaving unmounts the library, returning mounts a new
+    // one. It must come back to the gallery, not to the editor the user just
+    // navigated away from.
+    await user.click(screen.getByRole('button', { name: 'Skills' }));
+    await user.click(screen.getByRole('button', { name: 'Agents' }));
+    expect(screen.getByTestId('library')).toHaveTextContent('gallery');
   });
 
   it('opens the plain gallery when no agent was named', () => {

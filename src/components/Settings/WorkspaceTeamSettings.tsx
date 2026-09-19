@@ -434,9 +434,10 @@ export const AssignmentSection = ({
           <span>Enabled in this workspace</span>
         </label>
         <span className={styles.hint}>
-          Off parks it here: it stays on the crew with the context and grants below, and other
-          agents still see it listed, but it does not run and delegating a task to it is refused.
-          Reversible at any time.
+          Off parks it here: it keeps its seat on the crew with the context and grants below, and
+          it still appears in the roster other agents are given, though{' '}
+          <code>workspace_listAgents</code> skips it by default. Any task delegated to it is
+          refused, and delegation is the only thing that runs it. Reversible at any time.
         </span>
         {libraryHold && (
           <span className={styles.hintWarning}>

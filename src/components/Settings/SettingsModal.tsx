@@ -131,6 +131,13 @@ const SettingsModal = ({
   // state during render (React's documented "information from a previous
   // render" pattern) rather than in an effect: it skips the extra commit an
   // effect would cause and stays clear of react-hooks/set-state-in-effect.
+  //
+  // The agent deep link rides along for the same reason, and is consumed once
+  // per opening: the tabs are a `switch`, so leaving the Agents tab unmounts
+  // it and coming back mounts a fresh one. Without a link the tab switch can
+  // clear, that remount would reopen the editor the user just navigated away
+  // from, over the gallery they navigated to.
+  const [deepLinkAgentId, setDeepLinkAgentId] = useState(initialAgentDefinitionId);
   const [prevOpen, setPrevOpen] = useState(isOpen);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (isOpen !== prevOpen || initialTab !== prevInitialTab) {
@@ -138,8 +145,14 @@ const SettingsModal = ({
     setPrevInitialTab(initialTab);
     if (isOpen) {
       setActiveTab(initialTab);
+      setDeepLinkAgentId(initialAgentDefinitionId);
     }
   }
+
+  const selectTab = useCallback((tab: TabValue) => {
+    setActiveTab(tab);
+    setDeepLinkAgentId(null);
+  }, []);
 
   // Escape and the body-scroll lock, shared with every other open overlay:
   // this modal can sit over the workspace Settings modal, and a form modal can
@@ -161,11 +174,9 @@ const SettingsModal = ({
       case TABS.PROVIDER:
         return <AssistantProviderSettings initialAction={initialProviderAction} />;
       case TABS.AGENTS:
-        // The library consumes its initial id once per mount, like the
-        // provider tab's initial action. Every deep link comes from a control
-        // this modal's overlay covers, so a second one can only arrive after
-        // a close, which unmounts the tab.
-        return <AgentLibrarySettings initialAgentDefinitionId={initialAgentDefinitionId} />;
+        // The library consumes this id once per mount; `deepLinkAgentId` is
+        // what makes that "once per opening" rather than once per remount.
+        return <AgentLibrarySettings initialAgentDefinitionId={deepLinkAgentId} />;
       case TABS.SKILLS:
         return <SkillsSettings />;
       case TABS.MCP_SERVERS:
@@ -197,49 +208,49 @@ const SettingsModal = ({
           <nav className={styles.sidebar}>
             <button
               className={`${styles.navItem} ${activeTab === TABS.PROVIDER ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.PROVIDER)}
+              onClick={() => selectTab(TABS.PROVIDER)}
             >
               <ProviderIcon />
               <span>AI Provider</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.AGENTS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.AGENTS)}
+              onClick={() => selectTab(TABS.AGENTS)}
             >
               <AgentsIcon />
               <span>Agents</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.SKILLS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.SKILLS)}
+              onClick={() => selectTab(TABS.SKILLS)}
             >
               <SkillsIcon />
               <span>Skills</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.MCP_SERVERS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.MCP_SERVERS)}
+              onClick={() => selectTab(TABS.MCP_SERVERS)}
             >
               <PlugIcon />
               <span>MCP Servers</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.APPLICATIONS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.APPLICATIONS)}
+              onClick={() => selectTab(TABS.APPLICATIONS)}
             >
               <AppsIcon />
               <span>Applications</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.APPEARANCE ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.APPEARANCE)}
+              onClick={() => selectTab(TABS.APPEARANCE)}
             >
               <AppearanceIcon />
               <span>Appearance</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.ABOUT ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.ABOUT)}
+              onClick={() => selectTab(TABS.ABOUT)}
             >
               <AboutIcon />
               <span>About</span>

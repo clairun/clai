@@ -14,6 +14,7 @@ import styles from './ProviderSettings.module.css';
 // editors look and behave identically.
 import modalStyles from './McpServerFormModal.module.css';
 import { openExternal } from '../../utils/openExternal';
+import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
 
@@ -406,6 +407,12 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     setSelectedEntry(null);
     setProbeModels([]);
   }, [saving]);
+
+  // Both of these portal to <body> above the Settings modal hosting this
+  // pane, so Escape has to reach them and stop there. Never both at once:
+  // choosing a provider closes the picker as it opens the form.
+  useOverlayLayer(pickerOpen, closePicker);
+  useOverlayLayer(formOpen, closeForm);
 
   // Consume a 'new' deep link once per mount, after the catalog has loaded.
   const consumedInitialActionRef = useRef(false);

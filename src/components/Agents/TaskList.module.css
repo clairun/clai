@@ -95,6 +95,7 @@
 }
 
 .openable {
+  cursor: pointer;
   transition:
     background var(--transition-fast),
     border-color var(--transition-fast);
@@ -106,9 +107,11 @@
 }
 
 /*
- * The row's primary action: an invisible button covering the whole row, so a
- * click anywhere opens the task's log without nesting "Mark reviewed" inside
- * a button.
+ * The row's keyboard control: an invisible button covering the whole row, so
+ * the focus ring outlines the row it opens. It is transparent to the pointer
+ * — the click is handled by the <li>, which leaves the row's text selectable
+ * (a failed task's error is rendered in .summary and has to be copyable) and
+ * leaves "Mark reviewed" its own clicks without nesting it inside a button.
  */
 .open {
   position: absolute;
@@ -117,7 +120,7 @@
   padding: 0;
   border: none;
   background: none;
-  cursor: pointer;
+  pointer-events: none;
 }
 
 .open:focus-visible {
