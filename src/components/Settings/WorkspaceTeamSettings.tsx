@@ -20,6 +20,7 @@ import {
   type WorkspaceAssignmentPayload,
 } from '../../api/client';
 import AgentCardPicker from '../Agents/AgentCardPicker';
+import { openGlobalSettings } from '../../utils/globalSettings';
 import styles from './WorkspaceSettingsModal.module.css';
 
 /** Editable list of path grants, shared by the assignment and policy forms. */
@@ -158,7 +159,7 @@ export const TeamPolicySection = ({
   if (loading) return <div className={styles.sectionRoot}>Loading…</div>;
 
   return (
-    <div>
+    <div className={styles.sectionRoot}>
       <h4 className={styles.sectionTitle}>Project context</h4>
       <p className={styles.sectionDescription}>
         Added to the instructions of every agent working in this workspace — the Main and each
@@ -205,9 +206,11 @@ export const TeamPolicySection = ({
           {error}
         </div>
       )}
-      <button type="button" className={styles.primaryButton} onClick={save} disabled={saving}>
-        {saving ? 'Saving…' : saved ? 'Saved' : 'Save team settings'}
-      </button>
+      <div className={styles.actions}>
+        <button type="button" className={styles.primaryButton} onClick={save} disabled={saving}>
+          {saving ? 'Saving…' : saved ? 'Saved' : 'Save team settings'}
+        </button>
+      </div>
     </div>
   );
 };
@@ -308,6 +311,17 @@ export const AssignmentSection = ({
 
   const handleUnassign = useCallback(async () => {
     if (!agentId) return;
+    // Unlike unchecking Enabled, this drops the row and everything hanging off
+    // it. Confirming matches the other destructive action in this modal
+    // (AgentBehaviorForm's "Delete agent").
+    const name = definition?.name || 'this agent';
+    if (
+      !window.confirm(
+        `Remove ${name} from this crew? The context and path grants it has here are deleted, and adding it back gives it a new callable id.`
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -321,7 +335,26 @@ export const AssignmentSection = ({
     } finally {
       setBusy(false);
     }
-  }, [workspaceId, agentId, onChanged, onUnassigned]);
+  }, [workspaceId, agentId, definition?.name, onChanged, onUnassigned]);
+
+  // Unsaved workspace-local edits: this section keeps its own draft and Save,
+  // so the modal's dirty tracking (which only covers the sections that
+  // register a handle) does not cover it.
+  const draftDirty =
+    !!assignment &&
+    (enabled !== assignment.enabled ||
+      context !== (assignment.context || '') ||
+      JSON.stringify(grants) !== JSON.stringify(assignment.filesystemGrants || []));
+
+  // Opening the shared definition closes this modal (the global one is its
+  // sibling at a lower z-index), so ask before dropping a draft.
+  const handleOpenDefinition = useCallback(() => {
+    if (!definition) return;
+    if (draftDirty && !window.confirm('You have unsaved changes here. Leave without saving?')) {
+      return;
+    }
+    openGlobalSettings({ tab: 'agents', agentDefinitionId: definition.id });
+  }, [definition, draftDirty]);
 
   if (loading) return <div className={styles.sectionRoot}>Loading…</div>;
 
@@ -330,7 +363,7 @@ export const AssignmentSection = ({
   // with identical behavior and no way to tell them apart.
   if (!agentId) {
     return (
-      <div>
+      <div className={styles.sectionRoot}>
         <h4 className={styles.sectionTitle}>Add to crew</h4>
         {error && (
           <div className={styles.errorBanner} role="alert">
@@ -342,9 +375,10 @@ export const AssignmentSection = ({
           definitions={definitions}
           assignedDefinitionIds={assignments.map((item) => item.agentDefinitionId)}
           onChanged={handleCrewChanged}
-          // No create link here on purpose: the global Settings modal would open
-          // underneath this one (see the z-index of both modals). The copy
-          // points at Settings → Agents instead.
+          // Safe now that this modal hands over instead of stacking: it closes
+          // itself when a global-settings open is requested, so the library
+          // opens on top rather than underneath.
+          onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
           disabled={busy}
         />
       </div>
@@ -352,31 +386,56 @@ export const AssignmentSection = ({
   }
 
   if (!assignment) {
-    return <div className={styles.errorBanner}>This agent is no longer on the crew.</div>;
+    return (
+      <div className={styles.sectionRoot}>
+        <div className={styles.errorBanner}>This agent is no longer on the crew.</div>
+      </div>
+    );
   }
 
   return (
-    <div>
+    <div className={styles.sectionRoot}>
       <h4 className={styles.sectionTitle}>{definition?.name || 'Unavailable agent'}</h4>
-      <p className={styles.sectionDescription}>
-        {definition
-          ? 'Shared agent. Instructions, skills, providers, MCP and shell policy are edited once in Settings → Agents and apply in every workspace that uses this agent, from its next turn.'
-          : 'This assignment points at a shared agent that no longer exists. Re-create it in Settings → Agents, or remove it from the crew.'}
+      <p className={styles.metaRow}>
+        <span>Callable id</span>
+        <code>{assignment.id}</code>
       </p>
-      <p className={styles.sectionDescription}>
-        Callable id: <code>{assignment.id}</code>
-      </p>
+      {definition ? (
+        <div className={styles.splitNote}>
+          <p>
+            <strong>This workspace decides</strong> whether {definition.name} is on here, the
+            context it works under, and the paths it may touch — the three things below.
+          </p>
+          <p>
+            <strong>Shared everywhere</strong>: instructions, skills, providers, MCP and shell
+            policy. Those belong to the agent&apos;s definition, and an edit there reaches every
+            workspace using it, from its next turn.{' '}
+            <button type="button" className={styles.linkButton} onClick={handleOpenDefinition}>
+              Edit in Settings → Agents
+            </button>
+          </p>
+        </div>
+      ) : (
+        <p className={styles.sectionDescription}>
+          This assignment points at a shared agent that no longer exists. Re-create it in Settings
+          → Agents, or remove it from the crew.
+        </p>
+      )}
 
       <div className={styles.field}>
-        <label className={styles.label}>
+        <label className={styles.checkboxRow}>
           <input
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
             disabled={busy}
-          />{' '}
-          Enabled in this workspace
+          />
+          <span>Enabled in this workspace</span>
         </label>
+        <span className={styles.hint}>
+          Off parks it here: it stays on the crew with the context and grants below, but no agent
+          can delegate to it and it is left out of the roster. Reversible at any time.
+        </span>
       </div>
 
       <div className={styles.field}>
@@ -392,15 +451,18 @@ export const AssignmentSection = ({
           placeholder="What this agent should know about its job here."
           disabled={busy}
         />
+        <span className={styles.hint}>
+          Added to the shared instructions, in this workspace only.
+        </span>
       </div>
 
       <div className={styles.field}>
         <label className={styles.label}>Path grants in this workspace</label>
-        <p className={styles.sectionDescription}>
+        <PathGrantList grants={grants} onChange={setGrants} disabled={busy} />
+        <span className={styles.hint}>
           Local to this workspace. Paths approved during a run are saved here too, so approving
           access in one project never widens it in another.
-        </p>
-        <PathGrantList grants={grants} onChange={setGrants} disabled={busy} />
+        </span>
       </div>
 
       {error && (
@@ -408,12 +470,23 @@ export const AssignmentSection = ({
           {error}
         </div>
       )}
-      <div className={styles.listInputRow}>
+      <div className={styles.actions}>
+        <div className={styles.dangerZone}>
+          <button
+            type="button"
+            className={styles.dangerButton}
+            onClick={handleUnassign}
+            disabled={busy}
+          >
+            Remove from crew
+          </button>
+          <span className={styles.hint}>
+            Deletes the context and grants above and retires the callable id. Uncheck Enabled
+            instead to park it.
+          </span>
+        </div>
         <button type="button" className={styles.primaryButton} onClick={handleSave} disabled={busy}>
           {busy ? 'Saving…' : 'Save'}
-        </button>
-        <button type="button" className={styles.dangerButton} onClick={handleUnassign} disabled={busy}>
-          Remove from crew
         </button>
       </div>
     </div>

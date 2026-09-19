@@ -18,6 +18,7 @@ import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
 import { AgentBehaviorForm, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
 import type { ScheduleKind, WorkspaceSnapshot } from '../../generated/bindings';
+import { OPEN_GLOBAL_SETTINGS_EVENT } from '../../utils/globalSettings';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
 import styles from './WorkspaceSettingsModal.module.css';
@@ -263,6 +264,19 @@ const WorkspaceSettingsModal = ({
     }
     onClose();
   }, [saving, anyDirty, onClose]);
+
+  // A deep link into the global Settings modal (the shared-definition link on
+  // a crew member, the create link in the picker) is a hand-off, not a second
+  // layer: that modal is our sibling at a lower z-index and would open
+  // underneath. We close instead of stacking. `handleClose` keeps its
+  // unsaved-changes prompt; declining it leaves this modal up with the global
+  // one behind, which the host has already opened by the time we run.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const onGlobalSettings = () => handleClose();
+    window.addEventListener(OPEN_GLOBAL_SETTINGS_EVENT, onGlobalSettings);
+    return () => window.removeEventListener(OPEN_GLOBAL_SETTINGS_EVENT, onGlobalSettings);
+  }, [isOpen, handleClose]);
 
   // Escape key
   useEffect(() => {

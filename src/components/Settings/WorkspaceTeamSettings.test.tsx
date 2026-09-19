@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -6,6 +6,26 @@ const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
 import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
+import {
+  OPEN_GLOBAL_SETTINGS_EVENT,
+  type OpenGlobalSettingsDetail,
+} from '../../utils/globalSettings';
+
+const cleanups: Array<() => void> = [];
+afterEach(() => {
+  while (cleanups.length) cleanups.pop()!();
+  vi.restoreAllMocks();
+});
+
+/** Records the deep links the section asks the app to open. */
+const recordGlobalSettingsOpens = (): OpenGlobalSettingsDetail[] => {
+  const seen: OpenGlobalSettingsDetail[] = [];
+  const listener = (event: Event) =>
+    seen.push((event as CustomEvent<OpenGlobalSettingsDetail>).detail);
+  window.addEventListener(OPEN_GLOBAL_SETTINGS_EVENT, listener);
+  cleanups.push(() => window.removeEventListener(OPEN_GLOBAL_SETTINGS_EVENT, listener));
+  return seen;
+};
 
 const WORKSPACE = 'ws-1';
 
@@ -151,7 +171,9 @@ describe('AssignmentSection picker', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Writer joined the crew.');
   });
 
-  it('points at Settings → Agents instead of a link the modal could not show', async () => {
+  it('offers a create link that opens the shared library, with nothing left to add', async () => {
+    const user = userEvent.setup();
+    const opened = recordGlobalSettingsOpens();
     mockInvoke.mockImplementation((cmd: string) => {
       if (cmd === 'agent_definitions_list') return Promise.resolve(DEFINITIONS.filter((d) => d.id === 'def-review'));
       if (cmd === 'workspace_team_policy') return Promise.resolve(policy);
@@ -159,9 +181,11 @@ describe('AssignmentSection picker', () => {
     });
     render(<AssignmentSection workspaceId={WORKSPACE} />);
     expect(
-      await screen.findByText('Every agent in the library is already on this crew. Create one in Settings → Agents.')
+      await screen.findByText('Every agent in the library is already on this crew.')
     ).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Create a new agent →' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Create a new agent →' }));
+    expect(opened).toEqual([{ tab: 'agents' }]);
   });
 });
 
@@ -184,6 +208,7 @@ describe('AssignmentSection editor', () => {
   it('hands the modal back control after unassigning instead of sitting on a dead row', async () => {
     const user = userEvent.setup();
     const onUnassigned = vi.fn();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(
       <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
     );
@@ -191,6 +216,7 @@ describe('AssignmentSection editor', () => {
 
     await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
 
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Remove Reviewer from this crew?'));
     await waitFor(() => expect(onUnassigned).toHaveBeenCalledWith('assign-1'));
     expect(mockInvoke).toHaveBeenCalledWith('workspace_delete_agent', {
       workspaceId: WORKSPACE,
@@ -198,12 +224,72 @@ describe('AssignmentSection editor', () => {
     });
   });
 
-  it('names the callable id and says where shared behavior is edited', async () => {
+  it('drops nothing when the remove is not confirmed', async () => {
+    const user = userEvent.setup();
+    const onUnassigned = vi.fn();
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(
+      <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
+    );
+    await screen.findByText('Reviewer');
+
+    await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
+
+    expect(mockInvoke).not.toHaveBeenCalledWith('workspace_delete_agent', expect.anything());
+    expect(onUnassigned).not.toHaveBeenCalled();
+  });
+
+  // The two controls look adjacent but are not alternatives: parking keeps the
+  // row (and with it the context, the grants and the callable id); removing
+  // deletes it.
+  it('parks the agent through the assignment row instead of deleting it', async () => {
+    const user = userEvent.setup();
+    const onUnassigned = vi.fn();
+    render(
+      <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
+    );
+    await screen.findByText('Reviewer');
+
+    await user.click(screen.getByRole('checkbox', { name: 'Enabled in this workspace' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith('workspace_configure_assignment', {
+        workspaceId: WORKSPACE,
+        assignment: { ...ASSIGNMENT, enabled: false },
+      })
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith('workspace_delete_agent', expect.anything());
+    expect(onUnassigned).not.toHaveBeenCalled();
+  });
+
+  it('names the callable id and opens the shared definition it belongs to', async () => {
+    const user = userEvent.setup();
+    const opened = recordGlobalSettingsOpens();
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
     await screen.findByText('Reviewer');
 
     expect(screen.getByText('assign-1')).toBeInTheDocument();
-    expect(screen.getByText(/Settings → Agents/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Edit in Settings → Agents' }));
+
+    // The definition id, not this workspace's callable id: the editor over
+    // there edits the shared agent.
+    expect(opened).toEqual([{ tab: 'agents', agentDefinitionId: 'def-review' }]);
+  });
+
+  it('asks before leaving an unsaved draft for the shared definition', async () => {
+    const user = userEvent.setup();
+    const opened = recordGlobalSettingsOpens();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
+    await screen.findByText('Reviewer');
+
+    await user.type(screen.getByLabelText('Context for this workspace'), ' and docs');
+    await user.click(screen.getByRole('button', { name: 'Edit in Settings → Agents' }));
+
+    expect(confirm).toHaveBeenCalled();
+    expect(opened).toEqual([]);
   });
 
   it('explains an assignment whose shared agent is gone instead of rendering a blank form', async () => {

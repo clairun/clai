@@ -242,6 +242,85 @@
   margin-left: 2px;
 }
 
+/* A checkbox and its text as one row and one hit area. Deliberately not
+   `.label`: that is a block at weight 600, which leaves the box and its text
+   unaligned and makes a control read as a section heading. */
+.checkboxRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.checkboxRow input[type="checkbox"] {
+  margin: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+/* Two short lines that belong together — here, what this workspace owns
+   versus what the shared definition owns. */
+.splitNote {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-tertiary);
+}
+
+.splitNote p {
+  margin: 0 0 4px;
+}
+
+.splitNote p:last-child {
+  margin-bottom: 0;
+}
+
+/* One line of read-only metadata (an id, a revision) under a section title. */
+.metaRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.metaRow code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background: var(--color-overlay-06, rgba(0, 0, 0, 0.04));
+  padding: 1px 6px;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+/* An inline "go here instead" link inside body copy. Mirrors SkillPicker's
+   .linkButton so the two read as the same affordance. */
+.linkButton {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--color-primary);
+  font-size: inherit;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.linkButton:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.linkButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .input,
 .textarea {
   width: 100%;
@@ -360,6 +439,16 @@
 
 .deleteSpacer {
   margin-right: auto;
+}
+
+/* Left half of an actions row: the destructive button with the caption of
+   what it costs, held away from the affirmative action on the right. */
+.dangerZone {
+  margin-right: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 60%;
 }
 
 .primaryButton {

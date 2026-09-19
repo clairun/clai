@@ -108,6 +108,9 @@ interface SettingsModalProps {
   // When 'new', the provider tab opens with its "Add Connection" form
   // already open — used by first-run deep links (no provider configured).
   initialProviderAction?: 'new' | null;
+  // When set, the agents tab opens with this shared definition in its editor
+  // — used by the link on a crew member in workspace settings.
+  initialAgentDefinitionId?: string | null;
 }
 
 const SettingsModal = ({
@@ -115,6 +118,7 @@ const SettingsModal = ({
   onClose,
   initialTab = TABS.PROVIDER,
   initialProviderAction = null,
+  initialAgentDefinitionId = null,
 }: SettingsModalProps) => {
   const [activeTab, setActiveTab] = useState<TabValue>(initialTab);
 
@@ -175,7 +179,15 @@ const SettingsModal = ({
       case TABS.PROVIDER:
         return <AssistantProviderSettings initialAction={initialProviderAction} />;
       case TABS.AGENTS:
-        return <AgentLibrarySettings />;
+        // The library consumes its initial id once per mount, like the
+        // provider tab's initial action. Keying on the id lets a second deep
+        // link name a different agent while the tab is already on screen.
+        return (
+          <AgentLibrarySettings
+            key={initialAgentDefinitionId ?? 'library'}
+            initialAgentDefinitionId={initialAgentDefinitionId}
+          />
+        );
       case TABS.SKILLS:
         return <SkillsSettings />;
       case TABS.MCP_SERVERS:

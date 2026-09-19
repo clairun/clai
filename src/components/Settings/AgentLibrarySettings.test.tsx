@@ -268,6 +268,29 @@ describe('AgentLibrarySettings', () => {
     expect(screen.getByRole('button', { name: /^Reviewer/ })).toBeEnabled();
   });
 
+  it('opens straight into the editor for the agent a deep link names', async () => {
+    render(<AgentLibrarySettings initialAgentDefinitionId="def-1" />);
+
+    expect(await screen.findByRole('heading', { name: 'Reviewer' })).toBeInTheDocument();
+    expect(screen.getByTestId('behavior-form')).toBeInTheDocument();
+    // Landed in the editor, not on the gallery behind it.
+    expect(screen.queryByRole('button', { name: '+ Create agent' })).toBeNull();
+    // Back still works: the deep link chose the first screen, nothing more.
+    await userEvent.click(screen.getByRole('button', { name: '‹ Agents' }));
+    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
+  });
+
+  it('shows the gallery when the deep link names an agent the library does not have', async () => {
+    render(<AgentLibrarySettings initialAgentDefinitionId="def-deleted" />);
+
+    // An editor with no definition is the create form; the gallery is the
+    // honest landing for a stale link.
+    expect(await screen.findByRole('button', { name: /^Reviewer/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
+    expect(screen.queryByTestId('behavior-form')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'New agent' })).toBeNull();
+  });
+
   it('explains an agent that vanished from the library instead of a blank editor', async () => {
     await openReviewer();
     api.listAgentDefinitions.mockResolvedValue([]);

@@ -34,9 +34,17 @@ type View =
   | { kind: 'edit'; id: string }
   | { kind: 'create' };
 
-const AgentLibrarySettings = () => {
+const AgentLibrarySettings = ({
+  initialAgentDefinitionId = null,
+}: {
+  /** Deep link: open this agent's editor once the library has been read. */
+  initialAgentDefinitionId?: string | null;
+} = {}) => {
   const [definitions, setDefinitions] = useState<AgentDefinitionDetail[]>([]);
   const [view, setView] = useState<View>({ kind: 'gallery', focusId: null });
+  // The library has been read at least once. Until then a deep link cannot be
+  // told from one naming an agent that is gone.
+  const [loaded, setLoaded] = useState(false);
   const [deps, setDeps] = useState<AgentFormDeps>({
     mcpServers: [],
     skills: [],
@@ -49,6 +57,7 @@ const AgentLibrarySettings = () => {
   const reload = useCallback(async (): Promise<boolean> => {
     try {
       setDefinitions(await listAgentDefinitions());
+      setLoaded(true);
       setError(null);
       return true;
     } catch (err) {
@@ -81,6 +90,20 @@ const AgentLibrarySettings = () => {
   }, [reload]);
 
   const backToGallery = useCallback(() => setView({ kind: 'gallery', focusId: null }), []);
+
+  // Consume the deep link once per mount, as soon as the library has been
+  // read — only then can a live agent be told from one that was deleted or
+  // archived out from under the link, which stays on the gallery rather than
+  // opening an editor on a dead id (`AgentEditor` without a definition is the
+  // *create* form, which would be a worse lie). Adjusted during render, the
+  // way SettingsModal re-syncs its tab: it skips the extra commit an effect
+  // would cost, and the gallery never paints on its way to the editor.
+  const [deepLinkDone, setDeepLinkDone] = useState(!initialAgentDefinitionId);
+  if (!deepLinkDone && loaded) {
+    setDeepLinkDone(true);
+    const target = definitions.find((definition) => definition.id === initialAgentDefinitionId);
+    if (target) setView({ kind: 'edit', id: target.id });
+  }
 
   // A create lands back in the gallery with the new card focused; an edit
   // stays open on the reloaded agent. If the reload failed the editor would
