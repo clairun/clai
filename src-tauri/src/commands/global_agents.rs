@@ -540,16 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn agents_saved_before_faces_existed_still_load() {
-        let json = r#"{"id":"a","name":"Old","description":"","enabled":true,"createdAt":1,"updatedAt":1}"#;
-        let agent: WorkspaceAgent = serde_json::from_str(json).expect("legacy agent");
-        assert_eq!(agent.avatar, None);
-        // And the absent face is not written back as `null`.
-        let out = serde_json::to_string(&agent).expect("serialize");
-        assert!(!out.contains("avatar"), "{out}");
-    }
-
-    #[test]
     fn saving_an_edit_built_on_a_stale_revision_is_refused() {
         let mut config = AppConfig::default();
         let id = upsert_definition(&mut config, &save_request("Reviewer"), 100).expect("create");

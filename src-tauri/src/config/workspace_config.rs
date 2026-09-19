@@ -421,8 +421,8 @@ pub struct WorkspaceAgent {
     #[serde(default)]
     pub execution: ExecutionCapabilityConfig,
     /// The procedurally drawn face, picked by the user from a row of
-    /// candidates when the agent is created. Absent for agents saved before
-    /// faces existed; the UI then derives a face from the id.
+    /// candidates. `None` for the Main (fixed face) and for agents saved
+    /// before faces existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
@@ -1646,5 +1646,20 @@ mod main_agent_recovery_tests {
         assert_eq!(loaded.context, "house rules");
         assert_eq!(loaded.filesystem_grants[0].path, "/opt/tools");
         assert_eq!(loaded.main_agent_id(), "main");
+    }
+}
+
+#[cfg(test)]
+mod agent_face_tests {
+    use super::*;
+
+    #[test]
+    fn agents_saved_before_faces_existed_still_load() {
+        let json = r#"{"id":"a","name":"Old","description":"","enabled":true,"createdAt":1,"updatedAt":1}"#;
+        let agent: WorkspaceAgent = serde_json::from_str(json).expect("legacy agent");
+        assert_eq!(agent.avatar, None);
+        // And the absent face is not written back as `null`.
+        let out = serde_json::to_string(&agent).expect("serialize");
+        assert!(!out.contains("avatar"), "{out}");
     }
 }

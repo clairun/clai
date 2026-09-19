@@ -451,7 +451,6 @@ struct WorkspaceAgentRow {
     workspace_id: String,
     /// Legacy: foreign key into `ClaiConfig.agents`. Will be dropped in Phase 1.7.
     agent_definition_id: String,
-    display_name: Option<String>,
     /// Legacy: replaced by `workspaces.default_workspace_agent_id` in Phase 1.6.
     role: String,
     enabled: bool,
@@ -1303,7 +1302,6 @@ fn workspace_agent_row_from_config(
             .definition_id()
             .unwrap_or(agent.id.as_str())
             .to_string(),
-        display_name: None,
         role: if matches!(resolved.source, AgentSource::Main) {
             "manager".to_string()
         } else {
@@ -1326,17 +1324,11 @@ fn workspace_agent_response_from_row(
     row: WorkspaceAgentRow,
     default_workspace_agent_id: Option<&str>,
 ) -> WorkspaceAgentResponse {
-    let display_name = row
-        .display_name
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            if row.name.trim().is_empty() {
-                row.agent_definition_id.clone()
-            } else {
-                row.name.clone()
-            }
-        });
+    let display_name = if row.name.trim().is_empty() {
+        row.agent_definition_id.clone()
+    } else {
+        row.name.clone()
+    };
 
     let agent_name = if row.name.trim().is_empty() {
         None
@@ -1468,20 +1460,16 @@ fn workspace_task_response_from_row(
     }
 }
 
-/// Workspace-agent id → display name, for resolving the assignee and creator
-/// names a task response carries. Roster failures degrade to raw ids rather
-/// than failing the task read.
+/// Workspace-agent id → the agent's name, for resolving the assignee and
+/// creator names a task response carries. The name is passed through raw: a
+/// blank one stays blank here, where the agent response mapper substitutes the
+/// definition id. Roster failures degrade to raw ids rather than failing the
+/// task read.
 fn workspace_agent_display_names(state: &AppState, workspace_id: &str) -> HashMap<String, String> {
     load_workspace_agent_rows(state, workspace_id)
         .unwrap_or_default()
         .into_iter()
-        .map(|agent| {
-            let name = agent
-                .display_name
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or(agent.name);
-            (agent.id, name)
-        })
+        .map(|agent| (agent.id, agent.name))
         .collect()
 }
 
@@ -6023,6 +6011,60 @@ mod tests {
             image_media_type_from_extension(Path::new("/w/no-ext")),
             None
         );
+    }
+
+    #[test]
+    fn the_picked_face_survives_the_trip_from_the_roster_to_the_response() {
+        let face = AgentAvatarRef {
+            seed: "nonce-7".to_string(),
+            generator_version: 1,
+        };
+        // A shared teammate carries the assignment's own id, never the
+        // workspace's main-agent id, so this row is a member and not the default.
+        let mut agent = WorkspaceAgent::new_manager("assign-1".to_string(), 1);
+        agent.name = "Reviewer".to_string();
+        agent.avatar = Some(face.clone());
+        let resolved = ResolvedAgent {
+            agent,
+            source: AgentSource::Shared {
+                definition_id: "def-1".to_string(),
+                revision: 3,
+            },
+        };
+        let workspace = WorkspaceConfig::new(WS.to_string(), "W".to_string(), 1, MGR.to_string());
+
+        let row = workspace_agent_row_from_config(&AppConfig::default(), &workspace, &resolved);
+        let response = workspace_agent_response_from_row(row, Some(MGR));
+
+        assert_eq!(
+            response.avatar,
+            Some(face),
+            "a face that stops here reverts every crew member to the id-derived fallback"
+        );
+        assert_eq!(response.display_name, "Reviewer");
+        assert!(!response.is_default);
+    }
+
+    #[test]
+    fn a_blank_agent_name_falls_back_to_the_definition_id() {
+        // `workspace_create_agent` stores the requested name verbatim, so an
+        // empty one reaches the mapper and must not render as a nameless row.
+        let mut agent = WorkspaceAgent::new_manager("assign-1".to_string(), 1);
+        agent.name = String::new();
+        let resolved = ResolvedAgent {
+            agent,
+            source: AgentSource::Shared {
+                definition_id: "def-1".to_string(),
+                revision: 3,
+            },
+        };
+        let workspace = WorkspaceConfig::new(WS.to_string(), "W".to_string(), 1, MGR.to_string());
+
+        let row = workspace_agent_row_from_config(&AppConfig::default(), &workspace, &resolved);
+        let response = workspace_agent_response_from_row(row, Some(MGR));
+
+        assert_eq!(response.display_name, "def-1");
+        assert_eq!(response.agent_name, None);
     }
 
     // -----------------------------------------------------------------------
