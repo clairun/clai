@@ -67,6 +67,7 @@ const MESSAGE_PAGE_LIMIT = 100;
 // per-tick cost is a memory walk plus a recursive artifact count.
 const LIGHTWEIGHT_SNAPSHOT_OPTIONS = {
   includeSessionPayload: false,
+  includeFiles: true,
 };
 // Two menu items of 12px text plus vertical padding, 1px gap, wrapper
 // padding, and border measure about 69px. Rounded up so the flip starts

@@ -266,6 +266,14 @@ pub struct WorkspaceSnapshot {
     pub next_run_in_seconds: Option<u64>,
 }
 
+/// The two expensive extras a snapshot can carry, both **opt-in**.
+///
+/// Omitting an option — or the whole `options` argument — asks for the cheap
+/// workspace header only. `includeSessionPayload` buys the session's entire
+/// conversation (every message and tool call, unbounded), `includeFiles` a
+/// memory walk plus a recursive artifact count. Defaulting both off keeps the
+/// most expensive query in the app off every path that never thought to ask
+/// about it.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshotOptions {
@@ -277,11 +285,11 @@ pub struct WorkspaceSnapshotOptions {
 
 impl WorkspaceSnapshotOptions {
     fn include_session_payload(&self) -> bool {
-        self.include_session_payload.unwrap_or(true)
+        self.include_session_payload.unwrap_or(false)
     }
 
     fn include_files(&self) -> bool {
-        self.include_files.unwrap_or(true)
+        self.include_files.unwrap_or(false)
     }
 }
 
@@ -1823,6 +1831,36 @@ fn snapshot_files(
     Ok((memories, artifact_tree_stats(root_path)))
 }
 
+/// The conversation payload a snapshot reports for `session_id`.
+///
+/// Messages and tool calls are the whole session with no ceiling, so they are
+/// loaded only when [`WorkspaceSnapshotOptions::include_session_payload`] asks
+/// for them. Runs are one small row each and the workspace header reads them
+/// on every poll, so they load either way.
+async fn snapshot_session_payload(
+    pool: &DbPool,
+    session_id: &str,
+    include_session_payload: bool,
+) -> Result<
+    (
+        Vec<AssistantMessage>,
+        Vec<AssistantRun>,
+        Vec<ToolInvocation>,
+    ),
+    String,
+> {
+    let runs = repository::list_runs(pool, session_id).await?;
+    if !include_session_payload {
+        return Ok((Vec::new(), runs, Vec::new()));
+    }
+
+    Ok((
+        repository::list_messages(pool, session_id).await?,
+        runs,
+        repository::list_tool_calls(pool, session_id, None).await?,
+    ))
+}
+
 #[tauri::command]
 pub async fn workspace_get_snapshot(
     workspace_id: Option<String>,
@@ -1839,19 +1877,16 @@ pub async fn workspace_get_snapshot(
     let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
 
     let session = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let (messages, runs, tool_calls) = if let Some(session) = &session {
-        let runs = repository::list_runs(&workspace_pool, &session.id).await?;
-        if !options.include_session_payload() {
-            (Vec::new(), runs, Vec::new())
-        } else {
-            (
-                repository::list_messages(&workspace_pool, &session.id).await?,
-                runs,
-                repository::list_tool_calls(&workspace_pool, &session.id, None).await?,
+    let (messages, runs, tool_calls) = match &session {
+        Some(session) => {
+            snapshot_session_payload(
+                &workspace_pool,
+                &session.id,
+                options.include_session_payload(),
             )
+            .await?
         }
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
     // Cheap single-table query, so it rides along even on lightweight polls —
     // the "Queued" chips stay accurate without the full session payload.
@@ -4220,6 +4255,7 @@ async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::{MessageRole, RunStatus, RunTrigger, ToolCallStatus};
     use crate::config::workspace_config::ScheduleSurface;
 
     const WS: &str = "ws-1";
@@ -5843,6 +5879,129 @@ mod tests {
 
         assert!(memories.is_empty());
         assert_eq!(stats.file_count, 1);
+    }
+
+    /// What `workspace_get_snapshot` ends up with for a given `options`
+    /// argument: the IPC layer hands it `Option<WorkspaceSnapshotOptions>`
+    /// deserialized from JSON, and a missing argument arrives as `null`.
+    fn options_from_ipc(json: &str) -> WorkspaceSnapshotOptions {
+        serde_json::from_str::<Option<WorkspaceSnapshotOptions>>(json)
+            .expect("snapshot options must deserialize")
+            .unwrap_or_default()
+    }
+
+    /// A session with one run, one message and one tool call — enough for the
+    /// payload flag to have something to include or to skip.
+    async fn seed_session_with_payload(pool: &DbPool) -> String {
+        let session = repository::create_session(
+            pool,
+            repository::CreateSessionParams {
+                kind: SessionKind::Interactive,
+                title: None,
+                context: SessionContext::default(),
+            },
+        )
+        .await
+        .expect("failed to create session");
+        let run = repository::create_run(
+            pool,
+            repository::CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Completed,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn-1".to_string(),
+                protocol_id: "proto-1".to_string(),
+                model_id: "model-1".to_string(),
+                error: None,
+            },
+        )
+        .await
+        .expect("failed to create run");
+        repository::create_message(
+            pool,
+            repository::CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "hello".to_string(),
+                }],
+                provider_metadata: None,
+            },
+        )
+        .await
+        .expect("failed to create message");
+        repository::create_tool_call(
+            pool,
+            repository::CreateToolCallParams {
+                id: "tool-1".to_string(),
+                run_id: run.id,
+                session_id: session.id.clone(),
+                tool_name: "bash_exec".to_string(),
+                params: serde_json::json!({ "command": "ls" }),
+                status: ToolCallStatus::Completed,
+            },
+        )
+        .await
+        .expect("failed to create tool call");
+
+        session.id
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_asked_for_nothing_carries_neither_the_payload_nor_the_files() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let session_id = seed_session_with_payload(&pool).await;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        workspace_with_memories(root);
+
+        // `workspace_get_snapshot(workspaceId, null)` — the settings modal's
+        // call. Both extras are opt-in, so neither may be loaded.
+        let options = options_from_ipc("null");
+
+        let (messages, runs, tool_calls) =
+            snapshot_session_payload(&pool, &session_id, options.include_session_payload())
+                .await
+                .unwrap();
+        assert!(messages.is_empty(), "messages are opt-in");
+        assert!(tool_calls.is_empty(), "tool calls are opt-in");
+        assert_eq!(runs.len(), 1, "runs are cheap and ride along regardless");
+
+        let (memories, stats) = snapshot_files(Some(root), options.include_files()).unwrap();
+        assert!(memories.is_empty(), "the memory walk is opt-in");
+        assert_eq!(stats, ArtifactTreeStats::default());
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_that_asks_for_the_payload_gets_it() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let session_id = seed_session_with_payload(&pool).await;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        workspace_with_memories(root);
+
+        let options = options_from_ipc(r#"{"includeSessionPayload":true,"includeFiles":true}"#);
+
+        let (messages, runs, tool_calls) =
+            snapshot_session_payload(&pool, &session_id, options.include_session_payload())
+                .await
+                .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(tool_calls.len(), 1);
+
+        let (memories, stats) = snapshot_files(Some(root), options.include_files()).unwrap();
+        assert!(!memories.is_empty());
+        assert_eq!(stats.file_count, 2);
+    }
+
+    #[test]
+    fn asking_for_one_extra_does_not_turn_the_other_on() {
+        // The workspace page's 5s poll: files yes, payload no.
+        let options = options_from_ipc(r#"{"includeFiles":true}"#);
+
+        assert!(options.include_files());
+        assert!(!options.include_session_payload());
     }
 
     #[test]
