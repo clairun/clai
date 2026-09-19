@@ -16,7 +16,7 @@ const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
  * avatar starts reading must be added to the key, which is why the key is
  * built here, once, instead of at each call site.
  */
-export const rosterKey = (agents: readonly WorkspaceAgentResponse[] | null | undefined): string =>
+const rosterKey = (agents: readonly WorkspaceAgentResponse[] | null | undefined): string =>
   (agents || [])
     .map((agent) =>
       [

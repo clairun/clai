@@ -447,10 +447,6 @@
   flex-shrink: 0;
 }
 
-.deleteSpacer {
-  margin-right: auto;
-}
-
 /* Left half of an actions row: the destructive button with the caption of
    what it costs, held away from the affirmative action on the right. */
 .dangerZone {
@@ -757,16 +753,6 @@
   color: var(--color-text-primary);
   font-size: 13px;
   font-family: inherit;
-}
-
-.scheduleStatus {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  margin-top: 4px;
-}
-
-.runNowButton {
-  composes: secondaryButton;
 }
 
 /* ── Schedule section — interval / cron editor ──────────────────── */

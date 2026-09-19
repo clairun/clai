@@ -3,8 +3,8 @@
  *
  * The one form that edits what an agent *is*: name, description, skills,
  * MCP servers, provider connections and local capabilities. Two hosts
- * render it — the Workspace Settings modal (per-workspace Main / crew
- * member, saves through the workspace commands) and the agent library
+ * render it — the Workspace Settings modal (this workspace's Main, saves
+ * through the workspace commands) and the agent library
  * (shared definition, saves through `saveBehavior`). Both drive it through
  * the imperative `SectionHandle` so a global Save button can validate and
  * submit it without owning its state.
@@ -568,21 +568,32 @@ export const AgentBehaviorForm = ({
     return <div className={styles.sectionRoot}>Loading…</div>;
   }
 
+  // The edit flow has nothing to edit if the fetch failed: showing the blank
+  // form here offered a Delete button `handleDelete` could only ignore.
+  if (!agent && !isCreate) {
+    return (
+      <div className={styles.sectionRoot}>
+        <div className={styles.errorBanner} role="alert">
+          {error || 'Failed to load agent.'}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={styles.sectionRoot}>
       {showHeading && (
         <>
+          {/* Only this workspace's own Main is edited here, so the heading
+              speaks for it: the settings modal routes every crew member to
+              AssignmentSection, and the shared library draws its own title. */}
           <h3 className={styles.sectionTitle}>
-            {isCreate ? 'Set up the main agent' : (isManager ? 'Main agent' : (agent?.name || 'Agent'))}
+            {isCreate ? 'Set up the main agent' : 'Main agent'}
           </h3>
           <p className={styles.sectionDescription}>
-            {/* Creating an agent here means configuring this workspace's own Main.
-                Crew members come from the shared library and are added from the Agents drawer. */}
             {isCreate
               ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; crew members are added from the shared agent library in the Agents drawer."
-              : isManager
-                ? "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."
-                : 'Teammate — invoked by the main agent via delegation.'}
+              : "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."}
           </p>
         </>
       )}

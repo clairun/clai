@@ -277,4 +277,16 @@ describe('AgentBehaviorForm', () => {
     expect(screen.getByText('agent name already taken')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Delete agent' })).toBeEnabled());
   });
+
+  it('shows the load failure instead of a form the edit flow cannot save', async () => {
+    api.workspaceGetAgent.mockRejectedValue(new Error('agent not found'));
+    renderForm({ agentId: 'agent-1' });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('agent not found');
+    // No fields, so no Delete button `handleDelete` would refuse and no save
+    // the host could aim at a null agent.
+    expect(screen.queryByLabelText(/^Name/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Description')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete agent' })).not.toBeInTheDocument();
+  });
 });

@@ -12,12 +12,7 @@
  * sends.
  */
 
-/**
- * Task statuses that mean "not finished". The same rule as `isTaskActive` in
- * `utils/taskDisplay`, which reads it off a task; here it is read off a raw,
- * unvalidated tool payload, so any string can arrive.
- */
-const ACTIVE_TASK_STATUSES: ReadonlySet<string> = new Set(['queued', 'running']);
+import { isTaskActive } from '../../utils/taskDisplay';
 
 /** Result/summary tone — drives colour on the row summary. */
 export type ResultTone = 'neutral' | 'error';
@@ -395,7 +390,7 @@ export const inlineTaskCard = (
 
   return {
     kind,
-    variant: kind === 'assign' || !ACTIVE_TASK_STATUSES.has(status) ? 'full' : 'slim',
+    variant: kind === 'assign' || !isTaskActive({ status }) ? 'full' : 'slim',
     taskId,
     title: clampCardText(title),
     instructions: clampCardText(stringField(task, 'instructions').trim()),

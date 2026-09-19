@@ -107,6 +107,42 @@ describe('useOverlayLayer', () => {
     expect(document.body.style.overflow).toBe('');
   });
 
+  it('a re-rendered overlay keeps its place under the one stacked over it', async () => {
+    const user = userEvent.setup();
+    const bottom = vi.fn();
+    const top = vi.fn();
+
+    // Fresh handler on every render, the way WorkspaceSettingsModal's
+    // `handleClose` is rebuilt whenever a section's dirty flag flips while the
+    // global Settings modal sits over it: the identity moves, the overlay stays put.
+    const { rerender } = render(
+      <>
+        <Layer open onEscape={() => bottom()} />
+        <Layer open onEscape={top} />
+      </>
+    );
+    rerender(
+      <>
+        <Layer open onEscape={() => bottom()} />
+        <Layer open onEscape={top} />
+      </>
+    );
+
+    await user.keyboard('{Escape}');
+    // A new handler must not re-register the bottom overlay on top of the
+    // one still open above it.
+    expect(top).toHaveBeenCalledTimes(1);
+    expect(bottom).not.toHaveBeenCalled();
+
+    rerender(
+      <>
+        <Layer open={false} onEscape={() => bottom()} />
+        <Layer open={false} onEscape={top} />
+      </>
+    );
+    expect(document.body.style.overflow).toBe('');
+  });
+
   it('lets a non-modal layer take Escape without locking or unlocking the page', async () => {
     const user = userEvent.setup();
     const modalEscape = vi.fn();
