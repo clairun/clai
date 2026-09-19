@@ -30,6 +30,8 @@
 }
 
 .row {
+  /* Zero global.css's 0.5em <li> margin, which would add to the list gap. */
+  margin: 0;
   display: flex;
   align-items: flex-start;
   gap: 12px;

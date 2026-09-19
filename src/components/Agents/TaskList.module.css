@@ -79,6 +79,11 @@
 }
 
 .task {
+  /*
+   * Zero the 0.5em bottom margin that global.css puts on every <li> (chat
+   * markdown needs it); here it would add ~8px to the .list gap.
+   */
+  margin: 0;
   /* Containing block for the full-bleed .open button. */
   position: relative;
   display: flex;

@@ -64,6 +64,8 @@
 }
 
 .chip {
+  /* Zero global.css's 0.5em <li> margin, which would add to the list gap. */
+  margin: 0;
   display: inline-flex;
   align-items: center;
   gap: 4px;
