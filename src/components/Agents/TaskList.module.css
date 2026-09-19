@@ -1,6 +1,7 @@
 /*
  * Tasks drawer rows: assignee face (ringed by the task's state), title,
- * status pill, then a "creator → assignee" line and the detail.
+ * status pill, then a "creator → assignee" line and the detail. A row with a
+ * log to open carries a full-bleed button that opens it.
  */
 .tasks {
   display: flex;
@@ -78,6 +79,8 @@
 }
 
 .task {
+  /* Containing block for the full-bleed .open button. */
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
@@ -89,6 +92,39 @@
   contain: layout paint style;
   content-visibility: auto;
   contain-intrinsic-size: 96px;
+}
+
+.openable {
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.openable:hover {
+  border-color: var(--color-primary-alpha-30);
+  background: var(--color-overlay-04);
+}
+
+/*
+ * The row's primary action: an invisible button covering the whole row, so a
+ * click anywhere opens the task's log without nesting "Mark reviewed" inside
+ * a button.
+ */
+.open {
+  position: absolute;
+  inset: 0;
+  appearance: none;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.open:focus-visible {
+  /* Drawn inside: the row clips its paint, so an outward offset is invisible. */
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: -3px;
+  border-radius: var(--radius-sm);
 }
 
 .taskFace {
@@ -168,15 +204,11 @@
   overflow: hidden;
 }
 
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-  flex-wrap: wrap;
-}
-
 .action {
+  /* Above the row's full-bleed button, so it keeps its own clicks. */
+  position: relative;
+  z-index: 1;
+  margin-top: 8px;
   height: 28px;
   border: 1px solid var(--color-border-medium);
   border-radius: var(--radius-sm);

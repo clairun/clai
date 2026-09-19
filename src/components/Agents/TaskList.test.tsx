@@ -214,18 +214,10 @@ describe('TaskList', () => {
     await waitFor(() => expect(other).toBeEnabled());
   });
 
-  it('acknowledges a blocked task once and reloads, and offers the log when there is a session', async () => {
+  it('acknowledges a blocked task once and reloads', async () => {
     const user = userEvent.setup();
     const onChanged = vi.fn();
-    const onViewTask = vi.fn();
-    render(
-      <TaskList
-        {...props}
-        onChanged={onChanged}
-        onViewTask={onViewTask}
-        tasks={[REVIEW_TASK, WRITE_TASK]}
-      />
-    );
+    render(<TaskList {...props} onChanged={onChanged} tasks={[REVIEW_TASK, WRITE_TASK]} />);
 
     await user.click(screen.getByRole('button', { name: 'Mark reviewed' }));
     await waitFor(() =>
@@ -233,9 +225,41 @@ describe('TaskList', () => {
     );
     expect(api.acknowledgeWorkspaceTask).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  });
 
-    expect(screen.getAllByRole('button', { name: 'View log' })).toHaveLength(1);
-    await user.click(screen.getByRole('button', { name: 'View log' }));
+  it('opens the log from the row itself, only where there is one to open', async () => {
+    const user = userEvent.setup();
+    const onViewTask = vi.fn();
+    render(<TaskList {...props} onViewTask={onViewTask} tasks={[REVIEW_TASK, WRITE_TASK]} />);
+
+    const [review, write] = screen.getAllByRole('listitem') as [HTMLElement, HTMLElement];
+    await user.click(within(review).getByRole('button', { name: 'Open the log of "Review PR"' }));
     expect(onViewTask).toHaveBeenCalledWith(REVIEW_TASK);
+
+    // No session, no transcript: that row is not a click target at all.
+    expect(within(write).queryByRole('button', { name: /Open the log/ })).toBeNull();
+  });
+
+  it('leaves the row inert when nobody is listening for the log', () => {
+    render(<TaskList {...props} tasks={[REVIEW_TASK]} />);
+    expect(screen.queryByRole('button', { name: /Open the log/ })).toBeNull();
+  });
+
+  it('acknowledges from a row that opens, without also opening it', async () => {
+    const user = userEvent.setup();
+    const onViewTask = vi.fn();
+    const both = task({ id: 't-both', title: 'Failed one', status: 'failed', sessionId: 'sess-2' });
+    render(<TaskList {...props} onViewTask={onViewTask} tasks={[both]} />);
+
+    const row = screen.getByRole('listitem');
+    expect(
+      within(row).getByRole('button', { name: 'Open the log of "Failed one"' })
+    ).toBeInTheDocument();
+    await user.click(within(row).getByRole('button', { name: 'Mark reviewed' }));
+    await waitFor(() =>
+      expect(api.acknowledgeWorkspaceTask).toHaveBeenCalledWith('ws-1', 't-both')
+    );
+    // The row's own action must not catch the acknowledge click.
+    expect(onViewTask).not.toHaveBeenCalled();
   });
 });

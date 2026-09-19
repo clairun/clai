@@ -2,7 +2,8 @@
  * The Tasks drawer: who is doing what. Every task leads with the face of the
  * agent it was handed to, ringed by what the task is doing now; the status
  * pill stays for colour-blind readers and for text search. A face row on top
- * narrows the list to one or more agents while the drawer is open.
+ * narrows the list to one or more agents while the drawer is open. A row with
+ * a session opens its log on click, like the chat's task cards.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { acknowledgeWorkspaceTask } from '../../workspace/client';
@@ -173,8 +174,27 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
               task.assignedToWorkspaceAgentId,
               task.assignedAgentDisplayName
             );
+            // A task only opens if there is a transcript to open and someone
+            // listening; otherwise the row stays inert rather than looking
+            // clickable and doing nothing.
+            const open = onViewTask && task.sessionId ? () => onViewTask(task) : null;
+            const openLabel = `Open the log of "${task.title}"`;
             return (
-              <li key={task.id} className={styles.task}>
+              <li key={task.id} className={`${styles.task} ${open ? styles.openable : ''}`}>
+                {open && (
+                  // The row's primary action, laid over the whole row as its
+                  // own button: "Mark reviewed" is a sibling above it, so it
+                  // stays independently clickable and its click cannot reach
+                  // this one. The label names the task, which the row's title
+                  // alone would not carry out of order.
+                  <button
+                    type="button"
+                    className={styles.open}
+                    aria-label={openLabel}
+                    title={openLabel}
+                    onClick={open}
+                  />
+                )}
                 <AgentAvatar
                   identity={taskIdentity(task, roster)}
                   size={28}
@@ -200,29 +220,16 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                     <span className={styles.metaTime}>{formatRelativeTime(task.updatedAt)}</span>
                   </div>
                   {detail && <p className={styles.summary}>{detail}</p>}
-                  {(needsAttention || task.sessionId) && (
-                    <div className={styles.actions}>
-                      {needsAttention && (
-                        <button
-                          type="button"
-                          className={styles.action}
-                          onClick={() => handleAcknowledge(task.id)}
-                          // One acknowledge at a time; a click on another row would be dropped silently.
-                          disabled={!!busyTaskId}
-                        >
-                          Mark reviewed
-                        </button>
-                      )}
-                      {task.sessionId && (
-                        <button
-                          type="button"
-                          className={styles.action}
-                          onClick={() => onViewTask?.(task)}
-                        >
-                          View log
-                        </button>
-                      )}
-                    </div>
+                  {needsAttention && (
+                    <button
+                      type="button"
+                      className={styles.action}
+                      onClick={() => handleAcknowledge(task.id)}
+                      // One acknowledge at a time; a click on another row would be dropped silently.
+                      disabled={!!busyTaskId}
+                    >
+                      Mark reviewed
+                    </button>
                   )}
                 </div>
               </li>
