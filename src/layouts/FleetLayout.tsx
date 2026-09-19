@@ -96,6 +96,10 @@ const FleetLayout = () => {
   // the chat context bar). Cleared on close so a later manual open of
   // Settings doesn't replay the form.
   const [globalSettingsProviderAction, setGlobalSettingsProviderAction] = useState<'new' | null>(null);
+  // Same idea for a deep link that names one shared agent (e.g. the link on a
+  // crew member in workspace settings): the agents tab opens with that
+  // definition in its editor. Cleared on close.
+  const [globalSettingsAgentId, setGlobalSettingsAgentId] = useState<string | null>(null);
   const [forkBusyId, setForkBusyId] = useState<string | null>(null);
   const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
   const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
@@ -144,6 +148,7 @@ const FleetLayout = () => {
       const detail = (event as CustomEvent<OpenGlobalSettingsDetail>).detail || {};
       setGlobalSettingsTab(detail.tab ?? TABS.PROVIDER);
       setGlobalSettingsProviderAction(detail.providerAction ?? null);
+      setGlobalSettingsAgentId(detail.agentDefinitionId ?? null);
       setGlobalSettingsOpen(true);
     };
     window.addEventListener(OPEN_GLOBAL_SETTINGS_EVENT, handleOpenSettings);
@@ -550,9 +555,11 @@ const FleetLayout = () => {
         onClose={() => {
           setGlobalSettingsOpen(false);
           setGlobalSettingsProviderAction(null);
+          setGlobalSettingsAgentId(null);
         }}
         initialTab={globalSettingsTab}
         initialProviderAction={globalSettingsProviderAction}
+        initialAgentDefinitionId={globalSettingsAgentId}
       />
 
       <ProgressDialog

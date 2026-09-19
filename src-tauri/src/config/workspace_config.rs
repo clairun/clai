@@ -420,8 +420,26 @@ pub struct WorkspaceAgent {
     pub provider_connection_ids: Vec<String>,
     #[serde(default)]
     pub execution: ExecutionCapabilityConfig,
+    /// The procedurally drawn face, picked by the user from a row of
+    /// candidates. `None` for the Main (fixed face) and for agents saved
+    /// before faces existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// A picked face: the seed and the generator version it was picked against.
+/// The two always travel together — a seed rendered by a different generator
+/// version is a different face. The version is recorded from day one (it
+/// cannot be back-filled) so a future redrawn generator can keep rendering
+/// old seeds with the old parts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct AgentAvatarRef {
+    pub seed: String,
+    pub generator_version: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -552,6 +570,7 @@ impl WorkspaceAgent {
             selected_mcp_servers: Vec::new(),
             provider_connection_ids: Vec::new(),
             execution,
+            avatar: None,
             created_at: now,
             updated_at: now,
         }
@@ -1627,5 +1646,20 @@ mod main_agent_recovery_tests {
         assert_eq!(loaded.context, "house rules");
         assert_eq!(loaded.filesystem_grants[0].path, "/opt/tools");
         assert_eq!(loaded.main_agent_id(), "main");
+    }
+}
+
+#[cfg(test)]
+mod agent_face_tests {
+    use super::*;
+
+    #[test]
+    fn agents_saved_before_faces_existed_still_load() {
+        let json = r#"{"id":"a","name":"Old","description":"","enabled":true,"createdAt":1,"updatedAt":1}"#;
+        let agent: WorkspaceAgent = serde_json::from_str(json).expect("legacy agent");
+        assert_eq!(agent.avatar, None);
+        // And the absent face is not written back as `null`.
+        let out = serde_json::to_string(&agent).expect("serialize");
+        assert!(!out.contains("avatar"), "{out}");
     }
 }

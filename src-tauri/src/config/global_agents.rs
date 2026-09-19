@@ -139,12 +139,13 @@ fn unavailable_agent(assignment: &super::workspace_config::WorkspaceAssignment) 
     WorkspaceAgent {
         id: assignment.id.clone(),
         name: "Unavailable agent".to_string(),
-        description: "This teammate's shared definition no longer exists. Re-create it in the agent library, or remove the assignment.".to_string(),
+        description: "This agent's shared definition no longer exists. Re-create it in the agent library, or remove the assignment.".to_string(),
         enabled: false,
         selected_skills: Vec::new(),
         selected_mcp_servers: Vec::new(),
         provider_connection_ids: Vec::new(),
         execution: super::ExecutionCapabilityConfig::default(),
+        avatar: None,
         created_at: assignment.created_at,
         updated_at: assignment.updated_at,
     }
@@ -197,7 +198,7 @@ fn merge_grants(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::workspace_config::WorkspaceAssignment;
+    use crate::config::workspace_config::{AgentAvatarRef, WorkspaceAssignment};
     use crate::config::{FilesystemPathAccess, ShellAccessMode};
 
     fn definition(id: &str, name: &str) -> AgentDefinition {
@@ -258,6 +259,38 @@ mod tests {
                 definition_id: "def-1".to_string(),
                 revision: 3,
             }
+        );
+    }
+
+    #[test]
+    fn the_assignment_overlay_keeps_the_face_the_definition_picked() {
+        let mut app = AppConfig::default();
+        let mut shared = definition("def-1", "Reviewer");
+        shared.behavior.avatar = Some(AgentAvatarRef {
+            seed: "nonce-7".to_string(),
+            generator_version: 1,
+        });
+        app.agent_definitions.push(shared);
+        let mut workspace = workspace();
+        workspace.context = "house rules".to_string();
+        let mut assigned = assignment("assign-1", "def-1");
+        assigned.context = "Only review the API crate".to_string();
+        workspace.assignments.push(assigned);
+
+        let teammate = &resolve_roster(&workspace, &app)[1].agent;
+
+        assert!(
+            teammate.description.contains("## Assignment context"),
+            "the overlay has to have run for this test to mean anything"
+        );
+        assert_eq!(teammate.created_at, 20, "the overlay restamps the times");
+        assert_eq!(
+            teammate.avatar,
+            Some(AgentAvatarRef {
+                seed: "nonce-7".to_string(),
+                generator_version: 1,
+            }),
+            "the face travels with the definition through resolution"
         );
     }
 

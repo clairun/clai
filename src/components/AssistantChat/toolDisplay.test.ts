@@ -3,6 +3,7 @@ import {
   asParamsObject,
   asPayloadObject,
   cleanToolName,
+  inlineTaskCard,
   guessLang,
   inlineChartPath,
   summarizeToolCall,
@@ -343,5 +344,135 @@ describe('summarizeToolCall via mcp__ prefix', () => {
       verb: 'Bash',
       arg: 'go test ./...',
     });
+  });
+});
+
+describe('inlineTaskCard', () => {
+  const task = (over: Record<string, unknown> = {}) => ({
+    ok: true,
+    task: {
+      id: 'task-1',
+      workspaceId: 'ws-1',
+      assignedToWorkspaceAgentId: 'wa-7',
+      assignedAgentDefinitionId: 'def-7',
+      title: 'Round 3 review',
+      instructions: '  Review the branch end to end.  ',
+      status: 'queued',
+      resultSummary: null,
+      error: null,
+      ...over,
+    },
+  });
+
+  it('reads an assignment into a full card', () => {
+    expect(inlineTaskCard('workspace_assignTask', task(), null, 'completed')).toEqual({
+      kind: 'assign',
+      variant: 'full',
+      taskId: 'task-1',
+      title: 'Round 3 review',
+      instructions: 'Review the branch end to end.',
+      status: 'queued',
+      assignedToWorkspaceAgentId: 'wa-7',
+      assignedAgentDefinitionId: 'def-7',
+      detail: '',
+      detailIsError: false,
+    });
+  });
+
+  it('keeps a poll of an unfinished task slim, queued as well as running', () => {
+    // A worker that has not been picked up yet answers `queued`, and a wait is
+    // mostly these: they collapse with the run instead of each drawing a card.
+    for (const status of ['running', 'queued']) {
+      expect(
+        inlineTaskCard('workspace_getTaskResult', task({ status }), null, 'completed')
+      ).toMatchObject({ kind: 'poll', variant: 'slim', status });
+    }
+  });
+
+  it('clamps what a card renders, so a whole brief is not a whole DOM node', () => {
+    const long = 'x'.repeat(400);
+    const card = inlineTaskCard(
+      'workspace_getTaskResult',
+      task({ status: 'completed', instructions: long, resultSummary: long, title: long }),
+      null,
+      'completed'
+    );
+    expect(card?.instructions).toHaveLength(301);
+    expect(card?.instructions.endsWith('…')).toBe(true);
+    expect(card?.detail).toHaveLength(301);
+    expect(card?.title).toHaveLength(301);
+    // Anything that already fits is left exactly as it came.
+    const short = inlineTaskCard('workspace_assignTask', task(), null, 'completed');
+    expect(short?.instructions).toBe('Review the branch end to end.');
+  });
+
+  it('gives a hand-off a full card whatever status it was stamped with', () => {
+    // TaskCard leans on this: a delegation never collapses into the slim run,
+    // so the full card is the only shape a hand-off ever takes.
+    for (const status of ['queued', 'running', 'completed', 'failed']) {
+      expect(inlineTaskCard('workspace_assignTask', task({ status }), null, 'completed'))
+        .toMatchObject({ kind: 'assign', variant: 'full', status });
+    }
+  });
+
+  it('gives every terminal status a full card', () => {
+    for (const status of ['completed', 'failed', 'blocked']) {
+      expect(inlineTaskCard('workspace_getTaskResult', task({ status }), null, 'completed'))
+        .toMatchObject({ variant: 'full', status });
+    }
+  });
+
+  it('prefers the task error over its summary, and says which it is', () => {
+    const card = inlineTaskCard(
+      'workspace_getTaskResult',
+      task({ status: 'failed', resultSummary: 'partial work', error: '  boom  ' }),
+      null,
+      'completed'
+    );
+    expect(card).toMatchObject({ detail: 'boom', detailIsError: true });
+  });
+
+  it('shows the summary when the task carries no error', () => {
+    const card = inlineTaskCard(
+      'workspace_getTaskResult',
+      task({ status: 'completed', resultSummary: 'Found 3 issues.' }),
+      null,
+      'completed'
+    );
+    expect(card).toMatchObject({ detail: 'Found 3 issues.', detailIsError: false });
+  });
+
+  it('unwraps the MCP envelope the bridged tools answer in', () => {
+    const envelope = { content: [{ type: 'text', text: JSON.stringify(task()) }] };
+    expect(inlineTaskCard('mcp__clai__workspace_assignTask', envelope, null, 'completed'))
+      .toMatchObject({ taskId: 'task-1', kind: 'assign' });
+  });
+
+  it('leaves the plain row in place for anything it cannot draw', () => {
+    // Another tool.
+    expect(inlineTaskCard('bash_exec', task(), null, 'completed')).toBeNull();
+    // The call itself failed or is still going — no task to show.
+    expect(inlineTaskCard('workspace_assignTask', task(), 'bad agent id', 'failed')).toBeNull();
+    expect(inlineTaskCard('workspace_assignTask', undefined, null, 'running')).toBeNull();
+    // Payloads that are not a task.
+    expect(inlineTaskCard('workspace_assignTask', { ok: false }, null, 'completed')).toBeNull();
+    expect(inlineTaskCard('workspace_assignTask', { ok: true }, null, 'completed')).toBeNull();
+    expect(
+      inlineTaskCard('workspace_assignTask', task({ id: '' }), null, 'completed')
+    ).toBeNull();
+    expect(
+      inlineTaskCard('workspace_assignTask', task({ title: '' }), null, 'completed')
+    ).toBeNull();
+    expect(
+      inlineTaskCard('workspace_assignTask', task({ status: '' }), null, 'completed')
+    ).toBeNull();
+    expect(
+      inlineTaskCard(
+        'workspace_assignTask',
+        task({ assignedToWorkspaceAgentId: '' }),
+        null,
+        'completed'
+      )
+    ).toBeNull();
   });
 });

@@ -4,7 +4,7 @@
  * Main settings modal with sidebar navigation for different settings sections.
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import ReactDOM from 'react-dom';
 import AgentLibrarySettings from './AgentLibrarySettings';
 import AssistantProviderSettings from './AssistantProviderSettings';
@@ -13,6 +13,7 @@ import SkillsSettings from './SkillsSettings';
 import AppearanceSettings from './AppearanceSettings';
 import ApplicationsSettings from './ApplicationsSettings';
 import AboutSettings from './AboutSettings';
+import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import styles from './SettingsModal.module.css';
 
 /**
@@ -108,6 +109,9 @@ interface SettingsModalProps {
   // When 'new', the provider tab opens with its "Add Connection" form
   // already open — used by first-run deep links (no provider configured).
   initialProviderAction?: 'new' | null;
+  // When set, the agents tab opens with this shared definition in its editor
+  // — used by the link on a crew member in workspace settings.
+  initialAgentDefinitionId?: string | null;
 }
 
 const SettingsModal = ({
@@ -115,6 +119,7 @@ const SettingsModal = ({
   onClose,
   initialTab = TABS.PROVIDER,
   initialProviderAction = null,
+  initialAgentDefinitionId = null,
 }: SettingsModalProps) => {
   const [activeTab, setActiveTab] = useState<TabValue>(initialTab);
 
@@ -126,6 +131,13 @@ const SettingsModal = ({
   // state during render (React's documented "information from a previous
   // render" pattern) rather than in an effect: it skips the extra commit an
   // effect would cause and stays clear of react-hooks/set-state-in-effect.
+  //
+  // The agent deep link rides along for the same reason, and is consumed once
+  // per opening: the tabs are a `switch`, so leaving the Agents tab unmounts
+  // it and coming back mounts a fresh one. Without a link the tab switch can
+  // clear, that remount would reopen the editor the user just navigated away
+  // from, over the gallery they navigated to.
+  const [deepLinkAgentId, setDeepLinkAgentId] = useState(initialAgentDefinitionId);
   const [prevOpen, setPrevOpen] = useState(isOpen);
   const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
   if (isOpen !== prevOpen || initialTab !== prevInitialTab) {
@@ -133,32 +145,19 @@ const SettingsModal = ({
     setPrevInitialTab(initialTab);
     if (isOpen) {
       setActiveTab(initialTab);
+      setDeepLinkAgentId(initialAgentDefinitionId);
     }
   }
 
-  // Handle escape key
-  useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
+  const selectTab = useCallback((tab: TabValue) => {
+    setActiveTab(tab);
+    setDeepLinkAgentId(null);
+  }, []);
 
-    document.addEventListener('keydown', handleEscape);
-    return () => document.removeEventListener('keydown', handleEscape);
-  }, [isOpen, onClose]);
-
-  // Prevent body scroll when modal is open
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-    } else {
-      document.body.style.overflow = '';
-    }
-    return () => {
-      document.body.style.overflow = '';
-    };
-  }, [isOpen]);
+  // Escape and the body-scroll lock, shared with every other open overlay:
+  // this modal can sit over the workspace Settings modal, and a form modal can
+  // sit over it.
+  useOverlayLayer(isOpen, onClose);
 
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) {
@@ -175,7 +174,9 @@ const SettingsModal = ({
       case TABS.PROVIDER:
         return <AssistantProviderSettings initialAction={initialProviderAction} />;
       case TABS.AGENTS:
-        return <AgentLibrarySettings />;
+        // The library consumes this id once per mount; `deepLinkAgentId` is
+        // what makes that "once per opening" rather than once per remount.
+        return <AgentLibrarySettings initialAgentDefinitionId={deepLinkAgentId} />;
       case TABS.SKILLS:
         return <SkillsSettings />;
       case TABS.MCP_SERVERS:
@@ -207,49 +208,49 @@ const SettingsModal = ({
           <nav className={styles.sidebar}>
             <button
               className={`${styles.navItem} ${activeTab === TABS.PROVIDER ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.PROVIDER)}
+              onClick={() => selectTab(TABS.PROVIDER)}
             >
               <ProviderIcon />
               <span>AI Provider</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.AGENTS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.AGENTS)}
+              onClick={() => selectTab(TABS.AGENTS)}
             >
               <AgentsIcon />
               <span>Agents</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.SKILLS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.SKILLS)}
+              onClick={() => selectTab(TABS.SKILLS)}
             >
               <SkillsIcon />
               <span>Skills</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.MCP_SERVERS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.MCP_SERVERS)}
+              onClick={() => selectTab(TABS.MCP_SERVERS)}
             >
               <PlugIcon />
               <span>MCP Servers</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.APPLICATIONS ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.APPLICATIONS)}
+              onClick={() => selectTab(TABS.APPLICATIONS)}
             >
               <AppsIcon />
               <span>Applications</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.APPEARANCE ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.APPEARANCE)}
+              onClick={() => selectTab(TABS.APPEARANCE)}
             >
               <AppearanceIcon />
               <span>Appearance</span>
             </button>
             <button
               className={`${styles.navItem} ${activeTab === TABS.ABOUT ? styles.active : ''}`}
-              onClick={() => setActiveTab(TABS.ABOUT)}
+              onClick={() => selectTab(TABS.ABOUT)}
             >
               <AboutIcon />
               <span>About</span>

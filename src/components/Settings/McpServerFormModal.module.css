@@ -13,7 +13,9 @@
   bottom: 0;
   background: var(--color-overlay-60);
   backdrop-filter: blur(4px);
-  z-index: 10001;
+  /* Opens from a pane inside SettingsModal (here and in
+     AssistantProviderSettings, which borrows this overlay). */
+  z-index: var(--z-portal-modal-form);
   display: flex;
   align-items: center;
   justify-content: center;

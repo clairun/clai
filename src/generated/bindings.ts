@@ -3,6 +3,15 @@ import type { JsonValue } from "./serde_json/JsonValue";
 
 export type AddSkillSourceRequest = { name: string, kind: string | null, path: string | null, uri: string | null, reference: string | null, };
 
+/**
+ * A picked face: the seed and the generator version it was picked against.
+ * The two always travel together — a seed rendered by a different generator
+ * version is a different face. The version is recorded from day one (it
+ * cannot be back-filled) so a future redrawn generator can keep rendering
+ * old seeds with the old parts.
+ */
+export type AgentAvatarRef = { seed: string, generatorVersion: number, };
+
 export type AppUpdateAvailableEvent = { update: AppUpdateInfo, };
 
 export type AppUpdateCheckResult = { support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck, };
@@ -462,7 +471,12 @@ selectedMcpServerIds: Array<string>,
  * `selected_mcp_server_ids` — needed to start a usable session
  * from the Fleet view.
  */
-execution: unknown, createdAt: bigint, updatedAt: bigint, };
+execution: unknown, 
+/**
+ * The picked face, from the shared definition. `None` for the Main
+ * (fixed face) and for definitions saved before faces existed.
+ */
+avatar?: AgentAvatarRef | null, createdAt: bigint, updatedAt: bigint, };
 
 export type WorkspaceAgentSummary = { id: string, agentDefinitionId: string, displayName: string, role: string, isDefault: boolean, description?: string | null, };
 

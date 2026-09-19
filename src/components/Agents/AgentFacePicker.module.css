@@ -1,0 +1,112 @@
+/*
+ * Face picker: a 64px preview of the selected face, then the row of 40px
+ * tiles (current face first when editing, then six candidates) and Shuffle.
+ * Tiles keyed by seed mount fresh on Shuffle, so the pop plays once per new
+ * row (keyframes defined here: CSS Modules scope @keyframes per file, see
+ * scripts/check-css-animations.mjs). global.css collapses it under
+ * prefers-reduced-motion.
+ */
+.picker {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.preview {
+  margin-top: 18px;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.legend {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 6px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.candidates {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tile {
+  appearance: none;
+  display: inline-flex;
+  padding: 2px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  line-height: 0;
+  animation: agentFacePop 180ms ease-out;
+}
+
+.tile:hover:not(:disabled) {
+  border-color: var(--color-border-medium);
+}
+
+.tileChecked,
+.tileChecked:hover:not(:disabled) {
+  border-color: var(--color-primary);
+}
+
+.tile:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.shuffle {
+  appearance: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-medium);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.shuffle:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.shuffle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.hint {
+  display: block;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+@keyframes agentFacePop {
+  from {
+    opacity: 0;
+    transform: scale(0.85) rotate(-4deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

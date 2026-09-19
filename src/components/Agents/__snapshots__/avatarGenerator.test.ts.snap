@@ -1,0 +1,208 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`agentAvatar > pins the v1 drawing: a change to any part table or geometry must bump GENERATOR_VERSION > lids 1`] = `
+[
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="ach4il8i"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#ach4il8i)"><path d="M50 23.9 C58.1 23.8 68.8 24.1 74.8 29.2 C80.9 34.2 86 45.5 86.2 54 C86.5 62.5 82.5 74.8 76.4 80.4 C70.4 86 58 88.5 50 87.6 C42 86.8 34.2 80.9 28.7 75.3 C23.1 69.7 17.3 61.5 16.9 54 C16.4 46.5 20.5 35.1 26.1 30.1 C31.6 25.1 41.9 24.1 50 23.9Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><circle cx="40.8" cy="46.3" r="3.5" fill="#001718"/><circle cx="59.2" cy="46.3" r="3.5" fill="#001718"/><path d="M43 63.5 Q50 71.9 57 63.5" fill="none" stroke="#001718" stroke-width="3.1" stroke-linecap="round"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="ach4il8i"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#ach4il8i)"><path d="M50 23.9 C58.1 23.8 68.8 24.1 74.8 29.2 C80.9 34.2 86 45.5 86.2 54 C86.5 62.5 82.5 74.8 76.4 80.4 C70.4 86 58 88.5 50 87.6 C42 86.8 34.2 80.9 28.7 75.3 C23.1 69.7 17.3 61.5 16.9 54 C16.4 46.5 20.5 35.1 26.1 30.1 C31.6 25.1 41.9 24.1 50 23.9Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><circle cx="40.8" cy="46.3" r="3.5" fill="#001718"/><circle cx="59.2" cy="46.3" r="3.5" fill="#001718"/><path d="M43 63.5 Q50 71.9 57 63.5" fill="none" stroke="#001718" stroke-width="3.1" stroke-linecap="round"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="ach4il8i"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#ach4il8i)"><path d="M50 23.9 C58.1 23.8 68.8 24.1 74.8 29.2 C80.9 34.2 86 45.5 86.2 54 C86.5 62.5 82.5 74.8 76.4 80.4 C70.4 86 58 88.5 50 87.6 C42 86.8 34.2 80.9 28.7 75.3 C23.1 69.7 17.3 61.5 16.9 54 C16.4 46.5 20.5 35.1 26.1 30.1 C31.6 25.1 41.9 24.1 50 23.9Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><circle cx="40.8" cy="46.3" r="4.7" fill="#001718"/><circle cx="59.2" cy="46.3" r="4.7" fill="#001718"/><circle cx="50" cy="65.6" r="4.9" fill="#001718"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="ach4il8i"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#ach4il8i)"><path d="M50 23.9 C58.1 23.8 68.8 24.1 74.8 29.2 C80.9 34.2 86 45.5 86.2 54 C86.5 62.5 82.5 74.8 76.4 80.4 C70.4 86 58 88.5 50 87.6 C42 86.8 34.2 80.9 28.7 75.3 C23.1 69.7 17.3 61.5 16.9 54 C16.4 46.5 20.5 35.1 26.1 30.1 C31.6 25.1 41.9 24.1 50 23.9Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><circle cx="40.8" cy="46.3" r="3.5" fill="#001718"/><circle cx="59.2" cy="46.3" r="3.5" fill="#001718"/><rect x="36.6" y="42.2" width="8.3" height="3.8" rx="0" fill="#00c3cb"/><rect x="55.1" y="42.2" width="8.3" height="3.8" rx="0" fill="#00c3cb"/><path d="M45.3 65.6 L54.7 65.6" fill="none" stroke="#001718" stroke-width="2.8" stroke-linecap="round"/></g></svg>",
+]
+`;
+
+exports[`agentAvatar > pins the v1 drawing: a change to any part table or geometry must bump GENERATOR_VERSION > moods 1`] = `
+[
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="acpzl36"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#acpzl36)"><path d="M45 23 L44.2 9" fill="none" stroke="#00c3cb" stroke-width="4" stroke-linecap="round"/><circle cx="44.2" cy="7" r="4" fill="#00c3cb"/><path d="M50 16.8 C58.1 16.2 70.3 21.8 76 28 C81.8 34.2 85.4 46.2 84.5 54 C83.6 61.8 76.3 69.7 70.5 74.5 C64.8 79.3 57.2 82.5 50 82.8 C42.8 83.1 32.7 81.3 27.5 76.5 C22.3 71.7 18.8 61.5 18.8 54 C18.8 46.5 22.3 37.7 27.5 31.5 C32.7 25.3 41.9 17.4 50 16.8Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><rect x="32.6" y="45.3" width="34.8" height="7.3" rx="3.6" fill="#001718"/><path d="M43 68.6 L57 68.6" fill="none" stroke="#001718" stroke-width="3.1" stroke-linecap="round"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="acpzl36"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#acpzl36)"><circle cx="44.2" cy="7" r="7" fill="#00c3cb" opacity="0.35"/><path d="M45 23 L44.2 9" fill="none" stroke="#00c3cb" stroke-width="4" stroke-linecap="round"/><circle cx="44.2" cy="7" r="4" fill="#00c3cb"/><path d="M50 16.8 C58.1 16.2 70.3 21.8 76 28 C81.8 34.2 85.4 46.2 84.5 54 C83.6 61.8 76.3 69.7 70.5 74.5 C64.8 79.3 57.2 82.5 50 82.8 C42.8 83.1 32.7 81.3 27.5 76.5 C22.3 71.7 18.8 61.5 18.8 54 C18.8 46.5 22.3 37.7 27.5 31.5 C32.7 25.3 41.9 17.4 50 16.8Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><rect x="32.6" y="45.3" width="34.8" height="7.3" rx="3.6" fill="#001718"/><circle cx="38.3" cy="49" r="2" fill="#00c3cb"/><path d="M43 68.6 L57 68.6" fill="none" stroke="#001718" stroke-width="3.1" stroke-linecap="round"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="acpzl36"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#acpzl36)"><path d="M45 23 L44.2 9" fill="none" stroke="#00c3cb" stroke-width="4" stroke-linecap="round"/><circle cx="44.2" cy="7" r="4" fill="#00c3cb"/><path d="M50 16.8 C58.1 16.2 70.3 21.8 76 28 C81.8 34.2 85.4 46.2 84.5 54 C83.6 61.8 76.3 69.7 70.5 74.5 C64.8 79.3 57.2 82.5 50 82.8 C42.8 83.1 32.7 81.3 27.5 76.5 C22.3 71.7 18.8 61.5 18.8 54 C18.8 46.5 22.3 37.7 27.5 31.5 C32.7 25.3 41.9 17.4 50 16.8Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><rect x="32.6" y="44.1" width="34.8" height="9.8" rx="4.9" fill="#001718"/><circle cx="50" cy="68.6" r="4.9" fill="#001718"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="acpzl36"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003134"/><g clip-path="url(#acpzl36)"><path d="M45 23 L44.2 9" fill="none" stroke="#00c3cb" stroke-width="4" stroke-linecap="round"/><circle cx="44.2" cy="7" r="4" fill="#00c3cb"/><path d="M50 16.8 C58.1 16.2 70.3 21.8 76 28 C81.8 34.2 85.4 46.2 84.5 54 C83.6 61.8 76.3 69.7 70.5 74.5 C64.8 79.3 57.2 82.5 50 82.8 C42.8 83.1 32.7 81.3 27.5 76.5 C22.3 71.7 18.8 61.5 18.8 54 C18.8 46.5 22.3 37.7 27.5 31.5 C32.7 25.3 41.9 17.4 50 16.8Z" fill="#00c3cb"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#00969f" opacity="0.45"/><rect x="32.6" y="45.3" width="34.8" height="7.3" rx="3.6" fill="#001718"/><rect x="32.6" y="45.3" width="34.8" height="3.6" rx="0" fill="#00c3cb"/><path d="M45.3 68.6 L54.7 68.6" fill="none" stroke="#001718" stroke-width="2.8" stroke-linecap="round"/></g></svg>",
+]
+`;
+
+exports[`agentAvatar > pins the v1 drawing: a change to any part table or geometry must bump GENERATOR_VERSION > palette-dark 1`] = `
+[
+  {
+    "bg": "#421b1c",
+    "body": "#f28788",
+    "bodyDeep": "#c25c5f",
+    "ink": "#20090a",
+    "ring": "#f28788",
+  },
+  {
+    "bg": "#401f0a",
+    "body": "#ec915c",
+    "bodyDeep": "#bc662f",
+    "ink": "#1f0b02",
+    "ring": "#ec915c",
+  },
+  {
+    "bg": "#382500",
+    "body": "#d5a13c",
+    "bodyDeep": "#a87600",
+    "ink": "#1b0f00",
+    "ring": "#d5a13c",
+  },
+  {
+    "bg": "#2b2b01",
+    "body": "#b0b246",
+    "bodyDeep": "#868604",
+    "ink": "#131300",
+    "ring": "#b0b246",
+  },
+  {
+    "bg": "#173012",
+    "body": "#7dbf6e",
+    "bodyDeep": "#539344",
+    "ink": "#071605",
+    "ring": "#7dbf6e",
+  },
+  {
+    "bg": "#003224",
+    "body": "#3bc59e",
+    "bodyDeep": "#009874",
+    "ink": "#00170f",
+    "ring": "#3bc59e",
+  },
+  {
+    "bg": "#003134",
+    "body": "#00c3cb",
+    "bodyDeep": "#00969f",
+    "ink": "#001718",
+    "ring": "#00c3cb",
+  },
+  {
+    "bg": "#002e41",
+    "body": "#3bb9ed",
+    "bodyDeep": "#008dbe",
+    "ink": "#001420",
+    "ring": "#3bb9ed",
+  },
+  {
+    "bg": "#172846",
+    "body": "#7aabfc",
+    "bodyDeep": "#507fcd",
+    "ink": "#071123",
+    "ring": "#7aabfc",
+  },
+  {
+    "bg": "#292344",
+    "body": "#aa9cf7",
+    "bodyDeep": "#8071c8",
+    "ink": "#120e22",
+    "ring": "#aa9cf7",
+  },
+  {
+    "bg": "#361e3b",
+    "body": "#cf8fde",
+    "bodyDeep": "#a264b0",
+    "ink": "#190b1c",
+    "ring": "#cf8fde",
+  },
+  {
+    "bg": "#3e1b2d",
+    "body": "#e887b6",
+    "bodyDeep": "#b85c8b",
+    "ink": "#1e0914",
+    "ring": "#e887b6",
+  },
+]
+`;
+
+exports[`agentAvatar > pins the v1 drawing: a change to any part table or geometry must bump GENERATOR_VERSION > palette-light 1`] = `
+[
+  {
+    "bg": "#fce0e0",
+    "body": "#e47b7c",
+    "bodyDeep": "#b45054",
+    "ink": "#2e1011",
+    "ring": "#c25c5f",
+  },
+  {
+    "bg": "#f9e3d7",
+    "body": "#de844f",
+    "bodyDeep": "#af5a21",
+    "ink": "#2c1204",
+    "ring": "#bc662f",
+  },
+  {
+    "bg": "#f3e6d2",
+    "body": "#c8942d",
+    "bodyDeep": "#9c6a00",
+    "ink": "#271700",
+    "ring": "#a87600",
+  },
+  {
+    "bg": "#e9ead3",
+    "body": "#a4a537",
+    "bodyDeep": "#7a7a00",
+    "ink": "#1c1c00",
+    "ring": "#868604",
+  },
+  {
+    "bg": "#deedda",
+    "body": "#71b262",
+    "bodyDeep": "#478638",
+    "ink": "#0d2008",
+    "ring": "#539344",
+  },
+  {
+    "bg": "#d5efe5",
+    "body": "#27b892",
+    "bodyDeep": "#008c69",
+    "ink": "#002217",
+    "ring": "#009874",
+  },
+  {
+    "bg": "#d2eef0",
+    "body": "#00b6be",
+    "bodyDeep": "#008a92",
+    "ink": "#002124",
+    "ring": "#00969f",
+  },
+  {
+    "bg": "#d5ecf8",
+    "body": "#28acdf",
+    "bodyDeep": "#0081b1",
+    "ink": "#001e2d",
+    "ring": "#008dbe",
+  },
+  {
+    "bg": "#dce9fd",
+    "body": "#6e9eef",
+    "bodyDeep": "#4573c0",
+    "ink": "#0c1a32",
+    "ring": "#507fcd",
+  },
+  {
+    "bg": "#e7e5fb",
+    "body": "#9e8fe9",
+    "bodyDeep": "#7565bb",
+    "ink": "#1b1630",
+    "ring": "#8071c8",
+  },
+  {
+    "bg": "#f1e2f5",
+    "body": "#c282d0",
+    "bodyDeep": "#9558a3",
+    "ink": "#251229",
+    "ring": "#a264b0",
+  },
+  {
+    "bg": "#f9e0eb",
+    "body": "#da7baa",
+    "bodyDeep": "#ab517f",
+    "ink": "#2b101e",
+    "ring": "#b85c8b",
+  },
+]
+`;
+
+exports[`agentAvatar > pins the v1 drawing: a change to any part table or geometry must bump GENERATOR_VERSION > parts 1`] = `
+[
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="ac8wt3om"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#361e3b"/><g clip-path="url(#ac8wt3om)"><path d="M42.2 24 L37.7 10" fill="none" stroke="#cf8fde" stroke-width="4" stroke-linecap="round"/><circle cx="37.7" cy="8" r="4" fill="#cf8fde"/><path d="M50 22 C78.4 22 82 25.6 82 54 C82 82.4 78.4 86 50 86 C21.6 86 18 82.4 18 54 C18 25.6 21.6 22 50 22Z" fill="#cf8fde"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#a264b0" opacity="0.45"/><rect x="38.4" y="43.3" width="4.5" height="13.4" rx="2.2" fill="#190b1c"/><rect x="57.1" y="43.3" width="4.5" height="13.4" rx="2.2" fill="#190b1c"/><path d="M45.3 69.2 L54.7 69.2" fill="none" stroke="#190b1c" stroke-width="2.8" stroke-linecap="round"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="acoshnjt"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#003224"/><g clip-path="url(#acoshnjt)"><path d="M52.2 30 L62.2 12 L70.2 28Z" fill="#3bc59e"/><rect x="10" y="24" width="80" height="60" rx="30" fill="#3bc59e"/><ellipse cx="50" cy="76" rx="36" ry="10" fill="#009874" opacity="0.45"/><path d="M33.4 50.4 A4.6 4.6 0 0 1 42.6 50.4Z" fill="#00170f"/><path d="M57.4 50.4 A4.6 4.6 0 0 1 66.6 50.4Z" fill="#00170f"/><circle cx="50" cy="67.9" r="3.1" fill="#00170f"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="aczoiap"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#401f0a"/><g clip-path="url(#aczoiap)"><path d="M50 21.3 C58 20.6 70.2 22.5 76.1 27.9 C81.9 33.4 85.8 46.2 85 54 C84.1 61.8 76.6 68.8 70.8 74.8 C65 80.8 57.3 89.7 50 90.1 C42.7 90.5 33 83.2 26.8 77.2 C20.6 71.2 12.5 61.5 12.7 54 C12.9 46.5 21.8 37.5 28.1 32.1 C34.3 26.6 42 22 50 21.3Z" fill="#ec915c"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#bc662f" opacity="0.45"/><circle cx="38.6" cy="50.5" r="4" fill="#1f0b02"/><circle cx="61.4" cy="50.5" r="4" fill="#1f0b02"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="ac40xou0"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#421b1c"/><g clip-path="url(#ac40xou0)"><path d="M45.2 24 Q47.2 8 55.2 12 M53.2 22 Q59.2 6 65.2 16" fill="none" stroke="#f28788" stroke-width="4" stroke-linecap="round"/><rect x="22" y="18" width="56" height="72" rx="28" fill="#f28788"/><ellipse cx="50" cy="76" rx="25.2" ry="10" fill="#c25c5f" opacity="0.45"/><circle cx="38" cy="48.8" r="4" fill="#20090a"/><circle cx="62" cy="48.8" r="6" fill="none" stroke="#20090a" stroke-width="2.8" stroke-linecap="round"/><path d="M43 68.6 L57 68.6" fill="none" stroke="#20090a" stroke-width="3.1" stroke-linecap="round"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="ac1ilndlc"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#421b1c"/><g clip-path="url(#ac1ilndlc)"><path d="M51.3 28 L61.3 10 L69.3 26Z" fill="#f28788"/><path d="M50 22 C76.2 22 82 27.8 82 54 C82 80.2 76.2 86 50 86 C23.8 86 18 80.2 18 54 C18 27.8 23.8 22 50 22Z" fill="#f28788"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#c25c5f" opacity="0.45"/><circle cx="37.6" cy="51.1" r="5.2" fill="none" stroke="#20090a" stroke-width="2.8" stroke-linecap="round"/><circle cx="62.4" cy="51.1" r="5.2" fill="none" stroke="#20090a" stroke-width="2.8" stroke-linecap="round"/><path d="M43 68.5 Q50 76.9 57 68.5" fill="none" stroke="#20090a" stroke-width="3.1" stroke-linecap="round"/></g></svg>",
+  "<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 100 100" role="img" aria-hidden="true" focusable="false"><defs><clipPath id="acry9fok"><circle cx="50" cy="50" r="50" /></clipPath></defs><circle cx="50" cy="50" r="50" fill="#172846"/><g clip-path="url(#acry9fok)"><path d="M52.9 27 L62.9 9 L70.9 25Z" fill="#7aabfc"/><path d="M50 17.2 C58 16.8 70.1 22.9 74.9 29.1 C79.8 35.2 79.5 45.8 79.4 54 C79.2 62.2 78.9 73.1 74 78 C69.1 82.9 58.1 83.3 50 83.5 C41.9 83.6 30.6 83.8 25.1 78.9 C19.6 74 16.6 61.9 17 54 C17.3 46.1 21.7 37.3 27.2 31.2 C32.7 25.1 42 17.5 50 17.2Z" fill="#7aabfc"/><ellipse cx="50" cy="76" rx="30.6" ry="10" fill="#507fcd" opacity="0.45"/><rect x="34.7" y="45.5" width="30.5" height="7.2" rx="3.6" fill="#071123"/><path d="M43 66.8 Q50 75.2 57 66.8" fill="none" stroke="#071123" stroke-width="3.1" stroke-linecap="round"/></g></svg>",
+]
+`;

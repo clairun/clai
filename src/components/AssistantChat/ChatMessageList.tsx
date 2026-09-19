@@ -17,6 +17,7 @@ import type {
   ContentPart,
   RunNotice,
   ToolInvocation,
+  WorkspaceAgentResponse,
 } from '../../generated/bindings';
 import {
   asParamsObject,
@@ -25,10 +26,14 @@ import {
   extractMcpText,
   guessLang,
   inlineChartPath,
+  inlineTaskCard,
   summarizeToolCall,
   summarizeToolResult,
   toPreviewText,
+  type TaskCallCard,
 } from './toolDisplay';
+import TaskCard from '../Agents/TaskCard';
+import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './taskCardContext';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
@@ -75,6 +80,7 @@ type RenderItem =
 
 const EMPTY_STREAMING: Record<string, string> = {};
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 
 const formatTimestamp = (timestamp: number | bigint | null | undefined): string => {
   if (!timestamp) return '';
@@ -551,6 +557,13 @@ interface ChatMessageListProps {
   hasOlderMessages?: boolean;
   isLoadingOlderMessages?: boolean;
   onLoadOlderMessages?: () => void;
+  // The crew, so a delegated task's card wears the assignee's face and name.
+  // Pass a reference that only changes when the crew itself does: it reaches
+  // the cards by context, and a new array on every poll would repaint them.
+  taskRoster?: readonly WorkspaceAgentResponse[];
+  // Open a delegated task's own log, by task id. Omit in read-only views —
+  // cards then render inert.
+  onOpenTask?: (taskId: string) => void;
 }
 
 const ChatMessageList = ({
@@ -573,6 +586,8 @@ const ChatMessageList = ({
   hasOlderMessages = false,
   isLoadingOlderMessages = false,
   onLoadOlderMessages,
+  taskRoster = EMPTY_ROSTER,
+  onOpenTask,
 }: ChatMessageListProps) => {
   // Build a Map of toolCalls keyed by id once per render, so every
   // tool_use part lookup is O(1) instead of an Array.find walk. Memoized
@@ -729,6 +744,11 @@ const ChatMessageList = ({
   // visible affordance/fallback and doubles as the loading indicator.
   const handleApproachTop = hasOlderMessages ? onLoadOlderMessages : undefined;
 
+  const taskCardSurface = useMemo<TaskCardSurface>(
+    () => ({ roster: taskRoster, onOpenTask }),
+    [taskRoster, onOpenTask]
+  );
+
   // Footer rendered inside the scroll area, right after the last message.
   // While a run is in flight we show the activity indicator; once it ends we
   // show the failure (if any) attached to the turn it belongs to. These are
@@ -744,30 +764,32 @@ const ChatMessageList = ({
 
   return (
     <WorkspaceFileContext.Provider value={fileLocation}>
-      <VirtualizedList
-        items={grouped}
-        itemKey={itemKey}
-        renderItem={renderItem}
-        className={styles.activityList}
-        // Most turns are now one-line tool rows (~30px). A large estimate
-        // over-allocates each not-yet-measured row, so during an active run the
-        // footer/last row sits well below the real content and stick-to-bottom
-        // scrolls into that empty slot — the "jumps off the bottom on every new
-        // tool" gap. Estimating near the common row height keeps the transient
-        // gap negligible; taller text blocks correct on measure (overscan keeps
-        // them rendered/measured).
-        estimateSize={48}
-        overscan={1400}
-        gap={12}
-        footer={footer}
-        footerEstimateSize={56}
-        initialScrollToBottom
-        scrollToBottomSignal={messages.length + scrollNudge * 1_000_000}
-        scrollToBottomBehavior="auto"
-        forceScrollToBottomKey={lastUserMessageId}
-        throttledMeasureKeys={throttledMeasureKeys}
-        onApproachTop={handleApproachTop}
-      />
+      <TaskCardContext.Provider value={taskCardSurface}>
+        <VirtualizedList
+          items={grouped}
+          itemKey={itemKey}
+          renderItem={renderItem}
+          className={styles.activityList}
+          // Most turns are now one-line tool rows (~30px). A large estimate
+          // over-allocates each not-yet-measured row, so during an active run the
+          // footer/last row sits well below the real content and stick-to-bottom
+          // scrolls into that empty slot — the "jumps off the bottom on every new
+          // tool" gap. Estimating near the common row height keeps the transient
+          // gap negligible; taller text blocks correct on measure (overscan keeps
+          // them rendered/measured).
+          estimateSize={48}
+          overscan={1400}
+          gap={12}
+          footer={footer}
+          footerEstimateSize={56}
+          initialScrollToBottom
+          scrollToBottomSignal={messages.length + scrollNudge * 1_000_000}
+          scrollToBottomBehavior="auto"
+          forceScrollToBottomKey={lastUserMessageId}
+          throttledMeasureKeys={throttledMeasureKeys}
+          onApproachTop={handleApproachTop}
+        />
+      </TaskCardContext.Provider>
     </WorkspaceFileContext.Provider>
   );
 };
@@ -1141,36 +1163,64 @@ const renderToolOutput = (
   return renderToolResult(result);
 };
 
+/** A tool call with the task card it draws, when it draws one. */
+interface ToolItem {
+  toolUse: EnrichedToolUse;
+  card: TaskCallCard | null;
+}
+
 /**
- * A tool list split at the rows whose result is a displayed chart. A chart
- * row is the agent's output, not noise, so it is never collapsed; the plain
- * rows on either side of it collapse as independent runs.
+ * A tool list split at the rows that render something the user came for: a
+ * chart, a task hand-off, a task's answer. Those are the agent's output, not
+ * noise, so they are never collapsed; the plain rows on either side collapse
+ * as independent runs.
+ *
+ * A poll that found its task still running is not an answer — it stays in the
+ * run as a slim line, so an agent waiting through a dozen polls costs a dozen
+ * quiet lines that collapse together.
  */
 type ToolSegment =
   // `key` is the first call's id so a run keeps its expanded/collapsed
   // state as later calls append to it.
-  | { kind: 'rows'; key: string; toolUses: EnrichedToolUse[] }
-  | { kind: 'chart'; toolUse: EnrichedToolUse };
+  | { kind: 'rows'; key: string; items: ToolItem[] }
+  | { kind: 'chart'; toolUse: EnrichedToolUse }
+  | { kind: 'task'; key: string; card: TaskCallCard };
 
-const splitAtChartRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
+const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
   const segments: ToolSegment[] = [];
-  let run: EnrichedToolUse[] = [];
+  let run: ToolItem[] = [];
   const flushRun = () => {
     const first = run[0];
-    if (first) segments.push({ kind: 'rows', key: first.toolCallId, toolUses: run });
+    if (first) segments.push({ kind: 'rows', key: first.toolUse.toolCallId, items: run });
     run = [];
   };
   for (const tu of toolUses) {
     if (inlineChartPath(tu.toolName, tu.result, tu.error, tu.status)) {
       flushRun();
       segments.push({ kind: 'chart', toolUse: tu });
-    } else {
-      run.push(tu);
+      continue;
     }
+    const card = inlineTaskCard(tu.toolName, tu.result, tu.error, tu.status);
+    if (card && card.variant === 'full') {
+      flushRun();
+      segments.push({ kind: 'task', key: tu.toolCallId, card });
+      continue;
+    }
+    run.push({ toolUse: tu, card });
   }
   flushRun();
   return segments;
 };
+
+/**
+ * A task card wired to the page around the chat. Reading the crew and the
+ * open-task handler from context here — rather than threading them as props —
+ * keeps every memoized message and tool group untouched when they change.
+ */
+const ChatTaskCard = memo(({ card }: { card: TaskCallCard }) => {
+  const { roster, onOpenTask } = useTaskCardSurface();
+  return <TaskCard card={card} roster={roster} onOpen={onOpenTask} />;
+});
 
 /**
  * ToolCallGroup — renders a turn's tool calls as compact one-line rows.
@@ -1183,7 +1233,7 @@ const splitAtChartRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
  * rows appearing above it while the run is still streaming.
  */
 const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
-  const segments = useMemo(() => splitAtChartRows(toolUses), [toolUses]);
+  const segments = useMemo(() => splitAtRichRows(toolUses), [toolUses]);
 
   if (toolUses.length === 0) return null;
 
@@ -1199,8 +1249,10 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
             result={seg.toolUse.result}
             error={seg.toolUse.error}
           />
+        ) : seg.kind === 'task' ? (
+          <ChatTaskCard key={seg.key} card={seg.card} />
         ) : (
-          <CollapsibleToolRows key={seg.key} toolUses={seg.toolUses} />
+          <CollapsibleToolRows key={seg.key} items={seg.items} />
         )
       )}
     </div>
@@ -1212,12 +1264,12 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
  * the oldest collapse behind a "show N earlier" toggle; the most-recent rows
  * stay on screen.
  */
-const CollapsibleToolRows = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
+const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
   const [showEarlier, setShowEarlier] = useState(false);
 
-  const overflow = toolUses.length - MAX_VISIBLE_TOOLS;
+  const overflow = items.length - MAX_VISIBLE_TOOLS;
   const hasOverflow = overflow > 0;
-  const visible = hasOverflow && !showEarlier ? toolUses.slice(-MAX_VISIBLE_TOOLS) : toolUses;
+  const visible = hasOverflow && !showEarlier ? items.slice(-MAX_VISIBLE_TOOLS) : items;
 
   return (
     <>
@@ -1236,16 +1288,20 @@ const CollapsibleToolRows = memo(({ toolUses }: { toolUses: EnrichedToolUse[] })
             : `Show ${overflow} earlier ${overflow === 1 ? 'call' : 'calls'}`}
         </button>
       )}
-      {visible.map((tu) => (
-        <ToolRow
-          key={tu.toolCallId}
-          toolName={tu.toolName}
-          params={tu.params ?? tu.arguments}
-          status={tu.status}
-          result={tu.result}
-          error={tu.error}
-        />
-      ))}
+      {visible.map(({ toolUse: tu, card }) =>
+        card ? (
+          <ChatTaskCard key={tu.toolCallId} card={card} />
+        ) : (
+          <ToolRow
+            key={tu.toolCallId}
+            toolName={tu.toolName}
+            params={tu.params ?? tu.arguments}
+            status={tu.status}
+            result={tu.result}
+            error={tu.error}
+          />
+        )
+      )}
     </>
   );
 });

@@ -15,6 +15,7 @@ import type {
   WorkspaceListEntry,
   WorkspaceSessionBinding,
   WorkspaceSnapshot,
+  WorkspaceTaskResponse,
 } from '../generated/bindings';
 
 interface SnapshotOptions {
@@ -204,6 +205,21 @@ export async function listWorkspaceAgents(workspaceId: string): Promise<Workspac
 // assignWorkspaceAgent / unassignWorkspaceAgent: removed. Agents are
 // workspace-local; use workspaceCreateAgent / workspaceDeleteAgent from
 // `../api/client.js` instead.
+
+/**
+ * One task by id, or null when it no longer exists.
+ *
+ * The snapshot carries only the 50 most recently touched tasks, so anything a
+ * chat transcript points at from further back has to be fetched on demand.
+ */
+export async function getWorkspaceTask(
+  workspaceId: string,
+  taskId: string
+): Promise<WorkspaceTaskResponse | null> {
+  return invoke('workspace_task_by_id', {
+    request: { workspaceId, taskId },
+  });
+}
 
 export async function acknowledgeWorkspaceTask(workspaceId: string, taskId: string): Promise<void> {
   return invoke('workspace_acknowledge_task', {

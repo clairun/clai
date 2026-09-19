@@ -174,6 +174,134 @@ describe('ChatMessageList', () => {
     expect(screen.queryByTestId('vega-chart')).toBeNull();
   });
 
+  const taskPayload = (over: Record<string, unknown> = {}) => ({
+    ok: true,
+    task: {
+      id: 'task-9',
+      workspaceId: 'ws-1',
+      assignedToWorkspaceAgentId: 'wa-review',
+      assignedAgentDefinitionId: 'def-review',
+      title: 'Round 3 review',
+      instructions: 'Review the branch end to end.',
+      status: 'queued',
+      resultSummary: null,
+      error: null,
+      ...over,
+    },
+  });
+
+  const taskCalls = (
+    calls: Array<{ tool: string; result: ToolInvocation['result'] }>
+  ): { messages: AssistantMessage[]; toolCalls: ToolInvocation[] } => ({
+    messages: [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: calls.map((call, i) => ({
+          type: 'tool_use' as const,
+          tool_call_id: `tk-${i}`,
+          tool_name: call.tool,
+          arguments: {},
+        })),
+      }),
+    ],
+    toolCalls: calls.map((call, i) => ({
+      id: `tk-${i}`,
+      runId: 'r-1',
+      sessionId: 'sess-1',
+      toolName: call.tool,
+      params: {},
+      status: 'completed',
+      result: call.result,
+      error: null,
+      startedAt: 0n,
+      completedAt: 1n,
+    })),
+  });
+
+  it('draws a delegated task as a card, and opens it on click', async () => {
+    const onOpenTask = vi.fn();
+    const { messages, toolCalls } = taskCalls([
+      { tool: 'workspace_assignTask', result: taskPayload() },
+    ]);
+    render(
+      <ChatMessageList
+        messages={messages}
+        toolCalls={toolCalls}
+        taskRoster={[]}
+        onOpenTask={onOpenTask}
+      />
+    );
+    expect(screen.getByText('Round 3 review')).toBeInTheDocument();
+    expect(screen.getByText('Delegated to')).toBeInTheDocument();
+    // The card replaces the row: no raw tool name is shown.
+    expect(screen.queryByText('workspace_assignTask')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: /Round 3 review/ }));
+    expect(onOpenTask).toHaveBeenCalledWith('task-9');
+  });
+
+  it('keeps a failed assignment as a plain row, where its error is', () => {
+    const { messages, toolCalls } = taskCalls([
+      { tool: 'workspace_assignTask', result: null },
+    ]);
+    toolCalls[0]!.status = 'failed';
+    toolCalls[0]!.error = 'workspaceAgentId must be one of the workspace agent ids';
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    expect(screen.getByText('workspace_assignTask')).toBeInTheDocument();
+    expect(screen.queryByText('Round 3 review')).toBeNull();
+  });
+
+  it('collapses the polls of a wait but never the answer', () => {
+    const { messages, toolCalls } = taskCalls([
+      { tool: 'workspace_assignTask', result: taskPayload() },
+      ...Array.from({ length: 6 }, () => ({
+        tool: 'workspace_getTaskResult',
+        result: taskPayload({ status: 'running' }),
+      })),
+      {
+        tool: 'workspace_getTaskResult',
+        result: taskPayload({ status: 'completed', resultSummary: 'Found 3 issues.' }),
+      },
+    ]);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
+
+    // Six identical "still running" lines collapse down to the last four.
+    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+    expect(screen.getAllByText('Running')).toHaveLength(4);
+    // The hand-off and the answer are cards of their own, outside the run.
+    expect(screen.getByText('Delegated to')).toBeInTheDocument();
+    expect(screen.getByText('Found 3 issues.')).toBeInTheDocument();
+  });
+
+  it('keeps every card in the order its call was made', () => {
+    // A card leaves the run it was found in; it must re-enter the transcript
+    // where it happened. An answer printed above the polls it followed would
+    // read as if the task finished before it was waited on.
+    const { messages, toolCalls } = taskCalls([
+      { tool: 'workspace_assignTask', result: taskPayload() },
+      { tool: 'workspace_getTaskResult', result: taskPayload({ status: 'running' }) },
+      {
+        tool: 'workspace_getTaskResult',
+        result: taskPayload({ status: 'completed', resultSummary: 'Found 3 issues.' }),
+      },
+      { tool: 'workspace_assignTask', result: taskPayload({ id: 'task-10', title: 'Round 4 review' }) },
+    ]);
+    const { container } = render(
+      <ChatMessageList messages={messages} toolCalls={toolCalls} taskRoster={[]} />
+    );
+    const text = container.textContent ?? '';
+    const at = (needle: string) => {
+      const index = text.indexOf(needle);
+      expect(index, `${needle} is missing`).toBeGreaterThan(-1);
+      return index;
+    };
+    // hand-off → the slim poll in its run → the answer → the next hand-off.
+    expect(at('Round 3 review')).toBeLessThan(at('Running'));
+    expect(at('Running')).toBeLessThan(at('Found 3 issues.'));
+    expect(at('Found 3 issues.')).toBeLessThan(at('Round 4 review'));
+  });
+
   it('renders a collapsed thinking block', () => {
     const messages: AssistantMessage[] = [
       msg({

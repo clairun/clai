@@ -456,6 +456,21 @@
   --z-popover: 1060;
   --z-tooltip: 1070;
 
+  /* Body-portaled layers.
+     Every overlay below renders through ReactDOM.createPortal(_, document.body),
+     so they are siblings in the root stacking context and their z-indexes
+     compete globally: no component can correct its own layering from its own
+     stylesheet, and any two that meet on screen are ordered only by the numbers
+     here. That is why this order is declared once, globally.
+     The order is "what can be opened from what": every layer must clear each
+     layer it can be opened on top of. */
+  --z-portal-modal: 10000;        /* modal opened from the page */
+  --z-portal-modal-nested: 10001; /* modal opened from inside another modal */
+  --z-portal-modal-form: 10002;   /* record form opened from a settings pane, which may itself be nested */
+  --z-portal-popover: 10003;      /* dropdown/popover; clears whichever modal hosts its trigger */
+  --z-portal-lightbox: 10005;     /* full-screen media viewer */
+  --z-portal-alert: 10010;        /* confirm/progress dialog; interrupts everything above its opener */
+
   /* ============================================
      COMPONENT-SPECIFIC TOKENS
      ============================================ */

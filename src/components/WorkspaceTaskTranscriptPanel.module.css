@@ -82,15 +82,26 @@
 }
 
 .status_completed {
-  background: color-mix(in srgb, var(--color-success, #2ea043) 14%, transparent);
-  color: var(--color-success, #2ea043);
-  border-color: color-mix(in srgb, var(--color-success, #2ea043) 30%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent);
+  border-color: color-mix(in srgb, var(--color-accent) 30%, transparent);
 }
 
 .status_failed {
-  background: color-mix(in srgb, var(--color-critical) 14%, transparent);
+  background: color-mix(in srgb, var(--color-critical) 10%, transparent);
   color: var(--color-critical);
   border-color: color-mix(in srgb, var(--color-critical) 30%, transparent);
+}
+
+.status_queued {
+  background: var(--color-overlay-06);
+  color: var(--color-text-tertiary);
+}
+
+.status_blocked {
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 30%, transparent);
 }
 
 .closeButton {

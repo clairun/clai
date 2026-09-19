@@ -4,8 +4,9 @@
  * Custom styled dropdown for selecting check intervals.
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom';
+import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import styles from './IntervalSelect.module.css';
 
 /**
@@ -135,9 +136,6 @@ const IntervalSelect = ({ value, onChange, disabled, id }: IntervalSelectProps) 
         e.preventDefault();
         setIsOpen(!isOpen);
         break;
-      case 'Escape':
-        setIsOpen(false);
-        break;
       case 'ArrowDown':
         e.preventDefault();
         if (!isOpen) {
@@ -160,6 +158,13 @@ const IntervalSelect = ({ value, onChange, disabled, id }: IntervalSelectProps) 
         break;
     }
   };
+
+  // Escape belongs to the overlay stack, not to this keydown: the popover
+  // portals to <body> above the modal that hosts it, whose own Escape
+  // listener would otherwise close the modal along with the dropdown. It
+  // takes no scroll lock — a dropdown must not freeze the page under it.
+  const close = useCallback(() => setIsOpen(false), []);
+  useOverlayLayer(isOpen, close, { lockScroll: false });
 
   const handleOptionClick = (optionValue: number) => {
     onChange(optionValue);

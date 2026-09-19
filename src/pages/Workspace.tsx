@@ -6,6 +6,11 @@ import { workspaceDeleteAgent } from '../api/client';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
 import WorkspaceTaskTranscriptPanel from '../components/WorkspaceTaskTranscriptPanel';
 import WorkspaceFilePreviewPanel from '../components/WorkspaceFilePreviewPanel';
+import CrewList from '../components/Agents/CrewList';
+import TaskList from '../components/Agents/TaskList';
+import AgentFacepile from '../components/Agents/AgentFacepile';
+import { useStableRoster } from '../components/Agents/useStableRoster';
+import { useOpenTask, type TaskView } from './useOpenTask';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
@@ -14,7 +19,6 @@ import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import VirtualizedList from '../components/common/VirtualizedList';
 import {
-  acknowledgeWorkspaceTask,
   getOrCreateWorkspaceSession,
   getWorkspaceSnapshot,
   importWorkspaceFiles,
@@ -32,12 +36,21 @@ import type {
   AssistantMessage,
   AssistantRun,
   ToolInvocation,
+  WorkspaceAgentResponse,
   WorkspaceDirEntry,
   WorkspaceFileEntry,
   WorkspaceSnapshot,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
+import {
+  formatRelativeTime,
+  isTaskActive,
+  isTaskAttention,
+  taskStatusLabel,
+  toNumber,
+  type NumericTimestamp,
+} from '../utils/taskDisplay';
 import { shouldCancelRunOnKey } from '../utils/cancelRunHotkey';
 import { fixedRightAlignedMenuStyle, sameFloatingMenuStyle } from '../utils/floatingMenu';
 import styles from './Workspace.module.css';
@@ -63,7 +76,6 @@ const ARTIFACT_ADD_MENU_GAP = 4;
 const ARTIFACT_ADD_MENU_MARGIN = 8;
 const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 
-type NumericTimestamp = number | bigint | null | undefined;
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry };
 type ArtifactImportKind = 'files' | 'folders';
@@ -76,6 +88,9 @@ type WorkspaceUiState = {
   activePanel: ActivePanel;
   previewEntry: PreviewEntry | null;
   viewingTask: WorkspaceTaskResponse | null;
+  // The Agents drawer's inline "Add to crew" picker; the drawer header carries
+  // the toggle, so the flag lives with the drawer, not inside the list.
+  crewPickerOpen: boolean;
 };
 // Stable fallbacks for store-derived values, so re-renders without session
 // data don't hand new `[]`/`{}` identities to memoized children each time.
@@ -83,16 +98,15 @@ const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_QUEUED_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_TASKS: readonly WorkspaceTaskResponse[] = [];
 
 const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
   previewEntry: null,
   viewingTask: null,
+  crewPickerOpen: false,
 };
-type SettingsSelection =
-  | { kind: 'general' }
-  | { kind: 'agent'; agentId: string }
-  | { kind: 'new-agent' };
+type SettingsSelection = { kind: 'general' } | { kind: 'agent'; agentId: string };
 type SnapshotOptions = Parameters<typeof getWorkspaceSnapshot>[1];
 type VirtualizedListProps<T> = {
   items: T[];
@@ -107,11 +121,6 @@ type VirtualizedListProps<T> = {
 const WorkspaceVirtualizedList = VirtualizedList as <T>(
   props: VirtualizedListProps<T>
 ) => React.ReactElement | null;
-
-const toNumber = (value: NumericTimestamp): number | null => {
-  if (value === null || value === undefined) return null;
-  return typeof value === 'bigint' ? Number(value) : value;
-};
 
 const errorMessage = (error: unknown, fallback: string): string => {
   if (typeof error === 'string') return error;
@@ -136,17 +145,6 @@ const formatTimestamp = (timestamp: NumericTimestamp): string => {
     hour: '2-digit',
     minute: '2-digit',
   });
-};
-
-const formatRelativeTime = (timestamp: NumericTimestamp): string => {
-  const value = toNumber(timestamp);
-  if (!value) return 'Never';
-  const diffMs = Date.now() - value;
-  const diffSec = Math.max(0, Math.floor(diffMs / 1000));
-  if (diffSec < 60) return `${diffSec}s ago`;
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-  return `${Math.floor(diffSec / 86400)}d ago`;
 };
 
 const formatNextRun = (seconds: number | bigint | null | undefined): string | null => {
@@ -212,218 +210,7 @@ const RUN_STATUS_LABEL: Partial<Record<AssistantRun['status'], string>> = {
   cancelled: 'Cancelled',
 };
 
-const TASK_STATUS_LABEL: Record<string, string> = {
-  queued: 'Queued',
-  running: 'Running',
-  completed: 'Completed',
-  failed: 'Failed',
-  blocked: 'Blocked',
-};
-
 const ACTIVE_RUN_STATUSES: AssistantRun['status'][] = ['queued', 'running', 'waiting_for_tool'];
-
-const isTaskAttention = (task: WorkspaceTaskResponse): boolean =>
-  (task.status === 'blocked' || task.status === 'failed') &&
-  !task.attentionAcknowledgedAt &&
-  !task.userResponseAt;
-
-interface WorkspaceAgentsPanelProps {
-  workspaceId: string;
-  snapshot: WorkspaceSnapshot | null;
-  busy: string;
-  error: string;
-  onOpenEdit: (workspaceAgentId: string) => void;
-  onRemove: (workspaceAgentId: string) => void;
-}
-
-const WorkspaceAgentsPanel = ({
-  workspaceId,
-  snapshot,
-  busy,
-  error,
-  onOpenEdit,
-  onRemove,
-}: WorkspaceAgentsPanelProps) => {
-  const assignedAgents = snapshot?.assignedAgents || [];
-  const isManageable = snapshot?.kind !== 'agent' && workspaceId !== DEFAULT_WORKSPACE_ID;
-
-  // Manager first (rendered as "Main"), then sub-agents. The manager is
-  // always present and not removable; Edit deep-links into the workspace
-  // settings modal just like sub-agents.
-  const sortedAgents = [...assignedAgents].sort((a, b) => {
-    if (a.isDefault === b.isDefault) return 0;
-    return a.isDefault ? -1 : 1;
-  });
-
-  if (!isManageable && sortedAgents.length === 0) {
-    return null;
-  }
-
-  return (
-    <section className={styles.agentRoster} aria-label="Workspace agents">
-      {error && <div className={styles.agentRosterError}>{error}</div>}
-
-      {sortedAgents.length > 0 ? (
-        <div className={styles.agentRosterList}>
-          {sortedAgents.map((agent) => (
-            <div key={agent.id} className={styles.agentRosterItem}>
-              <div className={styles.agentRosterIdentity}>
-                <div className={styles.agentRosterNameRow}>
-                  <span className={styles.agentRosterName}>
-                    {agent.isDefault ? 'Main' : agent.displayName}
-                  </span>
-                </div>
-                {agent.agentDescription && (
-                  <p className={styles.agentRosterDescription}>{agent.agentDescription}</p>
-                )}
-              </div>
-              {isManageable && (
-                <div className={styles.agentRosterActions}>
-                  <button
-                    type="button"
-                    className={styles.agentAction}
-                    onClick={() => onOpenEdit(agent.id)}
-                    disabled={!!busy}
-                  >
-                    Edit
-                  </button>
-                  {!agent.isDefault && (
-                    <button
-                      type="button"
-                      className={styles.agentActionDanger}
-                      onClick={() => onRemove(agent.id)}
-                      disabled={!!busy}
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className={styles.agentRosterEmpty}>
-          The workspace itself is the entry-point agent — its configuration is edited via the gear
-          icon next to the workspace title. Agents added here are optional helpers the workspace can
-          call as tools.
-        </div>
-      )}
-    </section>
-  );
-};
-
-interface WorkspaceTasksPanelProps {
-  workspaceId: string;
-  tasks: WorkspaceTaskResponse[];
-  onChanged: () => void | Promise<void>;
-  onViewTask?: (task: WorkspaceTaskResponse) => void;
-}
-
-const WorkspaceTasksPanel = ({
-  workspaceId,
-  tasks,
-  onChanged,
-  onViewTask,
-}: WorkspaceTasksPanelProps) => {
-  const visibleTasks = tasks || [];
-  const [busyTaskId, setBusyTaskId] = useState('');
-  const [error, setError] = useState('');
-
-  const handleAcknowledge = useCallback(
-    async (taskId: string) => {
-      if (busyTaskId) return;
-      setBusyTaskId(taskId);
-      setError('');
-      try {
-        await acknowledgeWorkspaceTask(workspaceId, taskId);
-        await onChanged();
-      } catch (err) {
-        setError(errorMessage(err, 'Failed to acknowledge task.'));
-      } finally {
-        setBusyTaskId('');
-      }
-    },
-    [busyTaskId, onChanged, workspaceId]
-  );
-
-  return (
-    <section className={styles.taskActivity} aria-label="Workspace task activity">
-      <div className={styles.taskActivityHeader}>
-        <div className={styles.agentRosterTitleBlock}>
-          <h2 className={styles.agentRosterTitle}>Task Activity</h2>
-          <span className={styles.agentRosterMeta}>{visibleTasks.length} recent</span>
-        </div>
-      </div>
-
-      {error && <div className={styles.agentRosterError}>{error}</div>}
-
-      {visibleTasks.length > 0 ? (
-        <div className={styles.taskList}>
-          {visibleTasks.map((task) => {
-            const statusLabel = TASK_STATUS_LABEL[task.status] || task.status;
-            const detail = task.error || task.resultSummary || task.instructions;
-            const needsAttention = isTaskAttention(task);
-            return (
-              <div key={task.id} className={styles.taskItem}>
-                <div className={styles.taskMain}>
-                  <div className={styles.taskTitleRow}>
-                    <span className={styles.taskTitle}>{task.title}</span>
-                    <span
-                      className={`${styles.taskStatus} ${styles[`taskStatus_${task.status}`] || ''}`}
-                    >
-                      {statusLabel}
-                    </span>
-                  </div>
-                  <div className={styles.taskMeta}>
-                    <span>{task.assignedAgentDisplayName}</span>
-                    <span className={styles.metricSeparator}>{'\u00B7'}</span>
-                    <span>{formatRelativeTime(task.updatedAt)}</span>
-                  </div>
-                  {detail && <p className={styles.taskSummary}>{detail}</p>}
-                  {needsAttention && (
-                    <div className={styles.taskActions}>
-                      <button
-                        type="button"
-                        className={styles.taskAction}
-                        onClick={() => handleAcknowledge(task.id)}
-                        disabled={busyTaskId === task.id}
-                      >
-                        Mark reviewed
-                      </button>
-                      {task.sessionId && (
-                        <button
-                          type="button"
-                          className={styles.taskAction}
-                          onClick={() => onViewTask?.(task)}
-                        >
-                          View log
-                        </button>
-                      )}
-                    </div>
-                  )}
-                  {!needsAttention && task.sessionId && (
-                    <div className={styles.taskActions}>
-                      <button
-                        type="button"
-                        className={styles.taskAction}
-                        onClick={() => onViewTask?.(task)}
-                      >
-                        View log
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <div className={styles.agentRosterEmpty}>No delegated tasks yet.</div>
-      )}
-    </section>
-  );
-};
 
 interface WorkspaceFileEntryListProps {
   entries: WorkspaceFileEntry[];
@@ -1258,7 +1045,7 @@ const WorkspaceAttentionBanner = ({ tasks }: { tasks: WorkspaceTaskResponse[] })
   }
 
   const primary = attentionTasks[0]!;
-  const statusLabel = TASK_STATUS_LABEL[primary.status] || primary.status;
+  const statusLabel = taskStatusLabel(primary.status);
   const detail = primary.error || primary.resultSummary || primary.instructions;
 
   return (
@@ -1331,18 +1118,14 @@ const WorkspaceHeader = ({
   // Active = a scheduled task is running, or any non-terminal task is in
   // flight on this workspace. Matches Fleet's "isProcessing" check so the
   // Run-now button correctly disables while a run is mid-flight.
-  const hasRunningTask = (snapshot?.tasks || []).some(
-    (task) => task.status === 'running' || task.status === 'queued'
-  );
+  const hasRunningTask = (snapshot?.tasks || []).some(isTaskActive);
   // Manager is invisible to the user — exclude it from the headline count so
   // the chip and the drawer (which already filters !isDefault) agree.
   // Count includes the main (default) agent — the manager is now a
   // first-class entry in the workspace's agent list.
   const assignedAgentCount = (snapshot?.assignedAgents || []).length;
   const taskCount = snapshot?.tasks?.length || 0;
-  const activeTaskCount = (snapshot?.tasks || []).filter(
-    (task) => task.status === 'running' || task.status === 'queued'
-  ).length;
+  const activeTaskCount = (snapshot?.tasks || []).filter(isTaskActive).length;
 
   // Click a counter to open its panel; click again (or click another) to switch.
   // null = no panel open, chat takes the full content area.
@@ -1415,7 +1198,9 @@ const WorkspaceHeader = ({
     count: number | string,
     label: string,
     clickable = true,
-    activeCount = 0
+    activeCount = 0,
+    // Drawn before the count; the agents chip puts its faces here.
+    leading: React.ReactNode = null
   ) => {
     const isActive = activePanel === panel;
     if (!clickable) {
@@ -1432,6 +1217,7 @@ const WorkspaceHeader = ({
         onClick={() => togglePanel(panel)}
         title={activeCount > 0 ? `${activeCount} ${label} in flight` : `Toggle ${label} panel`}
       >
+        {leading}
         {activeCount > 0 && (
           <span
             className={`${styles.statusDot} ${styles.status_running} ${styles.metricLeadingDot}`}
@@ -1585,7 +1371,16 @@ const WorkspaceHeader = ({
         )}
         {renderCounter(null, messageCount, 'msgs', false)}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter('agents', assignedAgentCount, 'agents')}
+        {renderCounter(
+          'agents',
+          assignedAgentCount,
+          'agents',
+          true,
+          0,
+          assignedAgentCount > 0 ? (
+            <AgentFacepile agents={snapshot?.assignedAgents || []} tasks={snapshot?.tasks || []} />
+          ) : null
+        )}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
         {renderCounter('tasks', taskCount, 'tasks', true, activeTaskCount)}
         <span className={styles.metricSeparator}>{'\u00B7'}</span>
@@ -1623,6 +1418,10 @@ interface ChatFirstLayoutProps {
   hasOlderMessages: boolean;
   isLoadingOlderMessages: boolean;
   onLoadOlderMessages: () => void;
+  // Crew and open-task handler for the chat's delegated-task cards. Both must
+  // keep a stable identity across snapshot polls; see `chatRoster` below.
+  taskRoster: readonly WorkspaceAgentResponse[];
+  onOpenTask: (taskId: string) => void;
 }
 
 const ChatFirstLayout = ({
@@ -1641,6 +1440,8 @@ const ChatFirstLayout = ({
   hasOlderMessages,
   isLoadingOlderMessages,
   onLoadOlderMessages,
+  taskRoster,
+  onOpenTask,
 }: ChatFirstLayoutProps) => {
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
@@ -1721,6 +1522,8 @@ const ChatFirstLayout = ({
             hasOlderMessages={hasOlderMessages}
             isLoadingOlderMessages={isLoadingOlderMessages}
             onLoadOlderMessages={onLoadOlderMessages}
+            taskRoster={taskRoster}
+            onOpenTask={onOpenTask}
           />
           <AskUserPanel sessionId={sessionId} />
           <InlineApprovalCard workspaceId={workspaceId} />
@@ -1768,6 +1571,9 @@ const Workspace = () => {
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
+  // Whether the crew can be edited here: agent-kind workspaces and the default
+  // one have a fixed roster. Drives the drawer's "+ Add" and the list alike.
+  const crewManageable = snapshot?.kind !== 'agent' && !isGenericWorkspace;
   // True only during the initial-entry load (loadSnapshot(true)); the periodic
   // poll refreshes without flipping it. Read by the chat panel so the first
   // hydration window renders a loading placeholder instead of the misleading
@@ -1787,7 +1593,7 @@ const Workspace = () => {
   //   - viewingTask:  task object — task transcript log
   // Only one slide-out may be open at a time; opening one clears the other.
   const [uiByWorkspace, setUiByWorkspace] = useState<Record<string, WorkspaceUiState>>({});
-  const { activePanel, previewEntry, viewingTask } =
+  const { activePanel, previewEntry, viewingTask, crewPickerOpen } =
     uiByWorkspace[workspaceId] ?? EMPTY_WORKSPACE_UI;
 
   const patchWorkspaceUi = useCallback(
@@ -1814,6 +1620,7 @@ const Workspace = () => {
             activePanel: next,
             previewEntry: next === 'memories' || next === 'artifacts' ? current.previewEntry : null,
             viewingTask: next === 'tasks' ? current.viewingTask : null,
+            crewPickerOpen: next === 'agents' ? current.crewPickerOpen : false,
           },
         };
       });
@@ -1875,8 +1682,8 @@ const Workspace = () => {
 
   // ── Workspace Settings modal (replaces the legacy AgentFormModal
   //    workspace-mode hack). Selection drives which section/agent the
-  //    modal opens to: gear icon -> General, drawer Edit -> agent:<id>,
-  //    drawer "+ Add" -> new-agent. ────────────────────────────────────
+  //    modal opens to: gear icon -> General, drawer Edit -> agent:<id>.
+  //    Adding to the crew happens in the drawer itself (CrewList). ───────
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSelection, setSettingsSelection] = useState<SettingsSelection>({
     kind: 'general',
@@ -2102,9 +1909,18 @@ const Workspace = () => {
     [openSettings]
   );
 
-  const openMemberCreate = useCallback(() => {
-    openSettings({ kind: 'new-agent' });
-  }, [openSettings]);
+  const setCrewPickerOpen = useCallback(
+    (open: boolean | ((current: boolean) => boolean)) => {
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        const next = typeof open === 'function' ? open(current.crewPickerOpen) : open;
+        return { ...prev, [workspaceId]: { ...current, crewPickerOpen: next } };
+      });
+    },
+    [workspaceId]
+  );
+  const toggleCrewPicker = useCallback(() => setCrewPickerOpen((open) => !open), [setCrewPickerOpen]);
+  const openCrewPicker = useCallback(() => setCrewPickerOpen(true), [setCrewPickerOpen]);
 
   const handleSettingsClose = useCallback(() => {
     setSettingsOpen(false);
@@ -2373,6 +2189,44 @@ const Workspace = () => {
   }, [loadSnapshot, snapshot, workspaceId]);
 
   const tasks = snapshot?.tasks || [];
+
+  // The chat's delegated-task cards are frozen at the moment of their tool
+  // call — the tasks drawer owns what is happening now. So the chat gets no
+  // live task data: handing it a fresh array every 5s poll would repaint
+  // cards that cannot change.
+  //
+  // The roster it does need (faces, names) keeps one reference across polls
+  // that changed nothing about a face — see `useStableRoster` — and the tasks
+  // a click has to resolve are read from a ref instead of a prop.
+  const chatRoster = useStableRoster(snapshot?.assignedAgents);
+
+  const tasksRef = useRef<readonly WorkspaceTaskResponse[]>(EMPTY_TASKS);
+  useEffect(() => {
+    tasksRef.current = snapshot?.tasks || EMPTY_TASKS;
+  }, [snapshot]);
+
+  const loadedTasks = useCallback(() => tasksRef.current, []);
+  const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
+  // One updater, reading and writing this workspace's own view in a single
+  // functional update: an answer that arrives late decides against the view it
+  // will actually land in, not against a copy that may have moved on.
+  const updateViewingTask = useCallback(
+    (update: (current: TaskView) => { viewingTask: WorkspaceTaskResponse | null } | null) => {
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        const patch = update(current);
+        if (!patch) return prev;
+        return { ...prev, [workspaceId]: { ...current, ...patch } };
+      });
+    },
+    [workspaceId]
+  );
+  const openTaskById = useOpenTask({
+    workspaceId,
+    loadedTasks,
+    showTasksPanel,
+    updateViewingTask,
+  });
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
   // `snapshot.runs` is sorted newest-first by the backend; pick the first
@@ -2557,6 +2411,8 @@ const Workspace = () => {
             hasOlderMessages={hasOlderMessages}
             isLoadingOlderMessages={isLoadingOlderMessages}
             onLoadOlderMessages={handleLoadOlderMessages}
+            taskRoster={chatRoster}
+            onOpenTask={openTaskById}
           />
         </div>
 
@@ -2572,7 +2428,11 @@ const Workspace = () => {
         )}
 
         {snapshot && activePanel === 'tasks' && viewingTask && (
-          <WorkspaceTaskTranscriptPanel task={viewingTask} onClose={closeTaskTranscript} />
+          <WorkspaceTaskTranscriptPanel
+            task={viewingTask}
+            roster={chatRoster}
+            onClose={closeTaskTranscript}
+          />
         )}
 
         {snapshot && activePanel && (
@@ -2744,16 +2604,15 @@ const Workspace = () => {
                     </button>
                   </>
                 )}
-                {activePanel === 'agents' &&
-                  snapshot?.kind !== 'agent' &&
-                  workspaceId !== DEFAULT_WORKSPACE_ID && (
+                {activePanel === 'agents' && crewManageable && (
                     <button
                       type="button"
                       className={styles.workspaceDrawerAction}
-                      onClick={openMemberCreate}
+                      onClick={toggleCrewPicker}
                       disabled={!!agentBusy}
+                      aria-expanded={crewPickerOpen}
                     >
-                      + Add Agent
+                      {crewPickerOpen ? 'Done' : '+ Add'}
                     </button>
                   )}
                 <button
@@ -2770,20 +2629,26 @@ const Workspace = () => {
 
             <div className={styles.workspaceDrawerBody}>
               {activePanel === 'agents' && (
-                <WorkspaceAgentsPanel
+                <CrewList
                   workspaceId={workspaceId}
-                  snapshot={snapshot}
+                  agents={snapshot.assignedAgents}
+                  tasks={tasks}
+                  manageable={crewManageable}
                   busy={agentBusy}
                   error={agentError}
+                  pickerOpen={crewPickerOpen}
+                  onOpenPicker={openCrewPicker}
                   onOpenEdit={openAgentEdit}
                   onRemove={handleAgentRemove}
+                  onChanged={() => loadSnapshot(false)}
                 />
               )}
 
               {activePanel === 'tasks' && (
-                <WorkspaceTasksPanel
+                <TaskList
                   workspaceId={workspaceId}
                   tasks={tasks}
+                  roster={snapshot.assignedAgents}
                   onChanged={() => loadSnapshot(false)}
                   onViewTask={openTaskTranscript}
                 />

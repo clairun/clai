@@ -4,56 +4,65 @@
  * A definition here is behavior without a home: instructions, skills,
  * providers, MCP selection and execution policy, and nothing workspace-shaped —
  * no history, no schedule, no files. It starts working when a workspace puts it
- * on its team, and an edit made here reaches every workspace that did, on their
+ * on its crew, and an edit made here reaches every workspace that did, on their
  * next turn. What stays local to each workspace is its Main agent, edited in
  * that workspace's settings.
+ *
+ * Two screens in one pane, never both: the gallery of cards, or the editor
+ * for one agent (or a new one).
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   getMcpServers,
   getSkills,
   listAgentDefinitions,
-  saveAgentDefinition,
   workspaceAgentDefaultExecution,
   type AgentDefinitionDetail,
 } from '../../api/client';
 import { assistantClient } from '../../assistant';
-import {
-  AgentSection,
-  type AgentDetail,
-  type ModalDeps,
-  type SectionHandle,
-} from './WorkspaceSettingsModal';
+import AgentGallery from '../Agents/AgentGallery';
+import AgentEditor from './AgentEditor';
+import type { AgentFormDeps } from './AgentBehaviorForm';
 import styles from './AgentLibrarySettings.module.css';
 
 const errText = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
 
-/** `null` selection = the "new agent" draft. */
-type Selected = { kind: 'new' } | { kind: 'definition'; id: string };
+type View =
+  | { kind: 'gallery'; focusId: string | null }
+  | { kind: 'edit'; id: string }
+  | { kind: 'create' };
 
-const AgentLibrarySettings = () => {
+const AgentLibrarySettings = ({
+  initialAgentDefinitionId = null,
+}: {
+  /** Deep link: open this agent's editor once the library has been read. */
+  initialAgentDefinitionId?: string | null;
+} = {}) => {
   const [definitions, setDefinitions] = useState<AgentDefinitionDetail[]>([]);
-  const [selected, setSelected] = useState<Selected>({ kind: 'new' });
-  const [deps, setDeps] = useState<ModalDeps>({
+  const [view, setView] = useState<View>({ kind: 'gallery', focusId: null });
+  // The library has been read at least once. Until then a deep link cannot be
+  // told from one naming an agent that is gone.
+  const [loaded, setLoaded] = useState(false);
+  const [deps, setDeps] = useState<AgentFormDeps>({
     mcpServers: [],
     skills: [],
     providerConnections: [],
     defaultExecution: undefined,
   });
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const sectionRef = useRef<SectionHandle | null>(null);
 
-  const reload = useCallback(async () => {
+  /** Re-reads the library; `false` when it could not, with the error shown. */
+  const reload = useCallback(async (): Promise<boolean> => {
     try {
-      const library = await listAgentDefinitions();
-      setDefinitions(library);
-      return library;
+      setDefinitions(await listAgentDefinitions());
+      setLoaded(true);
+      setError(null);
+      return true;
     } catch (err) {
       setError(errText(err, 'Failed to load the agent library.'));
-      return [];
+      return false;
     }
   }, []);
 
@@ -72,7 +81,7 @@ const AgentLibrarySettings = () => {
         skills: skills.status === 'fulfilled' ? skills.value || [] : [],
         providerConnections: connections.status === 'fulfilled' ? connections.value || [] : [],
         defaultExecution: defaults.status === 'fulfilled' ? defaults.value || null : null,
-      } as ModalDeps);
+      } as AgentFormDeps);
       await reload();
     })();
     return () => {
@@ -80,175 +89,82 @@ const AgentLibrarySettings = () => {
     };
   }, [reload]);
 
-  const current =
-    selected.kind === 'definition'
-      ? definitions.find((definition) => definition.id === selected.id)
-      : undefined;
+  const backToGallery = useCallback(() => setView({ kind: 'gallery', focusId: null }), []);
 
-  // The form speaks the workspace-agent shape; the library adds identity and
-  // the revision the edit started from.
-  const save = useCallback(
-    async (payload: Record<string, unknown>, archived: boolean) => {
-      const id = await saveAgentDefinition({
-        id: current?.id,
-        expectedRevision: current?.revision,
-        name: payload.name,
-        description: payload.description,
-        selectedSkillIds: payload.selectedSkillIds,
-        selectedMcpServerIds: payload.selectedMcpServerIds,
-        providerConnectionIds: payload.providerConnectionIds,
-        execution: payload.execution,
-        enabled: payload.enabled,
-        archived,
-      });
-      await reload();
-      setSelected({ kind: 'definition', id });
+  // Consume the deep link once per mount, as soon as the library has been read
+  // — before that every id looks missing. An id the library does not have
+  // lands on the editor view's own "no longer in the library" screen, which
+  // names the problem; the gallery would just look like the link did nothing.
+  // Adjusted during render, the way SettingsModal re-syncs its tab: it skips
+  // the extra commit an effect would cost, and the gallery never paints on its
+  // way to the editor.
+  const [deepLinkDone, setDeepLinkDone] = useState(!initialAgentDefinitionId);
+  if (!deepLinkDone && loaded && initialAgentDefinitionId) {
+    setDeepLinkDone(true);
+    setView({ kind: 'edit', id: initialAgentDefinitionId });
+  }
+
+  // A create lands back in the gallery with the new card focused; an edit
+  // stays open on the reloaded agent. If the reload failed the editor would
+  // keep a stale revision and every later save would be refused, so it goes
+  // back to the gallery too, where the error and Retry are.
+  const handleSaved = useCallback(
+    async (id: string, created: boolean) => {
+      const fresh = await reload();
+      if (created || !fresh) setView({ kind: 'gallery', focusId: id });
+      else setView({ kind: 'edit', id });
     },
-    [current, reload]
+    [reload]
   );
 
-  const handleSave = useCallback(async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const result = await sectionRef.current?.submit();
-      if (result && !result.ok) setError(result.error ?? 'Failed to save the agent.');
-    } catch (err) {
-      setError(errText(err, 'Failed to save the agent.'));
-    } finally {
-      setSaving(false);
-    }
-  }, []);
-
-  // Archiving keeps history and in-flight runs intact but stops new
-  // assignments and new runs — a shared definition can be referenced from
-  // workspaces the user is not looking at, so deleting it outright would break
-  // them silently.
-  const handleArchiveToggle = useCallback(async () => {
-    if (!current) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await saveAgentDefinition({
-        id: current.id,
-        expectedRevision: current.revision,
-        name: current.name,
-        description: current.description,
-        selectedSkillIds: current.selectedSkillIds,
-        selectedMcpServerIds: current.selectedMcpServerIds,
-        providerConnectionIds: current.providerConnectionIds,
-        execution: current.execution,
-        enabled: current.enabled,
-        archived: !current.archived,
-      });
-      await reload();
-    } catch (err) {
-      setError(errText(err, 'Failed to update the agent.'));
-    } finally {
-      setSaving(false);
-    }
-  }, [current, reload]);
-
-  const initialAgent: AgentDetail | undefined = current
-    ? {
-        id: current.id,
-        name: current.name,
-        description: current.description,
-        enabled: current.enabled,
-        selectedSkillIds: current.selectedSkillIds,
-        selectedMcpServerIds: current.selectedMcpServerIds,
-        providerConnectionIds: current.providerConnectionIds,
-        execution: current.execution as AgentDetail['execution'],
-      }
-    : undefined;
+  const editing =
+    view.kind === 'edit' ? definitions.find((definition) => definition.id === view.id) : undefined;
 
   return (
     <div className={styles.container}>
-      <div className={styles.header}>
-        <div className={styles.headerText}>
-          <h3 className={styles.title}>Agents</h3>
-          <p className={styles.description}>
-            Teammates shared across workspaces. Each workspace adds the ones it needs in its own
-            settings, and keeps its own Main agent there.
-          </p>
-        </div>
-      </div>
-
       {error && (
         <div className={styles.errorBanner} role="alert">
-          {error}
+          <span>{error}</span>
+          <button type="button" className={styles.retry} onClick={() => void reload()}>
+            Retry
+          </button>
         </div>
       )}
 
-      <div className={styles.layout}>
-        <div className={styles.list}>
-          {definitions.map((definition) => (
-            <button
-              key={definition.id}
-              type="button"
-              className={`${styles.listItem} ${
-                selected.kind === 'definition' && selected.id === definition.id
-                  ? styles.listItemActive
-                  : ''
-              }`}
-              onClick={() => setSelected({ kind: 'definition', id: definition.id })}
-            >
-              <span>
-                {definition.name}
-                {definition.archived ? ' (archived)' : ''}
-              </span>
-              <span className={styles.listItemMeta}>
-                {definition.assignedWorkspaces.length === 0
-                  ? 'Not on any workspace team'
-                  : `Used in ${definition.assignedWorkspaces.length} workspace${
-                      definition.assignedWorkspaces.length === 1 ? '' : 's'
-                    }`}
-              </span>
-            </button>
-          ))}
-          <button
-            type="button"
-            className={`${styles.listItem} ${selected.kind === 'new' ? styles.listItemActive : ''}`}
-            onClick={() => setSelected({ kind: 'new' })}
-          >
-            + New agent
-          </button>
-        </div>
+      {view.kind === 'gallery' && (
+        <AgentGallery
+          definitions={definitions}
+          // A failed reload leaves stale revisions: opening one would only end in a refused save.
+          cardsDisabled={error !== null}
+          focusId={view.focusId}
+          onOpen={(id) => setView({ kind: 'edit', id })}
+          onCreate={() => setView({ kind: 'create' })}
+        />
+      )}
 
-        <div className={styles.editor}>
-          <AgentSection
-            // Remount per selection: the form mirrors its agent into local
-            // state at load time, so switching agents must start it over.
-            key={current?.id || 'new'}
-            ref={sectionRef}
-            workspaceId=""
-            agentId={current?.id ?? null}
-            snapshot={null}
-            initialAgent={initialAgent}
-            saveBehavior={(payload) => save(payload, current?.archived ?? false)}
+      {view.kind === 'create' && (
+        <AgentEditor key="create" deps={deps} onBack={backToGallery} onSaved={handleSaved} />
+      )}
+
+      {view.kind === 'edit' &&
+        (editing ? (
+          // Remount per agent: the editor and the form mirror their agent into
+          // local state at mount time.
+          <AgentEditor
+            key={editing.id}
+            definition={editing}
             deps={deps}
-            saving={saving}
+            onBack={backToGallery}
+            onSaved={handleSaved}
           />
-
-          {current && current.assignedWorkspaces.length > 0 && (
-            <p className={styles.description}>
-              Saving changes this agent in:{' '}
-              {current.assignedWorkspaces.map((workspace) => workspace.title).join(', ')}.
-            </p>
-          )}
-
-          <div className={styles.actions}>
-            <button type="button" onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving…' : current ? 'Save agent' : 'Create agent'}
+        ) : (
+          <div className={styles.missing}>
+            <p>This agent is no longer in the library.</p>
+            <button type="button" onClick={backToGallery}>
+              Back to agents
             </button>
-            {current && (
-              <button type="button" onClick={handleArchiveToggle} disabled={saving}>
-                {current.archived ? 'Restore' : 'Archive'}
-              </button>
-            )}
           </div>
-        </div>
-      </div>
+        ))}
     </div>
   );
 };

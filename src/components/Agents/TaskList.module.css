@@ -1,0 +1,250 @@
+/*
+ * Tasks drawer rows: assignee face (ringed by the task's state), title,
+ * status pill, then a "creator → assignee" line and the detail. A row with a
+ * log to open carries a full-bleed button that opens it.
+ */
+.tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 4px 6px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.filterFace {
+  appearance: none;
+  display: inline-flex;
+  padding: 3px;
+  border: 1.5px solid transparent;
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+  line-height: 0;
+  opacity: 0.75;
+}
+
+.filterFace:hover,
+.filterFace:focus-visible {
+  opacity: 1;
+}
+
+.filterFacePressed,
+.filterFacePressed:hover {
+  border-color: var(--color-primary);
+  opacity: 1;
+}
+
+.filterClear {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0 4px;
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.filterClear:hover {
+  color: var(--color-primary);
+}
+
+.error {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-critical) 8%, var(--color-bg-elevated));
+  color: var(--color-critical);
+  font-size: 12px;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.task {
+  /*
+   * Zero the 0.5em bottom margin that global.css puts on every <li> (chat
+   * markdown needs it); here it would add ~8px to the .list gap.
+   */
+  margin: 0;
+  /* Containing block for the full-bleed .open button. */
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-secondary);
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: 96px;
+}
+
+.openable {
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.openable:hover {
+  border-color: var(--color-primary-alpha-30);
+  background: var(--color-overlay-04);
+}
+
+/*
+ * The row's keyboard control: an invisible button covering the whole row, so
+ * the focus ring outlines the row it opens. It is transparent to the pointer
+ * — the click is handled by the <li>, which leaves the row's text selectable
+ * (a failed task's error is rendered in .summary and has to be copyable) and
+ * leaves "Mark reviewed" its own clicks without nesting it inside a button.
+ */
+.open {
+  position: absolute;
+  inset: 0;
+  appearance: none;
+  padding: 0;
+  border: none;
+  background: none;
+  pointer-events: none;
+}
+
+.open:focus-visible {
+  /* Drawn inside: the row clips its paint, so an outward offset is invisible. */
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: -3px;
+  border-radius: var(--radius-sm);
+}
+
+.taskFace {
+  /* Leave room for the 3px ring inside the row's clipped paint. */
+  margin: 3px;
+}
+
+.taskMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status {
+  composes: pill from './taskStatus.module.css';
+}
+
+.status_completed {
+  composes: pill_completed from './taskStatus.module.css';
+}
+
+.status_running {
+  composes: pill_running from './taskStatus.module.css';
+}
+
+.status_queued {
+  composes: pill_queued from './taskStatus.module.css';
+}
+
+.status_failed {
+  composes: pill_failed from './taskStatus.module.css';
+}
+
+.status_blocked {
+  composes: pill_blocked from './taskStatus.module.css';
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  min-width: 0;
+}
+
+.metaTime {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.summary {
+  margin: 4px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.action {
+  /* Above the row's full-bleed button, so it keeps its own clicks. */
+  position: relative;
+  z-index: 1;
+  margin-top: 8px;
+  height: 28px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 10px;
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+  white-space: nowrap;
+}
+
+.action:hover {
+  border-color: var(--color-primary-alpha-30);
+  color: var(--color-primary);
+}
+
+.action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.empty {
+  padding: 8px 4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}

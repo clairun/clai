@@ -1,0 +1,122 @@
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.back {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  margin-left: -4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.back:hover:not(:disabled) {
+  color: var(--color-primary);
+  background: var(--color-bg-hover, transparent);
+}
+
+.back:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.crumbSeparator {
+  color: var(--color-border-medium);
+}
+
+.crumbCurrent {
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headerText {
+  min-width: 0;
+}
+
+.title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  margin: 0 0 6px 0;
+}
+
+.description {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.errorBanner {
+  padding: 12px 16px;
+  background: var(--color-critical-alpha-10, rgba(220, 38, 38, 0.1));
+  border: 1px solid var(--color-critical-alpha-30, rgba(220, 38, 38, 0.3));
+  border-radius: 8px;
+  color: var(--color-critical, #dc2626);
+  font-size: 13px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.primary,
+.secondary {
+  appearance: none;
+  border-radius: var(--radius-sm, 6px);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+
+.primary {
+  border: 1px solid var(--color-primary);
+  background: var(--color-primary);
+  color: white;
+}
+
+.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 88%, black);
+}
+
+.secondary {
+  border: 1px solid var(--color-border-medium);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+}
+
+.secondary:hover:not(:disabled) {
+  border-color: var(--color-primary-alpha-30);
+  color: var(--color-primary);
+}
+
+.primary:disabled,
+.secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.dirty {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}

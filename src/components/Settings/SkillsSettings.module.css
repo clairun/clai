@@ -290,6 +290,8 @@
 }
 
 .skillRow {
+  /* Zero global.css's 0.5em <li> margin, which would add to the list gap. */
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;

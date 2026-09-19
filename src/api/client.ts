@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AgentAvatarRef,
   McpCatalogEntry,
   McpOAuthStartResponse,
   McpServerResponse,
@@ -130,6 +131,8 @@ export interface AgentDefinitionDetail {
   providerConnectionIds: string[];
   execution: unknown;
   enabled: boolean;
+  /** The picked face; `null` for definitions saved before faces existed. */
+  avatar: AgentAvatarRef | null;
   createdAt: number;
   updatedAt: number;
   assignedWorkspaces: AssignedWorkspace[];
@@ -171,7 +174,25 @@ export const listAgentDefinitions = async (): Promise<AgentDefinitionDetail[]> =
  * revision the form was loaded from; the backend rejects a stale save rather
  * than overwriting a newer edit.
  */
-export const saveAgentDefinition = async (request: unknown): Promise<string> => {
+/** Payload of `agent_definition_save`; mirrors `AgentDefinitionSaveRequest` in Rust. */
+export interface AgentDefinitionSaveRequest {
+  /** Absent when creating. */
+  id?: string;
+  /** Revision the form was loaded from; absent when creating. */
+  expectedRevision?: number;
+  name: string;
+  description: string;
+  selectedSkillIds: string[];
+  selectedMcpServerIds: string[];
+  providerConnectionIds: string[];
+  execution: unknown;
+  enabled: boolean;
+  archived: boolean;
+  /** Omit to keep the stored face; the behaviour form does not carry it. */
+  avatar?: AgentAvatarRef;
+}
+
+export const saveAgentDefinition = async (request: AgentDefinitionSaveRequest): Promise<string> => {
   try {
     return await invoke('agent_definition_save', { request });
   } catch (error) {

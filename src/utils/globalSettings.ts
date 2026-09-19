@@ -13,9 +13,15 @@ export const OPEN_GLOBAL_SETTINGS_EVENT = 'open-global-settings';
 
 export interface OpenGlobalSettingsDetail {
   /** Settings tab to open. Matches SettingsModal's TABS values. */
-  tab?: 'provider' | 'skills' | 'mcp_servers' | 'applications' | 'appearance' | 'about';
+  tab?: 'provider' | 'agents' | 'skills' | 'mcp_servers' | 'applications' | 'appearance' | 'about';
   /** Open the provider tab with the "Add Connection" form already open. */
   providerAction?: 'new';
+  /**
+   * Open the agents tab with this shared definition already in its editor.
+   * Ignored if the library no longer has it (deleted, archived, stale event):
+   * the gallery is shown instead.
+   */
+  agentDefinitionId?: string;
 }
 
 export const openGlobalSettings = (detail: OpenGlobalSettingsDetail = {}): void => {

@@ -1,0 +1,41 @@
+/*
+ * The one task-status pill. Composed by every surface that labels a task —
+ * the tasks drawer and the chat's task cards — so "Blocked" is the same
+ * amber wherever it appears.
+ */
+.pill {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  background: var(--color-overlay-06);
+  color: var(--color-text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pill_completed {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent);
+}
+
+.pill_running {
+  background: var(--color-primary-alpha-08);
+  color: var(--color-primary);
+}
+
+.pill_queued {
+  background: var(--color-overlay-06);
+  color: var(--color-text-tertiary);
+}
+
+.pill_failed {
+  background: color-mix(in srgb, var(--color-critical) 10%, transparent);
+  color: var(--color-critical);
+}
+
+.pill_blocked {
+  background: color-mix(in srgb, var(--color-warning) 14%, transparent);
+  color: var(--color-warning);
+}
