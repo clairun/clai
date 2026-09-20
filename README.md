@@ -15,9 +15,9 @@
 </p>
 
 <p align="center">
-  <em>One team per workspace — each with its own provider, files, tools, and
-  permissions, working in parallel, on a schedule, and reporting to you from one
-  Fleet cockpit.</em>
+  <em>One team per workspace — every agent with its own provider, files, tools,
+  and permissions, working in parallel, on your schedule, and reporting to you
+  from one Fleet cockpit.</em>
 </p>
 
 <p align="center">
@@ -78,8 +78,10 @@ flagged, and selecting a card slides in a live chat preview.
 > `sandbox-exec`. **On Windows there is no sandbox backend**: shell execution is
 > labeled as a host shell, and while CLAI still validates the command's working
 > directory against the filesystem grants, nothing stops the command itself from
-> reaching outside them. The allow/block lists are enforced by CLAI before a
-> command spawns, on every platform.
+> reaching outside them. Windows also ships no POSIX shell, so `bash_exec`
+> looks for Git Bash, then MSYS2, then `bash` on `PATH`, and fails with an
+> "install Git for Windows" notice when it finds none. The allow/block lists
+> are enforced by CLAI before a command spawns, on every platform.
 
 ## Install
 
