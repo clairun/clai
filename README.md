@@ -11,12 +11,13 @@
 </p>
 
 <p align="center">
-  A desktop app for building, running, and supervising small teams of AI agents.
+  Control teams of AI agents. Local-first, open source, sandboxed.
 </p>
 
 <p align="center">
-  <em>Local-first and provider-agnostic — your agents run on your machine, use your
-  tools and files under per-agent permissions, and report to you from one Fleet cockpit.</em>
+  <em>One team per workspace — every agent with its own provider, files, tools,
+  and permissions, working in parallel, on your schedule, and reporting to you
+  from one Fleet cockpit.</em>
 </p>
 
 <p align="center">
@@ -73,10 +74,14 @@ flagged, and selecting a card slides in a live chat preview.
   "warnings" state and surfaces in the Fleet, instead of failing silently.
 
 > **Local execution sandboxing is platform-specific.** On Linux, shell commands
-> run through bubblewrap. On macOS, shell commands run through Seatbelt via
-> `sandbox-exec`. On platforms without a backend, shell execution is labeled as
-> a host shell. The allow/block lists still control *which commands* an agent can
-> run; filesystem grants control what sandboxed shell commands can access.
+> run through bubblewrap. On macOS, they run through Seatbelt via
+> `sandbox-exec`. **On Windows there is no sandbox backend**: shell execution is
+> labeled as a host shell, and while CLAI still validates the command's working
+> directory against the filesystem grants, nothing stops the command itself from
+> reaching outside them. Windows also ships no POSIX shell, so `bash_exec`
+> looks for Git Bash, then MSYS2, then `bash` on `PATH`, and fails with an
+> "install Git for Windows" notice when it finds none. The allow/block lists
+> are enforced by CLAI before a command spawns, on every platform.
 
 ## Install
 
