@@ -124,7 +124,7 @@ beforeEach(() => {
 });
 
 describe('crew rules', () => {
-  it('pins the Main first whatever order the snapshot used', () => {
+  it('pins the Main first whatever order the details used', () => {
     expect(sortCrew([REVIEWER, MAIN, WRITER]).map((a) => a.id)).toEqual([
       'wa-main',
       'wa-review',

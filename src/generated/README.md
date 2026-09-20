@@ -21,7 +21,7 @@ npm run gen:bindings
 The current closure covers:
 
 - The BE→FE event surface: `AssistantUiEvent`, `AssistantEventEnvelope`, and every type they transitively reach (sessions, messages, runs, tool invocations, ask_user options, run notices, …).
-- The workspace surfaces the FE reads directly: `WorkspaceSnapshot`, `WorkspaceListEntry`, workspace file/session response types, and their nested task/agent/file entries.
+- The workspace surfaces the FE reads directly: `WorkspaceDetails`, `WorkspaceListEntry`, workspace file/session response types, and their nested task/agent/file entries.
 
 `ExecutionCapabilityConfig` is intentionally erased to `unknown` in these bindings until the settings/provider surfaces are migrated.
 

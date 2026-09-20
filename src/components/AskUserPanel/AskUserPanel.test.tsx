@@ -299,13 +299,13 @@ describe('AskUserPanel — keyboard', () => {
   });
 });
 
-describe('AskUserPanel — snapshot poll race regression', () => {
+describe('AskUserPanel — details poll race regression', () => {
   // This is the failing case for the May 2026 bug: while a question
-  // is open, a snapshot poll calls loadSessionData which used to wipe
+  // is open, a details poll calls loadSessionData which used to wipe
   // pendingAskUser. The fix preserves the field; this test catches a
   // regression even if loadSessionData's preserve list is the broken
   // hop in the future.
-  it('survives a snapshot refresh while a question is open', () => {
+  it('survives a details refresh while a question is open', () => {
     mountWithPending(askUserRequest());
     expect(screen.getByText('Which option do you want?')).toBeInTheDocument();
 

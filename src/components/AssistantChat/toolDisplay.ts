@@ -313,7 +313,7 @@ export const inlineChartPath = (
  * Frozen on purpose: the card never follows the task's live status. The tasks
  * drawer is where "what is happening now" lives; the chat is a log of what the
  * agent saw when it looked. That also keeps every card a pure function of its
- * tool call, so a snapshot poll re-renders nothing here.
+ * tool call, so a details poll re-renders nothing here.
  */
 export interface TaskCallCard {
   /** Which call drew it: the hand-off, or a look at how it is going. */

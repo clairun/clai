@@ -6,8 +6,7 @@
 use crate::agents::types::AgentInstance;
 use crate::assistant::repository;
 use crate::assistant::types::{
-    AssistantMessage, AssistantRun, AssistantSession, ContentPart, SessionContext, SessionKind,
-    ToolInvocation, WorkspaceAgentSummary,
+    AssistantRun, AssistantSession, ContentPart, SessionContext, SessionKind, WorkspaceAgentSummary,
 };
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
 use crate::config::workspace_config::{AgentAvatarRef, WorkspaceAssignment};
@@ -59,7 +58,7 @@ pub(crate) fn is_skipped_artifact_dir_name(name: &str) -> bool {
 
 /// Ceiling on the recursive artifact walk, in **directory entries examined**.
 ///
-/// The walk is O(tree) and runs on every 5s snapshot poll, but its output
+/// The walk is O(tree) and runs on every 5s details poll, but its output
 /// feeds only a header count chip and a change-tick for the artifacts panel.
 /// Measured on a workspace holding cloned repos: 28.4k files (after the skip
 /// list) cost ~70ms per walk, i.e. ~1.4% of a core sustained. Workspaces here
@@ -180,7 +179,7 @@ pub struct WorkspaceDirEntry {
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
-pub struct WorkspaceSnapshot {
+pub struct WorkspaceDetails {
     pub workspace_id: String,
     pub kind: String,
     pub title: String,
@@ -209,19 +208,13 @@ pub struct WorkspaceSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<AssistantSession>,
     #[serde(default)]
-    pub messages: Vec<AssistantMessage>,
-    #[serde(default)]
     pub runs: Vec<AssistantRun>,
     #[serde(default)]
-    pub tool_calls: Vec<ToolInvocation>,
-    #[serde(default)]
     pub memories: Vec<WorkspaceFileEntry>,
-    #[serde(default)]
-    pub artifacts: Vec<WorkspaceFileEntry>,
     /// True recursive artifact count for the workspace root, independent of
     /// any list cap. The artifacts panel lazy-loads its tree one directory
-    /// level at a time via `workspace_list_dir`, so the header counter reads
-    /// this instead of `artifacts.len()`.
+    /// level at a time via `workspace_list_dir`, so this is the only artifact
+    /// figure the payload carries — there is no entry list to count.
     #[serde(default)]
     pub artifact_count: i64,
     /// Set when the walk stopped on its entry budget, so `artifact_count` is a
@@ -266,23 +259,18 @@ pub struct WorkspaceSnapshot {
     pub next_run_in_seconds: Option<u64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+/// The one expensive extra the details payload can carry: `includeFiles`
+/// buys a memory walk plus a recursive artifact count.
+///
+/// Required, not defaulted, and the whole `options` argument is required too.
+/// A missing flag must fail the call rather than fall back to `false`: the
+/// cheap answer is an empty memory list and a zero artifact count, which no
+/// caller can tell apart from an empty workspace.
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkspaceSnapshotOptions {
-    #[serde(default)]
-    pub include_session_payload: Option<bool>,
-    #[serde(default)]
-    pub include_files: Option<bool>,
-}
-
-impl WorkspaceSnapshotOptions {
-    fn include_session_payload(&self) -> bool {
-        self.include_session_payload.unwrap_or(true)
-    }
-
-    fn include_files(&self) -> bool {
-        self.include_files.unwrap_or(true)
-    }
+#[ts(export, export_to = "bindings.ts")]
+pub struct WorkspaceDetailsOptions {
+    pub include_files: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -1789,15 +1777,17 @@ fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathB
 }
 
 // ===============================================================================
-// Snapshot aggregation — workspace_get_snapshot
+// Details aggregation — workspace_get_details
 // ===============================================================================
 
-/// The memory entries and artifact counters a snapshot reports.
+/// The memory entries and artifact counters the details payload reports.
 ///
-/// Both are skipped wholesale on a lightweight poll (`includeFiles: false`)
-/// and for a workspace with no filesystem root; spelling that empty result
-/// once here is what keeps the two conditions from drifting apart — they were
-/// two nested `if`s with the same `(vec![], default())` arm written twice.
+/// Both are skipped wholesale for a caller that did not ask for them
+/// (`includeFiles: false` — the settings modal and the context bar; the
+/// workspace page's 5s poll is the caller that *does* ask) and for a
+/// workspace with no filesystem root; spelling that empty result once here is
+/// what keeps the two conditions from drifting apart — they were two nested
+/// `if`s with the same `(vec![], default())` arm written twice.
 ///
 /// Memories are returned as entries (their panel renders the flat list), so
 /// they are subject to `collect_files`' [`MAX_ENTRY_COUNT`] cap. Artifacts are
@@ -1805,11 +1795,11 @@ fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathB
 /// `workspace_list_dir`, so only the recursive count for the header counter is
 /// computed here. That keeps the periodic 5s poll bounded, and it is why the
 /// artifact count is not truncated at 500 the way an entry list would be.
-fn snapshot_files(
+fn details_files(
     root_path: Option<&Path>,
-    include_files: bool,
+    options: &WorkspaceDetailsOptions,
 ) -> Result<(Vec<WorkspaceFileEntry>, ArtifactTreeStats), String> {
-    let Some(root_path) = root_path.filter(|_| include_files) else {
+    let Some(root_path) = root_path.filter(|_| options.include_files) else {
         return Ok((Vec::new(), ArtifactTreeStats::default()));
     };
 
@@ -1824,52 +1814,51 @@ fn snapshot_files(
 }
 
 #[tauri::command]
-pub async fn workspace_get_snapshot(
+pub async fn workspace_get_details(
     workspace_id: Option<String>,
-    options: Option<WorkspaceSnapshotOptions>,
+    options: WorkspaceDetailsOptions,
     state: State<'_, AppState>,
-) -> Result<WorkspaceSnapshot, String> {
-    let options = options.unwrap_or_default();
-    let descriptor = resolve_workspace_descriptor(state.inner(), workspace_id)?;
+) -> Result<WorkspaceDetails, String> {
+    workspace_details(state.inner(), workspace_id, options).await
+}
+
+/// The body of [`workspace_get_details`], taking a plain [`AppState`] so the
+/// tests can reach it: the `options` callsite below decides whether the
+/// payload carries the file walk, and driving [`details_files`] directly would
+/// leave this function free to ignore its own argument.
+async fn workspace_details(
+    state: &AppState,
+    workspace_id: Option<String>,
+    options: WorkspaceDetailsOptions,
+) -> Result<WorkspaceDetails, String> {
+    let descriptor = resolve_workspace_descriptor(state, workspace_id)?;
     if let Some(root_path) = &descriptor.root_path {
         ensure_agent_workspace_root(root_path)?;
     }
     let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
 
-    let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
+    let provider_selection = resolve_workspace_provider_selection(state, &descriptor)?;
 
-    let session = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let (messages, runs, tool_calls) = if let Some(session) = &session {
-        let runs = repository::list_runs(&workspace_pool, &session.id).await?;
-        if !options.include_session_payload() {
-            (Vec::new(), runs, Vec::new())
-        } else {
-            (
-                repository::list_messages(&workspace_pool, &session.id).await?,
-                runs,
-                repository::list_tool_calls(&workspace_pool, &session.id, None).await?,
-            )
-        }
-    } else {
-        (Vec::new(), Vec::new(), Vec::new())
+    let session = find_workspace_session(&workspace_pool, state, &descriptor).await?;
+    // One small row each, and the workspace header reads them on every poll.
+    let runs = match &session {
+        Some(session) => repository::list_runs(&workspace_pool, &session.id).await?,
+        None => Vec::new(),
     };
     // Cheap single-table query, so it rides along even on lightweight polls —
-    // the "Queued" chips stay accurate without the full session payload.
+    // the "Queued" chips stay accurate without the file walk.
     let queued_message_ids = if let Some(session) = &session {
         repository::list_pending_queued_message_ids(&workspace_pool, &session.id).await?
     } else {
         Vec::new()
     };
 
-    let (memories, artifact_stats) =
-        snapshot_files(descriptor.root_path.as_deref(), options.include_files())?;
-    let artifacts: Vec<WorkspaceFileEntry> = Vec::new();
+    let (memories, artifact_stats) = details_files(descriptor.root_path.as_deref(), &options)?;
 
     let (assigned_agents, default_workspace_agent_id) =
-        list_workspace_agent_responses(state.inner(), &descriptor.workspace_id)?;
+        list_workspace_agent_responses(state, &descriptor.workspace_id)?;
     let tasks =
-        list_workspace_task_responses(&workspace_pool, state.inner(), &descriptor.workspace_id)
-            .await?;
+        list_workspace_task_responses(&workspace_pool, state, &descriptor.workspace_id).await?;
 
     // Workspace-level schedule (no longer per-agent). The scheduled tick
     // invokes the default agent.
@@ -1890,7 +1879,7 @@ pub async fn workspace_get_snapshot(
         _ => None,
     };
 
-    Ok(WorkspaceSnapshot {
+    Ok(WorkspaceDetails {
         workspace_id: descriptor.workspace_id,
         kind: descriptor.kind,
         title: descriptor.title,
@@ -1904,11 +1893,8 @@ pub async fn workspace_get_snapshot(
         selected_mcp_server_ids: descriptor.selected_mcp_server_ids,
         disabled_mcp_server_ids: descriptor.disabled_mcp_server_ids,
         session,
-        messages,
         runs,
-        tool_calls,
         memories,
-        artifacts,
         artifact_count: artifact_stats.file_count,
         artifact_count_capped: artifact_stats.capped,
         artifact_latest_modified_at: artifact_stats.latest_modified_at,
@@ -3190,7 +3176,7 @@ pub async fn workspace_acknowledge_task(
     Ok(())
 }
 
-/// Fetch a single task by id. The snapshot's task list is capped, so a
+/// Fetch a single task by id. The details payload's task list is capped, so a
 /// workspace with hundreds of tasks can still be asked for an older one by id.
 /// A task that no longer exists is `Ok(None)`, not an error: the caller is a
 /// click on a chat card, and a task deleted since leaves the reader on the
@@ -3237,7 +3223,7 @@ pub struct WorkspaceListEntry {
     pub latest_attention_task_updated_at: Option<i64>,
     // Periodic-workspace surface — copied from the workspace's default
     // manager agent so a card can render its cadence pill without a
-    // separate snapshot fetch. NOT a sort key: the rail orders purely by
+    // separate details fetch. NOT a sort key: the rail orders purely by
     // `updated_at` (see `WorkspaceRail.tsx`, and the test asserting that
     // scheduled workspaces do not jump the queue).
     pub schedule_enabled: bool,
@@ -4220,6 +4206,7 @@ async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::{RunStatus, RunTrigger};
     use crate::config::workspace_config::ScheduleSurface;
 
     const WS: &str = "ws-1";
@@ -5781,12 +5768,12 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_files_lists_memories_and_counts_artifacts_separately() {
+    fn details_files_lists_memories_and_counts_artifacts_separately() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         workspace_with_memories(root);
 
-        let (memories, stats) = snapshot_files(Some(root), true).unwrap();
+        let (memories, stats) = details_files(Some(root), &options_from_ipc(WITH_FILES)).unwrap();
 
         // Newest first — the memory panel renders this order verbatim, so the
         // sort is part of what this function owes its caller.
@@ -5810,39 +5797,239 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_files_skips_both_walks_on_a_lightweight_poll() {
+    fn details_files_skips_both_walks_when_they_were_not_asked_for() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         workspace_with_memories(root);
 
-        // `includeFiles: false` is what the 5s poll sends; neither walk may
-        // run, however much is on disk.
-        let (memories, stats) = snapshot_files(Some(root), false).unwrap();
+        // Neither walk may run for a caller that did not ask, however much is
+        // on disk.
+        let (memories, stats) =
+            details_files(Some(root), &options_from_ipc(WITHOUT_FILES)).unwrap();
 
         assert!(memories.is_empty());
         assert_eq!(stats, ArtifactTreeStats::default());
     }
 
     #[test]
-    fn snapshot_files_returns_empty_for_a_workspace_without_a_root() {
-        let (memories, stats) = snapshot_files(None, true).unwrap();
+    fn details_files_returns_empty_for_a_workspace_without_a_root() {
+        let (memories, stats) = details_files(None, &options_from_ipc(WITH_FILES)).unwrap();
 
         assert!(memories.is_empty());
         assert_eq!(stats, ArtifactTreeStats::default());
     }
 
     #[test]
-    fn snapshot_files_tolerates_a_workspace_that_has_no_memory_directory() {
+    fn details_files_tolerates_a_workspace_that_has_no_memory_directory() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         write_file(&root.join("report.md"), "report");
 
         // A fresh workspace has no `.clai/memory` yet. That is not an error,
         // and it must not stop the artifact count from being reported.
-        let (memories, stats) = snapshot_files(Some(root), true).unwrap();
+        let (memories, stats) = details_files(Some(root), &options_from_ipc(WITH_FILES)).unwrap();
 
         assert!(memories.is_empty());
         assert_eq!(stats.file_count, 1);
+    }
+
+    /// The workspace page's 5s poll, spelled the way the page sends it.
+    const WITH_FILES: &str = r#"{"includeFiles":true}"#;
+
+    /// The settings modal and the context bar, which want the header only.
+    const WITHOUT_FILES: &str = r#"{"includeFiles":false}"#;
+
+    /// What `workspace_get_details` ends up with for a given `options`
+    /// argument: the IPC layer deserializes the literal JSON the frontend
+    /// sends. Panicking here is the point — a rename that breaks the
+    /// `camelCase` key fails these tests instead of shipping.
+    fn options_from_ipc(json: &str) -> WorkspaceDetailsOptions {
+        serde_json::from_str(json).expect("details options must deserialize")
+    }
+
+    /// The flag has no default: an omitted `includeFiles` must fail the call
+    /// rather than quietly answer as if the workspace had no files.
+    #[test]
+    fn details_options_reject_an_omitted_flag() {
+        assert!(serde_json::from_str::<WorkspaceDetailsOptions>("{}").is_err());
+        assert!(options_from_ipc(WITH_FILES).include_files);
+        assert!(!options_from_ipc(WITHOUT_FILES).include_files);
+    }
+
+    /// A session carrying one run — the only conversation row the details
+    /// payload still reports.
+    async fn seed_session_with_run(pool: &DbPool, context: SessionContext) -> String {
+        let session = repository::create_session(
+            pool,
+            repository::CreateSessionParams {
+                kind: SessionKind::Interactive,
+                title: None,
+                context,
+            },
+        )
+        .await
+        .expect("failed to create session");
+        repository::create_run(
+            pool,
+            repository::CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Completed,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn-1".to_string(),
+                protocol_id: "proto-1".to_string(),
+                model_id: "model-1".to_string(),
+                error: None,
+            },
+        )
+        .await
+        .expect("failed to create run");
+
+        session.id
+    }
+
+    /// Runs are not gated: the workspace header reads them on every poll,
+    /// including the polls that ask for no files at all.
+    #[tokio::test]
+    async fn the_details_command_loads_the_runs_even_when_no_files_were_asked_for() {
+        let workspace = DetailsWorkspace::new().await;
+
+        let details = workspace.details(WITHOUT_FILES).await;
+
+        assert!(
+            details.session.is_some(),
+            "the fixture must resolve a session, or the run assertion below passes vacuously"
+        );
+        assert_eq!(details.runs.len(), 1);
+    }
+
+    /// A workspace whose manager has never been talked to: the details
+    /// command finds no conversation, so it has no session to list runs for.
+    /// The other agent's session and run are there to keep the empty answer
+    /// honest — it has to come from resolving no manager conversation, not
+    /// from an empty database.
+    #[tokio::test]
+    async fn the_details_command_answers_a_workspace_with_no_conversation() {
+        let workspace = DetailsWorkspace::without_a_manager_conversation().await;
+
+        let details = workspace.details(WITH_FILES).await;
+
+        assert!(
+            details.session.is_none(),
+            "the fixture must resolve no session, or this exercises the other arm"
+        );
+        assert!(details.runs.is_empty());
+        assert!(details.queued_message_ids.is_empty());
+
+        // The rest of the payload is answered in full: a missing conversation
+        // is an empty run list, not a short or failed reply.
+        assert_eq!(details.workspace_id, DETAILS_WORKSPACE_ID);
+        assert_eq!(details.title, "Details");
+        assert_eq!(details.kind, "general");
+        assert_eq!(
+            details.default_workspace_agent_id.as_deref(),
+            Some(DETAILS_MANAGER_ID)
+        );
+        assert!(!details.assigned_agents.is_empty());
+        assert!(!details.memories.is_empty());
+        assert!(details.artifact_count > 0);
+    }
+
+    const DETAILS_WORKSPACE_ID: &str = "77777777-7777-4777-8777-777777777777";
+    const DETAILS_MANAGER_ID: &str = "88888888-8888-4888-8888-888888888888";
+    const DETAILS_OTHER_AGENT_ID: &str = "99999999-9999-4999-8999-999999999999";
+
+    /// A workspace on disk (memories, artifacts, `config.json`) plus the
+    /// `AppState` and database that [`workspace_details`] resolves it
+    /// through, so the command body can be called the way the IPC layer calls
+    /// it. The helper-level tests above cannot see the command decide what to
+    /// pass; this can.
+    struct DetailsWorkspace {
+        _temp: tempfile::TempDir,
+        state: AppState,
+    }
+
+    impl DetailsWorkspace {
+        /// The common case: the manager owns the workspace conversation.
+        async fn new() -> Self {
+            Self::with_conversation_owner(DETAILS_MANAGER_ID).await
+        }
+
+        /// Same workspace, but the one session's `automation_id` is not the
+        /// manager's, so [`select_workspace_session`]'s first filter drops it
+        /// and [`find_workspace_session`] resolves nothing. The owner is
+        /// deliberately not on the roster: resolution never reads it.
+        async fn without_a_manager_conversation() -> Self {
+            Self::with_conversation_owner(DETAILS_OTHER_AGENT_ID).await
+        }
+
+        async fn with_conversation_owner(automation_id: &str) -> Self {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let parent = temp.path().join("workspaces");
+            let root = parent.join(DETAILS_WORKSPACE_ID);
+            let config = WorkspaceConfig::new(
+                DETAILS_WORKSPACE_ID.to_string(),
+                "Details".to_string(),
+                1_000,
+                DETAILS_MANAGER_ID.to_string(),
+            );
+            workspace_config::save(&root, &config).expect("seed workspace");
+            workspace_with_memories(&root);
+
+            let mut index = WorkspaceIndex::default();
+            index.insert_config(root.clone(), &config);
+            let app_config = AppConfig {
+                workspace_dirs: vec![parent],
+                ..AppConfig::default()
+            };
+            let config_manager =
+                crate::ConfigManager::new_for_tests(app_config, temp.path().join("config.json"));
+            let state = AppState::new_for_tests(config_manager, index).expect("app state");
+
+            let pool = state
+                .workspace_db(DETAILS_WORKSPACE_ID)
+                .await
+                .expect("workspace db");
+            // The details command resolves the manager's own conversation and
+            // loads the runs from it; a session owned by anyone else is not it.
+            seed_session_with_run(
+                &pool,
+                SessionContext {
+                    workspace_id: Some(DETAILS_WORKSPACE_ID.to_string()),
+                    automation_id: Some(automation_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            Self { _temp: temp, state }
+        }
+
+        async fn details(&self, json: &str) -> WorkspaceDetails {
+            workspace_details(
+                &self.state,
+                Some(DETAILS_WORKSPACE_ID.to_string()),
+                options_from_ipc(json),
+            )
+            .await
+            .expect("details")
+        }
+    }
+
+    /// The command's own wiring: the file walk is opt-in, and the opting in
+    /// happens at [`workspace_details`]'s callsite, not inside
+    /// [`details_files`]. A callsite that ignores `options` and always asks
+    /// for the files passes every helper-level test above and fails here.
+    #[tokio::test]
+    async fn the_details_command_walks_the_files_only_when_its_options_asked_for_them() {
+        let workspace = DetailsWorkspace::new().await;
+
+        let header_only = workspace.details(WITHOUT_FILES).await;
+        assert!(header_only.memories.is_empty(), "the memory walk is opt-in");
+        assert_eq!(header_only.artifact_count, 0, "the artifact walk is opt-in");
+
+        let poll = workspace.details(WITH_FILES).await;
+        assert!(!poll.memories.is_empty(), "the poll did ask for the files");
+        assert!(poll.artifact_count > 0, "the poll did ask for the files");
     }
 
     #[test]

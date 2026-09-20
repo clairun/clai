@@ -4,7 +4,7 @@ import {
   listWorkspaces,
   deleteWorkspace,
   forkWorkspace,
-  getWorkspaceSnapshot,
+  getWorkspaceDetails,
   runWorkspaceNow,
   setWorkspaceSchedulePaused,
   setWorkspaceStarred,
@@ -25,7 +25,7 @@ import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { errText, num } from '../fleet/workspaceStatus';
 import { onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
-import type { WorkspaceListEntry, WorkspaceSnapshot } from '../generated/bindings';
+import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
 
 const REFRESH_INTERVAL_MS = 5000;
@@ -45,13 +45,21 @@ export interface FleetOutletContext {
 interface SettingsState {
   open: boolean;
   workspaceId: string | null;
-  snapshot: WorkspaceSnapshot | null;
+  details: WorkspaceDetails | null;
 }
 
 interface PendingDelete {
   id: string;
   title: string;
 }
+
+// The workspace settings modal reads only workspace metadata (title, assigned
+// agents, schedule), so it skips the filesystem walk: nothing it renders comes
+// from the memory or artifact lists, and the walk is the one part of the call
+// whose cost grows with the workspace.
+const SETTINGS_DETAILS_OPTIONS = {
+  includeFiles: false,
+};
 
 /**
  * Unified Fleet/Workspace shell: a persistent (collapsible) workspace
@@ -85,7 +93,7 @@ const FleetLayout = () => {
   const [settingsState, setSettingsState] = useState<SettingsState>({
     open: false,
     workspaceId: null,
-    snapshot: null,
+    details: null,
   });
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -233,25 +241,25 @@ const FleetLayout = () => {
   const handleOpenSettings = useCallback(async (id: string) => {
     if (!id) return;
     try {
-      const snapshot = await getWorkspaceSnapshot(id);
-      setSettingsState({ open: true, workspaceId: id, snapshot });
+      const details = await getWorkspaceDetails(id, SETTINGS_DETAILS_OPTIONS);
+      setSettingsState({ open: true, workspaceId: id, details });
     } catch (err) {
       setError(errText(err, 'Failed to open workspace settings.'));
     }
   }, []);
 
   const handleSettingsClose = useCallback(() => {
-    setSettingsState({ open: false, workspaceId: null, snapshot: null });
+    setSettingsState({ open: false, workspaceId: null, details: null });
   }, []);
 
   const handleSettingsChanged = useCallback(async () => {
     const id = settingsState.workspaceId;
     if (!id) return;
     try {
-      const snapshot = await getWorkspaceSnapshot(id);
-      setSettingsState((s) => (s.workspaceId === id ? { ...s, snapshot } : s));
+      const details = await getWorkspaceDetails(id, SETTINGS_DETAILS_OPTIONS);
+      setSettingsState((s) => (s.workspaceId === id ? { ...s, details } : s));
     } catch {
-      /* non-fatal — modal stays open with old snapshot */
+      /* non-fatal — modal stays open with the previously loaded details */
     }
     loadWorkspaces();
   }, [settingsState.workspaceId, loadWorkspaces]);
@@ -545,7 +553,7 @@ const FleetLayout = () => {
         isOpen={settingsState.open}
         onClose={handleSettingsClose}
         workspaceId={settingsState.workspaceId || ''}
-        snapshot={settingsState.snapshot}
+        details={settingsState.details}
         initialSelection={{ kind: 'general' }}
         onChanged={handleSettingsChanged}
       />

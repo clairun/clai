@@ -6,8 +6,8 @@ const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 /**
  * The crew, keyed on the faces it draws.
  *
- * The workspace snapshot is rebuilt from scratch on every 5s poll, so
- * `snapshot.assignedAgents` is a new array each time even when nobody joined,
+ * The workspace details object is rebuilt from scratch on every 5s poll, so
+ * `details.assignedAgents` is a new array each time even when nobody joined,
  * left or changed their face. Handing that array to the chat would repaint
  * every agent face and every task card four times a minute for nothing.
  *

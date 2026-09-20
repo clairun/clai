@@ -33,15 +33,15 @@ vi.mock('./AgentLibrarySettings', () => ({ default: () => <div data-testid="libr
 import WorkspaceSettingsModal from './WorkspaceSettingsModal';
 import SettingsModal, { TABS } from './SettingsModal';
 import { OPEN_GLOBAL_SETTINGS_EVENT, openGlobalSettings } from '../../utils/globalSettings';
-import type { WorkspaceSnapshot } from '../../generated/bindings';
+import type { WorkspaceDetails } from '../../generated/bindings';
 
-const SNAPSHOT = {
+const DETAILS = {
   workspaceId: 'ws-1',
   title: 'Backend',
   assignedAgents: [],
   defaultWorkspaceAgentId: 'agent-main',
   scheduleEnabled: false,
-} as unknown as WorkspaceSnapshot;
+} as unknown as WorkspaceDetails;
 
 /**
  * The FleetLayout arrangement: the workspace modal open, and the global
@@ -64,7 +64,7 @@ const renderStack = () => {
           isOpen
           onClose={onClose}
           workspaceId="ws-1"
-          snapshot={SNAPSHOT}
+          details={DETAILS}
           initialSelection={{ kind: 'general' }}
         />
         <SettingsModal

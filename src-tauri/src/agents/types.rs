@@ -197,7 +197,7 @@ mod tests {
         let def = AgentDefinition::new("mgr-1", "Manager");
         let registered = AgentInstance::new(&def);
 
-        // `workspace_get_snapshot` looks the manager's countdown up by this
+        // `workspace_get_details` looks the manager's countdown up by this
         // key. If the two ever disagree the lookup misses silently and the
         // workspace reports no next run.
         assert_eq!(

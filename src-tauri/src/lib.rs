@@ -506,7 +506,7 @@ pub fn run() {
             commands::system_apps::set_system_apps_settings,
             commands::system_apps::open_workspace_path,
             commands::system_apps::workspace_import_files,
-            commands::workspace::workspace_get_snapshot,
+            commands::workspace::workspace_get_details,
             commands::workspace::workspace_get_or_create_session,
             commands::workspace::workspace_read_file,
             commands::workspace::workspace_read_file_base64,

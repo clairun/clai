@@ -5,13 +5,13 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
-import type { WorkspaceListEntry } from '../generated/bindings';
+import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 
 vi.mock('../workspace/client', () => ({
   listWorkspaces: vi.fn(),
   deleteWorkspace: vi.fn(),
   forkWorkspace: vi.fn(),
-  getWorkspaceSnapshot: vi.fn(),
+  getWorkspaceDetails: vi.fn(),
   runWorkspaceNow: vi.fn(),
   setWorkspaceSchedulePaused: vi.fn(),
   setWorkspaceStarred: vi.fn(),
@@ -33,8 +33,16 @@ vi.mock('../components/AppUpdateBadge', () => ({
   default: () => null,
 }));
 
+// Stands in for the real modal so the settings tests can drive the post-save
+// `onChanged` path. Renders nothing while closed, and no `role="dialog"`, so
+// the delete-dialog assertions below stay unambiguous.
 vi.mock('../components/Settings/WorkspaceSettingsModal', () => ({
-  default: () => null,
+  default: ({ isOpen, onChanged }: { isOpen: boolean; onChanged: () => void }) =>
+    isOpen ? (
+      <button type="button" data-testid="settings-modal" onClick={onChanged}>
+        Save settings
+      </button>
+    ) : null,
 }));
 
 vi.mock('../components/Settings', () => ({
@@ -50,6 +58,7 @@ const workspaceClient = await import('../workspace/client');
 const listWorkspaces = vi.mocked(workspaceClient.listWorkspaces);
 const deleteWorkspace = vi.mocked(workspaceClient.deleteWorkspace);
 const getSchedulerPaused = vi.mocked(workspaceClient.getSchedulerPaused);
+const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 
 const entry = (
   id: string,
@@ -253,5 +262,45 @@ describe('FleetLayout workspace deletion', () => {
 
     const reopened = await openDeleteDialog();
     expect(within(reopened).queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('FleetLayout workspace settings', () => {
+  // The modal reads only workspace metadata, so the file flag must be off:
+  // with it on, the command walks the whole workspace filesystem and that
+  // await gates the modal's first paint.
+  const METADATA_ONLY = { includeFiles: false };
+
+  const openSettings = async (title = 'Alpha') => {
+    const row = await screen.findByRole('button', { name: new RegExp(title) });
+    await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+    const menu = screen.getByRole('menu');
+    await userEvent.click(within(menu).getByRole('menuitem', { name: 'Settings' }));
+    return screen.findByTestId('settings-modal');
+  };
+
+  it('requests metadata-only details when opening workspace settings', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    getWorkspaceDetails.mockResolvedValue({ workspaceId: 'a' } as WorkspaceDetails);
+
+    renderFleet();
+    await openSettings();
+
+    expect(getWorkspaceDetails).toHaveBeenCalledWith('a', METADATA_ONLY);
+  });
+
+  it('requests metadata-only details when refreshing after a save', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    getWorkspaceDetails.mockResolvedValue({ workspaceId: 'a' } as WorkspaceDetails);
+
+    renderFleet();
+    await userEvent.click(await openSettings());
+
+    await waitFor(() => expect(getWorkspaceDetails).toHaveBeenCalledTimes(2));
+    for (const call of getWorkspaceDetails.mock.calls) {
+      expect(call).toEqual(['a', METADATA_ONLY]);
+    }
   });
 });

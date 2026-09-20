@@ -480,6 +480,67 @@ avatar?: AgentAvatarRef | null, createdAt: bigint, updatedAt: bigint, };
 
 export type WorkspaceAgentSummary = { id: string, agentDefinitionId: string, displayName: string, role: string, isDefault: boolean, description?: string | null, };
 
+export type WorkspaceDetails = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, 
+/**
+ * Attached-but-toggled-off MCP servers for the workspace conversation,
+ * sourced from the manager row's `disabled` ref flags in the workspace
+ * config (the canonical store). Disjoint from
+ * `selected_mcp_server_ids`, which is the effective enabled set.
+ */
+disabledMcpServerIds: Array<string>, session: AssistantSession | null, runs: Array<AssistantRun>, memories: Array<WorkspaceFileEntry>, 
+/**
+ * True recursive artifact count for the workspace root, independent of
+ * any list cap. The artifacts panel lazy-loads its tree one directory
+ * level at a time via `workspace_list_dir`, so this is the only artifact
+ * figure the payload carries — there is no entry list to count.
+ */
+artifactCount: bigint, 
+/**
+ * Set when the walk stopped on its entry budget, so `artifact_count` is a
+ * lower bound and `artifact_latest_modified_at` is partial. The header
+ * chip cannot infer this from the count alone: the budget is spent on
+ * directory entries while the count tallies only files, so a file-sparse
+ * workspace saturates well below the ceiling.
+ */
+artifactCountCapped: boolean, 
+/**
+ * Latest mtime (unix ms) across the artifact tree: files, non-skipped
+ * directories, **and the workspace root itself**. The artifacts panel
+ * keys its tree refresh on this, so it has to move for mutations the
+ * count cannot see — a content-only edit, or a rename that keeps the
+ * count identical. Folding the root's own mtime is what catches a
+ * rename directly in the root; the price is that a bare `touch .` on
+ * the root also reads as a change. Not `0` for an empty workspace any
+ * more — an empty root still has an mtime. `0` only when the root
+ * cannot be read at all.
+ */
+artifactLatestModifiedAt: bigint, 
+/**
+ * Ids of user messages still pending in the queue (written while a
+ * run was active, not yet picked up). The chat renders these with a
+ * "Queued" chip + remove affordance; live updates flow through the
+ * `QueuedMessagesDelivered` / `MessageDeleted` events.
+ */
+queuedMessageIds: Array<string>, enabled: boolean | null, scheduleEnabled: boolean, schedulePaused: boolean, 
+/**
+ * The workspace's schedule mode (interval vs cron). Empty when the
+ * workspace isn't scheduled. The frontend reads this to render the
+ * "every Nm" / "Cron: …" label and to populate the workspace
+ * settings modal.
+ */
+scheduleKind: ScheduleKind | null, nextRunInSeconds: bigint | null, };
+
+/**
+ * The one expensive extra the details payload can carry: `includeFiles`
+ * buys a memory walk plus a recursive artifact count.
+ *
+ * Required, not defaulted, and the whole `options` argument is required too.
+ * A missing flag must fail the call rather than fall back to `false`: the
+ * cheap answer is an empty memory list and a zero artifact count, which no
+ * caller can tell apart from an empty workspace.
+ */
+export type WorkspaceDetailsOptions = { includeFiles: boolean, };
+
 /**
  * One entry in a single directory level of the artifact tree, returned by
  * `workspace_list_dir`. Unlike `WorkspaceFileEntry` (always a file), this can
@@ -538,55 +599,5 @@ unread: boolean,
 starred: boolean, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
-
-export type WorkspaceSnapshot = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, 
-/**
- * Attached-but-toggled-off MCP servers for the workspace conversation,
- * sourced from the manager row's `disabled` ref flags in the workspace
- * config (the canonical store). Disjoint from
- * `selected_mcp_server_ids`, which is the effective enabled set.
- */
-disabledMcpServerIds: Array<string>, session: AssistantSession | null, messages: Array<AssistantMessage>, runs: Array<AssistantRun>, toolCalls: Array<ToolInvocation>, memories: Array<WorkspaceFileEntry>, artifacts: Array<WorkspaceFileEntry>, 
-/**
- * True recursive artifact count for the workspace root, independent of
- * any list cap. The artifacts panel lazy-loads its tree one directory
- * level at a time via `workspace_list_dir`, so the header counter reads
- * this instead of `artifacts.len()`.
- */
-artifactCount: bigint, 
-/**
- * Set when the walk stopped on its entry budget, so `artifact_count` is a
- * lower bound and `artifact_latest_modified_at` is partial. The header
- * chip cannot infer this from the count alone: the budget is spent on
- * directory entries while the count tallies only files, so a file-sparse
- * workspace saturates well below the ceiling.
- */
-artifactCountCapped: boolean, 
-/**
- * Latest mtime (unix ms) across the artifact tree: files, non-skipped
- * directories, **and the workspace root itself**. The artifacts panel
- * keys its tree refresh on this, so it has to move for mutations the
- * count cannot see — a content-only edit, or a rename that keeps the
- * count identical. Folding the root's own mtime is what catches a
- * rename directly in the root; the price is that a bare `touch .` on
- * the root also reads as a change. Not `0` for an empty workspace any
- * more — an empty root still has an mtime. `0` only when the root
- * cannot be read at all.
- */
-artifactLatestModifiedAt: bigint, 
-/**
- * Ids of user messages still pending in the queue (written while a
- * run was active, not yet picked up). The chat renders these with a
- * "Queued" chip + remove affordance; live updates flow through the
- * `QueuedMessagesDelivered` / `MessageDeleted` events.
- */
-queuedMessageIds: Array<string>, enabled: boolean | null, scheduleEnabled: boolean, schedulePaused: boolean, 
-/**
- * The workspace's schedule mode (interval vs cron). Empty when the
- * workspace isn't scheduled. The frontend reads this to render the
- * "every Nm" / "Cron: …" label and to populate the workspace
- * settings modal.
- */
-scheduleKind: ScheduleKind | null, nextRunInSeconds: bigint | null, };
 
 export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: string, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, userResponse: string | null, userResponseAt: bigint | null, };

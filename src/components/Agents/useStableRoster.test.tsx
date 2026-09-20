@@ -26,7 +26,7 @@ const agent = (over: Partial<WorkspaceAgentResponse> = {}): WorkspaceAgentRespon
 
 describe('useStableRoster', () => {
   it('keeps one reference when a poll rebuilt the same crew', () => {
-    // The snapshot is rebuilt from scratch every 5s. An unchanged crew arriving
+    // The details are rebuilt from scratch every 5s. An unchanged crew arriving
     // as a new array must not reach the chat as a new reference, or every face
     // and task card below it repaints four times a minute.
     const { result, rerender } = renderHook(
@@ -92,7 +92,7 @@ describe('useStableRoster', () => {
     expect(result.current).not.toBe(byId);
   });
 
-  it('holds one empty crew while the snapshot is still loading', () => {
+  it('holds one empty crew while the details are still loading', () => {
     const { result, rerender } = renderHook(
       ({ agents }: { agents: WorkspaceAgentResponse[] | undefined }) => useStableRoster(agents),
       { initialProps: { agents: undefined as WorkspaceAgentResponse[] | undefined } }

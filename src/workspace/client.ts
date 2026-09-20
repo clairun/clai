@@ -13,21 +13,17 @@ import type {
   WorkspaceFileContent,
   WorkspaceFileEntry,
   WorkspaceListEntry,
+  WorkspaceDetails,
+  WorkspaceDetailsOptions,
   WorkspaceSessionBinding,
-  WorkspaceSnapshot,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 
-interface SnapshotOptions {
-  includeSessionPayload?: boolean;
-  includeFiles?: boolean;
-}
-
-export async function getWorkspaceSnapshot(
-  workspaceId: string = 'default',
-  options: SnapshotOptions | null = null
-): Promise<WorkspaceSnapshot> {
-  return invoke('workspace_get_snapshot', { workspaceId, options });
+export async function getWorkspaceDetails(
+  workspaceId: string,
+  options: WorkspaceDetailsOptions
+): Promise<WorkspaceDetails> {
+  return invoke('workspace_get_details', { workspaceId, options });
 }
 
 export async function getOrCreateWorkspaceSession(
@@ -209,7 +205,7 @@ export async function listWorkspaceAgents(workspaceId: string): Promise<Workspac
 /**
  * One task by id, or null when it no longer exists.
  *
- * The snapshot carries only the 50 most recently touched tasks, so anything a
+ * Workspace details carry only the 50 most recently touched tasks, so anything a
  * chat transcript points at from further back has to be fetched on demand.
  */
 export async function getWorkspaceTask(

@@ -7,7 +7,7 @@ import ContextBadge from '../../components/ContextPanel/ContextBadge';
 import McpServerAvatar from '../../components/ContextPanel/McpServerAvatar';
 import McpServerSelector from '../../components/ContextPanel/McpServerSelector';
 import ProviderSetupBadge from '../../components/ContextPanel/ProviderSetupBadge';
-import { getWorkspaceSnapshot, updateWorkspaceSessionMcp, setWorkspaceProvider } from '../client';
+import { getWorkspaceDetails, updateWorkspaceSessionMcp, setWorkspaceProvider } from '../client';
 import styles from './WorkspaceContextBar.module.css';
 
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
@@ -15,8 +15,9 @@ const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
 // Dispatched by WorkspaceSettingsModal after a successful save so the
 // self-loading bar refetches instead of persisting stale local state.
 const WORKSPACE_SETTINGS_CHANGED_EVENT = 'workspace-settings-changed';
-const SNAPSHOT_OPTIONS = {
-  includeSessionPayload: false,
+// Only header fields are read here (kind, MCP selection, provider), so the
+// filesystem walk is skipped.
+const DETAILS_OPTIONS = {
   includeFiles: false,
 };
 
@@ -27,7 +28,7 @@ interface WorkspaceContextBarProps {
 /**
  * WorkspaceContextBar — shows MCP server badges and provider info for workspaces.
  *
- * Self-loading: only needs workspaceId, fetches its own data from the snapshot API.
+ * Self-loading: only needs workspaceId, fetches its own data from the workspace details API.
  *
  * Agent workspaces: read-only display (MCP configured via agent settings in Fleet).
  * General workspace: editable — user can add/remove/toggle MCP servers.
@@ -45,21 +46,21 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
   const [agentMcpServerIds, setAgentMcpServerIds] = useState<string[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState('');
 
-  // Load workspace snapshot to determine type and MCP config
+  // Load workspace details to determine type and MCP config
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
 
-    const loadSnapshot = async () => {
+    const loadDetails = async () => {
       try {
-        const snap = await getWorkspaceSnapshot(workspaceId, SNAPSHOT_OPTIONS);
+        const details = await getWorkspaceDetails(workspaceId, DETAILS_OPTIONS);
         if (cancelled) return;
-        const agent = snap?.kind === 'agent';
+        const agent = details?.kind === 'agent';
         setIsAgent(agent);
         if (agent) {
-          setAgentMcpServerIds(snap?.selectedMcpServerIds || []);
+          setAgentMcpServerIds(details?.selectedMcpServerIds || []);
         } else {
-          // The workspace config is the canonical MCP store: the snapshot's
+          // The workspace config is the canonical MCP store: the details'
           // selectedMcpServerIds carries the *effective* (enabled) set and
           // disabledMcpServerIds the toggled-off remainder; badges show the
           // union. Mirror the backend's precedence exactly: when a manager
@@ -68,12 +69,12 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
           // must not resurrect the session's stale list. Only manager-less
           // workspaces, where the config cannot record a selection, fall
           // back to the session context's enabled list.
-          const configEnabled = snap?.selectedMcpServerIds || [];
-          const disabled = snap?.disabledMcpServerIds || [];
+          const configEnabled = details?.selectedMcpServerIds || [];
+          const disabled = details?.disabledMcpServerIds || [];
           const enabled =
-            snap?.defaultWorkspaceAgentId || configEnabled.length || disabled.length
+            details?.defaultWorkspaceAgentId || configEnabled.length || disabled.length
               ? configEnabled
-              : snap?.session?.context?.mcpServerIds || [];
+              : details?.session?.context?.mcpServerIds || [];
           setLocalMcpServerIds([...enabled, ...disabled.filter((id) => !enabled.includes(id))]);
           setLocalDisabledIds(disabled);
         }
@@ -82,18 +83,18 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
         // scheduled runs use. Set it directly (not `prev || …`) so switching
         // workspaces doesn't retain the previous workspace's selection.
         if (!agent) {
-          setSelectedProviderId(snap?.providerConnectionIds?.[0] || '');
+          setSelectedProviderId(details?.providerConnectionIds?.[0] || '');
         }
       } catch {
-        // Snapshot not available yet — fine
+        // Details not available yet — fine
       }
     };
 
-    loadSnapshot();
-    window.addEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadSnapshot);
+    loadDetails();
+    window.addEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadDetails);
     return () => {
       cancelled = true;
-      window.removeEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadSnapshot);
+      window.removeEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadDetails);
     };
   }, [workspaceId]);
 
