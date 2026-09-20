@@ -172,6 +172,8 @@ interface VirtualizedListProps<T> {
   gap?: number;
   footer?: React.ReactNode;
   footerEstimateSize?: number;
+  // Start at the bottom and keep following new content. The follow-the-bottom
+  // state takes its initial value from this prop as read at mount.
   initialScrollToBottom?: boolean;
   scrollToBottomSignal?: number | null;
   scrollToBottomBehavior?: ScrollBehavior;
@@ -185,7 +187,6 @@ interface VirtualizedListProps<T> {
   // leaving a stale final height.
   throttledMeasureKeys?: ReadonlySet<string>;
   measureThrottleMs?: number;
-  onNearBottomChange?: (isNearBottom: boolean) => void;
   // Fired when a *user-initiated* upward scroll brings the viewport within
   // NEAR_TOP_THRESHOLD of the top (and on wheel-up while already pinned at
   // the top). Programmatic adjustments — stick-to-bottom pins, the prepend
@@ -212,7 +213,6 @@ const VirtualizedListInner = <T,>({
   forceScrollToBottomKey = null,
   throttledMeasureKeys,
   measureThrottleMs = DEFAULT_THROTTLED_MEASURE_MS,
-  onNearBottomChange,
   onApproachTop,
 }: VirtualizedListProps<T>) => {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -225,7 +225,10 @@ const VirtualizedListInner = <T,>({
   // follow new content — a new message appended below doesn't fire a scroll
   // or resize event, so this ref still reflects where the user was *before*
   // the update, which is exactly the signal we want.
-  const nearBottomRef = useRef(true);
+  // Seeded from initialScrollToBottom: a list that didn't opt into starting at
+  // the bottom must also not be dragged there when its content first measures
+  // or later grows. Scrolling to the bottom by hand still re-engages following.
+  const nearBottomRef = useRef(initialScrollToBottom);
   // Last seen scrollTop, to tell user "scrolled up" apart from "scrolled
   // down"; and a flag marking the next scroll event as programmatic (our own
   // pin/anchor adjustments), so it's never misread as user intent.
@@ -305,8 +308,7 @@ const VirtualizedListInner = <T,>({
       isNearBottom = nearBottomRef.current;
     }
     nearBottomRef.current = isNearBottom;
-    onNearBottomChange?.(isNearBottom);
-  }, [onNearBottomChange]);
+  }, []);
 
   const syncViewport = useCallback(() => {
     const node = scrollRef.current;
@@ -352,11 +354,8 @@ const VirtualizedListInner = <T,>({
       onApproachTopRef.current?.();
       return;
     }
-    if (nearBottomRef.current) {
-      nearBottomRef.current = false;
-      onNearBottomChange?.(false);
-    }
-  }, [onNearBottomChange]);
+    nearBottomRef.current = false;
+  }, []);
 
   useLayoutEffect(() => {
     syncViewport();
@@ -559,9 +558,8 @@ const VirtualizedListInner = <T,>({
     if (prev === undefined) return;
     if (prev === forceScrollToBottomKey) return;
     nearBottomRef.current = true;
-    onNearBottomChange?.(true);
     scrollToBottom(scrollToBottomBehavior);
-  }, [forceScrollToBottomKey, onNearBottomChange, scrollToBottom, scrollToBottomBehavior]);
+  }, [forceScrollToBottomKey, scrollToBottom, scrollToBottomBehavior]);
 
   const visibleItems: { item: T; index: number; position: Position }[] = [];
   for (let index = layout.start; index <= layout.end; index += 1) {
