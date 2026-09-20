@@ -11,12 +11,13 @@
 </p>
 
 <p align="center">
-  A desktop app for building, running, and supervising small teams of AI agents.
+  Control teams of AI agents. Local-first, open source, sandboxed.
 </p>
 
 <p align="center">
-  <em>Local-first and provider-agnostic — your agents run on your machine, use your
-  tools and files under per-agent permissions, and report to you from one Fleet cockpit.</em>
+  <em>One team per workspace — each with its own provider, files, tools, and
+  permissions, working in parallel, on a schedule, and reporting to you from one
+  Fleet cockpit.</em>
 </p>
 
 <p align="center">
