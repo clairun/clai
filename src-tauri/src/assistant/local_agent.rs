@@ -308,10 +308,9 @@ pub async fn run_session_turn(
     // name compaction as the reason instead of leaving the user with the CLI's
     // bare context-limit error.
     let mut compaction_attempt = compaction::CompactionAttempt::NotAttempted;
-    let messages = repository::list_messages(&deps.pool, &session.id).await?;
-    let provider_history =
-        compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
-    if compaction::should_auto_compact(&provider_history, &[]) {
+    let history = compaction::load_provider_history(&deps.pool, &session.id).await?;
+    if compaction::should_auto_compact(&history.view, None, &[], history.messages_since_compaction)
+    {
         let summary_working_dir = workspace_root_for_session(deps, &session);
         match compaction::compact_session_history(
             &deps.pool,
@@ -2613,13 +2612,9 @@ async fn turn_image_parts(
     let contents: Vec<Vec<ContentPart>> = if !queued.is_empty() {
         queued.into_iter().map(|q| q.message.content).collect()
     } else {
-        match repository::list_messages(&deps.pool, &session.id).await {
-            Ok(messages) => messages
-                .into_iter()
-                .rev()
-                .find(|m| m.role == MessageRole::User)
-                .map(|m| vec![m.content])
-                .unwrap_or_default(),
+        match repository::latest_message_by_role(&deps.pool, &session.id, MessageRole::User).await {
+            Ok(Some(message)) => vec![message.content],
+            Ok(None) => Vec::new(),
             Err(error) => {
                 tracing::warn!(%error, "CLI image: message read failed; sending text only");
                 Vec::new()
@@ -2898,20 +2893,18 @@ async fn prepare_prompt(
                 .collect();
             queued_messages_prompt(&messages)
         } else {
-            let messages = repository::list_messages(&deps.pool, &session.id).await?;
-            let latest_user = messages
-                .iter()
-                .rev()
-                .find(|message| message.role == MessageRole::User)
-                .ok_or_else(|| {
-                    LocalAgentRunError::failed(format!(
-                        "No user message found for {} run",
-                        provider_display_name
-                    ))
-                })?;
+            let latest_user =
+                repository::latest_message_by_role(&deps.pool, &session.id, MessageRole::User)
+                    .await?
+                    .ok_or_else(|| {
+                        LocalAgentRunError::failed(format!(
+                            "No user message found for {} run",
+                            provider_display_name
+                        ))
+                    })?;
             // Text may be empty for an image-only turn; the image attaches
             // separately, so don't treat empty text as "no message".
-            message_text(latest_user)
+            message_text(&latest_user)
         }
     };
 
@@ -2927,12 +2920,15 @@ async fn with_fresh_cli_session_context_prompt(
     session: &AssistantSession,
     prompt: String,
 ) -> Result<String, LocalAgentRunError> {
-    let messages = repository::list_messages(pool, &session.id).await?;
-    let provider_messages = compaction::provider_history_messages(pool, &session.id, &messages)
+    let history = compaction::load_provider_history(pool, &session.id)
         .await
         .map_err(LocalAgentRunError::failed)?;
-    let summary = compaction::latest_compaction_summary_text(pool, &session.id).await?;
-    let recent_messages: Vec<AssistantMessage> = provider_messages
+    let summary = history
+        .summary_message
+        .as_ref()
+        .map(|message| compaction::content_text(&message.content));
+    let recent_messages: Vec<AssistantMessage> = history
+        .view
         .into_iter()
         .filter(|message| !compaction::is_compaction_summary_message(message))
         .collect();

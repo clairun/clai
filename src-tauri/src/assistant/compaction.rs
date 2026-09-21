@@ -16,7 +16,20 @@ pub const COMPACTION_METADATA_SOURCE: &str = "clai-compaction";
 const RECENT_TAIL_MESSAGES: usize = 16;
 const MIN_AUTOMATIC_COMPACT_MESSAGES: usize = 24;
 const MIN_MANUAL_COMPACT_MESSAGES: usize = 2;
-const AUTO_COMPACTION_MESSAGE_CHARS: usize = 120_000;
+/// Trigger threshold for automatic compaction, measured against the estimated
+/// size of the outgoing request (system prompt + provider view + tool
+/// definitions). The predecessor gate measured content at the summariser's
+/// caps, which under-counted tool-heavy requests by an unbounded factor and
+/// let runs crash on the provider's context limit instead of compacting.
+const AUTO_COMPACTION_REQUEST_CHARS: usize = 360_000;
+/// Wire overhead each message adds on top of its rendered content (role
+/// label, ids, JSON keys in the request envelope).
+const REQUEST_OVERHEAD_CHARS_PER_MESSAGE: usize = 32;
+/// Hysteresis for the automatic trigger: messages persisted after the
+/// standing summary before the trigger can fire again. Without it a just-
+/// compacted session re-triggers on its own retained tail (the tail alone
+/// satisfies the message-count gate) and summarizes its fresh context away.
+const MIN_MESSAGES_SINCE_COMPACTION: usize = MIN_AUTOMATIC_COMPACT_MESSAGES;
 const SUMMARY_TRANSCRIPT_MAX_CHARS: usize = 96_000;
 const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 4096;
 const SUMMARY_TOOL_CALL_MAX_CHARS: usize = 4_000;
@@ -61,44 +74,153 @@ pub fn is_compaction_summary_message(message: &AssistantMessage) -> bool {
         == Some(COMPACTION_METADATA_SOURCE)
 }
 
-pub async fn provider_history_messages(
+/// The provider-bound history for a session, loaded with bounded queries.
+///
+/// `view` is byte-identical to what a full-session load produced before:
+/// `[standing summary] + messages after the boundary`, or every non-summary
+/// message when the session has no usable compaction. `summary_message` is
+/// the standing summary itself (the first message of `view` when present).
+/// `messages_since_compaction` counts messages persisted after that summary
+/// and drives the automatic trigger's hysteresis; `None` when the session has
+/// never completed a compaction. `boundary` is the `(created_at, id)` key of
+/// the boundary message (`source_to`): the last message the standing summary
+/// covers. Messages at or before it are no longer part of `view`, so callers
+/// that must distinguish "summarized away" from "never loaded" compare
+/// against it.
+pub struct ProviderHistory {
+    pub view: Vec<AssistantMessage>,
+    pub summary_message: Option<AssistantMessage>,
+    pub messages_since_compaction: Option<usize>,
+    pub boundary: Option<(i64, String)>,
+}
+
+pub async fn load_provider_history(
     pool: &DbPool,
     session_id: &str,
-    messages: &[AssistantMessage],
-) -> Result<Vec<AssistantMessage>, String> {
+) -> Result<ProviderHistory, String> {
     let latest = repository::latest_completed_compaction(pool, session_id).await?;
-    Ok(provider_history_messages_with_compaction(
-        messages,
-        latest.as_ref(),
-    ))
+    let Some(compaction) = latest else {
+        // Never compacted: the provider view is the whole session minus
+        // standing summaries from any earlier pass.
+        let messages = repository::list_messages(pool, session_id).await?;
+        return Ok(ProviderHistory {
+            view: filter_non_summary(&messages),
+            summary_message: None,
+            messages_since_compaction: None,
+            boundary: None,
+        });
+    };
+
+    if let (Some(summary_id), Some(source_to_id)) = (
+        compaction.summary_message_id.as_deref(),
+        compaction.source_to_message_id.as_deref(),
+    ) {
+        if let (Some(summary), Some(source_to)) = (
+            repository::get_message(pool, summary_id).await?,
+            repository::get_message(pool, source_to_id).await?,
+        ) {
+            if summary.session_id == session_id && source_to.session_id == session_id {
+                // Healthy path: two point lookups plus the post-boundary
+                // tail, without loading the compacted-away majority.
+                let tail = repository::list_messages_after(
+                    pool,
+                    session_id,
+                    (source_to.created_at, source_to.id.as_str()),
+                )
+                .await?;
+                let messages_since_compaction = tail
+                    .iter()
+                    .filter(|message| is_after(message, (summary.created_at, summary.id.as_str())))
+                    .count();
+                let mut view = Vec::with_capacity(tail.len() + 1);
+                view.push(summary.clone());
+                view.extend(tail.into_iter().filter(|message| {
+                    message.id != summary_id && !is_compaction_summary_message(message)
+                }));
+                return Ok(ProviderHistory {
+                    view,
+                    summary_message: Some(summary),
+                    messages_since_compaction: Some(messages_since_compaction),
+                    boundary: Some((source_to.created_at, source_to.id.clone())),
+                });
+            }
+        }
+    }
+
+    // Degenerate compaction row (referenced messages deleted, or pointing at
+    // another session): fall back to the full-session load, which is exactly
+    // what the pre-boundary implementation did for such rows.
+    let messages = repository::list_messages(pool, session_id).await?;
+    let view = provider_history_messages_with_compaction(&messages, Some(&compaction));
+    let summary_message = compaction
+        .summary_message_id
+        .as_deref()
+        .and_then(|id| messages.iter().find(|message| message.id == id).cloned());
+    let messages_since_compaction = summary_message.as_ref().map(|summary| {
+        messages
+            .iter()
+            .filter(|message| is_after(message, (summary.created_at, summary.id.as_str())))
+            .count()
+    });
+    Ok(ProviderHistory {
+        view,
+        summary_message,
+        messages_since_compaction,
+        boundary: None,
+    })
 }
 
-pub async fn latest_compaction_summary_text(
-    pool: &DbPool,
-    session_id: &str,
-) -> Result<Option<String>, String> {
-    let Some(compaction) = repository::latest_completed_compaction(pool, session_id).await? else {
-        return Ok(None);
-    };
-    let Some(summary_message_id) = compaction.summary_message_id.as_deref() else {
-        return Ok(None);
-    };
-    let Some(message) = repository::get_message(pool, summary_message_id).await? else {
-        return Ok(None);
-    };
-    Ok(Some(content_text(&message.content)))
+fn filter_non_summary(messages: &[AssistantMessage]) -> Vec<AssistantMessage> {
+    messages
+        .iter()
+        .filter(|message| !is_compaction_summary_message(message))
+        .cloned()
+        .collect()
 }
 
-pub fn should_auto_compact(messages: &[AssistantMessage], tools: &[ToolDefinition]) -> bool {
-    let non_compaction_messages = messages
+fn is_after(message: &AssistantMessage, key: (i64, &str)) -> bool {
+    message.created_at > key.0 || (message.created_at == key.0 && message.id.as_str() > key.1)
+}
+
+/// Decide whether the automatic compaction trigger fires before the next
+/// provider call.
+///
+/// Three gates, checked in order of cheapness:
+///
+/// * message count: at least `MIN_AUTOMATIC_COMPACT_MESSAGES +
+///   RECENT_TAIL_MESSAGES` non-summary messages in `view`. A summary never
+///   counts toward it, so the gate cannot be satisfied by the summary alone.
+/// * hysteresis: at least `MIN_MESSAGES_SINCE_COMPACTION` messages persisted
+///   after the standing summary. The retained tail of a just-finished pass
+///   satisfies the count gate on its own; without hysteresis a session could
+///   summarize its own fresh tail every turn and thrash.
+/// * request size: the estimated size of the outgoing request — system
+///   prompt, `view`, and tool definitions — crosses
+///   `AUTO_COMPACTION_REQUEST_CHARS`.
+///
+/// `messages_since_compaction` is `None` when the session has never completed
+/// a compaction; hysteresis only applies to sessions that have. The forced
+/// (`/compact`) path never consults this function.
+pub fn should_auto_compact(
+    view: &[AssistantMessage],
+    system_prompt: Option<&ProviderInputMessage>,
+    tools: &[ToolDefinition],
+    messages_since_compaction: Option<usize>,
+) -> bool {
+    let non_compaction_messages = view
         .iter()
         .filter(|message| !is_compaction_summary_message(message))
         .count();
     if non_compaction_messages < MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES {
         return false;
     }
+    if let Some(since) = messages_since_compaction {
+        if since < MIN_MESSAGES_SINCE_COMPACTION {
+            return false;
+        }
+    }
 
-    estimate_history_chars(messages, tools) >= AUTO_COMPACTION_MESSAGE_CHARS
+    request_chars(view, system_prompt, tools) >= AUTO_COMPACTION_REQUEST_CHARS
 }
 
 pub fn is_context_limit_error(message: &str) -> bool {
@@ -230,9 +352,7 @@ pub async fn compact_session_history(
     run_id: Option<&str>,
     force: bool,
 ) -> Result<Option<CompactionOutcome>, String> {
-    let messages = repository::list_messages(pool, &session.id).await?;
-    let latest = repository::latest_completed_compaction(pool, &session.id).await?;
-    let provider_view = provider_history_messages_with_compaction(&messages, latest.as_ref());
+    let provider_view = load_provider_history(pool, &session.id).await?.view;
     let Some(window) = select_compaction_window(&provider_view, force) else {
         return Ok(None);
     };
@@ -690,7 +810,7 @@ fn render_content_parts(
         .join("\n")
 }
 
-fn content_text(content: &[ContentPart]) -> String {
+pub fn content_text(content: &[ContentPart]) -> String {
     content
         .iter()
         .filter_map(|part| match part {
@@ -701,39 +821,42 @@ fn content_text(content: &[ContentPart]) -> String {
         .join("\n")
 }
 
-/// Approximate the size of the prompt we are about to send, in characters.
+/// Estimate the size of the request about to be sent, in characters.
 ///
-/// Every message in `messages` is counted, *including* the compaction summary:
-/// the provider view produced by `provider_history_messages_with_compaction`
-/// starts with that summary, so it is part of the prompt this estimate is
-/// deciding about. Excluding it under-counted by the whole stored summary --
-/// `SUMMARY_MESSAGE_MAX_CHARS` plus `SUMMARY_MESSAGE_PREAMBLE`, a fifth of the
-/// trigger -- which delays auto-compaction past the point it exists to protect.
+/// A close estimator of the outgoing payload, not exact accounting: every
+/// message of `view` — including the compaction summary, which is the first
+/// message of the view — is measured at its rendered text size (full tool
+/// arguments and results, not the summariser's caps) plus a fixed
+/// per-message overhead; the system prompt is counted because it is
+/// prepended to every call; tool definitions are counted by name,
+/// description, and rendered JSON schema.
 ///
-/// Counting it cannot make compaction chase its own summary: `should_auto_compact`
-/// gates on `MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES` *non-summary*
-/// messages, so a summary can never satisfy that gate however large it is. (A pass
-/// normally leaves `RECENT_TAIL_MESSAGES` behind; `group_aware_boundary` can retain
-/// a straddled tool group and leave more, in which case a second pass may follow
-/// immediately -- that pass swallows the group and converges.)
+/// Counting the summary cannot make compaction chase its own summary: the
+/// message-count gate only counts non-summary messages. (A pass normally
+/// leaves `RECENT_TAIL_MESSAGES` behind; `group_aware_boundary` can retain a
+/// straddled tool group and leave more, in which case hysteresis defers the
+/// follow-up pass until enough new messages accumulate.)
 ///
-/// This remains an under-estimate of the real prompt: tool payloads are counted at
-/// the summariser's caps rather than their true size, thinking parts and image bytes
-/// are not counted, and the system prompt is outside `messages` entirely. It is a
-/// trigger heuristic, not an accounting of the request.
-fn estimate_history_chars(messages: &[AssistantMessage], tools: &[ToolDefinition]) -> usize {
-    let message_chars: usize = messages
+/// It under-counts by construction: assistant thinking content is not
+/// rendered at all, images count as placeholders rather than base64 bytes,
+/// and JSON escaping inflates the wire payload past the rendered text. The
+/// forced context-limit recovery path remains the backstop for what slips
+/// past the estimate.
+fn request_chars(
+    view: &[AssistantMessage],
+    system_prompt: Option<&ProviderInputMessage>,
+    tools: &[ToolDefinition],
+) -> usize {
+    let message_chars: usize = view
         .iter()
         .map(|message| {
-            render_content_parts(
-                &message.content,
-                SUMMARY_TOOL_CALL_MAX_CHARS,
-                SUMMARY_TOOL_RESULT_MAX_CHARS,
-            )
-            .len()
-                + 16
+            render_content_parts(&message.content, usize::MAX, usize::MAX).len()
+                + REQUEST_OVERHEAD_CHARS_PER_MESSAGE
         })
         .sum();
+    let prompt_chars = system_prompt
+        .map(|message| render_content_parts(&message.content, usize::MAX, usize::MAX).len())
+        .unwrap_or(0);
     let tool_chars: usize = tools
         .iter()
         .map(|tool| {
@@ -744,7 +867,7 @@ fn estimate_history_chars(messages: &[AssistantMessage], tools: &[ToolDefinition
                     .unwrap_or_default()
         })
         .sum();
-    message_chars + tool_chars
+    message_chars + prompt_chars + tool_chars
 }
 
 fn truncate_json(value: &serde_json::Value, max_chars: usize) -> String {
@@ -866,20 +989,20 @@ mod tests {
             "f",
             MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES - 1,
         );
-        view[0].content = vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))];
+        view[0].content = vec![text(&"x".repeat(AUTO_COMPACTION_REQUEST_CHARS))];
 
-        assert!(!should_auto_compact(&view, &[]));
+        assert!(!should_auto_compact(&view, None, &[], None));
     }
 
     #[test]
     fn automatic_compaction_requires_the_estimated_size_threshold() {
         let mut view = filler("f", MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES);
 
-        assert!(!should_auto_compact(&view, &[]));
+        assert!(!should_auto_compact(&view, None, &[], None));
 
-        view[0].content = vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))];
+        view[0].content = vec![text(&"x".repeat(AUTO_COMPACTION_REQUEST_CHARS))];
 
-        assert!(should_auto_compact(&view, &[]));
+        assert!(should_auto_compact(&view, None, &[], None));
     }
 
     /// The compaction summary is the first message of the provider view, so it
@@ -896,7 +1019,7 @@ mod tests {
         // Sized so the history alone sits below the trigger while history plus a
         // full-size summary sits above it, with margin on both sides.
         let chars_per_message =
-            (AUTO_COMPACTION_MESSAGE_CHARS - SUMMARY_MESSAGE_MAX_CHARS / 2) / message_count;
+            (AUTO_COMPACTION_REQUEST_CHARS - SUMMARY_MESSAGE_MAX_CHARS / 2) / message_count;
         let mut view: Vec<AssistantMessage> = (0..message_count)
             .map(|i| {
                 msg(
@@ -907,7 +1030,7 @@ mod tests {
             })
             .collect();
         assert!(
-            !should_auto_compact(&view, &[]),
+            !should_auto_compact(&view, None, &[], None),
             "the history on its own is under budget"
         );
 
@@ -924,7 +1047,7 @@ mod tests {
         view.insert(0, summary);
 
         assert!(
-            should_auto_compact(&view, &[]),
+            should_auto_compact(&view, None, &[], None),
             "the summary is sent to the provider too, so it has to be counted"
         );
     }
@@ -940,14 +1063,144 @@ mod tests {
         let mut summary = msg(
             "summary",
             MessageRole::System,
-            vec![text(&"x".repeat(AUTO_COMPACTION_MESSAGE_CHARS))],
+            vec![text(&"x".repeat(AUTO_COMPACTION_REQUEST_CHARS))],
         );
         summary.provider_metadata = Some(serde_json::json!({
             "source": COMPACTION_METADATA_SOURCE,
         }));
         view.insert(0, summary);
 
-        assert!(!should_auto_compact(&view, &[]));
+        assert!(!should_auto_compact(&view, None, &[], None));
+    }
+
+    /// The trigger sizes the *outgoing request*, so the system prompt —
+    /// prepended to every call by the engine — is part of the budget. A view
+    /// under the threshold on its own must cross it once the prompt is
+    /// included, or the gate protects a request that no longer exists.
+    #[test]
+    fn the_trigger_counts_the_system_prompt() {
+        let mut view = filler("f", MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES);
+        let chars_per_message = (AUTO_COMPACTION_REQUEST_CHARS - 40_000)
+            / (MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES);
+        for message in &mut view {
+            message.content = vec![text(&"y".repeat(chars_per_message))];
+        }
+        let system_prompt = ProviderInputMessage {
+            role: MessageRole::System,
+            content: vec![text(&"z".repeat(80_000))],
+        };
+
+        assert!(!should_auto_compact(&view, None, &[], None));
+        assert!(should_auto_compact(&view, Some(&system_prompt), &[], None));
+    }
+
+    /// The trigger measures tool payloads at the size they are *sent*, not at
+    /// the summariser's caps. The predecessor estimate capped tool results at
+    /// `SUMMARY_TOOL_RESULT_MAX_CHARS`, so a run dominated by oversized tool
+    /// output could sit far past the provider's context limit while the gate
+    /// read "under budget" — the exact crash auto-compaction exists to prevent.
+    #[test]
+    fn the_trigger_sizes_tool_payloads_at_their_real_size() {
+        let message_count = MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES;
+        let mut view = filler("f", message_count - 1);
+        view.push(msg(
+            "fat",
+            MessageRole::Tool,
+            vec![ContentPart::ToolResult {
+                tool_call_id: "call".to_string(),
+                payload: serde_json::Value::String(
+                    "z".repeat(AUTO_COMPACTION_REQUEST_CHARS).to_string(),
+                ),
+                started_at: None,
+                completed_at: None,
+            }],
+        ));
+
+        assert!(should_auto_compact(&view, None, &[], None));
+
+        // The same shape at a tenth of the size stays under the trigger.
+        let capped = view
+            .iter()
+            .map(|message| {
+                let mut message = message.clone();
+                if message.id == "fat" {
+                    message.content = vec![ContentPart::ToolResult {
+                        tool_call_id: "call".to_string(),
+                        payload: serde_json::Value::String(
+                            "z".repeat(AUTO_COMPACTION_REQUEST_CHARS / 10).to_string(),
+                        ),
+                        started_at: None,
+                        completed_at: None,
+                    }];
+                }
+                message
+            })
+            .collect::<Vec<_>>();
+        assert!(!should_auto_compact(&capped, None, &[], None));
+    }
+
+    /// Hysteresis: a just-compacted session's retained tail satisfies the
+    /// message-count gate on its own, so the trigger must additionally require
+    /// fresh messages after the standing summary. Without this, a 40-message
+    /// view that compacts leaves a 24-message tail that re-triggers next turn
+    /// and summarizes the session's own fresh context away, forever.
+    #[test]
+    fn the_trigger_rearms_only_after_fresh_messages_follow_a_compaction() {
+        let message_count = MIN_AUTOMATIC_COMPACT_MESSAGES + RECENT_TAIL_MESSAGES;
+        let mut view = filler("f", message_count);
+        for message in &mut view {
+            message.content = vec![text(
+                &"y".repeat(AUTO_COMPACTION_REQUEST_CHARS / message_count + 1),
+            )];
+        }
+        let mut summary = msg(
+            "summary",
+            MessageRole::System,
+            vec![text(&summary_message_text("done"))],
+        );
+        summary.provider_metadata = Some(serde_json::json!({
+            "source": COMPACTION_METADATA_SOURCE,
+        }));
+        view.insert(0, summary);
+
+        assert!(
+            should_auto_compact(&view, None, &[], None),
+            "a never-compacted session is not gated by hysteresis"
+        );
+        assert!(
+            !should_auto_compact(&view, None, &[], Some(0)),
+            "the freshly completed pass leaves nothing new to compact"
+        );
+        assert!(!should_auto_compact(
+            &view,
+            None,
+            &[],
+            Some(MIN_MESSAGES_SINCE_COMPACTION - 1)
+        ));
+        assert!(should_auto_compact(
+            &view,
+            None,
+            &[],
+            Some(MIN_MESSAGES_SINCE_COMPACTION)
+        ));
+    }
+
+    /// The forced path (`/compact`) must not be touched by the automatic
+    /// gates: `select_compaction_window(force = true)` selects a window from a
+    /// view that every gate above rejects.
+    #[test]
+    fn manual_compaction_ignores_the_automatic_gates() {
+        let view = filler("f", MIN_MANUAL_COMPACT_MESSAGES + 2);
+
+        assert!(!should_auto_compact(
+            &view,
+            None,
+            &[],
+            Some(MIN_MESSAGES_SINCE_COMPACTION)
+        ));
+
+        let window = select_compaction_window(&view, true).expect("manual window");
+        assert!(!window.messages.is_empty());
     }
 
     /// The summariser input is budgeted: an oversized transcript is cut to a
@@ -1315,5 +1568,214 @@ mod tests {
             CompactionAttempt::Failed("first".to_string()),
             "the earliest failure is the one that let the context grow"
         );
+    }
+
+    /// DB-backed tests for `load_provider_history`, against a real migrated
+    /// sqlite pool (same harness `repository_tests` uses).
+    mod provider_history {
+        use super::super::*;
+        use crate::assistant::repository::{
+            complete_compaction, create_compaction, create_message, create_session,
+        };
+        use crate::assistant::types::{SessionContext, SessionKind};
+        use crate::config::ExecutionCapabilityConfig;
+        use crate::db::test_support::workspace_pool;
+
+        fn sample_context() -> SessionContext {
+            SessionContext {
+                workspace_id: Some("ws-1".to_string()),
+                tool_scopes: vec![],
+                mcp_server_ids: vec![],
+                execution: ExecutionCapabilityConfig::default(),
+                cli_session_id: None,
+                cli_session_provider: None,
+                automation_id: None,
+                agent_workspace_id: None,
+                automation_name: None,
+                inter_agent_call: None,
+                workspace_agents: vec![],
+            }
+        }
+
+        async fn db_session() -> (tempfile::TempDir, crate::db::DbPool, AssistantSession) {
+            let (tmp, pool) = workspace_pool().await;
+            let session = create_session(
+                &pool,
+                crate::assistant::repository::CreateSessionParams {
+                    kind: SessionKind::Interactive,
+                    title: None,
+                    context: sample_context(),
+                },
+            )
+            .await
+            .unwrap();
+            (tmp, pool, session)
+        }
+
+        async fn add_message(
+            pool: &crate::db::DbPool,
+            session_id: &str,
+            text: &str,
+        ) -> AssistantMessage {
+            create_message(
+                pool,
+                crate::assistant::repository::CreateMessageParams {
+                    session_id: session_id.to_string(),
+                    role: MessageRole::User,
+                    content: vec![ContentPart::Text {
+                        text: text.to_string(),
+                    }],
+                    provider_metadata: None,
+                },
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn add_summary_message(
+            pool: &crate::db::DbPool,
+            session_id: &str,
+            text: &str,
+        ) -> AssistantMessage {
+            create_message(
+                pool,
+                crate::assistant::repository::CreateMessageParams {
+                    session_id: session_id.to_string(),
+                    role: MessageRole::System,
+                    content: vec![ContentPart::Text {
+                        text: text.to_string(),
+                    }],
+                    provider_metadata: Some(serde_json::json!({
+                        "source": COMPACTION_METADATA_SOURCE,
+                    })),
+                },
+            )
+            .await
+            .unwrap()
+        }
+
+        async fn complete_compaction_over(
+            pool: &crate::db::DbPool,
+            session_id: &str,
+            source_to: &AssistantMessage,
+            summary: &AssistantMessage,
+        ) {
+            let compaction = create_compaction(
+                pool,
+                crate::assistant::repository::CreateCompactionParams {
+                    session_id: session_id.to_string(),
+                    trigger: CompactionTrigger::Automatic,
+                    strategy: CompactionStrategy::LocalSummary,
+                    source_from_message_id: None,
+                    source_to_message_id: Some(source_to.id.clone()),
+                    created_run_id: None,
+                    protocol_id: "test-protocol".to_string(),
+                    model_id: "test-model".to_string(),
+                    input_message_count: 0,
+                },
+            )
+            .await
+            .unwrap();
+            complete_compaction(pool, &compaction.id, &summary.id)
+                .await
+                .unwrap();
+        }
+
+        fn view_ids(history: &ProviderHistory) -> Vec<&str> {
+            history.view.iter().map(|m| m.id.as_str()).collect()
+        }
+
+        /// The healthy compacted path: boundary row excluded, standing
+        /// summary leads, stale summaries filtered, since-count right.
+        #[tokio::test]
+        async fn compacted_session_view_leads_with_summary_and_excludes_boundary_and_stale_summaries(
+        ) {
+            let (_tmp, pool, session) = db_session().await;
+
+            // Pre-boundary history the first compaction summarizes.
+            add_message(&pool, &session.id, "one").await;
+            let m2 = add_message(&pool, &session.id, "two").await;
+            add_message(&pool, &session.id, "three").await;
+            let boundary = add_message(&pool, &session.id, "four").await;
+            // Compaction #1 covers m1..m2 but its summary lands after `boundary`
+            // in (created_at, id) order — realistic, since the summary row is
+            // written after the window is chosen.
+            let stale_summary = add_summary_message(&pool, &session.id, "summary one").await;
+            complete_compaction_over(&pool, &session.id, &m2, &stale_summary).await;
+            // Retained tail of the second compaction, plus one message that
+            // arrives after the standing summary (counts toward hysteresis).
+            let m5 = add_message(&pool, &session.id, "five").await;
+            let summary = add_summary_message(&pool, &session.id, "summary two").await;
+            complete_compaction_over(&pool, &session.id, &boundary, &summary).await;
+            let m6 = add_message(&pool, &session.id, "six").await;
+
+            let history = load_provider_history(&pool, &session.id).await.unwrap();
+
+            // Boundary row itself (and everything before it) is gone; the
+            // stale summary is filtered even though it sits after the
+            // boundary in the total order; the standing summary leads.
+            assert_eq!(
+                view_ids(&history),
+                vec![summary.id.as_str(), m5.id.as_str(), m6.id.as_str()]
+            );
+            assert_eq!(
+                history.summary_message.as_ref().map(|m| m.id.as_str()),
+                Some(summary.id.as_str())
+            );
+            // Only m6 was persisted after the standing summary, not the whole
+            // tail (m5 predates it).
+            assert_eq!(history.messages_since_compaction, Some(1));
+            assert_eq!(
+                history
+                    .boundary
+                    .as_ref()
+                    .map(|(created_at, id)| (*created_at, id.as_str())),
+                Some((boundary.created_at, boundary.id.as_str()))
+            );
+        }
+
+        #[tokio::test]
+        async fn never_compacted_session_returns_full_history() {
+            let (_tmp, pool, session) = db_session().await;
+            let m1 = add_message(&pool, &session.id, "one").await;
+            let m2 = add_message(&pool, &session.id, "two").await;
+
+            let history = load_provider_history(&pool, &session.id).await.unwrap();
+
+            assert_eq!(view_ids(&history), vec![m1.id.as_str(), m2.id.as_str()]);
+            assert!(history.summary_message.is_none());
+            assert_eq!(history.messages_since_compaction, None);
+            assert!(history.boundary.is_none());
+        }
+
+        /// A completed compaction whose summary row lives in another session
+        /// is degenerate: the loader must fall back to the full-session view
+        /// instead of splicing another session's rows into the tail.
+        #[tokio::test]
+        async fn degenerate_compaction_row_falls_back_to_full_history() {
+            let (_tmp, pool, session) = db_session().await;
+            let m1 = add_message(&pool, &session.id, "one").await;
+            let m2 = add_message(&pool, &session.id, "two").await;
+
+            let other = create_session(
+                &pool,
+                crate::assistant::repository::CreateSessionParams {
+                    kind: SessionKind::Interactive,
+                    title: None,
+                    context: sample_context(),
+                },
+            )
+            .await
+            .unwrap();
+            let foreign = add_message(&pool, &other.id, "elsewhere").await;
+            complete_compaction_over(&pool, &session.id, &foreign, &foreign).await;
+
+            let history = load_provider_history(&pool, &session.id).await.unwrap();
+
+            assert_eq!(view_ids(&history), vec![m1.id.as_str(), m2.id.as_str()]);
+            assert!(history.summary_message.is_none());
+            assert_eq!(history.messages_since_compaction, None);
+            assert!(history.boundary.is_none());
+        }
     }
 }

@@ -376,7 +376,7 @@ pub async fn list_messages(
         SELECT id, session_id, role, content_json, provider_metadata_json, created_at
         FROM assistant_messages
         WHERE session_id = ?
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, id ASC
         "#,
     )
     .bind(session_id)
@@ -385,6 +385,60 @@ pub async fn list_messages(
     .map_err(|e| format!("Failed to load assistant messages: {}", e))?;
 
     rows.iter().map(map_message_row).collect()
+}
+
+/// Messages strictly after `(created_at, id)` in the session's total order
+/// `(created_at ASC, id ASC)` — the same order `list_messages` returns, so
+/// callers can splice bounded ranges into a full ordering without drift.
+pub async fn list_messages_after(
+    pool: &DbPool,
+    session_id: &str,
+    after: (i64, &str),
+) -> Result<Vec<AssistantMessage>, String> {
+    let (after_created_at, after_message_id) = after;
+    let rows = sqlx::query(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+        FROM assistant_messages
+        WHERE session_id = ?
+          AND (created_at > ? OR (created_at = ? AND id > ?))
+        ORDER BY created_at ASC, id ASC
+        "#,
+    )
+    .bind(session_id)
+    .bind(after_created_at)
+    .bind(after_created_at)
+    .bind(after_message_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load assistant messages after boundary: {}", e))?;
+
+    rows.iter().map(map_message_row).collect()
+}
+
+/// The newest message of `role` in the session, or `None` if the session has
+/// none. Ties on `created_at` break by `id`, matching `list_messages`.
+pub async fn latest_message_by_role(
+    pool: &DbPool,
+    session_id: &str,
+    role: MessageRole,
+) -> Result<Option<AssistantMessage>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+        FROM assistant_messages
+        WHERE session_id = ? AND role = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(session_id)
+    .bind(to_json_string(&role)?)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load latest message by role: {}", e))?;
+
+    rows.map(|row| map_message_row(&row)).transpose()
 }
 
 pub async fn list_messages_before(
@@ -668,16 +722,46 @@ pub async fn update_pending_queued_message(
     Ok(Some(message))
 }
 
+/// `created_at` for a new row, strictly greater than the session's newest
+/// row: same-millisecond inserts tie-break on random ids in the
+/// `(created_at, id)` load order, which can order a tool result before the
+/// assistant message that issued it (and split the pair at a later
+/// compaction boundary).
+async fn next_created_at<'e, E>(
+    executor: E,
+    session_id: &str,
+    requested_now: i64,
+) -> Result<i64, String>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
+    let last: Option<i64> = sqlx::query(
+        "SELECT MAX(created_at) AS max_created_at FROM assistant_messages WHERE session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(executor)
+    .await
+    .map_err(|e| format!("Failed to load newest message timestamp: {}", e))?
+    .get("max_created_at");
+    Ok(last.map_or(requested_now, |last| requested_now.max(last + 1)))
+}
+
 pub async fn create_message(
     pool: &DbPool,
     params: CreateMessageParams,
 ) -> Result<AssistantMessage, String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start assistant message transaction: {}", e))?;
+
+    let created_at = next_created_at(&mut *tx, &params.session_id, now_ms()).await?;
     let message = AssistantMessage {
         id: Uuid::new_v4().to_string(),
         session_id: params.session_id,
         role: params.role,
         content: params.content,
-        created_at: now_ms(),
+        created_at,
         provider_metadata: params.provider_metadata,
     };
 
@@ -700,9 +784,13 @@ pub async fn create_message(
             .transpose()?,
     )
     .bind(message.created_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to create assistant message: {}", e))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit assistant message transaction: {}", e))?;
 
     touch_session(pool, &message.session_id).await?;
 
@@ -737,19 +825,20 @@ pub async fn create_user_message_with_content(
     queue_connection_id: Option<&str>,
 ) -> Result<AssistantMessage, String> {
     let now = now_ms();
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start assistant message transaction: {}", e))?;
+
+    let created_at = next_created_at(&mut *tx, &session_id, now).await?;
     let message = AssistantMessage {
         id: Uuid::new_v4().to_string(),
         session_id,
         role: MessageRole::User,
         content,
-        created_at: now,
+        created_at,
         provider_metadata: None,
     };
-
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start assistant message transaction: {}", e))?;
 
     sqlx::query(
         r#"

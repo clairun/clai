@@ -987,3 +987,246 @@ async fn test_create_session_and_link_task_links_atomically() {
         "task-linked session excluded by anti-join"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Message ordering and bounded queries
+// ---------------------------------------------------------------------------
+
+/// `list_messages` orders by `(created_at, id)`. `list_messages_before` and
+/// `list_messages_after` already keyed on that pair; the full loader ordering
+/// by `created_at` alone left same-millisecond messages in arbitrary DB order,
+/// so a page boundary could split differently from the full load. These tests
+/// pin the total order all three loaders share.
+async fn message_test_session() -> (tempfile::TempDir, crate::db::DbPool, AssistantSession) {
+    let (tmp, pool) = workspace_pool().await;
+    let session = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    (tmp, pool, session)
+}
+
+fn text_message(session_id: &str, role: MessageRole, text: &str) -> CreateMessageParams {
+    CreateMessageParams {
+        session_id: session_id.to_string(),
+        role,
+        content: vec![ContentPart::Text {
+            text: text.to_string(),
+        }],
+        provider_metadata: None,
+    }
+}
+
+/// Force every message in `messages` to the same `created_at`, so the tests
+/// exercise the id tiebreak rather than racing the clock.
+async fn force_created_at(pool: &crate::db::DbPool, created_at: i64, ids: &[&str]) {
+    for id in ids {
+        sqlx::query("UPDATE assistant_messages SET created_at = ? WHERE id = ?")
+            .bind(created_at)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_list_messages_orders_same_timestamp_by_id() {
+    let (_tmp, pool, session) = message_test_session().await;
+
+    let first = create_message(&pool, text_message(&session.id, MessageRole::User, "one"))
+        .await
+        .unwrap();
+    let second = create_message(&pool, text_message(&session.id, MessageRole::User, "two"))
+        .await
+        .unwrap();
+    let third = create_message(&pool, text_message(&session.id, MessageRole::User, "three"))
+        .await
+        .unwrap();
+    force_created_at(&pool, 1_000, &[&first.id, &second.id, &third.id]).await;
+
+    let loaded = list_messages(&pool, &session.id).await.unwrap();
+    let mut expected = [first, second, third];
+    expected.sort_by(|a, b| a.id.cmp(&b.id));
+    let expected_ids: Vec<&str> = expected.iter().map(|m| m.id.as_str()).collect();
+    let loaded_ids: Vec<&str> = loaded.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(loaded_ids, expected_ids);
+
+    // The bounded loader keyed on (created_at, id) agrees with the full load,
+    // so a window never reorders messages the full load emits in sequence.
+    let after = list_messages_after(&pool, &session.id, (1_000, &expected[1].id))
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, expected[2].id);
+}
+
+#[tokio::test]
+async fn test_list_messages_after_returns_strictly_later_messages_in_order() {
+    let (_tmp, pool, session) = message_test_session().await;
+
+    let early = create_message(&pool, text_message(&session.id, MessageRole::User, "early"))
+        .await
+        .unwrap();
+    let boundary = create_message(
+        &pool,
+        text_message(&session.id, MessageRole::Assistant, "b"),
+    )
+    .await
+    .unwrap();
+    let late_a = create_message(
+        &pool,
+        text_message(&session.id, MessageRole::User, "late-a"),
+    )
+    .await
+    .unwrap();
+    let late_b = create_message(
+        &pool,
+        text_message(&session.id, MessageRole::User, "late-b"),
+    )
+    .await
+    .unwrap();
+    let other_session = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    create_message(
+        &pool,
+        text_message(&other_session.id, MessageRole::User, "elsewhere"),
+    )
+    .await
+    .unwrap();
+
+    force_created_at(&pool, 1_000, &[&early.id]).await;
+    force_created_at(&pool, 2_000, &[&boundary.id]).await;
+    force_created_at(&pool, 3_000, &[&late_a.id, &late_b.id]).await;
+
+    let tail = list_messages_after(&pool, &session.id, (2_000, &boundary.id))
+        .await
+        .unwrap();
+    let tail_ids: Vec<&str> = tail.iter().map(|m| m.id.as_str()).collect();
+    let mut expected = [late_a, late_b];
+    expected.sort_by(|a, b| a.id.cmp(&b.id));
+    let expected_ids: Vec<&str> = expected.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(tail_ids, expected_ids);
+    assert!(!tail_ids.contains(&early.id.as_str()));
+    assert!(!tail_ids.contains(&boundary.id.as_str()));
+
+    // A same-timestamp message only counts as after the boundary when its id
+    // is greater: the boundary row must not come back for its own key, and
+    // whichever late messages share its timestamp do only when their ids sort
+    // after it.
+    force_created_at(&pool, 3_000, &[&boundary.id]).await;
+    let tail = list_messages_after(&pool, &session.id, (3_000, &boundary.id))
+        .await
+        .unwrap();
+    let tail_ids: Vec<&str> = tail.iter().map(|m| m.id.as_str()).collect();
+    assert!(!tail_ids.contains(&boundary.id.as_str()));
+    for id in &tail_ids {
+        assert!(expected_ids.contains(id));
+        assert!(id > &boundary.id.as_str());
+    }
+    assert!(tail_ids.len() <= expected_ids.len());
+}
+
+#[tokio::test]
+async fn test_latest_message_by_role_returns_newest_of_role() {
+    let (_tmp, pool, session) = message_test_session().await;
+
+    let user_old = create_message(&pool, text_message(&session.id, MessageRole::User, "old"))
+        .await
+        .unwrap();
+    let assistant = create_message(
+        &pool,
+        text_message(&session.id, MessageRole::Assistant, "a"),
+    )
+    .await
+    .unwrap();
+    let user_new = create_message(&pool, text_message(&session.id, MessageRole::User, "new"))
+        .await
+        .unwrap();
+    force_created_at(&pool, 1_000, &[&user_old.id, &assistant.id]).await;
+    force_created_at(&pool, 2_000, &[&user_new.id]).await;
+
+    let latest_user = latest_message_by_role(&pool, &session.id, MessageRole::User)
+        .await
+        .unwrap()
+        .expect("a user message exists");
+    assert_eq!(latest_user.id, user_new.id);
+
+    // An absent role yields None instead of falling across roles.
+    let latest_tool = latest_message_by_role(&pool, &session.id, MessageRole::Tool)
+        .await
+        .unwrap();
+    assert!(latest_tool.is_none());
+}
+
+async fn pin_session_max_into_future(pool: &crate::db::DbPool, id: &str) -> i64 {
+    // Pin the row's created_at 10s past wall clock, so the next insert can
+    // only land past the session max via the bump, never via clock progress.
+    let pinned = chrono::Utc::now().timestamp_millis() + 10_000;
+    sqlx::query("UPDATE assistant_messages SET created_at = ? WHERE id = ?")
+        .bind(pinned)
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    pinned
+}
+
+#[tokio::test]
+async fn test_create_message_bumps_same_millisecond_inserts_into_insertion_order() {
+    let (_tmp, pool, session) = message_test_session().await;
+
+    let first = create_message(&pool, text_message(&session.id, MessageRole::User, "one"))
+        .await
+        .unwrap();
+    let pinned_max = pin_session_max_into_future(&pool, &first.id).await;
+
+    let second = create_message(&pool, text_message(&session.id, MessageRole::Tool, "two"))
+        .await
+        .unwrap();
+
+    // The pinned max sits 10s ahead of wall clock, so only the bump can
+    // place this insert strictly past it.
+    assert!(second.created_at > pinned_max);
+    let loaded = list_messages(&pool, &session.id).await.unwrap();
+    let loaded_ids: Vec<&str> = loaded.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(loaded_ids, vec![first.id.as_str(), second.id.as_str()]);
+    assert!(loaded[0].created_at < loaded[1].created_at);
+}
+
+#[tokio::test]
+async fn test_create_user_message_bumps_same_millisecond_inserts_into_insertion_order() {
+    let (_tmp, pool, session) = message_test_session().await;
+
+    let first = create_message(
+        &pool,
+        text_message(&session.id, MessageRole::Assistant, "one"),
+    )
+    .await
+    .unwrap();
+    let pinned_max = pin_session_max_into_future(&pool, &first.id).await;
+
+    let second = create_user_message(&pool, session.id.clone(), "two".to_string(), None)
+        .await
+        .unwrap();
+
+    assert!(second.created_at > pinned_max);
+    let loaded = list_messages(&pool, &session.id).await.unwrap();
+    let loaded_ids: Vec<&str> = loaded.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(loaded_ids, vec![first.id.as_str(), second.id.as_str()]);
+    assert!(loaded[0].created_at < loaded[1].created_at);
+}

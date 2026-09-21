@@ -219,10 +219,13 @@ pub async fn run_session_turn(
         // assistant turn, and merge consecutive same-role messages. The DB stays
         // the source of truth; this only shapes what the provider sees so a
         // mid-stream hangup or stacked user typing can't poison subsequent runs.
-        let mut messages = repository::list_messages(&deps.pool, &session.id).await?;
-        let current_provider_history =
-            compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
-        if compaction::should_auto_compact(&current_provider_history, &tool_defs) {
+        let mut history = compaction::load_provider_history(&deps.pool, &session.id).await?;
+        if compaction::should_auto_compact(
+            &history.view,
+            Some(&system_message),
+            &tool_defs,
+            history.messages_since_compaction,
+        ) {
             match compaction::compact_session_history(
                 &deps.pool,
                 &session,
@@ -245,7 +248,7 @@ pub async fn run_session_turn(
                             summary_message: outcome.summary_message,
                         },
                     );
-                    messages = repository::list_messages(&deps.pool, &session.id).await?;
+                    history = compaction::load_provider_history(&deps.pool, &session.id).await?;
                 }
                 // `force = false`: the *automatic* window selector declined,
                 // which says nothing about what a manual `/compact` could do.
@@ -261,16 +264,32 @@ pub async fn run_session_turn(
                 }
             }
         }
-        let message_ids_in_snapshot: HashSet<&str> =
-            messages.iter().map(|message| message.id.as_str()).collect();
-        let queued_message_ids_in_request: Vec<String> =
-            repository::list_pending_queued_message_ids(&deps.pool, &session.id)
-                .await?
-                .into_iter()
-                .filter(|id| message_ids_in_snapshot.contains(id.as_str()))
-                .collect();
-        let provider_history =
-            compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
+        let provider_history = history.view;
+        let message_ids_in_request: HashSet<&str> = provider_history
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        let mut queued_message_ids_in_request: Vec<String> = Vec::new();
+        for id in repository::list_pending_queued_message_ids(&deps.pool, &session.id).await? {
+            if message_ids_in_request.contains(id.as_str()) {
+                queued_message_ids_in_request.push(id);
+                continue;
+            }
+            // A pending user message missing from the view was either queued
+            // after this iteration loaded (leave it for its own run) or
+            // summarized away by the standing compaction (its content reached
+            // the provider inside the summary, so it counts as delivered).
+            if let Some((boundary_created_at, boundary_id)) = &history.boundary {
+                if let Some(message) = repository::get_message(&deps.pool, &id).await? {
+                    let at_or_before_boundary = message.created_at < *boundary_created_at
+                        || (message.created_at == *boundary_created_at
+                            && message.id <= *boundary_id);
+                    if at_or_before_boundary {
+                        queued_message_ids_in_request.push(id);
+                    }
+                }
+            }
+        }
         let normalized = normalize_history_for_provider(&provider_history);
         let supports_images = providers::connection_supports_images(&connection);
         // Drop image parts from history when the active connection can't accept
