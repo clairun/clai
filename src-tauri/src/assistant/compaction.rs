@@ -317,7 +317,7 @@ pub async fn compact_for_context_limit_recovery(
     .await
 }
 
-fn provider_history_messages_with_compaction(
+pub(crate) fn provider_history_messages_with_compaction(
     messages: &[AssistantMessage],
     latest: Option<&AssistantCompaction>,
 ) -> Vec<AssistantMessage> {
@@ -353,7 +353,7 @@ fn provider_history_messages_with_compaction(
 
     match (summary, source_to_idx) {
         (Some(summary), Some(source_to_idx)) => {
-            let mut out = vec![summary];
+            let mut out = vec![provider_bound_summary(summary)];
             out.extend(
                 messages
                     .iter()
@@ -371,6 +371,29 @@ fn provider_history_messages_with_compaction(
             .cloned()
             .collect(),
     }
+}
+
+/// The provider-bound form of the persisted compaction summary. Z.ai (GLM)
+/// rejects a `messages` array containing no user message ("The messages
+/// parameter is illegal"), which is exactly what a post-compaction tail of
+/// only assistant/tool messages produced while the summary was sent as
+/// system. The persisted row keeps role System; only the provider-facing
+/// copy becomes a user message. No wrapper is added: the persisted
+/// `SUMMARY_MESSAGE_PREAMBLE` already frames the text as a compaction
+/// summary, which suffices for a user-role message.
+fn provider_bound_summary(mut summary: AssistantMessage) -> AssistantMessage {
+    summary.role = MessageRole::User;
+    if !summary
+        .content
+        .iter()
+        .any(|part| matches!(part, ContentPart::Text { .. }))
+    {
+        tracing::debug!(
+            id = %summary.id,
+            "compaction summary has no Text part; role flips without the preamble framing"
+        );
+    }
+    summary
 }
 
 fn select_compaction_window(
@@ -785,7 +808,7 @@ fn provider_error_message(error: ProviderError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::{ContentPart, MessageRole};
+    use crate::assistant::types::{CompactionStatus, ContentPart, MessageRole};
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
@@ -948,6 +971,139 @@ mod tests {
         view.insert(0, summary);
 
         assert!(!should_auto_compact(&view, &[]));
+    }
+
+    fn summary_msg(id: &str) -> AssistantMessage {
+        let mut summary = msg(
+            id,
+            MessageRole::System,
+            vec![text(&summary_message_text("earlier conversation summary"))],
+        );
+        summary.provider_metadata = Some(serde_json::json!({
+            "source": COMPACTION_METADATA_SOURCE,
+        }));
+        summary
+    }
+
+    fn completed_compaction(summary_id: &str, source_to_id: &str) -> AssistantCompaction {
+        AssistantCompaction {
+            id: "compaction".to_string(),
+            session_id: "s".to_string(),
+            trigger: CompactionTrigger::Automatic,
+            strategy: CompactionStrategy::LocalSummary,
+            status: CompactionStatus::Completed,
+            source_from_message_id: Some("old-0".to_string()),
+            source_to_message_id: Some(source_to_id.to_string()),
+            summary_message_id: Some(summary_id.to_string()),
+            created_run_id: None,
+            protocol_id: "openai".to_string(),
+            model_id: "glm-5.3".to_string(),
+            input_message_count: 2,
+            created_at: 0,
+            completed_at: None,
+            error: None,
+        }
+    }
+
+    /// Regression (GLM/Z.ai 400 "The messages parameter is illegal"): when the
+    /// compaction cut falls after the last user message, the tail is all
+    /// assistant/tool messages. The provider-bound history must still lead
+    /// with a user message — the summary — or OpenAI-compatible providers
+    /// that require one reject the whole request.
+    #[test]
+    fn compacted_history_with_only_tool_tail_leads_with_user_summary() {
+        let messages = vec![
+            msg("old-0", MessageRole::User, vec![text("do the work")]),
+            tool_use_msg("old-1", &["call-1"]),
+            tool_result_msg("cut", "call-1"),
+            summary_msg("summary"),
+            tool_use_msg("tail-asst", &["call-2"]),
+            tool_result_msg("tail-res", "call-2"),
+        ];
+        let latest = completed_compaction("summary", "cut");
+
+        let out = provider_history_messages_with_compaction(&messages, Some(&latest));
+
+        assert_eq!(
+            out.iter().map(|m| m.role.clone()).collect::<Vec<_>>(),
+            vec![
+                MessageRole::User,
+                MessageRole::Assistant,
+                MessageRole::Tool
+            ],
+            "provider history must be [user(summary), assistant, tool] — no system role and never user-less"
+        );
+        assert!(
+            out[0].role == MessageRole::User
+                && matches!(&out[0].content[0], ContentPart::Text { text }
+                    if text.starts_with(SUMMARY_MESSAGE_PREAMBLE)
+                        && text.contains("earlier conversation summary")),
+            "the user-role summary is framed by the persisted preamble alone, no extra wrapper"
+        );
+        assert!(
+            is_compaction_summary_message(&out[0]),
+            "the provider-bound summary keeps its compaction metadata for downstream filters"
+        );
+        assert_eq!(
+            messages[3].role,
+            MessageRole::System,
+            "the persisted summary row stays System; only the provider copy is User"
+        );
+    }
+
+    /// A tail that still contains user messages keeps them, and the summary is
+    /// user there too — never a second system message after the system prompt.
+    #[test]
+    fn compacted_history_with_user_tail_keeps_user_messages() {
+        let messages = vec![
+            msg("old-0", MessageRole::User, vec![text("earlier request")]),
+            msg(
+                "old-1",
+                MessageRole::Assistant,
+                vec![text("earlier answer")],
+            ),
+            msg("cut", MessageRole::User, vec![text("the cut message")]),
+            summary_msg("summary"),
+            msg("tail-user", MessageRole::User, vec![text("follow-up")]),
+            msg("tail-asst", MessageRole::Assistant, vec![text("answer")]),
+        ];
+        let latest = completed_compaction("summary", "cut");
+
+        let out = provider_history_messages_with_compaction(&messages, Some(&latest));
+
+        assert_eq!(
+            out.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["summary", "tail-user", "tail-asst"]
+        );
+        assert!(out.iter().all(|m| m.role != MessageRole::System));
+        assert_eq!(out[0].role, MessageRole::User);
+        assert_eq!(out[1].role, MessageRole::User);
+    }
+
+    /// Regression (GLM), minimal failing shape: the compaction cut is the
+    /// FINAL message of the session, so the tail is empty. The provider
+    /// history must be exactly [User(summary)] — one message, never a
+    /// system-only or user-less array.
+    #[test]
+    fn compacted_history_with_empty_tail_is_summary_only() {
+        let messages = vec![
+            msg("old-0", MessageRole::User, vec![text("do the work")]),
+            tool_use_msg("old-1", &["call-1"]),
+            tool_result_msg("cut", "call-1"),
+            summary_msg("summary"),
+        ];
+        let latest = completed_compaction("summary", "cut");
+
+        let out = provider_history_messages_with_compaction(&messages, Some(&latest));
+
+        assert_eq!(out.len(), 1, "empty tail: the summary alone is the history");
+        assert_eq!(out[0].id, "summary");
+        assert_eq!(out[0].role, MessageRole::User);
+        assert!(
+            matches!(&out[0].content[0], ContentPart::Text { text }
+                if text.starts_with(SUMMARY_MESSAGE_PREAMBLE)),
+            "the single message is the framed summary"
+        );
     }
 
     /// The summariser input is budgeted: an oversized transcript is cut to a
