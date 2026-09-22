@@ -417,6 +417,7 @@ pub async fn run_session_turn(
                     &mcp_config_path,
                     &input.cancel_token,
                     &input.trigger,
+                    &system_prompt,
                     &mut assistant_slot,
                     &mut conversation,
                     &run_input,
@@ -436,6 +437,7 @@ pub async fn run_session_turn(
                         binding_guard.token(),
                         &input.cancel_token,
                         &input.trigger,
+                        &system_prompt,
                         &mut assistant_slot,
                         &mut conversation,
                         &run_input,
@@ -451,6 +453,7 @@ pub async fn run_session_turn(
                         binding_guard.token(),
                         &input.cancel_token,
                         &input.trigger,
+                        &system_prompt,
                         &mut assistant_slot,
                         &mut conversation,
                         &run_input,
@@ -468,6 +471,7 @@ pub async fn run_session_turn(
                     binding_guard.token(),
                     &input.cancel_token,
                     &input.trigger,
+                    &system_prompt,
                     &mut assistant_slot,
                     &mut conversation,
                     &run_input,
@@ -780,19 +784,19 @@ async fn ensure_assistant_message_slot(
     if let Some(existing) = slot.as_ref() {
         return Ok(existing.clone());
     }
-    let assistant_message = repository::create_message(
-        &deps.pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::Assistant,
-            content: vec![ContentPart::Text {
-                text: String::new(),
-            }],
-            provider_metadata: Some(serde_json::json!({ "source": metadata_source })),
-        },
-    )
-    .await?;
-    conversation.upsert(assistant_message.clone());
+    let assistant_message = conversation
+        .create_message(
+            &deps.pool,
+            CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: String::new(),
+                }],
+                provider_metadata: Some(serde_json::json!({ "source": metadata_source })),
+            },
+        )
+        .await?;
     let _ = emit_event(
         &deps.app,
         session,
@@ -1171,6 +1175,7 @@ async fn run_claude_turn(
     mcp_config_path: &PathBuf,
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
+    system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut compaction::RunConversation,
     run_input: &[AssistantMessage],
@@ -1187,7 +1192,6 @@ async fn run_claude_turn(
         run_input,
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger);
     let mut assistant_message = ensure_assistant_message_slot(
         deps,
         session,
@@ -1443,6 +1447,7 @@ async fn run_claude_turn(
             &value,
             &mut state,
             &mut result_error,
+            conversation,
         )
         .await?;
 
@@ -1559,6 +1564,7 @@ async fn run_codex_turn(
     mcp_token: &str,
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
+    system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut compaction::RunConversation,
     run_input: &[AssistantMessage],
@@ -1576,8 +1582,7 @@ async fn run_codex_turn(
         run_input,
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger);
-    let developer_instructions = codex_developer_instructions(&system_prompt);
+    let developer_instructions = codex_developer_instructions(system_prompt);
     let prompt_chars = prompt.chars().count();
     trace_codex_input_sizes(run_id, "exec", &developer_instructions, &prompt);
     if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
@@ -1697,7 +1702,6 @@ async fn run_codex_turn(
                     run_id,
                     &assistant_message,
                     &state.parts,
-                    &mut state.persisted_messages,
                     conversation,
                 )
                 .await?;
@@ -1724,6 +1728,7 @@ async fn run_codex_turn(
             &value,
             &mut state,
             &mut result_error,
+            conversation,
         )
         .await?;
     }
@@ -1738,7 +1743,6 @@ async fn run_codex_turn(
         run_id,
         &assistant_message,
         &state.parts,
-        &mut state.persisted_messages,
         conversation,
     )
     .await?;
@@ -1784,6 +1788,7 @@ async fn run_codex_turn_app_server(
     mcp_token: &str,
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
+    system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut compaction::RunConversation,
     run_input: &[AssistantMessage],
@@ -1803,8 +1808,7 @@ async fn run_codex_turn_app_server(
         run_input,
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger);
-    let developer_instructions = codex_developer_instructions(&system_prompt);
+    let developer_instructions = codex_developer_instructions(system_prompt);
     let prompt_chars = prompt.chars().count();
     trace_codex_input_sizes(run_id, "app-server", &developer_instructions, &prompt);
     if prompt_chars > CODEX_TURN_INPUT_MAX_CHARS {
@@ -1951,7 +1955,6 @@ async fn run_codex_turn_app_server(
                     run_id,
                     &assistant_message,
                     &state.parts,
-                    &mut state.persisted_messages,
                     conversation,
                 )
                 .await?;
@@ -2064,6 +2067,7 @@ async fn run_codex_turn_app_server(
             &mut state,
             &mut result_error,
             &mut active_turn_id,
+            conversation,
         )
         .await?;
         if turn_done {
@@ -2078,7 +2082,6 @@ async fn run_codex_turn_app_server(
         run_id,
         &assistant_message,
         &state.parts,
-        &mut state.persisted_messages,
         conversation,
     )
     .await?;
@@ -2175,6 +2178,7 @@ async fn handle_app_server_notification(
     state: &mut CodexStreamState,
     result_error: &mut Option<String>,
     active_turn_id: &mut Option<String>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<bool, LocalAgentRunError> {
     let null = Value::Null;
     let params = message.get("params").unwrap_or(&null);
@@ -2209,6 +2213,7 @@ async fn handle_app_server_notification(
                             state,
                             &normalized,
                             false,
+                            conversation,
                         )
                         .await?;
                     }
@@ -2226,6 +2231,7 @@ async fn handle_app_server_notification(
                         state,
                         &normalized,
                         true,
+                        conversation,
                     )
                     .await?;
                 }
@@ -2357,19 +2363,13 @@ async fn split_codex_assistant_message(
             run_id,
             current,
             &state.parts,
-            &mut state.persisted_messages,
             conversation,
         )
         .await?;
     } else {
         // Nothing emitted yet: drop the empty placeholder rather than leave an
         // empty bubble before the user's steered message.
-        if repository::delete_message(&deps.pool, &current.id)
-            .await
-            .is_ok()
-        {
-            conversation.remove(&current.id);
-        }
+        let _ = conversation.delete_message(&deps.pool, &current.id).await;
         let _ = emit_event(
             &deps.app,
             session,
@@ -2554,6 +2554,7 @@ async fn run_opencode_turn(
     mcp_token: &str,
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
+    system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut compaction::RunConversation,
     run_input: &[AssistantMessage],
@@ -2571,8 +2572,7 @@ async fn run_opencode_turn(
         run_input,
     )
     .await?;
-    let system_prompt = system_prompt_text(&deps.app, session, trigger);
-    let prompt = opencode_turn_prompt(&system_prompt, &prompt);
+    let prompt = opencode_turn_prompt(system_prompt, &prompt);
 
     let assistant_message = ensure_assistant_message_slot(
         deps,
@@ -2675,7 +2675,6 @@ async fn run_opencode_turn(
                     run_id,
                     &assistant_message,
                     &state.parts,
-                    &mut state.persisted_messages,
                     conversation,
                 )
                 .await?;
@@ -2703,6 +2702,7 @@ async fn run_opencode_turn(
             &value,
             &mut state,
             &mut result_error,
+            conversation,
         )
         .await?;
     }
@@ -2717,7 +2717,6 @@ async fn run_opencode_turn(
         run_id,
         &assistant_message,
         &state.parts,
-        &mut state.persisted_messages,
         conversation,
     )
     .await?;
@@ -3011,19 +3010,19 @@ async fn prepare_prompt(
     run_input: &[AssistantMessage],
 ) -> Result<String, LocalAgentRunError> {
     let prompt = if let Some(trigger_content) = build_trigger_message(session, trigger) {
-        let boundary_msg = repository::create_message(
-            &deps.pool,
-            CreateMessageParams {
-                session_id: session.id.clone(),
-                role: trigger_content.role.clone(),
-                content: trigger_content.content.clone(),
-                provider_metadata: Some(serde_json::json!({
-                    "source": format!("{}-trigger", metadata_source),
-                })),
-            },
-        )
-        .await?;
-        conversation.upsert(boundary_msg.clone());
+        let boundary_msg = conversation
+            .create_message(
+                &deps.pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: trigger_content.role.clone(),
+                    content: trigger_content.content.clone(),
+                    provider_metadata: Some(serde_json::json!({
+                        "source": format!("{}-trigger", metadata_source),
+                    })),
+                },
+            )
+            .await?;
         let _ = emit_event(
             &deps.app,
             session,
@@ -3361,9 +3360,6 @@ struct ClaudeStreamState {
     unresolved_tool_use_ids: std::collections::HashSet<String>,
     pending_tool_results: HashMap<String, Value>,
     last_update_emit_at: Option<std::time::Instant>,
-    /// Tool-result rows persisted during this attempt, handed to the run's
-    /// conversation when the assistant message is finalized.
-    persisted_messages: Vec<AssistantMessage>,
 }
 
 /// Minimum gap between consecutive `AssistantMessageUpdated` emissions.
@@ -3401,7 +3397,6 @@ impl ClaudeStreamState {
             unresolved_tool_use_ids: std::collections::HashSet::new(),
             pending_tool_results: HashMap::new(),
             last_update_emit_at: None,
-            persisted_messages: Vec::new(),
         }
     }
 
@@ -3444,7 +3439,6 @@ struct CodexStreamState {
     persisted_tool_item_ids: std::collections::HashSet<String>,
     tool_item_to_call_id: HashMap<String, String>,
     last_update_emit_at: Option<std::time::Instant>,
-    persisted_messages: Vec<AssistantMessage>,
 }
 
 impl CodexStreamState {
@@ -3454,7 +3448,6 @@ impl CodexStreamState {
             persisted_tool_item_ids: std::collections::HashSet::new(),
             tool_item_to_call_id: HashMap::new(),
             last_update_emit_at: None,
-            persisted_messages: Vec::new(),
         }
     }
 }
@@ -3463,7 +3456,6 @@ struct OpenCodeStreamState {
     parts: Vec<ContentPart>,
     persisted_tool_part_ids: std::collections::HashSet<String>,
     last_update_emit_at: Option<std::time::Instant>,
-    persisted_messages: Vec<AssistantMessage>,
 }
 
 impl OpenCodeStreamState {
@@ -3472,7 +3464,6 @@ impl OpenCodeStreamState {
             parts: Vec::new(),
             persisted_tool_part_ids: std::collections::HashSet::new(),
             last_update_emit_at: None,
-            persisted_messages: Vec::new(),
         }
     }
 }
@@ -3486,6 +3477,7 @@ async fn handle_opencode_event(
     value: &Value,
     state: &mut OpenCodeStreamState,
     result_error: &mut Option<String>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     if let Some(session_id) = value.get("sessionID").and_then(Value::as_str) {
         set_cli_session_id(deps, session, session_id.to_string(), OPENCODE_PROVIDER_ID).await?;
@@ -3542,6 +3534,7 @@ async fn handle_opencode_event(
                     assistant_message,
                     state,
                     part,
+                    conversation,
                 )
                 .await?;
             }
@@ -3579,6 +3572,7 @@ async fn persist_opencode_tool_use_and_result(
     assistant_message: &AssistantMessage,
     state: &mut OpenCodeStreamState,
     part: &Value,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let raw_part_id = part
         .get("id")
@@ -3613,15 +3607,7 @@ async fn persist_opencode_tool_use_and_result(
     flush_opencode_assistant_message_content(deps, session, run_id, assistant_message, state)
         .await?;
 
-    apply_opencode_tool_result(
-        deps,
-        session,
-        run_id,
-        &tool_call_id,
-        part,
-        &mut state.persisted_messages,
-    )
-    .await
+    apply_opencode_tool_result(deps, session, run_id, &tool_call_id, part, conversation).await
 }
 
 async fn apply_opencode_tool_result(
@@ -3630,7 +3616,7 @@ async fn apply_opencode_tool_result(
     run_id: &str,
     tool_call_id: &str,
     part: &Value,
-    persisted: &mut Vec<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let state = part.get("state").unwrap_or(&Value::Null);
     let status_value = state.get("status").and_then(Value::as_str);
@@ -3658,18 +3644,17 @@ async fn apply_opencode_tool_result(
         ToolCallOutcome::Completed { payload }
     };
 
-    persisted.extend(
-        record_tool_call_result(
-            deps,
-            session,
-            run_id,
-            tool_call_id,
-            outcome,
-            Some(CliProviderRuntime::OpenCode.metadata_source()),
-            MissingToolCall::SkipQuietly,
-        )
-        .await?,
-    );
+    record_tool_call_result(
+        deps,
+        session,
+        run_id,
+        tool_call_id,
+        outcome,
+        Some(CliProviderRuntime::OpenCode.metadata_source()),
+        MissingToolCall::SkipQuietly,
+        conversation,
+    )
+    .await?;
 
     Ok(())
 }
@@ -3781,6 +3766,7 @@ async fn handle_codex_event(
     value: &Value,
     state: &mut CodexStreamState,
     result_error: &mut Option<String>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     match value.get("type").and_then(Value::as_str) {
         Some("thread.started") => {
@@ -3818,6 +3804,7 @@ async fn handle_codex_event(
                     state,
                     item,
                     terminal,
+                    conversation,
                 )
                 .await?;
             }
@@ -3836,6 +3823,7 @@ async fn handle_codex_item(
     state: &mut CodexStreamState,
     item: &Value,
     terminal: bool,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     match item.get("type").and_then(Value::as_str) {
         Some("agent_message") if terminal => {
@@ -3873,7 +3861,8 @@ async fn handle_codex_item(
             persist_codex_mcp_tool_use(deps, session, run_id, assistant_message, state, item)
                 .await?;
             if terminal {
-                apply_codex_mcp_tool_result(deps, session, run_id, state, item).await?;
+                apply_codex_mcp_tool_result(deps, session, run_id, state, item, conversation)
+                    .await?;
             }
         }
         Some("command_execution") | Some("file_change") | Some("web_search") if terminal => {
@@ -3975,6 +3964,7 @@ async fn apply_codex_mcp_tool_result(
     run_id: &str,
     state: &mut CodexStreamState,
     item: &Value,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let raw_item_id = item
         .get("id")
@@ -4012,18 +4002,17 @@ async fn apply_codex_mcp_tool_result(
         ToolCallOutcome::Completed { payload }
     };
 
-    state.persisted_messages.extend(
-        record_tool_call_result(
-            deps,
-            session,
-            run_id,
-            &tool_call_id,
-            outcome,
-            Some(CliProviderRuntime::Codex.metadata_source()),
-            MissingToolCall::SkipQuietly,
-        )
-        .await?,
-    );
+    record_tool_call_result(
+        deps,
+        session,
+        run_id,
+        &tool_call_id,
+        outcome,
+        Some(CliProviderRuntime::Codex.metadata_source()),
+        MissingToolCall::SkipQuietly,
+        conversation,
+    )
+    .await?;
     Ok(())
 }
 
@@ -4136,11 +4125,21 @@ async fn handle_claude_event(
     value: &Value,
     state: &mut ClaudeStreamState,
     result_error: &mut Option<String>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     match value.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
             let event = value.get("event").unwrap_or(&Value::Null);
-            handle_stream_event(deps, session, run_id, assistant_message, event, state).await?;
+            handle_stream_event(
+                deps,
+                session,
+                run_id,
+                assistant_message,
+                event,
+                state,
+                conversation,
+            )
+            .await?;
         }
         Some("assistant") => {
             // Complete (non-partial) assistant message. We treat this
@@ -4158,6 +4157,7 @@ async fn handle_claude_event(
                 assistant_message,
                 message,
                 state,
+                conversation,
             )
             .await?;
         }
@@ -4172,7 +4172,7 @@ async fn handle_claude_event(
                     if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                         continue;
                     }
-                    handle_tool_result(deps, session, run_id, state, block).await?;
+                    handle_tool_result(deps, session, run_id, state, block, conversation).await?;
                 }
             }
         }
@@ -4239,6 +4239,7 @@ async fn handle_stream_event(
     assistant_message: &AssistantMessage,
     event: &Value,
     state: &mut ClaudeStreamState,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let event_type = event.get("type").and_then(Value::as_str);
     let block_index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -4435,6 +4436,7 @@ async fn handle_stream_event(
                         &tool_call_id,
                         &tool_name,
                         params,
+                        conversation,
                     )
                     .await?;
                 }
@@ -4461,6 +4463,7 @@ async fn handle_tool_result(
     run_id: &str,
     state: &mut ClaudeStreamState,
     block: &Value,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let tool_use_id = match block.get("tool_use_id").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -4477,15 +4480,7 @@ async fn handle_tool_result(
     // turn again. Cleared before applying so a persistence error can't
     // leave the in-flight flag stuck and starve mid-run delivery.
     state.unresolved_tool_use_ids.remove(&tool_use_id);
-    apply_tool_result(
-        deps,
-        session,
-        run_id,
-        &tool_use_id,
-        block,
-        &mut state.persisted_messages,
-    )
-    .await
+    apply_tool_result(deps, session, run_id, &tool_use_id, block, conversation).await
 }
 
 /// Persist a tool_use block (from either streamed or complete envelopes)
@@ -4510,6 +4505,7 @@ async fn persist_tool_use(
     tool_call_id: &str,
     tool_name: &str,
     params: Value,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     // Claude Code reaches our built-ins through the local MCP server, so
     // its stream reports them qualified (`mcp__clai__web_fetch`). Persist
@@ -4556,15 +4552,7 @@ async fn persist_tool_use(
     // now.
     if let Some(pending) = state.pending_tool_results.remove(tool_call_id) {
         state.unresolved_tool_use_ids.remove(tool_call_id);
-        apply_tool_result(
-            deps,
-            session,
-            run_id,
-            tool_call_id,
-            &pending,
-            &mut state.persisted_messages,
-        )
-        .await?;
+        apply_tool_result(deps, session, run_id, tool_call_id, &pending, conversation).await?;
     }
 
     Ok(())
@@ -4643,6 +4631,7 @@ async fn adopt_complete_assistant_message(
     assistant_message: &AssistantMessage,
     message: &Value,
     state: &mut ClaudeStreamState,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let Some(content) = message.get("content").and_then(Value::as_array) else {
         return Ok(());
@@ -4676,6 +4665,7 @@ async fn adopt_complete_assistant_message(
             &tool_use_id,
             &tool_name,
             input,
+            conversation,
         )
         .await?;
     }
@@ -4692,7 +4682,7 @@ async fn apply_tool_result(
     run_id: &str,
     tool_use_id: &str,
     block: &Value,
-    persisted: &mut Vec<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let is_error = block
         .get("is_error")
@@ -4715,18 +4705,17 @@ async fn apply_tool_result(
         ToolCallOutcome::Completed { payload }
     };
 
-    persisted.extend(
-        record_tool_call_result(
-            deps,
-            session,
-            run_id,
-            tool_use_id,
-            outcome,
-            Some(CliProviderRuntime::ClaudeCode.metadata_source()),
-            MissingToolCall::SkipQuietly,
-        )
-        .await?,
-    );
+    record_tool_call_result(
+        deps,
+        session,
+        run_id,
+        tool_use_id,
+        outcome,
+        Some(CliProviderRuntime::ClaudeCode.metadata_source()),
+        MissingToolCall::SkipQuietly,
+        conversation,
+    )
+    .await?;
 
     Ok(())
 }
@@ -4769,21 +4758,18 @@ async fn finalize_assistant_message(
         run_id,
         assistant_message,
         &state.parts,
-        &mut state.persisted_messages,
         conversation,
     )
     .await
 }
 
-/// Write the assistant row back from `parts` and record it, together with
-/// the tool rows this attempt persisted, in the run's conversation.
+/// Write the assistant row back from `parts` through the run's conversation.
 async fn finalize_assistant_message_from_parts(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
     assistant_message: &AssistantMessage,
     parts: &[ContentPart],
-    persisted: &mut Vec<AssistantMessage>,
     conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     // Build the final content from the ordered parts vec. Drop empty
@@ -4800,12 +4786,9 @@ async fn finalize_assistant_message_from_parts(
         });
     }
 
-    let updated =
-        repository::update_message_content(&deps.pool, &assistant_message.id, &content).await?;
-    for message in persisted.drain(..) {
-        conversation.upsert(message);
-    }
-    conversation.upsert(updated.clone());
+    let updated = conversation
+        .update_message_content(&deps.pool, &assistant_message.id, &content)
+        .await?;
     let _ = emit_event(
         &deps.app,
         session,

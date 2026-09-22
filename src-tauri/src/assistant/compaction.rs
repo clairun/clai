@@ -22,23 +22,20 @@ pub const COMPACTION_METADATA_SOURCE: &str = "clai-compaction";
 /// a 16k-token reply and for the estimator's error against the provider's own
 /// tokenizer. Models with smaller windows fall back to forced context-limit
 /// recovery, which uses the same compactor.
-pub const ESTIMATED_INPUT_BUDGET_TOKENS: usize = 96_000;
-/// Automatic compaction fires at 80% of the budget, so a compacted request
-/// has headroom instead of compacting again on the next iteration.
-const AUTO_COMPACTION_TRIGGER_TOKENS: usize = ESTIMATED_INPUT_BUDGET_TOKENS / 5 * 4;
-/// Newest complete tool groups an automatic compaction keeps verbatim:
-/// min(25% of the budget, 20k tokens). The newest group is kept regardless.
-const VERBATIM_TAIL_TOKENS: usize = if ESTIMATED_INPUT_BUDGET_TOKENS / 4 < 20_000 {
-    ESTIMATED_INPUT_BUDGET_TOKENS / 4
-} else {
-    20_000
-};
+const ESTIMATED_INPUT_BUDGET_TOKENS: usize = 96_000;
+/// Newest complete tool groups a compaction keeps verbatim. The newest group
+/// is kept regardless.
+const VERBATIM_TAIL_TOKENS: usize = 20_000;
 /// Request framing per message (role, ids, JSON keys) that the text lacks.
 const MESSAGE_FRAMING_TOKENS: usize = 4;
 /// Fixed allowance per image part; base64 length is not a vision token count.
 const IMAGE_TOKENS: usize = 1_600;
-const SUMMARY_TRANSCRIPT_MAX_CHARS: usize = 96_000;
 const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 4096;
+/// Transcript the summarizer request may carry: the input budget less the
+/// summary it is asked to write. Same unit as the trigger, so a compaction
+/// that fires can be summarized without dropping most of its own input.
+const SUMMARY_TRANSCRIPT_MAX_TOKENS: usize =
+    ESTIMATED_INPUT_BUDGET_TOKENS - SUMMARY_MAX_OUTPUT_TOKENS as usize;
 const SUMMARY_TOOL_CALL_MAX_CHARS: usize = 4_000;
 const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 8_000;
 /// Hard budget for the summary body we store back into the conversation.
@@ -52,9 +49,10 @@ const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 8_000;
 /// The number is pinned by two neighbours, not by taste:
 /// * it must stay above a *conforming* summary (~4 chars per token against a
 ///   4096-token ask, ~16_400 chars) so a well-behaved model is never clamped;
-/// * with the preamble it must stay under `SUMMARY_TRANSCRIPT_MAX_CHARS / 3`,
-///   the head slice of `transcript_for_summary`, or the *next* compaction pass
-///   drops this summary's own tail into its omitted middle.
+/// * with the preamble it must stay under a third of
+///   `SUMMARY_TRANSCRIPT_MAX_TOKENS`, the head slice of
+///   `transcript_for_summary`, even at one token per character, or the *next*
+///   compaction pass drops this summary's own tail into its omitted middle.
 ///
 /// It is also well under `CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES` (64_000), so the
 /// CLI fresh-session clamp never has to re-cut a summary we produced.
@@ -197,20 +195,19 @@ pub struct CompactionOutcome {
 
 /// The conversation one run sends to the provider, owned in memory for the
 /// whole run: `[standing summary] + the messages it does not cover`, in
-/// `(created_at, id)` order. It is loaded once when the run starts; from then
-/// on the run feeds it the exact rows it persists (`upsert`/`remove`) and the
-/// queue rows it reads at request boundaries (`refresh_pending`), so history
-/// is never re-read from the database while the run is active. Nothing here
-/// is durable: the next run reconstructs the same view from persistence.
+/// insertion order (`created_at`, then rowid). It is loaded once when the run
+/// starts; from then on the run writes its rows through it
+/// (`create_message`/`update_message_content`/`delete_message`) and feeds it
+/// the queue rows it reads at request boundaries (`refresh_pending`), so
+/// history is never re-read from the database while the run is active.
+/// Nothing here is durable: the next run reconstructs the same view from
+/// persistence.
 pub struct RunConversation {
     messages: Vec<AssistantMessage>,
     has_summary: bool,
-    /// Queued user rows still pending delivery. They are pinned outside any
-    /// compaction and reconciled against the queue at request boundaries.
+    /// Queued user rows still pending delivery, reconciled against the queue
+    /// at request boundaries.
     pending_ids: HashSet<String>,
-    /// Boundary of the last automatic pass whose summary would not have
-    /// shrunk the request; no automatic retry until the boundary moves.
-    rejected_source_to: Option<String>,
 }
 
 impl RunConversation {
@@ -232,7 +229,6 @@ impl RunConversation {
             messages,
             has_summary,
             pending_ids: HashSet::new(),
-            rejected_source_to: None,
         }
     }
 
@@ -256,9 +252,42 @@ impl RunConversation {
             .find(|message| message.role == MessageRole::User)
     }
 
+    /// Persist a new row and record it. Runs write conversation rows only
+    /// through this and the two methods below, so a row cannot reach the
+    /// database without reaching the view the provider sees. (Mid-stream
+    /// flushes of an assistant row may bypass them; its finalizing write
+    /// does not.)
+    pub async fn create_message(
+        &mut self,
+        pool: &DbPool,
+        params: CreateMessageParams,
+    ) -> Result<AssistantMessage, String> {
+        let message = repository::create_message(pool, params).await?;
+        self.upsert(message.clone());
+        Ok(message)
+    }
+
+    pub async fn update_message_content(
+        &mut self,
+        pool: &DbPool,
+        message_id: &str,
+        content: &[ContentPart],
+    ) -> Result<AssistantMessage, String> {
+        let message = repository::update_message_content(pool, message_id, content).await?;
+        self.upsert(message.clone());
+        Ok(message)
+    }
+
+    pub async fn delete_message(&mut self, pool: &DbPool, message_id: &str) -> Result<(), String> {
+        repository::delete_message(pool, message_id).await?;
+        self.remove(message_id);
+        Ok(())
+    }
+
     /// Record a persisted row: replace an existing row with the same id
-    /// (assistant placeholders are finalized in place), otherwise insert it at
-    /// its `(created_at, id)` position after the summary.
+    /// (assistant placeholders are finalized in place), otherwise insert it
+    /// after every row created at the same time or earlier, which is the
+    /// insertion order `list_messages` returns.
     pub fn upsert(&mut self, message: AssistantMessage) {
         if let Some(existing) = self.messages.iter_mut().find(|m| m.id == message.id) {
             *existing = message;
@@ -267,9 +296,7 @@ impl RunConversation {
         let start = self.summary_len();
         let offset = self.messages[start..]
             .iter()
-            .rposition(|m| {
-                (m.created_at, m.id.as_str()) <= (message.created_at, message.id.as_str())
-            })
+            .rposition(|m| m.created_at <= message.created_at)
             .map_or(0, |index| index + 1);
         self.messages.insert(start + offset, message);
     }
@@ -314,10 +341,10 @@ impl RunConversation {
 
     /// Choose what a compaction summarizes: `[standing summary] + the oldest
     /// complete tool groups`, keeping the newest groups verbatim within
-    /// `VERBATIM_TAIL_TOKENS` (only the newest group when `force`d), and never
-    /// a pending queued row or anything after it. `None` when no raw message
-    /// is eligible: a summary is never re-summarized on its own.
-    fn plan_compaction(&self, force: bool) -> Option<CompactionPlan> {
+    /// `VERBATIM_TAIL_TOKENS`, or only the newest group when
+    /// `newest_group_only`. `None` when no raw message is eligible: a summary
+    /// is never re-summarized on its own.
+    fn plan_compaction(&self, newest_group_only: bool) -> Option<CompactionPlan> {
         let summary_len = self.summary_len();
         let tail = &self.messages[summary_len..];
         let groups = tool_groups(tail);
@@ -325,35 +352,28 @@ impl RunConversation {
         let tokens: Vec<usize> = tail.iter().map(message_tokens).collect();
         let group_tokens = |group: &Range<usize>| tokens[group.clone()].iter().sum::<usize>();
 
-        let tail_budget = if force { 0 } else { VERBATIM_TAIL_TOKENS };
+        let tail_budget = if newest_group_only {
+            0
+        } else {
+            VERBATIM_TAIL_TOKENS
+        };
         let mut kept = group_tokens(newest);
         let mut keep_from = groups.len() - 1;
         while keep_from > 0 && kept + group_tokens(&groups[keep_from - 1]) <= tail_budget {
             keep_from -= 1;
             kept += group_tokens(&groups[keep_from]);
         }
-        let mut cut = groups[keep_from].start;
-        if let Some(pending_at) = tail
-            .iter()
-            .position(|message| self.pending_ids.contains(&message.id))
-        {
-            let pinned = groups.iter().find(|group| group.contains(&pending_at))?;
-            cut = cut.min(pinned.start);
-        }
+        let cut = groups[keep_from].start;
         if cut == 0 {
             return None;
         }
 
-        let source_to_message_id = tail[cut - 1].id.clone();
-        if !force && self.rejected_source_to.as_deref() == Some(source_to_message_id.as_str()) {
-            return None;
-        }
         let messages = self.messages[..summary_len + cut].to_vec();
         let prefix_tokens =
             self.summary().map(message_tokens).unwrap_or(0) + tokens[..cut].iter().sum::<usize>();
         Some(CompactionPlan {
             source_from_message_id: messages[0].id.clone(),
-            source_to_message_id,
+            source_to_message_id: tail[cut - 1].id.clone(),
             messages,
             prefix_tokens,
         })
@@ -363,7 +383,6 @@ impl RunConversation {
         self.messages.drain(..consumed);
         self.messages.insert(0, summary_message);
         self.has_summary = true;
-        self.rejected_source_to = None;
     }
 }
 
@@ -459,7 +478,7 @@ fn tool_result_ids(message: &AssistantMessage) -> Vec<&str> {
 /// Token count of `text` under the fixed `cl100k_base` encoding, which serves
 /// every provider: an estimate of the provider's count, not its tokenizer's
 /// answer. The encoding is embedded in the crate and initialized once.
-pub fn text_tokens(text: &str) -> usize {
+fn text_tokens(text: &str) -> usize {
     tiktoken_rs::cl100k_base_singleton().count_ordinary(text)
 }
 
@@ -483,31 +502,41 @@ fn message_tokens(message: &AssistantMessage) -> usize {
         + MESSAGE_FRAMING_TOKENS
 }
 
-/// Estimated tokens of the request about to be sent: system prompt, tool
-/// definitions, and every message of the conversation.
-pub fn estimate_request_tokens(
-    messages: &[AssistantMessage],
-    system_prompt: &str,
-    tools: &[ToolDefinition],
-) -> usize {
-    let tool_tokens: usize = tools
+fn tool_tokens(tools: &[ToolDefinition]) -> usize {
+    tools
         .iter()
         .map(|tool| {
             text_tokens(&tool.name)
                 + text_tokens(&tool.description)
                 + text_tokens(&json_string(&tool.input_schema))
         })
-        .sum();
-    text_tokens(system_prompt) + tool_tokens + messages.iter().map(message_tokens).sum::<usize>()
+        .sum()
 }
 
+/// Tokens the conversation may occupy in a request: the input budget less
+/// the system prompt, the tool definitions and `SUMMARY_MAX_OUTPUT_TOKENS`
+/// of reply. `None` when those leave no room: compaction only shrinks
+/// messages, so it cannot help.
+fn message_budget(system_prompt: &str, tools: &[ToolDefinition]) -> Option<usize> {
+    ESTIMATED_INPUT_BUDGET_TOKENS
+        .checked_sub(
+            text_tokens(system_prompt) + tool_tokens(tools) + SUMMARY_MAX_OUTPUT_TOKENS as usize,
+        )
+        .filter(|budget| *budget > 0)
+}
+
+/// Automatic compaction fires at 80% of the message budget, so a compacted
+/// request has headroom instead of compacting again on the next iteration.
 pub fn should_auto_compact(
     conversation: &RunConversation,
     system_prompt: &str,
     tools: &[ToolDefinition],
 ) -> bool {
-    estimate_request_tokens(conversation.messages(), system_prompt, tools)
-        >= AUTO_COMPACTION_TRIGGER_TOKENS
+    let Some(budget) = message_budget(system_prompt, tools) else {
+        return false;
+    };
+    let message_tokens: usize = conversation.messages().iter().map(message_tokens).sum();
+    message_tokens >= budget / 5 * 4
 }
 
 /// Compact the run's conversation in place: summarize the eligible prefix
@@ -579,7 +608,10 @@ where
     F: FnOnce(Vec<AssistantMessage>) -> Fut,
     Fut: Future<Output = Result<String, String>>,
 {
-    let Some(plan) = conversation.plan_compaction(force) else {
+    // Context-limit recovery keeps only the newest group; manual and
+    // automatic compaction keep the same token-budgeted tail.
+    let newest_group_only = trigger == CompactionTrigger::ErrorRecovery;
+    let Some(plan) = conversation.plan_compaction(newest_group_only) else {
         return Ok(None);
     };
     let strategy = if providers::is_cli_provider(protocol_id) {
@@ -591,9 +623,7 @@ where
     let summary = summarize(plan.messages.clone()).await?;
     let summary_text = summary_message_text(&summary);
     if !force && text_tokens(&summary_text) >= plan.prefix_tokens {
-        // The summary would not make the request smaller: keep the raw
-        // messages and do not ask again until older context becomes eligible.
-        conversation.rejected_source_to = Some(plan.source_to_message_id);
+        // The summary would not make the request smaller: keep the raw messages.
         return Ok(None);
     }
 
@@ -770,16 +800,25 @@ fn clamp_summary_body(summary: &str) -> String {
     )
 }
 
+/// The rendered transcript, or its head and tail when it exceeds
+/// `SUMMARY_TRANSCRIPT_MAX_TOKENS`: the cut is measured in the same tokens as
+/// the trigger, so a compaction that fires is summarized nearly whole.
 fn transcript_for_summary(messages: &[AssistantMessage]) -> String {
     let rendered = render_transcript(messages);
-    if rendered.len() <= SUMMARY_TRANSCRIPT_MAX_CHARS {
+    let encoding = tiktoken_rs::cl100k_base_singleton();
+    let tokens = encoding.encode_ordinary(&rendered);
+    if tokens.len() <= SUMMARY_TRANSCRIPT_MAX_TOKENS {
         return format!("Transcript to summarize:\n\n{}", rendered);
     }
 
-    let head_len = SUMMARY_TRANSCRIPT_MAX_CHARS / 3;
-    let tail_len = SUMMARY_TRANSCRIPT_MAX_CHARS - head_len;
-    let head = safe_prefix(&rendered, head_len);
-    let tail = safe_suffix(&rendered, tail_len);
+    let head_len = SUMMARY_TRANSCRIPT_MAX_TOKENS / 3;
+    let tail_len = SUMMARY_TRANSCRIPT_MAX_TOKENS - head_len;
+    let decode = |tokens: &[tiktoken_rs::Rank]| {
+        let bytes = encoding.decode_bytes(tokens).unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let head = decode(&tokens[..head_len]);
+    let tail = decode(&tokens[tokens.len() - tail_len..]);
     format!(
         "Transcript to summarize. The middle was omitted because it exceeded the summarizer budget; preserve all concrete information visible here.\n\n{}\n\n[... middle omitted during compaction ...]\n\n{}",
         head, tail
@@ -1014,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn request_estimate_counts_prompt_tools_payloads_images_and_framing() {
+    fn message_estimate_counts_payloads_images_framing_and_tool_schemas() {
         let tool = ToolDefinition {
             name: "probe".to_string(),
             description: "look around".to_string(),
@@ -1044,12 +1083,11 @@ mod tests {
         );
 
         assert_eq!(
-            estimate_request_tokens(&[image], "", &[]),
+            message_tokens(&image),
             IMAGE_TOKENS + MESSAGE_FRAMING_TOKENS
         );
-        assert!(estimate_request_tokens(&[fat], "", &[]) >= 1000);
-        assert!(estimate_request_tokens(&[], "system prompt", &[]) > 0);
-        assert!(estimate_request_tokens(&[], "", &[tool]) > 0);
+        assert!(message_tokens(&fat) >= 1000);
+        assert!(tool_tokens(&[tool]) > 0);
     }
 
     #[test]
@@ -1063,6 +1101,32 @@ mod tests {
             heavy_msg("c", 30_000),
         ]);
         assert!(should_auto_compact(&few_large, "", &[]));
+    }
+
+    fn tool_set(tokens: usize) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            name: "probe".to_string(),
+            description: " a".repeat(tokens),
+            input_schema: serde_json::json!({"type": "object"}),
+        }]
+    }
+
+    /// Only messages can be compacted, so the trigger measures them against
+    /// what the prompt and tools leave, not the whole request against a fixed
+    /// number: a fat tool set must not compact a short history.
+    #[test]
+    fn a_large_tool_set_does_not_trigger_compaction_on_a_short_history() {
+        let short = conversation(filler("f", 6));
+        assert!(!should_auto_compact(&short, "", &tool_set(70_000)));
+
+        // 96k - 70k tools - 4k reply = 22k budget; 80% of it is 17.6k.
+        let at_pressure = conversation(vec![heavy_msg("a", 20_000)]);
+        assert!(should_auto_compact(&at_pressure, "", &tool_set(70_000)));
+
+        // Tools alone exceed the budget: compaction cannot help, so it never
+        // runs automatically.
+        let huge = conversation(vec![heavy_msg("a", 90_000)]);
+        assert!(!should_auto_compact(&huge, "", &tool_set(100_000)));
     }
 
     /// An assistant issuing `n` parallel calls whose results each weigh
@@ -1107,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn forced_compaction_keeps_only_the_newest_group() {
+    fn error_recovery_keeps_only_the_newest_group() {
         let mut messages = filler("f", 4);
         messages.extend(tool_group("g", 2));
         let conversation = conversation(messages);
@@ -1115,18 +1179,6 @@ mod tests {
         let plan = conversation.plan_compaction(true).expect("plan");
 
         assert_eq!(ids(&plan.messages), vec!["f0", "f1", "f2", "f3"]);
-    }
-
-    #[test]
-    fn pending_queued_rows_are_pinned_outside_the_compacted_prefix() {
-        let mut conversation = conversation(filler("f", 6));
-        conversation.refresh_pending(vec![conversation.messages()[2].clone()]);
-
-        let plan = conversation.plan_compaction(true).expect("plan");
-        assert_eq!(ids(&plan.messages), vec!["f0", "f1"]);
-
-        conversation.refresh_pending(vec![conversation.messages()[0].clone()]);
-        assert!(conversation.plan_compaction(true).is_none());
     }
 
     #[test]
@@ -1138,7 +1190,6 @@ mod tests {
             ],
             has_summary: true,
             pending_ids: HashSet::new(),
-            rejected_source_to: None,
         };
 
         assert!(should_auto_compact(&conversation, "", &[]));
@@ -1148,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn upsert_replaces_by_id_and_inserts_in_created_at_order() {
+    fn upsert_replaces_by_id_and_inserts_in_insertion_order() {
         let mut conversation = conversation(vec![
             AssistantMessage {
                 created_at: 10,
@@ -1172,8 +1223,14 @@ mod tests {
             created_at: 40,
             ..msg("d", MessageRole::Tool, vec![text("d")])
         });
+        // Same millisecond as `d` and a smaller id: still after `d`, like the
+        // rowid order `list_messages` returns.
+        conversation.upsert(AssistantMessage {
+            created_at: 40,
+            ..msg("0", MessageRole::Tool, vec![text("0")])
+        });
 
-        assert_eq!(ids(conversation.messages()), vec!["a", "b", "c", "d"]);
+        assert_eq!(ids(conversation.messages()), vec!["a", "b", "c", "d", "0"]);
         assert!(
             matches!(&conversation.messages()[1].content[0], ContentPart::Text { text } if text == "final")
         );
@@ -1265,44 +1322,47 @@ mod tests {
         assert!(conversation.summary().is_none());
     }
 
-    /// The summariser input is budgeted: an oversized transcript is cut to a
-    /// head and a tail rather than sent whole. Two deleted tests used to guard
-    /// this budget; it had no coverage since. The only slack over the budget is
-    /// the fixed framing the function adds around the transcript.
+    /// The transcript cap is measured in the trigger's tokens: an oversized
+    /// transcript is cut to `SUMMARY_TRANSCRIPT_MAX_TOKENS` plus the fixed
+    /// framing, keeping both ends.
     #[test]
-    fn the_summary_transcript_stays_within_its_budget() {
-        // The cut branch adds two fixed string literals around the transcript
-        // (the instruction line and the omission marker) and nothing else, so
-        // the overhead is exact, not approximate.
-        let framing_chars = 186;
+    fn the_summary_transcript_stays_within_its_token_budget() {
         let view: Vec<AssistantMessage> = (0..40)
             .map(|i| {
                 msg(
                     &format!("m{i}"),
                     MessageRole::User,
                     vec![text(
-                        &format!("{i}").repeat(SUMMARY_TRANSCRIPT_MAX_CHARS / 8),
+                        &format!("{i} ").repeat(SUMMARY_TRANSCRIPT_MAX_TOKENS / 16),
                     )],
                 )
             })
             .collect();
         let rendered = render_transcript(&view);
-        assert!(rendered.len() > SUMMARY_TRANSCRIPT_MAX_CHARS);
+        assert!(text_tokens(&rendered) > SUMMARY_TRANSCRIPT_MAX_TOKENS);
 
         let transcript = transcript_for_summary(&view);
 
-        assert_eq!(
-            transcript.len(),
-            SUMMARY_TRANSCRIPT_MAX_CHARS + framing_chars,
-            "the cut transcript is the budget plus fixed framing, nothing else"
+        let framing_tokens = text_tokens(
+            "Transcript to summarize. The middle was omitted because it exceeded the summarizer budget; preserve all concrete information visible here.\n\n\n\n[... middle omitted during compaction ...]\n\n",
+        );
+        // Re-encoding the decoded head and tail can shift a few tokens at
+        // their edges; the slack covers that, not a second cut rule.
+        let tokens = text_tokens(&transcript);
+        assert!(
+            tokens <= SUMMARY_TRANSCRIPT_MAX_TOKENS + framing_tokens + 8,
+            "{tokens} tokens exceed the budget plus framing"
+        );
+        assert!(
+            tokens >= SUMMARY_TRANSCRIPT_MAX_TOKENS - 16,
+            "{tokens} tokens: the cut dropped more than the middle"
         );
         // Both ends survive: the cut takes the middle, not the tail.
         assert!(transcript.contains("[user message m0]"));
         assert!(transcript.contains("[user message m39]"));
+        assert!(transcript.contains("[... middle omitted during compaction ...]"));
     }
 
-    /// A transcript that fits is passed through untouched, so the budget test
-    /// above cannot pass by clamping everything.
     #[test]
     fn a_small_summary_transcript_is_not_cut() {
         let view = filler("f", 4);
@@ -1509,7 +1569,7 @@ mod tests {
         use crate::assistant::repository::{
             complete_compaction, create_compaction, create_message, create_run, create_session,
             create_user_message_with_content, delete_pending_queued_message,
-            list_pending_queued_messages, mark_queued_messages_delivered, update_message_content,
+            list_pending_queued_messages, mark_queued_messages_delivered,
             update_pending_queued_message,
         };
         use crate::assistant::types::{SessionContext, SessionKind};
@@ -1518,9 +1578,8 @@ mod tests {
         use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::{Arc, Mutex};
 
-        /// Rows written back-to-back share a millisecond and would then be
-        /// ordered by random id; stamp strictly increasing timestamps so the
-        /// tests assert on insertion order.
+        /// Rows written back-to-back share a millisecond; stamp strictly
+        /// increasing timestamps so the tests can assert on `created_at`.
         static CLOCK: AtomicI64 = AtomicI64::new(1_000_000);
 
         async fn stamp(pool: &crate::db::DbPool, message: AssistantMessage) -> AssistantMessage {
@@ -1632,45 +1691,55 @@ mod tests {
             }
         }
 
-        /// Several assistant/tool iterations: the conversation loaded once at
-        /// run start, fed only the rows the run persists, ends identical to
-        /// what the next run reconstructs from the database.
+        /// Several assistant/tool iterations written through the run's
+        /// conversation, as the engine and CLI loops write them: loaded once
+        /// at run start, it ends identical to what the next run reconstructs
+        /// from the database.
         #[tokio::test]
         async fn run_owned_conversation_mirrors_persisted_rows_without_rereading_history() {
             let (_tmp, pool, session) = db_session().await;
             add_text(&pool, &session.id, "do the thing").await;
             let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
+            let params = |role, content| crate::assistant::repository::CreateMessageParams {
+                session_id: session.id.clone(),
+                role,
+                content,
+                provider_metadata: None,
+            };
 
             for i in 0..3 {
-                let placeholder =
-                    add(&pool, &session.id, MessageRole::Assistant, vec![text("")]).await;
-                conversation.upsert(placeholder.clone());
+                let placeholder = conversation
+                    .create_message(&pool, params(MessageRole::Assistant, vec![text("")]))
+                    .await
+                    .unwrap();
                 let call_id = format!("call{i}");
-                let finalized = update_message_content(
-                    &pool,
-                    &placeholder.id,
-                    &[ContentPart::ToolUse {
-                        tool_call_id: call_id.clone(),
-                        tool_name: "probe".to_string(),
-                        arguments: serde_json::json!({"i": i}),
-                    }],
-                )
-                .await
-                .unwrap();
-                conversation.upsert(finalized);
-                let result = add(
-                    &pool,
-                    &session.id,
-                    MessageRole::Tool,
-                    vec![ContentPart::ToolResult {
-                        tool_call_id: call_id,
-                        payload: serde_json::json!({"ok": i % 2 == 0}),
-                        started_at: None,
-                        completed_at: None,
-                    }],
-                )
-                .await;
-                conversation.upsert(result);
+                conversation
+                    .update_message_content(
+                        &pool,
+                        &placeholder.id,
+                        &[ContentPart::ToolUse {
+                            tool_call_id: call_id.clone(),
+                            tool_name: "probe".to_string(),
+                            arguments: serde_json::json!({"i": i}),
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                conversation
+                    .create_message(
+                        &pool,
+                        params(
+                            MessageRole::Tool,
+                            vec![ContentPart::ToolResult {
+                                tool_call_id: call_id,
+                                payload: serde_json::json!({"ok": i % 2 == 0}),
+                                started_at: None,
+                                completed_at: None,
+                            }],
+                        ),
+                    )
+                    .await
+                    .unwrap();
             }
 
             let reloaded = RunConversation::load(&pool, &session.id).await.unwrap();
@@ -1843,9 +1912,9 @@ mod tests {
             );
         }
 
-        /// Forced recovery (context-limit retry, `/compact`) uses the same
-        /// in-memory conversation: everything but the newest group is
-        /// summarized, and the retry sees the summary without a reload.
+        /// Context-limit recovery uses the same in-memory conversation:
+        /// everything but the newest group is summarized, and the retry sees
+        /// the summary without a reload.
         #[tokio::test]
         async fn error_recovery_compacts_the_in_memory_conversation() {
             let (_tmp, pool, session) = db_session().await;
@@ -1913,7 +1982,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn a_non_shrinking_summary_is_rejected_and_not_retried_on_the_same_boundary() {
+        async fn a_non_shrinking_summary_is_rejected_and_nothing_is_persisted() {
             let (_tmp, pool, session) = db_session().await;
             let tiny = add_text(&pool, &session.id, "hi").await;
             add_text(&pool, &session.id, &" a".repeat(25_000)).await;
@@ -1934,25 +2003,10 @@ mod tests {
             )
             .await
             .unwrap();
+
             assert!(outcome.is_none());
             assert_eq!(calls.lock().unwrap()[0], vec![tiny.id.clone()]);
             assert_eq!(conversation.messages().len(), 2, "history unchanged");
-
-            let again = compact_with(
-                &pool,
-                &session.id,
-                "openai",
-                "m",
-                CompactionTrigger::Automatic,
-                None,
-                false,
-                &mut conversation,
-                recording_summarizer(&calls, bloated),
-            )
-            .await
-            .unwrap();
-            assert!(again.is_none());
-            assert_eq!(calls.lock().unwrap().len(), 1, "no second summarizer call");
             assert!(
                 RunConversation::load(&pool, &session.id)
                     .await
@@ -1960,6 +2014,49 @@ mod tests {
                     .summary()
                     .is_none(),
                 "nothing persisted"
+            );
+        }
+
+        /// Manual `/compact` is not an emergency: it keeps the same
+        /// token-budgeted verbatim tail as automatic compaction and bypasses
+        /// only the non-shrinking guard.
+        #[tokio::test]
+        async fn manual_compaction_keeps_the_token_budgeted_tail() {
+            let (_tmp, pool, session) = db_session().await;
+            let mut raw = Vec::new();
+            for i in 0..4 {
+                raw.push(add_text(&pool, &session.id, &format!("{i}{}", " a".repeat(8_000))).await);
+            }
+            let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+
+            let outcome = compact_with(
+                &pool,
+                &session.id,
+                "openai",
+                "m",
+                CompactionTrigger::Manual,
+                None,
+                true,
+                &mut conversation,
+                recording_summarizer(&calls, "manual"),
+            )
+            .await
+            .unwrap()
+            .expect("manual compaction");
+
+            // 20k tail budget keeps the newest two 8k messages verbatim.
+            assert_eq!(
+                calls.lock().unwrap()[0],
+                vec![raw[0].id.clone(), raw[1].id.clone()]
+            );
+            assert_eq!(
+                view_ids(&conversation),
+                vec![
+                    outcome.summary_message.id.clone(),
+                    raw[2].id.clone(),
+                    raw[3].id.clone()
+                ]
             );
         }
 

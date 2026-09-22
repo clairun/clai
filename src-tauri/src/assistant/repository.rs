@@ -376,7 +376,7 @@ pub async fn list_messages(
         SELECT id, session_id, role, content_json, provider_metadata_json, created_at
         FROM assistant_messages
         WHERE session_id = ?
-        ORDER BY created_at ASC, id ASC
+        ORDER BY created_at ASC, rowid ASC
         "#,
     )
     .bind(session_id)

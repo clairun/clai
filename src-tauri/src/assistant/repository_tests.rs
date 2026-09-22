@@ -992,11 +992,11 @@ async fn test_create_session_and_link_task_links_atomically() {
 // Message ordering
 // ---------------------------------------------------------------------------
 
-/// Same-millisecond rows (legacy tool groups written in one tick) load in a
-/// deterministic `(created_at, id)` order, so every run reconstructs the same
-/// conversation instead of whatever order SQLite happened to return.
+/// Same-millisecond rows (a run boundary and the assistant placeholder, or a
+/// tool group written in one tick) load in insertion order, not in the order
+/// of their random ids.
 #[tokio::test]
-async fn test_list_messages_orders_same_timestamp_by_id() {
+async fn test_list_messages_orders_same_timestamp_by_insertion() {
     let (_tmp, pool) = workspace_pool().await;
     let session = create_session(
         &pool,
@@ -1008,29 +1008,18 @@ async fn test_list_messages_orders_same_timestamp_by_id() {
     )
     .await
     .unwrap();
-    let mut created = Vec::new();
-    for text in ["one", "two", "three"] {
-        let message = create_message(
-            &pool,
-            CreateMessageParams {
-                session_id: session.id.clone(),
-                role: MessageRole::User,
-                content: vec![ContentPart::Text {
-                    text: text.to_string(),
-                }],
-                provider_metadata: None,
-            },
+    let inserted = ["z-first", "m-second", "a-third"];
+    for id in inserted {
+        sqlx::query(
+            "INSERT INTO assistant_messages (id, session_id, role, content_json, provider_metadata_json, created_at) \
+             VALUES (?, ?, '\"user\"', '[]', NULL, 1000)",
         )
+        .bind(id)
+        .bind(&session.id)
+        .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("UPDATE assistant_messages SET created_at = 1000 WHERE id = ?")
-            .bind(&message.id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        created.push(message.id);
     }
-    created.sort();
 
     let loaded: Vec<String> = list_messages(&pool, &session.id)
         .await
@@ -1039,5 +1028,5 @@ async fn test_list_messages_orders_same_timestamp_by_id() {
         .map(|message| message.id)
         .collect();
 
-    assert_eq!(loaded, created);
+    assert_eq!(loaded, inserted);
 }

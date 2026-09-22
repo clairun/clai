@@ -181,17 +181,17 @@ pub async fn run_session_turn(
     // where one run ends and the next begins. Without this, the LLM sees old
     // tool results from prior runs and may skip re-running tools.
     if let Some(trigger_content) = build_trigger_message(&session, &input.trigger) {
-        let boundary_msg = repository::create_message(
-            &deps.pool,
-            CreateMessageParams {
-                session_id: session.id.clone(),
-                role: trigger_content.role.clone(),
-                content: trigger_content.content.clone(),
-                provider_metadata: None,
-            },
-        )
-        .await?;
-        conversation.upsert(boundary_msg.clone());
+        let boundary_msg = conversation
+            .create_message(
+                &deps.pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: trigger_content.role.clone(),
+                    content: trigger_content.content.clone(),
+                    provider_metadata: None,
+                },
+            )
+            .await?;
         let _ = emit_event(
             &deps.app,
             &session,
@@ -406,19 +406,19 @@ pub async fn run_session_turn(
         }
 
         // Create assistant message placeholder
-        let assistant_message = repository::create_message(
-            &deps.pool,
-            CreateMessageParams {
-                session_id: session.id.clone(),
-                role: MessageRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: String::new(),
-                }],
-                provider_metadata: None,
-            },
-        )
-        .await?;
-        conversation.upsert(assistant_message.clone());
+        let assistant_message = conversation
+            .create_message(
+                &deps.pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: MessageRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: String::new(),
+                    }],
+                    provider_metadata: None,
+                },
+            )
+            .await?;
 
         let _ = emit_event(
             &deps.app,
@@ -533,13 +533,9 @@ pub async fn run_session_turn(
             // so the assistant row never persists with zero content.
             let final_content = final_content_parts(content_parts);
 
-            let updated_message = repository::update_message_content(
-                &deps.pool,
-                &assistant_message.id,
-                &final_content,
-            )
-            .await?;
-            conversation.upsert(updated_message.clone());
+            let updated_message = conversation
+                .update_message_content(&deps.pool, &assistant_message.id, &final_content)
+                .await?;
 
             let _ = emit_event(
                 &deps.app,
@@ -666,7 +662,7 @@ pub async fn run_session_turn(
                     error: Some(error.as_str()),
                 },
             };
-            if let Some(tool_message) = record_tool_call_result(
+            record_tool_call_result(
                 deps,
                 &session,
                 &run_id,
@@ -674,11 +670,9 @@ pub async fn run_session_turn(
                 outcome,
                 None,
                 MissingToolCall::Propagate,
+                &mut conversation,
             )
-            .await?
-            {
-                conversation.upsert(tool_message);
-            }
+            .await?;
         }
 
         // Continue loop — will call API again with tool results in message history.

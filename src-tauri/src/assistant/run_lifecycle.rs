@@ -18,14 +18,15 @@
 //! also own the assistant message — a caller that streamed content finalizes it
 //! before closing the run, so nothing here has to guess what was written.
 
+use crate::assistant::compaction::RunConversation;
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
 use crate::assistant::types::{
-    AssistantMessage, AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice,
-    RunStatus, ToolCallStatus, ToolInvocation,
+    AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice, RunStatus,
+    ToolCallStatus, ToolInvocation,
 };
 use serde_json::Value;
 
@@ -272,12 +273,12 @@ fn tool_result_metadata(metadata_source: Option<&str>) -> Option<Value> {
 }
 
 /// Close a tool call out: update the row, emit the matching completion event,
-/// and persist the tool-role message that carries the payload back to the
-/// provider on the next request. Returns that message so the run can append
-/// it to its in-memory conversation instead of re-reading history.
+/// and write the tool-role message that carries the payload back to the
+/// provider on the next request through the run's conversation.
 ///
-/// Returns `Ok(None)` (after a warning) when the row cannot be updated under
-/// `MissingToolCall::SkipQuietly`.
+/// Returns `Ok(())` without a message (after a warning) when the row cannot
+/// be updated under `MissingToolCall::SkipQuietly`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_tool_call_result(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -286,7 +287,8 @@ pub(crate) async fn record_tool_call_result(
     outcome: ToolCallOutcome<'_>,
     metadata_source: Option<&str>,
     on_missing: MissingToolCall,
-) -> Result<Option<AssistantMessage>, String> {
+    conversation: &mut RunConversation,
+) -> Result<(), String> {
     let (status, result, error) = tool_call_update(&outcome);
     let updated =
         match repository::update_tool_call(&deps.pool, tool_call_id, status.clone(), result, error)
@@ -302,7 +304,7 @@ pub(crate) async fn record_tool_call_result(
                         error = %err,
                         "Tool call update failed even after the tool_use was registered"
                     );
-                    return Ok(None);
+                    return Ok(());
                 }
             },
         };
@@ -319,32 +321,31 @@ pub(crate) async fn record_tool_call_result(
     let payload = match outcome {
         ToolCallOutcome::Completed { payload } | ToolCallOutcome::Failed { payload, .. } => payload,
     };
-    let message = repository::create_message(
-        &deps.pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::Tool,
-            content: vec![ContentPart::ToolResult {
-                tool_call_id: tool_call_id.to_string(),
-                payload,
-                started_at: Some(started_at),
-                completed_at,
-            }],
-            provider_metadata: tool_result_metadata(metadata_source),
-        },
-    )
-    .await?;
+    let message = conversation
+        .create_message(
+            &deps.pool,
+            CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::Tool,
+                content: vec![ContentPart::ToolResult {
+                    tool_call_id: tool_call_id.to_string(),
+                    payload,
+                    started_at: Some(started_at),
+                    completed_at,
+                }],
+                provider_metadata: tool_result_metadata(metadata_source),
+            },
+        )
+        .await?;
 
     let _ = emit_event(
         &deps.app,
         session,
         Some(run_id),
-        AssistantUiEvent::MessageCreated {
-            message: message.clone(),
-        },
+        AssistantUiEvent::MessageCreated { message },
     );
 
-    Ok(Some(message))
+    Ok(())
 }
 
 #[cfg(test)]
