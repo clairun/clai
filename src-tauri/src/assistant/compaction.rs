@@ -227,7 +227,7 @@ impl RunConversation {
         messages: &[AssistantMessage],
         latest: Option<&AssistantCompaction>,
     ) -> Self {
-        let messages = provider_view(messages, latest);
+        let messages = provider_view(join_tool_groups(messages.to_vec()), latest);
         Self {
             tokens: messages
                 .iter()
@@ -300,9 +300,8 @@ impl RunConversation {
     /// Record a persisted row: replace an existing row with the same id
     /// (assistant placeholders are finalized in place), otherwise insert it
     /// after every row created at the same time or earlier, which is the
-    /// insertion order `list_messages` returns -- except that a tool group
-    /// is never split: a user row queued while a call was in flight is
-    /// timestamped between the call and its results, and lands after them.
+    /// insertion order `list_messages` returns, and re-join tool groups the
+    /// same way `from_history` does.
     pub fn upsert(&mut self, message: AssistantMessage) {
         self.tokens
             .insert(message.id.clone(), message_tokens(&message));
@@ -311,18 +310,12 @@ impl RunConversation {
             return;
         }
         let start = self.summary_len();
-        let tail = &self.messages[start..];
-        let mut offset = tail
+        let offset = self.messages[start..]
             .iter()
             .rposition(|m| m.created_at <= message.created_at)
             .map_or(0, |index| index + 1);
-        if let Some(group) = tool_groups(tail)
-            .into_iter()
-            .find(|group| group.start < offset && offset < group.end)
-        {
-            offset = group.end;
-        }
         self.messages.insert(start + offset, message);
+        self.messages = join_tool_groups(std::mem::take(&mut self.messages));
     }
 
     fn remove(&mut self, message_id: &str) {
@@ -439,18 +432,13 @@ struct CompactionPlan {
 
 /// `[latest valid summary] + non-summary messages after its boundary`, or
 /// every non-summary message when the compaction row cannot be placed
-/// (referenced rows deleted or belonging to another session).
+/// (referenced rows deleted or belonging to another session). `messages`
+/// must be in view order (see [`join_tool_groups`]): the boundary is the
+/// last message a compaction consumed from that order.
 fn provider_view(
-    messages: &[AssistantMessage],
+    messages: Vec<AssistantMessage>,
     latest: Option<&AssistantCompaction>,
 ) -> Vec<AssistantMessage> {
-    let raw = |messages: &[AssistantMessage]| {
-        messages
-            .iter()
-            .filter(|message| !is_compaction_summary_message(message))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
     let summary_and_boundary = latest.and_then(|compaction| {
         let summary = messages.iter().find(|message| {
             Some(message.id.as_str()) == compaction.summary_message_id.as_deref()
@@ -458,22 +446,61 @@ fn provider_view(
         let boundary = messages.iter().position(|message| {
             Some(message.id.as_str()) == compaction.source_to_message_id.as_deref()
         })?;
-        Some((summary, boundary))
+        Some((summary.clone(), boundary + 1))
     });
-    match summary_and_boundary {
-        Some((summary, boundary)) => {
-            let mut view = vec![summary.clone()];
-            view.extend(raw(&messages[boundary + 1..]));
-            view
+    let (summary, boundary) = summary_and_boundary.unzip();
+    summary
+        .into_iter()
+        .chain(
+            messages
+                .into_iter()
+                .skip(boundary.unwrap_or(0))
+                .filter(|message| !is_compaction_summary_message(message)),
+        )
+        .collect()
+}
+
+/// Move every tool result directly behind the assistant message that issued
+/// its call, so [`tool_groups`] sees contiguous groups. `list_messages`
+/// orders by `created_at`, and a user row queued while a call was in flight
+/// is timestamped between the call and its results; it lands after them.
+/// Idempotent, and a no-op on an already joined sequence.
+fn join_tool_groups(messages: Vec<AssistantMessage>) -> Vec<AssistantMessage> {
+    let mut joined: Vec<AssistantMessage> = Vec::with_capacity(messages.len());
+    // The group still accepting results: the call ids its assistant message
+    // issued, and the index just past its last member.
+    let mut open: Option<(HashSet<String>, usize)> = None;
+    for message in messages {
+        let answers_open = open.as_ref().is_some_and(|(issued, _)| {
+            let answered = tool_result_ids(&message);
+            !answered.is_empty() && answered.iter().all(|id| issued.contains(*id))
+        });
+        match &mut open {
+            Some((_, end)) if answers_open => {
+                joined.insert(*end, message);
+                *end += 1;
+            }
+            _ => {
+                let issued: HashSet<String> = tool_use_ids(&message)
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                if !issued.is_empty() {
+                    open = Some((issued, joined.len() + 1));
+                } else if message.role != MessageRole::User {
+                    open = None;
+                }
+                joined.push(message);
+            }
         }
-        None => raw(messages),
     }
+    joined
 }
 
 /// Partition messages into the groups a compaction cut must not split: an
 /// assistant message together with the tool messages answering the calls it
-/// issued. Everything else is its own group. Results follow their call, so a
-/// group is a contiguous range.
+/// issued. Everything else is its own group. [`join_tool_groups`] keeps
+/// results right behind their call, so a group is a contiguous range.
 pub(crate) fn tool_groups(messages: &[AssistantMessage]) -> Vec<Range<usize>> {
     let mut groups = Vec::new();
     let mut start = 0usize;
@@ -1379,6 +1406,88 @@ mod tests {
         assert_token_cache_in_sync(&conversation);
     }
 
+    fn completed_compaction(from: &str, to: &str, summary: &str) -> AssistantCompaction {
+        AssistantCompaction {
+            id: "c".to_string(),
+            session_id: "s".to_string(),
+            trigger: CompactionTrigger::Automatic,
+            strategy: CompactionStrategy::LocalSummary,
+            status: crate::assistant::types::CompactionStatus::Completed,
+            source_from_message_id: Some(from.to_string()),
+            source_to_message_id: Some(to.to_string()),
+            summary_message_id: Some(summary.to_string()),
+            created_run_id: None,
+            protocol_id: "p".to_string(),
+            model_id: "m".to_string(),
+            input_message_count: 0,
+            created_at: 0,
+            completed_at: Some(0),
+            error: None,
+        }
+    }
+
+    /// `list_messages` returns a row queued during a tool call between the
+    /// call and its results. Loading that history must join the group
+    /// exactly as the run did when it fed the same rows one by one.
+    #[test]
+    fn from_history_joins_a_tool_group_split_by_a_queued_row_like_upsert_does() {
+        let at = |created_at: i64, message: AssistantMessage| AssistantMessage {
+            created_at,
+            ..message
+        };
+        let mut group = tool_group("g", 2);
+        let persisted = vec![
+            at(10, msg("u", MessageRole::User, vec![text("ask")])),
+            at(20, group.remove(0)),
+            at(30, group.remove(0)),
+            at(40, msg("q", MessageRole::User, vec![text("queued")])),
+            at(50, group.remove(0)),
+            at(60, msg("next", MessageRole::Assistant, vec![text("done")])),
+        ];
+
+        let loaded = conversation(persisted.clone());
+        assert_eq!(
+            ids(loaded.messages()),
+            vec!["u", "gasst", "gres0", "gres1", "q", "next"]
+        );
+        assert_eq!(tool_groups(loaded.messages()), vec![0..1, 1..4, 4..5, 5..6]);
+        assert_token_cache_in_sync(&loaded);
+
+        let mut fed = conversation(Vec::new());
+        for message in persisted {
+            fed.upsert(message);
+        }
+        assert_eq!(ids(fed.messages()), ids(loaded.messages()));
+        assert_token_cache_in_sync(&fed);
+    }
+
+    /// A cut lands after the last result of a group, so the compaction
+    /// boundary can be a result timestamped after the queued row that
+    /// followed it in view order. The boundary is resolved in view order:
+    /// the queued row survives, the result does not resurface.
+    #[test]
+    fn from_history_resolves_the_compaction_boundary_in_joined_order() {
+        let at = |created_at: i64, message: AssistantMessage| AssistantMessage {
+            created_at,
+            ..message
+        };
+        let mut group = tool_group("g", 1);
+        let messages = vec![
+            at(20, group.remove(0)),
+            at(30, msg("q", MessageRole::User, vec![text("queued")])),
+            at(40, group.remove(0)),
+            at(50, msg("next", MessageRole::Assistant, vec![text("done")])),
+            at(60, summary_msg("s", "summary")),
+        ];
+
+        let conversation = RunConversation::from_history(
+            &messages,
+            Some(&completed_compaction("gasst", "gres0", "s")),
+        );
+        assert_eq!(ids(conversation.messages()), vec!["s", "q", "next"]);
+        assert_token_cache_in_sync(&conversation);
+    }
+
     /// Restart reconstruction from stored rows: the standing summary leads,
     /// the boundary row and everything before it are gone, a stale summary
     /// stored after the boundary is filtered, and equal timestamps do not
@@ -1390,23 +1499,7 @@ mod tests {
         messages.push(msg("m4", MessageRole::User, vec![text("five")]));
         messages.push(summary_msg("standing", "second pass"));
         messages.push(msg("m5", MessageRole::Assistant, vec![text("six")]));
-        let compaction = AssistantCompaction {
-            id: "c".to_string(),
-            session_id: "s".to_string(),
-            trigger: CompactionTrigger::Automatic,
-            strategy: CompactionStrategy::LocalSummary,
-            status: crate::assistant::types::CompactionStatus::Completed,
-            source_from_message_id: Some("m0".to_string()),
-            source_to_message_id: Some("m3".to_string()),
-            summary_message_id: Some("standing".to_string()),
-            created_run_id: None,
-            protocol_id: "p".to_string(),
-            model_id: "m".to_string(),
-            input_message_count: 4,
-            created_at: 0,
-            completed_at: Some(0),
-            error: None,
-        };
+        let compaction = completed_compaction("m0", "m3", "standing");
 
         let conversation = RunConversation::from_history(&messages, Some(&compaction));
         assert_eq!(ids(conversation.messages()), vec!["standing", "m4", "m5"]);
