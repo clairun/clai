@@ -237,7 +237,7 @@ pub async fn run_session_turn(
                 None,
                 CompactionTrigger::Automatic,
                 Some(&run_id),
-                false,
+                compaction::verbatim_tail_tokens(&system_prompt_text, &tool_defs),
                 &mut conversation,
             )
             .await
@@ -254,8 +254,7 @@ pub async fn run_session_turn(
                         },
                     );
                 }
-                // Nothing eligible yet (or a summary that would not shrink the
-                // request); the forced paths can still compact more.
+                // Nothing eligible yet; the forced paths can still compact more.
                 Ok(None) => {}
                 Err(error) => {
                     tracing::warn!(

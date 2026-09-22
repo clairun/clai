@@ -702,7 +702,7 @@ pub async fn assistant_compact_session(
         summary_working_dir.as_deref(),
         CompactionTrigger::Manual,
         None,
-        true,
+        compaction::verbatim_tail_tokens("", &[]),
         &mut conversation,
     )
     .await?;

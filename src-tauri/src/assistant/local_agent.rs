@@ -325,7 +325,7 @@ pub async fn run_session_turn(
             summary_working_dir.as_deref(),
             CompactionTrigger::Automatic,
             Some(&run_id),
-            false,
+            compaction::verbatim_tail_tokens(&system_prompt, &[]),
             &mut conversation,
         )
         .await
@@ -3604,8 +3604,15 @@ async fn persist_opencode_tool_use_and_result(
         arguments: params,
     });
     state.persisted_tool_part_ids.insert(raw_part_id);
-    flush_opencode_assistant_message_content(deps, session, run_id, assistant_message, state)
-        .await?;
+    flush_opencode_assistant_message_content(
+        deps,
+        session,
+        run_id,
+        assistant_message,
+        state,
+        conversation,
+    )
+    .await?;
 
     apply_opencode_tool_result(deps, session, run_id, &tool_call_id, part, conversation).await
 }
@@ -3722,6 +3729,7 @@ async fn flush_opencode_assistant_message_content(
     run_id: &str,
     assistant_message: &AssistantMessage,
     state: &mut OpenCodeStreamState,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let content = non_empty_content_parts(&state.parts);
     if content.is_empty() {
@@ -3740,6 +3748,7 @@ async fn flush_opencode_assistant_message_content(
                 return Ok(());
             }
         };
+    conversation.upsert(updated.clone());
     let now = std::time::Instant::now();
     let should_emit = match state.last_update_emit_at {
         None => true,
@@ -3858,8 +3867,16 @@ async fn handle_codex_item(
             }
         }
         Some("mcp_tool_call") => {
-            persist_codex_mcp_tool_use(deps, session, run_id, assistant_message, state, item)
-                .await?;
+            persist_codex_mcp_tool_use(
+                deps,
+                session,
+                run_id,
+                assistant_message,
+                state,
+                item,
+                conversation,
+            )
+            .await?;
             if terminal {
                 apply_codex_mcp_tool_result(deps, session, run_id, state, item, conversation)
                     .await?;
@@ -3919,6 +3936,7 @@ async fn persist_codex_mcp_tool_use(
     assistant_message: &AssistantMessage,
     state: &mut CodexStreamState,
     item: &Value,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let raw_item_id = item
         .get("id")
@@ -3955,7 +3973,15 @@ async fn persist_codex_mcp_tool_use(
     });
     state.persisted_tool_item_ids.insert(raw_item_id.clone());
     state.tool_item_to_call_id.insert(raw_item_id, tool_call_id);
-    flush_codex_assistant_message_content(deps, session, run_id, assistant_message, state).await
+    flush_codex_assistant_message_content(
+        deps,
+        session,
+        run_id,
+        assistant_message,
+        state,
+        conversation,
+    )
+    .await
 }
 
 async fn apply_codex_mcp_tool_result(
@@ -4081,6 +4107,7 @@ async fn flush_codex_assistant_message_content(
     run_id: &str,
     assistant_message: &AssistantMessage,
     state: &mut CodexStreamState,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let content = non_empty_content_parts(&state.parts);
     if content.is_empty() {
@@ -4099,6 +4126,7 @@ async fn flush_codex_assistant_message_content(
                 return Ok(());
             }
         };
+    conversation.upsert(updated.clone());
     let now = std::time::Instant::now();
     let should_emit = match state.last_update_emit_at {
         None => true,
@@ -4545,7 +4573,15 @@ async fn persist_tool_use(
     // write happens every call; the AssistantMessageUpdated event is
     // throttled inside flush_assistant_message_content to avoid an
     // event storm on tool-heavy turns.
-    flush_assistant_message_content(deps, session, run_id, assistant_message, state).await?;
+    flush_assistant_message_content(
+        deps,
+        session,
+        run_id,
+        assistant_message,
+        state,
+        conversation,
+    )
+    .await?;
 
     // If a tool_result arrived before this tool_use was registered (e.g.
     // tool_use only present in the complete assistant message), flush it
@@ -4576,6 +4612,7 @@ async fn flush_assistant_message_content(
     run_id: &str,
     assistant_message: &AssistantMessage,
     state: &mut ClaudeStreamState,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let content: Vec<ContentPart> = state
         .parts
@@ -4599,6 +4636,7 @@ async fn flush_assistant_message_content(
                 return Ok(());
             }
         };
+    conversation.upsert(updated.clone());
 
     let now = std::time::Instant::now();
     let should_emit = match state.last_update_emit_at {
