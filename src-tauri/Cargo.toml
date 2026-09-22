@@ -116,6 +116,9 @@ async-trait = "0.1"
 
 # UUID generation (for tool invocations and agent IDs)
 uuid = { version = "1", features = ["v4"] }
+# Fixed cl100k_base tokenizer for the compaction trigger estimate; the
+# encoding is embedded in the crate, so nothing is fetched at runtime.
+tiktoken-rs = "0.12"
 
 # Date/time handling (for agent timestamps)
 chrono = { version = "0.4", features = ["serde"] }

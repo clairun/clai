@@ -1,5 +1,4 @@
 use futures::StreamExt;
-use std::collections::HashSet;
 use tauri::AppHandle;
 use tauri::Manager;
 use thiserror::Error;
@@ -172,6 +171,12 @@ pub async fn run_session_turn(
         workspace_root.as_deref(),
     );
 
+    let system_prompt_text = compaction::content_text(&system_message.content);
+
+    // The run's conversation, read from the database once. Every row this run
+    // persists below is appended to it; history is not re-read per iteration.
+    let mut conversation = compaction::RunConversation::load(&deps.pool, &session.id).await?;
+
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
     // tool results from prior runs and may skip re-running tools.
@@ -186,6 +191,7 @@ pub async fn run_session_turn(
             },
         )
         .await?;
+        conversation.upsert(boundary_msg.clone());
         let _ = emit_event(
             &deps.app,
             &session,
@@ -213,20 +219,18 @@ pub async fn run_session_turn(
             return Ok(());
         }
 
-        // Load fresh message history each iteration (includes the persisted trigger).
-        // Normalize before sending: drop empty assistant placeholders, drop tool
-        // messages whose tool_call_id has no matching tool_use in the preceding
-        // assistant turn, and merge consecutive same-role messages. The DB stays
-        // the source of truth; this only shapes what the provider sees so a
-        // mid-stream hangup or stacked user typing can't poison subsequent runs.
-        let mut history = compaction::load_provider_history(&deps.pool, &session.id).await?;
-        if compaction::should_auto_compact(
-            &history.view,
-            Some(&system_message),
-            &tool_defs,
-            history.messages_since_compaction,
-        ) {
-            match compaction::compact_session_history(
+        // Reconcile queued user input (sent, edited, or deleted while the run
+        // was busy) before sizing and shaping the request; pending rows are
+        // never summarized away. Then normalize before sending: drop empty
+        // assistant placeholders, drop tool messages whose tool_call_id has no
+        // matching tool_use in the preceding assistant turn, and merge
+        // consecutive same-role messages. The DB stays the source of truth;
+        // this only shapes what the provider sees so a mid-stream hangup or
+        // stacked user typing can't poison subsequent runs.
+        let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+        conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
+        if compaction::should_auto_compact(&conversation, &system_prompt_text, &tool_defs) {
+            match compaction::compact_conversation(
                 &deps.pool,
                 &session,
                 &connection,
@@ -234,6 +238,7 @@ pub async fn run_session_turn(
                 CompactionTrigger::Automatic,
                 Some(&run_id),
                 false,
+                &mut conversation,
             )
             .await
             {
@@ -248,10 +253,9 @@ pub async fn run_session_turn(
                             summary_message: outcome.summary_message,
                         },
                     );
-                    history = compaction::load_provider_history(&deps.pool, &session.id).await?;
                 }
-                // `force = false`: the *automatic* window selector declined,
-                // which says nothing about what a manual `/compact` could do.
+                // Nothing eligible yet (or a summary that would not shrink the
+                // request); the forced paths can still compact more.
                 Ok(None) => {}
                 Err(error) => {
                     tracing::warn!(
@@ -264,33 +268,8 @@ pub async fn run_session_turn(
                 }
             }
         }
-        let provider_history = history.view;
-        let message_ids_in_request: HashSet<&str> = provider_history
-            .iter()
-            .map(|message| message.id.as_str())
-            .collect();
-        let mut queued_message_ids_in_request: Vec<String> = Vec::new();
-        for id in repository::list_pending_queued_message_ids(&deps.pool, &session.id).await? {
-            if message_ids_in_request.contains(id.as_str()) {
-                queued_message_ids_in_request.push(id);
-                continue;
-            }
-            // A pending user message missing from the view was either queued
-            // after this iteration loaded (leave it for its own run) or
-            // summarized away by the standing compaction (its content reached
-            // the provider inside the summary, so it counts as delivered).
-            if let Some((boundary_created_at, boundary_id)) = &history.boundary {
-                if let Some(message) = repository::get_message(&deps.pool, &id).await? {
-                    let at_or_before_boundary = message.created_at < *boundary_created_at
-                        || (message.created_at == *boundary_created_at
-                            && message.id <= *boundary_id);
-                    if at_or_before_boundary {
-                        queued_message_ids_in_request.push(id);
-                    }
-                }
-            }
-        }
-        let normalized = normalize_history_for_provider(&provider_history);
+        let queued_message_ids_in_request = conversation.pending_ids();
+        let normalized = normalize_history_for_provider(conversation.messages());
         let supports_images = providers::connection_supports_images(&connection);
         // Drop image parts from history when the active connection can't accept
         // them (e.g. user switched to a non-vision provider mid-conversation).
@@ -342,6 +321,7 @@ pub async fn run_session_turn(
                         &connection,
                         None,
                         &run_id,
+                        &mut conversation,
                     )
                     .await
                     {
@@ -411,6 +391,7 @@ pub async fn run_session_turn(
             fail_run(deps, &session, &run_id, &e).await?;
             return Err(AssistantEngineError::Persistence(e));
         }
+        conversation.mark_delivered(&queued_message_ids_in_request);
         if !queued_message_ids_in_request.is_empty() {
             // The queued messages just became part of this run's request —
             // tell the FE so their "Queued" chips clear.
@@ -437,6 +418,7 @@ pub async fn run_session_turn(
             },
         )
         .await?;
+        conversation.upsert(assistant_message.clone());
 
         let _ = emit_event(
             &deps.app,
@@ -557,6 +539,7 @@ pub async fn run_session_turn(
                 &final_content,
             )
             .await?;
+            conversation.upsert(updated_message.clone());
 
             let _ = emit_event(
                 &deps.app,
@@ -683,7 +666,7 @@ pub async fn run_session_turn(
                     error: Some(error.as_str()),
                 },
             };
-            record_tool_call_result(
+            if let Some(tool_message) = record_tool_call_result(
                 deps,
                 &session,
                 &run_id,
@@ -692,7 +675,10 @@ pub async fn run_session_turn(
                 None,
                 MissingToolCall::Propagate,
             )
-            .await?;
+            .await?
+            {
+                conversation.upsert(tool_message);
+            }
         }
 
         // Continue loop — will call API again with tool results in message history.

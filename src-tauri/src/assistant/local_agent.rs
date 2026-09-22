@@ -308,11 +308,17 @@ pub async fn run_session_turn(
     // name compaction as the reason instead of leaving the user with the CLI's
     // bare context-limit error.
     let mut compaction_attempt = compaction::CompactionAttempt::NotAttempted;
-    let history = compaction::load_provider_history(&deps.pool, &session.id).await?;
-    if compaction::should_auto_compact(&history.view, None, &[], history.messages_since_compaction)
-    {
+    // The run's conversation, read once. Attempts append the rows they
+    // persist so a compaction or fresh-session prompt later in this run sees
+    // them without re-reading history. Native CLI sessions are resumed with
+    // only the new input; the conversation feeds fresh/rotated sessions.
+    let mut conversation = compaction::RunConversation::load(&deps.pool, &session.id).await?;
+    let run_input =
+        run_input_messages(deps, &session, &run_id, &input.trigger, &conversation).await?;
+    let system_prompt = system_prompt_text(&deps.app, &session, &input.trigger);
+    if compaction::should_auto_compact(&conversation, &system_prompt, &[]) {
         let summary_working_dir = workspace_root_for_session(deps, &session);
-        match compaction::compact_session_history(
+        match compaction::compact_conversation(
             &deps.pool,
             &session,
             &connection,
@@ -320,6 +326,7 @@ pub async fn run_session_turn(
             CompactionTrigger::Automatic,
             Some(&run_id),
             false,
+            &mut conversation,
         )
         .await
         {
@@ -336,8 +343,7 @@ pub async fn run_session_turn(
                     },
                 );
             }
-            // `force = false`: the *automatic* window selector declined, which
-            // says nothing about what a manual `/compact` could do.
+            // Nothing eligible yet; the forced paths can still compact more.
             Ok(None) => {}
             Err(error) => {
                 tracing::warn!(
@@ -412,6 +418,8 @@ pub async fn run_session_turn(
                     &input.cancel_token,
                     &input.trigger,
                     &mut assistant_slot,
+                    &mut conversation,
+                    &run_input,
                 )
                 .await;
                 let _ = std::fs::remove_file(&mcp_config_path);
@@ -429,6 +437,8 @@ pub async fn run_session_turn(
                         &input.cancel_token,
                         &input.trigger,
                         &mut assistant_slot,
+                        &mut conversation,
+                        &run_input,
                     )
                     .await
                 } else {
@@ -442,6 +452,8 @@ pub async fn run_session_turn(
                         &input.cancel_token,
                         &input.trigger,
                         &mut assistant_slot,
+                        &mut conversation,
+                        &run_input,
                     )
                     .await
                 }
@@ -457,6 +469,8 @@ pub async fn run_session_turn(
                     &input.cancel_token,
                     &input.trigger,
                     &mut assistant_slot,
+                    &mut conversation,
+                    &run_input,
                 )
                 .await
             }
@@ -497,6 +511,7 @@ pub async fn run_session_turn(
                     &connection,
                     summary_working_dir.as_deref(),
                     &run_id,
+                    &mut conversation,
                 )
                 .await
                 {
@@ -582,6 +597,33 @@ pub async fn run_session_turn(
             ))
         }
     }
+}
+
+/// The input this run answers, resolved once at run start: the queued batch
+/// already delivered to this run when there is one, otherwise the latest user
+/// message. Empty for automation triggers, whose prompt is the trigger marker
+/// `prepare_prompt` writes. Kept apart from the conversation so a compaction
+/// between attempts cannot summarize away the prompt or its images.
+async fn run_input_messages(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    trigger: &crate::assistant::types::RunTrigger,
+    conversation: &compaction::RunConversation,
+) -> Result<Vec<AssistantMessage>, AssistantEngineError> {
+    if build_trigger_message(session, trigger).is_some() {
+        return Ok(Vec::new());
+    }
+    let queued =
+        repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id).await?;
+    if !queued.is_empty() {
+        return Ok(queued.into_iter().map(|queued| queued.message).collect());
+    }
+    Ok(conversation
+        .latest_user_message()
+        .cloned()
+        .into_iter()
+        .collect())
 }
 
 /// After a failed CLI run, drop the unanswered input — but only when the
@@ -733,6 +775,7 @@ async fn ensure_assistant_message_slot(
     run_id: &str,
     metadata_source: &str,
     slot: &mut Option<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<AssistantMessage, LocalAgentRunError> {
     if let Some(existing) = slot.as_ref() {
         return Ok(existing.clone());
@@ -749,6 +792,7 @@ async fn ensure_assistant_message_slot(
         },
     )
     .await?;
+    conversation.upsert(assistant_message.clone());
     let _ = emit_event(
         &deps.app,
         session,
@@ -779,6 +823,7 @@ async fn ensure_assistant_message_slot(
 ///
 /// Resetting the stream state is part of the rotation: the parts just
 /// persisted must not be written a second time into the new row.
+#[allow(clippy::too_many_arguments)]
 async fn rotate_assistant_bubble(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -787,12 +832,27 @@ async fn rotate_assistant_bubble(
     assistant_message: &mut AssistantMessage,
     assistant_slot: &mut Option<AssistantMessage>,
     state: &mut ClaudeStreamState,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
-    finalize_assistant_message(deps, session, run_id, assistant_message, state).await?;
+    finalize_assistant_message(
+        deps,
+        session,
+        run_id,
+        assistant_message,
+        state,
+        conversation,
+    )
+    .await?;
     *assistant_slot = None;
-    *assistant_message =
-        ensure_assistant_message_slot(deps, session, run_id, metadata_source, assistant_slot)
-            .await?;
+    *assistant_message = ensure_assistant_message_slot(
+        deps,
+        session,
+        run_id,
+        metadata_source,
+        assistant_slot,
+        conversation,
+    )
+    .await?;
     *state = ClaudeStreamState::new();
     Ok(())
 }
@@ -977,6 +1037,7 @@ fn build_midrun_payload(user_lines: String, turn_active: bool) -> MidRunPayload 
     clippy::cognitive_complexity,
     reason = "lint debt: cognitive complexity 49 against a budget of 25"
 )]
+#[allow(clippy::too_many_arguments)]
 async fn try_deliver_queued_to_claude(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -984,6 +1045,7 @@ async fn try_deliver_queued_to_claude(
     connection_id: &str,
     stdin: &mut tokio::process::ChildStdin,
     turn_active: bool,
+    conversation: &mut compaction::RunConversation,
 ) -> MidRunDelivery {
     // Interrupting while the user is being asked a question would tear the
     // question down; leave messages queued until it resolves.
@@ -1063,6 +1125,10 @@ async fn try_deliver_queued_to_claude(
             },
         );
     }
+    // The exact rows written to the process are now part of the conversation.
+    for queued in matching {
+        conversation.upsert(queued.message);
+    }
     if owes_turn {
         tracing::info!(
             run_id,
@@ -1106,6 +1172,8 @@ async fn run_claude_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
+    run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     let prompt = prepare_prompt(
         deps,
@@ -1115,6 +1183,8 @@ async fn run_claude_turn(
         CliProviderRuntime::ClaudeCode.metadata_source(),
         CliProviderRuntime::ClaudeCode.display_name(),
         is_new_session,
+        conversation,
+        run_input,
     )
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger);
@@ -1124,6 +1194,7 @@ async fn run_claude_turn(
         run_id,
         CliProviderRuntime::ClaudeCode.metadata_source(),
         assistant_slot,
+        conversation,
     )
     .await?;
     let midrun_input = claude_midrun_input_enabled();
@@ -1232,7 +1303,7 @@ async fn run_claude_turn(
             // stream-json carries image content blocks on the user turn; the
             // legacy `-p` text path can't, so images only ride the modern
             // (default-on) mid-run input mode.
-            let images = resolve_cli_user_images(deps, session, run_id).await;
+            let images = resolve_cli_user_images(deps, session, run_input).await;
             claude_stream_json_user_message(&prompt, &images)
         } else {
             prompt
@@ -1282,8 +1353,15 @@ async fn run_claude_turn(
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
-                finalize_assistant_message(deps, session, run_id, &assistant_message, &state)
-                    .await?;
+                finalize_assistant_message(
+                    deps,
+                    session,
+                    run_id,
+                    &assistant_message,
+                    &mut state,
+                    conversation,
+                )
+                .await?;
                 return Err(LocalAgentRunError::Cancelled);
             }
             _ = queue_poll.tick(), if live_stdin.is_some() => {
@@ -1300,7 +1378,13 @@ async fn run_claude_turn(
                     continue;
                 };
                 let outcome = try_deliver_queued_to_claude(
-                    deps, session, run_id, &connection.id, stdin, turn_active,
+                    deps,
+                    session,
+                    run_id,
+                    &connection.id,
+                    stdin,
+                    turn_active,
+                    conversation,
                 )
                 .await;
                 if outcome.interrupted {
@@ -1395,6 +1479,7 @@ async fn run_claude_turn(
                             &connection.id,
                             stdin,
                             false,
+                            conversation,
                         )
                         .await;
                         if outcome.owes_turn {
@@ -1419,6 +1504,7 @@ async fn run_claude_turn(
                             &mut assistant_message,
                             assistant_slot,
                             &mut state,
+                            conversation,
                         )
                         .await?;
                     }
@@ -1436,7 +1522,15 @@ async fn run_claude_turn(
         .wait()
         .await
         .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    finalize_assistant_message(deps, session, run_id, &assistant_message, &state).await?;
+    finalize_assistant_message(
+        deps,
+        session,
+        run_id,
+        &assistant_message,
+        &mut state,
+        conversation,
+    )
+    .await?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -1466,6 +1560,8 @@ async fn run_codex_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
+    run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     let existing_thread_id = session.context.cli_session_id.clone();
     let prompt = prepare_prompt(
@@ -1476,6 +1572,8 @@ async fn run_codex_turn(
         CliProviderRuntime::Codex.metadata_source(),
         CliProviderRuntime::Codex.display_name(),
         existing_thread_id.is_none(),
+        conversation,
+        run_input,
     )
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger);
@@ -1494,6 +1592,7 @@ async fn run_codex_turn(
         run_id,
         CliProviderRuntime::Codex.metadata_source(),
         assistant_slot,
+        conversation,
     )
     .await?;
 
@@ -1546,7 +1645,7 @@ async fn run_codex_turn(
     // fresh `exec` (via shared options) and `exec resume` (ResumeArgsRaw.images)
     // paths; codex reads the files itself. Only present on the turn the user
     // actually sent them, so no per-turn re-send.
-    for image_path in resolve_codex_image_paths(deps, session, run_id).await {
+    for image_path in resolve_codex_image_paths(deps, session, run_input) {
         command.arg("--image").arg(image_path);
     }
     command
@@ -1598,6 +1697,8 @@ async fn run_codex_turn(
                     run_id,
                     &assistant_message,
                     &state.parts,
+                    &mut state.persisted_messages,
+                    conversation,
                 )
                 .await?;
                 return Err(LocalAgentRunError::Cancelled);
@@ -1631,8 +1732,16 @@ async fn run_codex_turn(
         .wait()
         .await
         .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    finalize_assistant_message_from_parts(deps, session, run_id, &assistant_message, &state.parts)
-        .await?;
+    finalize_assistant_message_from_parts(
+        deps,
+        session,
+        run_id,
+        &assistant_message,
+        &state.parts,
+        &mut state.persisted_messages,
+        conversation,
+    )
+    .await?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -1676,6 +1785,8 @@ async fn run_codex_turn_app_server(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
+    run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     use crate::assistant::codex_app_server as aps;
 
@@ -1688,6 +1799,8 @@ async fn run_codex_turn_app_server(
         CliProviderRuntime::Codex.metadata_source(),
         CliProviderRuntime::Codex.display_name(),
         existing_thread_id.is_none(),
+        conversation,
+        run_input,
     )
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger);
@@ -1706,6 +1819,7 @@ async fn run_codex_turn_app_server(
         run_id,
         CliProviderRuntime::Codex.metadata_source(),
         assistant_slot,
+        conversation,
     )
     .await?;
 
@@ -1795,7 +1909,7 @@ async fn run_codex_turn_app_server(
     // Fire the turn. We do not block on its response; the turn is tracked via
     // notifications in the loop below.
     let mut input = vec![aps::text_user_input(&prompt)];
-    for image_path in resolve_codex_image_paths(deps, session, run_id).await {
+    for image_path in resolve_codex_image_paths(deps, session, run_input) {
         input.push(aps::local_image_user_input(&image_path.to_string_lossy()));
     }
     transport
@@ -1811,12 +1925,12 @@ async fn run_codex_turn_app_server(
     // Monotonic id for client-initiated requests after the handshake
     // (steer/interrupt), kept distinct from the handshake ids 1/2/3.
     let mut next_request_id: i64 = 10;
-    // steer request id -> queued message ids carried by that steer, awaiting
-    // the server's accept/reject response. Best-effort and per-turn: the map
-    // lives only until `turn/completed` breaks the loop, and an entry whose
-    // response never arrives just leaves its messages pending in the DB for
-    // the follow-up run (no delivery is lost, nothing outlives the turn).
-    let mut pending_steer: HashMap<i64, Vec<String>> = HashMap::new();
+    // steer request id -> the queued message rows carried by that steer,
+    // awaiting the server's accept/reject response. Best-effort and per-turn:
+    // the map lives only until `turn/completed` breaks the loop, and an entry
+    // whose response never arrives just leaves its messages pending in the DB
+    // for the follow-up run (no delivery is lost, nothing outlives the turn).
+    let mut pending_steer: HashMap<i64, Vec<AssistantMessage>> = HashMap::new();
     // Message ids with a steer in flight so a later poll tick does not
     // re-send them before the response lands.
     let mut inflight_steer: HashSet<String> = HashSet::new();
@@ -1832,7 +1946,13 @@ async fn run_codex_turn_app_server(
                     .await;
                 transport.kill().await;
                 finalize_assistant_message_from_parts(
-                    deps, session, run_id, &assistant_message, &state.parts,
+                    deps,
+                    session,
+                    run_id,
+                    &assistant_message,
+                    &state.parts,
+                    &mut state.persisted_messages,
+                    conversation,
                 )
                 .await?;
                 return Err(LocalAgentRunError::Cancelled);
@@ -1841,7 +1961,7 @@ async fn run_codex_turn_app_server(
                 // Steer queued messages into the *live* turn (the win over the
                 // exec stop-and-restart model). Only while a turn is active.
                 if let Some(turn_id) = active_turn_id.clone() {
-                    if let Some((request, message_ids)) = build_codex_steer(
+                    if let Some((request, messages)) = build_codex_steer(
                         deps,
                         session,
                         connection.id.as_str(),
@@ -1853,10 +1973,10 @@ async fn run_codex_turn_app_server(
                     .await
                     {
                         if transport.send(&request).await.is_ok() {
-                            pending_steer.insert(next_request_id, message_ids);
+                            pending_steer.insert(next_request_id, messages);
                         } else {
-                            for id in message_ids {
-                                inflight_steer.remove(&id);
+                            for message in messages {
+                                inflight_steer.remove(&message.id);
                             }
                         }
                         next_request_id += 1;
@@ -1898,14 +2018,15 @@ async fn run_codex_turn_app_server(
             // The only responses we act on are steer accept/reject; everything
             // else (handshake echoes) is informational.
             if let Some(id) = aps::response_id(&message) {
-                if let Some(message_ids) = pending_steer.remove(&id) {
+                if let Some(messages) = pending_steer.remove(&id) {
                     let accepted = resolve_codex_steer_response(
                         deps,
                         session,
                         run_id,
                         &message,
-                        message_ids,
+                        messages,
                         &mut inflight_steer,
+                        conversation,
                     )
                     .await;
                     // The steered user message was written to the conversation
@@ -1922,6 +2043,7 @@ async fn run_codex_turn_app_server(
                             &assistant_message,
                             &mut state,
                             assistant_slot,
+                            conversation,
                         )
                         .await?;
                     }
@@ -1950,8 +2072,16 @@ async fn run_codex_turn_app_server(
     }
 
     transport.kill().await;
-    finalize_assistant_message_from_parts(deps, session, run_id, &assistant_message, &state.parts)
-        .await?;
+    finalize_assistant_message_from_parts(
+        deps,
+        session,
+        run_id,
+        &assistant_message,
+        &state.parts,
+        &mut state.persisted_messages,
+        conversation,
+    )
+    .await?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -2148,7 +2278,7 @@ async fn build_codex_steer(
     turn_id: &str,
     request_id: i64,
     inflight: &mut HashSet<String>,
-) -> Option<(Value, Vec<String>)> {
+) -> Option<(Value, Vec<AssistantMessage>)> {
     // Interrupting while the user is being asked a question would tear the
     // question down; leave messages queued until it resolves.
     if crate::assistant::tools::ask_user::session_has_pending_ask(&session.id) {
@@ -2158,7 +2288,7 @@ async fn build_codex_steer(
         .await
         .ok()?;
     let mut input = Vec::new();
-    let mut ids = Vec::new();
+    let mut messages = Vec::new();
     let mut total_chars = 0usize;
     for queued in pending {
         if queued.connection_id != connection_id || inflight.contains(&queued.message.id) {
@@ -2185,17 +2315,17 @@ async fn build_codex_steer(
         }
         total_chars += text_chars;
         input.push(codex_app_server::text_user_input(&text));
-        ids.push(queued.message.id.clone());
+        messages.push(queued.message);
     }
     if input.is_empty() {
         return None;
     }
-    for id in &ids {
-        inflight.insert(id.clone());
+    for message in &messages {
+        inflight.insert(message.id.clone());
     }
     Some((
         codex_app_server::turn_steer_request(request_id, thread_id, turn_id, input),
-        ids,
+        messages,
     ))
 }
 
@@ -2206,6 +2336,7 @@ async fn build_codex_steer(
 /// is frozen at turn start — making the reply (including the handling of the
 /// steered comment) render *before* the comment itself. Splitting yields the
 /// natural order: pre-steer output, the user's message, then post-steer output.
+#[allow(clippy::too_many_arguments)]
 async fn split_codex_assistant_message(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -2214,16 +2345,31 @@ async fn split_codex_assistant_message(
     current: &AssistantMessage,
     state: &mut CodexStreamState,
     slot: &mut Option<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<AssistantMessage, LocalAgentRunError> {
     let has_content = !non_empty_content_parts(&state.parts).is_empty()
         || !state.persisted_tool_item_ids.is_empty();
     if has_content {
         // Persist the pre-steer segment as its own completed message.
-        finalize_assistant_message_from_parts(deps, session, run_id, current, &state.parts).await?;
+        finalize_assistant_message_from_parts(
+            deps,
+            session,
+            run_id,
+            current,
+            &state.parts,
+            &mut state.persisted_messages,
+            conversation,
+        )
+        .await?;
     } else {
         // Nothing emitted yet: drop the empty placeholder rather than leave an
         // empty bubble before the user's steered message.
-        let _ = repository::delete_message(&deps.pool, &current.id).await;
+        if repository::delete_message(&deps.pool, &current.id)
+            .await
+            .is_ok()
+        {
+            conversation.remove(&current.id);
+        }
         let _ = emit_event(
             &deps.app,
             session,
@@ -2239,7 +2385,7 @@ async fn split_codex_assistant_message(
     state.parts.clear();
     state.last_update_emit_at = None;
     *slot = None;
-    ensure_assistant_message_slot(deps, session, run_id, metadata_source, slot).await
+    ensure_assistant_message_slot(deps, session, run_id, metadata_source, slot, conversation).await
 }
 
 /// Resolve a `turn/steer` response: on accept, mark the carried messages
@@ -2249,14 +2395,17 @@ async fn split_codex_assistant_message(
     clippy::cognitive_complexity,
     reason = "lint debt: cognitive complexity 26 against a budget of 25"
 )]
+#[allow(clippy::too_many_arguments)]
 async fn resolve_codex_steer_response(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
     response: &Value,
-    message_ids: Vec<String>,
+    messages: Vec<AssistantMessage>,
     inflight: &mut HashSet<String>,
+    conversation: &mut compaction::RunConversation,
 ) -> bool {
+    let message_ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
     for id in &message_ids {
         inflight.remove(id);
     }
@@ -2294,6 +2443,9 @@ async fn resolve_codex_steer_response(
     // Accepted by Codex (the input entered the live turn) regardless of the DB
     // mark result — the caller splits the assistant message either way so the
     // post-steer output is ordered after the user's message.
+    for message in messages {
+        conversation.upsert(message);
+    }
     true
 }
 
@@ -2403,6 +2555,8 @@ async fn run_opencode_turn(
     cancel_token: &CancellationToken,
     trigger: &crate::assistant::types::RunTrigger,
     assistant_slot: &mut Option<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
+    run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     let existing_session_id = session.context.cli_session_id.clone();
     let prompt = prepare_prompt(
@@ -2413,6 +2567,8 @@ async fn run_opencode_turn(
         CliProviderRuntime::OpenCode.metadata_source(),
         CliProviderRuntime::OpenCode.display_name(),
         existing_session_id.is_none(),
+        conversation,
+        run_input,
     )
     .await?;
     let system_prompt = system_prompt_text(&deps.app, session, trigger);
@@ -2424,6 +2580,7 @@ async fn run_opencode_turn(
         run_id,
         CliProviderRuntime::OpenCode.metadata_source(),
         assistant_slot,
+        conversation,
     )
     .await?;
 
@@ -2518,6 +2675,8 @@ async fn run_opencode_turn(
                     run_id,
                     &assistant_message,
                     &state.parts,
+                    &mut state.persisted_messages,
+                    conversation,
                 )
                 .await?;
                 return Err(LocalAgentRunError::Cancelled);
@@ -2552,8 +2711,16 @@ async fn run_opencode_turn(
         .wait()
         .await
         .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    finalize_assistant_message_from_parts(deps, session, run_id, &assistant_message, &state.parts)
-        .await?;
+    finalize_assistant_message_from_parts(
+        deps,
+        session,
+        run_id,
+        &assistant_message,
+        &state.parts,
+        &mut state.persisted_messages,
+        conversation,
+    )
+    .await?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -2592,36 +2759,17 @@ fn workspace_root_for_session(deps: &AssistantDeps, session: &AssistantSession) 
 /// images, the session has no workspace root, or a file can't be read (each
 /// failure is logged and skipped — a missing image never fails the turn, the
 /// surrounding text is still sent).
-/// Image `ContentPart`s contributing to this turn's prompt. Mirrors
-/// [`prepare_prompt`]: the FULL batch of delivered queued messages for the run
-/// when present (so a batched follow-up does not drop all but the newest
-/// image), otherwise the latest user message. Oldest-first, matching the
-/// prompt text order.
-async fn turn_image_parts(
-    deps: &AssistantDeps,
-    session: &AssistantSession,
-    run_id: &str,
-) -> Vec<ContentPart> {
-    let queued =
-        repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "CLI image: queued-message read failed; sending text only");
-                Vec::new()
-            });
-    let contents: Vec<Vec<ContentPart>> = if !queued.is_empty() {
-        queued.into_iter().map(|q| q.message.content).collect()
-    } else {
-        match repository::latest_message_by_role(&deps.pool, &session.id, MessageRole::User).await {
-            Ok(Some(message)) => vec![message.content],
-            Ok(None) => Vec::new(),
-            Err(error) => {
-                tracing::warn!(%error, "CLI image: message read failed; sending text only");
-                Vec::new()
-            }
-        }
-    };
-    image_parts_from_contents(contents)
+/// Image `ContentPart`s contributing to this turn's prompt: every image on the
+/// run's input messages (the FULL delivered queued batch when present, so a
+/// batched follow-up does not drop all but the newest image), oldest-first,
+/// matching the prompt text order.
+fn turn_image_parts(run_input: &[AssistantMessage]) -> Vec<ContentPart> {
+    image_parts_from_contents(
+        run_input
+            .iter()
+            .map(|message| message.content.clone())
+            .collect(),
+    )
 }
 
 /// Flatten per-message content into just the image parts, preserving order
@@ -2639,9 +2787,9 @@ fn image_parts_from_contents(contents: Vec<Vec<ContentPart>>) -> Vec<ContentPart
 async fn resolve_cli_user_images(
     deps: &AssistantDeps,
     session: &AssistantSession,
-    run_id: &str,
+    run_input: &[AssistantMessage],
 ) -> Vec<(String, String)> {
-    let parts = turn_image_parts(deps, session, run_id).await;
+    let parts = turn_image_parts(run_input);
     if parts.is_empty() {
         return Vec::new();
     }
@@ -2693,13 +2841,12 @@ async fn resolve_cli_image_parts(
 /// [`turn_image_parts`]). Codex ingests images as files
 /// (`codex exec [resume] --image`), so it gets paths rather than base64.
 /// Non-store paths and missing files are skipped (text still sends).
-async fn resolve_codex_image_paths(
+fn resolve_codex_image_paths(
     deps: &AssistantDeps,
     session: &AssistantSession,
-    run_id: &str,
+    run_input: &[AssistantMessage],
 ) -> Vec<PathBuf> {
-    let rels: Vec<String> = turn_image_parts(deps, session, run_id)
-        .await
+    let rels: Vec<String> = turn_image_parts(run_input)
         .into_iter()
         .filter_map(|part| match part {
             ContentPart::Image { path, .. } => Some(path),
@@ -2851,6 +2998,7 @@ fn append_stderr_tail(message: &str, tail: &Arc<Mutex<VecDeque<String>>>) -> Str
     format!("{}\n--- stderr ---\n{}", message, snippet.join("\n"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_prompt(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -2859,6 +3007,8 @@ async fn prepare_prompt(
     metadata_source: &str,
     provider_display_name: &str,
     include_fresh_session_context: bool,
+    conversation: &mut compaction::RunConversation,
+    run_input: &[AssistantMessage],
 ) -> Result<String, LocalAgentRunError> {
     let prompt = if let Some(trigger_content) = build_trigger_message(session, trigger) {
         let boundary_msg = repository::create_message(
@@ -2873,6 +3023,7 @@ async fn prepare_prompt(
             },
         )
         .await?;
+        conversation.upsert(boundary_msg.clone());
         let _ = emit_event(
             &deps.app,
             session,
@@ -2882,56 +3033,35 @@ async fn prepare_prompt(
             },
         );
         provider_message_text(&trigger_content)
+    } else if run_input.is_empty() {
+        return Err(LocalAgentRunError::failed(format!(
+            "No user message found for {} run",
+            provider_display_name
+        )));
     } else {
-        let queued_messages =
-            repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id)
-                .await?;
-        if !queued_messages.is_empty() {
-            let messages: Vec<AssistantMessage> = queued_messages
-                .into_iter()
-                .map(|queued| queued.message)
-                .collect();
-            queued_messages_prompt(&messages)
-        } else {
-            let latest_user =
-                repository::latest_message_by_role(&deps.pool, &session.id, MessageRole::User)
-                    .await?
-                    .ok_or_else(|| {
-                        LocalAgentRunError::failed(format!(
-                            "No user message found for {} run",
-                            provider_display_name
-                        ))
-                    })?;
-            // Text may be empty for an image-only turn; the image attaches
-            // separately, so don't treat empty text as "no message".
-            message_text(&latest_user)
-        }
+        // Text may be empty for an image-only turn; the image attaches
+        // separately, so don't treat empty text as "no message".
+        queued_messages_prompt(run_input)
     };
 
     if include_fresh_session_context {
-        with_fresh_cli_session_context_prompt(&deps.pool, session, prompt).await
+        Ok(with_fresh_cli_session_context_prompt(conversation, prompt))
     } else {
         Ok(prompt)
     }
 }
 
-async fn with_fresh_cli_session_context_prompt(
-    pool: &crate::db::DbPool,
-    session: &AssistantSession,
+/// Seed a fresh (new or rotated) CLI session from the run's conversation:
+/// the standing summary plus the recent tail. Resumed sessions skip this and
+/// send only the new input, because the CLI already holds its own history.
+fn with_fresh_cli_session_context_prompt(
+    conversation: &compaction::RunConversation,
     prompt: String,
-) -> Result<String, LocalAgentRunError> {
-    let history = compaction::load_provider_history(pool, &session.id)
-        .await
-        .map_err(LocalAgentRunError::failed)?;
-    let summary = history
-        .summary_message
-        .as_ref()
+) -> String {
+    let summary = conversation
+        .summary()
         .map(|message| compaction::content_text(&message.content));
-    let recent_messages: Vec<AssistantMessage> = history
-        .view
-        .into_iter()
-        .filter(|message| !compaction::is_compaction_summary_message(message))
-        .collect();
+    let recent_messages = conversation.tail();
 
     let has_summary = summary
         .as_deref()
@@ -2942,14 +3072,10 @@ async fn with_fresh_cli_session_context_prompt(
         .filter(|message| has_cli_context_message_content(message))
         .count();
     if !has_summary && context_message_count <= 1 {
-        return Ok(prompt);
+        return prompt;
     }
 
-    Ok(fresh_cli_session_context_prompt(
-        summary.as_deref(),
-        &recent_messages,
-        &prompt,
-    ))
+    fresh_cli_session_context_prompt(summary.as_deref(), recent_messages, &prompt)
 }
 
 fn fresh_cli_session_context_prompt(
@@ -2998,55 +3124,6 @@ fn fresh_cli_session_context_prompt(
     out
 }
 
-/// The `tool_call_id`s an assistant message issues.
-fn cli_context_tool_use_ids(message: &AssistantMessage) -> HashSet<&str> {
-    message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::ToolUse { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The `tool_call_id`s a tool message answers.
-fn cli_context_tool_result_ids(message: &AssistantMessage) -> Vec<&str> {
-    message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Partition messages into groups that must be kept or dropped together: an
-/// assistant message and the tool messages answering the calls it issued.
-/// Everything else is its own group. Results always follow their call, so every
-/// group is a contiguous range.
-fn cli_context_groups(messages: &[AssistantMessage]) -> Vec<std::ops::Range<usize>> {
-    let mut groups = Vec::new();
-    let mut start = 0usize;
-    while start < messages.len() {
-        let mut end = start + 1;
-        let issued = cli_context_tool_use_ids(&messages[start]);
-        if !issued.is_empty() {
-            while end < messages.len() && messages[end].role == MessageRole::Tool {
-                let answered = cli_context_tool_result_ids(&messages[end]);
-                if answered.is_empty() || !answered.iter().all(|id| issued.contains(id)) {
-                    break;
-                }
-                end += 1;
-            }
-        }
-        groups.push(start..end);
-        start = end;
-    }
-    groups
-}
-
 /// Render the tail of the conversation as the seed for a fresh CLI session.
 ///
 /// Selection is by *group*, not by message: a tool result rendered without the
@@ -3068,7 +3145,7 @@ fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
     let mut count = 0usize;
     let mut total = 0usize;
 
-    for group in cli_context_groups(messages).into_iter().rev() {
+    for group in compaction::tool_groups(messages).into_iter().rev() {
         if count >= CLI_FRESH_CONTEXT_MAX_MESSAGES {
             break;
         }
@@ -3284,6 +3361,9 @@ struct ClaudeStreamState {
     unresolved_tool_use_ids: std::collections::HashSet<String>,
     pending_tool_results: HashMap<String, Value>,
     last_update_emit_at: Option<std::time::Instant>,
+    /// Tool-result rows persisted during this attempt, handed to the run's
+    /// conversation when the assistant message is finalized.
+    persisted_messages: Vec<AssistantMessage>,
 }
 
 /// Minimum gap between consecutive `AssistantMessageUpdated` emissions.
@@ -3321,6 +3401,7 @@ impl ClaudeStreamState {
             unresolved_tool_use_ids: std::collections::HashSet::new(),
             pending_tool_results: HashMap::new(),
             last_update_emit_at: None,
+            persisted_messages: Vec::new(),
         }
     }
 
@@ -3363,6 +3444,7 @@ struct CodexStreamState {
     persisted_tool_item_ids: std::collections::HashSet<String>,
     tool_item_to_call_id: HashMap<String, String>,
     last_update_emit_at: Option<std::time::Instant>,
+    persisted_messages: Vec<AssistantMessage>,
 }
 
 impl CodexStreamState {
@@ -3372,6 +3454,7 @@ impl CodexStreamState {
             persisted_tool_item_ids: std::collections::HashSet::new(),
             tool_item_to_call_id: HashMap::new(),
             last_update_emit_at: None,
+            persisted_messages: Vec::new(),
         }
     }
 }
@@ -3380,6 +3463,7 @@ struct OpenCodeStreamState {
     parts: Vec<ContentPart>,
     persisted_tool_part_ids: std::collections::HashSet<String>,
     last_update_emit_at: Option<std::time::Instant>,
+    persisted_messages: Vec<AssistantMessage>,
 }
 
 impl OpenCodeStreamState {
@@ -3388,6 +3472,7 @@ impl OpenCodeStreamState {
             parts: Vec::new(),
             persisted_tool_part_ids: std::collections::HashSet::new(),
             last_update_emit_at: None,
+            persisted_messages: Vec::new(),
         }
     }
 }
@@ -3528,7 +3613,15 @@ async fn persist_opencode_tool_use_and_result(
     flush_opencode_assistant_message_content(deps, session, run_id, assistant_message, state)
         .await?;
 
-    apply_opencode_tool_result(deps, session, run_id, &tool_call_id, part).await
+    apply_opencode_tool_result(
+        deps,
+        session,
+        run_id,
+        &tool_call_id,
+        part,
+        &mut state.persisted_messages,
+    )
+    .await
 }
 
 async fn apply_opencode_tool_result(
@@ -3537,6 +3630,7 @@ async fn apply_opencode_tool_result(
     run_id: &str,
     tool_call_id: &str,
     part: &Value,
+    persisted: &mut Vec<AssistantMessage>,
 ) -> Result<(), LocalAgentRunError> {
     let state = part.get("state").unwrap_or(&Value::Null);
     let status_value = state.get("status").and_then(Value::as_str);
@@ -3564,16 +3658,18 @@ async fn apply_opencode_tool_result(
         ToolCallOutcome::Completed { payload }
     };
 
-    record_tool_call_result(
-        deps,
-        session,
-        run_id,
-        tool_call_id,
-        outcome,
-        Some(CliProviderRuntime::OpenCode.metadata_source()),
-        MissingToolCall::SkipQuietly,
-    )
-    .await?;
+    persisted.extend(
+        record_tool_call_result(
+            deps,
+            session,
+            run_id,
+            tool_call_id,
+            outcome,
+            Some(CliProviderRuntime::OpenCode.metadata_source()),
+            MissingToolCall::SkipQuietly,
+        )
+        .await?,
+    );
 
     Ok(())
 }
@@ -3916,16 +4012,18 @@ async fn apply_codex_mcp_tool_result(
         ToolCallOutcome::Completed { payload }
     };
 
-    record_tool_call_result(
-        deps,
-        session,
-        run_id,
-        &tool_call_id,
-        outcome,
-        Some(CliProviderRuntime::Codex.metadata_source()),
-        MissingToolCall::SkipQuietly,
-    )
-    .await?;
+    state.persisted_messages.extend(
+        record_tool_call_result(
+            deps,
+            session,
+            run_id,
+            &tool_call_id,
+            outcome,
+            Some(CliProviderRuntime::Codex.metadata_source()),
+            MissingToolCall::SkipQuietly,
+        )
+        .await?,
+    );
     Ok(())
 }
 
@@ -4379,7 +4477,15 @@ async fn handle_tool_result(
     // turn again. Cleared before applying so a persistence error can't
     // leave the in-flight flag stuck and starve mid-run delivery.
     state.unresolved_tool_use_ids.remove(&tool_use_id);
-    apply_tool_result(deps, session, run_id, &tool_use_id, block).await
+    apply_tool_result(
+        deps,
+        session,
+        run_id,
+        &tool_use_id,
+        block,
+        &mut state.persisted_messages,
+    )
+    .await
 }
 
 /// Persist a tool_use block (from either streamed or complete envelopes)
@@ -4450,7 +4556,15 @@ async fn persist_tool_use(
     // now.
     if let Some(pending) = state.pending_tool_results.remove(tool_call_id) {
         state.unresolved_tool_use_ids.remove(tool_call_id);
-        apply_tool_result(deps, session, run_id, tool_call_id, &pending).await?;
+        apply_tool_result(
+            deps,
+            session,
+            run_id,
+            tool_call_id,
+            &pending,
+            &mut state.persisted_messages,
+        )
+        .await?;
     }
 
     Ok(())
@@ -4578,6 +4692,7 @@ async fn apply_tool_result(
     run_id: &str,
     tool_use_id: &str,
     block: &Value,
+    persisted: &mut Vec<AssistantMessage>,
 ) -> Result<(), LocalAgentRunError> {
     let is_error = block
         .get("is_error")
@@ -4600,16 +4715,18 @@ async fn apply_tool_result(
         ToolCallOutcome::Completed { payload }
     };
 
-    record_tool_call_result(
-        deps,
-        session,
-        run_id,
-        tool_use_id,
-        outcome,
-        Some(CliProviderRuntime::ClaudeCode.metadata_source()),
-        MissingToolCall::SkipQuietly,
-    )
-    .await?;
+    persisted.extend(
+        record_tool_call_result(
+            deps,
+            session,
+            run_id,
+            tool_use_id,
+            outcome,
+            Some(CliProviderRuntime::ClaudeCode.metadata_source()),
+            MissingToolCall::SkipQuietly,
+        )
+        .await?,
+    );
 
     Ok(())
 }
@@ -4643,18 +4760,31 @@ async fn finalize_assistant_message(
     session: &AssistantSession,
     run_id: &str,
     assistant_message: &AssistantMessage,
-    state: &ClaudeStreamState,
+    state: &mut ClaudeStreamState,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
-    finalize_assistant_message_from_parts(deps, session, run_id, assistant_message, &state.parts)
-        .await
+    finalize_assistant_message_from_parts(
+        deps,
+        session,
+        run_id,
+        assistant_message,
+        &state.parts,
+        &mut state.persisted_messages,
+        conversation,
+    )
+    .await
 }
 
+/// Write the assistant row back from `parts` and record it, together with
+/// the tool rows this attempt persisted, in the run's conversation.
 async fn finalize_assistant_message_from_parts(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
     assistant_message: &AssistantMessage,
     parts: &[ContentPart],
+    persisted: &mut Vec<AssistantMessage>,
+    conversation: &mut compaction::RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     // Build the final content from the ordered parts vec. Drop empty
     // Text parts (left over when a turn was purely tool calls — the
@@ -4672,6 +4802,10 @@ async fn finalize_assistant_message_from_parts(
 
     let updated =
         repository::update_message_content(&deps.pool, &assistant_message.id, &content).await?;
+    for message in persisted.drain(..) {
+        conversation.upsert(message);
+    }
+    conversation.upsert(updated.clone());
     let _ = emit_event(
         &deps.app,
         session,
@@ -4988,6 +5122,110 @@ mod tests {
         // Non-result events never match.
         let other = serde_json::json!({ "type": "assistant" });
         assert!(!is_interrupted_turn_result(&other));
+    }
+
+    fn summary_message(id: &str, body: &str) -> AssistantMessage {
+        let mut message = test_message(id, MessageRole::System, vec![text_part(body)]);
+        message.provider_metadata = Some(serde_json::json!({
+            "source": compaction::COMPACTION_METADATA_SOURCE,
+        }));
+        message
+    }
+
+    /// A fresh (new or rotated) CLI session is seeded from the run's
+    /// in-memory conversation: the standing summary plus its tail, including
+    /// rows appended during this run, with no history reload.
+    #[test]
+    fn fresh_cli_session_prompt_is_seeded_from_the_run_conversation() {
+        let mut conversation = compaction::RunConversation::from_history(
+            &[
+                test_message("old", MessageRole::User, vec![text_part("compacted away")]),
+                summary_message("summary", "Earlier: PR #64 was reviewed."),
+                test_message(
+                    "recent",
+                    MessageRole::Assistant,
+                    vec![text_part("Ready to merge?")],
+                ),
+            ],
+            Some(&crate::assistant::types::AssistantCompaction {
+                id: "c".to_string(),
+                session_id: "session-1".to_string(),
+                trigger: CompactionTrigger::Automatic,
+                strategy: crate::assistant::types::CompactionStrategy::SessionRotationSummary,
+                status: crate::assistant::types::CompactionStatus::Completed,
+                source_from_message_id: Some("old".to_string()),
+                source_to_message_id: Some("old".to_string()),
+                summary_message_id: Some("summary".to_string()),
+                created_run_id: None,
+                protocol_id: "claude-code".to_string(),
+                model_id: "m".to_string(),
+                input_message_count: 1,
+                created_at: 0,
+                completed_at: Some(0),
+                error: None,
+            }),
+        );
+        conversation.upsert(test_message(
+            "this-run",
+            MessageRole::User,
+            vec![text_part("yes, merge it")],
+        ));
+
+        let prompt = with_fresh_cli_session_context_prompt(&conversation, "go".to_string());
+
+        assert!(prompt.contains("Earlier compacted summary:\nEarlier: PR #64 was reviewed."));
+        assert!(prompt.contains("Ready to merge?"));
+        assert!(prompt.contains("yes, merge it"));
+        assert!(!prompt.contains("compacted away"));
+        assert!(prompt.contains("Current user/task prompt to answer:\ngo"));
+    }
+
+    /// Without a summary and with at most one message of context there is
+    /// nothing to carry forward: the prompt is sent as-is.
+    #[test]
+    fn fresh_cli_session_prompt_is_unchanged_without_context_to_carry() {
+        let conversation = compaction::RunConversation::from_history(
+            &[test_message(
+                "only",
+                MessageRole::User,
+                vec![text_part("hi")],
+            )],
+            None,
+        );
+
+        assert_eq!(
+            with_fresh_cli_session_context_prompt(&conversation, "hi".to_string()),
+            "hi"
+        );
+    }
+
+    /// The run input resolved at run start feeds both the prompt text and
+    /// the images, so a batched follow-up keeps every image in order.
+    #[test]
+    fn turn_images_come_from_every_run_input_message_in_order() {
+        let img = |id: &str| ContentPart::Image {
+            id: id.into(),
+            path: format!(".clai/images/{id}.png"),
+            media_type: "image/png".into(),
+            filename: None,
+            width: None,
+            height: None,
+        };
+        let run_input = vec![
+            test_message("q1", MessageRole::User, vec![text_part("first"), img("a")]),
+            test_message("q2", MessageRole::User, vec![img("b")]),
+        ];
+
+        let ids: Vec<String> = turn_image_parts(&run_input)
+            .into_iter()
+            .filter_map(|part| match part {
+                ContentPart::Image { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(ids, vec!["a", "b"]);
+        assert_eq!(queued_messages_prompt(&run_input), "The user sent these additional messages while you were working. Respond to them in order:\n\nMessage 1:\nfirst");
     }
 
     #[test]

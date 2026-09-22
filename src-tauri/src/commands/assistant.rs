@@ -692,7 +692,10 @@ pub async fn assistant_compact_session(
         .workspace_id
         .as_deref()
         .and_then(|workspace_id| state.workspace_root(workspace_id));
-    let outcome = compaction::compact_session_history(
+    // No run owns this session's conversation while it is idle, so the manual
+    // command loads it once and compacts through the same core the runs use.
+    let mut conversation = compaction::RunConversation::load(&target_pool, &session.id).await?;
+    let outcome = compaction::compact_conversation(
         &target_pool,
         &session,
         &connection,
@@ -700,6 +703,7 @@ pub async fn assistant_compact_session(
         CompactionTrigger::Manual,
         None,
         true,
+        &mut conversation,
     )
     .await?;
 

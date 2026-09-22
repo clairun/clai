@@ -24,8 +24,8 @@ use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
 use crate::assistant::types::{
-    AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice, RunStatus,
-    ToolCallStatus, ToolInvocation,
+    AssistantMessage, AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice,
+    RunStatus, ToolCallStatus, ToolInvocation,
 };
 use serde_json::Value;
 
@@ -273,9 +273,10 @@ fn tool_result_metadata(metadata_source: Option<&str>) -> Option<Value> {
 
 /// Close a tool call out: update the row, emit the matching completion event,
 /// and persist the tool-role message that carries the payload back to the
-/// provider on the next request.
+/// provider on the next request. Returns that message so the run can append
+/// it to its in-memory conversation instead of re-reading history.
 ///
-/// Does nothing beyond a warning when the row cannot be updated under
+/// Returns `Ok(None)` (after a warning) when the row cannot be updated under
 /// `MissingToolCall::SkipQuietly`.
 pub(crate) async fn record_tool_call_result(
     deps: &AssistantDeps,
@@ -285,7 +286,7 @@ pub(crate) async fn record_tool_call_result(
     outcome: ToolCallOutcome<'_>,
     metadata_source: Option<&str>,
     on_missing: MissingToolCall,
-) -> Result<(), String> {
+) -> Result<Option<AssistantMessage>, String> {
     let (status, result, error) = tool_call_update(&outcome);
     let updated =
         match repository::update_tool_call(&deps.pool, tool_call_id, status.clone(), result, error)
@@ -301,7 +302,7 @@ pub(crate) async fn record_tool_call_result(
                         error = %err,
                         "Tool call update failed even after the tool_use was registered"
                     );
-                    return Ok(());
+                    return Ok(None);
                 }
             },
         };
@@ -338,10 +339,12 @@ pub(crate) async fn record_tool_call_result(
         &deps.app,
         session,
         Some(run_id),
-        AssistantUiEvent::MessageCreated { message },
+        AssistantUiEvent::MessageCreated {
+            message: message.clone(),
+        },
     );
 
-    Ok(())
+    Ok(Some(message))
 }
 
 #[cfg(test)]
