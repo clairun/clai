@@ -694,7 +694,8 @@ pub async fn assistant_compact_session(
         .and_then(|workspace_id| state.workspace_root(workspace_id));
     // No run owns this session's conversation while it is idle, so the manual
     // command loads it once and compacts through the same core the runs use.
-    let mut conversation = compaction::RunConversation::load(&target_pool, &session.id).await?;
+    let mut conversation =
+        compaction::RunConversation::load_for_manual_compaction(&target_pool, &session.id).await?;
     let outcome = compaction::compact_conversation(
         &target_pool,
         &session,

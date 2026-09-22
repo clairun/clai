@@ -3735,20 +3735,20 @@ async fn flush_opencode_assistant_message_content(
     if content.is_empty() {
         return Ok(());
     }
-    let updated =
-        match repository::update_message_content(&deps.pool, &assistant_message.id, &content).await
-        {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    message_id = %assistant_message.id,
-                    "Failed to flush OpenCode assistant message content mid-turn"
-                );
-                return Ok(());
-            }
-        };
-    conversation.upsert(updated.clone());
+    let updated = match conversation
+        .update_message_content(&deps.pool, &assistant_message.id, &content)
+        .await
+    {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                message_id = %assistant_message.id,
+                "Failed to flush OpenCode assistant message content mid-turn"
+            );
+            return Ok(());
+        }
+    };
     let now = std::time::Instant::now();
     let should_emit = match state.last_update_emit_at {
         None => true,
@@ -4113,20 +4113,20 @@ async fn flush_codex_assistant_message_content(
     if content.is_empty() {
         return Ok(());
     }
-    let updated =
-        match repository::update_message_content(&deps.pool, &assistant_message.id, &content).await
-        {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    message_id = %assistant_message.id,
-                    "Failed to flush Codex assistant message content mid-turn"
-                );
-                return Ok(());
-            }
-        };
-    conversation.upsert(updated.clone());
+    let updated = match conversation
+        .update_message_content(&deps.pool, &assistant_message.id, &content)
+        .await
+    {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                message_id = %assistant_message.id,
+                "Failed to flush Codex assistant message content mid-turn"
+            );
+            return Ok(());
+        }
+    };
     let now = std::time::Instant::now();
     let should_emit = match state.last_update_emit_at {
         None => true,
@@ -4623,20 +4623,20 @@ async fn flush_assistant_message_content(
     if content.is_empty() {
         return Ok(());
     }
-    let updated =
-        match repository::update_message_content(&deps.pool, &assistant_message.id, &content).await
-        {
-            Ok(m) => m,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    message_id = %assistant_message.id,
-                    "Failed to flush assistant message content mid-turn"
-                );
-                return Ok(());
-            }
-        };
-    conversation.upsert(updated.clone());
+    let updated = match conversation
+        .update_message_content(&deps.pool, &assistant_message.id, &content)
+        .await
+    {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                message_id = %assistant_message.id,
+                "Failed to flush assistant message content mid-turn"
+            );
+            return Ok(());
+        }
+    };
 
     let now = std::time::Instant::now();
     let should_emit = match state.last_update_emit_at {

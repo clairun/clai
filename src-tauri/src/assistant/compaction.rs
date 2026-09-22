@@ -196,11 +196,10 @@ pub struct CompactionOutcome {
 
 /// The conversation one run sends to the provider, owned in memory for the
 /// whole run: `[standing summary] + the messages it does not cover`, in
-/// insertion order (`created_at`, then rowid). It is loaded once when the run
-/// starts; from then on the run writes its rows through it
-/// (`create_message`/`update_message_content`/`delete_message`) and feeds it
-/// the queue rows it reads at request boundaries (`refresh_pending`), so
-/// history is never re-read from the database while the run is active.
+/// insertion order (`created_at`, then rowid), with tool results placed by
+/// their issuing assistant. It is loaded once when the run starts; from then
+/// on the run writes its rows through it and feeds it queue rows at request
+/// boundaries, so history is never re-read while the run is active.
 /// Nothing here is durable: the next run reconstructs the same view from
 /// persistence.
 pub struct RunConversation {
@@ -223,6 +222,17 @@ impl RunConversation {
         Ok(Self::from_history(&messages, latest.as_ref()))
     }
 
+    /// Load an idle session and mark queued rows before choosing a manual cut.
+    pub async fn load_for_manual_compaction(
+        pool: &DbPool,
+        session_id: &str,
+    ) -> Result<Self, String> {
+        let mut conversation = Self::load(pool, session_id).await?;
+        let pending = repository::list_pending_queued_messages(pool, session_id).await?;
+        conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
+        Ok(conversation)
+    }
+
     pub fn from_history(
         messages: &[AssistantMessage],
         latest: Option<&AssistantCompaction>,
@@ -243,7 +253,7 @@ impl RunConversation {
     }
 
     /// Estimated tokens of the whole conversation as the provider receives it.
-    pub fn estimated_tokens(&self) -> usize {
+    fn estimated_tokens(&self) -> usize {
         self.tokens.values().sum()
     }
 
@@ -379,7 +389,12 @@ impl RunConversation {
         let newest = groups.last()?;
         let tokens: Vec<usize> = tail
             .iter()
-            .map(|message| self.tokens[&message.id])
+            .map(|message| {
+                self.tokens
+                    .get(&message.id)
+                    .copied()
+                    .unwrap_or_else(|| message_tokens(message))
+            })
             .collect();
         let group_tokens = |group: &Range<usize>| tokens[group.clone()].iter().sum::<usize>();
 
@@ -460,47 +475,35 @@ fn provider_view(
         .collect()
 }
 
-/// Move every tool result directly behind the assistant message that issued
-/// its call, so [`tool_groups`] sees contiguous groups. `list_messages`
-/// orders by `created_at`, and a user row queued while a call was in flight
-/// is timestamped between the call and its results; it lands after them.
-/// Idempotent, and a no-op on an already joined sequence.
+/// Move tool results behind the assistant that issued each call. A later
+/// assistant can appear before a result, so call ownership must survive
+/// intervening messages. Idempotent on an already joined sequence.
 fn join_tool_groups(messages: Vec<AssistantMessage>) -> Vec<AssistantMessage> {
-    let mut joined: Vec<AssistantMessage> = Vec::with_capacity(messages.len());
-    // The group still accepting results: the call ids its assistant message
-    // issued, and the index just past its last member.
-    let mut open: Option<(HashSet<String>, usize)> = None;
+    let mut groups: Vec<Vec<AssistantMessage>> = Vec::with_capacity(messages.len());
+    let mut issuers: HashMap<String, usize> = HashMap::new();
     for message in messages {
-        let answers_open = open.as_ref().is_some_and(|(issued, _)| {
-            let answered = tool_result_ids(&message);
-            !answered.is_empty() && answered.iter().all(|id| issued.contains(*id))
-        });
-        match &mut open {
-            Some((_, end)) if answers_open => {
-                joined.insert(*end, message);
-                *end += 1;
-            }
-            _ => {
-                let issued: HashSet<String> = tool_use_ids(&message)
-                    .into_iter()
-                    .map(String::from)
-                    .collect();
-                if !issued.is_empty() {
-                    open = Some((issued, joined.len() + 1));
-                } else if message.role != MessageRole::User {
-                    open = None;
+        if message.role == MessageRole::Tool {
+            let results = tool_result_ids(&message);
+            if let Some(&group) = results.first().and_then(|id| issuers.get(*id)) {
+                if results.iter().all(|id| issuers.get(*id) == Some(&group)) {
+                    groups[group].push(message);
+                    continue;
                 }
-                joined.push(message);
             }
         }
+        let group = groups.len();
+        for id in tool_use_ids(&message) {
+            issuers.insert(id.to_string(), group);
+        }
+        groups.push(vec![message]);
     }
-    joined
+    groups.into_iter().flatten().collect()
 }
 
 /// Partition messages into the groups a compaction cut must not split: an
 /// assistant message together with the tool messages answering the calls it
-/// issued. Everything else is its own group. [`join_tool_groups`] keeps
-/// results right behind their call, so a group is a contiguous range.
+/// issued. Everything else is its own group. [`join_tool_groups`] places
+/// results right behind their call, so each group is a contiguous range.
 pub(crate) fn tool_groups(messages: &[AssistantMessage]) -> Vec<Range<usize>> {
     let mut groups = Vec::new();
     let mut start = 0usize;
@@ -1461,6 +1464,25 @@ mod tests {
         assert_token_cache_in_sync(&fed);
     }
 
+    #[test]
+    fn interleaved_assistant_does_not_detach_an_earlier_tool_result() {
+        let messages = vec![
+            tool_use_msg("a", &["x"]),
+            msg("b", MessageRole::Assistant, vec![text("later")]),
+            tool_result_msg("result", "x"),
+        ];
+        let joined = join_tool_groups(messages.clone());
+        assert_eq!(ids(&joined), vec!["a", "result", "b"]);
+        assert_eq!(tool_groups(&joined), vec![0..2, 2..3]);
+        assert_eq!(ids(&join_tool_groups(joined.clone())), ids(&joined));
+
+        let mut fed = conversation(Vec::new());
+        for message in messages {
+            fed.upsert(message);
+        }
+        assert_eq!(ids(fed.messages()), ids(&joined));
+    }
+
     /// A cut lands after the last result of a group, so the compaction
     /// boundary can be a result timestamped after the queued row that
     /// followed it in view order. The boundary is resolved in view order:
@@ -1764,7 +1786,7 @@ mod tests {
     /// the same repository writes and `RunConversation` calls.
     mod run_flow {
         use super::super::*;
-        use super::text;
+        use super::{text, tool_result_msg, tool_use_msg};
         use crate::assistant::repository::{
             complete_compaction, create_compaction, create_message, create_run, create_session,
             create_user_message_with_content, delete_pending_queued_message,
@@ -2024,6 +2046,99 @@ mod tests {
             );
             assert_eq!(conversation.messages().len(), 2);
             assert!(conversation.pending_ids().is_empty());
+        }
+
+        #[tokio::test]
+        async fn idle_manual_compaction_keeps_pending_queue_rows() {
+            let (_tmp, pool, session) = db_session().await;
+            let old = add_text(&pool, &session.id, &" a".repeat(25_000)).await;
+            let queued = add_queued(&pool, &session.id, "pending").await;
+            let newest = add_text(&pool, &session.id, &" b".repeat(25_000)).await;
+            let mut conversation = RunConversation::load_for_manual_compaction(&pool, &session.id)
+                .await
+                .unwrap();
+
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let outcome = compact_with(
+                &pool,
+                &session.id,
+                "openai",
+                "m",
+                CompactionTrigger::Manual,
+                None,
+                VERBATIM_TAIL_MAX_TOKENS,
+                &mut conversation,
+                recording_summarizer(&calls, "summary"),
+            )
+            .await
+            .unwrap()
+            .expect("old row is eligible");
+            assert_eq!(calls.lock().unwrap()[0], vec![old.id]);
+            assert_eq!(
+                view_ids(&conversation),
+                vec![
+                    outcome.summary_message.id.clone(),
+                    queued.id.clone(),
+                    newest.id
+                ]
+            );
+            assert_eq!(conversation.pending_ids(), vec![queued.id]);
+        }
+
+        #[tokio::test]
+        async fn interleaved_assistant_result_survives_cut_and_reload() {
+            let (_tmp, pool, session) = db_session().await;
+            add_text(&pool, &session.id, &" a".repeat(25_000)).await;
+            let call = add(
+                &pool,
+                &session.id,
+                MessageRole::Assistant,
+                tool_use_msg("unused", &["x"]).content,
+            )
+            .await;
+            let later = add(
+                &pool,
+                &session.id,
+                MessageRole::Assistant,
+                vec![text("later")],
+            )
+            .await;
+            let result = add(
+                &pool,
+                &session.id,
+                MessageRole::Tool,
+                tool_result_msg("unused", "x").content,
+            )
+            .await;
+            let newest = add_text(&pool, &session.id, &" b".repeat(25_000)).await;
+            let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
+            assert_eq!(
+                view_ids(&conversation)[1..4],
+                [call.id.clone(), result.id.clone(), later.id.clone()]
+            );
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let outcome = compact_with(
+                &pool,
+                &session.id,
+                "openai",
+                "m",
+                CompactionTrigger::Manual,
+                None,
+                VERBATIM_TAIL_MAX_TOKENS,
+                &mut conversation,
+                recording_summarizer(&calls, "summary"),
+            )
+            .await
+            .unwrap()
+            .expect("old prefix is eligible");
+            let input = calls.lock().unwrap()[0].clone();
+            assert_eq!(&input[1..4], &[call.id, result.id, later.id]);
+            let expected = vec![outcome.summary_message.id, newest.id];
+            assert_eq!(view_ids(&conversation), expected);
+            assert_eq!(
+                view_ids(&RunConversation::load(&pool, &session.id).await.unwrap()),
+                expected
+            );
         }
 
         /// Two automatic compactions: the second summarizes `[S1 + messages
