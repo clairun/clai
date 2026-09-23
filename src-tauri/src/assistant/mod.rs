@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod codex_app_server;
 pub mod compaction;
+pub mod compaction_service;
 pub mod engine;
 pub mod events;
 pub mod image_store;

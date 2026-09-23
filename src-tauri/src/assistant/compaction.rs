@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
-use crate::assistant::repository::{self, CreateCompactionParams, CreateMessageParams};
+use crate::assistant::repository::{self, CreateMessageParams};
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantSession, CompactionStrategy, CompactionTrigger,
     CompletionRequest, ContentPart, MessageRole, ProviderConnection, ProviderEvent,
@@ -192,6 +192,20 @@ pub async fn reset_cli_session_for_rotation(
 pub struct CompactionOutcome {
     pub compaction: AssistantCompaction,
     pub summary_message: AssistantMessage,
+}
+
+pub struct PreparedCompaction {
+    pub(crate) session_id: String,
+    pub(crate) trigger: CompactionTrigger,
+    pub(crate) strategy: CompactionStrategy,
+    pub(crate) source_from_message_id: String,
+    pub(crate) source_to_message_id: String,
+    pub(crate) created_run_id: Option<String>,
+    pub(crate) protocol_id: String,
+    pub(crate) model_id: String,
+    pub(crate) input_message_count: i64,
+    pub(crate) summary_text: String,
+    pub(crate) consumed: usize,
 }
 
 /// The conversation one run sends to the provider, owned in memory for the
@@ -427,7 +441,7 @@ impl RunConversation {
         })
     }
 
-    fn apply_compaction(&mut self, consumed: usize, summary_message: AssistantMessage) {
+    pub(crate) fn apply_compaction(&mut self, consumed: usize, summary_message: AssistantMessage) {
         for message in self.messages.drain(..consumed) {
             self.tokens.remove(&message.id);
         }
@@ -616,25 +630,19 @@ pub fn should_auto_compact(
     conversation.estimated_tokens() >= budget / 5 * 4
 }
 
-/// Compact the run's conversation in place: summarize the eligible prefix
-/// (with the previous summary folded in once), persist the compaction and
-/// its summary message exactly as before, then replace the prefix with the
-/// summary. The conversation is left untouched when nothing is eligible or
-/// persistence fails. `verbatim_tail_tokens` is what the newest history may
-/// weigh and stay raw; see [`verbatim_tail_tokens`].
+/// Summarize the eligible prefix and return the data needed to commit it.
+/// The conversation and database remain untouched until the caller commits.
 #[allow(clippy::too_many_arguments)]
-pub async fn compact_conversation(
-    pool: &DbPool,
+pub async fn prepare_compaction(
     session: &AssistantSession,
     connection: &ProviderConnection,
     summary_working_dir: Option<&Path>,
     trigger: CompactionTrigger,
     run_id: Option<&str>,
     verbatim_tail_tokens: usize,
-    conversation: &mut RunConversation,
-) -> Result<Option<CompactionOutcome>, String> {
-    compact_with(
-        pool,
+    conversation: &RunConversation,
+) -> Result<Option<PreparedCompaction>, String> {
+    prepare_with(
         &session.id,
         &connection.protocol_id,
         &connection.model_id,
@@ -649,16 +657,14 @@ pub async fn compact_conversation(
     .await
 }
 
-pub async fn compact_for_context_limit_recovery(
-    pool: &DbPool,
+pub async fn prepare_context_limit_recovery(
     session: &AssistantSession,
     connection: &ProviderConnection,
     summary_working_dir: Option<&Path>,
     run_id: &str,
-    conversation: &mut RunConversation,
-) -> Result<Option<CompactionOutcome>, String> {
-    compact_conversation(
-        pool,
+    conversation: &RunConversation,
+) -> Result<Option<PreparedCompaction>, String> {
+    prepare_compaction(
         session,
         connection,
         summary_working_dir,
@@ -671,17 +677,16 @@ pub async fn compact_for_context_limit_recovery(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn compact_with<F, Fut>(
-    pool: &DbPool,
+async fn prepare_with<F, Fut>(
     session_id: &str,
     protocol_id: &str,
     model_id: &str,
     trigger: CompactionTrigger,
     run_id: Option<&str>,
     verbatim_tail_tokens: usize,
-    conversation: &mut RunConversation,
+    conversation: &RunConversation,
     summarize: F,
-) -> Result<Option<CompactionOutcome>, String>
+) -> Result<Option<PreparedCompaction>, String>
 where
     F: FnOnce(Vec<AssistantMessage>) -> Fut,
     Fut: Future<Output = Result<String, String>>,
@@ -698,48 +703,18 @@ where
     let summary = summarize(plan.messages.clone()).await?;
     let summary_text = summary_message_text(&summary);
 
-    let compaction = repository::create_compaction(
-        pool,
-        CreateCompactionParams {
-            session_id: session_id.to_string(),
-            trigger: trigger.clone(),
-            strategy: strategy.clone(),
-            source_from_message_id: Some(plan.source_from_message_id.clone()),
-            source_to_message_id: Some(plan.source_to_message_id.clone()),
-            created_run_id: run_id.map(str::to_string),
-            protocol_id: protocol_id.to_string(),
-            model_id: model_id.to_string(),
-            input_message_count: plan.messages.len() as i64,
-        },
-    )
-    .await?;
-
-    let summary_message = repository::create_message(
-        pool,
-        CreateMessageParams {
-            session_id: session_id.to_string(),
-            role: MessageRole::System,
-            content: vec![ContentPart::Text { text: summary_text }],
-            provider_metadata: Some(serde_json::json!({
-                "source": COMPACTION_METADATA_SOURCE,
-                "compactionId": compaction.id,
-                "trigger": trigger,
-                "strategy": strategy,
-                "sourceFromMessageId": plan.source_from_message_id,
-                "sourceToMessageId": plan.source_to_message_id,
-                "createdAt": chrono::Utc::now().timestamp_millis(),
-            })),
-        },
-    )
-    .await?;
-
-    let compaction =
-        repository::complete_compaction(pool, &compaction.id, &summary_message.id).await?;
-    conversation.apply_compaction(plan.messages.len(), summary_message.clone());
-
-    Ok(Some(CompactionOutcome {
-        compaction,
-        summary_message,
+    Ok(Some(PreparedCompaction {
+        session_id: session_id.to_string(),
+        trigger,
+        strategy,
+        source_from_message_id: plan.source_from_message_id,
+        source_to_message_id: plan.source_to_message_id,
+        created_run_id: run_id.map(str::to_string),
+        protocol_id: protocol_id.to_string(),
+        model_id: model_id.to_string(),
+        input_message_count: plan.messages.len() as i64,
+        summary_text,
+        consumed: plan.messages.len(),
     }))
 }
 
@@ -1012,6 +987,45 @@ fn provider_error_message(error: ProviderError) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[allow(clippy::too_many_arguments)]
+    async fn compact_with<F, Fut>(
+        pool: &DbPool,
+        session_id: &str,
+        protocol_id: &str,
+        model_id: &str,
+        trigger: CompactionTrigger,
+        run_id: Option<&str>,
+        verbatim_tail_tokens: usize,
+        conversation: &mut RunConversation,
+        summarize: F,
+    ) -> Result<Option<CompactionOutcome>, String>
+    where
+        F: FnOnce(Vec<AssistantMessage>) -> Fut,
+        Fut: Future<Output = Result<String, String>>,
+    {
+        let prepared = prepare_with(
+            session_id,
+            protocol_id,
+            model_id,
+            trigger,
+            run_id,
+            verbatim_tail_tokens,
+            conversation,
+            summarize,
+        )
+        .await?;
+        match prepared {
+            Some(prepared) => crate::assistant::compaction_service::commit_compaction(
+                pool,
+                conversation,
+                prepared,
+            )
+            .await
+            .map(Some),
+            None => Ok(None),
+        }
+    }
+
     use super::*;
     use crate::assistant::types::{ContentPart, MessageRole};
 
@@ -1786,7 +1800,7 @@ mod tests {
     /// the same repository writes and `RunConversation` calls.
     mod run_flow {
         use super::super::*;
-        use super::{ids, text, tool_result_msg, tool_use_msg};
+        use super::{compact_with, ids, text, tool_result_msg, tool_use_msg};
         use crate::assistant::repository::{
             complete_compaction, create_compaction, create_message, create_run, create_session,
             create_user_message_with_content, delete_pending_queued_message,
@@ -1910,6 +1924,78 @@ mod tests {
                     .push(messages.iter().map(|m| m.id.clone()).collect());
                 std::future::ready(Ok(summary.to_string()))
             }
+        }
+
+        #[tokio::test]
+        async fn preparation_is_read_only_until_shared_commit() {
+            let (_tmp, pool, session) = db_session().await;
+            let old = add_text(&pool, &session.id, "old").await;
+            let newest = add_text(&pool, &session.id, "newest").await;
+            let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
+            let before = view_ids(&conversation);
+            let compaction_count_before: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM assistant_compactions WHERE session_id = ?",
+            )
+            .bind(&session.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+
+            let prepared = prepare_with(
+                &session.id,
+                "openai",
+                "m",
+                CompactionTrigger::Manual,
+                None,
+                0,
+                &conversation,
+                recording_summarizer(&calls, "summary"),
+            )
+            .await
+            .unwrap()
+            .expect("old row is eligible");
+
+            assert_eq!(calls.lock().unwrap()[0], vec![old.id]);
+            assert_eq!(view_ids(&conversation), before);
+            assert_eq!(
+                repository::list_messages(&pool, &session.id)
+                    .await
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert!(repository::latest_completed_compaction(&pool, &session.id)
+                .await
+                .unwrap()
+                .is_none());
+            let compaction_count_after: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM assistant_compactions WHERE session_id = ?",
+            )
+            .bind(&session.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(compaction_count_after, compaction_count_before);
+
+            let outcome = crate::assistant::compaction_service::commit_compaction(
+                &pool,
+                &mut conversation,
+                prepared,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                view_ids(&conversation),
+                vec![outcome.summary_message.id, newest.id]
+            );
+            assert_eq!(
+                repository::list_messages(&pool, &session.id)
+                    .await
+                    .unwrap()
+                    .len(),
+                3
+            );
         }
 
         /// Several assistant/tool iterations written through the run's

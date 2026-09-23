@@ -13,7 +13,6 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::assistant::codex_app_server;
-use crate::assistant::compaction;
 use crate::assistant::engine::{
     build_trigger_message, AssistantDeps, AssistantEngineError, RunTurnInput,
 };
@@ -33,6 +32,7 @@ use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
     ProviderConnection, ProviderInputMessage, RunNotice, RunStatus,
 };
+use crate::assistant::{compaction, compaction_service};
 
 const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
@@ -318,7 +318,7 @@ pub async fn run_session_turn(
     let system_prompt = system_prompt_text(&deps.app, &session, &input.trigger);
     if compaction::should_auto_compact(&conversation, &system_prompt, &[]) {
         let summary_working_dir = workspace_root_for_session(deps, &session);
-        match compaction::compact_conversation(
+        match compaction_service::compact_conversation(
             &deps.pool,
             &session,
             &connection,
@@ -509,7 +509,7 @@ pub async fn run_session_turn(
                     provider_runtime.display_name()
                 );
                 let summary_working_dir = workspace_root_for_session(deps, &session);
-                match compaction::compact_for_context_limit_recovery(
+                match compaction_service::compact_for_context_limit_recovery(
                     &deps.pool,
                     &session,
                     &connection,

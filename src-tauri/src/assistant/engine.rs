@@ -3,7 +3,6 @@ use tauri::AppHandle;
 use tauri::Manager;
 use thiserror::Error;
 
-use crate::assistant::compaction;
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
@@ -20,6 +19,7 @@ use crate::assistant::types::{
     ProviderEvent, ProviderInputMessage, RunId, RunStatus, RunTrigger, SessionId,
     ToolInvocationDraft,
 };
+use crate::assistant::{compaction, compaction_service};
 use crate::db::DbPool;
 use crate::AppState;
 use tokio_util::sync::CancellationToken;
@@ -230,7 +230,7 @@ pub async fn run_session_turn(
         let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
         conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
         if compaction::should_auto_compact(&conversation, &system_prompt_text, &tool_defs) {
-            match compaction::compact_conversation(
+            match compaction_service::compact_conversation(
                 &deps.pool,
                 &session,
                 &connection,
@@ -314,7 +314,7 @@ pub async fn run_session_turn(
                     && compaction::is_context_limit_error(&e.to_string())
                 {
                     retried_after_context_compaction = true;
-                    match compaction::compact_for_context_limit_recovery(
+                    match compaction_service::compact_for_context_limit_recovery(
                         &deps.pool,
                         &session,
                         &connection,

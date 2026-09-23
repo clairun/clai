@@ -696,7 +696,7 @@ pub async fn assistant_compact_session(
     // command loads it once and compacts through the same core the runs use.
     let mut conversation =
         compaction::RunConversation::load_for_manual_compaction(&target_pool, &session.id).await?;
-    let outcome = compaction::compact_conversation(
+    let outcome = crate::assistant::compaction_service::compact_conversation(
         &target_pool,
         &session,
         &connection,
