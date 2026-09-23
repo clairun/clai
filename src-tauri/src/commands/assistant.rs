@@ -703,7 +703,7 @@ pub async fn assistant_compact_session(
         summary_working_dir.as_deref(),
         CompactionTrigger::Manual,
         None,
-        compaction::verbatim_tail_tokens("", &[]),
+        compaction::VERBATIM_TAIL_MAX_TOKENS,
         &mut conversation,
     )
     .await?;

@@ -26,7 +26,7 @@ pub const COMPACTION_METADATA_SOURCE: &str = "clai-compaction";
 const ESTIMATED_INPUT_BUDGET_TOKENS: usize = 96_000;
 /// Cap on the newest history a compaction keeps verbatim; see
 /// [`verbatim_tail_tokens`]. The newest group is kept regardless.
-const VERBATIM_TAIL_MAX_TOKENS: usize = 20_000;
+pub(crate) const VERBATIM_TAIL_MAX_TOKENS: usize = 20_000;
 /// Request framing per message (role, ids, JSON keys) that the text lacks.
 const MESSAGE_FRAMING_TOKENS: usize = 4;
 /// Fixed allowance per image part; base64 length is not a vision token count.
@@ -59,7 +59,7 @@ const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 8_000;
 /// CLI fresh-session clamp never has to re-cut a summary we produced.
 const SUMMARY_MESSAGE_MAX_CHARS: usize = 24_000;
 
-pub fn is_compaction_summary_message(message: &AssistantMessage) -> bool {
+pub(crate) fn is_compaction_summary_message(message: &AssistantMessage) -> bool {
     message
         .provider_metadata
         .as_ref()
@@ -233,7 +233,7 @@ impl RunConversation {
         Ok(conversation)
     }
 
-    pub fn from_history(
+    pub(crate) fn from_history(
         messages: &[AssistantMessage],
         latest: Option<&AssistantCompaction>,
     ) -> Self {
@@ -1786,7 +1786,7 @@ mod tests {
     /// the same repository writes and `RunConversation` calls.
     mod run_flow {
         use super::super::*;
-        use super::{text, tool_result_msg, tool_use_msg};
+        use super::{ids, text, tool_result_msg, tool_use_msg};
         use crate::assistant::repository::{
             complete_compaction, create_compaction, create_message, create_run, create_session,
             create_user_message_with_content, delete_pending_queued_message,
@@ -2083,6 +2083,115 @@ mod tests {
                 ]
             );
             assert_eq!(conversation.pending_ids(), vec![queued.id]);
+        }
+
+        #[tokio::test]
+        async fn queued_row_before_one_large_tool_group_cannot_be_recovered_by_unpinning() {
+            let (_tmp, pool, session) = db_session().await;
+            let old = add_text(&pool, &session.id, &" a".repeat(30_000)).await;
+            let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
+
+            // The row arrives after the request's queue snapshot. The successful
+            // stream then writes one assistant and its tool results before the
+            // next iteration can refresh the queue again.
+            let queued = add_queued(&pool, &session.id, "pending").await;
+            let assistant = add(
+                &pool,
+                &session.id,
+                MessageRole::Assistant,
+                tool_use_msg("unused", &["x", "y"]).content,
+            )
+            .await;
+            let result_x = add(
+                &pool,
+                &session.id,
+                MessageRole::Tool,
+                vec![ContentPart::ToolResult {
+                    tool_call_id: "x".to_string(),
+                    payload: serde_json::Value::String(" a".repeat(30_000)),
+                    started_at: None,
+                    completed_at: None,
+                }],
+            )
+            .await;
+            let result_y = add(
+                &pool,
+                &session.id,
+                MessageRole::Tool,
+                vec![ContentPart::ToolResult {
+                    tool_call_id: "y".to_string(),
+                    payload: serde_json::Value::String(" b".repeat(30_000)),
+                    started_at: None,
+                    completed_at: None,
+                }],
+            )
+            .await;
+            conversation.upsert(assistant.clone());
+            conversation.upsert(result_x.clone());
+            conversation.upsert(result_y.clone());
+            conversation.refresh_pending(
+                list_pending_queued_messages(&pool, &session.id)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.message)
+                    .collect(),
+            );
+            assert_eq!(
+                view_ids(&conversation),
+                vec![
+                    old.id.clone(),
+                    queued.id.clone(),
+                    assistant.id.clone(),
+                    result_x.id.clone(),
+                    result_y.id.clone()
+                ]
+            );
+
+            assert!(should_auto_compact(&conversation, "", &[]));
+
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let outcome = compact_with(
+                &pool,
+                &session.id,
+                "openai",
+                "m",
+                CompactionTrigger::Automatic,
+                None,
+                VERBATIM_TAIL_MAX_TOKENS,
+                &mut conversation,
+                recording_summarizer(&calls, "summary"),
+            )
+            .await
+            .unwrap()
+            .expect("old prefix is eligible");
+            assert_eq!(calls.lock().unwrap()[0], vec![old.id]);
+            assert_eq!(
+                view_ids(&conversation),
+                vec![
+                    outcome.summary_message.id.clone(),
+                    queued.id.clone(),
+                    assistant.id.clone(),
+                    result_x.id.clone(),
+                    result_y.id.clone()
+                ]
+            );
+            assert!(conversation.plan_compaction(0).is_none());
+            let reloaded = RunConversation::load_for_manual_compaction(&pool, &session.id)
+                .await
+                .unwrap();
+            assert_eq!(view_ids(&reloaded), view_ids(&conversation));
+            assert!(reloaded.plan_compaction(0).is_none());
+
+            // If the failed request's pending pin were removed, the only
+            // eligible prefix would contain the queued row; the large newest
+            // assistant/tool group would still be sent in full.
+            conversation.mark_delivered(std::slice::from_ref(&queued.id));
+            let unpinned = conversation.plan_compaction(0).expect("unpinned plan");
+            assert_eq!(
+                ids(&unpinned.messages),
+                vec![outcome.summary_message.id.as_str(), queued.id.as_str()]
+            );
         }
 
         #[tokio::test]
