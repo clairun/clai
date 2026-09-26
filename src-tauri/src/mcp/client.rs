@@ -156,7 +156,7 @@ impl ConnectedMcpServer {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult, String> {
-        // CallToolRequestParams is #[non_exhaustive] in rmcp 1.7, so build it
+        // CallToolRequestParams is #[non_exhaustive] in rmcp, so build it
         // from Default and set the fields we care about.
         let mut params = CallToolRequestParams::default();
         params.name = tool_name.to_string().into();
@@ -559,7 +559,7 @@ impl McpClientManager {
             crate::config::McpServerTransport::Http { url, headers } => {
                 // Build on rmcp's own bundled reqwest client via `from_config`
                 // so CLAI doesn't have to share reqwest's major version with
-                // rmcp (rmcp 1.7 uses reqwest 0.13; CLAI stays on 0.12).
+                // rmcp (rmcp uses reqwest 0.13; CLAI stays on 0.12).
                 let mut transport_config =
                     StreamableHttpClientTransportConfig::with_uri(url.clone());
                 let custom_headers = build_mcp_custom_headers(headers);

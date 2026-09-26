@@ -63,16 +63,16 @@ dbg_macro = "deny"
 todo = "deny"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.7.0", features = [] }
 
 [dependencies]
 # Tauri framework and plugins
-tauri = { version = "2", features = [] }
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-opener = "2"
-tauri-plugin-os = "2"
-tauri-plugin-updater = "2"
+tauri = { version = "2.12.0", features = [] }
+tauri-plugin-clipboard-manager = "2.3.3"
+tauri-plugin-dialog = "2.7.3"
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-os = "2.3.2"
+tauri-plugin-updater = "2.12.0"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -85,7 +85,7 @@ http = "1"  # HeaderName/HeaderValue for MCP custom headers (shared 1.x in tree)
 
 # Async runtime - required by reqwest
 # The "full" feature enables all async utilities
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 
 # Keyring for secure token storage
 # - linux-native-sync-persistent: Combines keyutils + Secret Service for persistent storage across restarts
@@ -145,18 +145,18 @@ dirs = "5"
 # - server: Core server functionality
 # - transport-streamable-http-server: Full HTTP/SSE transport for AI CLI connections
 # - macros: #[tool] and #[tool_router] procedural macros
-rmcp = { version = "1.7", features = ["client", "server", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "macros", "auth"] }
+rmcp = { version = "1.8.0", features = ["client", "server", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "macros", "auth"] }
 # Direct alias for the same reqwest major rmcp uses internally. This lets CLAI
 # construct rmcp's auth-aware Streamable HTTP client without mixing it with the
 # app's existing reqwest 0.12 dependency.
-rmcp-reqwest = { package = "reqwest", version = "0.13.2", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+rmcp-reqwest = { package = "reqwest", version = "0.13.5", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
 
 # JSON Schema generation for MCP tool definitions
 schemars = "1"
 jsonschema = "0.33"
 
 # HTTP server for MCP (AI CLIs connect via HTTP)
-axum = "0.8"
+axum = "0.8.9"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # SQLite database for workspace state persistence
@@ -198,6 +198,6 @@ libc = "0.2"
 
 [dev-dependencies]
 # test-util enables tokio::test(start_paused) for virtual-time tests.
-tokio = { version = "1", features = ["test-util"] }
+tokio = { version = "1.53.1", features = ["test-util"] }
 # Temporary directories for testing
 tempfile = "3"

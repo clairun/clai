@@ -320,14 +320,19 @@ pub async fn runtime_auth_manager_for_server(
     Ok(manager)
 }
 
-pub fn callback_issuer_matches(
-    expected_issuer: Option<&str>,
-    callback_issuer: Option<&str>,
-) -> bool {
-    match (expected_issuer, callback_issuer) {
-        (Some(expected), Some(actual)) => expected == actual,
-        _ => true,
-    }
+/// Exchanges the callback code for tokens. The callback `iss` must be
+/// forwarded: rmcp enforces RFC 9207 against the discovered issuer and rejects
+/// a mismatch, and a missing `iss` when the server advertises
+/// `authorization_response_iss_parameter_supported`.
+pub async fn exchange_authorization_code(
+    session: &AuthorizationSession,
+    callback: &McpOAuthCallback,
+) -> Result<(), String> {
+    session
+        .handle_callback_with_issuer(&callback.code, &callback.state, callback.iss.as_deref())
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("OAuth token exchange failed: {error}"))
 }
 
 #[derive(Debug, Clone)]
@@ -529,4 +534,99 @@ pub async fn build_authorization_session(
     };
 
     Ok((session, expected_issuer))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{routing::post, Json};
+    use rmcp::transport::auth::AuthorizationMetadata;
+
+    use super::*;
+
+    const ISSUER: &str = "https://auth.example.com";
+
+    /// Serves a token endpoint and returns its URL plus a hit counter.
+    async fn spawn_token_endpoint() -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let router = Router::new().route(
+            "/token",
+            post(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Json(serde_json::json!({ "access_token": "token", "token_type": "Bearer" }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}/token"), hits)
+    }
+
+    /// Session against a server advertising RFC 9207 `iss` support; returns the
+    /// session and the `state` embedded in its authorization URL.
+    async fn session_requiring_issuer(token_endpoint: &str) -> (AuthorizationSession, String) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut manager = AuthorizationManager::new("http://127.0.0.1/mcp")
+            .await
+            .unwrap();
+        let mut metadata = AuthorizationMetadata::default();
+        metadata.authorization_endpoint = "https://auth.example.com/authorize".to_string();
+        metadata.token_endpoint = token_endpoint.to_string();
+        metadata.issuer = Some(ISSUER.to_string());
+        metadata.additional_fields.insert(
+            "authorization_response_iss_parameter_supported".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        manager.set_metadata(metadata);
+        let redirect_uri = "http://127.0.0.1/oauth/mcp/callback";
+        manager
+            .configure_client(OAuthClientConfig::new("client", redirect_uri))
+            .unwrap();
+        let auth_url = manager.get_authorization_url(&["read"]).await.unwrap();
+        let state = auth_url
+            .split(['?', '&'])
+            .find_map(|pair| pair.strip_prefix("state="))
+            .expect("authorization URL carries state")
+            .to_string();
+        (
+            AuthorizationSession::for_scope_upgrade(manager, auth_url, redirect_uri),
+            state,
+        )
+    }
+
+    fn callback(state: String, iss: Option<&str>) -> McpOAuthCallback {
+        McpOAuthCallback {
+            code: "code".to_string(),
+            state,
+            iss: iss.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_accepts_matching_callback_issuer() {
+        let (token_endpoint, hits) = spawn_token_endpoint().await;
+        let (session, state) = session_requiring_issuer(&token_endpoint).await;
+
+        exchange_authorization_code(&session, &callback(state, Some(ISSUER)))
+            .await
+            .unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn exchange_rejects_mismatched_or_missing_callback_issuer() {
+        let (token_endpoint, hits) = spawn_token_endpoint().await;
+        for iss in [Some("https://evil.example.com"), None] {
+            let (session, state) = session_requiring_issuer(&token_endpoint).await;
+            let error = exchange_authorization_code(&session, &callback(state, iss))
+                .await
+                .unwrap_err();
+            assert!(error.contains("issuer"), "{iss:?}: {error}");
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
 }

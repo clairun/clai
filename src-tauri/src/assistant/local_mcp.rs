@@ -215,7 +215,7 @@ pub async fn ensure_started(app: &AppHandle) -> Result<Arc<LocalMcpRuntime>, Str
             },
             Default::default(),
             {
-                // rmcp 1.7's StreamableHttpServerConfig is #[non_exhaustive]
+                // rmcp's StreamableHttpServerConfig is #[non_exhaustive]
                 // (added DNS-rebinding host/origin allowlists, session store,
                 // etc.), so build from Default and override only what we need.
                 // The default allowed_hosts (loopback) already covers our
@@ -257,7 +257,7 @@ struct ClaiMcpService {
 #[allow(clippy::manual_async_fn)]
 impl ServerHandler for ClaiMcpService {
     fn get_info(&self) -> ServerInfo {
-        // ServerInfo (InitializeResult) is #[non_exhaustive] in rmcp 1.7, so we
+        // ServerInfo (InitializeResult) is #[non_exhaustive] in rmcp, so we
         // can't use struct-literal syntax. Default sets protocol_version to
         // rmcp's LATEST (2025-11-25), which is what Claude Code >=2.1.153
         // negotiates — the version mismatch that previously left runs tool-less.
@@ -517,7 +517,7 @@ fn tool_definition_to_mcp(definition: ToolDefinition) -> RmcpTool {
         serde_json::Value::Object(map) => map,
         _ => JsonObject::default(),
     };
-    // RmcpTool is #[non_exhaustive] in rmcp 1.7 (new `execution`, `icons`,
+    // RmcpTool is #[non_exhaustive] in rmcp (new `execution`, `icons`,
     // `meta` fields), so construct via the builder rather than a literal.
     let title = definition.name.clone();
     let mut tool = RmcpTool::new(definition.name, definition.description, input_schema);
