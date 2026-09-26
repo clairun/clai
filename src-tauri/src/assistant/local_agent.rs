@@ -1358,6 +1358,7 @@ async fn run_claude_turn(
     queue_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        let update_due = state.update_throttle.due();
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
@@ -1409,9 +1410,15 @@ async fn run_claude_turn(
                 }
                 continue;
             }
+            _ = sleep_until_due(update_due) => {
+                let due = state.update_throttle.take_due(std::time::Instant::now());
+                emit_assistant_update(deps, session, run_id, due);
+                continue;
+            }
             next = lines.next_line() => next
         }
-        .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
+        .map_err(|e| LocalAgentRunError::failed(e.to_string()));
+        let line = emit_pending_on_err(line, deps, session, run_id, &mut state.update_throttle)?;
 
         let Some(line) = line else {
             break;
@@ -1420,9 +1427,10 @@ async fn run_claude_turn(
             continue;
         }
         log_cli_stream_line("claude-code", run_id, &line);
-        let value: Value = serde_json::from_str(&line).map_err(|e| {
+        let value = serde_json::from_str::<Value>(&line).map_err(|e| {
             LocalAgentRunError::failed(format!("Invalid Claude stream-json event: {}", e))
-        })?;
+        });
+        let value = emit_pending_on_err(value, deps, session, run_id, &mut state.update_throttle)?;
 
         let event_type = value.get("type").and_then(Value::as_str);
         match event_type {
@@ -1443,7 +1451,7 @@ async fn run_claude_turn(
         }
         let suppress_interrupted = awaiting_interrupt_result && is_interrupted_turn_result(&value);
 
-        handle_claude_event(
+        let handled = handle_claude_event(
             deps,
             session,
             run_id,
@@ -1453,7 +1461,8 @@ async fn run_claude_turn(
             &mut result_error,
             conversation,
         )
-        .await?;
+        .await;
+        emit_pending_on_err(handled, deps, session, run_id, &mut state.update_throttle)?;
 
         if suppress_interrupted && result_error.take().is_some() {
             let subtype = value
@@ -1697,6 +1706,7 @@ async fn run_codex_turn(
     let mut result_error: Option<String> = None;
 
     loop {
+        let update_due = state.update_throttle.due();
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
@@ -1711,9 +1721,15 @@ async fn run_codex_turn(
                 .await?;
                 return Err(LocalAgentRunError::Cancelled);
             }
+            _ = sleep_until_due(update_due) => {
+                let due = state.update_throttle.take_due(std::time::Instant::now());
+                emit_assistant_update(deps, session, run_id, due);
+                continue;
+            }
             next = lines.next_line() => next
         }
-        .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
+        .map_err(|e| LocalAgentRunError::failed(e.to_string()));
+        let line = emit_pending_on_err(line, deps, session, run_id, &mut state.update_throttle)?;
 
         let Some(line) = line else {
             break;
@@ -1722,9 +1738,10 @@ async fn run_codex_turn(
             continue;
         }
         log_cli_stream_line("codex", run_id, &line);
-        let value: Value = serde_json::from_str(&line)
-            .map_err(|e| LocalAgentRunError::failed(format!("Invalid Codex JSONL event: {}", e)))?;
-        handle_codex_event(
+        let value = serde_json::from_str::<Value>(&line)
+            .map_err(|e| LocalAgentRunError::failed(format!("Invalid Codex JSONL event: {}", e)));
+        let value = emit_pending_on_err(value, deps, session, run_id, &mut state.update_throttle)?;
+        let handled = handle_codex_event(
             deps,
             session,
             run_id,
@@ -1734,7 +1751,8 @@ async fn run_codex_turn(
             &mut result_error,
             conversation,
         )
-        .await?;
+        .await;
+        emit_pending_on_err(handled, deps, session, run_id, &mut state.update_throttle)?;
     }
 
     let status = child
@@ -1947,6 +1965,7 @@ async fn run_codex_turn_app_server(
     steer_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        let update_due = state.update_throttle.due();
         let message = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = transport
@@ -1989,6 +2008,11 @@ async fn run_codex_turn_app_server(
                         next_request_id += 1;
                     }
                 }
+                continue;
+            }
+            _ = sleep_until_due(update_due) => {
+                let due = state.update_throttle.take_due(std::time::Instant::now());
+                emit_assistant_update(deps, session, run_id, due);
                 continue;
             }
             msg = transport.recv() => msg,
@@ -2073,7 +2097,9 @@ async fn run_codex_turn_app_server(
             &mut active_turn_id,
             conversation,
         )
-        .await?;
+        .await;
+        let turn_done =
+            emit_pending_on_err(turn_done, deps, session, run_id, &mut state.update_throttle)?;
         if turn_done {
             break;
         }
@@ -2387,7 +2413,7 @@ async fn split_codex_assistant_message(
     // item echoed across the split is not persisted twice; reset the delta
     // throttle so the new message's first delta emits promptly.
     state.parts.clear();
-    state.last_update_emit_at = None;
+    state.update_throttle = UpdateThrottle::default();
     *slot = None;
     ensure_assistant_message_slot(deps, session, run_id, metadata_source, slot, conversation).await
 }
@@ -2670,6 +2696,7 @@ async fn run_opencode_turn(
     let mut result_error: Option<String> = None;
 
     loop {
+        let update_due = state.update_throttle.due();
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
@@ -2684,9 +2711,15 @@ async fn run_opencode_turn(
                 .await?;
                 return Err(LocalAgentRunError::Cancelled);
             }
+            _ = sleep_until_due(update_due) => {
+                let due = state.update_throttle.take_due(std::time::Instant::now());
+                emit_assistant_update(deps, session, run_id, due);
+                continue;
+            }
             next = lines.next_line() => next
         }
-        .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
+        .map_err(|e| LocalAgentRunError::failed(e.to_string()));
+        let line = emit_pending_on_err(line, deps, session, run_id, &mut state.update_throttle)?;
 
         let Some(line) = line else {
             break;
@@ -2695,10 +2728,11 @@ async fn run_opencode_turn(
             continue;
         }
         log_cli_stream_line("opencode", run_id, &line);
-        let value: Value = serde_json::from_str(&line).map_err(|e| {
+        let value = serde_json::from_str::<Value>(&line).map_err(|e| {
             LocalAgentRunError::failed(format!("Invalid OpenCode JSONL event: {}", e))
-        })?;
-        handle_opencode_event(
+        });
+        let value = emit_pending_on_err(value, deps, session, run_id, &mut state.update_throttle)?;
+        let handled = handle_opencode_event(
             deps,
             session,
             run_id,
@@ -2708,7 +2742,8 @@ async fn run_opencode_turn(
             &mut result_error,
             conversation,
         )
-        .await?;
+        .await;
+        emit_pending_on_err(handled, deps, session, run_id, &mut state.update_throttle)?;
     }
 
     let status = child
@@ -3368,7 +3403,7 @@ fn system_prompt_text(
 /// runs: cutting a build or git operation half-way can corrupt
 /// work-in-progress, so the message waits for the next clean point (the
 /// tool's result, when the model is back to streaming thought).
-/// `last_update_emit_at` throttles `AssistantMessageUpdated` emissions
+/// `update_throttle` coalesces `AssistantMessageUpdated` emissions
 /// — without it a tool-heavy turn fires one full message-replacement
 /// event per tool_use and React re-renders the entire chat tree each
 /// time, wedging WebKit on long runs.
@@ -3378,16 +3413,109 @@ struct ClaudeStreamState {
     persisted_tool_use_ids: std::collections::HashSet<String>,
     unresolved_tool_use_ids: std::collections::HashSet<String>,
     pending_tool_results: HashMap<String, Value>,
-    last_update_emit_at: Option<std::time::Instant>,
+    update_throttle: UpdateThrottle<AssistantMessage>,
 }
 
 /// Minimum gap between consecutive `AssistantMessageUpdated` emissions.
-/// The DB write still happens on every flush (so the persisted state is
-/// always up to date), but the frontend gets coalesced updates at most
-/// ~5/sec. The turn-final `AssistantMessageCompleted` always fires
-/// regardless, so the user sees the final state immediately on
-/// completion.
-const ASSISTANT_UPDATE_EMIT_THROTTLE_MS: u128 = 200;
+const ASSISTANT_UPDATE_EMIT_THROTTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Coalesces `AssistantMessageUpdated` emissions to at most one per
+/// `ASSISTANT_UPDATE_EMIT_THROTTLE`. An update offered inside the window is
+/// held (latest wins) and becomes due when the window ends, so the newest
+/// content reaches the UI within one window even if the stream goes quiet.
+/// The read loops sleep until `due()` and emit whatever `take_due` returns.
+/// Finalizing a message drops the held update: `AssistantMessageCompleted`
+/// carries the full content.
+struct UpdateThrottle<T> {
+    last_emit: Option<std::time::Instant>,
+    pending: Option<T>,
+}
+
+impl<T> Default for UpdateThrottle<T> {
+    fn default() -> Self {
+        Self {
+            last_emit: None,
+            pending: None,
+        }
+    }
+}
+
+impl<T> UpdateThrottle<T> {
+    /// Returns the update if it may be emitted now; otherwise holds it.
+    fn offer(&mut self, now: std::time::Instant, update: T) -> Option<T> {
+        match self.last_emit {
+            Some(last) if now < last + ASSISTANT_UPDATE_EMIT_THROTTLE => {
+                self.pending = Some(update);
+                None
+            }
+            _ => {
+                self.last_emit = Some(now);
+                self.pending = None;
+                Some(update)
+            }
+        }
+    }
+
+    /// When the held update may be emitted, if one is held.
+    fn due(&self) -> Option<std::time::Instant> {
+        self.pending.as_ref()?;
+        self.last_emit
+            .map(|last| last + ASSISTANT_UPDATE_EMIT_THROTTLE)
+    }
+
+    /// Releases the held update once it is due.
+    fn take_due(&mut self, now: std::time::Instant) -> Option<T> {
+        if self.due()? > now {
+            return None;
+        }
+        self.last_emit = Some(now);
+        self.pending.take()
+    }
+
+    /// Releases the held update regardless of the window (error exits).
+    fn take_pending(&mut self) -> Option<T> {
+        self.pending.take()
+    }
+}
+
+/// Resolves when `deadline` passes; never, when there is none.
+async fn sleep_until_due(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn emit_assistant_update(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    message: Option<AssistantMessage>,
+) {
+    if let Some(message) = message {
+        let _ = emit_event(
+            &deps.app,
+            session,
+            Some(run_id),
+            AssistantUiEvent::AssistantMessageUpdated { message },
+        );
+    }
+}
+
+/// On an error exit from a read loop, emit the held update so the UI is not
+/// left behind the persisted row (a failed run is not finalized).
+fn emit_pending_on_err<T>(
+    result: Result<T, LocalAgentRunError>,
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    throttle: &mut UpdateThrottle<AssistantMessage>,
+) -> Result<T, LocalAgentRunError> {
+    if result.is_err() {
+        emit_assistant_update(deps, session, run_id, throttle.take_pending());
+    }
+    result
+}
 
 enum OpenBlock {
     /// Text block currently being streamed. Deltas append to
@@ -3415,7 +3543,7 @@ impl ClaudeStreamState {
             persisted_tool_use_ids: std::collections::HashSet::new(),
             unresolved_tool_use_ids: std::collections::HashSet::new(),
             pending_tool_results: HashMap::new(),
-            last_update_emit_at: None,
+            update_throttle: UpdateThrottle::default(),
         }
     }
 
@@ -3457,7 +3585,7 @@ struct CodexStreamState {
     parts: Vec<ContentPart>,
     persisted_tool_item_ids: std::collections::HashSet<String>,
     tool_item_to_call_id: HashMap<String, String>,
-    last_update_emit_at: Option<std::time::Instant>,
+    update_throttle: UpdateThrottle<AssistantMessage>,
 }
 
 impl CodexStreamState {
@@ -3466,7 +3594,7 @@ impl CodexStreamState {
             parts: Vec::new(),
             persisted_tool_item_ids: std::collections::HashSet::new(),
             tool_item_to_call_id: HashMap::new(),
-            last_update_emit_at: None,
+            update_throttle: UpdateThrottle::default(),
         }
     }
 }
@@ -3474,7 +3602,7 @@ impl CodexStreamState {
 struct OpenCodeStreamState {
     parts: Vec<ContentPart>,
     persisted_tool_part_ids: std::collections::HashSet<String>,
-    last_update_emit_at: Option<std::time::Instant>,
+    update_throttle: UpdateThrottle<AssistantMessage>,
 }
 
 impl OpenCodeStreamState {
@@ -3482,7 +3610,7 @@ impl OpenCodeStreamState {
         Self {
             parts: Vec::new(),
             persisted_tool_part_ids: std::collections::HashSet::new(),
-            last_update_emit_at: None,
+            update_throttle: UpdateThrottle::default(),
         }
     }
 }
@@ -3768,20 +3896,10 @@ async fn flush_opencode_assistant_message_content(
             return Ok(());
         }
     };
-    let now = std::time::Instant::now();
-    let should_emit = match state.last_update_emit_at {
-        None => true,
-        Some(last) => now.duration_since(last).as_millis() >= ASSISTANT_UPDATE_EMIT_THROTTLE_MS,
-    };
-    if should_emit {
-        state.last_update_emit_at = Some(now);
-        let _ = emit_event(
-            &deps.app,
-            session,
-            Some(run_id),
-            AssistantUiEvent::AssistantMessageUpdated { message: updated },
-        );
-    }
+    let ready = state
+        .update_throttle
+        .offer(std::time::Instant::now(), updated);
+    emit_assistant_update(deps, session, run_id, ready);
     Ok(())
 }
 
@@ -4146,20 +4264,10 @@ async fn flush_codex_assistant_message_content(
             return Ok(());
         }
     };
-    let now = std::time::Instant::now();
-    let should_emit = match state.last_update_emit_at {
-        None => true,
-        Some(last) => now.duration_since(last).as_millis() >= ASSISTANT_UPDATE_EMIT_THROTTLE_MS,
-    };
-    if should_emit {
-        state.last_update_emit_at = Some(now);
-        let _ = emit_event(
-            &deps.app,
-            session,
-            Some(run_id),
-            AssistantUiEvent::AssistantMessageUpdated { message: updated },
-        );
-    }
+    let ready = state
+        .update_throttle
+        .offer(std::time::Instant::now(), updated);
+    emit_assistant_update(deps, session, run_id, ready);
     Ok(())
 }
 
@@ -4613,18 +4721,14 @@ async fn persist_tool_use(
     Ok(())
 }
 
-/// Push the in-memory `state.parts` to the assistant message row and,
-/// when not throttled, emit `AssistantMessageUpdated`.
+/// Push the in-memory `state.parts` to the assistant message row and offer
+/// the result to `state.update_throttle` for `AssistantMessageUpdated`.
 ///
 /// The DB UPDATE runs on every call (cheap, single-row write) so the
-/// persisted state is always current. The frontend event is coalesced
-/// to at most one emission per `ASSISTANT_UPDATE_EMIT_THROTTLE_MS` — on
+/// persisted state is always current. The frontend event is throttled — on
 /// a tool-heavy turn (e.g. 35 sequential tool_uses) un-throttled
 /// emissions would re-render the entire chat tree dozens of times,
-/// pinning WebKit at 100%+ CPU. The turn-final
-/// `AssistantMessageCompleted` is always emitted by
-/// `finalize_assistant_message`, so the user sees the final state
-/// immediately when the run ends regardless of throttling.
+/// pinning WebKit at 100%+ CPU.
 async fn flush_assistant_message_content(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -4656,21 +4760,10 @@ async fn flush_assistant_message_content(
             return Ok(());
         }
     };
-
-    let now = std::time::Instant::now();
-    let should_emit = match state.last_update_emit_at {
-        None => true,
-        Some(last) => now.duration_since(last).as_millis() >= ASSISTANT_UPDATE_EMIT_THROTTLE_MS,
-    };
-    if should_emit {
-        state.last_update_emit_at = Some(now);
-        let _ = emit_event(
-            &deps.app,
-            session,
-            Some(run_id),
-            AssistantUiEvent::AssistantMessageUpdated { message: updated },
-        );
-    }
+    let ready = state
+        .update_throttle
+        .offer(std::time::Instant::now(), updated);
+    emit_assistant_update(deps, session, run_id, ready);
     Ok(())
 }
 
@@ -6039,5 +6132,102 @@ mod tests {
         assert!(!out.interrupted);
         assert!(!out.owes_turn);
         assert!(out.payload.is_empty(), "nothing is written to stdin");
+    }
+
+    fn window() -> std::time::Duration {
+        ASSISTANT_UPDATE_EMIT_THROTTLE
+    }
+
+    #[test]
+    fn update_throttle_emits_first_offer_immediately() {
+        let mut throttle = UpdateThrottle::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(throttle.offer(t0, 1), Some(1));
+        assert_eq!(throttle.due(), None, "nothing held after an immediate emit");
+    }
+
+    #[test]
+    fn update_throttle_holds_offer_inside_window_until_due() {
+        let mut throttle = UpdateThrottle::default();
+        let t0 = std::time::Instant::now();
+        throttle.offer(t0, 1);
+        let ms = std::time::Duration::from_millis;
+
+        assert_eq!(throttle.offer(t0 + ms(5), 2), None);
+        assert_eq!(throttle.offer(t0 + ms(40), 3), None);
+        assert_eq!(throttle.due(), Some(t0 + window()));
+        assert_eq!(
+            throttle.take_due(t0 + window() - ms(1)),
+            None,
+            "not due yet"
+        );
+
+        assert_eq!(
+            throttle.take_due(t0 + window()),
+            Some(3),
+            "latest held update"
+        );
+        assert_eq!(throttle.due(), None);
+        assert_eq!(throttle.take_due(t0 + window() * 2), None, "emitted once");
+    }
+
+    #[test]
+    fn update_throttle_trailing_emit_restarts_the_window() {
+        let mut throttle = UpdateThrottle::default();
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        throttle.offer(t0, 1);
+        throttle.offer(t0 + ms(10), 2);
+        let t1 = t0 + window() + ms(30);
+        assert_eq!(throttle.take_due(t1), Some(2));
+
+        assert_eq!(throttle.offer(t1 + ms(10), 3), None);
+        assert_eq!(throttle.due(), Some(t1 + window()));
+        assert_eq!(throttle.offer(t1 + window(), 4), Some(4), "window elapsed");
+        assert_eq!(
+            throttle.due(),
+            None,
+            "an immediate emit supersedes the held one"
+        );
+    }
+
+    #[test]
+    fn update_throttle_take_pending_ignores_window() {
+        let mut throttle = UpdateThrottle::default();
+        let t0 = std::time::Instant::now();
+        assert_eq!(throttle.take_pending(), None);
+        throttle.offer(t0, 1);
+        throttle.offer(t0, 2);
+        assert_eq!(throttle.take_pending(), Some(2));
+        assert_eq!(throttle.due(), None);
+    }
+
+    /// Parallel tool calls persisted a few ms apart: the UI must end up with
+    /// both, without waiting for another stream event.
+    #[test]
+    fn update_throttle_last_emit_carries_both_parallel_tool_calls() {
+        let mut throttle = UpdateThrottle::default();
+        let t0 = std::time::Instant::now();
+        let mut emitted = Vec::new();
+        emitted.extend(throttle.offer(t0, vec!["tool_a"]));
+        emitted.extend(throttle.offer(
+            t0 + std::time::Duration::from_millis(3),
+            vec!["tool_a", "tool_b"],
+        ));
+        let due = throttle
+            .due()
+            .expect("second tool call is held, not dropped");
+        emitted.extend(throttle.take_due(due));
+        assert_eq!(emitted.last(), Some(&vec!["tool_a", "tool_b"]));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sleep_until_due_fires_at_deadline_and_never_without_one() {
+        let deadline = std::time::Instant::now() + window();
+        tokio::time::timeout(window() * 2, sleep_until_due(Some(deadline)))
+            .await
+            .expect("fires by its deadline");
+        let never = tokio::time::timeout(window() * 50, sleep_until_due(None)).await;
+        assert!(never.is_err(), "no deadline never fires");
     }
 }
