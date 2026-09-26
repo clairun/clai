@@ -18,7 +18,7 @@
 //! also own the assistant message — a caller that streamed content finalizes it
 //! before closing the run, so nothing here has to guess what was written.
 
-use crate::assistant::compaction::RunConversation;
+use crate::assistant::conversation::RunConversation;
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository::{
@@ -267,7 +267,7 @@ fn completion_event(status: ToolCallStatus, tool_call: ToolInvocation) -> Assist
 /// Tag the tool message with the CLI runtime that produced it.
 ///
 /// The API path has no runtime to name and passes `None`. The key is `source`,
-/// the same one `compaction.rs` tags its own generated messages with.
+/// the same one `compaction_service.rs` uses for summary messages.
 fn tool_result_metadata(metadata_source: Option<&str>) -> Option<Value> {
     metadata_source.map(|source| serde_json::json!({ "source": source }))
 }

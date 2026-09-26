@@ -1,3 +1,7 @@
+use crate::assistant::{
+    conversation::content_text, conversation::RunConversation,
+    providers::types::is_context_limit_error,
+};
 use futures::StreamExt;
 use tauri::AppHandle;
 use tauri::Manager;
@@ -171,11 +175,11 @@ pub async fn run_session_turn(
         workspace_root.as_deref(),
     );
 
-    let system_prompt_text = compaction::content_text(&system_message.content);
+    let system_prompt_text = content_text(&system_message.content);
 
     // The run's conversation, read from the database once. Every row this run
     // persists below is appended to it; history is not re-read per iteration.
-    let mut conversation = compaction::RunConversation::load(&deps.pool, &session.id).await?;
+    let mut conversation = RunConversation::load(&deps.pool, &session.id).await?;
 
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
@@ -310,9 +314,7 @@ pub async fn run_session_turn(
         let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                if !retried_after_context_compaction
-                    && compaction::is_context_limit_error(&e.to_string())
-                {
+                if !retried_after_context_compaction && is_context_limit_error(&e.to_string()) {
                     retried_after_context_compaction = true;
                     match compaction_service::compact_for_context_limit_recovery(
                         &deps.pool,
@@ -2272,7 +2274,7 @@ fn failure_message_with_compaction_context(
     provider_message: &str,
     attempt: &compaction::CompactionAttempt,
 ) -> String {
-    if compaction::is_context_limit_error(provider_message) {
+    if is_context_limit_error(provider_message) {
         compaction::context_limit_failure_message("The request", provider_message, attempt)
     } else {
         provider_message.to_string()

@@ -1,3 +1,8 @@
+use crate::assistant::{
+    cli_session::reset_cli_session_for_rotation, conversation::content_text,
+    conversation::tool_groups, conversation::RunConversation,
+    providers::types::is_context_limit_error,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -312,7 +317,7 @@ pub async fn run_session_turn(
     // persist so a compaction or fresh-session prompt later in this run sees
     // them without re-reading history. Native CLI sessions are resumed with
     // only the new input; the conversation feeds fresh/rotated sessions.
-    let mut conversation = compaction::RunConversation::load(&deps.pool, &session.id).await?;
+    let mut conversation = RunConversation::load(&deps.pool, &session.id).await?;
     let run_input =
         run_input_messages(deps, &session, &run_id, &input.trigger, &conversation).await?;
     let system_prompt = system_prompt_text(&deps.app, &session, &input.trigger);
@@ -332,7 +337,7 @@ pub async fn run_session_turn(
         {
             Ok(Some(outcome)) => {
                 compaction_attempt.record_success();
-                compaction::reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
+                reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
                 let _ = emit_event(
                     &deps.app,
                     &session,
@@ -521,8 +526,7 @@ pub async fn run_session_turn(
                 {
                     Ok(Some(outcome)) => {
                         compaction_attempt.record_success();
-                        compaction::reset_cli_session_for_rotation(&deps.pool, &mut session)
-                            .await?;
+                        reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
                         let _ = emit_event(
                             &deps.app,
                             &session,
@@ -613,7 +617,7 @@ async fn run_input_messages(
     session: &AssistantSession,
     run_id: &str,
     trigger: &crate::assistant::types::RunTrigger,
-    conversation: &compaction::RunConversation,
+    conversation: &RunConversation,
 ) -> Result<Vec<AssistantMessage>, AssistantEngineError> {
     if build_trigger_message(session, trigger).is_some() {
         return Ok(Vec::new());
@@ -688,7 +692,7 @@ fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) ->
 }
 
 fn should_recover_cli_context_limit(message: &str) -> bool {
-    compaction::is_context_limit_error(message)
+    is_context_limit_error(message)
 }
 
 /// Detects a provider usage/rate-limit failure from a CLI error message.
@@ -779,7 +783,7 @@ async fn ensure_assistant_message_slot(
     run_id: &str,
     metadata_source: &str,
     slot: &mut Option<AssistantMessage>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<AssistantMessage, LocalAgentRunError> {
     if let Some(existing) = slot.as_ref() {
         return Ok(existing.clone());
@@ -836,7 +840,7 @@ async fn rotate_assistant_bubble(
     assistant_message: &mut AssistantMessage,
     assistant_slot: &mut Option<AssistantMessage>,
     state: &mut ClaudeStreamState,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     finalize_assistant_message(
         deps,
@@ -1049,7 +1053,7 @@ async fn try_deliver_queued_to_claude(
     connection_id: &str,
     stdin: &mut tokio::process::ChildStdin,
     turn_active: bool,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> MidRunDelivery {
     // Interrupting while the user is being asked a question would tear the
     // question down; leave messages queued until it resolves.
@@ -1177,7 +1181,7 @@ async fn run_claude_turn(
     trigger: &crate::assistant::types::RunTrigger,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
     run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     let prompt = prepare_prompt(
@@ -1566,7 +1570,7 @@ async fn run_codex_turn(
     trigger: &crate::assistant::types::RunTrigger,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
     run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     let existing_thread_id = session.context.cli_session_id.clone();
@@ -1790,7 +1794,7 @@ async fn run_codex_turn_app_server(
     trigger: &crate::assistant::types::RunTrigger,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
     run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     use crate::assistant::codex_app_server as aps;
@@ -2178,7 +2182,7 @@ async fn handle_app_server_notification(
     state: &mut CodexStreamState,
     result_error: &mut Option<String>,
     active_turn_id: &mut Option<String>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<bool, LocalAgentRunError> {
     let null = Value::Null;
     let params = message.get("params").unwrap_or(&null);
@@ -2351,7 +2355,7 @@ async fn split_codex_assistant_message(
     current: &AssistantMessage,
     state: &mut CodexStreamState,
     slot: &mut Option<AssistantMessage>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<AssistantMessage, LocalAgentRunError> {
     let has_content = !non_empty_content_parts(&state.parts).is_empty()
         || !state.persisted_tool_item_ids.is_empty();
@@ -2403,7 +2407,7 @@ async fn resolve_codex_steer_response(
     response: &Value,
     messages: Vec<AssistantMessage>,
     inflight: &mut HashSet<String>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> bool {
     let message_ids: Vec<String> = messages.iter().map(|message| message.id.clone()).collect();
     for id in &message_ids {
@@ -2556,7 +2560,7 @@ async fn run_opencode_turn(
     trigger: &crate::assistant::types::RunTrigger,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
     run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     let existing_session_id = session.context.cli_session_id.clone();
@@ -3006,7 +3010,7 @@ async fn prepare_prompt(
     metadata_source: &str,
     provider_display_name: &str,
     include_fresh_session_context: bool,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
     run_input: &[AssistantMessage],
 ) -> Result<String, LocalAgentRunError> {
     let prompt = if let Some(trigger_content) = build_trigger_message(session, trigger) {
@@ -3053,13 +3057,10 @@ async fn prepare_prompt(
 /// Seed a fresh (new or rotated) CLI session from the run's conversation:
 /// the standing summary plus the recent tail. Resumed sessions skip this and
 /// send only the new input, because the CLI already holds its own history.
-fn with_fresh_cli_session_context_prompt(
-    conversation: &compaction::RunConversation,
-    prompt: String,
-) -> String {
+fn with_fresh_cli_session_context_prompt(conversation: &RunConversation, prompt: String) -> String {
     let summary = conversation
         .summary()
-        .map(|message| compaction::content_text(&message.content));
+        .map(|message| content_text(&message.content));
     let recent_messages = conversation.tail();
 
     let has_summary = summary
@@ -3144,7 +3145,7 @@ fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
     let mut count = 0usize;
     let mut total = 0usize;
 
-    for group in compaction::tool_groups(messages).into_iter().rev() {
+    for group in tool_groups(messages).into_iter().rev() {
         if count >= CLI_FRESH_CONTEXT_MAX_MESSAGES {
             break;
         }
@@ -3477,7 +3478,7 @@ async fn handle_opencode_event(
     value: &Value,
     state: &mut OpenCodeStreamState,
     result_error: &mut Option<String>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     if let Some(session_id) = value.get("sessionID").and_then(Value::as_str) {
         set_cli_session_id(deps, session, session_id.to_string(), OPENCODE_PROVIDER_ID).await?;
@@ -3572,7 +3573,7 @@ async fn persist_opencode_tool_use_and_result(
     assistant_message: &AssistantMessage,
     state: &mut OpenCodeStreamState,
     part: &Value,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let raw_part_id = part
         .get("id")
@@ -3623,7 +3624,7 @@ async fn apply_opencode_tool_result(
     run_id: &str,
     tool_call_id: &str,
     part: &Value,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let state = part.get("state").unwrap_or(&Value::Null);
     let status_value = state.get("status").and_then(Value::as_str);
@@ -3729,7 +3730,7 @@ async fn flush_opencode_assistant_message_content(
     run_id: &str,
     assistant_message: &AssistantMessage,
     state: &mut OpenCodeStreamState,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let content = non_empty_content_parts(&state.parts);
     if content.is_empty() {
@@ -3775,7 +3776,7 @@ async fn handle_codex_event(
     value: &Value,
     state: &mut CodexStreamState,
     result_error: &mut Option<String>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     match value.get("type").and_then(Value::as_str) {
         Some("thread.started") => {
@@ -3832,7 +3833,7 @@ async fn handle_codex_item(
     state: &mut CodexStreamState,
     item: &Value,
     terminal: bool,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     match item.get("type").and_then(Value::as_str) {
         Some("agent_message") if terminal => {
@@ -3936,7 +3937,7 @@ async fn persist_codex_mcp_tool_use(
     assistant_message: &AssistantMessage,
     state: &mut CodexStreamState,
     item: &Value,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let raw_item_id = item
         .get("id")
@@ -3990,7 +3991,7 @@ async fn apply_codex_mcp_tool_result(
     run_id: &str,
     state: &mut CodexStreamState,
     item: &Value,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let raw_item_id = item
         .get("id")
@@ -4107,7 +4108,7 @@ async fn flush_codex_assistant_message_content(
     run_id: &str,
     assistant_message: &AssistantMessage,
     state: &mut CodexStreamState,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let content = non_empty_content_parts(&state.parts);
     if content.is_empty() {
@@ -4153,7 +4154,7 @@ async fn handle_claude_event(
     value: &Value,
     state: &mut ClaudeStreamState,
     result_error: &mut Option<String>,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     match value.get("type").and_then(Value::as_str) {
         Some("stream_event") => {
@@ -4267,7 +4268,7 @@ async fn handle_stream_event(
     assistant_message: &AssistantMessage,
     event: &Value,
     state: &mut ClaudeStreamState,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let event_type = event.get("type").and_then(Value::as_str);
     let block_index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
@@ -4491,7 +4492,7 @@ async fn handle_tool_result(
     run_id: &str,
     state: &mut ClaudeStreamState,
     block: &Value,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let tool_use_id = match block.get("tool_use_id").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -4533,7 +4534,7 @@ async fn persist_tool_use(
     tool_call_id: &str,
     tool_name: &str,
     params: Value,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     // Claude Code reaches our built-ins through the local MCP server, so
     // its stream reports them qualified (`mcp__clai__web_fetch`). Persist
@@ -4612,7 +4613,7 @@ async fn flush_assistant_message_content(
     run_id: &str,
     assistant_message: &AssistantMessage,
     state: &mut ClaudeStreamState,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let content: Vec<ContentPart> = state
         .parts
@@ -4669,7 +4670,7 @@ async fn adopt_complete_assistant_message(
     assistant_message: &AssistantMessage,
     message: &Value,
     state: &mut ClaudeStreamState,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let Some(content) = message.get("content").and_then(Value::as_array) else {
         return Ok(());
@@ -4720,7 +4721,7 @@ async fn apply_tool_result(
     run_id: &str,
     tool_use_id: &str,
     block: &Value,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     let is_error = block
         .get("is_error")
@@ -4788,7 +4789,7 @@ async fn finalize_assistant_message(
     run_id: &str,
     assistant_message: &AssistantMessage,
     state: &mut ClaudeStreamState,
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     finalize_assistant_message_from_parts(
         deps,
@@ -4808,7 +4809,7 @@ async fn finalize_assistant_message_from_parts(
     run_id: &str,
     assistant_message: &AssistantMessage,
     parts: &[ContentPart],
-    conversation: &mut compaction::RunConversation,
+    conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     // Build the final content from the ordered parts vec. Drop empty
     // Text parts (left over when a turn was purely tool calls — the
@@ -5148,7 +5149,7 @@ mod tests {
     fn summary_message(id: &str, body: &str) -> AssistantMessage {
         let mut message = test_message(id, MessageRole::System, vec![text_part(body)]);
         message.provider_metadata = Some(serde_json::json!({
-            "source": compaction::COMPACTION_METADATA_SOURCE,
+            "source": crate::assistant::conversation::COMPACTION_METADATA_SOURCE,
         }));
         message
     }
@@ -5158,7 +5159,7 @@ mod tests {
     /// rows appended during this run, with no history reload.
     #[test]
     fn fresh_cli_session_prompt_is_seeded_from_the_run_conversation() {
-        let mut conversation = compaction::RunConversation::from_history(
+        let mut conversation = RunConversation::from_history(
             &[
                 test_message("old", MessageRole::User, vec![text_part("compacted away")]),
                 summary_message("summary", "Earlier: PR #64 was reviewed."),
@@ -5205,7 +5206,7 @@ mod tests {
     /// nothing to carry forward: the prompt is sent as-is.
     #[test]
     fn fresh_cli_session_prompt_is_unchanged_without_context_to_carry() {
-        let conversation = compaction::RunConversation::from_history(
+        let conversation = RunConversation::from_history(
             &[test_message(
                 "only",
                 MessageRole::User,

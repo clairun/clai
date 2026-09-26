@@ -1,20 +1,17 @@
 use futures::StreamExt;
-use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
 
+use crate::assistant::conversation::{tool_groups, RunConversation};
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
-use crate::assistant::repository::{self, CreateMessageParams};
+use crate::assistant::token_estimate::{json_string, text_tokens, tool_tokens};
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantSession, CompactionStrategy, CompactionTrigger,
     CompletionRequest, ContentPart, MessageRole, ProviderConnection, ProviderEvent,
     ProviderInputMessage, ToolDefinition,
 };
-use crate::db::DbPool;
-
-pub const COMPACTION_METADATA_SOURCE: &str = "clai-compaction";
 
 /// Estimated input tokens a request may hold before automatic compaction
 /// runs. CLAI knows no per-model context capacity, so this is one engineering
@@ -27,10 +24,6 @@ const ESTIMATED_INPUT_BUDGET_TOKENS: usize = 96_000;
 /// Cap on the newest history a compaction keeps verbatim; see
 /// [`verbatim_tail_tokens`]. The newest group is kept regardless.
 pub(crate) const VERBATIM_TAIL_MAX_TOKENS: usize = 20_000;
-/// Request framing per message (role, ids, JSON keys) that the text lacks.
-const MESSAGE_FRAMING_TOKENS: usize = 4;
-/// Fixed allowance per image part; base64 length is not a vision token count.
-const IMAGE_TOKENS: usize = 1_600;
 const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 4096;
 /// Transcript the summarizer request may carry: the input budget less the
 /// summary it is asked to write. Same unit as the trigger, so a compaction
@@ -58,37 +51,6 @@ const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 8_000;
 /// It is also well under `CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES` (64_000), so the
 /// CLI fresh-session clamp never has to re-cut a summary we produced.
 const SUMMARY_MESSAGE_MAX_CHARS: usize = 24_000;
-
-pub(crate) fn is_compaction_summary_message(message: &AssistantMessage) -> bool {
-    message
-        .provider_metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("source"))
-        .and_then(|value| value.as_str())
-        == Some(COMPACTION_METADATA_SOURCE)
-}
-
-pub fn is_context_limit_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    [
-        "context length",
-        "context window",
-        "maximum context",
-        "max context",
-        "too many tokens",
-        "token limit",
-        "prompt is too long",
-        "prompt too long",
-        "input is too long",
-        "input exceeds the maximum length",
-        "input_too_large",
-        "input tokens",
-        "exceeds the model",
-        "exceeds context",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle))
-}
 
 /// What automatic compaction achieved during a run.
 ///
@@ -174,20 +136,6 @@ pub fn context_limit_failure_message(
     )
 }
 
-pub async fn reset_cli_session_for_rotation(
-    pool: &DbPool,
-    session: &mut AssistantSession,
-) -> Result<(), String> {
-    if session.context.cli_session_id.is_none() && session.context.cli_session_provider.is_none() {
-        return Ok(());
-    }
-    session.context.cli_session_id = None;
-    session.context.cli_session_provider = None;
-    session.updated_at = chrono::Utc::now().timestamp_millis();
-    *session = repository::update_session(pool, session).await?;
-    Ok(())
-}
-
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
     pub compaction: AssistantCompaction,
@@ -208,397 +156,6 @@ pub struct PreparedCompaction {
     pub(crate) consumed: usize,
 }
 
-/// The conversation one run sends to the provider, owned in memory for the
-/// whole run: `[standing summary] + the messages it does not cover`, in
-/// insertion order (`created_at`, then rowid), with tool results placed by
-/// their issuing assistant. It is loaded once when the run starts; from then
-/// on the run writes its rows through it and feeds it queue rows at request
-/// boundaries, so history is never re-read while the run is active.
-/// Nothing here is durable: the next run reconstructs the same view from
-/// persistence.
-pub struct RunConversation {
-    messages: Vec<AssistantMessage>,
-    /// `message_tokens` of every row in `messages`, by id. Tokenizing a full
-    /// conversation costs tens of milliseconds and the trigger runs on every
-    /// engine iteration, so counts are kept from the writes instead.
-    tokens: HashMap<String, usize>,
-    /// Queued user rows still pending delivery, reconciled against the queue
-    /// at request boundaries.
-    pending_ids: HashSet<String>,
-}
-
-impl RunConversation {
-    /// The one history read of a run: every message plus the latest completed
-    /// compaction, projected onto the provider view.
-    pub async fn load(pool: &DbPool, session_id: &str) -> Result<Self, String> {
-        let messages = repository::list_messages(pool, session_id).await?;
-        let latest = repository::latest_completed_compaction(pool, session_id).await?;
-        Ok(Self::from_history(&messages, latest.as_ref()))
-    }
-
-    /// Load an idle session and mark queued rows before choosing a manual cut.
-    pub async fn load_for_manual_compaction(
-        pool: &DbPool,
-        session_id: &str,
-    ) -> Result<Self, String> {
-        let mut conversation = Self::load(pool, session_id).await?;
-        let pending = repository::list_pending_queued_messages(pool, session_id).await?;
-        conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
-        Ok(conversation)
-    }
-
-    pub(crate) fn from_history(
-        messages: &[AssistantMessage],
-        latest: Option<&AssistantCompaction>,
-    ) -> Self {
-        let messages = provider_view(join_tool_groups(messages.to_vec()), latest);
-        Self {
-            tokens: messages
-                .iter()
-                .map(|message| (message.id.clone(), message_tokens(message)))
-                .collect(),
-            messages,
-            pending_ids: HashSet::new(),
-        }
-    }
-
-    pub fn messages(&self) -> &[AssistantMessage] {
-        &self.messages
-    }
-
-    /// Estimated tokens of the whole conversation as the provider receives it.
-    fn estimated_tokens(&self) -> usize {
-        self.tokens.values().sum()
-    }
-
-    /// The standing summary; `provider_view` places at most one, first.
-    pub fn summary(&self) -> Option<&AssistantMessage> {
-        self.messages
-            .first()
-            .filter(|message| is_compaction_summary_message(message))
-    }
-
-    /// Messages after the standing summary.
-    pub fn tail(&self) -> &[AssistantMessage] {
-        &self.messages[self.summary_len()..]
-    }
-
-    pub fn latest_user_message(&self) -> Option<&AssistantMessage> {
-        self.messages
-            .iter()
-            .rev()
-            .find(|message| message.role == MessageRole::User)
-    }
-
-    /// Persist a new row and record it. Every conversation write a run makes
-    /// goes through this, the two methods below, or `upsert` right after the
-    /// repository call, so a row cannot reach the database without reaching
-    /// the view the provider sees.
-    pub async fn create_message(
-        &mut self,
-        pool: &DbPool,
-        params: CreateMessageParams,
-    ) -> Result<AssistantMessage, String> {
-        let message = repository::create_message(pool, params).await?;
-        self.upsert(message.clone());
-        Ok(message)
-    }
-
-    pub async fn update_message_content(
-        &mut self,
-        pool: &DbPool,
-        message_id: &str,
-        content: &[ContentPart],
-    ) -> Result<AssistantMessage, String> {
-        let message = repository::update_message_content(pool, message_id, content).await?;
-        self.upsert(message.clone());
-        Ok(message)
-    }
-
-    pub async fn delete_message(&mut self, pool: &DbPool, message_id: &str) -> Result<(), String> {
-        repository::delete_message(pool, message_id).await?;
-        self.remove(message_id);
-        Ok(())
-    }
-
-    /// Record a persisted row: replace an existing row with the same id
-    /// (assistant placeholders are finalized in place), otherwise insert it
-    /// after every row created at the same time or earlier, which is the
-    /// insertion order `list_messages` returns, and re-join tool groups the
-    /// same way `from_history` does.
-    pub fn upsert(&mut self, message: AssistantMessage) {
-        self.tokens
-            .insert(message.id.clone(), message_tokens(&message));
-        if let Some(existing) = self.messages.iter_mut().find(|m| m.id == message.id) {
-            *existing = message;
-            return;
-        }
-        let start = self.summary_len();
-        let offset = self.messages[start..]
-            .iter()
-            .rposition(|m| m.created_at <= message.created_at)
-            .map_or(0, |index| index + 1);
-        self.messages.insert(start + offset, message);
-        self.messages = join_tool_groups(std::mem::take(&mut self.messages));
-    }
-
-    fn remove(&mut self, message_id: &str) {
-        self.messages.retain(|message| message.id != message_id);
-        self.tokens.remove(message_id);
-        self.pending_ids.remove(message_id);
-    }
-
-    /// Reconcile with the queue's current pending rows: edits replace the
-    /// row by id, newcomers are inserted, and a previously pending row that
-    /// is neither pending nor delivered by this run was deleted by the user.
-    pub fn refresh_pending(&mut self, pending: Vec<AssistantMessage>) {
-        let fresh: HashSet<String> = pending.iter().map(|message| message.id.clone()).collect();
-        let deleted: Vec<String> = self
-            .messages
-            .iter()
-            .filter(|message| {
-                self.pending_ids.contains(&message.id) && !fresh.contains(&message.id)
-            })
-            .map(|message| message.id.clone())
-            .collect();
-        for id in &deleted {
-            self.remove(id);
-        }
-        for message in pending {
-            self.upsert(message);
-        }
-        self.pending_ids = fresh;
-    }
-
-    /// Pending queued rows in this conversation, in view order.
-    pub fn pending_ids(&self) -> Vec<String> {
-        self.messages
-            .iter()
-            .filter(|message| self.pending_ids.contains(&message.id))
-            .map(|message| message.id.clone())
-            .collect()
-    }
-
-    pub fn mark_delivered(&mut self, message_ids: &[String]) {
-        for id in message_ids {
-            self.pending_ids.remove(id);
-        }
-    }
-
-    fn summary_len(&self) -> usize {
-        usize::from(self.summary().is_some())
-    }
-
-    /// Choose what a compaction summarizes: `[standing summary] + the oldest
-    /// complete tool groups`, keeping the newest groups verbatim within
-    /// `verbatim_tail_tokens` (the newest group always). Pending queued rows
-    /// are never summarized: they are delivered verbatim by the next request
-    /// and marked delivered by id, so the cut stops at the first of them.
-    /// `None` when no raw message is eligible: a summary is never
-    /// re-summarized on its own.
-    fn plan_compaction(&self, verbatim_tail_tokens: usize) -> Option<CompactionPlan> {
-        let summary_len = self.summary_len();
-        let tail = &self.messages[summary_len..];
-        let groups = tool_groups(tail);
-        let newest = groups.last()?;
-        let tokens: Vec<usize> = tail
-            .iter()
-            .map(|message| {
-                self.tokens
-                    .get(&message.id)
-                    .copied()
-                    .unwrap_or_else(|| message_tokens(message))
-            })
-            .collect();
-        let group_tokens = |group: &Range<usize>| tokens[group.clone()].iter().sum::<usize>();
-
-        let mut kept = group_tokens(newest);
-        let mut keep_from = groups.len() - 1;
-        while keep_from > 0 && kept + group_tokens(&groups[keep_from - 1]) <= verbatim_tail_tokens {
-            keep_from -= 1;
-            kept += group_tokens(&groups[keep_from]);
-        }
-        if let Some(first_pending) = tail
-            .iter()
-            .position(|message| self.pending_ids.contains(&message.id))
-        {
-            let pending_group = groups
-                .iter()
-                .position(|group| group.contains(&first_pending))
-                .expect("groups partition the tail");
-            keep_from = keep_from.min(pending_group);
-        }
-        let cut = groups[keep_from].start;
-        if cut == 0 {
-            return None;
-        }
-
-        let messages = self.messages[..summary_len + cut].to_vec();
-        Some(CompactionPlan {
-            source_from_message_id: messages[0].id.clone(),
-            source_to_message_id: tail[cut - 1].id.clone(),
-            messages,
-        })
-    }
-
-    pub(crate) fn apply_compaction(&mut self, consumed: usize, summary_message: AssistantMessage) {
-        for message in self.messages.drain(..consumed) {
-            self.tokens.remove(&message.id);
-        }
-        self.tokens
-            .insert(summary_message.id.clone(), message_tokens(&summary_message));
-        self.messages.insert(0, summary_message);
-    }
-}
-
-struct CompactionPlan {
-    /// `[standing summary] + eligible raw prefix`: the summarizer input.
-    messages: Vec<AssistantMessage>,
-    source_from_message_id: String,
-    /// The last raw message the new summary covers.
-    source_to_message_id: String,
-}
-
-/// `[latest valid summary] + non-summary messages after its boundary`, or
-/// every non-summary message when the compaction row cannot be placed
-/// (referenced rows deleted or belonging to another session). `messages`
-/// must be in view order (see [`join_tool_groups`]): the boundary is the
-/// last message a compaction consumed from that order.
-fn provider_view(
-    messages: Vec<AssistantMessage>,
-    latest: Option<&AssistantCompaction>,
-) -> Vec<AssistantMessage> {
-    let summary_and_boundary = latest.and_then(|compaction| {
-        let summary = messages.iter().find(|message| {
-            Some(message.id.as_str()) == compaction.summary_message_id.as_deref()
-        })?;
-        let boundary = messages.iter().position(|message| {
-            Some(message.id.as_str()) == compaction.source_to_message_id.as_deref()
-        })?;
-        Some((summary.clone(), boundary + 1))
-    });
-    let (summary, boundary) = summary_and_boundary.unzip();
-    summary
-        .into_iter()
-        .chain(
-            messages
-                .into_iter()
-                .skip(boundary.unwrap_or(0))
-                .filter(|message| !is_compaction_summary_message(message)),
-        )
-        .collect()
-}
-
-/// Move tool results behind the assistant that issued each call. A later
-/// assistant can appear before a result, so call ownership must survive
-/// intervening messages. Idempotent on an already joined sequence.
-fn join_tool_groups(messages: Vec<AssistantMessage>) -> Vec<AssistantMessage> {
-    let mut groups: Vec<Vec<AssistantMessage>> = Vec::with_capacity(messages.len());
-    let mut issuers: HashMap<String, usize> = HashMap::new();
-    for message in messages {
-        if message.role == MessageRole::Tool {
-            let results = tool_result_ids(&message);
-            if let Some(&group) = results.first().and_then(|id| issuers.get(*id)) {
-                if results.iter().all(|id| issuers.get(*id) == Some(&group)) {
-                    groups[group].push(message);
-                    continue;
-                }
-            }
-        }
-        let group = groups.len();
-        for id in tool_use_ids(&message) {
-            issuers.insert(id.to_string(), group);
-        }
-        groups.push(vec![message]);
-    }
-    groups.into_iter().flatten().collect()
-}
-
-/// Partition messages into the groups a compaction cut must not split: an
-/// assistant message together with the tool messages answering the calls it
-/// issued. Everything else is its own group. [`join_tool_groups`] places
-/// results right behind their call, so each group is a contiguous range.
-pub(crate) fn tool_groups(messages: &[AssistantMessage]) -> Vec<Range<usize>> {
-    let mut groups = Vec::new();
-    let mut start = 0usize;
-    while start < messages.len() {
-        let mut end = start + 1;
-        let issued = tool_use_ids(&messages[start]);
-        if !issued.is_empty() {
-            while end < messages.len() && messages[end].role == MessageRole::Tool {
-                let answered = tool_result_ids(&messages[end]);
-                if answered.is_empty() || !answered.iter().all(|id| issued.contains(id)) {
-                    break;
-                }
-                end += 1;
-            }
-        }
-        groups.push(start..end);
-        start = end;
-    }
-    groups
-}
-
-fn tool_use_ids(message: &AssistantMessage) -> HashSet<&str> {
-    message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::ToolUse { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn tool_result_ids(message: &AssistantMessage) -> Vec<&str> {
-    message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::ToolResult { tool_call_id, .. } => Some(tool_call_id.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Token count of `text` under the fixed `cl100k_base` encoding, which serves
-/// every provider: an estimate of the provider's count, not its tokenizer's
-/// answer. The encoding is embedded in the crate and initialized once.
-fn text_tokens(text: &str) -> usize {
-    tiktoken_rs::cl100k_base_singleton().count_ordinary(text)
-}
-
-/// A message as the provider receives it: text and thinking, tool calls and
-/// results at full size, a fixed allowance per image, plus framing.
-fn message_tokens(message: &AssistantMessage) -> usize {
-    message
-        .content
-        .iter()
-        .map(|part| match part {
-            ContentPart::Text { text } | ContentPart::Thinking { text, .. } => text_tokens(text),
-            ContentPart::ToolUse {
-                tool_name,
-                arguments,
-                ..
-            } => text_tokens(tool_name) + text_tokens(&json_string(arguments)),
-            ContentPart::ToolResult { payload, .. } => text_tokens(&json_string(payload)),
-            ContentPart::Image { .. } => IMAGE_TOKENS,
-        })
-        .sum::<usize>()
-        + MESSAGE_FRAMING_TOKENS
-}
-
-fn tool_tokens(tools: &[ToolDefinition]) -> usize {
-    tools
-        .iter()
-        .map(|tool| {
-            text_tokens(&tool.name)
-                + text_tokens(&tool.description)
-                + text_tokens(&json_string(&tool.input_schema))
-        })
-        .sum()
-}
-
 /// Tokens the conversation may occupy in a request: the input budget less
 /// the system prompt and the tool definitions. `None` when those leave no
 /// room: compaction only shrinks messages, so it cannot help.
@@ -606,6 +163,63 @@ fn message_budget(system_prompt: &str, tools: &[ToolDefinition]) -> Option<usize
     ESTIMATED_INPUT_BUDGET_TOKENS
         .checked_sub(text_tokens(system_prompt) + tool_tokens(tools))
         .filter(|budget| *budget > 0)
+}
+
+/// Choose what a compaction summarizes: `[standing summary] + the oldest
+/// complete tool groups`, keeping the newest groups verbatim within
+/// `verbatim_tail_tokens` (the newest group always). Pending queued rows
+/// are never summarized: they are delivered verbatim by the next request
+/// and marked delivered by id, so the cut stops at the first of them.
+/// `None` when no raw message is eligible: a summary is never
+/// re-summarized on its own.
+fn plan_compaction(
+    conversation: &RunConversation,
+    verbatim_tail_tokens: usize,
+) -> Option<CompactionPlan> {
+    let summary_len = usize::from(conversation.summary().is_some());
+    let tail = &conversation.messages()[summary_len..];
+    let groups = tool_groups(tail);
+    let newest = groups.last()?;
+    let tokens: Vec<usize> = tail
+        .iter()
+        .map(|message| conversation.cached_message_tokens(message))
+        .collect();
+    let group_tokens = |group: &Range<usize>| tokens[group.clone()].iter().sum::<usize>();
+
+    let mut kept = group_tokens(newest);
+    let mut keep_from = groups.len() - 1;
+    while keep_from > 0 && kept + group_tokens(&groups[keep_from - 1]) <= verbatim_tail_tokens {
+        keep_from -= 1;
+        kept += group_tokens(&groups[keep_from]);
+    }
+    if let Some(first_pending) = tail
+        .iter()
+        .position(|message| conversation.is_pending(&message.id))
+    {
+        let pending_group = groups
+            .iter()
+            .position(|group| group.contains(&first_pending))
+            .expect("groups partition the tail");
+        keep_from = keep_from.min(pending_group);
+    }
+    let cut = groups[keep_from].start;
+    if cut == 0 {
+        return None;
+    }
+
+    let messages = conversation.messages()[..summary_len + cut].to_vec();
+    Some(CompactionPlan {
+        source_from_message_id: messages[0].id.clone(),
+        source_to_message_id: tail[cut - 1].id.clone(),
+        messages,
+    })
+}
+struct CompactionPlan {
+    /// `[standing summary] + eligible raw prefix`: the summarizer input.
+    messages: Vec<AssistantMessage>,
+    source_from_message_id: String,
+    /// The last raw message the new summary covers.
+    source_to_message_id: String,
 }
 
 /// Newest complete tool groups a compaction keeps verbatim: a quarter of the
@@ -691,7 +305,7 @@ where
     F: FnOnce(Vec<AssistantMessage>) -> Fut,
     Fut: Future<Output = Result<String, String>>,
 {
-    let Some(plan) = conversation.plan_compaction(verbatim_tail_tokens) else {
+    let Some(plan) = plan_compaction(conversation, verbatim_tail_tokens) else {
         return Ok(None);
     };
     let strategy = if providers::is_cli_provider(protocol_id) {
@@ -935,21 +549,6 @@ fn render_content_parts(
         .join("\n")
 }
 
-pub fn content_text(content: &[ContentPart]) -> String {
-    content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn json_string(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
-}
-
 fn truncate_json(value: &serde_json::Value, max_chars: usize) -> String {
     let rendered = json_string(value);
     if rendered.len() <= max_chars {
@@ -1027,7 +626,10 @@ mod tests {
     }
 
     use super::*;
+    use crate::assistant::conversation::{join_tool_groups, COMPACTION_METADATA_SOURCE};
+    use crate::assistant::token_estimate::message_tokens;
     use crate::assistant::types::{ContentPart, MessageRole};
+    use crate::db::DbPool;
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
@@ -1135,11 +737,7 @@ mod tests {
             .map(|m| (m.id.as_str(), message_tokens(m)))
             .collect();
         expected.sort();
-        let mut cached: Vec<(&str, usize)> = conversation
-            .tokens
-            .iter()
-            .map(|(id, tokens)| (id.as_str(), *tokens))
-            .collect();
+        let mut cached = conversation.token_cache_for_test();
         cached.sort();
         assert_eq!(cached, expected);
     }
@@ -1247,9 +845,7 @@ mod tests {
         messages.extend(tool_group("g2", 2));
         let conversation = conversation(messages);
 
-        let plan = conversation
-            .plan_compaction(VERBATIM_TAIL_MAX_TOKENS)
-            .expect("plan");
+        let plan = plan_compaction(&conversation, VERBATIM_TAIL_MAX_TOKENS).expect("plan");
 
         // g2 + `mid` fit in 20k; g1 (~15k) does not, and it moves whole.
         assert_eq!(
@@ -1264,9 +860,7 @@ mod tests {
     fn the_newest_group_is_kept_even_when_it_alone_exceeds_the_tail_budget() {
         let conversation = conversation(vec![heavy_msg("a", 100), heavy_msg("huge", 40_000)]);
 
-        let plan = conversation
-            .plan_compaction(VERBATIM_TAIL_MAX_TOKENS)
-            .expect("plan");
+        let plan = plan_compaction(&conversation, VERBATIM_TAIL_MAX_TOKENS).expect("plan");
 
         assert_eq!(ids(&plan.messages), vec!["a"]);
     }
@@ -1277,7 +871,7 @@ mod tests {
         messages.extend(tool_group("g", 2));
         let conversation = conversation(messages);
 
-        let plan = conversation.plan_compaction(0).expect("plan");
+        let plan = plan_compaction(&conversation, 0).expect("plan");
 
         assert_eq!(ids(&plan.messages), vec!["f0", "f1", "f2", "f3"]);
     }
@@ -1288,20 +882,11 @@ mod tests {
             summary_msg("s", &"x".repeat(SUMMARY_MESSAGE_MAX_CHARS)),
             heavy_msg("only", 90_000),
         ];
-        let conversation = RunConversation {
-            tokens: messages
-                .iter()
-                .map(|m| (m.id.clone(), message_tokens(m)))
-                .collect(),
-            messages,
-            pending_ids: HashSet::new(),
-        };
+        let conversation = RunConversation::from_provider_view_for_test(messages);
 
         assert!(should_auto_compact(&conversation, "", &[]));
-        assert!(conversation
-            .plan_compaction(VERBATIM_TAIL_MAX_TOKENS)
-            .is_none());
-        assert!(conversation.plan_compaction(0).is_none());
+        assert!(plan_compaction(&conversation, VERBATIM_TAIL_MAX_TOKENS).is_none());
+        assert!(plan_compaction(&conversation, 0).is_none());
         assert_eq!(conversation.summary().map(|m| m.id.as_str()), Some("s"));
     }
 
@@ -1374,9 +959,7 @@ mod tests {
 
         // `huge` alone exceeds the tail budget, so without the pending pin
         // the cut would fall right before it and swallow `q`.
-        let plan = conversation
-            .plan_compaction(VERBATIM_TAIL_MAX_TOKENS)
-            .expect("plan");
+        let plan = plan_compaction(&conversation, VERBATIM_TAIL_MAX_TOKENS).expect("plan");
         assert_eq!(ids(&plan.messages), vec!["old", "gasst", "gres0"]);
 
         conversation.apply_compaction(plan.messages.len(), summary_msg("s", "summary"));
@@ -1610,13 +1193,6 @@ mod tests {
         assert!(transcript.contains("[assistant message f3]"));
     }
 
-    #[test]
-    fn context_limit_classifier_matches_codex_turn_start_input_too_large() {
-        assert!(is_context_limit_error(
-            "Error: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)"
-        ));
-    }
-
     // --- R-comp.7: the stored summary is bounded --------------------------------
 
     #[test]
@@ -1801,6 +1377,7 @@ mod tests {
     mod run_flow {
         use super::super::*;
         use super::{compact_with, ids, text, tool_result_msg, tool_use_msg};
+        use crate::assistant::repository;
         use crate::assistant::repository::{
             complete_compaction, create_compaction, create_message, create_run, create_session,
             create_user_message_with_content, delete_pending_queued_message,
@@ -2140,7 +1717,11 @@ mod tests {
             let old = add_text(&pool, &session.id, &" a".repeat(25_000)).await;
             let queued = add_queued(&pool, &session.id, "pending").await;
             let newest = add_text(&pool, &session.id, &" b".repeat(25_000)).await;
-            let mut conversation = RunConversation::load_for_manual_compaction(&pool, &session.id)
+            let mut conversation =
+                crate::assistant::compaction_service::load_for_manual_compaction(
+                    &pool,
+                    &session.id,
+                )
                 .await
                 .unwrap();
 
@@ -2262,18 +1843,21 @@ mod tests {
                     result_y.id.clone()
                 ]
             );
-            assert!(conversation.plan_compaction(0).is_none());
-            let reloaded = RunConversation::load_for_manual_compaction(&pool, &session.id)
-                .await
-                .unwrap();
+            assert!(plan_compaction(&conversation, 0).is_none());
+            let reloaded = crate::assistant::compaction_service::load_for_manual_compaction(
+                &pool,
+                &session.id,
+            )
+            .await
+            .unwrap();
             assert_eq!(view_ids(&reloaded), view_ids(&conversation));
-            assert!(reloaded.plan_compaction(0).is_none());
+            assert!(plan_compaction(&reloaded, 0).is_none());
 
             // If the failed request's pending pin were removed, the only
             // eligible prefix would contain the queued row; the large newest
             // assistant/tool group would still be sent in full.
             conversation.mark_delivered(std::slice::from_ref(&queued.id));
-            let unpinned = conversation.plan_compaction(0).expect("unpinned plan");
+            let unpinned = plan_compaction(&conversation, 0).expect("unpinned plan");
             assert_eq!(
                 ids(&unpinned.messages),
                 vec![outcome.summary_message.id.as_str(), queued.id.as_str()]

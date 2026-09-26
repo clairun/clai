@@ -1,3 +1,4 @@
+use crate::assistant::cli_session::reset_cli_session_for_rotation;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
@@ -695,7 +696,8 @@ pub async fn assistant_compact_session(
     // No run owns this session's conversation while it is idle, so the manual
     // command loads it once and compacts through the same core the runs use.
     let mut conversation =
-        compaction::RunConversation::load_for_manual_compaction(&target_pool, &session.id).await?;
+        crate::assistant::compaction_service::load_for_manual_compaction(&target_pool, &session.id)
+            .await?;
     let outcome = crate::assistant::compaction_service::compact_conversation(
         &target_pool,
         &session,
@@ -716,7 +718,7 @@ pub async fn assistant_compact_session(
     };
 
     if crate::assistant::providers::is_cli_provider(&connection.protocol_id) {
-        compaction::reset_cli_session_for_rotation(&target_pool, &mut session).await?;
+        reset_cli_session_for_rotation(&target_pool, &mut session).await?;
     }
 
     emit_event(

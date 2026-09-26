@@ -1,11 +1,23 @@
+use crate::assistant::{conversation::RunConversation, conversation::COMPACTION_METADATA_SOURCE};
 use std::path::Path;
 
-use crate::assistant::compaction::{self, CompactionOutcome, PreparedCompaction, RunConversation};
+use crate::assistant::compaction::{self, CompactionOutcome, PreparedCompaction};
 use crate::assistant::repository::{self, CreateCompactionParams, CreateMessageParams};
 use crate::assistant::types::{
     AssistantSession, CompactionTrigger, ContentPart, MessageRole, ProviderConnection,
 };
 use crate::db::DbPool;
+
+/// Load an idle conversation and protect queued rows from a manual compaction cut.
+pub async fn load_for_manual_compaction(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<RunConversation, String> {
+    let mut conversation = RunConversation::load(pool, session_id).await?;
+    let pending = repository::list_pending_queued_messages(pool, session_id).await?;
+    conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
+    Ok(conversation)
+}
 
 /// Commit a prepared summary, then update the run's provider view.
 pub async fn commit_compaction(
@@ -48,7 +60,7 @@ pub async fn commit_compaction(
             role: MessageRole::System,
             content: vec![ContentPart::Text { text: summary_text }],
             provider_metadata: Some(serde_json::json!({
-                "source": compaction::COMPACTION_METADATA_SOURCE,
+                "source": COMPACTION_METADATA_SOURCE,
                 "compactionId": compaction.id,
                 "trigger": trigger,
                 "strategy": strategy,
