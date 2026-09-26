@@ -585,16 +585,7 @@ pub async fn finish_mcp_oauth_login(
     };
     pending.callback_listener.cancellation_token.cancel();
 
-    if !oauth::callback_issuer_matches(pending.expected_issuer.as_deref(), callback.iss.as_deref())
-    {
-        return Err("OAuth callback issuer did not match authorization server issuer".to_string());
-    }
-
-    pending
-        .authorization_session
-        .handle_callback(&callback.code, &callback.state)
-        .await
-        .map_err(|error| format!("OAuth token exchange failed: {}", error))?;
+    oauth::exchange_authorization_code(&pending.authorization_session, &callback).await?;
     let (client_id, _) = pending
         .authorization_session
         .get_credentials()
