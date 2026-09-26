@@ -1006,6 +1006,42 @@ mod tests {
         assert_token_cache_in_sync(&conversation);
     }
 
+    #[test]
+    fn pending_changes_during_compaction_reach_the_next_request() {
+        let mut conversation = conversation(vec![msg("old", MessageRole::User, vec![text("old")])]);
+        let queued = AssistantMessage {
+            created_at: 20,
+            ..msg("queued", MessageRole::User, vec![text("before")])
+        };
+        let deleted = AssistantMessage {
+            created_at: 30,
+            ..msg("deleted", MessageRole::User, vec![text("delete me")])
+        };
+        conversation.refresh_pending(vec![queued.clone(), deleted]);
+
+        conversation.apply_compaction(1, summary_msg("summary", "older history"));
+        let edited = AssistantMessage {
+            content: vec![text("after")],
+            ..queued
+        };
+        let arrived = AssistantMessage {
+            created_at: 40,
+            ..msg("arrived", MessageRole::User, vec![text("new")])
+        };
+        conversation.refresh_pending(vec![edited, arrived]);
+
+        assert_eq!(
+            ids(conversation.messages()),
+            vec!["summary", "queued", "arrived"]
+        );
+        assert_eq!(conversation.pending_ids(), vec!["queued", "arrived"]);
+        assert!(matches!(
+            &conversation.messages()[1].content[0],
+            ContentPart::Text { text } if text == "after"
+        ));
+        assert_token_cache_in_sync(&conversation);
+    }
+
     fn completed_compaction(from: &str, to: &str, summary: &str) -> AssistantCompaction {
         AssistantCompaction {
             id: "c".to_string(),

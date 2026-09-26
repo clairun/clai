@@ -270,6 +270,10 @@ pub async fn run_session_turn(
                     compaction_attempt.record_failure(&error);
                 }
             }
+            // Summarization may have waited while the user edited or deleted queued input.
+            let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+            conversation
+                .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
         }
         let queued_message_ids_in_request = conversation.pending_ids();
         let normalized = normalize_history_for_provider(conversation.messages());
