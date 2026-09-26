@@ -145,7 +145,7 @@ dirs = "5"
 # - server: Core server functionality
 # - transport-streamable-http-server: Full HTTP/SSE transport for AI CLI connections
 # - macros: #[tool] and #[tool_router] procedural macros
-rmcp = { version = "1.7", features = ["client", "server", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "macros", "auth"] }
+rmcp = { version = "2.0", features = ["client", "server", "transport-streamable-http-server", "transport-streamable-http-client-reqwest", "macros", "auth"] }
 # Direct alias for the same reqwest major rmcp uses internally. This lets CLAI
 # construct rmcp's auth-aware Streamable HTTP client without mixing it with the
 # app's existing reqwest 0.12 dependency.
