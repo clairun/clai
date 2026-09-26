@@ -696,8 +696,7 @@ pub async fn assistant_compact_session(
     // No run owns this session's conversation while it is idle, so the manual
     // command loads it once and compacts through the same core the runs use.
     let mut conversation =
-        crate::assistant::compaction_service::load_for_manual_compaction(&target_pool, &session.id)
-            .await?;
+        crate::assistant::compaction_service::load_with_pending(&target_pool, &session.id).await?;
     let outcome = crate::assistant::compaction_service::compact_conversation(
         &target_pool,
         &session,

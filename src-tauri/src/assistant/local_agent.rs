@@ -317,7 +317,7 @@ pub async fn run_session_turn(
     // persist so a compaction or fresh-session prompt later in this run sees
     // them without re-reading history. Native CLI sessions are resumed with
     // only the new input; the conversation feeds fresh/rotated sessions.
-    let mut conversation = RunConversation::load(&deps.pool, &session.id).await?;
+    let mut conversation = compaction_service::load_with_pending(&deps.pool, &session.id).await?;
     let run_input =
         run_input_messages(deps, &session, &run_id, &input.trigger, &conversation).await?;
     let system_prompt = system_prompt_text(&deps.app, &session, &input.trigger);

@@ -8,11 +8,8 @@ use crate::assistant::types::{
 };
 use crate::db::DbPool;
 
-/// Load an idle conversation and protect queued rows from a manual compaction cut.
-pub async fn load_for_manual_compaction(
-    pool: &DbPool,
-    session_id: &str,
-) -> Result<RunConversation, String> {
+/// Load a conversation with queued rows marked pending before any compaction cut.
+pub async fn load_with_pending(pool: &DbPool, session_id: &str) -> Result<RunConversation, String> {
     let mut conversation = RunConversation::load(pool, session_id).await?;
     let pending = repository::list_pending_queued_messages(pool, session_id).await?;
     conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());

@@ -1718,12 +1718,9 @@ mod tests {
             let queued = add_queued(&pool, &session.id, "pending").await;
             let newest = add_text(&pool, &session.id, &" b".repeat(25_000)).await;
             let mut conversation =
-                crate::assistant::compaction_service::load_for_manual_compaction(
-                    &pool,
-                    &session.id,
-                )
-                .await
-                .unwrap();
+                crate::assistant::compaction_service::load_with_pending(&pool, &session.id)
+                    .await
+                    .unwrap();
 
             let calls = Arc::new(Mutex::new(Vec::new()));
             let outcome = compact_with(
@@ -1748,6 +1745,48 @@ mod tests {
                     queued.id.clone(),
                     newest.id
                 ]
+            );
+            assert_eq!(conversation.pending_ids(), vec![queued.id]);
+        }
+
+        #[tokio::test]
+        async fn cli_startup_auto_compaction_excludes_already_pending_row() {
+            let (_tmp, pool, session) = db_session().await;
+            let old = add_text(&pool, &session.id, &" a".repeat(100_000)).await;
+            let queued = add_queued(&pool, &session.id, "pending").await;
+            let newest = add_text(&pool, &session.id, &" b".repeat(25_000)).await;
+
+            // CLI startup uses this load before its automatic compaction check.
+            let mut conversation =
+                crate::assistant::compaction_service::load_with_pending(&pool, &session.id)
+                    .await
+                    .unwrap();
+            assert_eq!(conversation.pending_ids(), vec![queued.id.clone()]);
+            assert!(should_auto_compact(&conversation, "", &[]));
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let outcome = compact_with(
+                &pool,
+                &session.id,
+                "codex",
+                "m",
+                CompactionTrigger::Automatic,
+                None,
+                verbatim_tail_tokens("", &[]),
+                &mut conversation,
+                recording_summarizer(&calls, "summary"),
+            )
+            .await
+            .unwrap()
+            .expect("old row is eligible");
+
+            assert_eq!(calls.lock().unwrap()[0], vec![old.id.clone()]);
+            assert_eq!(
+                outcome.compaction.source_to_message_id.as_deref(),
+                Some(old.id.as_str())
+            );
+            assert_eq!(
+                view_ids(&conversation),
+                vec![outcome.summary_message.id, queued.id.clone(), newest.id]
             );
             assert_eq!(conversation.pending_ids(), vec![queued.id]);
         }
@@ -1844,12 +1883,10 @@ mod tests {
                 ]
             );
             assert!(plan_compaction(&conversation, 0).is_none());
-            let reloaded = crate::assistant::compaction_service::load_for_manual_compaction(
-                &pool,
-                &session.id,
-            )
-            .await
-            .unwrap();
+            let reloaded =
+                crate::assistant::compaction_service::load_with_pending(&pool, &session.id)
+                    .await
+                    .unwrap();
             assert_eq!(view_ids(&reloaded), view_ids(&conversation));
             assert!(plan_compaction(&reloaded, 0).is_none());
 
