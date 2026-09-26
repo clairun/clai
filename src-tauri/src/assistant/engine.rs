@@ -1,10 +1,12 @@
+use crate::assistant::{
+    conversation::content_text, conversation::RunConversation,
+    providers::types::is_context_limit_error,
+};
 use futures::StreamExt;
-use std::collections::HashSet;
 use tauri::AppHandle;
 use tauri::Manager;
 use thiserror::Error;
 
-use crate::assistant::compaction;
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
@@ -21,6 +23,7 @@ use crate::assistant::types::{
     ProviderEvent, ProviderInputMessage, RunId, RunStatus, RunTrigger, SessionId,
     ToolInvocationDraft,
 };
+use crate::assistant::{compaction, compaction_service};
 use crate::db::DbPool;
 use crate::AppState;
 use tokio_util::sync::CancellationToken;
@@ -172,20 +175,27 @@ pub async fn run_session_turn(
         workspace_root.as_deref(),
     );
 
+    let system_prompt_text = content_text(&system_message.content);
+
+    // The run's conversation, read from the database once. Every row this run
+    // persists below is appended to it; history is not re-read per iteration.
+    let mut conversation = RunConversation::load(&deps.pool, &session.id).await?;
+
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
     // tool results from prior runs and may skip re-running tools.
     if let Some(trigger_content) = build_trigger_message(&session, &input.trigger) {
-        let boundary_msg = repository::create_message(
-            &deps.pool,
-            CreateMessageParams {
-                session_id: session.id.clone(),
-                role: trigger_content.role.clone(),
-                content: trigger_content.content.clone(),
-                provider_metadata: None,
-            },
-        )
-        .await?;
+        let boundary_msg = conversation
+            .create_message(
+                &deps.pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: trigger_content.role.clone(),
+                    content: trigger_content.content.clone(),
+                    provider_metadata: None,
+                },
+            )
+            .await?;
         let _ = emit_event(
             &deps.app,
             &session,
@@ -213,24 +223,26 @@ pub async fn run_session_turn(
             return Ok(());
         }
 
-        // Load fresh message history each iteration (includes the persisted trigger).
-        // Normalize before sending: drop empty assistant placeholders, drop tool
-        // messages whose tool_call_id has no matching tool_use in the preceding
-        // assistant turn, and merge consecutive same-role messages. The DB stays
-        // the source of truth; this only shapes what the provider sees so a
-        // mid-stream hangup or stacked user typing can't poison subsequent runs.
-        let mut messages = repository::list_messages(&deps.pool, &session.id).await?;
-        let current_provider_history =
-            compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
-        if compaction::should_auto_compact(&current_provider_history, &tool_defs) {
-            match compaction::compact_session_history(
+        // Reconcile queued user input (sent, edited, or deleted while the run
+        // was busy) before sizing and shaping the request; pending rows are
+        // never summarized away. Then normalize before sending: drop empty
+        // assistant placeholders, drop tool messages whose tool_call_id has no
+        // matching tool_use in the preceding assistant turn, and merge
+        // consecutive same-role messages. The DB stays the source of truth;
+        // this only shapes what the provider sees so a mid-stream hangup or
+        // stacked user typing can't poison subsequent runs.
+        let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+        conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
+        if compaction::should_auto_compact(&conversation, &system_prompt_text, &tool_defs) {
+            match compaction_service::compact_conversation(
                 &deps.pool,
                 &session,
                 &connection,
                 None,
                 CompactionTrigger::Automatic,
                 Some(&run_id),
-                false,
+                compaction::verbatim_tail_tokens(&system_prompt_text, &tool_defs),
+                &mut conversation,
             )
             .await
             {
@@ -245,10 +257,8 @@ pub async fn run_session_turn(
                             summary_message: outcome.summary_message,
                         },
                     );
-                    messages = repository::list_messages(&deps.pool, &session.id).await?;
                 }
-                // `force = false`: the *automatic* window selector declined,
-                // which says nothing about what a manual `/compact` could do.
+                // Nothing eligible yet; the forced paths can still compact more.
                 Ok(None) => {}
                 Err(error) => {
                     tracing::warn!(
@@ -260,18 +270,13 @@ pub async fn run_session_turn(
                     compaction_attempt.record_failure(&error);
                 }
             }
+            // Summarization may have waited while the user edited or deleted queued input.
+            let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+            conversation
+                .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
         }
-        let message_ids_in_snapshot: HashSet<&str> =
-            messages.iter().map(|message| message.id.as_str()).collect();
-        let queued_message_ids_in_request: Vec<String> =
-            repository::list_pending_queued_message_ids(&deps.pool, &session.id)
-                .await?
-                .into_iter()
-                .filter(|id| message_ids_in_snapshot.contains(id.as_str()))
-                .collect();
-        let provider_history =
-            compaction::provider_history_messages(&deps.pool, &session.id, &messages).await?;
-        let normalized = normalize_history_for_provider(&provider_history);
+        let queued_message_ids_in_request = conversation.pending_ids();
+        let normalized = normalize_history_for_provider(conversation.messages());
         let supports_images = providers::connection_supports_images(&connection);
         // Drop image parts from history when the active connection can't accept
         // them (e.g. user switched to a non-vision provider mid-conversation).
@@ -313,16 +318,15 @@ pub async fn run_session_turn(
         let mut stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                if !retried_after_context_compaction
-                    && compaction::is_context_limit_error(&e.to_string())
-                {
+                if !retried_after_context_compaction && is_context_limit_error(&e.to_string()) {
                     retried_after_context_compaction = true;
-                    match compaction::compact_for_context_limit_recovery(
+                    match compaction_service::compact_for_context_limit_recovery(
                         &deps.pool,
                         &session,
                         &connection,
                         None,
                         &run_id,
+                        &mut conversation,
                     )
                     .await
                     {
@@ -392,6 +396,7 @@ pub async fn run_session_turn(
             fail_run(deps, &session, &run_id, &e).await?;
             return Err(AssistantEngineError::Persistence(e));
         }
+        conversation.mark_delivered(&queued_message_ids_in_request);
         if !queued_message_ids_in_request.is_empty() {
             // The queued messages just became part of this run's request —
             // tell the FE so their "Queued" chips clear.
@@ -406,18 +411,19 @@ pub async fn run_session_turn(
         }
 
         // Create assistant message placeholder
-        let assistant_message = repository::create_message(
-            &deps.pool,
-            CreateMessageParams {
-                session_id: session.id.clone(),
-                role: MessageRole::Assistant,
-                content: vec![ContentPart::Text {
-                    text: String::new(),
-                }],
-                provider_metadata: None,
-            },
-        )
-        .await?;
+        let assistant_message = conversation
+            .create_message(
+                &deps.pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: MessageRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: String::new(),
+                    }],
+                    provider_metadata: None,
+                },
+            )
+            .await?;
 
         let _ = emit_event(
             &deps.app,
@@ -532,12 +538,9 @@ pub async fn run_session_turn(
             // so the assistant row never persists with zero content.
             let final_content = final_content_parts(content_parts);
 
-            let updated_message = repository::update_message_content(
-                &deps.pool,
-                &assistant_message.id,
-                &final_content,
-            )
-            .await?;
+            let updated_message = conversation
+                .update_message_content(&deps.pool, &assistant_message.id, &final_content)
+                .await?;
 
             let _ = emit_event(
                 &deps.app,
@@ -672,6 +675,7 @@ pub async fn run_session_turn(
                 outcome,
                 None,
                 MissingToolCall::Propagate,
+                &mut conversation,
             )
             .await?;
         }
@@ -2274,7 +2278,7 @@ fn failure_message_with_compaction_context(
     provider_message: &str,
     attempt: &compaction::CompactionAttempt,
 ) -> String {
-    if compaction::is_context_limit_error(provider_message) {
+    if is_context_limit_error(provider_message) {
         compaction::context_limit_failure_message("The request", provider_message, attempt)
     } else {
         provider_message.to_string()

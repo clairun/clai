@@ -18,6 +18,7 @@
 //! also own the assistant message — a caller that streamed content finalizes it
 //! before closing the run, so nothing here has to guess what was written.
 
+use crate::assistant::conversation::RunConversation;
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository::{
@@ -266,17 +267,18 @@ fn completion_event(status: ToolCallStatus, tool_call: ToolInvocation) -> Assist
 /// Tag the tool message with the CLI runtime that produced it.
 ///
 /// The API path has no runtime to name and passes `None`. The key is `source`,
-/// the same one `compaction.rs` tags its own generated messages with.
+/// the same one `compaction_service.rs` uses for summary messages.
 fn tool_result_metadata(metadata_source: Option<&str>) -> Option<Value> {
     metadata_source.map(|source| serde_json::json!({ "source": source }))
 }
 
 /// Close a tool call out: update the row, emit the matching completion event,
-/// and persist the tool-role message that carries the payload back to the
-/// provider on the next request.
+/// and write the tool-role message that carries the payload back to the
+/// provider on the next request through the run's conversation.
 ///
-/// Does nothing beyond a warning when the row cannot be updated under
-/// `MissingToolCall::SkipQuietly`.
+/// Returns `Ok(())` without a message (after a warning) when the row cannot
+/// be updated under `MissingToolCall::SkipQuietly`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_tool_call_result(
     deps: &AssistantDeps,
     session: &AssistantSession,
@@ -285,6 +287,7 @@ pub(crate) async fn record_tool_call_result(
     outcome: ToolCallOutcome<'_>,
     metadata_source: Option<&str>,
     on_missing: MissingToolCall,
+    conversation: &mut RunConversation,
 ) -> Result<(), String> {
     let (status, result, error) = tool_call_update(&outcome);
     let updated =
@@ -318,21 +321,22 @@ pub(crate) async fn record_tool_call_result(
     let payload = match outcome {
         ToolCallOutcome::Completed { payload } | ToolCallOutcome::Failed { payload, .. } => payload,
     };
-    let message = repository::create_message(
-        &deps.pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::Tool,
-            content: vec![ContentPart::ToolResult {
-                tool_call_id: tool_call_id.to_string(),
-                payload,
-                started_at: Some(started_at),
-                completed_at,
-            }],
-            provider_metadata: tool_result_metadata(metadata_source),
-        },
-    )
-    .await?;
+    let message = conversation
+        .create_message(
+            &deps.pool,
+            CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::Tool,
+                content: vec![ContentPart::ToolResult {
+                    tool_call_id: tool_call_id.to_string(),
+                    payload,
+                    started_at: Some(started_at),
+                    completed_at,
+                }],
+                provider_metadata: tool_result_metadata(metadata_source),
+            },
+        )
+        .await?;
 
     let _ = emit_event(
         &deps.app,

@@ -987,3 +987,46 @@ async fn test_create_session_and_link_task_links_atomically() {
         "task-linked session excluded by anti-join"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Message ordering
+// ---------------------------------------------------------------------------
+
+/// Same-millisecond rows (a run boundary and the assistant placeholder, or a
+/// tool group written in one tick) load in insertion order, not in the order
+/// of their random ids.
+#[tokio::test]
+async fn test_list_messages_orders_same_timestamp_by_insertion() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    let inserted = ["z-first", "m-second", "a-third"];
+    for id in inserted {
+        sqlx::query(
+            "INSERT INTO assistant_messages (id, session_id, role, content_json, provider_metadata_json, created_at) \
+             VALUES (?, ?, '\"user\"', '[]', NULL, 1000)",
+        )
+        .bind(id)
+        .bind(&session.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let loaded: Vec<String> = list_messages(&pool, &session.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|message| message.id)
+        .collect();
+
+    assert_eq!(loaded, inserted);
+}

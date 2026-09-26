@@ -4,8 +4,11 @@
 //! abstraction, event protocol, and persistence foundations.
 
 pub mod auth;
+pub mod cli_session;
 pub mod codex_app_server;
 pub mod compaction;
+pub mod compaction_service;
+pub mod conversation;
 pub mod engine;
 pub mod events;
 pub mod image_store;
@@ -17,6 +20,7 @@ pub mod run_lifecycle;
 pub mod runtime;
 pub mod sandbox;
 pub mod system_prompt;
+pub mod token_estimate;
 pub mod tools;
 pub mod types;
 

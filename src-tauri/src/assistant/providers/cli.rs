@@ -319,16 +319,17 @@ async fn run_cli_json_command(
 
 /// Feed `prompt` to a CLI summarizer on stdin and collect its stdout.
 ///
-/// The prompt reaches `SUMMARY_TRANSCRIPT_MAX_CHARS` (~96 KB), far more than a
-/// pipe buffer holds, so the order here is load-bearing: both output pipes are
-/// drained concurrently with the write, and the whole exchange — write, wait,
-/// and both reads — sits under one timeout. Writing first and reading
-/// afterwards deadlocks against any child that stalls before consuming the
-/// prompt, and a timeout around `wait()` alone cannot break it because the hang
-/// happens before `wait()` is ever reached. The reads are inside the budget for
-/// the same reason: `read_to_end` only sees EOF when the *last* holder of the
-/// write end closes it, so a grandchild that inherited the pipe would otherwise
-/// hang us after the child has already exited.
+/// The prompt reaches `SUMMARY_TRANSCRIPT_MAX_TOKENS` (~92k tokens, hundreds
+/// of KB), far more than a pipe buffer holds, so the order here is
+/// load-bearing: both output pipes are drained concurrently with the write,
+/// and the whole exchange — write, wait, and both reads — sits under one
+/// timeout. Writing first and reading afterwards deadlocks against any child
+/// that stalls before consuming the prompt, and a timeout around `wait()`
+/// alone cannot break it because the hang happens before `wait()` is ever
+/// reached. The reads are inside the budget for the same reason:
+/// `read_to_end` only sees EOF when the *last* holder of the write end closes
+/// it, so a grandchild that inherited the pipe would otherwise hang us after
+/// the child has already exited.
 ///
 /// Timeout cleanup follows `sandbox::runner`: kill the process *group*, not the
 /// direct child, then bound the reap. These CLIs spawn helpers of their own
@@ -998,9 +999,9 @@ mod tests {
         assert!(err.contains("provider failed"), "got: {err}");
     }
 
-    /// A prompt at the production ceiling: `SUMMARY_TRANSCRIPT_MAX_CHARS`
-    /// (96_000) plus the framing `sessionless_prompt_parts` adds. Bigger than
-    /// any pipe buffer, which is the whole point of these tests.
+    /// A prompt bigger than any pipe buffer, which is the whole point of
+    /// these tests; production prompts reach `SUMMARY_TRANSCRIPT_MAX_TOKENS`
+    /// (~92k tokens), several times this.
     #[cfg(unix)]
     fn oversized_prompt() -> String {
         "x".repeat(96_300)

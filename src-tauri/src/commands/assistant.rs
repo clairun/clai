@@ -1,3 +1,4 @@
+use crate::assistant::cli_session::reset_cli_session_for_rotation;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
@@ -692,14 +693,19 @@ pub async fn assistant_compact_session(
         .workspace_id
         .as_deref()
         .and_then(|workspace_id| state.workspace_root(workspace_id));
-    let outcome = compaction::compact_session_history(
+    // No run owns this session's conversation while it is idle, so the manual
+    // command loads it once and compacts through the same core the runs use.
+    let mut conversation =
+        crate::assistant::compaction_service::load_with_pending(&target_pool, &session.id).await?;
+    let outcome = crate::assistant::compaction_service::compact_conversation(
         &target_pool,
         &session,
         &connection,
         summary_working_dir.as_deref(),
         CompactionTrigger::Manual,
         None,
-        true,
+        compaction::VERBATIM_TAIL_MAX_TOKENS,
+        &mut conversation,
     )
     .await?;
 
@@ -711,7 +717,7 @@ pub async fn assistant_compact_session(
     };
 
     if crate::assistant::providers::is_cli_provider(&connection.protocol_id) {
-        compaction::reset_cli_session_for_rotation(&target_pool, &mut session).await?;
+        reset_cli_session_for_rotation(&target_pool, &mut session).await?;
     }
 
     emit_event(
