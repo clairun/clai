@@ -3048,10 +3048,28 @@ async fn prepare_prompt(
     };
 
     if include_fresh_session_context {
-        Ok(with_fresh_cli_session_context_prompt(conversation, prompt))
+        fresh_cli_session_context_prompt_from_current_queue(
+            &deps.pool,
+            &session.id,
+            conversation,
+            prompt,
+        )
+        .await
+        .map_err(Into::into)
     } else {
         Ok(prompt)
     }
+}
+
+async fn fresh_cli_session_context_prompt_from_current_queue(
+    pool: &crate::db::DbPool,
+    session_id: &str,
+    conversation: &mut RunConversation,
+    prompt: String,
+) -> Result<String, String> {
+    let pending = repository::list_pending_queued_messages(pool, session_id).await?;
+    conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
+    Ok(with_fresh_cli_session_context_prompt(conversation, prompt))
 }
 
 /// Seed a fresh (new or rotated) CLI session from the run's conversation:
@@ -5200,6 +5218,73 @@ mod tests {
         assert!(prompt.contains("yes, merge it"));
         assert!(!prompt.contains("compacted away"));
         assert!(prompt.contains("Current user/task prompt to answer:\ngo"));
+    }
+
+    #[tokio::test]
+    async fn fresh_cli_prompt_reflects_queue_edits_and_deletes_after_load() {
+        use crate::db::test_support::workspace_pool;
+
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(
+            &pool,
+            repository::CreateSessionParams {
+                kind: crate::assistant::types::SessionKind::Interactive,
+                title: None,
+                context: crate::assistant::types::SessionContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+        repository::create_user_message(&pool, session.id.clone(), "current task".into(), None)
+            .await
+            .unwrap();
+        let edited = repository::create_user_message(
+            &pool,
+            session.id.clone(),
+            "old queued text".into(),
+            Some("conn-1"),
+        )
+        .await
+        .unwrap();
+        let deleted = repository::create_user_message(
+            &pool,
+            session.id.clone(),
+            "deleted queued text".into(),
+            Some("conn-1"),
+        )
+        .await
+        .unwrap();
+        let mut conversation = compaction_service::load_with_pending(&pool, &session.id)
+            .await
+            .unwrap();
+        let mut summary = summary_message("summary", "Earlier task context");
+        summary.session_id = session.id.clone();
+        conversation.apply_compaction(1, summary);
+
+        repository::update_pending_queued_message(
+            &pool,
+            &session.id,
+            &edited.id,
+            "new queued text".into(),
+        )
+        .await
+        .unwrap();
+        repository::delete_pending_queued_message(&pool, &session.id, &deleted.id)
+            .await
+            .unwrap();
+
+        let prompt = fresh_cli_session_context_prompt_from_current_queue(
+            &pool,
+            &session.id,
+            &mut conversation,
+            "current task".into(),
+        )
+        .await
+        .unwrap();
+        assert!(prompt.contains("Earlier task context"), "{prompt}");
+        assert!(prompt.contains("new queued text"), "{prompt}");
+        assert!(!prompt.contains("old queued text"), "{prompt}");
+        assert!(!prompt.contains("deleted queued text"), "{prompt}");
     }
 
     /// Without a summary and with at most one message of context there is
