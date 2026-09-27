@@ -1418,33 +1418,6 @@ pub async fn get_tool_call_for_session(
     row.as_ref().map(map_tool_call_row).transpose()
 }
 
-pub async fn get_tool_call_for_session_chain(
-    pool: &DbPool,
-    session_id: &str,
-    tool_call_id: &str,
-) -> Result<Option<ToolInvocation>, String> {
-    let row = sqlx::query(
-        r#"
-        WITH RECURSIVE chain(session_id) AS (
-            SELECT ?
-            UNION
-            SELECT l.parent_session_id
-            FROM assistant_session_links l
-            JOIN chain c ON l.child_session_id = c.session_id
-        )
-        SELECT id, run_id, session_id, tool_name, params_json, status, result_json, error, started_at, completed_at
-        FROM assistant_tool_calls
-        WHERE id = ? AND session_id IN (SELECT session_id FROM chain)
-        "#,
-    )
-    .bind(session_id)
-    .bind(tool_call_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load assistant tool call input: {}", e))?;
-    row.as_ref().map(map_tool_call_row).transpose()
-}
-
 pub async fn list_tool_calls(
     pool: &DbPool,
     session_id: &str,

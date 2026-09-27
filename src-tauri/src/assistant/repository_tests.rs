@@ -1107,12 +1107,12 @@ async fn tool_result_lookup_is_session_scoped_and_keeps_full_payload() {
 }
 
 #[tokio::test]
-async fn tool_input_lookup_accepts_ancestors_only_and_preserves_stored_copies() {
+async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
     use super::display;
 
     let (_tmp, pool) = workspace_pool().await;
     let mut sessions = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..2 {
         sessions.push(
             create_session(
                 &pool,
@@ -1126,9 +1126,6 @@ async fn tool_input_lookup_accepts_ancestors_only_and_preserves_stored_copies() 
             .unwrap(),
         );
     }
-    create_session_rotation_link(&pool, &sessions[1].id, &sessions[0].id)
-        .await
-        .unwrap();
     let run = create_run(
         &pool,
         CreateRunParams {
@@ -1185,25 +1182,17 @@ async fn tool_input_lookup_accepts_ancestors_only_and_preserves_stored_copies() 
     assert!(!page_json.contains("long content"));
     assert!(page_json.contains("report.md"));
     assert_eq!(
-        get_tool_call_for_session_chain(&pool, &sessions[1].id, &original.id)
+        get_tool_call_for_session(&pool, &sessions[0].id, &original.id)
             .await
             .unwrap()
             .unwrap()
             .params,
         full
     );
-    assert!(
-        get_tool_call_for_session_chain(&pool, &sessions[2].id, &original.id)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        get_tool_call_for_session_chain(&pool, &sessions[0].id, &original.id)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    assert!(get_tool_call_for_session(&pool, &sessions[1].id, &original.id)
+        .await
+        .unwrap()
+        .is_none());
     let stored = list_messages(&pool, &sessions[0].id).await.unwrap();
     assert!(
         matches!(&stored[0].content[0], ContentPart::ToolUse { arguments, .. } if arguments == &full)

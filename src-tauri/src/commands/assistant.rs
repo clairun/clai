@@ -438,10 +438,10 @@ pub async fn assistant_get_tool_call_input(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
-    repository::get_tool_call_for_session_chain(&target_pool, &session_id, &tool_call_id)
+    repository::get_tool_call_for_session(&target_pool, &session_id, &tool_call_id)
         .await?
         .map(|call| call.params)
-        .ok_or_else(|| format!("Tool call not found in session chain: {}", tool_call_id))
+        .ok_or_else(|| format!("Tool call not found in session: {}", tool_call_id))
 }
 
 #[tauri::command]
