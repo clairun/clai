@@ -1104,4 +1104,32 @@ async fn tool_result_lookup_is_session_scoped_and_keeps_full_payload() {
         .await
         .unwrap()
         .is_none());
+
+    let failure = serde_json::json!({"error": "full failure payload"});
+    create_message(
+        &pool,
+        CreateMessageParams {
+            session_id: first.id.clone(),
+            role: MessageRole::Tool,
+            content: vec![ContentPart::ToolResult {
+                tool_call_id: "call-1".into(),
+                payload: failure.clone(),
+                started_at: None,
+                completed_at: None,
+            }],
+            provider_metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        get_tool_result_message_payload(&pool, &first.id, "call-1")
+            .await
+            .unwrap(),
+        Some(failure)
+    );
+    assert!(get_tool_result_message_payload(&pool, &second.id, "call-1")
+        .await
+        .unwrap()
+        .is_none());
 }
