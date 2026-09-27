@@ -5,7 +5,6 @@ import {
   cleanToolName,
   inlineTaskCard,
   guessLang,
-  chartArtifactPath,
   summarizeToolCall,
   toPreviewText,
 } from './toolDisplay';
@@ -59,38 +58,6 @@ describe('chart calls', () => {
       verb: 'Chart',
       arg: 'Q3 Revenue',
     });
-  });
-});
-
-describe('chartArtifactPath', () => {
-  const result = { ok: true, path: 'charts/q3.vl.json' };
-
-  it('returns the saved path of a completed chart call', () => {
-    expect(chartArtifactPath('create_vega_chart', result, null, 'completed')).toBe('charts/q3.vl.json');
-    // Old persisted results may still carry `display`; it no longer matters.
-    expect(
-      chartArtifactPath('create_vega_chart', { ...result, display: false }, null, 'completed')
-    ).toBe('charts/q3.vl.json');
-    // Claude Code stores the JSON as text; Codex reaches us via MCP envelopes.
-    expect(
-      chartArtifactPath('mcp__clai__create_vega_chart', JSON.stringify(result), null, 'completed')
-    ).toBe('charts/q3.vl.json');
-    expect(
-      chartArtifactPath(
-        'create_vega_chart',
-        { content: [{ type: 'text', text: JSON.stringify(result) }] },
-        null,
-        'completed'
-      )
-    ).toBe('charts/q3.vl.json');
-  });
-
-  it('returns null when there is no saved chart', () => {
-    expect(chartArtifactPath('create_vega_chart', result, 'schema error', 'failed')).toBeNull();
-    expect(chartArtifactPath('create_vega_chart', null, null, 'running')).toBeNull();
-    expect(chartArtifactPath('create_vega_chart', { ok: false }, null, 'completed')).toBeNull();
-    expect(chartArtifactPath('create_vega_chart', null, null, 'completed')).toBeNull();
-    expect(chartArtifactPath('fs_write', result, null, 'completed')).toBeNull();
   });
 });
 

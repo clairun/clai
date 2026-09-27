@@ -404,37 +404,18 @@ describe('Workspace navigation', () => {
   });
 });
 
-describe('Workspace chart rows', () => {
-  const chartPage = (path: string): AssistantMessagePage => ({
-    ...messagePage([
+describe('Workspace embedded charts', () => {
+  const chartPage = (path: string): AssistantMessagePage =>
+    messagePage([
       {
         id: 'm-1',
         sessionId: 'sess-a',
         role: 'assistant',
-        content: [
-          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'create_vega_chart', arguments: {} },
-        ],
+        content: [{ type: 'text', text: `![Q3](/${path})` }],
         createdAt: 1n,
         providerMetadata: null,
       },
-    ]),
-    toolCalls: [
-      {
-        id: 'tc-1',
-        runId: 'r-1',
-        sessionId: 'sess-a',
-        toolName: 'create_vega_chart',
-        params: { title: 'Q3' },
-        status: 'completed',
-        result: { ok: true, path },
-        hasFullResult: true,
-        hasFullInput: false,
-        error: null,
-        startedAt: 0n,
-        completedAt: 1n,
-      },
-    ],
-  });
+    ]);
 
   it('opens a chart saved under memory as a memory, without the delete button', async () => {
     loadSessionMessagesPage.mockResolvedValue(chartPage('.clai/memory/trend.vl.json'));
@@ -459,9 +440,9 @@ describe('Workspace chart rows', () => {
   });
 
   it('opens a link to an unlisted memory file as a memory, without the delete button', async () => {
-    loadSessionMessagesPage.mockResolvedValue(chartPage('report.md'));
+    loadSessionMessagesPage.mockResolvedValue(chartPage('report.vl.json'));
     readWorkspaceFile.mockImplementation(async (_workspaceId, path) =>
-      path === 'report.md'
+      path === 'report.vl.json'
         ? { path, viewer: 'markdown', content: '[notes](.clai/memory/notes.md)' }
         : { path, viewer: 'markdown', content: '# Notes' }
     );

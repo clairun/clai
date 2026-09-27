@@ -206,25 +206,6 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
 };
 
 /**
- * Workspace-relative path of the chart file a successful `create_vega_chart`
- * call saved, so its row can open it in the artifacts panel; null for another
- * tool, or a chart call still running, failed, or rejected. The chat draws the
- * chart itself only from the markdown embed in the reply.
- */
-export const chartArtifactPath = (
-  toolName: string,
-  result: unknown,
-  error: string | null | undefined,
-  status: string,
-): string | null => {
-  if (cleanToolName(toolName || '') !== 'create_vega_chart') return null;
-  if (error || status !== 'completed') return null;
-  const obj = asPayloadObject(result);
-  if (obj?.ok === false) return null;
-  return typeof obj?.path === 'string' && obj.path ? obj.path : null;
-};
-
-/**
  * A workspace task, frozen exactly as `workspace_assignTask` /
  * `workspace_getTaskResult` answered. The chat draws it as a card instead of a
  * one-line row.

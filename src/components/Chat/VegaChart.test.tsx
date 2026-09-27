@@ -460,6 +460,55 @@ describe('VegaChart (spec file)', () => {
 });
 
 
+describe('VegaChart (spec file header)', () => {
+  it('titles the chart and opens it by its workspace path, before the spec loads', () => {
+    readWorkspaceFileBase64Mock.mockReturnValue(new Promise(() => {}));
+    const onOpenFile = vi.fn();
+    render(
+      <WorkspaceFileContext.Provider value={{ workspaceId: 'ws-1', basePath: '', onOpenFile }}>
+        <VegaChart specPath="/.clai/memory/trend.vl.json" title="Trend" />
+      </WorkspaceFileContext.Provider>,
+    );
+    expect(screen.getByText('Trend')).toBeInTheDocument();
+    expect(screen.getByText('Loading chart…')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open chart Trend' }));
+    expect(onOpenFile).toHaveBeenCalledWith('.clai/memory/trend.vl.json');
+  });
+
+  it('resolves the opened path against the enclosing document', () => {
+    readWorkspaceFileBase64Mock.mockReturnValue(new Promise(() => {}));
+    const onOpenFile = vi.fn();
+    render(
+      <WorkspaceFileContext.Provider value={{ ...LOCATION, onOpenFile }}>
+        <VegaChart specPath="charts/q3.vl.json" title="Q3" />
+      </WorkspaceFileContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Open chart Q3' }));
+    expect(onOpenFile).toHaveBeenCalledWith('reports/charts/q3.vl.json');
+  });
+
+  it('falls back to the file name and hides Open when nothing can open files', () => {
+    readWorkspaceFileBase64Mock.mockReturnValue(new Promise(() => {}));
+    render(
+      <WorkspaceFileContext.Provider value={LOCATION}>
+        <VegaChart specPath="charts/q3.vl.json" />
+      </WorkspaceFileContext.Provider>,
+    );
+    expect(screen.getByText('q3.vl.json')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Open chart/ })).toBeNull();
+  });
+
+  it('draws no header for an inline spec', async () => {
+    render(
+      <WorkspaceFileContext.Provider value={{ ...LOCATION, onOpenFile: vi.fn() }}>
+        <VegaChart source={SOURCE} />
+      </WorkspaceFileContext.Provider>,
+    );
+    await waitFor(() => expect(renderedCharts()).toBe(1));
+    expect(screen.queryByRole('button', { name: /^Open chart/ })).toBeNull();
+  });
+});
+
 describe('VegaChart interaction controls', () => {
   const interactiveSource = JSON.stringify({
     mark: 'point',

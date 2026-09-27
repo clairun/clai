@@ -607,45 +607,6 @@
   transform: rotate(180deg);
 }
 
-/* Saved-chart row: opens the file, so it reads as a link. The path yields
-   space before the action does. */
-.chartToolRow:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 1px;
-}
-
-.chartToolRowRight {
-  flex-shrink: 1;
-  min-width: 0;
-}
-
-.chartToolRowPath {
-  min-width: 0;
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chartToolRowAction {
-  flex-shrink: 0;
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  color: var(--color-primary);
-  text-decoration: underline transparent;
-  text-underline-offset: 2px;
-  transition:
-    color var(--transition-fast),
-    text-decoration-color var(--transition-fast);
-}
-
-.chartToolRow:hover .chartToolRowAction,
-.chartToolRow:focus-visible .chartToolRowAction {
-  color: var(--color-primary-light);
-  text-decoration-color: currentColor;
-}
-
 /* "Show N earlier calls" toggle above a capped group. */
 .toolShowEarlier {
   display: inline-flex;

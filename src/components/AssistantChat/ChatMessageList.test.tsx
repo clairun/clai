@@ -35,10 +35,23 @@ vi.mock('../Chat/MarkdownMessage', async () => {
     // Expose the workspace location markdown would resolve relative links
     // (`.vl.json` charts, `data.url`) against.
     const location = useWorkspaceFileLocation();
+    const onOpenFile = location?.onOpenFile;
     return (
-      <div data-testid="markdown" data-workspace={location?.workspaceId ?? ''} data-base={location?.basePath ?? ''}>
-        {content}
-      </div>
+      <>
+        <div
+          data-testid="markdown"
+          data-workspace={location?.workspaceId ?? ''}
+          data-base={location?.basePath ?? ''}
+          data-can-open={String(!!onOpenFile)}
+        >
+          {content}
+        </div>
+        {onOpenFile && (
+          <button type="button" onClick={() => onOpenFile('.clai/memory/trend.vl.json')}>
+            open from markdown
+          </button>
+        )}
+      </>
     );
   };
   return { default: MarkdownMock };
@@ -47,10 +60,22 @@ vi.mock('../Chat/StreamingMarkdown', async () => {
   const { useWorkspaceFileLocation } = await import('../Chat/WorkspaceFileContext');
   const StreamingMock = ({ content }: { content: string }) => {
     const location = useWorkspaceFileLocation();
+    const onOpenFile = location?.onOpenFile;
     return (
-      <div data-testid="streaming" data-workspace={location?.workspaceId ?? ''}>
-        {content}
-      </div>
+      <>
+        <div
+          data-testid="streaming"
+          data-workspace={location?.workspaceId ?? ''}
+          data-can-open={String(!!onOpenFile)}
+        >
+          {content}
+        </div>
+        {onOpenFile && (
+          <button type="button" onClick={() => onOpenFile('.clai/memory/trend.vl.json')}>
+            open from markdown
+          </button>
+        )}
+      </>
     );
   };
   return { default: StreamingMock };
@@ -192,28 +217,26 @@ describe('ChatMessageList', () => {
     ],
   ];
 
-  it('shows a saved chart as a row that opens the file, with no chart card or fetch', () => {
+  it('shows a saved chart call as a plain expandable row, with no open action', () => {
     const [messages, toolCalls] = chartCall({});
-    const onOpenFile = vi.fn();
     render(
       <ChatMessageList
         messages={messages}
         toolCalls={toolCalls}
         workspaceId="ws-1"
-        onOpenFile={onOpenFile}
+        onOpenFile={vi.fn()}
       />
     );
-    const row = screen.getByRole('button', { name: 'Open chart Q3 Revenue' });
-    expect(row).not.toHaveAttribute('aria-expanded');
+    const row = screen.getByRole('button', { name: /Q3 Revenue/ });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('Chart')).toBeInTheDocument();
-    expect(screen.getByText('charts/q3-revenue.vl.json')).toBeInTheDocument();
-    expect(row).toHaveTextContent('Open chart ↗');
+    expect(screen.queryByText(/Open chart/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Open/ })).toBeNull();
     expect(screen.queryByTestId('vega-chart')).toBeNull();
 
     fireEvent.click(row);
-    expect(onOpenFile).toHaveBeenCalledWith('charts/q3-revenue.vl.json');
-    expect(screen.queryByText('Output')).toBeNull();
-    expect(getToolCallResult).not.toHaveBeenCalled();
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Output')).toBeInTheDocument();
   });
 
   it('shows a running chart call as a plain tool row', () => {
@@ -247,13 +270,6 @@ describe('ChatMessageList', () => {
     expect(screen.getByText(/The spec is not a valid Vega-Lite chart/)).toBeInTheDocument();
   });
 
-  it('leaves a chart row expandable when nothing can open artifacts', () => {
-    const [messages, toolCalls] = chartCall({});
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
-    expect(screen.getByRole('button', { name: /Q3 Revenue/ })).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByTestId('vega-chart')).toBeNull();
-  });
-
   it("hands a reply's .vl.json embed to markdown with the workspace to resolve it against", () => {
     const [toolMessages, toolCalls] = chartCall({});
     const reply = msg({
@@ -271,6 +287,35 @@ describe('ChatMessageList', () => {
     );
     const markdown = screen.getByText('![Q3 Revenue](/charts/q3-revenue.vl.json)');
     expect(markdown).toHaveAttribute('data-workspace', 'ws-1');
+    expect(markdown).toHaveAttribute('data-can-open', 'true');
+  });
+
+  it("lets markdown open files through the page's current handler", () => {
+    const reply = msg({
+      id: 'm2',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'see chart' }],
+    });
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender } = render(
+      <ChatMessageList messages={[reply]} workspaceId="ws-1" onOpenFile={first} />
+    );
+    rerender(<ChatMessageList messages={[reply]} workspaceId="ws-1" onOpenFile={second} />);
+    fireEvent.click(screen.getByRole('button', { name: 'open from markdown' }));
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledWith('.clai/memory/trend.vl.json');
+  });
+
+  it('gives markdown no file opener in a read-only transcript', () => {
+    const reply = msg({
+      id: 'm2',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'see chart' }],
+    });
+    render(<ChatMessageList messages={[reply]} workspaceId="ws-1" />);
+    expect(screen.getByText('see chart')).toHaveAttribute('data-can-open', 'false');
+    expect(screen.queryByRole('button', { name: 'open from markdown' })).toBeNull();
   });
 
   const taskPayload = (over: Record<string, unknown> = {}) => ({
@@ -494,7 +539,7 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
     expect(screen.queryByText('Q3 Revenue')).toBeNull();
     fireEvent.click(screen.getByText('Show 2 earlier calls'));
-    expect(screen.getByRole('button', { name: /Open chart Q3 Revenue/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Q3 Revenue/ })).toHaveAttribute('aria-expanded', 'false');
   });
 
   const singleCall = (

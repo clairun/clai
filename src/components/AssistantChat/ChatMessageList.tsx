@@ -5,7 +5,7 @@
  * Handles markdown rendering, tool call display, and auto-scrolling.
  */
 
-import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef, memo } from 'react';
 import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
@@ -21,7 +21,6 @@ import type {
 import {
   asParamsObject,
   asPayloadObject,
-  chartArtifactPath,
   cleanToolName,
   extractMcpText,
   guessLang,
@@ -610,10 +609,9 @@ interface ChatMessageListProps {
   // Open a delegated task's own log, by task id. Omit in read-only views —
   // cards then render inert.
   onOpenTask?: (taskId: string) => void;
-  // Open a workspace-relative file in its drawer, artifacts or memories (a
-  // chart call's saved spec). Omit in read-only transcripts: chart rows are then normal
-  // expandable rows, and the chart itself appears only where the reply
-  // embedded it.
+  // Open a workspace-relative file in its drawer, artifacts or memories: the
+  // "Open" action on a chart embedded in a message. Omit in read-only
+  // transcripts to hide it.
   onOpenFile?: (path: string) => void;
 }
 
@@ -654,9 +652,24 @@ const ChatMessageList = ({
 
   // Lets markdown in messages resolve workspace-relative references (a
   // `.vl.json` chart link, a spec's `data.url`) against the workspace root.
+  // The opener is read through a ref: the page's handler changes identity
+  // when its memory list refreshes, and a new location would make every
+  // embedded chart re-read and re-draw its spec.
+  const onOpenFileRef = useRef(onOpenFile);
+  useEffect(() => {
+    onOpenFileRef.current = onOpenFile;
+  });
+  const canOpenFile = !!onOpenFile;
   const fileLocation = useMemo<WorkspaceFileLocation | null>(
-    () => (workspaceId ? { workspaceId, basePath: '' } : null),
-    [workspaceId]
+    () =>
+      workspaceId
+        ? {
+            workspaceId,
+            basePath: '',
+            onOpenFile: canOpenFile ? (path) => onOpenFileRef.current?.(path) : undefined,
+          }
+        : null,
+    [workspaceId, canOpenFile]
   );
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
@@ -798,8 +811,8 @@ const ChatMessageList = ({
   const handleApproachTop = hasOlderMessages ? onLoadOlderMessages : undefined;
 
   const taskCardSurface = useMemo<TaskCardSurface>(
-    () => ({ roster: taskRoster, onOpenTask, onOpenFile }),
-    [taskRoster, onOpenTask, onOpenFile]
+    () => ({ roster: taskRoster, onOpenTask }),
+    [taskRoster, onOpenTask]
   );
 
   // Footer rendered inside the scroll area, right after the last message.
@@ -1336,7 +1349,6 @@ const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
             toolName={tu.toolName}
             params={tu.params ?? tu.arguments}
             status={tu.status}
-            result={tu.result}
             error={tu.error}
             call={tu.call}
           />
@@ -1355,67 +1367,11 @@ interface ToolRowProps {
   toolName: string;
   params?: unknown;
   status: string;
-  result?: unknown;
   error?: string | null;
   call?: ToolInvocation;
 }
 
-const ToolRow = memo((props: ToolRowProps) => {
-  const { onOpenFile } = useTaskCardSurface();
-  const { toolName, params, status, result, error } = props;
-  const chartPath = useMemo(
-    () => chartArtifactPath(toolName, result, error, status),
-    [toolName, result, error, status]
-  );
-  if (chartPath && onOpenFile) {
-    return (
-      <ChartToolRow toolName={toolName} params={params} path={chartPath} onOpen={onOpenFile} />
-    );
-  }
-  return <ExpandableToolRow {...props} />;
-});
-
-/**
- * A saved chart's row. The chart itself is drawn by the reply's markdown
- * embed, so the row has nothing to expand: it opens the file in the
- * artifacts or memories drawer instead.
- */
-const ChartToolRow = ({
-  toolName,
-  params,
-  path,
-  onOpen,
-}: {
-  toolName: string;
-  params?: unknown;
-  path: string;
-  onOpen: (path: string) => void;
-}) => {
-  const { verb, arg } = summarizeToolCall(toolName, params);
-  return (
-    <div className={styles.toolRowBlock}>
-      <button
-        type="button"
-        className={`${styles.toolRow} ${styles.chartToolRow}`}
-        onClick={() => onOpen(path)}
-        aria-label={`Open chart ${arg || path}`}
-        title={`Open ${path}`}
-      >
-        <span className={styles.toolRowIcon}>✓</span>
-        <span className={styles.toolRowVerb}>{verb}</span>
-        {arg && <span className={styles.toolRowArg}>{arg}</span>}
-        <span className={`${styles.toolRowRight} ${styles.chartToolRowRight}`}>
-          <span className={`${styles.toolRowSummary} ${styles.chartToolRowPath}`}>{path}</span>
-          <span className={styles.chartToolRowAction} aria-hidden="true">
-            Open chart ↗
-          </span>
-        </span>
-      </button>
-    </div>
-  );
-};
-
-const ExpandableToolRow = ({ toolName, params, status, error, call }: ToolRowProps) => {
+const ToolRow = memo(({ toolName, params, status, error, call }: ToolRowProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'output' | 'input'>('output');
 
@@ -1540,7 +1496,7 @@ const ExpandableToolRow = ({ toolName, params, status, error, call }: ToolRowPro
       )}
     </div>
   );
-};
+});
 
 /**
  * NoticesBanner — expandable banner showing policy warnings for a run

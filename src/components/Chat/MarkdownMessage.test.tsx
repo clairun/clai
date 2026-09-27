@@ -6,11 +6,22 @@ import { render, screen } from '@testing-library/react';
 vi.mock('./VegaChart', async (importOriginal) => ({
   // Keep the real path predicate; only the renderer is stubbed.
   ...(await importOriginal<typeof import('./VegaChart')>()),
-  default: ({ source, specPath, isStreaming }: { source?: string; specPath?: string; isStreaming?: boolean }) => (
+  default: ({
+    source,
+    specPath,
+    title,
+    isStreaming,
+  }: {
+    source?: string;
+    specPath?: string;
+    title?: string;
+    isStreaming?: boolean;
+  }) => (
     <div
       data-testid="vega-chart-mock"
       data-source={source ?? ''}
       data-spec-path={specPath ?? ''}
+      data-title={title ?? ''}
       data-streaming={String(!!isStreaming)}
     />
   ),
@@ -39,6 +50,7 @@ describe('MarkdownMessage — Vega-Lite embedding', () => {
     render(<MarkdownMessage content={'Before\n\n![Q3 revenue](charts/q3.vl.json)\n\nAfter'} />);
     const chart = screen.getByTestId('vega-chart-mock');
     expect(chart.dataset.specPath).toBe('charts/q3.vl.json');
+    expect(chart.dataset.title).toBe('Q3 revenue');
     expect(chart.dataset.source).toBe('');
     // A block element is not valid inside <p>; the chart's paragraph becomes a <div>.
     expect(chart.closest('p')).toBeNull();

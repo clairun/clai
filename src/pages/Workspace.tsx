@@ -2060,8 +2060,8 @@ const Workspace = () => {
     [previewEntryForPath, patchWorkspaceUi]
   );
 
-  // Open a workspace file from the chat (a chart call's row): show its drawer
-  // (memories or artifacts) with the file previewed beside it.
+  // Open a workspace file from the chat (an embedded chart's Open): show its
+  // drawer (memories or artifacts) with the file previewed beside it.
   const openWorkspaceFile = useCallback(
     (path: string) => {
       const previewEntry = previewEntryForPath(path);
