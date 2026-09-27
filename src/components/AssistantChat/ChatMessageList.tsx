@@ -610,11 +610,11 @@ interface ChatMessageListProps {
   // Open a delegated task's own log, by task id. Omit in read-only views —
   // cards then render inert.
   onOpenTask?: (taskId: string) => void;
-  // Open a workspace-relative file in the artifacts panel (a chart call's
-  // saved spec). Omit in read-only transcripts: chart rows are then normal
+  // Open a workspace-relative file in its drawer, artifacts or memories (a
+  // chart call's saved spec). Omit in read-only transcripts: chart rows are then normal
   // expandable rows, and the chart itself appears only where the reply
   // embedded it.
-  onOpenArtifact?: (path: string) => void;
+  onOpenFile?: (path: string) => void;
 }
 
 const ChatMessageList = ({
@@ -640,7 +640,7 @@ const ChatMessageList = ({
   onLoadOlderMessages,
   taskRoster = EMPTY_ROSTER,
   onOpenTask,
-  onOpenArtifact,
+  onOpenFile,
 }: ChatMessageListProps) => {
   // Build a Map of toolCalls keyed by id once per render, so every
   // tool_use part lookup is O(1) instead of an Array.find walk. Memoized
@@ -798,8 +798,8 @@ const ChatMessageList = ({
   const handleApproachTop = hasOlderMessages ? onLoadOlderMessages : undefined;
 
   const taskCardSurface = useMemo<TaskCardSurface>(
-    () => ({ roster: taskRoster, onOpenTask, onOpenArtifact }),
-    [taskRoster, onOpenTask, onOpenArtifact]
+    () => ({ roster: taskRoster, onOpenTask, onOpenFile }),
+    [taskRoster, onOpenTask, onOpenFile]
   );
 
   // Footer rendered inside the scroll area, right after the last message.
@@ -1361,15 +1361,15 @@ interface ToolRowProps {
 }
 
 const ToolRow = memo((props: ToolRowProps) => {
-  const { onOpenArtifact } = useTaskCardSurface();
+  const { onOpenFile } = useTaskCardSurface();
   const { toolName, params, status, result, error } = props;
   const chartPath = useMemo(
     () => chartArtifactPath(toolName, result, error, status),
     [toolName, result, error, status]
   );
-  if (chartPath && onOpenArtifact) {
+  if (chartPath && onOpenFile) {
     return (
-      <ChartToolRow toolName={toolName} params={params} path={chartPath} onOpen={onOpenArtifact} />
+      <ChartToolRow toolName={toolName} params={params} path={chartPath} onOpen={onOpenFile} />
     );
   }
   return <ExpandableToolRow {...props} />;
@@ -1378,7 +1378,7 @@ const ToolRow = memo((props: ToolRowProps) => {
 /**
  * A saved chart's row. The chart itself is drawn by the reply's markdown
  * embed, so the row has nothing to expand: it opens the file in the
- * artifacts panel instead.
+ * artifacts or memories drawer instead.
  */
 const ChartToolRow = ({
   toolName,

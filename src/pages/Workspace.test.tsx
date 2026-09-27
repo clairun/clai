@@ -45,6 +45,7 @@ vi.mock('../assistant/client', () => ({
 const workspaceClient = await import('../workspace/client');
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 const getOrCreateWorkspaceSession = vi.mocked(workspaceClient.getOrCreateWorkspaceSession);
+const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
 // Taken through `vi.mocked` on the real module, so the fixtures below are
 // checked against the command's actual return types: a page missing
 // `toolCalls`/`nextCursor`/`hasMore`/`totalCount` — all four read by
@@ -184,6 +185,7 @@ beforeEach(() => {
   });
   loadSessionMessagesPage.mockResolvedValue(messagePage([]));
   listRuns.mockResolvedValue([]);
+  readWorkspaceFile.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -409,7 +411,9 @@ describe('Workspace chart rows', () => {
         id: 'm-1',
         sessionId: 'sess-a',
         role: 'assistant',
-        content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'create_vega_chart', arguments: {} }],
+        content: [
+          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'create_vega_chart', arguments: {} },
+        ],
         createdAt: 1n,
         providerMetadata: null,
       },
@@ -438,7 +442,9 @@ describe('Workspace chart rows', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: /open chart q3/i }));
 
-    expect(await screen.findByRole('region', { name: 'Memory: trend.vl.json' })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('region', { name: 'Memory: trend.vl.json' })
+    ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
   });
 
@@ -450,5 +456,21 @@ describe('Workspace chart rows', () => {
 
     expect(await screen.findByRole('region', { name: 'Artifact: q3.vl.json' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete file' })).toBeInTheDocument();
+  });
+
+  it('opens a link to an unlisted memory file as a memory, without the delete button', async () => {
+    loadSessionMessagesPage.mockResolvedValue(chartPage('report.md'));
+    readWorkspaceFile.mockImplementation(async (_workspaceId, path) =>
+      path === 'report.md'
+        ? { path, viewer: 'markdown', content: '[notes](.clai/memory/notes.md)' }
+        : null
+    );
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /open chart q3/i }));
+    await userEvent.click(await screen.findByRole('link', { name: 'notes' }));
+
+    expect(await screen.findByRole('region', { name: 'Memory: notes.md' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
   });
 });

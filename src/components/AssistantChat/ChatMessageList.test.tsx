@@ -194,13 +194,13 @@ describe('ChatMessageList', () => {
 
   it('shows a saved chart as a row that opens the file, with no chart card or fetch', () => {
     const [messages, toolCalls] = chartCall({});
-    const onOpenArtifact = vi.fn();
+    const onOpenFile = vi.fn();
     render(
       <ChatMessageList
         messages={messages}
         toolCalls={toolCalls}
         workspaceId="ws-1"
-        onOpenArtifact={onOpenArtifact}
+        onOpenFile={onOpenFile}
       />
     );
     const row = screen.getByRole('button', { name: 'Open chart Q3 Revenue' });
@@ -210,7 +210,7 @@ describe('ChatMessageList', () => {
     expect(screen.queryByTestId('vega-chart')).toBeNull();
 
     fireEvent.click(row);
-    expect(onOpenArtifact).toHaveBeenCalledWith('charts/q3-revenue.vl.json');
+    expect(onOpenFile).toHaveBeenCalledWith('charts/q3-revenue.vl.json');
     expect(screen.queryByText('Output')).toBeNull();
     expect(getToolCallResult).not.toHaveBeenCalled();
   });
@@ -222,7 +222,7 @@ describe('ChatMessageList', () => {
       hasFullResult: false,
       completedAt: null,
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenArtifact={vi.fn()} />);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenFile={vi.fn()} />);
     expect(screen.getByRole('button', { name: /Q3 Revenue/ })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('running…')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Open chart/ })).toBeNull();
@@ -235,7 +235,7 @@ describe('ChatMessageList', () => {
       hasFullResult: false,
       error: 'The spec is not a valid Vega-Lite chart',
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenArtifact={vi.fn()} />);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenFile={vi.fn()} />);
     const row = screen.getByRole('button', { name: /Q3 Revenue/ });
     expect(row).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(row);
@@ -263,7 +263,7 @@ describe('ChatMessageList', () => {
         messages={[...toolMessages, reply]}
         toolCalls={toolCalls}
         workspaceId="ws-1"
-        onOpenArtifact={vi.fn()}
+        onOpenFile={vi.fn()}
       />
     );
     const markdown = screen.getByText('![Q3 Revenue](/charts/q3-revenue.vl.json)');
@@ -487,7 +487,7 @@ describe('ChatMessageList', () => {
       params: { title: 'Q3 Revenue', spec: {} },
       result: { ok: true, path: 'charts/q3-revenue.vl.json' },
     };
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenArtifact={vi.fn()} />);
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenFile={vi.fn()} />);
     expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
     expect(screen.queryByText('Q3 Revenue')).toBeNull();
     fireEvent.click(screen.getByText('Show 2 earlier calls'));

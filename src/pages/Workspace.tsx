@@ -1439,7 +1439,7 @@ interface ChatFirstLayoutProps {
   // keep a stable identity across details polls; see `chatRoster` below.
   taskRoster: readonly WorkspaceAgentResponse[];
   onOpenTask: (taskId: string) => void;
-  onOpenArtifact: (path: string) => void;
+  onOpenFile: (path: string) => void;
 }
 
 const ChatFirstLayout = ({
@@ -1460,7 +1460,7 @@ const ChatFirstLayout = ({
   onLoadOlderMessages,
   taskRoster,
   onOpenTask,
-  onOpenArtifact,
+  onOpenFile,
 }: ChatFirstLayoutProps) => {
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
@@ -1544,7 +1544,7 @@ const ChatFirstLayout = ({
             onLoadOlderMessages={onLoadOlderMessages}
             taskRoster={taskRoster}
             onOpenTask={onOpenTask}
-            onOpenArtifact={onOpenArtifact}
+            onOpenFile={onOpenFile}
           />
           <AskUserPanel sessionId={sessionId} />
           <InlineApprovalCard workspaceId={workspaceId} />
@@ -2062,7 +2062,7 @@ const Workspace = () => {
 
   // Open a workspace file from the chat (a chart call's row): show its drawer
   // (memories or artifacts) with the file previewed beside it.
-  const openArtifactPath = useCallback(
+  const openWorkspaceFile = useCallback(
     (path: string) => {
       const previewEntry = previewEntryForPath(path);
       patchWorkspaceUi({
@@ -2423,7 +2423,7 @@ const Workspace = () => {
             onLoadOlderMessages={handleLoadOlderMessages}
             taskRoster={chatRoster}
             onOpenTask={openTaskById}
-            onOpenArtifact={openArtifactPath}
+            onOpenFile={openWorkspaceFile}
           />
         </div>
 

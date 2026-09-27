@@ -4,7 +4,7 @@ import type { WorkspaceAgentResponse } from '../../generated/bindings';
 /**
  * What the chat's task cards and chart rows need from the page around them:
  * the crew, for the assignee's face and name, how to open a task, and how to
- * open a workspace file in the artifacts panel.
+ * open a workspace file in its drawer (artifacts or memories).
  *
  * It travels by context rather than by prop so the roster reaching the cards
  * does not walk through the memoized message/tool tree — a poll that changes
@@ -19,8 +19,8 @@ export interface TaskCardSurface {
   roster: readonly WorkspaceAgentResponse[];
   /** Open a task's own log. Omit to render cards inert. */
   onOpenTask?: (taskId: string) => void;
-  /** Open a workspace-relative file in the artifacts panel. */
-  onOpenArtifact?: (path: string) => void;
+  /** Open a workspace-relative file in its drawer (artifacts or memories). */
+  onOpenFile?: (path: string) => void;
 }
 
 const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
