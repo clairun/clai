@@ -1445,37 +1445,6 @@ pub async fn get_tool_call_for_session_chain(
     row.as_ref().map(map_tool_call_row).transpose()
 }
 
-pub async fn get_tool_result_message_payload(
-    pool: &DbPool,
-    session_id: &str,
-    tool_call_id: &str,
-) -> Result<Option<serde_json::Value>, String> {
-    let rows = sqlx::query(
-        r#"SELECT content_json FROM assistant_messages WHERE session_id = ? AND role = '"tool"' ORDER BY created_at DESC"#,
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load tool result messages: {}", e))?;
-    for row in rows {
-        let content: Vec<ContentPart> =
-            parse_json(&row.get::<String, _>("content_json"), "tool result content")?;
-        for part in content {
-            if let ContentPart::ToolResult {
-                tool_call_id: id,
-                payload,
-                ..
-            } = part
-            {
-                if id == tool_call_id {
-                    return Ok(Some(payload));
-                }
-            }
-        }
-    }
-    Ok(None)
-}
-
 pub async fn list_tool_calls(
     pool: &DbPool,
     session_id: &str,

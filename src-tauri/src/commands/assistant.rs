@@ -451,16 +451,10 @@ pub async fn assistant_get_tool_call_result(
     state: State<'_, AppState>,
 ) -> Result<Option<serde_json::Value>, String> {
     let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
-    let call = repository::get_tool_call_for_session(&target_pool, &session_id, &tool_call_id)
+    repository::get_tool_call_for_session(&target_pool, &session_id, &tool_call_id)
         .await?
-        .ok_or_else(|| format!("Tool call not found in session: {}", tool_call_id))?;
-    match call.result {
-        Some(result) => Ok(Some(result)),
-        None => {
-            repository::get_tool_result_message_payload(&target_pool, &session_id, &tool_call_id)
-                .await
-        }
-    }
+        .map(|call| call.result)
+        .ok_or_else(|| format!("Tool call not found in session: {}", tool_call_id))
 }
 
 /// Validate the attachments on a user send: only `ContentPart::Image` parts may
