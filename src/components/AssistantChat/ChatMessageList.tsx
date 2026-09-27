@@ -28,7 +28,6 @@ import {
   inlineChartPath,
   inlineTaskCard,
   summarizeToolCall,
-  summarizeToolResult,
   toPreviewText,
   type TaskCallCard,
 } from './toolDisplay';
@@ -39,6 +38,7 @@ import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './tas
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
+import { useToolCallInput, useToolCallResult } from '../../assistant/toolCallResult';
 
 // Tools beyond this count collapse behind a "show N earlier" toggle so a turn
 // that fires dozens of tools stays scannable; the most-recent MAX_VISIBLE rows
@@ -52,8 +52,8 @@ type TextPart = Extract<ContentPart, { type: 'text' }>;
 type ToolUsePart = Extract<ContentPart, { type: 'tool_use' }>;
 type ImagePart = Extract<ContentPart, { type: 'image' }>;
 
-// A tool_use enriched with the matching ToolInvocation record (status,
-// params, result, error) for rendering.
+// A tool_use enriched with the matching ToolInvocation record for rendering.
+// `result` is the compact view: only charts and task cards keep one.
 interface EnrichedToolUse {
   toolCallId: string;
   toolName: string;
@@ -62,6 +62,7 @@ interface EnrichedToolUse {
   params?: unknown;
   result?: unknown;
   error?: string | null;
+  call?: ToolInvocation;
 }
 
 type AssistantSegment =
@@ -298,6 +299,7 @@ const groupAssistantContent = (
         params: tc?.params,
         result: tc?.result,
         error: tc?.error,
+        call: tc,
       };
       const last = segments[segments.length - 1];
       if (last && last.kind === 'tools') {
@@ -482,6 +484,37 @@ const formatParams = (params: unknown): string | null => {
     }
   }
   return JSON.stringify(params, null, 2);
+};
+
+// Tools whose Output view draws from their input (the command, the question,
+// the written content), so it needs the full input, not the row's projection.
+const OUTPUT_READS_INPUT = new Set(['bash_exec', 'ask_user', 'fs_write']);
+
+/** The loading or error state of a lazily fetched detail, or null once it is ready. */
+const renderDetailPending = (
+  detail: ReturnType<typeof useToolCallResult>,
+  label: string
+): React.ReactNode => {
+  if (detail.state === 'loading') {
+    return (
+      <div className={styles.loadingState} role="status">
+        <span>{`Loading ${label}…`}</span>
+      </div>
+    );
+  }
+  if (detail.state === 'error') {
+    return (
+      <div className={styles.toolResultError} role="alert">
+        <span>{detail.message}</span>
+        {detail.retryable && (
+          <button type="button" className={styles.toolResultRetry} onClick={detail.retry}>
+            Retry
+          </button>
+        )}
+      </div>
+    );
+  }
+  return null;
 };
 
 const formatElapsed = (ms: number): string => {
@@ -1032,6 +1065,7 @@ const MergedToolGroup = memo(
             params: tc?.params,
             result: tc?.result,
             error: tc?.error,
+            call: tc,
           };
         }),
       [item.toolUses, toolCallsById]
@@ -1265,6 +1299,7 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
             status={seg.toolUse.status}
             result={seg.toolUse.result}
             error={seg.toolUse.error}
+            call={seg.toolUse.call}
           />
         ) : seg.kind === 'task' ? (
           <ChatTaskCard key={seg.key} card={seg.card} />
@@ -1316,6 +1351,7 @@ const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
             status={tu.status}
             result={tu.result}
             error={tu.error}
+            call={tu.call}
           />
         )
       )}
@@ -1334,19 +1370,16 @@ interface ToolRowProps {
   status: string;
   result?: unknown;
   error?: string | null;
+  call?: ToolInvocation;
 }
 
-const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps) => {
+const ToolRow = memo(({ toolName, params, status, result, error, call }: ToolRowProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'output' | 'input'>('output');
 
   const handleToggle = useCallback(() => setIsExpanded((prev) => !prev), []);
 
   const { verb, arg } = useMemo(() => summarizeToolCall(toolName, params), [toolName, params]);
-  const resultSummary = useMemo(
-    () => summarizeToolResult(toolName, result, error, status),
-    [toolName, result, error, status]
-  );
   // A `create_vega_chart` result is the chart itself: render it under the
   // row from the saved file, so a reload draws it again without re-running
   // the tool.
@@ -1358,15 +1391,39 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
   const isRunning = status === 'running';
   const isFailed = status === 'failed' || !!error;
   const icon = isFailed ? '✗' : isRunning ? '⚙' : '✓';
+  const resultSummary =
+    call?.resultSummary ?? (isFailed && !isRunning ? { text: 'error', tone: 'error' } : null);
 
   // formatParams hides empty params — right for tools legitimately called
   // with no args, but on a failed call "the model sent {}" is exactly what
   // the user needs to see (e.g. a schema-validation reject for a missing
   // required property), so fall back to the raw JSON there.
-  const formattedParams =
-    formatParams(params) ?? (isFailed && params != null ? JSON.stringify(params, null, 2) : null);
-  const hasInput = !!formattedParams;
-  const hasOutput = result != null || !!error || isRunning;
+  const formatInput = (input: unknown) =>
+    formatParams(input) ?? (isFailed && input != null ? JSON.stringify(input, null, 2) : null);
+  // `params` is a projection of the input; the full one is fetched when a
+  // view needs more than the row shows.
+  const hasFullInput = !!call?.hasFullInput;
+  const hasInput = hasFullInput || !!formatInput(params);
+  const hasFullResult = !!call?.hasFullResult;
+  const hasOutput = hasFullResult || !!error || isRunning;
+  const outputReadsInput = OUTPUT_READS_INPUT.has(cleanToolName(toolName || ''));
+  const fullResult = useToolCallResult(
+    call,
+    isExpanded && activeTab === 'output' && hasFullResult && !isRunning
+  );
+  const fullInput = useToolCallInput(
+    call,
+    isExpanded &&
+      hasFullInput &&
+      (activeTab === 'input' || (activeTab === 'output' && outputReadsInput && !isRunning))
+  );
+  const input = fullInput.state === 'ready' ? fullInput.value : params;
+  // The output view degrades to the projected input if the full one fails.
+  const outputPending =
+    renderDetailPending(fullResult, 'output') ??
+    (outputReadsInput && fullInput.state === 'loading'
+      ? renderDetailPending(fullInput, 'output')
+      : null);
 
   return (
     <div className={styles.toolRowBlock}>
@@ -1432,16 +1489,25 @@ const ToolRow = memo(({ toolName, params, status, result, error }: ToolRowProps)
 
           {activeTab === 'input' && hasInput && (
             <div className={styles.toolResult}>
-              <MarkdownMessage
-                content={'```json\n' + formattedParams + '\n```'}
-                isStreaming={false}
-              />
+              {renderDetailPending(fullInput, 'input') ?? (
+                <MarkdownMessage
+                  content={'```json\n' + (formatInput(input) ?? '{}') + '\n```'}
+                  isStreaming={false}
+                />
+              )}
             </div>
           )}
 
           {activeTab === 'output' && (
             <div className={styles.toolResult}>
-              {renderToolOutput(toolName, params, result, error, isRunning)}
+              {outputPending ??
+                renderToolOutput(
+                  toolName,
+                  input,
+                  fullResult.state === 'ready' ? fullResult.value : null,
+                  error,
+                  isRunning
+                )}
             </div>
           )}
         </div>

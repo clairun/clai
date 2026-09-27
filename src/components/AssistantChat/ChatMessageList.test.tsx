@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 // VirtualizedList windows its children by scroll geometry, which jsdom
@@ -63,7 +63,24 @@ vi.mock('../../workspace/client', () => ({
   })),
 }));
 
+// Rows get only a compact view of each call; the full result is fetched on
+// expand. Tests seed it per call id.
+const fullResults = vi.hoisted(() => new Map<string, unknown>());
+const getToolCallResult = vi.hoisted(() =>
+  vi.fn(async (_sessionId: string, toolCallId: string): Promise<unknown> =>
+    fullResults.get(toolCallId) ?? null
+  )
+);
+const fullInputs = vi.hoisted(() => new Map<string, unknown>());
+const getToolCallInput = vi.hoisted(() =>
+  vi.fn(async (_sessionId: string, toolCallId: string): Promise<unknown> =>
+    fullInputs.get(toolCallId) ?? null
+  )
+);
+vi.mock('../../assistant/client', () => ({ getToolCallResult, getToolCallInput }));
+
 import ChatMessageList from './ChatMessageList';
+import { clearToolCallResultCache } from '../../assistant/toolCallResult';
 import { mainIdentity } from '../Agents/agentIdentity';
 import type { AssistantMessage, ToolInvocation } from '../../generated/bindings';
 
@@ -81,6 +98,14 @@ const msg = (
 });
 
 describe('ChatMessageList', () => {
+  beforeEach(() => {
+    clearToolCallResultCache();
+    fullResults.clear();
+    getToolCallResult.mockClear();
+    fullInputs.clear();
+    getToolCallInput.mockClear();
+  });
+
   it('renders a user message and an assistant text reply', () => {
     const messages: AssistantMessage[] = [
       msg({ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello there' }] }),
@@ -117,6 +142,8 @@ describe('ChatMessageList', () => {
         params: {},
         status: 'completed',
         result: 'done',
+        hasFullResult: true,
+        hasFullInput: false,
         error: null,
         startedAt: 0n,
         completedAt: 1n,
@@ -146,6 +173,8 @@ describe('ChatMessageList', () => {
         params: { title: 'Q3 Revenue', spec: {} },
         status: 'completed',
         result: { ok: true, path: 'charts/q3-revenue.vl.json', display: true },
+        hasFullResult: true,
+        hasFullInput: false,
         error: null,
         startedAt: 0n,
         completedAt: 1n,
@@ -166,6 +195,7 @@ describe('ChatMessageList', () => {
     const [failedMessages, failedCalls] = chartCall({
       status: 'failed',
       result: null,
+      hasFullResult: false,
       error: 'The spec is not a valid Vega-Lite chart',
     });
     const { unmount } = render(<ChatMessageList messages={failedMessages} toolCalls={failedCalls} />);
@@ -218,6 +248,8 @@ describe('ChatMessageList', () => {
       params: {},
       status: 'completed',
       result: call.result,
+      hasFullResult: true,
+      hasFullInput: false,
       error: null,
       startedAt: 0n,
       completedAt: 1n,
@@ -355,6 +387,8 @@ describe('ChatMessageList', () => {
       params: {},
       status: 'completed',
       result: 'ok',
+      hasFullResult: true,
+      hasFullInput: false,
       error: null,
       startedAt: 0n,
       completedAt: 1n,
@@ -465,134 +499,309 @@ describe('ChatMessageList', () => {
     expect(screen.queryByText('Q3 Revenue')).toBeNull();
   });
 
-  it('shows a bash row summary (verb, command, exit code) without expanding', () => {
-    const messages: AssistantMessage[] = [
+  const singleCall = (
+    over: Partial<ToolInvocation> & Pick<ToolInvocation, 'toolName' | 'params'>
+  ): { messages: AssistantMessage[]; toolCalls: ToolInvocation[] } => ({
+    messages: [
       msg({
         id: 'm1',
         role: 'assistant',
         content: [
-          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'bash_exec', arguments: {} },
+          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: over.toolName, arguments: {} },
         ],
       }),
-    ];
-    const toolCalls: ToolInvocation[] = [
+    ],
+    toolCalls: [
       {
         id: 'tc-1',
         runId: 'r-1',
         sessionId: 'sess-1',
-        toolName: 'bash_exec',
-        params: { command: 'npm run build' },
         status: 'completed',
-        result: { exitCode: 0, stdout: 'Build complete', stderr: '' },
+        result: null,
+        hasFullResult: true,
+        hasFullInput: false,
         error: null,
         startedAt: 0n,
         completedAt: 1n,
+        ...over,
       },
-    ];
+    ],
+  });
+
+  it('shows a bash row summary (verb, command, exit code) without fetching the output', () => {
+    const { messages, toolCalls } = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'npm run build' },
+      resultSummary: { text: 'exit 0', tone: 'neutral' },
+    });
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('Bash')).toBeInTheDocument();
     expect(screen.getByText('npm run build')).toBeInTheDocument();
     expect(screen.getByText('exit 0')).toBeInTheDocument();
+    expect(getToolCallResult).not.toHaveBeenCalled();
   });
 
-  it('reads a bash result delivered as an MCP content envelope', () => {
+  it('fetches the full bash output on expand and reads its MCP envelope', async () => {
     // Claude Code reaches our built-ins through the local MCP server, so the
     // result is stored as the wire envelope rather than the tool's own JSON.
-    const messages: AssistantMessage[] = [
-      msg({
-        id: 'm1',
-        role: 'assistant',
-        content: [
-          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'bash_exec', arguments: {} },
-        ],
-      }),
-    ];
-    const toolCalls: ToolInvocation[] = [
-      {
-        id: 'tc-1',
-        runId: 'r-1',
-        sessionId: 'sess-1',
-        toolName: 'bash_exec',
-        params: { command: 'ls' },
-        status: 'completed',
-        result: [
-          {
-            type: 'text',
-            text: JSON.stringify({ exitCode: 0, stdout: 'Build complete', stderr: '' }),
-          },
-        ],
-        error: null,
-        startedAt: 0n,
-        completedAt: 1n,
-      },
-    ];
+    fullResults.set('tc-1', [
+      { type: 'text', text: JSON.stringify({ exitCode: 0, stdout: 'Build complete', stderr: '' }) },
+    ]);
+    const { messages, toolCalls } = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'ls' },
+      resultSummary: { text: 'exit 0', tone: 'neutral' },
+    });
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
-    expect(screen.getByText('exit 0')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Bash'));
+    expect(screen.getByRole('status')).toHaveTextContent('Loading output…');
     // The terminal block shows the command's output, not the raw envelope.
-    expect(screen.getByText('Build complete')).toBeInTheDocument();
+    expect(await screen.findByText('Build complete')).toBeInTheDocument();
+    expect(getToolCallResult).toHaveBeenCalledWith('sess-1', 'tc-1');
   });
 
-  it('shows file content from an MCP-enveloped fs_read result', () => {
-    const messages: AssistantMessage[] = [
-      msg({
-        id: 'm1',
-        role: 'assistant',
-        content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'fs_read', arguments: {} }],
-      }),
-    ];
-    const toolCalls: ToolInvocation[] = [
-      {
-        id: 'tc-1',
-        runId: 'r-1',
-        sessionId: 'sess-1',
-        toolName: 'fs_read',
-        params: { path: '/main.rs' },
-        status: 'completed',
-        result: [
-          { type: 'text', text: JSON.stringify({ path: '/main.rs', content: 'fn main() {}' }) },
-        ],
-        error: null,
-        startedAt: 0n,
-        completedAt: 1n,
-      },
-    ];
+  it('shows file content from an MCP-enveloped fs_read result', async () => {
+    fullResults.set('tc-1', [
+      { type: 'text', text: JSON.stringify({ path: '/main.rs', content: 'fn main() {}' }) },
+    ]);
+    const { messages, toolCalls } = singleCall({
+      toolName: 'fs_read',
+      params: { path: '/main.rs' },
+      resultSummary: { text: '1 line', tone: 'neutral' },
+    });
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('1 line')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Read'));
     // Fenced with the language guessed from the path, not dumped as JSON.
-    const rendered = screen.getAllByTestId('markdown').map((el) => el.textContent ?? '');
-    expect(rendered).toContain('```rust\nfn main() {}\n```');
+    await waitFor(() =>
+      expect(screen.getAllByTestId('markdown').map((el) => el.textContent ?? '')).toContain(
+        '```rust\nfn main() {}\n```'
+      )
+    );
   });
 
-  it('pretty-prints an MCP-enveloped JSON result instead of one escaped line', () => {
-    const messages: AssistantMessage[] = [
-      msg({
-        id: 'm1',
-        role: 'assistant',
-        content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'fs_glob', arguments: {} }],
-      }),
-    ];
-    const toolCalls: ToolInvocation[] = [
-      {
-        id: 'tc-1',
-        runId: 'r-1',
-        sessionId: 'sess-1',
-        toolName: 'fs_glob',
-        params: { pattern: '**/*.rs' },
-        status: 'completed',
-        result: [{ type: 'text', text: '{"matches":[{"path":"/a.rs"}]}' }],
-        error: null,
-        startedAt: 0n,
-        completedAt: 1n,
-      },
-    ];
+  it('pretty-prints an MCP-enveloped JSON result instead of one escaped line', async () => {
+    fullResults.set('tc-1', [{ type: 'text', text: '{"matches":[{"path":"/a.rs"}]}' }]);
+    const { messages, toolCalls } = singleCall({
+      toolName: 'fs_glob',
+      params: { pattern: '**/*.rs' },
+    });
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
     fireEvent.click(screen.getByText('Glob'));
-    const rendered = screen.getAllByTestId('markdown').map((el) => el.textContent ?? '');
-    expect(rendered.some((text) => text.includes('```json\n{\n  "matches"'))).toBe(true);
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId('markdown')
+          .some((el) => (el.textContent ?? '').includes('```json\n{\n  "matches"'))
+      ).toBe(true)
+    );
+  });
+
+  it('fetches an ancestor-session call from its own session', async () => {
+    fullResults.set('tc-1', { exitCode: 0, stdout: 'from the parent', stderr: '' });
+    const { messages, toolCalls } = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'ls' },
+      sessionId: 'sess-parent',
+    });
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    fireEvent.click(screen.getByText('Bash'));
+    expect(await screen.findByText('from the parent')).toBeInTheDocument();
+    expect(getToolCallResult).toHaveBeenCalledWith('sess-parent', 'tc-1');
+  });
+
+  it('offers Retry when the output fails to load, and recovers', async () => {
+    getToolCallResult.mockRejectedValueOnce(new Error('database is locked'));
+    fullResults.set('tc-1', { exitCode: 0, stdout: 'second try', stderr: '' });
+    const { messages, toolCalls } = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'ls' },
+    });
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    fireEvent.click(screen.getByText('Bash'));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load output");
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('second try')).toBeInTheDocument();
+    expect(getToolCallResult).toHaveBeenCalledTimes(2);
+  });
+
+  it('says the output is gone, without Retry, when the call no longer exists', async () => {
+    getToolCallResult.mockRejectedValueOnce('Tool call not found in session: tc-1');
+    const { messages, toolCalls } = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'ls' },
+    });
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    fireEvent.click(screen.getByText('Bash'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Output no longer available');
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('fetches once the running call it is expanded on completes', async () => {
+    fullResults.set('tc-1', { exitCode: 0, stdout: 'finished', stderr: '' });
+    const running = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'make' },
+      status: 'running',
+      hasFullResult: false,
+      completedAt: null,
+    });
+    const { rerender } = render(
+      <ChatMessageList messages={running.messages} toolCalls={running.toolCalls} />
+    );
+    fireEvent.click(screen.getByText('Bash'));
+    expect(screen.getByText('Executing…')).toBeInTheDocument();
+    expect(getToolCallResult).not.toHaveBeenCalled();
+
+    const done = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'make' },
+      resultSummary: { text: 'exit 0', tone: 'neutral' },
+    });
+    rerender(<ChatMessageList messages={running.messages} toolCalls={done.toolCalls} />);
+    expect(await screen.findByText('finished')).toBeInTheDocument();
+    expect(getToolCallResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('reuses a fetched result when the row is expanded again', async () => {
+    fullResults.set('tc-1', { exitCode: 0, stdout: 'cached', stderr: '' });
+    const { messages, toolCalls } = singleCall({
+      toolName: 'bash_exec',
+      params: { command: 'ls' },
+    });
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    fireEvent.click(screen.getByText('Bash'));
+    expect(await screen.findByText('cached')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Bash'));
+    fireEvent.click(screen.getByText('Bash'));
+    expect(screen.getByText('cached')).toBeInTheDocument();
+    expect(getToolCallResult).toHaveBeenCalledTimes(1);
+  });
+
+  describe('projected input', () => {
+    const LARGE = 'large payload line\n'.repeat(2_000);
+    const writeCall = (over: Partial<ToolInvocation> = {}) =>
+      singleCall({
+        toolName: 'fs_write',
+        params: { path: 'report.md' },
+        hasFullInput: true,
+        hasFullResult: true,
+        resultSummary: { text: 'written', tone: 'neutral' },
+        ...over,
+      });
+    const markdownText = () => screen.queryAllByTestId('markdown').map((el) => el.textContent ?? '');
+
+    it('keeps a large input out of the page until the Input tab asks for it', async () => {
+      fullInputs.set('tc-1', { path: 'report.md', content: LARGE });
+      fullResults.set('tc-1', { path: 'report.md', bytesWritten: LARGE.length });
+      const { messages, toolCalls } = writeCall();
+      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+
+      expect(screen.getByText('report.md')).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain('large payload line');
+      expect(getToolCallInput).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByText('Write'));
+      fireEvent.click(screen.getByRole('button', { name: 'Input' }));
+      expect(screen.getByRole('status')).toHaveTextContent('Loading input…');
+      await waitFor(() =>
+        expect(markdownText().some((text) => text.includes('"content": "large payload line'))).toBe(
+          true
+        )
+      );
+      expect(getToolCallInput).toHaveBeenCalledTimes(1);
+      expect(getToolCallInput).toHaveBeenCalledWith('sess-1', 'tc-1');
+    });
+
+    it('draws the written content in the Output tab from the full input', async () => {
+      fullInputs.set('tc-1', { path: 'main.rs', content: 'fn main() {}' });
+      fullResults.set('tc-1', { path: 'main.rs', bytesWritten: 12 });
+      const { messages, toolCalls } = writeCall({ params: { path: 'main.rs' } });
+      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      fireEvent.click(screen.getByText('Write'));
+      await waitFor(() => expect(markdownText()).toContain('```rust\nfn main() {}\n```'));
+
+      // The Input tab reuses the input the Output tab already fetched.
+      fireEvent.click(screen.getByRole('button', { name: 'Input' }));
+      expect(markdownText().some((text) => text.includes('"content": "fn main() {}"'))).toBe(true);
+      expect(getToolCallInput).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows a complete input as sent, without fetching', () => {
+      const { messages, toolCalls } = singleCall({
+        toolName: 'fs_glob',
+        params: { pattern: '**/*.rs' },
+        hasFullInput: false,
+      });
+      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      fireEvent.click(screen.getByText('Glob'));
+      fireEvent.click(screen.getByRole('button', { name: 'Input' }));
+      expect(markdownText()).toContain('```json\n{\n  "pattern": "**/*.rs"\n}\n```');
+      expect(getToolCallInput).not.toHaveBeenCalled();
+    });
+
+    it('offers an Input tab even when the projection kept no field', async () => {
+      fullInputs.set('tc-1', { items: [1, 2, 3] });
+      const { messages, toolCalls } = singleCall({
+        toolName: 'custom_tool',
+        params: {},
+        hasFullInput: true,
+      });
+      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      fireEvent.click(screen.getByText('custom_tool'));
+      fireEvent.click(screen.getByRole('button', { name: 'Input' }));
+      await waitFor(() =>
+        expect(markdownText().some((text) => text.includes('"items": ['))).toBe(true)
+      );
+    });
+
+    it('fetches an ancestor-session input from its own session and retries a failure', async () => {
+      getToolCallInput.mockRejectedValueOnce(new Error('database is locked'));
+      fullInputs.set('tc-1', { path: 'report.md', content: 'from the parent' });
+      const { messages, toolCalls } = writeCall({ sessionId: 'sess-parent' });
+      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      fireEvent.click(screen.getByText('Write'));
+      fireEvent.click(screen.getByRole('button', { name: 'Input' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load input");
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      await waitFor(() =>
+        expect(markdownText().some((text) => text.includes('from the parent'))).toBe(true)
+      );
+      expect(getToolCallInput).toHaveBeenCalledTimes(2);
+      expect(getToolCallInput).toHaveBeenLastCalledWith('sess-parent', 'tc-1');
+    });
+
+    it('waits for completion before fetching the input an Output view draws from', async () => {
+      const command = `echo ${'x'.repeat(400)}`;
+      fullInputs.set('tc-1', { command });
+      fullResults.set('tc-1', { exitCode: 0, stdout: 'finished', stderr: '' });
+      const projected = { command: `${command.slice(0, 300)}…` };
+      const running = singleCall({
+        toolName: 'bash_exec',
+        params: projected,
+        hasFullInput: true,
+        status: 'running',
+        hasFullResult: false,
+        completedAt: null,
+      });
+      const { rerender } = render(
+        <ChatMessageList messages={running.messages} toolCalls={running.toolCalls} />
+      );
+      fireEvent.click(screen.getByText('Bash'));
+      expect(screen.getByText('Executing…')).toBeInTheDocument();
+      expect(getToolCallInput).not.toHaveBeenCalled();
+
+      const done = singleCall({ toolName: 'bash_exec', params: projected, hasFullInput: true });
+      rerender(<ChatMessageList messages={running.messages} toolCalls={done.toolCalls} />);
+      expect(await screen.findByText('finished')).toBeInTheDocument();
+      expect(screen.getByText(`$ ${command}`)).toBeInTheDocument();
+      expect(getToolCallInput).toHaveBeenCalledTimes(1);
+      expect(getToolCallResult).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('hides the empty assistant placeholder until content or streaming text arrives', () => {

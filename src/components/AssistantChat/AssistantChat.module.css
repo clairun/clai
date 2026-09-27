@@ -855,6 +855,35 @@
   font-size: 13px;
 }
 
+.toolResultError {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  color: var(--color-critical);
+  font-size: 13px;
+}
+
+.toolResultRetry {
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-xs);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.toolResultRetry:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.toolResultRetry:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
 /* Status Indicators */
 .statusPending {
   display: inline-flex;
