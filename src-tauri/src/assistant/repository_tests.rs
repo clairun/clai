@@ -1189,10 +1189,12 @@ async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
             .params,
         full
     );
-    assert!(get_tool_call_for_session(&pool, &sessions[1].id, &original.id)
-        .await
-        .unwrap()
-        .is_none());
+    assert!(
+        get_tool_call_for_session(&pool, &sessions[1].id, &original.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let stored = list_messages(&pool, &sessions[0].id).await.unwrap();
     assert!(
         matches!(&stored[0].content[0], ContentPart::ToolUse { arguments, .. } if arguments == &full)
