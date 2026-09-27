@@ -842,7 +842,7 @@ async fn rotate_assistant_bubble(
     state: &mut ClaudeStreamState,
     conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
-    finalize_assistant_message(
+    let finalized = finalize_assistant_message(
         deps,
         session,
         run_id,
@@ -850,7 +850,8 @@ async fn rotate_assistant_bubble(
         state,
         conversation,
     )
-    .await?;
+    .await;
+    emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
     *assistant_slot = None;
     *assistant_message = ensure_assistant_message_slot(
         deps,
@@ -1362,7 +1363,7 @@ async fn run_claude_turn(
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
-                finalize_assistant_message(
+                let finalized = finalize_assistant_message(
                     deps,
                     session,
                     run_id,
@@ -1370,7 +1371,8 @@ async fn run_claude_turn(
                     &mut state,
                     conversation,
                 )
-                .await?;
+                .await;
+                emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
                 return Err(LocalAgentRunError::Cancelled);
             }
             _ = queue_poll.tick(), if live_stdin.is_some() => {
@@ -1539,8 +1541,9 @@ async fn run_claude_turn(
     let status = child
         .wait()
         .await
-        .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    finalize_assistant_message(
+        .map_err(|e| LocalAgentRunError::failed(e.to_string()));
+    let status = emit_pending_on_err(status, deps, session, run_id, &mut state.update_throttle)?;
+    let finalized = finalize_assistant_message(
         deps,
         session,
         run_id,
@@ -1548,7 +1551,8 @@ async fn run_claude_turn(
         &mut state,
         conversation,
     )
-    .await?;
+    .await;
+    emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -1710,7 +1714,7 @@ async fn run_codex_turn(
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
-                finalize_assistant_message_from_parts(
+                let finalized = finalize_assistant_message_from_parts(
                     deps,
                     session,
                     run_id,
@@ -1718,7 +1722,8 @@ async fn run_codex_turn(
                     &state.parts,
                     conversation,
                 )
-                .await?;
+                .await;
+                emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
                 return Err(LocalAgentRunError::Cancelled);
             }
             _ = sleep_until_due(update_due) => {
@@ -1758,8 +1763,9 @@ async fn run_codex_turn(
     let status = child
         .wait()
         .await
-        .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    finalize_assistant_message_from_parts(
+        .map_err(|e| LocalAgentRunError::failed(e.to_string()));
+    let status = emit_pending_on_err(status, deps, session, run_id, &mut state.update_throttle)?;
+    let finalized = finalize_assistant_message_from_parts(
         deps,
         session,
         run_id,
@@ -1767,7 +1773,8 @@ async fn run_codex_turn(
         &state.parts,
         conversation,
     )
-    .await?;
+    .await;
+    emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -1972,7 +1979,7 @@ async fn run_codex_turn_app_server(
                     .send(&aps::turn_interrupt_request(next_request_id, &thread_id))
                     .await;
                 transport.kill().await;
-                finalize_assistant_message_from_parts(
+                let finalized = finalize_assistant_message_from_parts(
                     deps,
                     session,
                     run_id,
@@ -1980,7 +1987,8 @@ async fn run_codex_turn_app_server(
                     &state.parts,
                     conversation,
                 )
-                .await?;
+                .await;
+                emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
                 return Err(LocalAgentRunError::Cancelled);
             }
             _ = steer_poll.tick() => {
@@ -2106,7 +2114,7 @@ async fn run_codex_turn_app_server(
     }
 
     transport.kill().await;
-    finalize_assistant_message_from_parts(
+    let finalized = finalize_assistant_message_from_parts(
         deps,
         session,
         run_id,
@@ -2114,7 +2122,8 @@ async fn run_codex_turn_app_server(
         &state.parts,
         conversation,
     )
-    .await?;
+    .await;
+    emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -2387,7 +2396,7 @@ async fn split_codex_assistant_message(
         || !state.persisted_tool_item_ids.is_empty();
     if has_content {
         // Persist the pre-steer segment as its own completed message.
-        finalize_assistant_message_from_parts(
+        let finalized = finalize_assistant_message_from_parts(
             deps,
             session,
             run_id,
@@ -2395,7 +2404,8 @@ async fn split_codex_assistant_message(
             &state.parts,
             conversation,
         )
-        .await?;
+        .await;
+        emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
     } else {
         // Nothing emitted yet: drop the empty placeholder rather than leave an
         // empty bubble before the user's steered message.
@@ -2700,7 +2710,7 @@ async fn run_opencode_turn(
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
                 let _ = child.kill().await;
-                finalize_assistant_message_from_parts(
+                let finalized = finalize_assistant_message_from_parts(
                     deps,
                     session,
                     run_id,
@@ -2708,7 +2718,8 @@ async fn run_opencode_turn(
                     &state.parts,
                     conversation,
                 )
-                .await?;
+                .await;
+                emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
                 return Err(LocalAgentRunError::Cancelled);
             }
             _ = sleep_until_due(update_due) => {
@@ -2749,8 +2760,9 @@ async fn run_opencode_turn(
     let status = child
         .wait()
         .await
-        .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    finalize_assistant_message_from_parts(
+        .map_err(|e| LocalAgentRunError::failed(e.to_string()));
+    let status = emit_pending_on_err(status, deps, session, run_id, &mut state.update_throttle)?;
+    let finalized = finalize_assistant_message_from_parts(
         deps,
         session,
         run_id,
@@ -2758,7 +2770,8 @@ async fn run_opencode_turn(
         &state.parts,
         conversation,
     )
-    .await?;
+    .await;
+    emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
     if let Some(message) = result_error {
         let enriched = append_stderr_tail(&message, &stderr_tail);
@@ -3476,6 +3489,15 @@ impl<T> UpdateThrottle<T> {
     fn take_pending(&mut self) -> Option<T> {
         self.pending.take()
     }
+
+    /// Releases the held update now, restarting the window if one was held.
+    fn flush(&mut self, now: std::time::Instant) -> Option<T> {
+        let held = self.pending.take();
+        if held.is_some() {
+            self.last_emit = Some(now);
+        }
+        held
+    }
 }
 
 /// Resolves when `deadline` passes; never, when there is none.
@@ -3502,8 +3524,43 @@ fn emit_assistant_update(
     }
 }
 
-/// On an error exit from a read loop, emit the held update so the UI is not
-/// left behind the persisted row (a failed run is not finalized).
+/// Emits a text delta, preceded by any held update for the run. The frontend
+/// drops its delta accumulator on `AssistantMessageUpdated`, so a held update
+/// sent after this delta would erase the streamed text.
+fn emit_assistant_delta(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    throttle: &mut UpdateThrottle<AssistantMessage>,
+    message_id: &str,
+    text: &str,
+) {
+    for event in delta_events(throttle, std::time::Instant::now(), message_id, text) {
+        let _ = emit_event(&deps.app, session, Some(run_id), event);
+    }
+}
+
+fn delta_events(
+    throttle: &mut UpdateThrottle<AssistantMessage>,
+    now: std::time::Instant,
+    message_id: &str,
+    text: &str,
+) -> impl Iterator<Item = AssistantUiEvent> {
+    let held = throttle
+        .flush(now)
+        .map(|message| AssistantUiEvent::AssistantMessageUpdated { message });
+    held.into_iter()
+        .chain(std::iter::once(AssistantUiEvent::AssistantDelta {
+            message_id: message_id.to_string(),
+            text: text.to_string(),
+        }))
+}
+
+/// On an error exit, emit the held update so the UI is not left behind the
+/// persisted row (a failed run is not finalized). Wraps every fallible step of
+/// the read loops up to and including finalization; once a message is
+/// finalized its held update is stale and must not be emitted, so errors after
+/// that point (e.g. opening the next bubble) are deliberately not wrapped.
 fn emit_pending_on_err<T>(
     result: Result<T, LocalAgentRunError>,
     deps: &AssistantDeps,
@@ -3639,14 +3696,13 @@ async fn handle_opencode_event(
                 .filter(|text| !text.is_empty())
             {
                 push_opencode_text(state, text);
-                let _ = emit_event(
-                    &deps.app,
+                emit_assistant_delta(
+                    deps,
                     session,
-                    Some(run_id),
-                    AssistantUiEvent::AssistantDelta {
-                        message_id: assistant_message.id.clone(),
-                        text: text.to_string(),
-                    },
+                    run_id,
+                    &mut state.update_throttle,
+                    &assistant_message.id,
+                    text,
                 );
             }
         }
@@ -3975,14 +4031,13 @@ async fn handle_codex_item(
         Some("agent_message") if terminal => {
             if let Some(text) = item.get("text").and_then(Value::as_str) {
                 push_codex_text(state, text);
-                let _ = emit_event(
-                    &deps.app,
+                emit_assistant_delta(
+                    deps,
                     session,
-                    Some(run_id),
-                    AssistantUiEvent::AssistantDelta {
-                        message_id: assistant_message.id.clone(),
-                        text: text.to_string(),
-                    },
+                    run_id,
+                    &mut state.update_throttle,
+                    &assistant_message.id,
+                    text,
                 );
             }
         }
@@ -4356,14 +4411,13 @@ async fn handle_claude_event(
                     state.parts.push(ContentPart::Text {
                         text: text.to_string(),
                     });
-                    let _ = emit_event(
-                        &deps.app,
+                    emit_assistant_delta(
+                        deps,
                         session,
-                        Some(run_id),
-                        AssistantUiEvent::AssistantDelta {
-                            message_id: assistant_message.id.clone(),
-                            text: text.to_string(),
-                        },
+                        run_id,
+                        &mut state.update_throttle,
+                        &assistant_message.id,
+                        text,
                     );
                 }
             }
@@ -4419,14 +4473,13 @@ async fn handle_stream_event(
                         };
                         if !separator.is_empty() {
                             state.append_to_last_text(separator);
-                            let _ = emit_event(
-                                &deps.app,
+                            emit_assistant_delta(
+                                deps,
                                 session,
-                                Some(run_id),
-                                AssistantUiEvent::AssistantDelta {
-                                    message_id: assistant_message.id.clone(),
-                                    text: separator.to_string(),
-                                },
+                                run_id,
+                                &mut state.update_throttle,
+                                &assistant_message.id,
+                                separator,
                             );
                         }
                         let parts_index = state.parts.len() - 1;
@@ -4504,14 +4557,13 @@ async fn handle_stream_event(
                                 t.push_str(text);
                             }
                         }
-                        let _ = emit_event(
-                            &deps.app,
+                        emit_assistant_delta(
+                            deps,
                             session,
-                            Some(run_id),
-                            AssistantUiEvent::AssistantDelta {
-                                message_id: assistant_message.id.clone(),
-                                text: text.to_string(),
-                            },
+                            run_id,
+                            &mut state.update_throttle,
+                            &assistant_message.id,
+                            text,
                         );
                     }
                 }
@@ -6200,6 +6252,42 @@ mod tests {
         throttle.offer(t0, 2);
         assert_eq!(throttle.take_pending(), Some(2));
         assert_eq!(throttle.due(), None);
+    }
+
+    /// A held update must reach the UI before a delta for the same message:
+    /// emitted after it, the update would wipe the streamed text.
+    #[test]
+    fn delta_events_emit_held_update_before_delta() {
+        let mut throttle = UpdateThrottle::default();
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let snapshot = |text: &str| {
+            test_message(
+                "m1",
+                MessageRole::Assistant,
+                vec![ContentPart::Text {
+                    text: text.to_string(),
+                }],
+            )
+        };
+        assert!(throttle.offer(t0, snapshot("a")).is_some());
+        assert!(throttle.offer(t0 + ms(5), snapshot("ab")).is_none());
+
+        let events: Vec<_> = delta_events(&mut throttle, t0 + ms(10), "m1", "c").collect();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AssistantUiEvent::AssistantMessageUpdated { message },
+                AssistantUiEvent::AssistantDelta { message_id, text },
+            ] if serde_json::to_value(&message.content).ok() == serde_json::to_value(snapshot("ab").content).ok() && message_id == "m1" && text == "c"
+        ));
+        assert_eq!(throttle.due(), None, "nothing left to emit after the delta");
+
+        let events: Vec<_> = delta_events(&mut throttle, t0 + ms(15), "m1", "d").collect();
+        assert!(matches!(
+            events.as_slice(),
+            [AssistantUiEvent::AssistantDelta { .. }]
+        ));
     }
 
     /// Parallel tool calls persisted a few ms apart: the UI must end up with
