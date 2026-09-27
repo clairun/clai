@@ -1171,7 +1171,7 @@ async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
     .unwrap();
     let page = display::page(AssistantMessagePage {
         messages: list_messages(&pool, &sessions[0].id).await.unwrap(),
-        tool_calls: list_tool_calls_by_ids(&pool, &[original.id.clone()])
+        tool_calls: list_tool_calls_by_ids(&pool, std::slice::from_ref(&original.id))
             .await
             .unwrap(),
         next_cursor: None,
