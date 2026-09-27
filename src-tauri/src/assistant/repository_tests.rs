@@ -1030,3 +1030,173 @@ async fn test_list_messages_orders_same_timestamp_by_insertion() {
 
     assert_eq!(loaded, inserted);
 }
+
+#[tokio::test]
+async fn tool_result_lookup_is_session_scoped_and_keeps_full_payload() {
+    let (_tmp, pool) = workspace_pool().await;
+    let first = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    let second = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    let run = create_run(
+        &pool,
+        CreateRunParams {
+            session_id: first.id.clone(),
+            status: RunStatus::Running,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn".into(),
+            protocol_id: "openai".into(),
+            model_id: "model".into(),
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    create_tool_call(
+        &pool,
+        CreateToolCallParams {
+            id: "call-1".into(),
+            run_id: run.id,
+            session_id: first.id.clone(),
+            tool_name: "bash_exec".into(),
+            params: serde_json::json!({}),
+            status: ToolCallStatus::Running,
+        },
+    )
+    .await
+    .unwrap();
+    let full = serde_json::json!({"stdout": "full output", "exitCode": 0});
+    update_tool_call(
+        &pool,
+        "call-1",
+        ToolCallStatus::Completed,
+        Some(&full),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        get_tool_call_for_session(&pool, &first.id, "call-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .result,
+        Some(full)
+    );
+    assert!(get_tool_call_for_session(&pool, &second.id, "call-1")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
+    use super::display;
+
+    let (_tmp, pool) = workspace_pool().await;
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        sessions.push(
+            create_session(
+                &pool,
+                CreateSessionParams {
+                    kind: SessionKind::Interactive,
+                    title: None,
+                    context: sample_context(),
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    let run = create_run(
+        &pool,
+        CreateRunParams {
+            session_id: sessions[0].id.clone(),
+            status: RunStatus::Running,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn".into(),
+            protocol_id: "openai".into(),
+            model_id: "model".into(),
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let full = serde_json::json!({"path":"report.md", "content":"long content".repeat(10_000)});
+    let original = create_tool_call(
+        &pool,
+        CreateToolCallParams {
+            id: "large-input".into(),
+            run_id: run.id,
+            session_id: sessions[0].id.clone(),
+            tool_name: "fs_write".into(),
+            params: full.clone(),
+            status: ToolCallStatus::Completed,
+        },
+    )
+    .await
+    .unwrap();
+    create_message(
+        &pool,
+        CreateMessageParams {
+            session_id: sessions[0].id.clone(),
+            role: MessageRole::Assistant,
+            content: vec![ContentPart::ToolUse {
+                tool_call_id: original.id.clone(),
+                tool_name: original.tool_name.clone(),
+                arguments: full.clone(),
+            }],
+            provider_metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+    let page = display::page(AssistantMessagePage {
+        messages: list_messages(&pool, &sessions[0].id).await.unwrap(),
+        tool_calls: list_tool_calls_by_ids(&pool, std::slice::from_ref(&original.id))
+            .await
+            .unwrap(),
+        next_cursor: None,
+        has_more: false,
+        total_count: 1,
+    });
+    let page_json = serde_json::to_string(&page).unwrap();
+    assert!(!page_json.contains("long content"));
+    assert!(page_json.contains("report.md"));
+    assert_eq!(
+        get_tool_call_for_session(&pool, &sessions[0].id, &original.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .params,
+        full
+    );
+    assert!(
+        get_tool_call_for_session(&pool, &sessions[1].id, &original.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stored = list_messages(&pool, &sessions[0].id).await.unwrap();
+    assert!(
+        matches!(&stored[0].content[0], ContentPart::ToolUse { arguments, .. } if arguments == &full)
+    );
+}

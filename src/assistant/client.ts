@@ -132,6 +132,23 @@ export async function listToolCalls(
   });
 }
 
+/**
+ * Full result of one tool call. Live events and message pages carry only a
+ * compact view of it, so the expanded row fetches the rest on demand. Pass the
+ * call's own `sessionId`: an ancestor session's call lives in that session.
+ */
+export async function getToolCallResult(sessionId: string, toolCallId: string): Promise<unknown> {
+  return invoke('assistant_get_tool_call_result', { sessionId, toolCallId });
+}
+
+/**
+ * Full input of one tool call; events and message pages carry a projection of
+ * it. Pass the call's own `sessionId`, as for `getToolCallResult`.
+ */
+export async function getToolCallInput(sessionId: string, toolCallId: string): Promise<unknown> {
+  return invoke('assistant_get_tool_call_input', { sessionId, toolCallId });
+}
+
 export async function retryRun(runId: string, connectionId: string): Promise<AssistantRun> {
   return invoke('assistant_retry_run', { runId, connectionId });
 }

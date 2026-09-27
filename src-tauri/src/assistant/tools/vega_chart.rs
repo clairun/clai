@@ -4,8 +4,9 @@
 //! The model hands over a Vega-Lite spec (or names an existing `.vl.json`
 //! file); the tool validates it against the Vega-Lite JSON schema and, when
 //! valid, stores it at the requested workspace path as a `.vl.json` artifact
-//! the frontend renders as an interactive chart (`VegaChart`: chat, `.md` reports via
-//! `![title](/reports/x.vl.json)`, and the artifacts panel).
+//! the frontend renders as an interactive chart (`VegaChart`) wherever the
+//! returned `![title](/reports/x.vl.json)` embed appears — a chat reply or an
+//! `.md` report — and in the artifacts panel.
 //!
 //! Why a tool instead of writing through `bash_exec`: a spec written blind renders as an
 //! error card the model never sees. Validating here turns that into a tool
@@ -56,14 +57,6 @@ pub struct CreateVegaChartParams {
     /// Full workspace-relative `.vl.json` path: the destination when `spec`
     /// is given, the file to validate otherwise.
     pub path: String,
-    /// Show the chart inline in the chat as this call's result card
-    /// (default true). `false` for charts that only belong in a report.
-    #[serde(default = "default_display")]
-    pub display: bool,
-}
-
-fn default_display() -> bool {
-    true
 }
 
 pub fn execute(
@@ -75,7 +68,6 @@ pub fn execute(
             .to_string()
     })?;
     let title = params.title.trim();
-    let display = params.display;
     if title.is_empty() {
         return Err("`title` must not be empty".to_string());
     }
@@ -110,7 +102,6 @@ pub fn execute(
         "action": action,
         "path": path_string,
         "title": title,
-        "display": display,
         // Leading `/` = workspace root for the markdown renderer (same rule
         // as `data.url`), so the snippet renders from a report at any depth.
         "markdown": format!("![{}](/{})", markdown_alt_text(title), path_string),
@@ -843,7 +834,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Q3 Revenue by Region".to_string(),
-                display: true,
                 spec: Some(bar_spec()),
                 path: "reports/q3/revenue-by-region.vl.json".to_string(),
             },
@@ -857,7 +847,6 @@ mod tests {
             result["markdown"],
             "![Q3 Revenue by Region](/reports/q3/revenue-by-region.vl.json)"
         );
-        assert_eq!(result["display"], true);
         assert!(result.get("warnings").is_none());
 
         let written: serde_json::Value = serde_json::from_str(
@@ -885,7 +874,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Existing".to_string(),
-                display: true,
                 spec: None,
                 path: "charts/existing.vl.json".to_string(),
             },
@@ -897,7 +885,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "New".to_string(),
-                display: true,
                 spec: Some(bar_spec()),
                 path: "charts/new.vl.json".to_string(),
             },
@@ -920,7 +907,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Linked".to_string(),
-                display: true,
                 spec: Some(bar_spec()),
                 path: "reports/linked.vl.json".to_string(),
             },
@@ -944,14 +930,12 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Latency".to_string(),
-                display: false,
                 spec: Some(serde_json::Value::String(bar_spec().to_string())),
                 path: "reports/latency.vl.json".to_string(),
             },
         )
         .unwrap();
         assert_eq!(result["path"], "reports/latency.vl.json");
-        assert_eq!(result["display"], false);
         assert!(dir.path().join("reports/latency.vl.json").is_file());
     }
 
@@ -965,7 +949,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Broken".to_string(),
-                display: true,
                 spec: Some(spec),
                 path: "reports/broken.vl.json".to_string(),
             },
@@ -988,7 +971,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Existing".to_string(),
-                display: true,
                 spec: None,
                 path: "charts/existing.vl.json".to_string(),
             },
@@ -1002,7 +984,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Missing".to_string(),
-                display: true,
                 spec: None,
                 path: "charts/missing.vl.json".to_string(),
             },
@@ -1033,7 +1014,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "Big".to_string(),
-                display: true,
                 spec: Some(spec),
                 path: "analysis/big.vl.json".to_string(),
             },
@@ -1051,7 +1031,6 @@ mod tests {
             &no_workspace,
             CreateVegaChartParams {
                 title: "t".to_string(),
-                display: true,
                 spec: Some(bar_spec()),
                 path: "analysis/chart.vl.json".to_string(),
             },
@@ -1068,7 +1047,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "  ".to_string(),
-                display: true,
                 spec: Some(bar_spec()),
                 path: "analysis/chart.vl.json".to_string(),
             },
@@ -1080,7 +1058,6 @@ mod tests {
             &context,
             CreateVegaChartParams {
                 title: "t".to_string(),
-                display: true,
                 spec: None,
                 path: "   ".to_string(),
             },

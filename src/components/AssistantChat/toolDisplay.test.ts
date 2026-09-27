@@ -5,9 +5,7 @@ import {
   cleanToolName,
   inlineTaskCard,
   guessLang,
-  inlineChartPath,
   summarizeToolCall,
-  summarizeToolResult,
   toPreviewText,
 } from './toolDisplay';
 
@@ -54,127 +52,11 @@ describe('summarizeToolCall', () => {
   });
 });
 
-describe('summarizeToolResult', () => {
-  it('shows bash exit code with tone', () => {
-    expect(summarizeToolResult('bash_exec', { exitCode: 0 }, null, 'completed')).toEqual({
-      text: 'exit 0',
-      tone: 'neutral',
-    });
-    expect(summarizeToolResult('bash_exec', { exitCode: 1 }, null, 'completed')).toEqual({
-      text: 'exit 1',
-      tone: 'error',
-    });
-  });
-
-  it('counts lines / entries / results', () => {
-    expect(summarizeToolResult('fs_read', { content: 'a\nb\nc' }, null, 'completed')).toEqual({
-      text: '3 lines',
-      tone: 'neutral',
-    });
-    expect(summarizeToolResult('fs_list', { entries: [1, 2] }, null, 'completed')).toEqual({
-      text: '2 entries',
-      tone: 'neutral',
-    });
-    expect(summarizeToolResult('web_search', { results: [1] }, null, 'completed')).toEqual({
-      text: '1 result',
-      tone: 'neutral',
-    });
-  });
-
-  it('returns null while running and for unknown tools', () => {
-    expect(summarizeToolResult('fs_read', null, null, 'running')).toBeNull();
-    expect(summarizeToolResult('some_mcp_tool', { ok: true }, null, 'completed')).toBeNull();
-  });
-
-  it('labels chart calls by title and shows the saved path', () => {
+describe('chart calls', () => {
+  it('are labelled by title', () => {
     expect(summarizeToolCall('create_vega_chart', { title: 'Q3 Revenue', spec: {} })).toEqual({
       verb: 'Chart',
       arg: 'Q3 Revenue',
-    });
-    const result = { ok: true, path: 'charts/q3-revenue.vl.json', display: true };
-    expect(summarizeToolResult('create_vega_chart', result, null, 'completed')).toEqual({
-      text: 'charts/q3-revenue.vl.json',
-      tone: 'neutral',
-    });
-    expect(summarizeToolResult('create_vega_chart', null, 'invalid spec', 'failed')).toEqual({
-      text: 'error',
-      tone: 'error',
-    });
-  });
-});
-
-describe('inlineChartPath', () => {
-  const result = { ok: true, path: 'charts/q3.vl.json', display: true };
-
-  it('returns the chart path for a completed call that asked to display', () => {
-    expect(inlineChartPath('create_vega_chart', result, null, 'completed')).toBe('charts/q3.vl.json');
-    // `display` defaults to true when the payload omits it.
-    expect(inlineChartPath('create_vega_chart', { ok: true, path: 'charts/q3.vl.json' }, null, 'completed')).toBe(
-      'charts/q3.vl.json'
-    );
-    // Claude Code stores the JSON as text; Codex reaches us via MCP envelopes.
-    expect(inlineChartPath('mcp__clai__create_vega_chart', JSON.stringify(result), null, 'completed')).toBe(
-      'charts/q3.vl.json'
-    );
-    expect(
-      inlineChartPath(
-        'create_vega_chart',
-        { content: [{ type: 'text', text: JSON.stringify(result) }] },
-        null,
-        'completed'
-      )
-    ).toBe('charts/q3.vl.json');
-  });
-
-  it('returns null when there is nothing to show inline', () => {
-    expect(inlineChartPath('create_vega_chart', { ...result, display: false }, null, 'completed')).toBeNull();
-    expect(inlineChartPath('create_vega_chart', result, 'schema error', 'failed')).toBeNull();
-    expect(inlineChartPath('create_vega_chart', null, null, 'running')).toBeNull();
-    expect(inlineChartPath('create_vega_chart', { ok: false }, null, 'completed')).toBeNull();
-    expect(inlineChartPath('fs_write', { ok: true, path: 'charts/q3.vl.json' }, null, 'completed')).toBeNull();
-  });
-
-  it('flags errors', () => {
-    expect(summarizeToolResult('web_fetch', null, 'boom', 'failed')).toEqual({
-      text: 'error',
-      tone: 'error',
-    });
-  });
-
-  // A CLI provider (Claude Code) runs our built-ins over MCP and reports the
-  // wire envelope, so the payload arrives as a JSON string inside a content
-  // part. Without unwrapping, every one of these summaries reads an object
-  // with none of its keys: "0 entries" for a real listing, no exit code at all.
-  it('summarizes results wrapped in an MCP content envelope', () => {
-    const wrap = (payload: unknown) => [{ type: 'text', text: JSON.stringify(payload) }];
-
-    expect(summarizeToolResult('bash_exec', wrap({ exitCode: 2 }), null, 'completed')).toEqual({
-      text: 'exit 2',
-      tone: 'error',
-    });
-    expect(summarizeToolResult('fs_list', wrap({ entries: [1, 2, 3] }), null, 'completed')).toEqual(
-      { text: '3 entries', tone: 'neutral' }
-    );
-    expect(summarizeToolResult('fs_read', wrap({ content: 'a\nb' }), null, 'completed')).toEqual({
-      text: '2 lines',
-      tone: 'neutral',
-    });
-    expect(summarizeToolResult('fs_glob', wrap({ matches: [1] }), null, 'completed')).toEqual({
-      text: '1 match',
-      tone: 'neutral',
-    });
-  });
-
-  it('summarizes results wrapped in an MCP client envelope object', () => {
-    const result = {
-      serverId: 'srv-1',
-      toolName: 'fs_list',
-      content: [{ type: 'text', text: '{"entries":[1,2]}' }],
-      text: '{"entries":[1,2]}',
-    };
-    expect(summarizeToolResult('fs_list', result, null, 'completed')).toEqual({
-      text: '2 entries',
-      tone: 'neutral',
     });
   });
 });

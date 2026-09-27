@@ -30,6 +30,7 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   markWorkspaceOpened: vi.fn(async () => {}),
   getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
+  readWorkspaceFile: vi.fn(),
 }));
 
 vi.mock('../assistant/client', () => ({
@@ -44,6 +45,7 @@ vi.mock('../assistant/client', () => ({
 const workspaceClient = await import('../workspace/client');
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 const getOrCreateWorkspaceSession = vi.mocked(workspaceClient.getOrCreateWorkspaceSession);
+const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
 // Taken through `vi.mocked` on the real module, so the fixtures below are
 // checked against the command's actual return types: a page missing
 // `toolCalls`/`nextCursor`/`hasMore`/`totalCount` — all four read by
@@ -183,6 +185,7 @@ beforeEach(() => {
   });
   loadSessionMessagesPage.mockResolvedValue(messagePage([]));
   listRuns.mockResolvedValue([]);
+  readWorkspaceFile.mockRejectedValue(new Error('File not found'));
 });
 
 afterEach(() => {
@@ -398,5 +401,23 @@ describe('Workspace navigation', () => {
     });
 
     expect(await screen.findByText('conversation of sess-b')).toBeInTheDocument();
+  });
+});
+
+describe('Workspace file preview', () => {
+  it('opens a link to an unlisted memory file as a memory, without the delete button', async () => {
+    readWorkspaceFile.mockImplementation(async (_workspaceId, path) =>
+      path === MEMORY.path
+        ? { path, viewer: 'markdown', content: '[notes](notes.md)' }
+        : { path, viewer: 'markdown', content: '# Notes' }
+    );
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /1 memories/ }));
+    await userEvent.click(await screen.findByText(MEMORY.name));
+    await userEvent.click(await screen.findByRole('link', { name: 'notes' }));
+
+    expect(await screen.findByRole('region', { name: 'Memory: notes.md' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
   });
 });

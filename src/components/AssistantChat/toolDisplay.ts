@@ -2,7 +2,6 @@
  * toolDisplay — pure helpers that turn a tool call's name/params/result into
  * the compact, human-readable pieces the chat renders:
  *   - summarizeToolCall:   the one-line row label   → { verb, arg }
- *   - summarizeToolResult: the right-aligned hint    → { text, tone } | null
  *   - toPreviewText:       plain text for the inline preview / terminal view
  *   - guessLang:           a fence language from a file path
  *
@@ -14,19 +13,11 @@
 
 import { isTaskActive } from '../../utils/taskDisplay';
 
-/** Result/summary tone — drives colour on the row summary. */
-export type ResultTone = 'neutral' | 'error';
-
 export interface ToolCallSummary {
   /** Human verb, e.g. "Read", "Bash", or a cleaned tool name for MCP tools. */
   verb: string;
   /** Primary argument, single-line (path, command, query, …). May be empty. */
   arg: string;
-}
-
-export interface ToolResultSummary {
-  text: string;
-  tone: ResultTone;
 }
 
 /**
@@ -212,97 +203,6 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
     default:
       return { verb: name || 'tool', arg: firstScalarParam(obj) };
   }
-};
-
-const countLines = (text: unknown): number => {
-  if (typeof text !== 'string' || text.length === 0) return 0;
-  const trimmed = text.replace(/\n$/, '');
-  if (trimmed.length === 0) return 0;
-  return trimmed.split('\n').length;
-};
-
-const arrayLen = (value: unknown): number => (Array.isArray(value) ? value.length : 0);
-
-/**
- * Build the short, right-aligned result hint shown on the row without
- * expanding (e.g. "exit 0", "128 lines", "3 results"). Returns null when there
- * is nothing useful to show (still running, or a tool we have no summary for) —
- * the row then shows a spinner (running) or nothing.
- */
-export const summarizeToolResult = (
-  toolName: string,
-  result: unknown,
-  error: string | null | undefined,
-  status: string,
-): ToolResultSummary | null => {
-  const name = cleanToolName(toolName || '');
-
-  // bash exit code is the most useful signal even on failure, so check it
-  // before the generic error branch.
-  if (name === 'bash_exec') {
-    const obj = asPayloadObject(result);
-    if (obj && obj.exitCode != null) {
-      const code = Number(obj.exitCode);
-      return { text: `exit ${code}`, tone: code === 0 ? 'neutral' : 'error' };
-    }
-    if (error) return { text: 'error', tone: 'error' };
-    if (status === 'running') return null;
-    return null;
-  }
-
-  if (error || status === 'failed') {
-    return { text: 'error', tone: 'error' };
-  }
-  if (status === 'running') return null;
-
-  const obj = asPayloadObject(result);
-  switch (name) {
-    case 'fs_read': {
-      const n = countLines(obj?.content);
-      return n ? { text: `${n} ${n === 1 ? 'line' : 'lines'}`, tone: 'neutral' } : null;
-    }
-    case 'fs_write':
-      return { text: 'written', tone: 'neutral' };
-    case 'fs_list': {
-      const n = arrayLen(obj?.entries);
-      return { text: `${n} ${n === 1 ? 'entry' : 'entries'}`, tone: 'neutral' };
-    }
-    case 'fs_glob': {
-      const n = arrayLen(obj?.matches);
-      return { text: `${n} ${n === 1 ? 'match' : 'matches'}`, tone: 'neutral' };
-    }
-    case 'web_search': {
-      const n = arrayLen(obj?.results);
-      return { text: `${n} ${n === 1 ? 'result' : 'results'}`, tone: 'neutral' };
-    }
-    case 'web_fetch':
-      return { text: 'fetched', tone: 'neutral' };
-    case 'ask_user':
-      return obj && typeof obj.answer === 'string' ? { text: 'answered', tone: 'neutral' } : null;
-    case 'create_vega_chart':
-      return typeof obj?.path === 'string' ? { text: obj.path, tone: 'neutral' } : null;
-    default:
-      return null;
-  }
-};
-
-/**
- * Workspace-relative path of the chart a completed `create_vega_chart` call
- * asked to show inline (`display` defaults to true), or null when the row has
- * no chart to render: another tool, still running, failed, validation error,
- * or `display: false` (a chart meant only for a report).
- */
-export const inlineChartPath = (
-  toolName: string,
-  result: unknown,
-  error: string | null | undefined,
-  status: string,
-): string | null => {
-  if (cleanToolName(toolName || '') !== 'create_vega_chart') return null;
-  if (error || status !== 'completed') return null;
-  const obj = asPayloadObject(result);
-  if (!obj || obj.ok !== true || typeof obj.path !== 'string' || !obj.path) return null;
-  return obj.display === false ? null : obj.path;
 };
 
 /**

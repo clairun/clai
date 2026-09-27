@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
+use crate::assistant::display;
 use crate::assistant::tools::ask_user::AskUserOption;
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantRun, AssistantSession, MessageId, RunId,
@@ -135,7 +136,7 @@ pub fn emit_event(
         run_id: run_id.map(str::to_string),
         workspace_id: session.context.workspace_id.clone(),
         timestamp: Utc::now().timestamp_millis(),
-        event,
+        event: display::event(event),
     };
 
     app.emit(ASSISTANT_EVENT_NAME, envelope)

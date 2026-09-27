@@ -79,6 +79,18 @@ const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry };
 type ArtifactImportKind = 'files' | 'folders';
+
+// A minimal entry for a workspace-relative path the page has no listing for;
+// the preview panel derives its viewer from the path.
+const fileEntryForPath = (path: string): WorkspaceFileEntry => ({
+  path,
+  relativePath: path,
+  name: path.slice(path.lastIndexOf('/') + 1),
+  viewer: '',
+  size: null,
+  updatedAt: null,
+  preview: null,
+});
 // The per-workspace "view state": which drawer chip is open plus its
 // contextual slide-out (open artifact/memory preview, or task transcript).
 // Kept per workspaceId so switching workspaces neither leaks the previous
@@ -2027,23 +2039,24 @@ const Workspace = () => {
   // still opens (the panel derives its viewer from path). Artifacts have no
   // list to resolve against — the panel lazy-loads its tree one directory at a
   // time — so a link to one always takes the synthesized path.
+  // A file under `.clai/memory/` is a memory even when the list does not carry
+  // it, so it never gets the artifact-only delete button.
+  const previewEntryForPath = useCallback(
+    (path: string): PreviewEntry => {
+      const memoryMatch = memories.find((item) => item.path === path);
+      if (memoryMatch) return { kind: 'memory', entry: memoryMatch };
+      const kind = path.startsWith('.clai/memory/') ? 'memory' : 'artifact';
+      return { kind, entry: fileEntryForPath(path) };
+    },
+    [memories]
+  );
   const navigatePreviewFile = useCallback(
     (path: string) => {
-      const memoryMatch = memories.find((item) => item.path === path);
-      const kind: PreviewEntry['kind'] = memoryMatch ? 'memory' : 'artifact';
-      const entry: WorkspaceFileEntry = memoryMatch ?? {
-        path,
-        relativePath: path,
-        name: path.slice(path.lastIndexOf('/') + 1),
-        viewer: '',
-        size: null,
-        updatedAt: null,
-        preview: null,
-      };
-      patchWorkspaceUi({ previewEntry: { kind, entry }, viewingTask: null });
+      patchWorkspaceUi({ previewEntry: previewEntryForPath(path), viewingTask: null });
     },
-    [memories, patchWorkspaceUi]
+    [previewEntryForPath, patchWorkspaceUi]
   );
+
   const messages = storeMessages || EMPTY_MESSAGES;
   // While the initial entry load is in flight and no messages have arrived
   // yet, the conversation is unknown — not provably empty. Suppress the

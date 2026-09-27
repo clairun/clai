@@ -448,7 +448,9 @@ export type TestResult = { success: boolean, error: string | null, };
 
 export type ToolCallStatus = "pending" | "running" | "completed" | "failed";
 
-export type ToolInvocation = { id: string, runId: string, sessionId: string, toolName: string, params: JsonValue, status: ToolCallStatus, result: JsonValue | null, error: string | null, startedAt: bigint, completedAt: bigint | null, };
+export type ToolInvocation = { id: string, runId: string, sessionId: string, toolName: string, params: JsonValue, status: ToolCallStatus, result: JsonValue | null, resultSummary?: ToolResultSummary | null, hasFullResult: boolean, hasFullInput: boolean, error: string | null, startedAt: bigint, completedAt: bigint | null, };
+
+export type ToolResultSummary = { text: string, tone: string, };
 
 export type UpdateMcpServerRequest = { id: string, name: string, enabled: boolean, transport: McpServerTransport, auth: McpServerAuthRequest, };
 
