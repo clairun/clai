@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use crate::assistant::compaction;
+use crate::assistant::display;
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository;
@@ -272,7 +273,11 @@ pub async fn assistant_load_session_messages(
     state: State<'_, AppState>,
 ) -> Result<Vec<AssistantMessage>, String> {
     let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
-    repository::list_messages(&target_pool, &session_id).await
+    Ok(repository::list_messages(&target_pool, &session_id)
+        .await?
+        .into_iter()
+        .map(display::message)
+        .collect())
 }
 
 #[tauri::command]
@@ -381,7 +386,11 @@ pub async fn assistant_load_session_messages_page(
             }
         }
     }
-    let tool_calls = repository::list_tool_calls_by_ids(&target_pool, &tool_call_ids).await?;
+    let tool_calls = repository::list_tool_calls_by_ids(&target_pool, &tool_call_ids)
+        .await?
+        .into_iter()
+        .map(display::tool_call)
+        .collect();
 
     // Counted from the *requested* session (not the cursor's), so the total
     // always covers the full conversation regardless of how deep into the
@@ -394,7 +403,7 @@ pub async fn assistant_load_session_messages_page(
     .await?;
 
     Ok(AssistantMessagePage {
-        messages,
+        messages: messages.into_iter().map(display::message).collect(),
         tool_calls,
         next_cursor,
         has_more,
@@ -417,7 +426,32 @@ pub async fn assistant_list_tool_calls(
     state: State<'_, AppState>,
 ) -> Result<Vec<ToolInvocation>, String> {
     let (target_pool, _session) = session_pool(state.inner(), &request.session_id).await?;
-    repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref()).await
+    Ok(
+        repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref())
+            .await?
+            .into_iter()
+            .map(display::tool_call)
+            .collect(),
+    )
+}
+
+#[tauri::command]
+pub async fn assistant_get_tool_call_result(
+    session_id: String,
+    tool_call_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<serde_json::Value>, String> {
+    let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
+    let call = repository::get_tool_call_for_session(&target_pool, &session_id, &tool_call_id)
+        .await?
+        .ok_or_else(|| format!("Tool call not found in session: {}", tool_call_id))?;
+    match call.result {
+        Some(result) => Ok(Some(result)),
+        None => {
+            repository::get_tool_result_message_payload(&target_pool, &session_id, &tool_call_id)
+                .await
+        }
+    }
 }
 
 /// Validate the attachments on a user send: only `ContentPart::Image` parts may

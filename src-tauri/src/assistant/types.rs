@@ -376,6 +376,14 @@ pub enum ToolCallStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
+pub struct ToolResultSummary {
+    pub text: String,
+    pub tone: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ToolInvocation {
     pub id: ToolCallId,
     pub run_id: RunId,
@@ -385,6 +393,10 @@ pub struct ToolInvocation {
     pub status: ToolCallStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<ToolResultSummary>,
+    #[serde(default)]
+    pub has_full_result: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub started_at: i64,

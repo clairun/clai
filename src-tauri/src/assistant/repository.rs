@@ -1308,6 +1308,8 @@ fn map_tool_call_row(row: &sqlx::sqlite::SqliteRow) -> Result<ToolInvocation, St
         params: parse_json(&row.get::<String, _>("params_json"), "tool call params")?,
         status: parse_json::<ToolCallStatus>(&row.get::<String, _>("status"), "tool call status")?,
         result: parse_optional_json(row.get("result_json"), "tool call result")?,
+        result_summary: None,
+        has_full_result: false,
         error: row.get("error"),
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
@@ -1326,6 +1328,8 @@ pub async fn create_tool_call(
         params: params.params,
         status: params.status,
         result: None,
+        result_summary: None,
+        has_full_result: false,
         error: None,
         started_at: now_ms(),
         completed_at: None,
@@ -1394,6 +1398,53 @@ pub async fn update_tool_call(
     .map_err(|e| format!("Failed to load updated tool call: {}", e))?;
 
     map_tool_call_row(&row)
+}
+
+pub async fn get_tool_call_for_session(
+    pool: &DbPool,
+    session_id: &str,
+    tool_call_id: &str,
+) -> Result<Option<ToolInvocation>, String> {
+    let row = sqlx::query(
+        "SELECT id, run_id, session_id, tool_name, params_json, status, result_json, error, started_at, completed_at FROM assistant_tool_calls WHERE session_id = ? AND id = ?",
+    )
+    .bind(session_id)
+    .bind(tool_call_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load assistant tool call: {}", e))?;
+    row.as_ref().map(map_tool_call_row).transpose()
+}
+
+pub async fn get_tool_result_message_payload(
+    pool: &DbPool,
+    session_id: &str,
+    tool_call_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let rows = sqlx::query(
+        r#"SELECT content_json FROM assistant_messages WHERE session_id = ? AND role = '"tool"' ORDER BY created_at DESC"#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load tool result messages: {}", e))?;
+    for row in rows {
+        let content: Vec<ContentPart> =
+            parse_json(&row.get::<String, _>("content_json"), "tool result content")?;
+        for part in content {
+            if let ContentPart::ToolResult {
+                tool_call_id: id,
+                payload,
+                ..
+            } = part
+            {
+                if id == tool_call_id {
+                    return Ok(Some(payload));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub async fn list_tool_calls(

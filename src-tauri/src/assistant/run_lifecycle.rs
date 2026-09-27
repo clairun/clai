@@ -375,6 +375,8 @@ mod tests {
             params: serde_json::json!({}),
             status,
             result: None,
+            result_summary: None,
+            has_full_result: false,
             error: None,
             started_at: 0,
             completed_at: None,

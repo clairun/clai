@@ -1030,3 +1030,78 @@ async fn test_list_messages_orders_same_timestamp_by_insertion() {
 
     assert_eq!(loaded, inserted);
 }
+
+#[tokio::test]
+async fn tool_result_lookup_is_session_scoped_and_keeps_full_payload() {
+    let (_tmp, pool) = workspace_pool().await;
+    let first = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    let second = create_session(
+        &pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title: None,
+            context: sample_context(),
+        },
+    )
+    .await
+    .unwrap();
+    let run = create_run(
+        &pool,
+        CreateRunParams {
+            session_id: first.id.clone(),
+            status: RunStatus::Running,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "conn".into(),
+            protocol_id: "openai".into(),
+            model_id: "model".into(),
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    create_tool_call(
+        &pool,
+        CreateToolCallParams {
+            id: "call-1".into(),
+            run_id: run.id,
+            session_id: first.id.clone(),
+            tool_name: "bash_exec".into(),
+            params: serde_json::json!({}),
+            status: ToolCallStatus::Running,
+        },
+    )
+    .await
+    .unwrap();
+    let full = serde_json::json!({"stdout": "full output", "exitCode": 0});
+    update_tool_call(
+        &pool,
+        "call-1",
+        ToolCallStatus::Completed,
+        Some(&full),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        get_tool_call_for_session(&pool, &first.id, "call-1")
+            .await
+            .unwrap()
+            .unwrap()
+            .result,
+        Some(full)
+    );
+    assert!(get_tool_call_for_session(&pool, &second.id, "call-1")
+        .await
+        .unwrap()
+        .is_none());
+}
