@@ -182,8 +182,9 @@ fn summary(
 pub fn tool_call(mut call: ToolInvocation) -> ToolInvocation {
     call.result_summary = summary(&call.tool_name, call.result.as_ref(), call.error.as_deref());
     call.has_full_result = call.result.is_some();
-    call.has_full_input = true;
-    call.params = compact_input(&call.tool_name, &call.params);
+    let compact_params = compact_input(&call.tool_name, &call.params);
+    call.has_full_input = compact_params != call.params;
+    call.params = compact_params;
     call.result = call
         .result
         .as_ref()
@@ -365,6 +366,74 @@ mod tests {
         assert!(displayed_page.tool_calls[0].has_full_input);
         assert!(matches!(&displayed_page.messages[0].content[0],
             ContentPart::ToolUse { arguments, .. } if arguments == &json!({"path":"report.md"})));
+    }
+
+    #[test]
+    fn has_full_input_only_when_projection_changes_params() {
+        let cases = [
+            (json!({}), json!({}), false),
+            (
+                json!({"path": "report.md"}),
+                json!({"path": "report.md"}),
+                false,
+            ),
+            (
+                json!({"path": "report.md", "content": "short"}),
+                json!({"path": "report.md"}),
+                true,
+            ),
+            (json!(["report.md"]), Value::Null, true),
+            (json!("report.md"), Value::Null, true),
+            (
+                json!("{\"path\":\"report.md\"}"),
+                json!({"path": "report.md"}),
+                true,
+            ),
+        ];
+        for (params, expected, has_full_input) in cases {
+            let mut invocation = call("fs_write", Value::Null);
+            invocation.params = params;
+            let displayed = tool_call(invocation);
+            assert_eq!(displayed.params, expected);
+            assert_eq!(displayed.has_full_input, has_full_input);
+        }
+
+        let long_path = "x".repeat(301);
+        let mut invocation = call("fs_write", Value::Null);
+        invocation.params = json!({"path": long_path});
+        let displayed = tool_call(invocation);
+        assert!(displayed.has_full_input);
+        assert_eq!(
+            displayed.params["path"].as_str().unwrap().chars().count(),
+            301
+        );
+        assert!(displayed.params["path"].as_str().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn tool_use_without_matching_call_uses_the_same_input_projection() {
+        use crate::assistant::types::MessageRole;
+        let full = json!({"path": "report.md", "content": "private"});
+        let displayed = page(AssistantMessagePage {
+            messages: vec![AssistantMessage {
+                id: "m".into(),
+                session_id: "s".into(),
+                role: MessageRole::Assistant,
+                content: vec![ContentPart::ToolUse {
+                    tool_call_id: "missing".into(),
+                    tool_name: "fs_write".into(),
+                    arguments: full,
+                }],
+                created_at: 1,
+                provider_metadata: None,
+            }],
+            tool_calls: vec![],
+            next_cursor: None,
+            has_more: false,
+            total_count: 1,
+        });
+        assert!(matches!(&displayed.messages[0].content[0],
+            ContentPart::ToolUse { arguments, .. } if arguments == &json!({"path": "report.md"})));
     }
 
     #[test]
