@@ -64,41 +64,33 @@ describe('chart calls', () => {
 
 describe('chartArtifactPath', () => {
   const result = { ok: true, path: 'charts/q3.vl.json' };
-  const params = { title: 'Q3', path: 'charts/q3.vl.json' };
 
   it('returns the saved path of a completed chart call', () => {
-    expect(chartArtifactPath('create_vega_chart', result, params, null, 'completed')).toBe('charts/q3.vl.json');
+    expect(chartArtifactPath('create_vega_chart', result, null, 'completed')).toBe('charts/q3.vl.json');
     // Old persisted results may still carry `display`; it no longer matters.
     expect(
-      chartArtifactPath('create_vega_chart', { ...result, display: false }, params, null, 'completed')
+      chartArtifactPath('create_vega_chart', { ...result, display: false }, null, 'completed')
     ).toBe('charts/q3.vl.json');
     // Claude Code stores the JSON as text; Codex reaches us via MCP envelopes.
     expect(
-      chartArtifactPath('mcp__clai__create_vega_chart', JSON.stringify(result), params, null, 'completed')
+      chartArtifactPath('mcp__clai__create_vega_chart', JSON.stringify(result), null, 'completed')
     ).toBe('charts/q3.vl.json');
     expect(
       chartArtifactPath(
         'create_vega_chart',
         { content: [{ type: 'text', text: JSON.stringify(result) }] },
-        params,
         null,
         'completed'
       )
     ).toBe('charts/q3.vl.json');
   });
 
-  it('falls back to the params path and drops a leading slash', () => {
-    expect(chartArtifactPath('create_vega_chart', null, { path: '/charts/q3.vl.json' }, null, 'completed')).toBe(
-      'charts/q3.vl.json'
-    );
-  });
-
   it('returns null when there is no saved chart', () => {
-    expect(chartArtifactPath('create_vega_chart', result, params, 'schema error', 'failed')).toBeNull();
-    expect(chartArtifactPath('create_vega_chart', null, params, null, 'running')).toBeNull();
-    expect(chartArtifactPath('create_vega_chart', { ok: false }, params, null, 'completed')).toBeNull();
-    expect(chartArtifactPath('create_vega_chart', null, {}, null, 'completed')).toBeNull();
-    expect(chartArtifactPath('fs_write', result, params, null, 'completed')).toBeNull();
+    expect(chartArtifactPath('create_vega_chart', result, 'schema error', 'failed')).toBeNull();
+    expect(chartArtifactPath('create_vega_chart', null, null, 'running')).toBeNull();
+    expect(chartArtifactPath('create_vega_chart', { ok: false }, null, 'completed')).toBeNull();
+    expect(chartArtifactPath('create_vega_chart', null, null, 'completed')).toBeNull();
+    expect(chartArtifactPath('fs_write', result, null, 'completed')).toBeNull();
   });
 });
 

@@ -215,17 +215,6 @@ describe('ChatMessageList', () => {
     expect(getToolCallResult).not.toHaveBeenCalled();
   });
 
-  it('opens the params path when the compact result carries no path', () => {
-    const [messages, toolCalls] = chartCall({
-      params: { title: 'Q3 Revenue', path: '/charts/from-params.vl.json' },
-      result: { ok: true },
-    });
-    const onOpenArtifact = vi.fn();
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenArtifact={onOpenArtifact} />);
-    fireEvent.click(screen.getByRole('button', { name: /Open chart Q3 Revenue/ }));
-    expect(onOpenArtifact).toHaveBeenCalledWith('charts/from-params.vl.json');
-  });
-
   it('shows a running chart call as a plain tool row', () => {
     const [messages, toolCalls] = chartCall({
       status: 'running',

@@ -611,7 +611,9 @@ interface ChatMessageListProps {
   // cards then render inert.
   onOpenTask?: (taskId: string) => void;
   // Open a workspace-relative file in the artifacts panel (a chart call's
-  // saved spec). Omit in read-only views — chart rows then expand as usual.
+  // saved spec). Omit in read-only transcripts: chart rows are then normal
+  // expandable rows, and the chart itself appears only where the reply
+  // embedded it.
   onOpenArtifact?: (path: string) => void;
 }
 
@@ -1362,8 +1364,8 @@ const ToolRow = memo((props: ToolRowProps) => {
   const { onOpenArtifact } = useTaskCardSurface();
   const { toolName, params, status, result, error } = props;
   const chartPath = useMemo(
-    () => chartArtifactPath(toolName, result, params, error, status),
-    [toolName, result, params, error, status]
+    () => chartArtifactPath(toolName, result, error, status),
+    [toolName, result, error, status]
   );
   if (chartPath && onOpenArtifact) {
     return (

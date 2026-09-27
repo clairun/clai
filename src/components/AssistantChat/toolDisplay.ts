@@ -214,7 +214,6 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
 export const chartArtifactPath = (
   toolName: string,
   result: unknown,
-  params: unknown,
   error: string | null | undefined,
   status: string,
 ): string | null => {
@@ -222,8 +221,7 @@ export const chartArtifactPath = (
   if (error || status !== 'completed') return null;
   const obj = asPayloadObject(result);
   if (obj?.ok === false) return null;
-  const path = typeof obj?.path === 'string' && obj.path ? obj.path : asParamsObject(params)?.path;
-  return typeof path === 'string' && path ? path.replace(/^\/+/, '') : null;
+  return typeof obj?.path === 'string' && obj.path ? obj.path : null;
 };
 
 /**
