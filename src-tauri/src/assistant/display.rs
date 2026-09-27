@@ -2,7 +2,7 @@ use serde_json::{json, Map, Value};
 
 use super::events::AssistantUiEvent;
 use super::types::{
-    AssistantMessage, ContentPart, ToolCallStatus, ToolInvocation, ToolResultSummary,
+    AssistantMessage, AssistantMessagePage, ContentPart, ToolInvocation, ToolResultSummary,
 };
 
 fn clean_tool_name(name: &str) -> &str {
@@ -18,6 +18,9 @@ fn clean_tool_name(name: &str) -> &str {
 fn payload_object(value: &Value) -> Option<Map<String, Value>> {
     match value {
         Value::Object(object) => {
+            if let Some(structured) = object.get("structuredContent").and_then(Value::as_object) {
+                return Some(structured.clone());
+            }
             if let Some(parts) = object.get("content").and_then(Value::as_array) {
                 let text = parts.iter().find_map(|part| {
                     (part.get("type")?.as_str()? == "text")
@@ -49,6 +52,38 @@ fn clipped(value: Option<&Value>) -> String {
     } else {
         prefix
     }
+}
+
+fn compact_input(tool_name: &str, input: &Value) -> Value {
+    let parsed = input
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok());
+    let Some(object) = parsed.as_ref().unwrap_or(input).as_object() else {
+        return Value::Null;
+    };
+    let preferred = match clean_tool_name(tool_name) {
+        "fs_read" | "fs_write" | "fs_list" | "fs_request_grant" => "path",
+        "fs_glob" => "pattern",
+        "bash_exec" => "command",
+        "web_search" => "query",
+        "web_fetch" => "url",
+        "ask_user" => "question",
+        "create_vega_chart" => "title",
+        _ => "",
+    };
+    let selected = object.get_key_value(preferred).or_else(|| {
+        object.iter().find(|(_, value)| {
+            matches!(value, Value::String(_) | Value::Number(_) | Value::Bool(_))
+        })
+    });
+    let Some((key, value)) = selected else {
+        return json!({});
+    };
+    let preview = match value {
+        Value::String(_) => Value::String(clipped(Some(value))),
+        other => other.clone(),
+    };
+    json!({key: preview})
 }
 
 fn compact_result(tool_name: &str, result: &Value) -> Option<Value> {
@@ -146,7 +181,9 @@ fn summary(
 
 pub fn tool_call(mut call: ToolInvocation) -> ToolInvocation {
     call.result_summary = summary(&call.tool_name, call.result.as_ref(), call.error.as_deref());
-    call.has_full_result = call.result.is_some() || call.status == ToolCallStatus::Failed;
+    call.has_full_result = call.result.is_some();
+    call.has_full_input = true;
+    call.params = compact_input(&call.tool_name, &call.params);
     call.result = call
         .result
         .as_ref()
@@ -156,11 +193,23 @@ pub fn tool_call(mut call: ToolInvocation) -> ToolInvocation {
 
 pub fn message(mut message: AssistantMessage) -> AssistantMessage {
     for part in &mut message.content {
-        if let ContentPart::ToolResult { payload, .. } = part {
-            *payload = Value::Null;
+        match part {
+            ContentPart::ToolResult { payload, .. } => *payload = Value::Null,
+            ContentPart::ToolUse {
+                tool_name,
+                arguments,
+                ..
+            } => *arguments = compact_input(tool_name, arguments),
+            _ => {}
         }
     }
     message
+}
+
+pub fn page(mut page: AssistantMessagePage) -> AssistantMessagePage {
+    page.messages = page.messages.into_iter().map(message).collect();
+    page.tool_calls = page.tool_calls.into_iter().map(tool_call).collect();
+    page
 }
 
 pub fn event(event: AssistantUiEvent) -> AssistantUiEvent {
@@ -198,6 +247,7 @@ pub fn event(event: AssistantUiEvent) -> AssistantUiEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::ToolCallStatus;
 
     fn call(tool_name: &str, result: Value) -> ToolInvocation {
         ToolInvocation {
@@ -210,6 +260,7 @@ mod tests {
             result: Some(result),
             result_summary: None,
             has_full_result: false,
+            has_full_input: false,
             error: None,
             started_at: 0,
             completed_at: Some(1),
@@ -269,6 +320,90 @@ mod tests {
         assert!(
             matches!(&message.content[0], ContentPart::ToolResult { payload: Value::Null, tool_call_id, .. } if tool_call_id == "t")
         );
+    }
+
+    #[test]
+    fn both_input_copies_are_compact_in_events_and_pages() {
+        use crate::assistant::types::MessageRole;
+        let large = "payload".repeat(10_000);
+        let full = json!({"path": "report.md", "content": large});
+        let message = AssistantMessage {
+            id: "m".into(),
+            session_id: "s".into(),
+            role: MessageRole::Assistant,
+            content: vec![ContentPart::ToolUse {
+                tool_call_id: "t".into(),
+                tool_name: "fs_write".into(),
+                arguments: full.clone(),
+            }],
+            created_at: 1,
+            provider_metadata: None,
+        };
+        let mut invocation = call("fs_write", Value::Null);
+        invocation.params = full;
+        let displayed_event = event(AssistantUiEvent::AssistantMessageUpdated {
+            message: message.clone(),
+        });
+        let displayed_call = event(AssistantUiEvent::ToolCallStarted {
+            tool_call: invocation.clone(),
+        });
+        let displayed_page = page(AssistantMessagePage {
+            messages: vec![message],
+            tool_calls: vec![invocation],
+            next_cursor: None,
+            has_more: false,
+            total_count: 1,
+        });
+        let serialized =
+            serde_json::to_string(&(displayed_event, displayed_call, &displayed_page)).unwrap();
+        assert!(!serialized.contains("payloadpayload"));
+        assert!(serialized.contains("report.md"));
+        assert_eq!(
+            displayed_page.tool_calls[0].params,
+            json!({"path":"report.md"})
+        );
+        assert!(displayed_page.tool_calls[0].has_full_input);
+        assert!(matches!(&displayed_page.messages[0].content[0],
+            ContentPart::ToolUse { arguments, .. } if arguments == &json!({"path":"report.md"})));
+    }
+
+    #[test]
+    fn filesystem_summaries_handle_bare_and_client_envelopes() {
+        let cases = [
+            ("fs_list", json!({"entries": [1, 2]}), "2 entries"),
+            ("fs_read", json!({"content": "one\ntwo\n"}), "2 lines"),
+            ("fs_glob", json!({"matches": ["a"]}), "1 match"),
+        ];
+        for (name, value, expected) in cases {
+            let envelope = json!({"content": [{"type": "text", "text": value.to_string()}]});
+            assert_eq!(
+                tool_call(call(name, value)).result_summary.unwrap().text,
+                expected
+            );
+            assert_eq!(
+                tool_call(call(name, envelope)).result_summary.unwrap().text,
+                expected
+            );
+        }
+        let structured = json!({"content": [{"type":"image", "data":"large"}],
+            "structuredContent": {"entries": [1]}});
+        assert_eq!(
+            tool_call(call("fs_list", structured))
+                .result_summary
+                .unwrap()
+                .text,
+            "1 entry"
+        );
+        let mut failed = call("fs_read", json!({"content": []}));
+        failed.result = None;
+        failed.error = Some("disk error".into());
+        failed.status = ToolCallStatus::Failed;
+        let displayed = tool_call(failed);
+        assert_eq!(displayed.result_summary.unwrap().text, "error");
+        assert!(!displayed.has_full_result);
+        assert!(tool_call(call("fs_read", json!({"content": []})))
+            .result_summary
+            .is_none());
     }
 
     #[test]

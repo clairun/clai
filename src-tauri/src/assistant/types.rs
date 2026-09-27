@@ -397,6 +397,8 @@ pub struct ToolInvocation {
     pub result_summary: Option<ToolResultSummary>,
     #[serde(default)]
     pub has_full_result: bool,
+    #[serde(default)]
+    pub has_full_input: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub started_at: i64,

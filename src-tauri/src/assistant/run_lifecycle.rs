@@ -376,6 +376,7 @@ mod tests {
             result: None,
             result_summary: None,
             has_full_result: false,
+            has_full_input: false,
             error: None,
             started_at: 0,
             completed_at: None,
