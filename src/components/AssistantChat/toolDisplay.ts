@@ -206,22 +206,24 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
 };
 
 /**
- * Workspace-relative path of the chart a completed `create_vega_chart` call
- * asked to show inline (`display` defaults to true), or null when the row has
- * no chart to render: another tool, still running, failed, validation error,
- * or `display: false` (a chart meant only for a report).
+ * Workspace-relative path of the chart file a successful `create_vega_chart`
+ * call saved, so its row can open it in the artifacts panel; null for another
+ * tool, or a chart call still running, failed, or rejected. The chat draws the
+ * chart itself only from the markdown embed in the reply.
  */
-export const inlineChartPath = (
+export const chartArtifactPath = (
   toolName: string,
   result: unknown,
+  params: unknown,
   error: string | null | undefined,
   status: string,
 ): string | null => {
   if (cleanToolName(toolName || '') !== 'create_vega_chart') return null;
   if (error || status !== 'completed') return null;
   const obj = asPayloadObject(result);
-  if (!obj || obj.ok !== true || typeof obj.path !== 'string' || !obj.path) return null;
-  return obj.display === false ? null : obj.path;
+  if (obj?.ok === false) return null;
+  const path = typeof obj?.path === 'string' && obj.path ? obj.path : asParamsObject(params)?.path;
+  return typeof path === 'string' && path ? path.replace(/^\/+/, '') : null;
 };
 
 /**

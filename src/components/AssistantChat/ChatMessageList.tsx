@@ -9,7 +9,6 @@ import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
-import VegaChart from '../Chat/VegaChart';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from '../Chat/WorkspaceFileContext';
 import VirtualizedList from '../common/VirtualizedList';
 import type {
@@ -22,10 +21,10 @@ import type {
 import {
   asParamsObject,
   asPayloadObject,
+  chartArtifactPath,
   cleanToolName,
   extractMcpText,
   guessLang,
-  inlineChartPath,
   inlineTaskCard,
   summarizeToolCall,
   toPreviewText,
@@ -611,6 +610,9 @@ interface ChatMessageListProps {
   // Open a delegated task's own log, by task id. Omit in read-only views —
   // cards then render inert.
   onOpenTask?: (taskId: string) => void;
+  // Open a workspace-relative file in the artifacts panel (a chart call's
+  // saved spec). Omit in read-only views — chart rows then expand as usual.
+  onOpenArtifact?: (path: string) => void;
 }
 
 const ChatMessageList = ({
@@ -636,6 +638,7 @@ const ChatMessageList = ({
   onLoadOlderMessages,
   taskRoster = EMPTY_ROSTER,
   onOpenTask,
+  onOpenArtifact,
 }: ChatMessageListProps) => {
   // Build a Map of toolCalls keyed by id once per render, so every
   // tool_use part lookup is O(1) instead of an Array.find walk. Memoized
@@ -793,8 +796,8 @@ const ChatMessageList = ({
   const handleApproachTop = hasOlderMessages ? onLoadOlderMessages : undefined;
 
   const taskCardSurface = useMemo<TaskCardSurface>(
-    () => ({ roster: taskRoster, onOpenTask }),
-    [taskRoster, onOpenTask]
+    () => ({ roster: taskRoster, onOpenTask, onOpenArtifact }),
+    [taskRoster, onOpenTask, onOpenArtifact]
   );
 
   // Footer rendered inside the scroll area, right after the last message.
@@ -1222,7 +1225,7 @@ interface ToolItem {
 
 /**
  * A tool list split at the rows that render something the user came for: a
- * chart, a task hand-off, a task's answer. Those are the agent's output, not
+ * task hand-off, a task's answer. Those are the agent's output, not
  * noise, so they are never collapsed; the plain rows on either side collapse
  * as independent runs.
  *
@@ -1234,7 +1237,6 @@ type ToolSegment =
   // `key` is the first call's id so a run keeps its expanded/collapsed
   // state as later calls append to it.
   | { kind: 'rows'; key: string; items: ToolItem[] }
-  | { kind: 'chart'; key: string; path: string }
   | { kind: 'task'; key: string; card: TaskCallCard };
 
 const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
@@ -1246,12 +1248,6 @@ const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
     run = [];
   };
   for (const tu of toolUses) {
-    const chartPath = inlineChartPath(tu.toolName, tu.result, tu.error, tu.status);
-    if (chartPath) {
-      flushRun();
-      segments.push({ kind: 'chart', key: tu.toolCallId, path: chartPath });
-      continue;
-    }
     const card = inlineTaskCard(tu.toolName, tu.result, tu.error, tu.status);
     if (card && card.variant === 'full') {
       flushRun();
@@ -1279,11 +1275,8 @@ const ChatTaskCard = memo(({ card }: { card: TaskCallCard }) => {
  * Beyond MAX_VISIBLE_TOOLS, older calls collapse behind a "show N earlier"
  * toggle so a 35-tool turn stays scannable.
  *
- * A displayed chart replaces its call's row, like a task card, and breaks
- * the count: it stays on screen wherever it was produced and the calls that
- * follow it collapse
- * *below* it, so the chart never gets hidden and never gets pushed down by
- * rows appearing above it while the run is still streaming.
+ * A full task card breaks the count: it stays on screen wherever it was
+ * produced and the calls that follow it collapse *below* it.
  */
 const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
   const segments = useMemo(() => splitAtRichRows(toolUses), [toolUses]);
@@ -1293,11 +1286,7 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
   return (
     <div className={styles.toolList}>
       {segments.map((seg) =>
-        seg.kind === 'chart' ? (
-          <div key={seg.key} className={styles.toolChartCard}>
-            <VegaChart specPath={seg.path} />
-          </div>
-        ) : seg.kind === 'task' ? (
+        seg.kind === 'task' ? (
           <ChatTaskCard key={seg.key} card={seg.card} />
         ) : (
           <CollapsibleToolRows key={seg.key} items={seg.items} />
@@ -1345,6 +1334,7 @@ const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
             toolName={tu.toolName}
             params={tu.params ?? tu.arguments}
             status={tu.status}
+            result={tu.result}
             error={tu.error}
             call={tu.call}
           />
@@ -1363,11 +1353,67 @@ interface ToolRowProps {
   toolName: string;
   params?: unknown;
   status: string;
+  result?: unknown;
   error?: string | null;
   call?: ToolInvocation;
 }
 
-const ToolRow = memo(({ toolName, params, status, error, call }: ToolRowProps) => {
+const ToolRow = memo((props: ToolRowProps) => {
+  const { onOpenArtifact } = useTaskCardSurface();
+  const { toolName, params, status, result, error } = props;
+  const chartPath = useMemo(
+    () => chartArtifactPath(toolName, result, params, error, status),
+    [toolName, result, params, error, status]
+  );
+  if (chartPath && onOpenArtifact) {
+    return (
+      <ChartToolRow toolName={toolName} params={params} path={chartPath} onOpen={onOpenArtifact} />
+    );
+  }
+  return <ExpandableToolRow {...props} />;
+});
+
+/**
+ * A saved chart's row. The chart itself is drawn by the reply's markdown
+ * embed, so the row has nothing to expand: it opens the file in the
+ * artifacts panel instead.
+ */
+const ChartToolRow = ({
+  toolName,
+  params,
+  path,
+  onOpen,
+}: {
+  toolName: string;
+  params?: unknown;
+  path: string;
+  onOpen: (path: string) => void;
+}) => {
+  const { verb, arg } = summarizeToolCall(toolName, params);
+  return (
+    <div className={styles.toolRowBlock}>
+      <button
+        type="button"
+        className={styles.toolRow}
+        onClick={() => onOpen(path)}
+        aria-label={`Open chart ${arg || path} in artifacts`}
+        title={`Open ${path} in artifacts`}
+      >
+        <span className={styles.toolRowIcon}>✓</span>
+        <span className={styles.toolRowVerb}>{verb}</span>
+        {arg && <span className={styles.toolRowArg}>{arg}</span>}
+        <span className={styles.toolRowRight}>
+          <span className={styles.toolRowSummary}>{path}</span>
+          <span className={styles.toolRowChevron} aria-hidden="true">
+            ↗
+          </span>
+        </span>
+      </button>
+    </div>
+  );
+};
+
+const ExpandableToolRow = ({ toolName, params, status, error, call }: ToolRowProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'output' | 'input'>('output');
 
@@ -1492,7 +1538,7 @@ const ToolRow = memo(({ toolName, params, status, error, call }: ToolRowProps) =
       )}
     </div>
   );
-});
+};
 
 /**
  * NoticesBanner — expandable banner showing policy warnings for a run
