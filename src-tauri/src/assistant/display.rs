@@ -165,8 +165,8 @@ fn summary(
                 )
             })
         }
-        "fs_write" => Some("written".into()),
-        "web_fetch" => Some("fetched".into()),
+        "fs_write" => result.map(|_| "written".into()),
+        "web_fetch" => result.map(|_| "fetched".into()),
         "ask_user" => field("answer")
             .and_then(Value::as_str)
             .map(|_| "answered".into()),
@@ -473,6 +473,24 @@ mod tests {
         assert!(tool_call(call("fs_read", json!({"content": []})))
             .result_summary
             .is_none());
+    }
+
+    #[test]
+    fn write_and_fetch_summaries_wait_for_a_result() {
+        for (name, expected) in [("fs_write", "written"), ("web_fetch", "fetched")] {
+            let mut running = call(name, json!({}));
+            running.result = None;
+            running.status = ToolCallStatus::Running;
+            running.completed_at = None;
+            assert!(tool_call(running).result_summary.is_none());
+            assert_eq!(
+                tool_call(call(name, json!({"ok": true})))
+                    .result_summary
+                    .unwrap()
+                    .text,
+                expected
+            );
+        }
     }
 
     #[test]
