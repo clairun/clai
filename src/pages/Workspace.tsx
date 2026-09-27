@@ -79,6 +79,18 @@ const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry };
 type ArtifactImportKind = 'files' | 'folders';
+
+// A minimal entry for a workspace-relative path the page has no listing for;
+// the preview panel derives its viewer from the path.
+const fileEntryForPath = (path: string): WorkspaceFileEntry => ({
+  path,
+  relativePath: path,
+  name: path.slice(path.lastIndexOf('/') + 1),
+  viewer: '',
+  size: null,
+  updatedAt: null,
+  preview: null,
+});
 // The per-workspace "view state": which drawer chip is open plus its
 // contextual slide-out (open artifact/memory preview, or task transcript).
 // Kept per workspaceId so switching workspaces neither leaks the previous
@@ -1427,6 +1439,7 @@ interface ChatFirstLayoutProps {
   // keep a stable identity across details polls; see `chatRoster` below.
   taskRoster: readonly WorkspaceAgentResponse[];
   onOpenTask: (taskId: string) => void;
+  onOpenArtifact: (path: string) => void;
 }
 
 const ChatFirstLayout = ({
@@ -1447,6 +1460,7 @@ const ChatFirstLayout = ({
   onLoadOlderMessages,
   taskRoster,
   onOpenTask,
+  onOpenArtifact,
 }: ChatFirstLayoutProps) => {
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
@@ -1530,6 +1544,7 @@ const ChatFirstLayout = ({
             onLoadOlderMessages={onLoadOlderMessages}
             taskRoster={taskRoster}
             onOpenTask={onOpenTask}
+            onOpenArtifact={onOpenArtifact}
           />
           <AskUserPanel sessionId={sessionId} />
           <InlineApprovalCard workspaceId={workspaceId} />
@@ -2031,18 +2046,24 @@ const Workspace = () => {
     (path: string) => {
       const memoryMatch = memories.find((item) => item.path === path);
       const kind: PreviewEntry['kind'] = memoryMatch ? 'memory' : 'artifact';
-      const entry: WorkspaceFileEntry = memoryMatch ?? {
-        path,
-        relativePath: path,
-        name: path.slice(path.lastIndexOf('/') + 1),
-        viewer: '',
-        size: null,
-        updatedAt: null,
-        preview: null,
-      };
+      const entry = memoryMatch ?? fileEntryForPath(path);
       patchWorkspaceUi({ previewEntry: { kind, entry }, viewingTask: null });
     },
     [memories, patchWorkspaceUi]
+  );
+
+  // Open a workspace file from the chat (a chart call's row): show the
+  // artifacts drawer with the file previewed beside it.
+  const openArtifactPath = useCallback(
+    (path: string) => {
+      patchWorkspaceUi({
+        activePanel: 'artifacts',
+        previewEntry: { kind: 'artifact', entry: fileEntryForPath(path) },
+        viewingTask: null,
+        crewPickerOpen: false,
+      });
+    },
+    [patchWorkspaceUi]
   );
   const messages = storeMessages || EMPTY_MESSAGES;
   // While the initial entry load is in flight and no messages have arrived
@@ -2393,6 +2414,7 @@ const Workspace = () => {
             onLoadOlderMessages={handleLoadOlderMessages}
             taskRoster={chatRoster}
             onOpenTask={openTaskById}
+            onOpenArtifact={openArtifactPath}
           />
         </div>
 
