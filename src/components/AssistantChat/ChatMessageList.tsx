@@ -1234,7 +1234,7 @@ type ToolSegment =
   // `key` is the first call's id so a run keeps its expanded/collapsed
   // state as later calls append to it.
   | { kind: 'rows'; key: string; items: ToolItem[] }
-  | { kind: 'chart'; toolUse: EnrichedToolUse }
+  | { kind: 'chart'; key: string; path: string }
   | { kind: 'task'; key: string; card: TaskCallCard };
 
 const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
@@ -1246,9 +1246,10 @@ const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
     run = [];
   };
   for (const tu of toolUses) {
-    if (inlineChartPath(tu.toolName, tu.result, tu.error, tu.status)) {
+    const chartPath = inlineChartPath(tu.toolName, tu.result, tu.error, tu.status);
+    if (chartPath) {
       flushRun();
-      segments.push({ kind: 'chart', toolUse: tu });
+      segments.push({ kind: 'chart', key: tu.toolCallId, path: chartPath });
       continue;
     }
     const card = inlineTaskCard(tu.toolName, tu.result, tu.error, tu.status);
@@ -1278,8 +1279,9 @@ const ChatTaskCard = memo(({ card }: { card: TaskCallCard }) => {
  * Beyond MAX_VISIBLE_TOOLS, older calls collapse behind a "show N earlier"
  * toggle so a 35-tool turn stays scannable.
  *
- * Rows that carry a displayed chart break the count: the chart stays on
- * screen wherever it was produced and the calls that follow it collapse
+ * A displayed chart replaces its call's row, like a task card, and breaks
+ * the count: it stays on screen wherever it was produced and the calls that
+ * follow it collapse
  * *below* it, so the chart never gets hidden and never gets pushed down by
  * rows appearing above it while the run is still streaming.
  */
@@ -1292,15 +1294,9 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
     <div className={styles.toolList}>
       {segments.map((seg) =>
         seg.kind === 'chart' ? (
-          <ToolRow
-            key={seg.toolUse.toolCallId}
-            toolName={seg.toolUse.toolName}
-            params={seg.toolUse.params ?? seg.toolUse.arguments}
-            status={seg.toolUse.status}
-            result={seg.toolUse.result}
-            error={seg.toolUse.error}
-            call={seg.toolUse.call}
-          />
+          <div key={seg.key} className={styles.toolChartCard}>
+            <VegaChart specPath={seg.path} />
+          </div>
         ) : seg.kind === 'task' ? (
           <ChatTaskCard key={seg.key} card={seg.card} />
         ) : (
@@ -1349,7 +1345,6 @@ const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
             toolName={tu.toolName}
             params={tu.params ?? tu.arguments}
             status={tu.status}
-            result={tu.result}
             error={tu.error}
             call={tu.call}
           />
@@ -1368,26 +1363,17 @@ interface ToolRowProps {
   toolName: string;
   params?: unknown;
   status: string;
-  result?: unknown;
   error?: string | null;
   call?: ToolInvocation;
 }
 
-const ToolRow = memo(({ toolName, params, status, result, error, call }: ToolRowProps) => {
+const ToolRow = memo(({ toolName, params, status, error, call }: ToolRowProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'output' | 'input'>('output');
 
   const handleToggle = useCallback(() => setIsExpanded((prev) => !prev), []);
 
   const { verb, arg } = useMemo(() => summarizeToolCall(toolName, params), [toolName, params]);
-  // A `create_vega_chart` result is the chart itself: render it under the
-  // row from the saved file, so a reload draws it again without re-running
-  // the tool.
-  const chartPath = useMemo(
-    () => inlineChartPath(toolName, result, error, status),
-    [toolName, result, error, status]
-  );
-
   const isRunning = status === 'running';
   const isFailed = status === 'failed' || !!error;
   const icon = isFailed ? '✗' : isRunning ? '⚙' : '✓';
@@ -1442,9 +1428,7 @@ const ToolRow = memo(({ toolName, params, status, result, error, call }: ToolRow
         {arg && <span className={styles.toolRowArg}>{arg}</span>}
         <span className={styles.toolRowRight}>
           {isRunning ? (
-            <span className={styles.toolRowRunning}>
-              running…
-            </span>
+            <span className={styles.toolRowRunning}>running…</span>
           ) : resultSummary ? (
             <span
               className={`${styles.toolRowSummary} ${resultSummary.tone === 'error' ? styles.toolRowSummaryError : ''}`}
@@ -1455,12 +1439,6 @@ const ToolRow = memo(({ toolName, params, status, result, error, call }: ToolRow
           <span className={`${styles.toolRowChevron} ${isExpanded ? styles.expanded : ''}`}>▾</span>
         </span>
       </button>
-
-      {chartPath && (
-        <div className={styles.toolChartCard}>
-          <VegaChart specPath={chartPath} />
-        </div>
-      )}
 
       {isExpanded && (
         <div className={styles.toolContent}>

@@ -183,12 +183,44 @@ describe('ChatMessageList', () => {
     ],
   ];
 
-  it('renders the chart a completed create_vega_chart call produced, under its row', () => {
+  it('replaces a displayed chart call with its chart card: no tool row, tabs, or result fetch', () => {
     const [messages, toolCalls] = chartCall({});
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
-    expect(screen.getByText('Chart')).toBeInTheDocument();
-    expect(screen.getByText('Q3 Revenue')).toBeInTheDocument();
     expect(screen.getByTestId('vega-chart')).toHaveAttribute('data-spec-path', 'charts/q3-revenue.vl.json');
+    expect(screen.queryByText('Chart')).toBeNull();
+    expect(screen.queryByText('Q3 Revenue')).toBeNull();
+    expect(screen.queryByRole('button', { expanded: false })).toBeNull();
+    expect(screen.queryByText('Output')).toBeNull();
+    expect(getToolCallResult).not.toHaveBeenCalled();
+  });
+
+  it('shows a running chart call as a plain tool row', () => {
+    const [messages, toolCalls] = chartCall({
+      status: 'running',
+      result: null,
+      hasFullResult: false,
+      completedAt: null,
+    });
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    expect(screen.getByRole('button', { name: /Q3 Revenue/ })).toBeInTheDocument();
+    expect(screen.getByText('running…')).toBeInTheDocument();
+    expect(screen.queryByTestId('vega-chart')).toBeNull();
+  });
+
+  it('keeps a failed chart call expandable, so its error stays reachable', () => {
+    const [messages, toolCalls] = chartCall({
+      status: 'failed',
+      result: null,
+      hasFullResult: false,
+      error: 'The spec is not a valid Vega-Lite chart',
+    });
+    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    const row = screen.getByRole('button', { name: /Q3 Revenue/ });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(row);
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('Output')).toBeInTheDocument();
+    expect(screen.getByText(/The spec is not a valid Vega-Lite chart/)).toBeInTheDocument();
   });
 
   it('renders no chart for a failed call or one with display:false', () => {
@@ -440,7 +472,7 @@ describe('ChatMessageList', () => {
     };
   };
 
-  it('never collapses a displayed chart row; plain runs on each side collapse on their own', () => {
+  it('never collapses a displayed chart; plain runs on each side collapse on their own', () => {
     // 7 plain, chart, 6 plain → "Show 3 earlier" + 4 rows, chart, "Show 2 earlier" + 4 rows.
     const { messages, toolCalls } = toolGroupWithChart(14, 7);
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
@@ -461,7 +493,7 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
   });
 
-  it('renders adjacent chart rows back to back with no empty run between them', () => {
+  it('renders adjacent charts back to back with no empty run between them', () => {
     const { messages, toolCalls } = toolGroupWithChart(2, 0);
     const second = toolCalls[1];
     if (!second) throw new Error('expected two tool calls');
@@ -481,7 +513,7 @@ describe('ChatMessageList', () => {
     expect(screen.queryByText(/earlier/)).toBeNull();
   });
 
-  it('keeps a trailing chart row visible even when the run before it overflows', () => {
+  it('keeps a trailing chart visible even when the run before it overflows', () => {
     const { messages, toolCalls } = toolGroupWithChart(6, 5);
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} workspaceId="ws-1" />);
     expect(screen.getByTestId('vega-chart')).toBeInTheDocument();

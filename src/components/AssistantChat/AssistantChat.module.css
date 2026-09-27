@@ -636,10 +636,10 @@
 }
 
 /* Expanded view, indented under the row's verb. */
-/* Chart produced by a `create_vega_chart` call, shown under its row without
-   expanding it: the chart is the result. */
+/* Chart produced by a `create_vega_chart` call, shown in place of its row:
+   the chart is the result. */
 .toolChartCard {
-  margin: 4px 0 8px 22px;
+  margin: 6px 0;
 }
 
 .toolContent {
