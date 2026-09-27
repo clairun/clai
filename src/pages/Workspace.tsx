@@ -2042,28 +2042,37 @@ const Workspace = () => {
   // still opens (the panel derives its viewer from path). Artifacts have no
   // list to resolve against — the panel lazy-loads its tree one directory at a
   // time — so a link to one always takes the synthesized path.
+  // A file under `.clai/memory/` is a memory even when the list does not carry
+  // it, so it never gets the artifact-only delete button.
+  const previewEntryForPath = useCallback(
+    (path: string): PreviewEntry => {
+      const memoryMatch = memories.find((item) => item.path === path);
+      if (memoryMatch) return { kind: 'memory', entry: memoryMatch };
+      const kind = path.startsWith('.clai/memory/') ? 'memory' : 'artifact';
+      return { kind, entry: fileEntryForPath(path) };
+    },
+    [memories]
+  );
   const navigatePreviewFile = useCallback(
     (path: string) => {
-      const memoryMatch = memories.find((item) => item.path === path);
-      const kind: PreviewEntry['kind'] = memoryMatch ? 'memory' : 'artifact';
-      const entry = memoryMatch ?? fileEntryForPath(path);
-      patchWorkspaceUi({ previewEntry: { kind, entry }, viewingTask: null });
+      patchWorkspaceUi({ previewEntry: previewEntryForPath(path), viewingTask: null });
     },
-    [memories, patchWorkspaceUi]
+    [previewEntryForPath, patchWorkspaceUi]
   );
 
-  // Open a workspace file from the chat (a chart call's row): show the
-  // artifacts drawer with the file previewed beside it.
+  // Open a workspace file from the chat (a chart call's row): show its drawer
+  // (memories or artifacts) with the file previewed beside it.
   const openArtifactPath = useCallback(
     (path: string) => {
+      const previewEntry = previewEntryForPath(path);
       patchWorkspaceUi({
-        activePanel: 'artifacts',
-        previewEntry: { kind: 'artifact', entry: fileEntryForPath(path) },
+        activePanel: previewEntry.kind === 'memory' ? 'memories' : 'artifacts',
+        previewEntry,
         viewingTask: null,
         crewPickerOpen: false,
       });
     },
-    [patchWorkspaceUi]
+    [previewEntryForPath, patchWorkspaceUi]
   );
   const messages = storeMessages || EMPTY_MESSAGES;
   // While the initial entry load is in flight and no messages have arrived

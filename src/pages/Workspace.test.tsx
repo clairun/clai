@@ -30,6 +30,7 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   markWorkspaceOpened: vi.fn(async () => {}),
   getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
+  readWorkspaceFile: vi.fn(async () => null),
 }));
 
 vi.mock('../assistant/client', () => ({
@@ -398,5 +399,56 @@ describe('Workspace navigation', () => {
     });
 
     expect(await screen.findByText('conversation of sess-b')).toBeInTheDocument();
+  });
+});
+
+describe('Workspace chart rows', () => {
+  const chartPage = (path: string): AssistantMessagePage => ({
+    ...messagePage([
+      {
+        id: 'm-1',
+        sessionId: 'sess-a',
+        role: 'assistant',
+        content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'create_vega_chart', arguments: {} }],
+        createdAt: 1n,
+        providerMetadata: null,
+      },
+    ]),
+    toolCalls: [
+      {
+        id: 'tc-1',
+        runId: 'r-1',
+        sessionId: 'sess-a',
+        toolName: 'create_vega_chart',
+        params: { title: 'Q3' },
+        status: 'completed',
+        result: { ok: true, path },
+        hasFullResult: true,
+        hasFullInput: false,
+        error: null,
+        startedAt: 0n,
+        completedAt: 1n,
+      },
+    ],
+  });
+
+  it('opens a chart saved under memory as a memory, without the delete button', async () => {
+    loadSessionMessagesPage.mockResolvedValue(chartPage('.clai/memory/trend.vl.json'));
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /open chart q3/i }));
+
+    expect(await screen.findByRole('region', { name: 'Memory: trend.vl.json' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
+  });
+
+  it('opens any other chart as a deletable artifact', async () => {
+    loadSessionMessagesPage.mockResolvedValue(chartPage('charts/q3.vl.json'));
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /open chart q3/i }));
+
+    expect(await screen.findByRole('region', { name: 'Artifact: q3.vl.json' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete file' })).toBeInTheDocument();
   });
 });
