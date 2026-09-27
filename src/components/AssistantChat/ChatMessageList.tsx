@@ -5,7 +5,7 @@
  * Handles markdown rendering, tool call display, and auto-scrolling.
  */
 
-import React, { useState, useCallback, useEffect, useMemo, useRef, memo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
@@ -609,10 +609,6 @@ interface ChatMessageListProps {
   // Open a delegated task's own log, by task id. Omit in read-only views —
   // cards then render inert.
   onOpenTask?: (taskId: string) => void;
-  // Open a workspace-relative file in its drawer, artifacts or memories: the
-  // "Open" action on a chart embedded in a message. Omit in read-only
-  // transcripts to hide it.
-  onOpenFile?: (path: string) => void;
 }
 
 const ChatMessageList = ({
@@ -638,7 +634,6 @@ const ChatMessageList = ({
   onLoadOlderMessages,
   taskRoster = EMPTY_ROSTER,
   onOpenTask,
-  onOpenFile,
 }: ChatMessageListProps) => {
   // Build a Map of toolCalls keyed by id once per render, so every
   // tool_use part lookup is O(1) instead of an Array.find walk. Memoized
@@ -652,24 +647,9 @@ const ChatMessageList = ({
 
   // Lets markdown in messages resolve workspace-relative references (a
   // `.vl.json` chart link, a spec's `data.url`) against the workspace root.
-  // The opener is read through a ref: the page's handler changes identity
-  // when its memory list refreshes, and a new location would make every
-  // embedded chart re-read and re-draw its spec.
-  const onOpenFileRef = useRef(onOpenFile);
-  useEffect(() => {
-    onOpenFileRef.current = onOpenFile;
-  });
-  const canOpenFile = !!onOpenFile;
   const fileLocation = useMemo<WorkspaceFileLocation | null>(
-    () =>
-      workspaceId
-        ? {
-            workspaceId,
-            basePath: '',
-            onOpenFile: canOpenFile ? (path) => onOpenFileRef.current?.(path) : undefined,
-          }
-        : null,
-    [workspaceId, canOpenFile]
+    () => (workspaceId ? { workspaceId, basePath: '' } : null),
+    [workspaceId]
   );
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the

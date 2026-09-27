@@ -404,51 +404,17 @@ describe('Workspace navigation', () => {
   });
 });
 
-describe('Workspace embedded charts', () => {
-  const chartPage = (path: string): AssistantMessagePage =>
-    messagePage([
-      {
-        id: 'm-1',
-        sessionId: 'sess-a',
-        role: 'assistant',
-        content: [{ type: 'text', text: `![Q3](/${path})` }],
-        createdAt: 1n,
-        providerMetadata: null,
-      },
-    ]);
-
-  it('opens a chart saved under memory as a memory, without the delete button', async () => {
-    loadSessionMessagesPage.mockResolvedValue(chartPage('.clai/memory/trend.vl.json'));
-    renderWorkspace();
-
-    await userEvent.click(await screen.findByRole('button', { name: /open chart q3/i }));
-
-    expect(
-      await screen.findByRole('region', { name: 'Memory: trend.vl.json' })
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
-  });
-
-  it('opens any other chart as a deletable artifact', async () => {
-    loadSessionMessagesPage.mockResolvedValue(chartPage('charts/q3.vl.json'));
-    renderWorkspace();
-
-    await userEvent.click(await screen.findByRole('button', { name: /open chart q3/i }));
-
-    expect(await screen.findByRole('region', { name: 'Artifact: q3.vl.json' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Delete file' })).toBeInTheDocument();
-  });
-
+describe('Workspace file preview', () => {
   it('opens a link to an unlisted memory file as a memory, without the delete button', async () => {
-    loadSessionMessagesPage.mockResolvedValue(chartPage('report.vl.json'));
     readWorkspaceFile.mockImplementation(async (_workspaceId, path) =>
-      path === 'report.vl.json'
-        ? { path, viewer: 'markdown', content: '[notes](.clai/memory/notes.md)' }
+      path === MEMORY.path
+        ? { path, viewer: 'markdown', content: '[notes](notes.md)' }
         : { path, viewer: 'markdown', content: '# Notes' }
     );
     renderWorkspace();
 
-    await userEvent.click(await screen.findByRole('button', { name: /open chart q3/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /1 memories/ }));
+    await userEvent.click(await screen.findByText(MEMORY.name));
     await userEvent.click(await screen.findByRole('link', { name: 'notes' }));
 
     expect(await screen.findByRole('region', { name: 'Memory: notes.md' })).toBeInTheDocument();

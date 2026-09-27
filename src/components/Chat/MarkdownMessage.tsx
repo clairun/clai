@@ -157,7 +157,7 @@ const useMarkdownComponents = (isStreaming: boolean): Components =>
     img: ({ src, alt, title }) => {
       const source = typeof src === 'string' ? src : undefined;
       if (isVegaLiteSpecLink(source)) {
-        return <VegaChart specPath={source} title={alt} />;
+        return <VegaChart specPath={source} />;
       }
       return <img src={source} alt={alt} title={title} />;
     },

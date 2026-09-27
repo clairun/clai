@@ -10,9 +10,6 @@ import { createContext, useContext } from 'react';
  * - `basePath`: workspace-relative path of the document being rendered; the
  *   directory part is the base for relative references. Empty string means
  *   the workspace root (chat messages have no file of their own).
- * - `onOpenFile`: opens a workspace-relative file in its drawer; an embedded
- *   chart offers it as "Open". Omit where opening has nowhere to go (a
- *   read-only transcript, the file drawer itself).
  *
  * `null` (no provider) means relative references cannot be resolved; the
  * consumer should degrade to an explanatory placeholder, not throw.
@@ -20,7 +17,6 @@ import { createContext, useContext } from 'react';
 export interface WorkspaceFileLocation {
   workspaceId: string;
   basePath: string;
-  onOpenFile?: (path: string) => void;
 }
 
 export const WorkspaceFileContext = createContext<WorkspaceFileLocation | null>(null);

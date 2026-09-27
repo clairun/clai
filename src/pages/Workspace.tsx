@@ -1439,7 +1439,6 @@ interface ChatFirstLayoutProps {
   // keep a stable identity across details polls; see `chatRoster` below.
   taskRoster: readonly WorkspaceAgentResponse[];
   onOpenTask: (taskId: string) => void;
-  onOpenFile: (path: string) => void;
 }
 
 const ChatFirstLayout = ({
@@ -1460,7 +1459,6 @@ const ChatFirstLayout = ({
   onLoadOlderMessages,
   taskRoster,
   onOpenTask,
-  onOpenFile,
 }: ChatFirstLayoutProps) => {
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
@@ -1544,7 +1542,6 @@ const ChatFirstLayout = ({
             onLoadOlderMessages={onLoadOlderMessages}
             taskRoster={taskRoster}
             onOpenTask={onOpenTask}
-            onOpenFile={onOpenFile}
           />
           <AskUserPanel sessionId={sessionId} />
           <InlineApprovalCard workspaceId={workspaceId} />
@@ -2060,20 +2057,6 @@ const Workspace = () => {
     [previewEntryForPath, patchWorkspaceUi]
   );
 
-  // Open a workspace file from the chat (an embedded chart's Open): show its
-  // drawer (memories or artifacts) with the file previewed beside it.
-  const openWorkspaceFile = useCallback(
-    (path: string) => {
-      const previewEntry = previewEntryForPath(path);
-      patchWorkspaceUi({
-        activePanel: previewEntry.kind === 'memory' ? 'memories' : 'artifacts',
-        previewEntry,
-        viewingTask: null,
-        crewPickerOpen: false,
-      });
-    },
-    [previewEntryForPath, patchWorkspaceUi]
-  );
   const messages = storeMessages || EMPTY_MESSAGES;
   // While the initial entry load is in flight and no messages have arrived
   // yet, the conversation is unknown — not provably empty. Suppress the
@@ -2423,7 +2406,6 @@ const Workspace = () => {
             onLoadOlderMessages={handleLoadOlderMessages}
             taskRoster={chatRoster}
             onOpenTask={openTaskById}
-            onOpenFile={openWorkspaceFile}
           />
         </div>
 

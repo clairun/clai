@@ -10,57 +10,6 @@
   overflow-x: auto;
 }
 
-/* A file chart's title and Open action. Drawn before the spec loads, at a
-   fixed height, so the chart arriving below it shifts nothing; the title
-   truncates before the action gives way. */
-.header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 24px;
-  margin: -8px 0 12px;
-}
-
-.title {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.open {
-  flex-shrink: 0;
-  padding: 2px 6px;
-  border: none;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--color-primary);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-  text-decoration: underline transparent;
-  text-underline-offset: 2px;
-  transition:
-    background var(--transition-fast),
-    text-decoration-color var(--transition-fast);
-}
-
-.open:hover {
-  background: var(--color-bg-hover);
-  text-decoration-color: currentColor;
-}
-
-.open:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 1px;
-}
-
 /* Host for the vega-embed element(s). `position: relative` anchors the
    hidden pending render so it measures the same width as the live chart. */
 .chart {

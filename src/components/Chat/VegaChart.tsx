@@ -181,8 +181,6 @@ interface VegaChartProps {
    * (see WorkspaceFileContext). Mutually exclusive with `source`.
    */
   specPath?: string;
-  /** Header label for a `specPath` chart (the embed's alt text); defaults to the file name. */
-  title?: string;
   isStreaming?: boolean;
 }
 
@@ -192,7 +190,7 @@ interface LoadedSpecFile {
   error: string | null;
 }
 
-const VegaChart = memo(({ source, specPath, title, isStreaming = false }: VegaChartProps) => {
+const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProps) => {
   const location = useWorkspaceFileLocation();
   const appTheme = useAppTheme();
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -403,29 +401,8 @@ const VegaChart = memo(({ source, specPath, title, isStreaming = false }: VegaCh
   // Errors on final content are always reported; when a previous chart is
   // still up (a failed re-render) it stays visible above the message, and
   // the source is only repeated when there is no chart to look at.
-  const headerTitle = title?.trim() || specPath?.split('/').pop() || '';
-  const onOpenFile = location?.onOpenFile;
-
   return (
     <div className={styles.card}>
-      {specPath && (
-        <div className={styles.header}>
-          <span className={styles.title} title={headerTitle}>
-            {headerTitle}
-          </span>
-          {onOpenFile && resolvedSpecPath && (
-            <button
-              type="button"
-              className={styles.open}
-              aria-label={`Open chart ${headerTitle}`}
-              title={`Open ${resolvedSpecPath}`}
-              onClick={() => onOpenFile(resolvedSpecPath)}
-            >
-              Open ↗
-            </button>
-          )}
-        </div>
-      )}
       <div
         ref={hostRef}
         className={styles.chart}
