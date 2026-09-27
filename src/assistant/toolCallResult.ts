@@ -95,8 +95,9 @@ const useToolCallDetail = (
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    // A cache hit still resolves into `settled`, so the row keeps its value if
+    // the entry is evicted while it stays open.
     if (!key || sessionId === undefined || id === undefined || status === undefined) return;
-    if (cache.has(key)) return;
     let cancelled = false;
     fetchDetail(detail, { sessionId, id, status, completedAt: completedAt ?? null }).then(
       (value) => {
