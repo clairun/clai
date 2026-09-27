@@ -207,6 +207,7 @@ describe('ChatMessageList', () => {
     expect(row).not.toHaveAttribute('aria-expanded');
     expect(screen.getByText('Chart')).toBeInTheDocument();
     expect(screen.getByText('charts/q3-revenue.vl.json')).toBeInTheDocument();
+    expect(row).toHaveTextContent('Open chart ↗');
     expect(screen.queryByTestId('vega-chart')).toBeNull();
 
     fireEvent.click(row);
@@ -226,6 +227,7 @@ describe('ChatMessageList', () => {
     expect(screen.getByRole('button', { name: /Q3 Revenue/ })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('running…')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Open chart/ })).toBeNull();
+    expect(screen.queryByText(/Open chart/)).toBeNull();
   });
 
   it('keeps a failed chart call expandable, so its error stays reachable', () => {
@@ -238,6 +240,7 @@ describe('ChatMessageList', () => {
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} onOpenFile={vi.fn()} />);
     const row = screen.getByRole('button', { name: /Q3 Revenue/ });
     expect(row).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText(/Open chart/)).toBeNull();
     fireEvent.click(row);
     expect(row).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByText('Output')).toBeInTheDocument();

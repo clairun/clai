@@ -1396,7 +1396,7 @@ const ChartToolRow = ({
     <div className={styles.toolRowBlock}>
       <button
         type="button"
-        className={styles.toolRow}
+        className={`${styles.toolRow} ${styles.chartToolRow}`}
         onClick={() => onOpen(path)}
         aria-label={`Open chart ${arg || path}`}
         title={`Open ${path}`}
@@ -1404,10 +1404,10 @@ const ChartToolRow = ({
         <span className={styles.toolRowIcon}>✓</span>
         <span className={styles.toolRowVerb}>{verb}</span>
         {arg && <span className={styles.toolRowArg}>{arg}</span>}
-        <span className={styles.toolRowRight}>
-          <span className={styles.toolRowSummary}>{path}</span>
-          <span className={styles.toolRowChevron} aria-hidden="true">
-            ↗
+        <span className={`${styles.toolRowRight} ${styles.chartToolRowRight}`}>
+          <span className={`${styles.toolRowSummary} ${styles.chartToolRowPath}`}>{path}</span>
+          <span className={styles.chartToolRowAction} aria-hidden="true">
+            Open chart ↗
           </span>
         </span>
       </button>
