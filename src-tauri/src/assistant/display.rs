@@ -94,9 +94,7 @@ fn compact_result(tool_name: &str, result: &Value) -> Option<Value> {
             if object.get("ok") != Some(&Value::Bool(true)) {
                 return None;
             }
-            Some(
-                json!({"ok": true, "path": path, "display": object.get("display").and_then(Value::as_bool).unwrap_or(true)}),
-            )
+            Some(json!({"ok": true, "path": path}))
         }
         "workspace_assignTask" | "workspace_getTaskResult" => {
             if object.get("ok") != Some(&Value::Bool(true)) {
@@ -283,11 +281,11 @@ mod tests {
     fn chart_and_task_keep_only_card_fields() {
         let chart = tool_call(call(
             "mcp__clai__create_vega_chart",
-            json!({"ok": true, "path": "charts/a.vl.json", "spec": "private"}),
+            json!({"ok": true, "path": "charts/a.vl.json", "display": true, "spec": "private"}),
         ));
         assert_eq!(
             chart.result.unwrap(),
-            json!({"ok": true, "path": "charts/a.vl.json", "display": true})
+            json!({"ok": true, "path": "charts/a.vl.json"})
         );
         let task = tool_call(call(
             "workspace_assignTask",
