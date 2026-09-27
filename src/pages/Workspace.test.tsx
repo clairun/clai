@@ -30,7 +30,7 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   markWorkspaceOpened: vi.fn(async () => {}),
   getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
-  readWorkspaceFile: vi.fn(async () => null),
+  readWorkspaceFile: vi.fn(),
 }));
 
 vi.mock('../assistant/client', () => ({
@@ -185,7 +185,7 @@ beforeEach(() => {
   });
   loadSessionMessagesPage.mockResolvedValue(messagePage([]));
   listRuns.mockResolvedValue([]);
-  readWorkspaceFile.mockResolvedValue(null);
+  readWorkspaceFile.mockRejectedValue(new Error('File not found'));
 });
 
 afterEach(() => {
@@ -463,7 +463,7 @@ describe('Workspace chart rows', () => {
     readWorkspaceFile.mockImplementation(async (_workspaceId, path) =>
       path === 'report.md'
         ? { path, viewer: 'markdown', content: '[notes](.clai/memory/notes.md)' }
-        : null
+        : { path, viewer: 'markdown', content: '# Notes' }
     );
     renderWorkspace();
 
