@@ -1398,8 +1398,8 @@ const ChartToolRow = ({
         type="button"
         className={styles.toolRow}
         onClick={() => onOpen(path)}
-        aria-label={`Open chart ${arg || path} in artifacts`}
-        title={`Open ${path} in artifacts`}
+        aria-label={`Open chart ${arg || path}`}
+        title={`Open ${path}`}
       >
         <span className={styles.toolRowIcon}>✓</span>
         <span className={styles.toolRowVerb}>{verb}</span>

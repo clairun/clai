@@ -192,7 +192,7 @@ describe('ChatMessageList', () => {
     ],
   ];
 
-  it('shows a saved chart as a row that opens the file in artifacts, with no chart card or fetch', () => {
+  it('shows a saved chart as a row that opens the file, with no chart card or fetch', () => {
     const [messages, toolCalls] = chartCall({});
     const onOpenArtifact = vi.fn();
     render(
@@ -203,7 +203,7 @@ describe('ChatMessageList', () => {
         onOpenArtifact={onOpenArtifact}
       />
     );
-    const row = screen.getByRole('button', { name: 'Open chart Q3 Revenue in artifacts' });
+    const row = screen.getByRole('button', { name: 'Open chart Q3 Revenue' });
     expect(row).not.toHaveAttribute('aria-expanded');
     expect(screen.getByText('Chart')).toBeInTheDocument();
     expect(screen.getByText('charts/q3-revenue.vl.json')).toBeInTheDocument();
