@@ -311,6 +311,13 @@ pub(crate) async fn record_tool_call_result(
 
     let started_at = updated.started_at;
     let completed_at = updated.completed_at;
+    let _ = emit_event(
+        &deps.app,
+        session,
+        Some(run_id),
+        completion_event(status, updated),
+    );
+
     let payload = match outcome {
         ToolCallOutcome::Completed { payload } | ToolCallOutcome::Failed { payload, .. } => payload,
     };
@@ -331,12 +338,6 @@ pub(crate) async fn record_tool_call_result(
         )
         .await?;
 
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(run_id),
-        completion_event(status, updated),
-    );
     let _ = emit_event(
         &deps.app,
         session,
