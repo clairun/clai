@@ -373,7 +373,7 @@ pub(crate) fn build_system_prompt(
             "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
         );
         prompt.push_str(
-            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never hand-write a Vega-Lite spec into a file or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The saved chart renders inline in the chat and as an artifact, and you embed it in a markdown document as `![title](/reports/q3/revenue.vl.json)` — leading `/` = workspace root, so the link works from a report in any folder (the tool returns that snippet as `markdown`).\n",
+            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never hand-write a Vega-Lite spec into a file or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The tool does not show the chart in chat: it returns a `markdown` snippet such as `![title](/reports/q3/revenue.vl.json)`, and embedding that snippet in your reply or in a markdown report is the only way the chart is displayed — put it exactly where the chart belongs, once. Leading `/` = workspace root, so the link works from a report in any folder. Saved charts also appear as artifacts.\n",
         );
         if can_write_files {
             prompt.push_str(
@@ -847,6 +847,9 @@ mod tests {
         assert!(text.contains("avoid cache, dependency, and build-output directories"));
         assert!(text.contains("Reuse an existing chart's exact path"));
         assert!(text.contains("![title](/reports/q3/revenue.vl.json)"));
+        // Embedding the returned snippet is the only chat display path.
+        assert!(text.contains("the only way the chart is displayed"));
+        assert!(!text.contains("renders inline"));
         assert!(!text.contains("charts/<slug>.vl.json"));
         // Large tables go to a workspace file referenced by data.url.
         assert!(text.contains("`data.url`"));
