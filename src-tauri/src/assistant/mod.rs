@@ -3,6 +3,7 @@
 //! This subsystem owns the app-native assistant session model, provider
 //! abstraction, event protocol, and persistence foundations.
 
+mod api_turn;
 pub mod auth;
 pub mod cli_session;
 pub mod codex_app_server;
@@ -23,6 +24,7 @@ pub mod sandbox;
 pub mod system_prompt;
 pub mod token_estimate;
 pub mod tools;
+mod turn_common;
 pub mod types;
 
 #[cfg(test)]

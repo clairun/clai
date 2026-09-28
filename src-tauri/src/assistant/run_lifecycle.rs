@@ -1,10 +1,9 @@
-//! Run lifecycle helpers shared by the API engine and the CLI local agent.
+//! Run lifecycle helpers shared by API and CLI turns.
 //!
-//! Both `engine::run_session_turn` and `local_agent::run_session_turn` drive one
-//! turn to a terminal run state, emitting one `AssistantUiEvent` stream and
-//! returning `Result<(), AssistantEngineError>`. `engine` is the only entry
-//! point: it loads the session and the connection, and hands both to
-//! `local_agent` when the protocol is a CLI provider. So the bookkeeping at
+//! `engine::run_session_turn` loads the session and connection, then dispatches
+//! to `api_turn::run_session_turn` or `local_agent::run_session_turn`. Both drive
+//! one turn to a terminal run state, emitting one `AssistantUiEvent` stream and
+//! returning `Result<(), AssistantEngineError>`. The bookkeeping at
 //! every edge of a run — open it, and close it as failed, cancelled or
 //! complete — has to behave identically on both paths. All four
 //! edges used to be written twice: `fail_run` and `cancel_run` existed
@@ -165,7 +164,7 @@ pub(crate) async fn complete_run_with_notices(
 
 /// Persist a tool call as `Running` and announce it to the UI.
 ///
-/// Every provider path reaches this point differently — the API engine has a
+/// Every provider path reaches this point differently — the API turn has a
 /// `ToolInvocationDraft` it is about to execute itself, while each CLI path
 /// scrapes an id, a name and an argument blob out of a provider-specific
 /// stream envelope — but from here on the record and the event are the same on
@@ -241,7 +240,7 @@ fn tool_call_update<'a>(
 
 /// What to do when the `tool_call` row cannot be updated.
 pub(crate) enum MissingToolCall {
-    /// Fail the caller. The API engine wrote the row itself moments earlier, so
+    /// Fail the caller. The API turn wrote the row itself moments earlier, so
     /// a failure here is a genuine persistence fault, not a race.
     Propagate,
     /// Warn and record nothing further. The CLI paths update rows they may

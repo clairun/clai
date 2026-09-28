@@ -18,9 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::assistant::codex_app_server;
-use crate::assistant::engine::{
-    build_trigger_message, AssistantDeps, AssistantEngineError, RunTurnInput,
-};
+use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::{
@@ -33,6 +31,9 @@ use crate::assistant::run_lifecycle::{
 };
 use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
+use crate::assistant::turn_common::{
+    build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
+};
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
     ProviderConnection, ProviderInputMessage, RunNotice, RunStatus,
@@ -650,9 +651,7 @@ async fn discard_if_unanswered(
     let placeholder_id = match assistant_slot.as_ref() {
         None => None,
         Some(slot) => match repository::get_message(&deps.pool, &slot.id).await {
-            Ok(Some(current))
-                if crate::assistant::engine::run_produced_no_content(&current.content) =>
-            {
+            Ok(Some(current)) if run_produced_no_content(&current.content) => {
                 Some(slot.id.as_str())
             }
             Ok(None) => None,
@@ -661,7 +660,7 @@ async fn discard_if_unanswered(
             _ => return,
         },
     };
-    crate::assistant::engine::discard_unanswered_run_input(
+    discard_unanswered_run_input(
         deps,
         session,
         run_id,
