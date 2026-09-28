@@ -94,9 +94,8 @@ async fn run_api_session_turn(
 
     // Build execution context for tool calls
     let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    // Run-scoped filesystem grants accepted via fs_request_grant. Cloned
-    // into each per-tool-call ToolExecutionContext so accepting a grant
-    // mid-run is visible to subsequent tool calls in the same run.
+    // Run-scoped filesystem grants accepted via fs_request_grant stay visible
+    // to subsequent tool calls through this shared context.
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_allowed_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_blocked_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -115,6 +114,25 @@ async fn run_api_session_turn(
         workspace_root.as_deref(),
     );
 
+    let tool_context = ToolExecutionContext {
+        session_id: session.id.clone(),
+        run_id: run_id.clone(),
+        tool_call_id: None,
+        cancel_token: input.cancel_token.clone(),
+        workspace_id: session.context.workspace_id.clone(),
+        mcp_server_ids: session.context.mcp_server_ids.clone(),
+        agent_workspace_id: session.context.agent_workspace_id.clone(),
+        workspace_root: workspace_root.clone(),
+        automation_id: session.context.automation_id.clone(),
+        workspace_agents: session.context.workspace_agents.clone(),
+        inter_agent_call_depth: input.inter_agent_call_depth,
+        execution: session.context.execution.clone(),
+        notices,
+        session_grants,
+        session_allowed_command_prefixes,
+        session_blocked_command_prefixes,
+    };
+
     // The run's conversation, read from the database once. Every row this run
     // persists below is appended to it; history is not re-read per iteration.
     let mut state = ApiTurnState {
@@ -122,6 +140,7 @@ async fn run_api_session_turn(
         iteration: 0,
         retried_after_context_compaction: false,
         compaction_attempt: compaction::CompactionAttempt::NotAttempted,
+        tool_context,
     };
 
     // Persist the trigger message as a run boundary marker so the LLM can see
@@ -363,108 +382,18 @@ async fn run_api_session_turn(
             break;
         }
 
-        tracing::info!(
-            "Assistant engine: executing {} tool call(s) (state.iteration {})",
-            tool_calls.len(),
-            state.iteration + 1
-        );
-
-        // Execute each tool call
-        for tc in &tool_calls {
-            if input.cancel_token.is_cancelled() {
-                cancel_run(deps, &session, &run_id).await?;
-                return Ok(());
-            }
-
-            // Persist tool call
-            record_tool_call_started(
-                deps,
-                &session,
-                &run_id,
-                &tc.tool_call_id,
-                &tc.tool_name,
-                tc.params.clone(),
-            )
-            .await?;
-
-            // Execute the tool
-            let tool_context = ToolExecutionContext {
-                session_id: session.id.clone(),
-                run_id: run_id.clone(),
-                tool_call_id: Some(tc.tool_call_id.clone()),
-                cancel_token: input.cancel_token.clone(),
-                workspace_id: session.context.workspace_id.clone(),
-                mcp_server_ids: session.context.mcp_server_ids.clone(),
-                agent_workspace_id: session.context.agent_workspace_id.clone(),
-                workspace_root: workspace_root.clone(),
-                automation_id: session.context.automation_id.clone(),
-                workspace_agents: session.context.workspace_agents.clone(),
-                inter_agent_call_depth: input.inter_agent_call_depth,
-                execution: session.context.execution.clone(),
-                notices: notices.clone(),
-                session_grants: session_grants.clone(),
-                session_allowed_command_prefixes: session_allowed_command_prefixes.clone(),
-                session_blocked_command_prefixes: session_blocked_command_prefixes.clone(),
-            };
-            let tool_result = tokio::select! {
-                _ = input.cancel_token.cancelled() => {
-                    cancel_run(deps, &session, &run_id).await?;
-                    return Ok(());
-                }
-                result = tools::execute_tool(
-                    deps,
-                    &tool_context,
-                    &tc.tool_name,
-                    tc.params.clone()
-                ) => result,
-            };
-
-            // A failed tool still gets its result persisted, so the provider
-            // sees why the call failed on the next request.
-            let outcome = match tool_result {
-                Ok(result) => ToolCallOutcome::Completed { payload: result },
-                Err(ref error) => ToolCallOutcome::Failed {
-                    payload: serde_json::json!({ "error": error }),
-                    error: Some(error.as_str()),
-                },
-            };
-            record_tool_call_result(
-                deps,
-                &session,
-                &run_id,
-                &tc.tool_call_id,
-                outcome,
-                None,
-                MissingToolCall::Propagate,
-                &mut state.conversation,
-            )
-            .await?;
+        if matches!(
+            execute_api_tool_calls(deps, &session, &run_id, &tool_calls, &mut state).await?,
+            ToolLoopOutcome::Cancelled
+        ) {
+            return Ok(());
         }
 
         // Continue loop — will call API again with tool results in message history.
         state.iteration += 1;
     }
 
-    // Complete the run — check for policy notices
-    let tool_context = ToolExecutionContext {
-        session_id: session.id.clone(),
-        run_id: run_id.clone(),
-        tool_call_id: None,
-        cancel_token: input.cancel_token.clone(),
-        workspace_id: session.context.workspace_id.clone(),
-        mcp_server_ids: session.context.mcp_server_ids.clone(),
-        agent_workspace_id: session.context.agent_workspace_id.clone(),
-        workspace_root: workspace_root.clone(),
-        automation_id: session.context.automation_id.clone(),
-        workspace_agents: session.context.workspace_agents.clone(),
-        inter_agent_call_depth: input.inter_agent_call_depth,
-        execution: session.context.execution.clone(),
-        notices,
-        session_grants,
-        session_allowed_command_prefixes,
-        session_blocked_command_prefixes,
-    };
-    let notices = tool_context.take_notices();
+    let notices = state.tool_context.take_notices();
     complete_run_with_notices(deps, &session, &run_id, &notices).await?;
 
     Ok(())
@@ -475,6 +404,7 @@ struct ApiTurnState {
     iteration: usize,
     retried_after_context_compaction: bool,
     compaction_attempt: compaction::CompactionAttempt,
+    tool_context: ToolExecutionContext,
 }
 
 async fn prepare_api_request(
@@ -631,6 +561,82 @@ async fn try_context_limit_recovery(
         }
     }
     Ok(false)
+}
+
+enum ToolLoopOutcome {
+    Continue,
+    Cancelled,
+}
+
+async fn execute_api_tool_calls(
+    deps: &AssistantDeps,
+    session: &crate::assistant::types::AssistantSession,
+    run_id: &str,
+    calls: &[ToolInvocationDraft],
+    state: &mut ApiTurnState,
+) -> Result<ToolLoopOutcome, AssistantEngineError> {
+    tracing::info!(
+        "Assistant engine: executing {} tool call(s) (iteration {})",
+        calls.len(),
+        state.iteration + 1
+    );
+
+    // Execute each tool call
+    for tc in calls {
+        if state.tool_context.cancel_token.is_cancelled() {
+            cancel_run(deps, session, run_id).await?;
+            return Ok(ToolLoopOutcome::Cancelled);
+        }
+
+        state.tool_context.tool_call_id = Some(tc.tool_call_id.clone());
+
+        // Persist tool call
+        record_tool_call_started(
+            deps,
+            session,
+            run_id,
+            &tc.tool_call_id,
+            &tc.tool_name,
+            tc.params.clone(),
+        )
+        .await?;
+
+        let tool_result = tokio::select! {
+            _ = state.tool_context.cancel_token.cancelled() => {
+                cancel_run(deps, session, run_id).await?;
+                return Ok(ToolLoopOutcome::Cancelled);
+            }
+            result = tools::execute_tool(
+                deps,
+                &state.tool_context,
+                &tc.tool_name,
+                tc.params.clone()
+            ) => result,
+        };
+
+        // A failed tool still gets its result persisted, so the provider
+        // sees why the call failed on the next request.
+        let outcome = match tool_result {
+            Ok(result) => ToolCallOutcome::Completed { payload: result },
+            Err(ref error) => ToolCallOutcome::Failed {
+                payload: serde_json::json!({ "error": error }),
+                error: Some(error.as_str()),
+            },
+        };
+        record_tool_call_result(
+            deps,
+            session,
+            run_id,
+            &tc.tool_call_id,
+            outcome,
+            None,
+            MissingToolCall::Propagate,
+            &mut state.conversation,
+        )
+        .await?;
+    }
+
+    Ok(ToolLoopOutcome::Continue)
 }
 
 type ProviderStream =
