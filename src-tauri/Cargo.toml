@@ -70,7 +70,7 @@ tauri-build = { version = "=3.0.0-alpha.2", features = [] }
 tauri = { version = "=3.0.0-alpha.3", features = ["gtk4"] }
 tauri-runtime-cef = "=3.0.0-alpha.4"
 tauri-plugin-clipboard-manager = "=3.0.0-alpha.1"
-tauri-plugin-dialog = "=3.0.0-alpha.1"
+tauri-plugin-dialog = { version = "=3.0.0-alpha.1", default-features = false, features = ["xdg-portal"] }
 tauri-plugin-opener = "=3.0.0-alpha.1"
 tauri-plugin-os = "=3.0.0-alpha.1"
 tauri-plugin-updater = "=3.0.0-alpha.1"
