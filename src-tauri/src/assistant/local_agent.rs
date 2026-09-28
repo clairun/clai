@@ -18,9 +18,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::assistant::codex_app_server;
-use crate::assistant::engine::{
-    AssistantDeps, AssistantEngineError, RunTurnInput, TurnRunner, TurnTarget,
-};
+use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::{
@@ -41,7 +39,6 @@ use crate::assistant::types::{
     ProviderConnection, ProviderInputMessage, RunNotice, RunStatus,
 };
 use crate::assistant::{compaction, compaction_service};
-use async_trait::async_trait;
 
 const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
@@ -243,20 +240,6 @@ impl CliProviderRuntime {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
         }
-    }
-}
-
-pub struct CliTurnRunner;
-
-#[async_trait]
-impl TurnRunner for CliTurnRunner {
-    async fn run_session_turn(
-        &self,
-        deps: &AssistantDeps,
-        input: RunTurnInput,
-        target: TurnTarget,
-    ) -> Result<(), AssistantEngineError> {
-        run_session_turn(deps, input, target.session, target.connection).await
     }
 }
 

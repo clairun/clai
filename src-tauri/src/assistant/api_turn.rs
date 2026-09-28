@@ -5,12 +5,10 @@ use crate::assistant::{
 use futures::StreamExt;
 use tauri::Manager;
 
-use crate::assistant::engine::{
-    AssistantDeps, AssistantEngineError, RunTurnInput, TurnRunner, TurnTarget,
-};
+use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::providers;
-use crate::assistant::providers::types::ProviderError;
+use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::repository;
 use crate::assistant::repository::CreateMessageParams;
 use crate::assistant::run_lifecycle::{
@@ -23,25 +21,20 @@ use crate::assistant::turn_common::{
     build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
 };
 use crate::assistant::types::{
-    AssistantMessage, CompactionTrigger, CompletionRequest, ContentPart, MessageRole,
-    ProviderEvent, ProviderInputMessage, RunStatus, ToolInvocationDraft,
+    AssistantMessage, AssistantSession, CompactionTrigger, CompletionRequest, ContentPart,
+    MessageRole, ProviderConnection, ProviderEvent, ProviderInputMessage, RunStatus,
+    ToolDefinition, ToolInvocationDraft,
 };
 use crate::assistant::{compaction, compaction_service};
 use crate::AppState;
-use async_trait::async_trait;
 
-pub struct ApiTurnRunner;
-
-#[async_trait]
-impl TurnRunner for ApiTurnRunner {
-    async fn run_session_turn(
-        &self,
-        deps: &AssistantDeps,
-        input: RunTurnInput,
-        target: TurnTarget,
-    ) -> Result<(), AssistantEngineError> {
-        run_api_session_turn(deps, input, target).await
-    }
+pub async fn run_session_turn(
+    deps: &AssistantDeps,
+    input: RunTurnInput,
+    session: AssistantSession,
+    connection: ProviderConnection,
+) -> Result<(), AssistantEngineError> {
+    run_api_session_turn_with_adapter(deps, input, session, connection, None).await
 }
 
 #[allow(
@@ -52,35 +45,325 @@ impl TurnRunner for ApiTurnRunner {
     clippy::too_many_lines,
     reason = "the turn orchestrator still exceeds the 100-line budget"
 )]
-async fn run_api_session_turn(
+async fn run_api_session_turn_with_adapter(
     deps: &AssistantDeps,
     input: RunTurnInput,
-    target: TurnTarget,
+    session: AssistantSession,
+    connection: ProviderConnection,
+    injected_adapter: Option<&dyn ProviderAdapter>,
 ) -> Result<(), AssistantEngineError> {
-    let TurnTarget {
+    let Some((run_id, system_message, tool_defs, mut state, resolved_adapter)) =
+        start_api_turn(deps, &input, &session, &connection, injected_adapter).await?
+    else {
+        return Ok(());
+    };
+    let adapter = injected_adapter.unwrap_or_else(|| resolved_adapter.as_deref().unwrap());
+
+    // No iteration cap: the agent runs as long as the LLM keeps emitting
+    // tool calls. The cancel token is the only stop — surfaced as the
+    // "Stop" button in the UI and any explicit cancel from upstream.
+    // Provider-side context-length limits will surface as errors and
+    // exit via fail_run; this loop itself imposes no ceiling.
+    loop {
+        if input.cancel_token.is_cancelled() {
+            cancel_run(deps, &session, &run_id).await?;
+            return Ok(());
+        }
+
+        let (request, queued_message_ids_in_request) = prepare_api_request(
+            deps,
+            &session,
+            &connection,
+            &run_id,
+            &system_message,
+            &tool_defs,
+            &mut state,
+        )
+        .await?;
+
+        // Call the provider
+        let stream_result = adapter.stream_completion(&connection, request).await;
+
+        let stream = match stream_result {
+            Ok(s) => s,
+            Err(e) => {
+                if !state.retried_after_context_compaction && is_context_limit_error(&e.to_string())
+                {
+                    state.retried_after_context_compaction = true;
+                    if try_context_limit_recovery(deps, &session, &connection, &run_id, &mut state)
+                        .await?
+                    {
+                        continue;
+                    }
+                }
+                return fail_opening_api_stream(deps, &input, &session, &run_id, &state, e).await;
+            }
+        };
+
+        let assistant_message = accept_api_stream(
+            deps,
+            &session,
+            &run_id,
+            &queued_message_ids_in_request,
+            &mut state,
+        )
+        .await?;
+
+        let (stream_exit, tool_calls, produced_no_content) = consume_and_finalize_api_stream(
+            stream,
+            deps,
+            &input,
+            &session,
+            &run_id,
+            &assistant_message.id,
+            &mut state.conversation,
+        )
+        .await?;
+
+        match stream_exit {
+            StreamExit::Completed => {}
+            StreamExit::Cancelled => {
+                cancel_run(deps, &session, &run_id).await?;
+                return Ok(());
+            }
+            StreamExit::ProviderReported { message } => {
+                fail_terminal_api_stream(
+                    deps,
+                    &input,
+                    &session,
+                    &run_id,
+                    &state,
+                    (&assistant_message.id, produced_no_content),
+                    &message,
+                )
+                .await?;
+                return Ok(());
+            }
+            StreamExit::StreamFailed { message } => {
+                let message = fail_terminal_api_stream(
+                    deps,
+                    &input,
+                    &session,
+                    &run_id,
+                    &state,
+                    (&assistant_message.id, produced_no_content),
+                    &message,
+                )
+                .await?;
+                return Err(AssistantEngineError::Provider(
+                    ProviderError::RequestFailed(message),
+                ));
+            }
+        }
+
+        // If no tool calls, we're done
+        if tool_calls.is_empty() {
+            break;
+        }
+
+        if matches!(
+            execute_api_tool_calls(deps, &session, &run_id, &tool_calls, &mut state).await?,
+            ToolLoopOutcome::Cancelled
+        ) {
+            return Ok(());
+        }
+
+        // Continue loop — will call API again with tool results in message history.
+        state.iteration += 1;
+    }
+
+    let notices = state.tool_context.take_notices();
+    complete_run_with_notices(deps, &session, &run_id, &notices).await?;
+
+    Ok(())
+}
+
+async fn consume_and_finalize_api_stream(
+    stream: ProviderStream,
+    deps: &AssistantDeps,
+    input: &RunTurnInput,
+    session: &AssistantSession,
+    run_id: &str,
+    assistant_message_id: &str,
+    conversation: &mut RunConversation,
+) -> Result<(StreamExit, Vec<ToolInvocationDraft>, bool), AssistantEngineError> {
+    let (exit, parts, calls) = consume_api_stream(
+        stream,
+        &input.cancel_token,
+        deps,
         session,
-        connection,
-        workspace_root,
-    } = target;
+        run_id,
+        assistant_message_id,
+    )
+    .await;
+    let produced_no_content = finalize_api_message(
+        deps,
+        session,
+        run_id,
+        assistant_message_id,
+        &exit,
+        parts,
+        conversation,
+    )
+    .await?;
+    Ok((exit, calls, produced_no_content))
+}
+
+async fn fail_opening_api_stream(
+    deps: &AssistantDeps,
+    input: &RunTurnInput,
+    session: &AssistantSession,
+    run_id: &str,
+    state: &ApiTurnState,
+    error: ProviderError,
+) -> Result<(), AssistantEngineError> {
+    let provider_message = error.to_string();
+    let failure =
+        failure_message_with_compaction_context(&provider_message, &state.compaction_attempt);
+    fail_run(deps, session, run_id, &failure).await?;
+    if state.iteration == 0 {
+        discard_unanswered_run_input(
+            deps,
+            session,
+            run_id,
+            input.trigger_message_id.as_deref(),
+            None,
+        )
+        .await;
+    }
+    Err(provider_error_with_compaction_context(error, &provider_message, failure).into())
+}
+
+async fn fail_terminal_api_stream(
+    deps: &AssistantDeps,
+    input: &RunTurnInput,
+    session: &AssistantSession,
+    run_id: &str,
+    state: &ApiTurnState,
+    assistant_message: (&str, bool),
+    provider_message: &str,
+) -> Result<String, AssistantEngineError> {
+    let message =
+        failure_message_with_compaction_context(provider_message, &state.compaction_attempt);
+    fail_run(deps, session, run_id, &message).await?;
+    if state.iteration == 0 && assistant_message.1 {
+        discard_unanswered_run_input(
+            deps,
+            session,
+            run_id,
+            input.trigger_message_id.as_deref(),
+            Some(assistant_message.0),
+        )
+        .await;
+    }
+    Ok(message)
+}
+
+async fn accept_api_stream(
+    deps: &AssistantDeps,
+    session: &AssistantSession,
+    run_id: &str,
+    queued_message_ids_in_request: &[String],
+    state: &mut ApiTurnState,
+) -> Result<AssistantMessage, AssistantEngineError> {
+    if let Err(e) = repository::mark_queued_messages_delivered(
+        &deps.pool,
+        &session.id,
+        run_id,
+        queued_message_ids_in_request,
+    )
+    .await
+    {
+        fail_run(deps, session, run_id, &e).await?;
+        return Err(AssistantEngineError::Persistence(e));
+    }
+    state
+        .conversation
+        .mark_delivered(queued_message_ids_in_request);
+    if !queued_message_ids_in_request.is_empty() {
+        // The queued messages just became part of this run's request —
+        // tell the FE so their "Queued" chips clear.
+        let _ = emit_event(
+            &deps.app,
+            session,
+            Some(run_id),
+            AssistantUiEvent::QueuedMessagesDelivered {
+                message_ids: queued_message_ids_in_request.to_vec(),
+            },
+        );
+    }
+
+    // Create assistant message placeholder
+    let assistant_message = state
+        .conversation
+        .create_message(
+            &deps.pool,
+            CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: String::new(),
+                }],
+                provider_metadata: None,
+            },
+        )
+        .await?;
+
+    let _ = emit_event(
+        &deps.app,
+        session,
+        Some(run_id),
+        AssistantUiEvent::MessageCreated {
+            message: assistant_message.clone(),
+        },
+    );
+
+    Ok(assistant_message)
+}
+
+async fn start_api_turn(
+    deps: &AssistantDeps,
+    input: &RunTurnInput,
+    session: &AssistantSession,
+    connection: &ProviderConnection,
+    injected_adapter: Option<&dyn ProviderAdapter>,
+) -> Result<
+    Option<(
+        String,
+        ProviderInputMessage,
+        Vec<ToolDefinition>,
+        ApiTurnState,
+        Option<Box<dyn ProviderAdapter>>,
+    )>,
+    AssistantEngineError,
+> {
+    let workspace_root = session
+        .context
+        .agent_workspace_id
+        .as_deref()
+        .and_then(|id| deps.app.try_state::<AppState>()?.workspace_root(id));
     // Get or create the run
-    let run_id = resolve_run_id(deps, &session, &connection, &input).await?;
+    let run_id = resolve_run_id(deps, session, connection, input).await?;
 
     // Transition run to Running
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
     let _ = emit_event(
         &deps.app,
-        &session,
+        session,
         Some(&run_id),
         AssistantUiEvent::RunStarted { run },
     );
 
     if input.cancel_token.is_cancelled() {
-        cancel_run(deps, &session, &run_id).await?;
-        return Ok(());
+        cancel_run(deps, session, &run_id).await?;
+        return Ok(None);
     }
 
-    // Resolve adapter
-    let adapter = providers::resolve_adapter(&connection.protocol_id)?;
+    let resolved_adapter = if injected_adapter.is_none() {
+        Some(providers::resolve_adapter(&connection.protocol_id)?)
+    } else {
+        None
+    };
 
     // Get available tools for this session's context
     let external_tools = {
@@ -146,7 +429,7 @@ async fn run_api_session_turn(
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
     // tool results from prior runs and may skip re-running tools.
-    if let Some(trigger_content) = build_trigger_message(&session, &input.trigger) {
+    if let Some(trigger_content) = build_trigger_message(session, &input.trigger) {
         let boundary_msg = state
             .conversation
             .create_message(
@@ -161,7 +444,7 @@ async fn run_api_session_turn(
             .await?;
         let _ = emit_event(
             &deps.app,
-            &session,
+            session,
             Some(&run_id),
             AssistantUiEvent::MessageCreated {
                 message: boundary_msg,
@@ -169,206 +452,13 @@ async fn run_api_session_turn(
         );
     }
 
-    // No iteration cap: the agent runs as long as the LLM keeps emitting
-    // tool calls. The cancel token is the only stop — surfaced as the
-    // "Stop" button in the UI and any explicit cancel from upstream.
-    // Provider-side context-length limits will surface as errors and
-    // exit via fail_run; this loop itself imposes no ceiling.
-    loop {
-        if input.cancel_token.is_cancelled() {
-            cancel_run(deps, &session, &run_id).await?;
-            return Ok(());
-        }
-
-        let (request, queued_message_ids_in_request) = prepare_api_request(
-            deps,
-            &session,
-            &connection,
-            &run_id,
-            &system_message,
-            &tool_defs,
-            &mut state,
-        )
-        .await?;
-
-        // Call the provider
-        let stream_result = adapter.stream_completion(&connection, request).await;
-
-        let stream = match stream_result {
-            Ok(s) => s,
-            Err(e) => {
-                if !state.retried_after_context_compaction && is_context_limit_error(&e.to_string())
-                {
-                    state.retried_after_context_compaction = true;
-                    if try_context_limit_recovery(deps, &session, &connection, &run_id, &mut state)
-                        .await?
-                    {
-                        continue;
-                    }
-                }
-                let provider_message = e.to_string();
-                let failure = failure_message_with_compaction_context(
-                    &provider_message,
-                    &state.compaction_attempt,
-                );
-                fail_run(deps, &session, &run_id, &failure).await?;
-                // First iteration: the provider rejected the request outright
-                // (connection/auth/limit), so the user's message never reached
-                // the LLM — drop it. Later iterations already produced content.
-                if state.iteration == 0 {
-                    discard_unanswered_run_input(
-                        deps,
-                        &session,
-                        &run_id,
-                        input.trigger_message_id.as_deref(),
-                        None,
-                    )
-                    .await;
-                }
-                return Err(
-                    provider_error_with_compaction_context(e, &provider_message, failure).into(),
-                );
-            }
-        };
-
-        if let Err(e) = repository::mark_queued_messages_delivered(
-            &deps.pool,
-            &session.id,
-            &run_id,
-            &queued_message_ids_in_request,
-        )
-        .await
-        {
-            fail_run(deps, &session, &run_id, &e).await?;
-            return Err(AssistantEngineError::Persistence(e));
-        }
-        state
-            .conversation
-            .mark_delivered(&queued_message_ids_in_request);
-        if !queued_message_ids_in_request.is_empty() {
-            // The queued messages just became part of this run's request —
-            // tell the FE so their "Queued" chips clear.
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&run_id),
-                AssistantUiEvent::QueuedMessagesDelivered {
-                    message_ids: queued_message_ids_in_request.clone(),
-                },
-            );
-        }
-
-        // Create assistant message placeholder
-        let assistant_message = state
-            .conversation
-            .create_message(
-                &deps.pool,
-                CreateMessageParams {
-                    session_id: session.id.clone(),
-                    role: MessageRole::Assistant,
-                    content: vec![ContentPart::Text {
-                        text: String::new(),
-                    }],
-                    provider_metadata: None,
-                },
-            )
-            .await?;
-
-        let _ = emit_event(
-            &deps.app,
-            &session,
-            Some(&run_id),
-            AssistantUiEvent::MessageCreated {
-                message: assistant_message.clone(),
-            },
-        );
-
-        let (stream_exit, content_parts, tool_calls) = consume_api_stream(
-            stream,
-            &input.cancel_token,
-            deps,
-            &session,
-            &run_id,
-            &assistant_message.id,
-        )
-        .await;
-
-        let produced_no_content = finalize_api_message(
-            deps,
-            &session,
-            &run_id,
-            &assistant_message.id,
-            &stream_exit,
-            content_parts,
-            &mut state.conversation,
-        )
-        .await?;
-
-        match stream_exit {
-            StreamExit::Completed => {}
-            StreamExit::Cancelled => {
-                cancel_run(deps, &session, &run_id).await?;
-                return Ok(());
-            }
-            // Mid-stream failure before anything came back (some providers
-            // report limits this way): the user got no answer at all, so drop
-            // their message and the empty assistant placeholder created above.
-            StreamExit::ProviderReported { message } => {
-                let message =
-                    failure_message_with_compaction_context(&message, &state.compaction_attempt);
-                fail_run(deps, &session, &run_id, &message).await?;
-                if state.iteration == 0 && produced_no_content {
-                    discard_unanswered_run_input(
-                        deps,
-                        &session,
-                        &run_id,
-                        input.trigger_message_id.as_deref(),
-                        Some(&assistant_message.id),
-                    )
-                    .await;
-                }
-                return Ok(());
-            }
-            StreamExit::StreamFailed { message } => {
-                let message =
-                    failure_message_with_compaction_context(&message, &state.compaction_attempt);
-                fail_run(deps, &session, &run_id, &message).await?;
-                if state.iteration == 0 && produced_no_content {
-                    discard_unanswered_run_input(
-                        deps,
-                        &session,
-                        &run_id,
-                        input.trigger_message_id.as_deref(),
-                        Some(&assistant_message.id),
-                    )
-                    .await;
-                }
-                return Err(AssistantEngineError::Provider(
-                    ProviderError::RequestFailed(message),
-                ));
-            }
-        }
-
-        // If no tool calls, we're done
-        if tool_calls.is_empty() {
-            break;
-        }
-
-        if matches!(
-            execute_api_tool_calls(deps, &session, &run_id, &tool_calls, &mut state).await?,
-            ToolLoopOutcome::Cancelled
-        ) {
-            return Ok(());
-        }
-
-        // Continue loop — will call API again with tool results in message history.
-        state.iteration += 1;
-    }
-
-    let notices = state.tool_context.take_notices();
-    complete_run_with_notices(deps, &session, &run_id, &notices).await?;
-
-    Ok(())
+    Ok(Some((
+        run_id,
+        system_message,
+        tool_defs,
+        state,
+        resolved_adapter,
+    )))
 }
 
 struct ApiTurnState {
@@ -642,12 +732,24 @@ type ProviderStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
 
 async fn consume_api_stream(
-    mut stream: ProviderStream,
+    stream: ProviderStream,
     cancel: &tokio_util::sync::CancellationToken,
     deps: &AssistantDeps,
-    session: &crate::assistant::types::AssistantSession,
+    session: &AssistantSession,
     run_id: &str,
     message_id: &str,
+) -> (StreamExit, Vec<ContentPart>, Vec<ToolInvocationDraft>) {
+    consume_api_stream_with_sink(stream, cancel, message_id, |event| {
+        let _ = emit_event(&deps.app, session, Some(run_id), event);
+    })
+    .await
+}
+
+async fn consume_api_stream_with_sink(
+    mut stream: ProviderStream,
+    cancel: &tokio_util::sync::CancellationToken,
+    message_id: &str,
+    mut emit: impl FnMut(AssistantUiEvent),
 ) -> (StreamExit, Vec<ContentPart>, Vec<ToolInvocationDraft>) {
     let mut content_parts: Vec<ContentPart> = Vec::new();
     let mut tool_calls: Vec<ToolInvocationDraft> = Vec::new();
@@ -664,27 +766,17 @@ async fn consume_api_stream(
                 ProviderEvent::MessageStart => {}
                 ProviderEvent::TextDelta { text } => {
                     push_text_delta(&mut content_parts, &text);
-                    let _ = emit_event(
-                        &deps.app,
-                        session,
-                        Some(run_id),
-                        AssistantUiEvent::AssistantDelta {
-                            message_id: message_id.to_string(),
-                            text,
-                        },
-                    );
+                    emit(AssistantUiEvent::AssistantDelta {
+                        message_id: message_id.to_string(),
+                        text,
+                    });
                 }
                 ProviderEvent::ThinkingDelta { text } => {
                     push_thinking_delta(&mut content_parts, &text);
-                    let _ = emit_event(
-                        &deps.app,
-                        session,
-                        Some(run_id),
-                        AssistantUiEvent::AssistantThinkingDelta {
-                            message_id: message_id.to_string(),
-                            text,
-                        },
-                    );
+                    emit(AssistantUiEvent::AssistantThinkingDelta {
+                        message_id: message_id.to_string(),
+                        text,
+                    });
                 }
                 ProviderEvent::ThinkingSignature { signature } => {
                     // Anthropic sends the signature in its own event after a
@@ -799,6 +891,164 @@ mod tests {
         assert!(
             matches!(&provider[0].content[0], ContentPart::Text { text } if text == "partial answer")
         );
+    }
+
+    #[tokio::test]
+    async fn streamed_text_and_tool_result_replay_in_order() {
+        use crate::assistant::repository::CreateSessionParams;
+        use crate::db::test_support::workspace_pool;
+
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(
+            &pool,
+            CreateSessionParams {
+                kind: SessionKind::Interactive,
+                title: None,
+                context: SessionContext {
+                    workspace_id: None,
+                    tool_scopes: vec![],
+                    mcp_server_ids: vec![],
+                    execution: Default::default(),
+                    cli_session_id: None,
+                    cli_session_provider: None,
+                    automation_id: None,
+                    agent_workspace_id: None,
+                    automation_name: None,
+                    inter_agent_call: None,
+                    workspace_agents: vec![],
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
+        let assistant = conversation
+            .create_message(
+                &pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: MessageRole::Assistant,
+                    content: vec![text("")],
+                    provider_metadata: None,
+                },
+            )
+            .await
+            .unwrap();
+        let call = ToolInvocationDraft {
+            tool_call_id: "call-1".into(),
+            tool_name: "test".into(),
+            params: serde_json::json!({"x": 1}),
+        };
+        let stream: ProviderStream = Box::pin(futures::stream::iter(vec![
+            Ok(ProviderEvent::TextDelta {
+                text: "answer".into(),
+            }),
+            Ok(ProviderEvent::ToolCallReady { tool_call: call }),
+        ]));
+        let mut deltas = Vec::new();
+        let (exit, parts, calls) = consume_api_stream_with_sink(
+            stream,
+            &tokio_util::sync::CancellationToken::new(),
+            &assistant.id,
+            |event| deltas.push(event),
+        )
+        .await;
+        assert!(matches!(exit, StreamExit::Completed));
+        assert!(
+            matches!(&deltas[..], [AssistantUiEvent::AssistantDelta { text, .. }] if text == "answer")
+        );
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &parts[..],
+            [ContentPart::Text { .. }, ContentPart::ToolUse { .. }]
+        ));
+        conversation
+            .update_message_content(&pool, &assistant.id, &parts)
+            .await
+            .unwrap();
+        conversation
+            .create_message(
+                &pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: MessageRole::Tool,
+                    content: vec![ContentPart::ToolResult {
+                        tool_call_id: "call-1".into(),
+                        payload: serde_json::json!({"ok": true}),
+                        started_at: None,
+                        completed_at: None,
+                    }],
+                    provider_metadata: None,
+                },
+            )
+            .await
+            .unwrap();
+        let rows = repository::list_messages(&pool, &session.id).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0].role, MessageRole::Assistant));
+        assert!(matches!(rows[1].role, MessageRole::Tool));
+        let replay = normalize_history_for_provider(&rows);
+        assert!(matches!(
+            &replay[0].content[..],
+            [ContentPart::Text { .. }, ContentPart::ToolUse { .. }]
+        ));
+        assert!(matches!(
+            &replay[1].content[..],
+            [ContentPart::ToolResult { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_delta_and_stream_error_keep_partial_text() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let stream_cancel = cancel.clone();
+        let stream: ProviderStream = Box::pin(futures::stream::unfold(0, move |n| {
+            let stream_cancel = stream_cancel.clone();
+            async move {
+                if n == 0 {
+                    Some((
+                        Ok(ProviderEvent::TextDelta {
+                            text: "partial".into(),
+                        }),
+                        1,
+                    ))
+                } else {
+                    stream_cancel.cancel();
+                    futures::future::pending().await
+                }
+            }
+        }));
+        let mut events = Vec::new();
+        let (exit, parts, _) =
+            consume_api_stream_with_sink(stream, &cancel, "assistant", |event| events.push(event))
+                .await;
+        assert!(matches!(exit, StreamExit::Cancelled));
+        assert!(matches!(&parts[..], [ContentPart::Text { text }] if text == "partial"));
+        assert_eq!(events.len(), 1);
+        assert!(exit_keeps_streamed_message(
+            &exit,
+            run_produced_no_content(&parts)
+        ));
+
+        let stream: ProviderStream = Box::pin(futures::stream::iter(vec![
+            Ok(ProviderEvent::TextDelta {
+                text: "partial".into(),
+            }),
+            Err(ProviderError::RequestFailed("context length".into())),
+        ]));
+        let (exit, parts, _) = consume_api_stream_with_sink(
+            stream,
+            &tokio_util::sync::CancellationToken::new(),
+            "assistant",
+            |_| {},
+        )
+        .await;
+        assert!(matches!(exit, StreamExit::StreamFailed { .. }));
+        assert!(matches!(&parts[..], [ContentPart::Text { text }] if text == "partial"));
+        assert!(exit_keeps_streamed_message(
+            &exit,
+            run_produced_no_content(&parts)
+        ));
     }
 
     fn text(t: &str) -> ContentPart {

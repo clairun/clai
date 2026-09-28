@@ -1,16 +1,12 @@
-use std::path::PathBuf;
-
-use async_trait::async_trait;
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
-use crate::assistant::api_turn::ApiTurnRunner;
-use crate::assistant::local_agent::CliTurnRunner;
 use crate::assistant::providers;
 use crate::assistant::providers::types::ProviderError;
 use crate::assistant::repository;
-use crate::assistant::types::{AssistantSession, ProviderConnection, RunId, RunTrigger, SessionId};
+use crate::assistant::types::{RunId, RunTrigger, SessionId};
+use crate::assistant::{api_turn, local_agent};
 use crate::db::DbPool;
 use crate::AppState;
 
@@ -55,20 +51,13 @@ impl From<String> for AssistantEngineError {
     }
 }
 
-pub struct TurnTarget {
-    pub(crate) session: AssistantSession,
-    pub(crate) connection: ProviderConnection,
-    pub(crate) workspace_root: Option<PathBuf>,
-}
-
-async fn load_turn_target(
+pub async fn run_session_turn(
     deps: &AssistantDeps,
-    input: &RunTurnInput,
-) -> Result<TurnTarget, AssistantEngineError> {
+    input: RunTurnInput,
+) -> Result<(), AssistantEngineError> {
     let session = repository::get_session(&deps.pool, &input.session_id)
         .await?
         .ok_or_else(|| AssistantEngineError::SessionNotFound(input.session_id.clone()))?;
-
     let app_state = deps.app.try_state::<AppState>();
     let connection = app_state
         .as_ref()
@@ -80,54 +69,22 @@ async fn load_turn_target(
                 .get_provider_connection(&input.connection_id)
         })
         .ok_or_else(|| AssistantEngineError::ProviderNotConfigured(input.connection_id.clone()))?;
-    let workspace_root = match session.context.agent_workspace_id.as_deref() {
-        Some(workspace_id) => {
-            let root = app_state
-                .as_ref()
-                .and_then(|state| state.workspace_root(workspace_id));
-            if root.is_none() {
-                return Err(AssistantEngineError::Persistence(format!(
-                    "workspace {} no longer exists or failed to load",
-                    workspace_id
-                )));
-            }
-            root
+    if let Some(workspace_id) = session.context.agent_workspace_id.as_deref() {
+        if app_state
+            .as_ref()
+            .and_then(|state| state.workspace_root(workspace_id))
+            .is_none()
+        {
+            return Err(AssistantEngineError::Persistence(format!(
+                "workspace {} no longer exists or failed to load",
+                workspace_id
+            )));
         }
-        None => None,
-    };
-    Ok(TurnTarget {
-        session,
-        connection,
-        workspace_root,
-    })
-}
-
-#[async_trait]
-pub trait TurnRunner: Send + Sync {
-    async fn run_session_turn(
-        &self,
-        deps: &AssistantDeps,
-        input: RunTurnInput,
-        target: TurnTarget,
-    ) -> Result<(), AssistantEngineError>;
-}
-
-fn turn_runner_for(connection: &ProviderConnection) -> &'static dyn TurnRunner {
-    static API: ApiTurnRunner = ApiTurnRunner;
-    static CLI: CliTurnRunner = CliTurnRunner;
-    if providers::is_cli_provider(&connection.protocol_id) {
-        &CLI
-    } else {
-        &API
     }
-}
 
-pub async fn run_session_turn(
-    deps: &AssistantDeps,
-    input: RunTurnInput,
-) -> Result<(), AssistantEngineError> {
-    let target = load_turn_target(deps, &input).await?;
-    turn_runner_for(&target.connection)
-        .run_session_turn(deps, input, target)
-        .await
+    if providers::is_cli_provider(&connection.protocol_id) {
+        local_agent::run_session_turn(deps, input, session, connection).await
+    } else {
+        api_turn::run_session_turn(deps, input, session, connection).await
+    }
 }
