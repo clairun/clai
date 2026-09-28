@@ -720,6 +720,68 @@ mod tests {
     use crate::assistant::types::SessionContext;
     use crate::assistant::types::SessionKind;
 
+    #[tokio::test]
+    async fn partial_assistant_output_survives_database_reload() {
+        use crate::assistant::repository::CreateSessionParams;
+        use crate::assistant::types::SessionContext;
+        use crate::db::test_support::workspace_pool;
+
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(
+            &pool,
+            CreateSessionParams {
+                kind: SessionKind::Interactive,
+                title: None,
+                context: SessionContext {
+                    workspace_id: None,
+                    tool_scopes: vec![],
+                    mcp_server_ids: vec![],
+                    execution: Default::default(),
+                    cli_session_id: None,
+                    cli_session_provider: None,
+                    automation_id: None,
+                    agent_workspace_id: None,
+                    automation_name: None,
+                    inter_agent_call: None,
+                    workspace_agents: vec![],
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
+        let placeholder = conversation
+            .create_message(
+                &pool,
+                CreateMessageParams {
+                    session_id: session.id.clone(),
+                    role: MessageRole::Assistant,
+                    content: vec![text("")],
+                    provider_metadata: None,
+                },
+            )
+            .await
+            .unwrap();
+        let partial = vec![text("partial answer")];
+        assert!(exit_keeps_streamed_message(
+            &StreamExit::StreamFailed {
+                message: "connection reset".into(),
+            },
+            run_produced_no_content(&partial),
+        ));
+        conversation
+            .update_message_content(&pool, &placeholder.id, &final_content_parts(partial))
+            .await
+            .unwrap();
+
+        let reloaded = RunConversation::load(&pool, &session.id).await.unwrap();
+        let provider = normalize_history_for_provider(reloaded.messages());
+        assert_eq!(provider.len(), 1);
+        assert!(
+            matches!(&provider[0].content[0], ContentPart::Text { text } if text == "partial answer")
+        );
+    }
+
     fn text(t: &str) -> ContentPart {
         ContentPart::Text {
             text: t.to_string(),
