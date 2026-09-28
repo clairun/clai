@@ -169,12 +169,17 @@ pub(crate) fn destroy_chromium_work_source() {
     ffi::g_source_destroy(probe);
     ffi::g_source_unref(probe);
 
+    let mut destroyed = false;
     for id in 1..id_bound {
       let source = ffi::g_main_context_find_source_by_id(context, id);
       if !source.is_null() && is_chromium_work_source(source) {
         ffi::g_source_destroy(source);
+        destroyed = true;
         log::debug!("destroyed Chromium's busy GLib work source (id {id})");
       }
+    }
+    if !destroyed {
+      log::warn!("Chromium's GLib work source not found; the main loop may busy-poll");
     }
   }
 }
