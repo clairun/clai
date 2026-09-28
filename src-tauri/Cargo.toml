@@ -206,3 +206,5 @@ tempfile = "3"
 [patch.crates-io]
 # Published dialog alpha omits the Manager trait import needed by Tauri 3.
 tauri-plugin-dialog = { path = "../vendor/tauri-plugin-dialog" }
+# Destroys the Chromium GLib work source that busy-polls the main loop on Linux (CEF #3002).
+tauri-runtime-cef = { path = "../vendor/tauri-runtime-cef" }
