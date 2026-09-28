@@ -115,17 +115,21 @@ async fn run_api_session_turn(
         workspace_root.as_deref(),
     );
 
-    let system_prompt_text = content_text(&system_message.content);
-
     // The run's conversation, read from the database once. Every row this run
     // persists below is appended to it; history is not re-read per iteration.
-    let mut conversation = RunConversation::load(&deps.pool, &session.id).await?;
+    let mut state = ApiTurnState {
+        conversation: RunConversation::load(&deps.pool, &session.id).await?,
+        iteration: 0,
+        retried_after_context_compaction: false,
+        compaction_attempt: compaction::CompactionAttempt::NotAttempted,
+    };
 
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
     // tool results from prior runs and may skip re-running tools.
     if let Some(trigger_content) = build_trigger_message(&session, &input.trigger) {
-        let boundary_msg = conversation
+        let boundary_msg = state
+            .conversation
             .create_message(
                 &deps.pool,
                 CreateMessageParams {
@@ -151,106 +155,22 @@ async fn run_api_session_turn(
     // "Stop" button in the UI and any explicit cancel from upstream.
     // Provider-side context-length limits will surface as errors and
     // exit via fail_run; this loop itself imposes no ceiling.
-    let mut iteration: usize = 0;
-    let mut retried_after_context_compaction = false;
-    // What compaction managed to do this run, so a context-limit failure can
-    // name compaction as the reason instead of leaving the user with the
-    // provider's bare "prompt is too long".
-    let mut compaction_attempt = compaction::CompactionAttempt::NotAttempted;
     loop {
         if input.cancel_token.is_cancelled() {
             cancel_run(deps, &session, &run_id).await?;
             return Ok(());
         }
 
-        // Reconcile queued user input (sent, edited, or deleted while the run
-        // was busy) before sizing and shaping the request; pending rows are
-        // never summarized away. Then normalize before sending: drop empty
-        // assistant placeholders, drop tool messages whose tool_call_id has no
-        // matching tool_use in the preceding assistant turn, and merge
-        // consecutive same-role messages. The DB stays the source of truth;
-        // this only shapes what the provider sees so a mid-stream hangup or
-        // stacked user typing can't poison subsequent runs.
-        let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
-        conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
-        if compaction::should_auto_compact(&conversation, &system_prompt_text, &tool_defs) {
-            match compaction_service::compact_conversation(
-                &deps.pool,
-                &session,
-                &connection,
-                None,
-                CompactionTrigger::Automatic,
-                Some(&run_id),
-                compaction::verbatim_tail_tokens(&system_prompt_text, &tool_defs),
-                &mut conversation,
-            )
-            .await
-            {
-                Ok(Some(outcome)) => {
-                    compaction_attempt.record_success();
-                    let _ = emit_event(
-                        &deps.app,
-                        &session,
-                        Some(&run_id),
-                        AssistantUiEvent::SessionCompacted {
-                            compaction: outcome.compaction,
-                            summary_message: outcome.summary_message,
-                        },
-                    );
-                }
-                // Nothing eligible yet; the forced paths can still compact more.
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %session.id,
-                        run_id = %run_id,
-                        error = %error,
-                        "Automatic assistant history compaction failed"
-                    );
-                    compaction_attempt.record_failure(&error);
-                }
-            }
-            // Summarization may have waited while the user edited or deleted queued input.
-            let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
-            conversation
-                .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
-        }
-        let queued_message_ids_in_request = conversation.pending_ids();
-        let normalized = normalize_history_for_provider(conversation.messages());
-        let supports_images = providers::connection_supports_images(&connection);
-        // Drop image parts from history when the active connection can't accept
-        // them (e.g. user switched to a non-vision provider mid-conversation).
-        // The gate stops *new* image attachments; this keeps replayed history
-        // valid for the current provider. CLI providers already render images as
-        // a text placeholder upstream, so this only bites the HTTP path.
-        let normalized = if supports_images {
-            normalized
-        } else {
-            strip_unsupported_images(normalized)
-        };
-
-        let mut provider_messages = vec![system_message.clone()];
-        provider_messages.extend(normalized);
-
-        // Resolve image files to inline base64 for image-capable API providers.
-        // CLI providers ingest images via their own mechanism (file paths in the
-        // CLI invocation), not this HTTP request, so they don't need inlining.
-        let images = if supports_images && !providers::is_cli_provider(&connection.protocol_id) {
-            resolve_request_images(deps, &session, &provider_messages).await
-        } else {
-            std::collections::HashMap::new()
-        };
-
-        let request = CompletionRequest {
-            run_id: run_id.clone(),
-            session_id: session.id.clone(),
-            model_id: connection.model_id.clone(),
-            messages: provider_messages,
-            tools: tool_defs.clone(),
-            temperature: None,
-            max_output_tokens: None,
-            images,
-        };
+        let (request, queued_message_ids_in_request) = prepare_api_request(
+            deps,
+            &session,
+            &connection,
+            &run_id,
+            &system_message,
+            &tool_defs,
+            &mut state,
+        )
+        .await?;
 
         // Call the provider
         let stream_result = adapter.stream_completion(&connection, request).await;
@@ -258,58 +178,25 @@ async fn run_api_session_turn(
         let stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                if !retried_after_context_compaction && is_context_limit_error(&e.to_string()) {
-                    retried_after_context_compaction = true;
-                    match compaction_service::compact_for_context_limit_recovery(
-                        &deps.pool,
-                        &session,
-                        &connection,
-                        None,
-                        &run_id,
-                        &mut conversation,
-                    )
-                    .await
+                if !state.retried_after_context_compaction && is_context_limit_error(&e.to_string())
+                {
+                    state.retried_after_context_compaction = true;
+                    if try_context_limit_recovery(deps, &session, &connection, &run_id, &mut state)
+                        .await?
                     {
-                        Ok(Some(outcome)) => {
-                            compaction_attempt.record_success();
-                            let _ = emit_event(
-                                &deps.app,
-                                &session,
-                                Some(&run_id),
-                                AssistantUiEvent::SessionCompacted {
-                                    compaction: outcome.compaction,
-                                    summary_message: outcome.summary_message,
-                                },
-                            );
-                            continue;
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                session_id = %session.id,
-                                run_id = %run_id,
-                                "Context-limit recovery found no compactable assistant history"
-                            );
-                            compaction_attempt.record_nothing_to_compact();
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                session_id = %session.id,
-                                run_id = %run_id,
-                                error = %error,
-                                "Context-limit recovery compaction failed"
-                            );
-                            compaction_attempt.record_failure(&error);
-                        }
+                        continue;
                     }
                 }
                 let provider_message = e.to_string();
-                let failure =
-                    failure_message_with_compaction_context(&provider_message, &compaction_attempt);
+                let failure = failure_message_with_compaction_context(
+                    &provider_message,
+                    &state.compaction_attempt,
+                );
                 fail_run(deps, &session, &run_id, &failure).await?;
                 // First iteration: the provider rejected the request outright
                 // (connection/auth/limit), so the user's message never reached
                 // the LLM — drop it. Later iterations already produced content.
-                if iteration == 0 {
+                if state.iteration == 0 {
                     discard_unanswered_run_input(
                         deps,
                         &session,
@@ -336,7 +223,9 @@ async fn run_api_session_turn(
             fail_run(deps, &session, &run_id, &e).await?;
             return Err(AssistantEngineError::Persistence(e));
         }
-        conversation.mark_delivered(&queued_message_ids_in_request);
+        state
+            .conversation
+            .mark_delivered(&queued_message_ids_in_request);
         if !queued_message_ids_in_request.is_empty() {
             // The queued messages just became part of this run's request —
             // tell the FE so their "Queued" chips clear.
@@ -351,7 +240,8 @@ async fn run_api_session_turn(
         }
 
         // Create assistant message placeholder
-        let assistant_message = conversation
+        let assistant_message = state
+            .conversation
             .create_message(
                 &deps.pool,
                 CreateMessageParams {
@@ -408,7 +298,8 @@ async fn run_api_session_turn(
             // so the assistant row never persists with zero content.
             let final_content = final_content_parts(content_parts);
 
-            let updated_message = conversation
+            let updated_message = state
+                .conversation
                 .update_message_content(&deps.pool, &assistant_message.id, &final_content)
                 .await?;
 
@@ -433,9 +324,9 @@ async fn run_api_session_turn(
             // their message and the empty assistant placeholder created above.
             StreamExit::ProviderReported { message } => {
                 let message =
-                    failure_message_with_compaction_context(&message, &compaction_attempt);
+                    failure_message_with_compaction_context(&message, &state.compaction_attempt);
                 fail_run(deps, &session, &run_id, &message).await?;
-                if iteration == 0 && produced_no_content {
+                if state.iteration == 0 && produced_no_content {
                     discard_unanswered_run_input(
                         deps,
                         &session,
@@ -449,9 +340,9 @@ async fn run_api_session_turn(
             }
             StreamExit::StreamFailed { message } => {
                 let message =
-                    failure_message_with_compaction_context(&message, &compaction_attempt);
+                    failure_message_with_compaction_context(&message, &state.compaction_attempt);
                 fail_run(deps, &session, &run_id, &message).await?;
-                if iteration == 0 && produced_no_content {
+                if state.iteration == 0 && produced_no_content {
                     discard_unanswered_run_input(
                         deps,
                         &session,
@@ -473,9 +364,9 @@ async fn run_api_session_turn(
         }
 
         tracing::info!(
-            "Assistant engine: executing {} tool call(s) (iteration {})",
+            "Assistant engine: executing {} tool call(s) (state.iteration {})",
             tool_calls.len(),
-            iteration + 1
+            state.iteration + 1
         );
 
         // Execute each tool call
@@ -545,13 +436,13 @@ async fn run_api_session_turn(
                 outcome,
                 None,
                 MissingToolCall::Propagate,
-                &mut conversation,
+                &mut state.conversation,
             )
             .await?;
         }
 
         // Continue loop — will call API again with tool results in message history.
-        iteration += 1;
+        state.iteration += 1;
     }
 
     // Complete the run — check for policy notices
@@ -577,6 +468,169 @@ async fn run_api_session_turn(
     complete_run_with_notices(deps, &session, &run_id, &notices).await?;
 
     Ok(())
+}
+
+struct ApiTurnState {
+    conversation: RunConversation,
+    iteration: usize,
+    retried_after_context_compaction: bool,
+    compaction_attempt: compaction::CompactionAttempt,
+}
+
+async fn prepare_api_request(
+    deps: &AssistantDeps,
+    session: &crate::assistant::types::AssistantSession,
+    connection: &crate::assistant::types::ProviderConnection,
+    run_id: &str,
+    system_message: &ProviderInputMessage,
+    tool_defs: &[crate::assistant::types::ToolDefinition],
+    state: &mut ApiTurnState,
+) -> Result<(CompletionRequest, Vec<String>), AssistantEngineError> {
+    let system_prompt_text = content_text(&system_message.content);
+    // Reconcile queued user input (sent, edited, or deleted while the run
+    // was busy) before sizing and shaping the request; pending rows are
+    // never summarized away. Then normalize before sending: drop empty
+    // assistant placeholders, drop tool messages whose tool_call_id has no
+    // matching tool_use in the preceding assistant turn, and merge
+    // consecutive same-role messages. The DB stays the source of truth;
+    // this only shapes what the provider sees so a mid-stream hangup or
+    // stacked user typing can't poison subsequent runs.
+    let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+    state
+        .conversation
+        .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
+    if compaction::should_auto_compact(&state.conversation, &system_prompt_text, tool_defs) {
+        match compaction_service::compact_conversation(
+            &deps.pool,
+            session,
+            connection,
+            None,
+            CompactionTrigger::Automatic,
+            Some(run_id),
+            compaction::verbatim_tail_tokens(&system_prompt_text, tool_defs),
+            &mut state.conversation,
+        )
+        .await
+        {
+            Ok(Some(outcome)) => {
+                state.compaction_attempt.record_success();
+                let _ = emit_event(
+                    &deps.app,
+                    session,
+                    Some(run_id),
+                    AssistantUiEvent::SessionCompacted {
+                        compaction: outcome.compaction,
+                        summary_message: outcome.summary_message,
+                    },
+                );
+            }
+            // Nothing eligible yet; the forced paths can still compact more.
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    run_id = %run_id,
+                    error = %error,
+                    "Automatic assistant history compaction failed"
+                );
+                state.compaction_attempt.record_failure(&error);
+            }
+        }
+        // Summarization may have waited while the user edited or deleted queued input.
+        let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+        state
+            .conversation
+            .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
+    }
+    let queued_message_ids_in_request = state.conversation.pending_ids();
+    let normalized = normalize_history_for_provider(state.conversation.messages());
+    let supports_images = providers::connection_supports_images(connection);
+    // Drop image parts from history when the active connection can't accept
+    // them (e.g. user switched to a non-vision provider mid-conversation).
+    // The gate stops *new* image attachments; this keeps replayed history
+    // valid for the current provider. CLI providers already render images as
+    // a text placeholder upstream, so this only bites the HTTP path.
+    let normalized = if supports_images {
+        normalized
+    } else {
+        strip_unsupported_images(normalized)
+    };
+
+    let mut provider_messages = vec![system_message.clone()];
+    provider_messages.extend(normalized);
+
+    // Resolve image files to inline base64 for image-capable API providers.
+    // CLI providers ingest images via their own mechanism (file paths in the
+    // CLI invocation), not this HTTP request, so they don't need inlining.
+    let images = if supports_images && !providers::is_cli_provider(&connection.protocol_id) {
+        resolve_request_images(deps, session, &provider_messages).await
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    let request = CompletionRequest {
+        run_id: run_id.to_string(),
+        session_id: session.id.clone(),
+        model_id: connection.model_id.clone(),
+        messages: provider_messages,
+        tools: tool_defs.to_vec(),
+        temperature: None,
+        max_output_tokens: None,
+        images,
+    };
+
+    Ok((request, queued_message_ids_in_request))
+}
+
+async fn try_context_limit_recovery(
+    deps: &AssistantDeps,
+    session: &crate::assistant::types::AssistantSession,
+    connection: &crate::assistant::types::ProviderConnection,
+    run_id: &str,
+    state: &mut ApiTurnState,
+) -> Result<bool, AssistantEngineError> {
+    match compaction_service::compact_for_context_limit_recovery(
+        &deps.pool,
+        session,
+        connection,
+        None,
+        run_id,
+        &mut state.conversation,
+    )
+    .await
+    {
+        Ok(Some(outcome)) => {
+            state.compaction_attempt.record_success();
+            let _ = emit_event(
+                &deps.app,
+                session,
+                Some(run_id),
+                AssistantUiEvent::SessionCompacted {
+                    compaction: outcome.compaction,
+                    summary_message: outcome.summary_message,
+                },
+            );
+            return Ok(true);
+        }
+        Ok(None) => {
+            tracing::warn!(
+                session_id = %session.id,
+                run_id = %run_id,
+                "Context-limit recovery found no compactable assistant history"
+            );
+            state.compaction_attempt.record_nothing_to_compact();
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session.id,
+                run_id = %run_id,
+                error = %error,
+                "Context-limit recovery compaction failed"
+            );
+            state.compaction_attempt.record_failure(&error);
+        }
+    }
+    Ok(false)
 }
 
 type ProviderStream =
