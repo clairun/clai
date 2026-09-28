@@ -46,11 +46,11 @@ impl TurnRunner for ApiTurnRunner {
 
 #[allow(
     clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 87 against a budget of 25"
+    reason = "the turn orchestrator retains terminal status branches"
 )]
 #[expect(
     clippy::too_many_lines,
-    reason = "lint debt: 497 lines against a 100-line budget; split it, do not raise the budget"
+    reason = "the turn orchestrator still exceeds the 100-line budget"
 )]
 async fn run_api_session_turn(
     deps: &AssistantDeps,
@@ -293,44 +293,16 @@ async fn run_api_session_turn(
         )
         .await;
 
-        // Finalize the assistant message from whatever we accumulated, on
-        // *every* way out of the stream loop — normal end, Stop, or a
-        // mid-stream provider error — and before the run is marked terminal.
-        // Two bugs live here if this is skipped:
-        //
-        //  - the orphan-tool case: tool_calls captured via
-        //    `finish_reason: tool_calls` but [DONE] never arriving, leaving the
-        //    assistant row empty while tool result rows get persisted below;
-        //  - the cancel case: everything already streamed to the screen lives
-        //    only in `content_parts`, so returning early wrote nothing back to
-        //    the row and the text the user watched arrive vanished on reload.
-        //    Every CLI driver in `local_agent.rs` already finalizes on cancel
-        //    (`finalize_assistant_message` in its own cancel arm); the API path
-        //    did not.
-        //
-        // No arm of the loop above returns on its own any more: it breaks with
-        // a `StreamExit` and *this* is the only exit, which is what keeps the
-        // two cases above from drifting apart again.
-        let produced_no_content = run_produced_no_content(&content_parts);
-        if exit_keeps_streamed_message(&stream_exit, produced_no_content) {
-            // `content_parts` is already in arrival order. Guarantee non-empty
-            // so the assistant row never persists with zero content.
-            let final_content = final_content_parts(content_parts);
-
-            let updated_message = state
-                .conversation
-                .update_message_content(&deps.pool, &assistant_message.id, &final_content)
-                .await?;
-
-            let _ = emit_event(
-                &deps.app,
-                &session,
-                Some(&run_id),
-                AssistantUiEvent::AssistantMessageCompleted {
-                    message: updated_message,
-                },
-            );
-        }
+        let produced_no_content = finalize_api_message(
+            deps,
+            &session,
+            &run_id,
+            &assistant_message.id,
+            &stream_exit,
+            content_parts,
+            &mut state.conversation,
+        )
+        .await?;
 
         match stream_exit {
             StreamExit::Completed => {}
@@ -563,6 +535,33 @@ async fn try_context_limit_recovery(
     Ok(false)
 }
 
+async fn finalize_api_message(
+    deps: &AssistantDeps,
+    session: &crate::assistant::types::AssistantSession,
+    run_id: &str,
+    message_id: &str,
+    exit: &StreamExit,
+    parts: Vec<ContentPart>,
+    conversation: &mut RunConversation,
+) -> Result<bool, AssistantEngineError> {
+    let produced_no_content = run_produced_no_content(&parts);
+    if exit_keeps_streamed_message(exit, produced_no_content) {
+        let final_content = final_content_parts(parts);
+        let updated_message = conversation
+            .update_message_content(&deps.pool, message_id, &final_content)
+            .await?;
+        let _ = emit_event(
+            &deps.app,
+            session,
+            Some(run_id),
+            AssistantUiEvent::AssistantMessageCompleted {
+                message: updated_message,
+            },
+        );
+    }
+    Ok(produced_no_content)
+}
+
 enum ToolLoopOutcome {
     Continue,
     Cancelled,
@@ -728,9 +727,8 @@ async fn consume_api_stream(
     (stream_exit, content_parts, tool_calls)
 }
 
-// Production helper fns (normalize_history_for_provider, build_trigger_message,
-// fail_run, cancel_run) live below the test module for legacy reasons; the
-// allow silences clippy's items-after-test-module lint without a noisy reflow.
+// The existing helper tests still precede their private functions; keep the
+// test module in place to avoid moving unrelated code in this refactor.
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
