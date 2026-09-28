@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     /// DB-backed run-flow tests against a real migrated sqlite pool (same
-    /// harness `repository_tests` uses). The engine and CLI loops need a
+    /// harness `repository_tests` uses). The API and CLI turn loops need a
     /// Tauri app handle, so the data flow they perform is driven here through
     /// the same repository writes and `RunConversation` calls.
     mod run_flow {
@@ -1612,7 +1612,7 @@ mod tests {
         }
 
         /// Several assistant/tool iterations written through the run's
-        /// conversation, as the engine and CLI loops write them: loaded once
+        /// conversation, as the API and CLI turn loops write them: loaded once
         /// at run start, it ends identical to what the next run reconstructs
         /// from the database.
         #[tokio::test]

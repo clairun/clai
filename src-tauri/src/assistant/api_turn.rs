@@ -29,16 +29,6 @@ use crate::assistant::types::{
 use crate::assistant::{compaction, compaction_service};
 use crate::AppState;
 
-pub async fn run_session_turn(
-    deps: &AssistantDeps,
-    input: RunTurnInput,
-    session: AssistantSession,
-    connection: ProviderConnection,
-    workspace_root: Option<PathBuf>,
-) -> Result<(), AssistantEngineError> {
-    run_api_session_turn_with_adapter(deps, input, session, connection, workspace_root, None).await
-}
-
 #[allow(
     clippy::cognitive_complexity,
     reason = "the turn orchestrator retains terminal status branches"
@@ -47,27 +37,18 @@ pub async fn run_session_turn(
     clippy::too_many_lines,
     reason = "the turn orchestrator still exceeds the 100-line budget"
 )]
-async fn run_api_session_turn_with_adapter(
+pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
     session: AssistantSession,
     connection: ProviderConnection,
     workspace_root: Option<PathBuf>,
-    injected_adapter: Option<&dyn ProviderAdapter>,
 ) -> Result<(), AssistantEngineError> {
-    let Some((run_id, system_message, tool_defs, mut state, resolved_adapter)) = start_api_turn(
-        deps,
-        &input,
-        &session,
-        &connection,
-        workspace_root,
-        injected_adapter,
-    )
-    .await?
+    let Some((run_id, system_message, tool_defs, mut state, adapter)) =
+        start_api_turn(deps, &input, &session, &connection, workspace_root).await?
     else {
         return Ok(());
     };
-    let adapter = injected_adapter.unwrap_or_else(|| resolved_adapter.as_deref().unwrap());
 
     // No iteration cap: the agent runs as long as the LLM keeps emitting
     // tool calls. The cancel token is the only stop — surfaced as the
@@ -337,14 +318,13 @@ async fn start_api_turn(
     session: &AssistantSession,
     connection: &ProviderConnection,
     workspace_root: Option<PathBuf>,
-    injected_adapter: Option<&dyn ProviderAdapter>,
 ) -> Result<
     Option<(
         String,
         ProviderInputMessage,
         Vec<ToolDefinition>,
         ApiTurnState,
-        Option<Box<dyn ProviderAdapter>>,
+        Box<dyn ProviderAdapter>,
     )>,
     AssistantEngineError,
 > {
@@ -365,11 +345,7 @@ async fn start_api_turn(
         return Ok(None);
     }
 
-    let resolved_adapter = if injected_adapter.is_none() {
-        Some(providers::resolve_adapter(&connection.protocol_id)?)
-    } else {
-        None
-    };
+    let adapter = providers::resolve_adapter(&connection.protocol_id)?;
 
     // Get available tools for this session's context
     let external_tools = {
@@ -458,13 +434,7 @@ async fn start_api_turn(
         );
     }
 
-    Ok(Some((
-        run_id,
-        system_message,
-        tool_defs,
-        state,
-        resolved_adapter,
-    )))
+    Ok(Some((run_id, system_message, tool_defs, state, adapter)))
 }
 
 struct ApiTurnState {
