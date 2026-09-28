@@ -158,7 +158,7 @@ impl Drop for PlatformPump {
 /// blocking on the default context busy-polls one core. The source is inert in this mode because
 /// CEF schedules work through `OnScheduleMessagePumpWork`.
 /// <https://github.com/chromiumembedded/cef/issues/3002>
-pub(super) fn destroy_chromium_work_source() {
+pub(crate) fn destroy_chromium_work_source() {
   let context = glib::MainContext::default();
   let context: *mut ffi::GMainContext = context.to_glib_none().0;
 
@@ -180,8 +180,8 @@ pub(super) fn destroy_chromium_work_source() {
 }
 
 /// Chromium symbols are not exported, so the source is recognized by shape: a recursive source
-/// whose prepare lives in `libcef.so`, polling a single pipe, and currently asking for a zero
-/// timeout without being ready.
+/// at idle priority whose prepare lives in `libcef.so`, polling a single pipe, and currently
+/// asking for a zero timeout without being ready.
 unsafe fn is_chromium_work_source(source: *mut ffi::GSource) -> bool {
   unsafe {
     let Some(prepare) = (*(*source).source_funcs).prepare else {
@@ -198,7 +198,9 @@ unsafe fn is_chromium_work_source(source: *mut ffi::GSource) -> bool {
       return false;
     }
 
-    if ffi::g_source_get_can_recurse(source) == ffi::GFALSE {
+    if ffi::g_source_get_can_recurse(source) == ffi::GFALSE
+      || ffi::g_source_get_priority(source) != ffi::G_PRIORITY_DEFAULT_IDLE
+    {
       return false;
     }
 
