@@ -255,7 +255,7 @@ async fn run_api_session_turn(
         // Call the provider
         let stream_result = adapter.stream_completion(&connection, request).await;
 
-        let mut stream = match stream_result {
+        let stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
                 if !retried_after_context_compaction && is_context_limit_error(&e.to_string()) {
@@ -374,85 +374,15 @@ async fn run_api_session_turn(
             },
         );
 
-        // Consume the stream. `content_parts` grows in the order events
-        // arrive so the assistant message preserves the model's real
-        // text↔thinking↔tool interleaving (e.g. think → call tool → think →
-        // answer) instead of hoisting all reasoning to the top. `tool_calls`
-        // is tracked separately because the execution loop below needs it.
-        let mut content_parts: Vec<ContentPart> = Vec::new();
-        let mut tool_calls: Vec<ToolInvocationDraft> = Vec::new();
-
-        let stream_exit = loop {
-            match tokio::select! {
-                _ = input.cancel_token.cancelled() => None,
-                next = stream.next() => next,
-            } {
-                None if input.cancel_token.is_cancelled() => {
-                    break StreamExit::Cancelled;
-                }
-                Some(Ok(event)) => match event {
-                    ProviderEvent::MessageStart => {}
-                    ProviderEvent::TextDelta { text } => {
-                        push_text_delta(&mut content_parts, &text);
-                        let _ = emit_event(
-                            &deps.app,
-                            &session,
-                            Some(&run_id),
-                            AssistantUiEvent::AssistantDelta {
-                                message_id: assistant_message.id.clone(),
-                                text,
-                            },
-                        );
-                    }
-                    ProviderEvent::ThinkingDelta { text } => {
-                        push_thinking_delta(&mut content_parts, &text);
-                        let _ = emit_event(
-                            &deps.app,
-                            &session,
-                            Some(&run_id),
-                            AssistantUiEvent::AssistantThinkingDelta {
-                                message_id: assistant_message.id.clone(),
-                                text,
-                            },
-                        );
-                    }
-                    ProviderEvent::ThinkingSignature { signature } => {
-                        // Anthropic sends the signature in its own event after a
-                        // thinking block's text; bind it to that block so it can
-                        // be replayed verbatim. A later thinking_delta opens a new
-                        // block, so each block keeps its own signature.
-                        set_thinking_signature(&mut content_parts, signature);
-                    }
-                    ProviderEvent::ToolCallReady { tool_call } => {
-                        // Record it in content (in position) and in tool_calls
-                        // (for the execution loop below).
-                        content_parts.push(ContentPart::ToolUse {
-                            tool_call_id: tool_call.tool_call_id.clone(),
-                            tool_name: tool_call.tool_name.clone(),
-                            arguments: tool_call.params.clone(),
-                        });
-                        tool_calls.push(tool_call);
-                    }
-                    ProviderEvent::ToolCallDelta { .. } => {
-                        // Could emit live UI updates here in the future
-                    }
-                    ProviderEvent::MessageComplete => {
-                        // Finalization happens once after the stream loop exits
-                        // so we also capture in-memory state (text + tool_calls)
-                        // when the provider hangs up before sending [DONE].
-                    }
-                    ProviderEvent::ProviderError { message } => {
-                        break StreamExit::ProviderReported { message };
-                    }
-                },
-                Some(Err(e)) => {
-                    break StreamExit::StreamFailed {
-                        message: e.to_string(),
-                    };
-                }
-                None => break StreamExit::Completed,
-            }
-        };
+        let (stream_exit, content_parts, tool_calls) = consume_api_stream(
+            stream,
+            &input.cancel_token,
+            deps,
+            &session,
+            &run_id,
+            &assistant_message.id,
+        )
+        .await;
 
         // Finalize the assistant message from whatever we accumulated, on
         // *every* way out of the stream loop — normal end, Stop, or a
@@ -647,6 +577,95 @@ async fn run_api_session_turn(
     complete_run_with_notices(deps, &session, &run_id, &notices).await?;
 
     Ok(())
+}
+
+type ProviderStream =
+    std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
+
+async fn consume_api_stream(
+    mut stream: ProviderStream,
+    cancel: &tokio_util::sync::CancellationToken,
+    deps: &AssistantDeps,
+    session: &crate::assistant::types::AssistantSession,
+    run_id: &str,
+    message_id: &str,
+) -> (StreamExit, Vec<ContentPart>, Vec<ToolInvocationDraft>) {
+    let mut content_parts: Vec<ContentPart> = Vec::new();
+    let mut tool_calls: Vec<ToolInvocationDraft> = Vec::new();
+
+    let stream_exit = loop {
+        match tokio::select! {
+            _ = cancel.cancelled() => None,
+            next = stream.next() => next,
+        } {
+            None if cancel.is_cancelled() => {
+                break StreamExit::Cancelled;
+            }
+            Some(Ok(event)) => match event {
+                ProviderEvent::MessageStart => {}
+                ProviderEvent::TextDelta { text } => {
+                    push_text_delta(&mut content_parts, &text);
+                    let _ = emit_event(
+                        &deps.app,
+                        session,
+                        Some(run_id),
+                        AssistantUiEvent::AssistantDelta {
+                            message_id: message_id.to_string(),
+                            text,
+                        },
+                    );
+                }
+                ProviderEvent::ThinkingDelta { text } => {
+                    push_thinking_delta(&mut content_parts, &text);
+                    let _ = emit_event(
+                        &deps.app,
+                        session,
+                        Some(run_id),
+                        AssistantUiEvent::AssistantThinkingDelta {
+                            message_id: message_id.to_string(),
+                            text,
+                        },
+                    );
+                }
+                ProviderEvent::ThinkingSignature { signature } => {
+                    // Anthropic sends the signature in its own event after a
+                    // thinking block's text; bind it to that block so it can
+                    // be replayed verbatim. A later thinking_delta opens a new
+                    // block, so each block keeps its own signature.
+                    set_thinking_signature(&mut content_parts, signature);
+                }
+                ProviderEvent::ToolCallReady { tool_call } => {
+                    // Record it in content (in position) and in tool_calls
+                    // (for the execution loop below).
+                    content_parts.push(ContentPart::ToolUse {
+                        tool_call_id: tool_call.tool_call_id.clone(),
+                        tool_name: tool_call.tool_name.clone(),
+                        arguments: tool_call.params.clone(),
+                    });
+                    tool_calls.push(tool_call);
+                }
+                ProviderEvent::ToolCallDelta { .. } => {
+                    // Could emit live UI updates here in the future
+                }
+                ProviderEvent::MessageComplete => {
+                    // Finalization happens once after the stream loop exits
+                    // so we also capture in-memory state (text + tool_calls)
+                    // when the provider hangs up before sending [DONE].
+                }
+                ProviderEvent::ProviderError { message } => {
+                    break StreamExit::ProviderReported { message };
+                }
+            },
+            Some(Err(e)) => {
+                break StreamExit::StreamFailed {
+                    message: e.to_string(),
+                };
+            }
+            None => break StreamExit::Completed,
+        }
+    };
+
+    (stream_exit, content_parts, tool_calls)
 }
 
 // Production helper fns (normalize_history_for_provider, build_trigger_message,
