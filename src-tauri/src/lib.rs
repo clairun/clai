@@ -377,6 +377,7 @@ pub fn run() {
 
     // Build and run the Tauri application
     tauri::Builder::default()
+        .runtime(tauri_runtime_cef::Cef::default())
         // Register Tauri plugins
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())

@@ -63,16 +63,17 @@ dbg_macro = "deny"
 todo = "deny"
 
 [build-dependencies]
-tauri-build = { version = "2.7.0", features = [] }
+tauri-build = { version = "=3.0.0-alpha.2", features = [] }
 
 [dependencies]
 # Tauri framework and plugins
-tauri = { version = "2.12.0", features = [] }
-tauri-plugin-clipboard-manager = "2.3.3"
-tauri-plugin-dialog = "2.7.3"
-tauri-plugin-opener = "2.5.5"
-tauri-plugin-os = "2.3.2"
-tauri-plugin-updater = "2.12.0"
+tauri = { version = "=3.0.0-alpha.3", features = ["gtk4"] }
+tauri-runtime-cef = "=3.0.0-alpha.4"
+tauri-plugin-clipboard-manager = "=3.0.0-alpha.1"
+tauri-plugin-dialog = "=3.0.0-alpha.1"
+tauri-plugin-opener = "=3.0.0-alpha.1"
+tauri-plugin-os = "=3.0.0-alpha.1"
+tauri-plugin-updater = "=3.0.0-alpha.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -201,3 +202,7 @@ libc = "0.2"
 tokio = { version = "1.53.1", features = ["test-util"] }
 # Temporary directories for testing
 tempfile = "3"
+
+[patch.crates-io]
+# Published dialog alpha omits the Manager trait import needed by Tauri 3.
+tauri-plugin-dialog = { path = "../vendor/tauri-plugin-dialog" }

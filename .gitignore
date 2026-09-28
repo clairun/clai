@@ -42,3 +42,8 @@ docs/*.md
 /clai.flatpak
 /repo/
 /flatpak-build/
+
+# Local experimental Rust toolchain and Cargo cache.
+/.rustup-home/
+/.cargo-home/
+/.npm-cache/
