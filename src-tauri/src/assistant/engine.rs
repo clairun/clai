@@ -69,22 +69,25 @@ pub async fn run_session_turn(
                 .get_provider_connection(&input.connection_id)
         })
         .ok_or_else(|| AssistantEngineError::ProviderNotConfigured(input.connection_id.clone()))?;
-    if let Some(workspace_id) = session.context.agent_workspace_id.as_deref() {
-        if app_state
-            .as_ref()
-            .and_then(|state| state.workspace_root(workspace_id))
-            .is_none()
-        {
-            return Err(AssistantEngineError::Persistence(format!(
-                "workspace {} no longer exists or failed to load",
-                workspace_id
-            )));
+    let workspace_root = match session.context.agent_workspace_id.as_deref() {
+        Some(workspace_id) => {
+            let root = app_state
+                .as_ref()
+                .and_then(|state| state.workspace_root(workspace_id));
+            if root.is_none() {
+                return Err(AssistantEngineError::Persistence(format!(
+                    "workspace {} no longer exists or failed to load",
+                    workspace_id
+                )));
+            }
+            root
         }
-    }
+        None => None,
+    };
 
     if providers::is_cli_provider(&connection.protocol_id) {
         local_agent::run_session_turn(deps, input, session, connection).await
     } else {
-        api_turn::run_session_turn(deps, input, session, connection).await
+        api_turn::run_session_turn(deps, input, session, connection, workspace_root).await
     }
 }

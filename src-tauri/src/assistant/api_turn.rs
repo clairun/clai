@@ -3,6 +3,7 @@ use crate::assistant::{
     providers::types::is_context_limit_error,
 };
 use futures::StreamExt;
+use std::path::PathBuf;
 use tauri::Manager;
 
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
@@ -33,8 +34,9 @@ pub async fn run_session_turn(
     input: RunTurnInput,
     session: AssistantSession,
     connection: ProviderConnection,
+    workspace_root: Option<PathBuf>,
 ) -> Result<(), AssistantEngineError> {
-    run_api_session_turn_with_adapter(deps, input, session, connection, None).await
+    run_api_session_turn_with_adapter(deps, input, session, connection, workspace_root, None).await
 }
 
 #[allow(
@@ -50,10 +52,18 @@ async fn run_api_session_turn_with_adapter(
     input: RunTurnInput,
     session: AssistantSession,
     connection: ProviderConnection,
+    workspace_root: Option<PathBuf>,
     injected_adapter: Option<&dyn ProviderAdapter>,
 ) -> Result<(), AssistantEngineError> {
-    let Some((run_id, system_message, tool_defs, mut state, resolved_adapter)) =
-        start_api_turn(deps, &input, &session, &connection, injected_adapter).await?
+    let Some((run_id, system_message, tool_defs, mut state, resolved_adapter)) = start_api_turn(
+        deps,
+        &input,
+        &session,
+        &connection,
+        workspace_root,
+        injected_adapter,
+    )
+    .await?
     else {
         return Ok(());
     };
@@ -326,6 +336,7 @@ async fn start_api_turn(
     input: &RunTurnInput,
     session: &AssistantSession,
     connection: &ProviderConnection,
+    workspace_root: Option<PathBuf>,
     injected_adapter: Option<&dyn ProviderAdapter>,
 ) -> Result<
     Option<(
@@ -337,11 +348,6 @@ async fn start_api_turn(
     )>,
     AssistantEngineError,
 > {
-    let workspace_root = session
-        .context
-        .agent_workspace_id
-        .as_deref()
-        .and_then(|id| deps.app.try_state::<AppState>()?.workspace_root(id));
     // Get or create the run
     let run_id = resolve_run_id(deps, session, connection, input).await?;
 
