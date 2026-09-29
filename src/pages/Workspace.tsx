@@ -1273,7 +1273,7 @@ const WorkspaceHeader = ({
           />
         ) : (
           <h1
-            className={`${styles.title} ${isGenericWorkspace ? '' : styles.titleEditable}`}
+            className={`${styles.title} ${canEditTitle ? styles.titleEditable : ''}`}
             onClick={beginEditTitle}
             title={canEditTitle ? 'Click to rename' : undefined}
             role={canEditTitle ? 'button' : undefined}
@@ -1592,18 +1592,23 @@ const Workspace = () => {
   const { loadWorkspaces, workspaces } = useOutletContext<FleetOutletContext>() ?? {};
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
-  const [details, setDetails] = useState<WorkspaceDetails | null>(null);
+  const [rawDetails, setDetails] = useState<WorkspaceDetails | null>(null);
   // The Workspace instance is REUSED across workspace→workspace navigation, so
-  // after the URL changes `details` briefly still holds the PREVIOUS workspace's
-  // data until the new details round-trip resolves. Everything rendered from
-  // details reads `activeDetails`, so the switch shows loading placeholders
-  // instead of the previous workspace's conversation, header, and drawer.
-  const detailsReady = details?.workspaceId === workspaceId;
-  const activeDetails = detailsReady ? details : null;
+  // after the URL changes `rawDetails` briefly still holds the PREVIOUS
+  // workspace's data until the new details round-trip resolves. `details` is
+  // null until they belong to the current workspace, so the switch shows
+  // loading placeholders instead of the previous workspace's data.
+  const details = rawDetails?.workspaceId === workspaceId ? rawDetails : null;
+  const detailsReady = !!details;
+  // Late replies and optimistic updates check this so a workspace the user
+  // has left cannot write into the current one.
+  const currentWorkspaceIdRef = useRef(workspaceId);
+  useLayoutEffect(() => {
+    currentWorkspaceIdRef.current = workspaceId;
+  }, [workspaceId]);
   // Whether the crew can be edited here: agent-kind workspaces and the default
   // one have a fixed roster. Drives the drawer's "+ Add" and the list alike.
-  const crewManageable =
-    !!activeDetails && activeDetails.kind !== 'agent' && !isGenericWorkspace;
+  const crewManageable = !!details && details.kind !== 'agent' && !isGenericWorkspace;
   // True only during the initial-entry load (loadDetails(true)); the periodic
   // poll refreshes without flipping it. Read by the chat panel so the first
   // hydration window renders a loading placeholder instead of the misleading
@@ -1787,7 +1792,7 @@ const Workspace = () => {
     }
   }, [artifactAddMenu, activePanel]);
 
-  const sessionId = activeDetails?.session?.id || null;
+  const sessionId = details?.session?.id || null;
   // Narrow store subscriptions: each value the page shell renders gets its
   // own selector, so this (very large) component body only re-runs when one
   // of these actually changes. Subscribing to the whole `sessions[sessionId]`
@@ -1833,6 +1838,7 @@ const Workspace = () => {
 
       try {
         const nextDetails = await getWorkspaceDetails(workspaceId, DETAILS_WITH_FILES);
+        if (currentWorkspaceIdRef.current !== workspaceId) return;
         setDetails(nextDetails);
         setError('');
 
@@ -1857,6 +1863,7 @@ const Workspace = () => {
               }),
               assistantClient.listRuns(nextDetails.session.id),
             ]);
+            if (currentWorkspaceIdRef.current !== workspaceId) return;
 
             store.loadSessionData(
               nextDetails.session.id,
@@ -1873,9 +1880,10 @@ const Workspace = () => {
           }
         }
       } catch (err) {
+        if (currentWorkspaceIdRef.current !== workspaceId) return;
         setError(errorMessage(err, 'Failed to load workspace.'));
       } finally {
-        setIsLoading(false);
+        if (currentWorkspaceIdRef.current === workspaceId) setIsLoading(false);
       }
     },
     [workspaceId]
@@ -1941,10 +1949,12 @@ const Workspace = () => {
   // Fleet rail so its row updates at once rather than on the next 5s poll.
   const handleTitleSaved = useCallback(
     (title: string) => {
-      setDetails((current) => (current ? { ...current, title } : current));
+      setDetails((current) =>
+        current?.workspaceId === workspaceId ? { ...current, title } : current
+      );
       void loadWorkspaces?.();
     },
-    [loadWorkspaces]
+    [loadWorkspaces, workspaceId]
   );
 
   const handleRunNow = useCallback(async () => {
@@ -1992,14 +2002,18 @@ const Workspace = () => {
       // Optimistically flip the pause flag so the button swaps
       // immediately — the next details poll will reconcile if the backend
       // disagrees.
-      setDetails((current) => (current ? { ...current, schedulePaused: nextPaused } : current));
+      setDetails((current) =>
+        current?.workspaceId === workspaceId ? { ...current, schedulePaused: nextPaused } : current
+      );
       try {
         await setWorkspaceSchedulePaused(workspaceId, nextPaused);
         setError('');
         await loadDetails(false);
       } catch (err) {
         setError(errorMessage(err, 'Failed to update pause state.'));
-        setDetails((current) => (current ? { ...current, schedulePaused: !nextPaused } : current));
+        setDetails((current) =>
+        current?.workspaceId === workspaceId ? { ...current, schedulePaused: !nextPaused } : current
+      );
       } finally {
         setPauseBusy(false);
       }
@@ -2032,9 +2046,9 @@ const Workspace = () => {
     return () => window.clearInterval(interval);
   }, [loadDetails]);
 
-  const memories = useMemo(() => activeDetails?.memories || [], [activeDetails?.memories]);
-  const artifactCount = Number(activeDetails?.artifactCount ?? 0);
-  const artifactCountCapped = activeDetails?.artifactCountCapped ?? false;
+  const memories = useMemo(() => details?.memories || [], [details?.memories]);
+  const artifactCount = Number(details?.artifactCount ?? 0);
+  const artifactCountCapped = details?.artifactCountCapped ?? false;
 
   // Open another workspace file in the preview — used when a link inside a
   // previewed file points at a sibling (an index page linking to a report, a
@@ -2075,7 +2089,7 @@ const Workspace = () => {
   // Store is the live source once the session is hydrated; the workspace
   // details cover the first render before hydration.
   const queuedMessageIds =
-    storeQueuedMessageIds ?? activeDetails?.queuedMessageIds ?? EMPTY_QUEUED_IDS;
+    storeQueuedMessageIds ?? details?.queuedMessageIds ?? EMPTY_QUEUED_IDS;
   const handleDeleteQueuedMessage = useCallback(
     (messageId: string) => {
       if (!sessionId) return;
@@ -2185,7 +2199,7 @@ const Workspace = () => {
     };
   }, [loadDetails, details, workspaceId]);
 
-  const tasks = activeDetails?.tasks || [];
+  const tasks = details?.tasks || [];
 
   // The chat's delegated-task cards are frozen at the moment of their tool
   // call — the tasks drawer owns what is happening now. So the chat gets no
@@ -2195,12 +2209,12 @@ const Workspace = () => {
   // The roster it does need (faces, names) keeps one reference across polls
   // that changed nothing about a face — see `useStableRoster` — and the tasks
   // a click has to resolve are read from a ref instead of a prop.
-  const chatRoster = useStableRoster(activeDetails?.assignedAgents);
+  const chatRoster = useStableRoster(details?.assignedAgents);
 
   const tasksRef = useRef<readonly WorkspaceTaskResponse[]>(EMPTY_TASKS);
   useEffect(() => {
-    tasksRef.current = activeDetails?.tasks || EMPTY_TASKS;
-  }, [activeDetails]);
+    tasksRef.current = details?.tasks || EMPTY_TASKS;
+  }, [details]);
 
   const loadedTasks = useCallback(() => tasksRef.current, []);
   const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
@@ -2229,7 +2243,7 @@ const Workspace = () => {
   // `details.runs` is sorted newest-first by the backend; pick the first
   // non-terminal entry so we cancel the most recent activation.
   const activeRun =
-    (activeDetails?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
+    (details?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
   // Ctrl+C cancels the in-flight run (terminal-style interrupt). The guard
   // logic lives in shouldCancelRunOnKey so it stays unit-tested: a real text
@@ -2260,7 +2274,7 @@ const Workspace = () => {
   // Surface the most recent run's failure in the chat. Derived from the
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
-  const lastRun = getLastRunInfo(storeRuns || activeDetails?.runs);
+  const lastRun = getLastRunInfo(storeRuns || details?.runs);
   const runError = lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
   const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
   // Tell the backend this workspace is being viewed so the rail clears its
@@ -2358,7 +2372,7 @@ const Workspace = () => {
   return (
     <div className={styles.workspacePage}>
       <WorkspaceHeader
-        details={activeDetails}
+        details={details}
         workspaceId={workspaceId}
         listTitle={workspaces?.find((entry) => entry.id === workspaceId)?.title}
         isGenericWorkspace={isGenericWorkspace}
@@ -2629,16 +2643,16 @@ const Workspace = () => {
             </div>
 
             <div className={styles.workspaceDrawerBody}>
-              {!activeDetails && (
+              {!details && (
                 <div className={styles.drawerEmpty} aria-busy="true">
                   Loading…
                 </div>
               )}
 
-              {activeDetails && activePanel === 'agents' && (
+              {details && activePanel === 'agents' && (
                 <CrewList
                   workspaceId={workspaceId}
-                  agents={activeDetails.assignedAgents}
+                  agents={details.assignedAgents}
                   tasks={tasks}
                   manageable={crewManageable}
                   busy={agentBusy}
@@ -2651,17 +2665,17 @@ const Workspace = () => {
                 />
               )}
 
-              {activeDetails && activePanel === 'tasks' && (
+              {details && activePanel === 'tasks' && (
                 <TaskList
                   workspaceId={workspaceId}
                   tasks={tasks}
-                  roster={activeDetails.assignedAgents}
+                  roster={details.assignedAgents}
                   onChanged={() => loadDetails(false)}
                   onViewTask={openTaskTranscript}
                 />
               )}
 
-              {activeDetails && activePanel === 'memories' && (
+              {details && activePanel === 'memories' && (
                 <WorkspaceFileEntryList
                   entries={memories}
                   emptyMessage="The workspace hasn't stored anything in memory yet."
@@ -2669,12 +2683,12 @@ const Workspace = () => {
                 />
               )}
 
-              {activeDetails && activePanel === 'artifacts' && (
+              {details && activePanel === 'artifacts' && (
                 <ArtifactsList
                   workspaceId={workspaceId}
                   totalCount={artifactCount}
                   totalCountCapped={artifactCountCapped}
-                  latestModifiedAt={Number(activeDetails.artifactLatestModifiedAt ?? 0)}
+                  latestModifiedAt={Number(details.artifactLatestModifiedAt ?? 0)}
                   onSelect={handleSelectArtifact}
                   onDeleted={handleArtifactDeleted}
                   onMoved={handleArtifactMoved}

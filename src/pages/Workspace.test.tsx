@@ -2,7 +2,7 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes, useNavigate } from 'react-router';
+import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
 import styles from './Workspace.module.css';
@@ -14,6 +14,8 @@ import type {
   WorkspaceDetails,
   WorkspaceDetailsOptions,
   WorkspaceFileEntry,
+  WorkspaceListEntry,
+  WorkspaceTaskResponse,
 } from '../generated/bindings';
 
 // The chat panel mounts the inline approval / path-grant cards, which
@@ -172,28 +174,47 @@ const GoToAlpha = () => {
   );
 };
 
+// The rail's workspace list, as FleetLayout hands it to the page.
+const LISTED_WORKSPACES = [
+  { id: 'a', title: 'Alpha' },
+  { id: 'b', title: 'Beta' },
+] as WorkspaceListEntry[];
+
+const FleetOutlet = () => (
+  <Outlet context={{ workspaces: LISTED_WORKSPACES, loadWorkspaces: async () => {} }} />
+);
+
 const renderSwitchableWorkspace = () =>
   render(
     <MemoryRouter initialEntries={['/workspace/a']}>
       <GoToAlpha />
       <GoToBeta />
       <Routes>
-        <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        <Route element={<FleetOutlet />}>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Route>
       </Routes>
     </MemoryRouter>
   );
 
-// Resolves `b`'s details only when the returned `release` is called; `a`
-// answers at once.
-const holdBetaDetails = (beta: WorkspaceDetails) => {
+// Resolves `heldId`'s details only when the returned `release` is called;
+// every other workspace answers at once through `resolveOther`.
+const holdDetails = (
+  heldId: string,
+  heldValue: WorkspaceDetails,
+  resolveOther: (workspaceId: string, options: WorkspaceDetailsOptions) => WorkspaceDetails = (
+    _workspaceId,
+    options
+  ) => detailsFor(options)
+) => {
   let release: () => void = () => {};
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
   getWorkspaceDetails.mockImplementation(async (workspaceId, options) => {
-    if (workspaceId !== 'b') return detailsFor(options);
+    if (workspaceId !== heldId) return resolveOther(workspaceId, options);
     await held;
-    return beta;
+    return heldValue;
   });
   return async () => {
     await act(async () => {
@@ -201,6 +222,31 @@ const holdBetaDetails = (beta: WorkspaceDetails) => {
       await held;
     });
   };
+};
+
+const holdBetaDetails = (beta: WorkspaceDetails) => holdDetails('b', beta);
+
+const FAILED_TASK: WorkspaceTaskResponse = {
+  id: 'task-a',
+  workspaceId: 'a',
+  createdByWorkspaceAgentId: null,
+  createdByDisplayName: null,
+  assignedToWorkspaceAgentId: 'wa-1',
+  assignedAgentDefinitionId: 'agent-1',
+  assignedAgentDisplayName: 'Helper',
+  title: 'Alpha task',
+  instructions: 'Do the alpha thing',
+  status: 'failed',
+  resultSummary: null,
+  error: 'Alpha broke',
+  sessionId: null,
+  runId: null,
+  createdAt: 1n,
+  updatedAt: 1n,
+  completedAt: 1n,
+  attentionAcknowledgedAt: null,
+  userResponse: null,
+  userResponseAt: null,
 };
 
 const renderWorkspace = () =>
@@ -478,11 +524,58 @@ describe('Workspace switch chrome', () => {
 
     expect(await screen.findByText('Loading conversation…')).toBeInTheDocument();
     expect(screen.queryByText('Alpha', { selector: 'h1' })).toBeNull();
+    // The rail already knows b's title, so the header names it at once.
+    expect(screen.getByText('Beta', { selector: 'h1' })).not.toHaveAttribute('title');
     // Stop (and Ctrl+C) would cancel a's run from b's page.
     expect(screen.queryByRole('button', { name: 'Stop current run' })).toBeNull();
 
     await releaseBeta();
-    expect(await screen.findByText('Beta', { selector: 'h1' })).toBeInTheDocument();
+    expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
+  });
+
+  it("keeps the previous workspace's counts and attention banner off the page", async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [FAILED_TASK] })
+    );
+    renderSwitchableWorkspace();
+    expect(await screen.findByRole('button', { name: /1 tasks/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /1 memories/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /7 artifacts/ })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Workspace attention' })).toBeInTheDocument();
+
+    const releaseBeta = holdBetaDetails(beta);
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByText('Loading conversation…');
+
+    expect(screen.getByRole('button', { name: /0 tasks/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /0 memories/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /0 artifacts/ })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Workspace attention' })).toBeNull();
+
+    await releaseBeta();
+  });
+
+  it('drops a late reply for the workspace the user already left', async () => {
+    const releaseAlpha = holdDetails(
+      'a',
+      detailsFor({ includeFiles: true }, { tasks: [FAILED_TASK] }),
+      () => beta
+    );
+    renderSwitchableWorkspace();
+    await screen.findByText('Loading conversation…');
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
+    expect(screen.queryByText('Loading conversation…')).toBeNull();
+
+    await releaseAlpha();
+
+    expect(screen.getByTitle('Click to rename')).toHaveTextContent('Beta');
+    expect(screen.queryByText('Loading conversation…')).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Workspace attention' })).toBeNull();
+    expect(loadSessionMessagesPage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'sess-a' })
+    );
   });
 
   it("holds a remembered drawer open on loading instead of the previous workspace's list", async () => {
