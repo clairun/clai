@@ -163,6 +163,46 @@ const GoToBeta = () => {
   );
 };
 
+const GoToAlpha = () => {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate('/workspace/a')}>
+      go to alpha
+    </button>
+  );
+};
+
+const renderSwitchableWorkspace = () =>
+  render(
+    <MemoryRouter initialEntries={['/workspace/a']}>
+      <GoToAlpha />
+      <GoToBeta />
+      <Routes>
+        <Route path="/workspace/:workspaceId" element={<Workspace />} />
+      </Routes>
+    </MemoryRouter>
+  );
+
+// Resolves `b`'s details only when the returned `release` is called; `a`
+// answers at once.
+const holdBetaDetails = (beta: WorkspaceDetails) => {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  getWorkspaceDetails.mockImplementation(async (workspaceId, options) => {
+    if (workspaceId !== 'b') return detailsFor(options);
+    await held;
+    return beta;
+  });
+  return async () => {
+    await act(async () => {
+      release();
+      await held;
+    });
+  };
+};
+
 const renderWorkspace = () =>
   render(
     <MemoryRouter initialEntries={['/workspace/a']}>
@@ -401,6 +441,72 @@ describe('Workspace navigation', () => {
     });
 
     expect(await screen.findByText('conversation of sess-b')).toBeInTheDocument();
+  });
+});
+
+describe('Workspace switch chrome', () => {
+  const beta = detailsFor(
+    { includeFiles: true },
+    { workspaceId: 'b', title: 'Beta', memories: [], session: sessionFor('b', 10n) }
+  );
+
+  it("keeps the previous workspace's title and run controls out of the header", async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        runs: [
+          {
+            id: 'run-a',
+            sessionId: 'sess-a',
+            status: 'running',
+            trigger: 'user_message',
+            connectionId: 'conn-1',
+            protocolId: 'p',
+            modelId: 'm',
+            startedAt: 1n,
+            completedAt: null,
+            error: null,
+          },
+        ],
+      })
+    );
+    renderSwitchableWorkspace();
+    expect(await screen.findByText('Alpha', { selector: 'h1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop current run' })).toBeInTheDocument();
+
+    const releaseBeta = holdBetaDetails(beta);
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+
+    expect(await screen.findByText('Loading conversation…')).toBeInTheDocument();
+    expect(screen.queryByText('Alpha', { selector: 'h1' })).toBeNull();
+    // Stop (and Ctrl+C) would cancel a's run from b's page.
+    expect(screen.queryByRole('button', { name: 'Stop current run' })).toBeNull();
+
+    await releaseBeta();
+    expect(await screen.findByText('Beta', { selector: 'h1' })).toBeInTheDocument();
+  });
+
+  it("holds a remembered drawer open on loading instead of the previous workspace's list", async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      workspaceId === 'b' ? beta : detailsFor(options)
+    );
+    renderSwitchableWorkspace();
+    await screen.findByText('Alpha', { selector: 'h1' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByText('Beta', { selector: 'h1' });
+    await userEvent.click(screen.getByRole('button', { name: /0 memories/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'go to alpha' }));
+    await screen.findByText('Alpha', { selector: 'h1' });
+
+    const releaseBeta = holdBetaDetails(beta);
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+
+    const drawer = await screen.findByRole('complementary', { name: 'memories drawer' });
+    expect(drawer).toHaveTextContent('Loading…');
+    expect(screen.queryByText(MEMORY.name)).toBeNull();
+
+    await releaseBeta();
+    expect(await screen.findByText(/hasn't stored anything in memory yet/)).toBeInTheDocument();
   });
 });
 

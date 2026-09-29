@@ -1081,6 +1081,7 @@ const WorkspaceAttentionBanner = ({ tasks }: { tasks: WorkspaceTaskResponse[] })
 const WorkspaceHeader = ({
   details,
   workspaceId,
+  listTitle,
   isGenericWorkspace,
   messageCount,
   memories,
@@ -1100,6 +1101,8 @@ const WorkspaceHeader = ({
 }: {
   details: WorkspaceDetails | null;
   workspaceId: string;
+  // Title from the rail's workspace list, shown until `details` land.
+  listTitle: string | undefined;
   isGenericWorkspace: boolean;
   // Total messages in the conversation (including not-yet-loaded history
   // and rotation ancestors), not just the loaded window.
@@ -1147,7 +1150,8 @@ const WorkspaceHeader = ({
   // ── Inline title rename ────────────────────────────────────────────
   // Click the title to edit it in place; Enter/blur commits, Escape
   // cancels. The generic workspace has no real title to rename.
-  const currentTitle = details?.title || (isGenericWorkspace ? 'Workspace' : workspaceId);
+  const currentTitle =
+    details?.title || listTitle || (isGenericWorkspace ? 'Workspace' : workspaceId);
   const canEditTitle = !isGenericWorkspace && !!details;
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
@@ -1269,7 +1273,7 @@ const WorkspaceHeader = ({
           />
         ) : (
           <h1
-            className={`${styles.title} ${canEditTitle ? styles.titleEditable : ''}`}
+            className={`${styles.title} ${isGenericWorkspace ? '' : styles.titleEditable}`}
             onClick={beginEditTitle}
             title={canEditTitle ? 'Click to rename' : undefined}
             role={canEditTitle ? 'button' : undefined}
@@ -1585,13 +1589,21 @@ const Workspace = () => {
   // immediately after changes (e.g. a title rename) instead of waiting for
   // its 5s poll. Optional-chained so the page is resilient if ever rendered
   // outside that layout.
-  const { loadWorkspaces } = useOutletContext<FleetOutletContext>() ?? {};
+  const { loadWorkspaces, workspaces } = useOutletContext<FleetOutletContext>() ?? {};
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
   const [details, setDetails] = useState<WorkspaceDetails | null>(null);
+  // The Workspace instance is REUSED across workspace→workspace navigation, so
+  // after the URL changes `details` briefly still holds the PREVIOUS workspace's
+  // data until the new details round-trip resolves. Everything rendered from
+  // details reads `activeDetails`, so the switch shows loading placeholders
+  // instead of the previous workspace's conversation, header, and drawer.
+  const detailsReady = details?.workspaceId === workspaceId;
+  const activeDetails = detailsReady ? details : null;
   // Whether the crew can be edited here: agent-kind workspaces and the default
   // one have a fixed roster. Drives the drawer's "+ Add" and the list alike.
-  const crewManageable = details?.kind !== 'agent' && !isGenericWorkspace;
+  const crewManageable =
+    !!activeDetails && activeDetails.kind !== 'agent' && !isGenericWorkspace;
   // True only during the initial-entry load (loadDetails(true)); the periodic
   // poll refreshes without flipping it. Read by the chat panel so the first
   // hydration window renders a loading placeholder instead of the misleading
@@ -1775,14 +1787,6 @@ const Workspace = () => {
     }
   }, [artifactAddMenu, activePanel]);
 
-  // The Workspace instance is REUSED across workspace→workspace navigation, so
-  // after the URL changes `details` briefly still holds the PREVIOUS workspace's
-  // data until the new details round-trip resolves. Gate all conversation-derived
-  // state on details that actually belong to the current workspace, so the
-  // panel shows the loading placeholder instead of the previous workspace's
-  // conversation during the switch.
-  const detailsReady = details?.workspaceId === workspaceId;
-  const activeDetails = detailsReady ? details : null;
   const sessionId = activeDetails?.session?.id || null;
   // Narrow store subscriptions: each value the page shell renders gets its
   // own selector, so this (very large) component body only re-runs when one
@@ -2028,9 +2032,9 @@ const Workspace = () => {
     return () => window.clearInterval(interval);
   }, [loadDetails]);
 
-  const memories = useMemo(() => details?.memories || [], [details?.memories]);
-  const artifactCount = Number(details?.artifactCount ?? 0);
-  const artifactCountCapped = details?.artifactCountCapped ?? false;
+  const memories = useMemo(() => activeDetails?.memories || [], [activeDetails?.memories]);
+  const artifactCount = Number(activeDetails?.artifactCount ?? 0);
+  const artifactCountCapped = activeDetails?.artifactCountCapped ?? false;
 
   // Open another workspace file in the preview — used when a link inside a
   // previewed file points at a sibling (an index page linking to a report, a
@@ -2181,7 +2185,7 @@ const Workspace = () => {
     };
   }, [loadDetails, details, workspaceId]);
 
-  const tasks = details?.tasks || [];
+  const tasks = activeDetails?.tasks || [];
 
   // The chat's delegated-task cards are frozen at the moment of their tool
   // call — the tasks drawer owns what is happening now. So the chat gets no
@@ -2191,12 +2195,12 @@ const Workspace = () => {
   // The roster it does need (faces, names) keeps one reference across polls
   // that changed nothing about a face — see `useStableRoster` — and the tasks
   // a click has to resolve are read from a ref instead of a prop.
-  const chatRoster = useStableRoster(details?.assignedAgents);
+  const chatRoster = useStableRoster(activeDetails?.assignedAgents);
 
   const tasksRef = useRef<readonly WorkspaceTaskResponse[]>(EMPTY_TASKS);
   useEffect(() => {
-    tasksRef.current = details?.tasks || EMPTY_TASKS;
-  }, [details]);
+    tasksRef.current = activeDetails?.tasks || EMPTY_TASKS;
+  }, [activeDetails]);
 
   const loadedTasks = useCallback(() => tasksRef.current, []);
   const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
@@ -2225,7 +2229,7 @@ const Workspace = () => {
   // `details.runs` is sorted newest-first by the backend; pick the first
   // non-terminal entry so we cancel the most recent activation.
   const activeRun =
-    (details?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
+    (activeDetails?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
   // Ctrl+C cancels the in-flight run (terminal-style interrupt). The guard
   // logic lives in shouldCancelRunOnKey so it stays unit-tested: a real text
@@ -2354,8 +2358,9 @@ const Workspace = () => {
   return (
     <div className={styles.workspacePage}>
       <WorkspaceHeader
-        details={details}
+        details={activeDetails}
         workspaceId={workspaceId}
+        listTitle={workspaces?.find((entry) => entry.id === workspaceId)?.title}
         isGenericWorkspace={isGenericWorkspace}
         messageCount={totalMessageCount}
         memories={memories}
@@ -2379,7 +2384,10 @@ const Workspace = () => {
       <WorkspaceAttentionBanner tasks={tasks} />
 
       <div className={styles.workspaceBody}>
+        {/* Keyed by workspace so a switch applies the new workspace's panel
+            padding at once instead of animating from the previous one's. */}
         <div
+          key={workspaceId}
           className={`${styles.workspaceMain} ${
             isSidePanelOpen
               ? styles.workspaceMainWithPreview
@@ -2409,7 +2417,7 @@ const Workspace = () => {
           />
         </div>
 
-        {details && activePanel && previewEntry && (
+        {activePanel && previewEntry && (
           <WorkspaceFilePreviewPanel
             workspaceId={workspaceId}
             kind={previewEntry.kind}
@@ -2420,7 +2428,7 @@ const Workspace = () => {
           />
         )}
 
-        {details && activePanel === 'tasks' && viewingTask && (
+        {activePanel === 'tasks' && viewingTask && (
           <WorkspaceTaskTranscriptPanel
             task={viewingTask}
             roster={chatRoster}
@@ -2428,7 +2436,7 @@ const Workspace = () => {
           />
         )}
 
-        {details && activePanel && (
+        {activePanel && (
           <aside className={styles.workspaceDrawer} aria-label={`${activePanel} drawer`}>
             <div className={styles.workspaceDrawerHeader}>
               <span className={styles.workspaceDrawerTitle}>
@@ -2621,10 +2629,16 @@ const Workspace = () => {
             </div>
 
             <div className={styles.workspaceDrawerBody}>
-              {activePanel === 'agents' && (
+              {!activeDetails && (
+                <div className={styles.drawerEmpty} aria-busy="true">
+                  Loading…
+                </div>
+              )}
+
+              {activeDetails && activePanel === 'agents' && (
                 <CrewList
                   workspaceId={workspaceId}
-                  agents={details.assignedAgents}
+                  agents={activeDetails.assignedAgents}
                   tasks={tasks}
                   manageable={crewManageable}
                   busy={agentBusy}
@@ -2637,17 +2651,17 @@ const Workspace = () => {
                 />
               )}
 
-              {activePanel === 'tasks' && (
+              {activeDetails && activePanel === 'tasks' && (
                 <TaskList
                   workspaceId={workspaceId}
                   tasks={tasks}
-                  roster={details.assignedAgents}
+                  roster={activeDetails.assignedAgents}
                   onChanged={() => loadDetails(false)}
                   onViewTask={openTaskTranscript}
                 />
               )}
 
-              {activePanel === 'memories' && (
+              {activeDetails && activePanel === 'memories' && (
                 <WorkspaceFileEntryList
                   entries={memories}
                   emptyMessage="The workspace hasn't stored anything in memory yet."
@@ -2655,12 +2669,12 @@ const Workspace = () => {
                 />
               )}
 
-              {activePanel === 'artifacts' && (
+              {activeDetails && activePanel === 'artifacts' && (
                 <ArtifactsList
                   workspaceId={workspaceId}
                   totalCount={artifactCount}
                   totalCountCapped={artifactCountCapped}
-                  latestModifiedAt={Number(details?.artifactLatestModifiedAt ?? 0)}
+                  latestModifiedAt={Number(activeDetails.artifactLatestModifiedAt ?? 0)}
                   onSelect={handleSelectArtifact}
                   onDeleted={handleArtifactDeleted}
                   onMoved={handleArtifactMoved}
