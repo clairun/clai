@@ -12,6 +12,7 @@ import type {
   AssistantMessagePage,
   AssistantSession,
   WorkspaceDetails,
+  WorkspaceAgentResponse,
   WorkspaceDetailsOptions,
   WorkspaceFileEntry,
   WorkspaceListEntry,
@@ -33,6 +34,14 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
   readWorkspaceFile: vi.fn(),
+  runWorkspaceNow: vi.fn(async () => {}),
+  setWorkspaceSchedulePaused: vi.fn(async () => {}),
+  importWorkspaceFiles: vi.fn(async () => []),
+}));
+
+vi.mock('../api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/client')>()),
+  workspaceDeleteAgent: vi.fn(async () => {}),
 }));
 
 vi.mock('../assistant/client', () => ({
@@ -48,6 +57,10 @@ const workspaceClient = await import('../workspace/client');
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 const getOrCreateWorkspaceSession = vi.mocked(workspaceClient.getOrCreateWorkspaceSession);
 const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
+const runWorkspaceNow = vi.mocked(workspaceClient.runWorkspaceNow);
+const setWorkspaceSchedulePaused = vi.mocked(workspaceClient.setWorkspaceSchedulePaused);
+const importWorkspaceFiles = vi.mocked(workspaceClient.importWorkspaceFiles);
+const workspaceDeleteAgent = vi.mocked((await import('../api/client')).workspaceDeleteAgent);
 // Taken through `vi.mocked` on the real module, so the fixtures below are
 // checked against the command's actual return types: a page missing
 // `toolCalls`/`nextCursor`/`hasMore`/`totalCount` — all four read by
@@ -55,6 +68,7 @@ const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
 const assistantClient = await import('../assistant/client');
 const loadSessionMessagesPage = vi.mocked(assistantClient.loadSessionMessagesPage);
 const listRuns = vi.mocked(assistantClient.listRuns);
+const cancelRun = vi.mocked(assistantClient.cancelRun);
 
 const MEMORY: WorkspaceFileEntry = {
   path: '.clai/memory/knowledge.md',
@@ -600,6 +614,426 @@ describe('Workspace switch chrome', () => {
 
     await releaseBeta();
     expect(await screen.findByText(/hasn't stored anything in memory yet/)).toBeInTheDocument();
+  });
+});
+
+// A promise the test settles by hand, for holding one call in flight.
+const deferred = <T,>() => {
+  let resolve: (value: T) => void = () => {};
+  let reject: (reason: unknown) => void = () => {};
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+const ACTIVE_RUN = {
+  id: 'run-a',
+  sessionId: 'sess-a',
+  status: 'running',
+  trigger: 'user_message',
+  connectionId: 'conn-1',
+  protocolId: 'p',
+  modelId: 'm',
+  startedAt: 1n,
+  completedAt: null,
+  error: null,
+} as WorkspaceDetails['runs'][number];
+
+describe('Workspace switch with a call in flight', () => {
+  const scheduledDetails = (workspaceId: string, options: WorkspaceDetailsOptions) =>
+    detailsFor(
+      options,
+      workspaceId === 'b'
+        ? { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n), scheduleEnabled: true }
+        : { scheduleEnabled: true }
+    );
+
+  it("keeps the previous workspace's pending Run now and Pause off the new one", async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      scheduledDetails(workspaceId, options)
+    );
+    const alphaRun = deferred<void>();
+    const alphaPause = deferred<void>();
+    const betaRun = deferred<void>();
+    const betaPause = deferred<void>();
+    runWorkspaceNow.mockImplementation((workspaceId) =>
+      workspaceId === 'a' ? alphaRun.promise : betaRun.promise
+    );
+    setWorkspaceSchedulePaused.mockImplementation((workspaceId) =>
+      workspaceId === 'a' ? alphaPause.promise : betaPause.promise
+    );
+    renderSwitchableWorkspace();
+    await userEvent.click(await screen.findByRole('button', { name: 'Run now' }));
+    expect(screen.getByRole('button', { name: 'Run now' })).toBeDisabled();
+    // The optimistic pause swaps a's Pause for Resume and hides Run now.
+    await userEvent.click(screen.getByRole('button', { name: 'Pause schedule' }));
+    expect(screen.getByRole('button', { name: 'Resume schedule' })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByTitle('Click to rename');
+
+    const runNow = screen.getByRole('button', { name: 'Run now' });
+    expect(runNow).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Pause schedule' })).toBeEnabled();
+    await userEvent.click(runNow);
+    expect(runWorkspaceNow).toHaveBeenCalledWith('b');
+
+    // a's calls settling must not release b's own pending ones.
+    await act(async () => {
+      alphaRun.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Run now' })).toBeDisabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Pause schedule' }));
+    await act(async () => {
+      alphaPause.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'Resume schedule' })).toBeDisabled();
+
+    await act(async () => {
+      betaRun.resolve();
+      betaPause.resolve();
+    });
+  });
+
+  it('still shows a pending Run now and Pause on returning to their workspace', async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      scheduledDetails(workspaceId, options)
+    );
+    const alphaRun = deferred<void>();
+    const alphaPause = deferred<void>();
+    const betaRun = deferred<void>();
+    runWorkspaceNow.mockImplementation((workspaceId) =>
+      workspaceId === 'a' ? alphaRun.promise : betaRun.promise
+    );
+    setWorkspaceSchedulePaused.mockImplementation(() => alphaPause.promise);
+    renderSwitchableWorkspace();
+    await userEvent.click(await screen.findByRole('button', { name: 'Run now' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Pause schedule' }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByText('Beta');
+    await userEvent.click(screen.getByRole('button', { name: 'Run now' }));
+    await userEvent.click(screen.getByRole('button', { name: 'go to alpha' }));
+    await screen.findByText('Alpha');
+
+    // a's reload reports the schedule unpaused, so both controls are back.
+    expect(await screen.findByRole('button', { name: 'Run now' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Pause schedule' })).toBeDisabled();
+
+    await act(async () => {
+      alphaRun.resolve();
+      alphaPause.resolve();
+      betaRun.resolve();
+    });
+  });
+
+  it("keeps the previous workspace's pending import off the new one", async () => {
+    const alphaImport = deferred<string[]>();
+    importWorkspaceFiles.mockImplementation((workspaceId) =>
+      workspaceId === 'a' ? alphaImport.promise : Promise.resolve([])
+    );
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      workspaceId === 'b'
+        ? detailsFor(options, { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n) })
+        : detailsFor(options)
+    );
+    renderSwitchableWorkspace();
+    const addFiles = 'Add files or folders to the workspace';
+    await userEvent.click(await screen.findByRole('button', { name: /artifacts/i }));
+    await userEvent.click(screen.getByRole('button', { name: addFiles }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Files…' }));
+    expect(screen.getByRole('button', { name: addFiles })).toHaveAttribute('aria-disabled', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByTitle('Click to rename');
+    await userEvent.click(screen.getByRole('button', { name: /artifacts/i }));
+    expect(screen.getByRole('button', { name: addFiles })).not.toHaveAttribute('aria-disabled');
+
+    await act(async () => {
+      alphaImport.reject(new Error('alpha import failed'));
+    });
+
+    expect(screen.queryByText('alpha import failed')).toBeNull();
+    expect(document.querySelector(`.${styles.errorBanner}`)).toBeNull();
+  });
+
+  it("keeps the previous workspace's pending agent removal off the new one", async () => {
+    const helper = {
+      id: 'wa-1',
+      agentDefinitionId: 'agent-1',
+      displayName: 'Helper',
+      role: 'member',
+      enabled: true,
+      isDefault: false,
+      agentName: null,
+      agentDescription: null,
+    } as WorkspaceAgentResponse;
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      detailsFor(
+        options,
+        workspaceId === 'b'
+          ? {
+              workspaceId: 'b',
+              title: 'Beta',
+              session: sessionFor('b', 10n),
+              assignedAgents: [{ ...helper, workspaceId: 'b' }],
+            }
+          : { assignedAgents: [{ ...helper, workspaceId: 'a' }] }
+      )
+    );
+    const alphaRemove = deferred<void>();
+    workspaceDeleteAgent.mockImplementation((workspaceId) =>
+      workspaceId === 'a' ? alphaRemove.promise : Promise.resolve()
+    );
+    renderSwitchableWorkspace();
+    const removeHelper = 'Remove Helper from the crew';
+    await userEvent.click(await screen.findByRole('button', { name: /agents/i }));
+    await userEvent.click(await screen.findByRole('button', { name: removeHelper }));
+    expect(screen.getByRole('button', { name: removeHelper })).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByTitle('Click to rename');
+    await userEvent.click(screen.getByRole('button', { name: /agents/i }));
+    expect(await screen.findByRole('button', { name: removeHelper })).toBeEnabled();
+
+    await act(async () => {
+      alphaRemove.reject(new Error('alpha remove failed'));
+    });
+
+    expect(screen.queryByText('alpha remove failed')).toBeNull();
+  });
+
+  it("clears the previous workspace's crew error on switch", async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      workspaceId === 'b'
+        ? detailsFor(options, { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n) })
+        : detailsFor(options, {
+            assignedAgents: [
+              {
+                id: 'wa-1',
+                workspaceId: 'a',
+                agentDefinitionId: 'agent-1',
+                displayName: 'Helper',
+                role: 'member',
+                enabled: true,
+                isDefault: false,
+                agentName: null,
+                agentDescription: null,
+              } as WorkspaceAgentResponse,
+            ],
+          })
+    );
+    workspaceDeleteAgent.mockRejectedValueOnce(new Error('alpha remove failed'));
+    renderSwitchableWorkspace();
+    await userEvent.click(await screen.findByRole('button', { name: /agents/i }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Remove Helper from the crew' })
+    );
+    expect(await screen.findByText('alpha remove failed')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByTitle('Click to rename');
+    await userEvent.click(screen.getByRole('button', { name: /agents/i }));
+
+    expect(screen.queryByText('alpha remove failed')).toBeNull();
+  });
+
+  it("keeps a failed Stop from the previous workspace from releasing the new one's", async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      workspaceId === 'b'
+        ? detailsFor(options, {
+            workspaceId: 'b',
+            title: 'Beta',
+            session: sessionFor('b', 10n),
+            runs: [{ ...ACTIVE_RUN, id: 'run-b', sessionId: 'sess-b' }],
+          })
+        : detailsFor(options, { runs: [ACTIVE_RUN] })
+    );
+    const alphaStop = deferred<never>();
+    cancelRun.mockImplementation((runId) =>
+      runId === 'run-a' ? alphaStop.promise : new Promise<never>(() => {})
+    );
+    renderSwitchableWorkspace();
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop current run' }));
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByTitle('Click to rename');
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop current run' }));
+    expect(screen.getByRole('button', { name: 'Stop current run' })).toBeDisabled();
+
+    await act(async () => {
+      alphaStop.reject(new Error('alpha stop failed'));
+    });
+
+    expect(screen.getByRole('button', { name: 'Stop current run' })).toBeDisabled();
+  });
+
+  it.each([
+    {
+      action: 'Run now',
+      hold: (call: Promise<never>) => runWorkspaceNow.mockImplementation(() => call),
+    },
+    {
+      action: 'Pause schedule',
+      hold: (call: Promise<never>) => setWorkspaceSchedulePaused.mockImplementation(() => call),
+    },
+    {
+      action: 'Stop current run',
+      hold: (call: Promise<never>) => cancelRun.mockImplementation(() => call),
+    },
+  ])(
+    "keeps a failed $action from the previous workspace out of the new one's banner",
+    async ({ action, hold }) => {
+      getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+        workspaceId === 'b'
+          ? scheduledDetails(workspaceId, options)
+          : detailsFor(options, {
+              scheduleEnabled: true,
+              runs: action === 'Stop current run' ? [ACTIVE_RUN] : [],
+            })
+      );
+      const alphaCall = deferred<never>();
+      hold(alphaCall.promise);
+      renderSwitchableWorkspace();
+      await userEvent.click(await screen.findByRole('button', { name: action }));
+      await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+      await screen.findByTitle('Click to rename');
+
+      await act(async () => {
+        alphaCall.reject(new Error('alpha call failed'));
+      });
+
+      expect(screen.queryByText('alpha call failed')).toBeNull();
+      expect(document.querySelector(`.${styles.errorBanner}`)).toBeNull();
+    }
+  );
+
+  it.each([
+    {
+      action: 'Run now',
+      hold: (call: Promise<void>) => runWorkspaceNow.mockImplementation(() => call),
+    },
+    {
+      action: 'Pause schedule',
+      hold: (call: Promise<void>) => setWorkspaceSchedulePaused.mockImplementation(() => call),
+    },
+    {
+      action: 'Stop current run',
+      hold: (call: Promise<void>) =>
+        cancelRun.mockImplementation(() => call.then(() => ACTIVE_RUN)),
+    },
+  ])(
+    "keeps a late successful $action from clearing the new workspace's error",
+    async ({ action, hold }) => {
+      getWorkspaceDetails.mockImplementation(async (workspaceId, options) => {
+        if (workspaceId === 'b') throw new Error('beta unavailable');
+        return detailsFor(options, {
+          scheduleEnabled: true,
+          runs: action === 'Stop current run' ? [ACTIVE_RUN] : [],
+        });
+      });
+      const alphaCall = deferred<void>();
+      hold(alphaCall.promise);
+      renderSwitchableWorkspace();
+      await userEvent.click(await screen.findByRole('button', { name: action }));
+      await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+      expect(await screen.findByText('beta unavailable')).toBeInTheDocument();
+
+      await act(async () => {
+        alphaCall.resolve();
+      });
+
+      expect(screen.getByText('beta unavailable')).toBeInTheDocument();
+    }
+  );
+
+  it("keeps the new workspace's own error when a call from the previous one fails", async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) => {
+      if (workspaceId === 'b') throw new Error('beta unavailable');
+      return detailsFor(options, { scheduleEnabled: true });
+    });
+    const alphaRun = deferred<never>();
+    runWorkspaceNow.mockImplementation(() => alphaRun.promise);
+    renderSwitchableWorkspace();
+    await userEvent.click(await screen.findByRole('button', { name: 'Run now' }));
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    expect(await screen.findByText('beta unavailable')).toBeInTheDocument();
+
+    await act(async () => {
+      alphaRun.reject(new Error('alpha run failed'));
+    });
+
+    expect(screen.getByText('beta unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('alpha run failed')).toBeNull();
+  });
+
+  it('still shows a pending Stop on returning to its workspace', async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      workspaceId === 'b'
+        ? detailsFor(options, { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n) })
+        : detailsFor(options, { runs: [ACTIVE_RUN] })
+    );
+    cancelRun.mockImplementation(() => new Promise<never>(() => {}));
+    renderSwitchableWorkspace();
+    await userEvent.click(await screen.findByRole('button', { name: 'Stop current run' }));
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByText('Beta');
+    await userEvent.click(screen.getByRole('button', { name: 'go to alpha' }));
+    await screen.findByText('Alpha');
+
+    expect(await screen.findByRole('button', { name: 'Stop current run' })).toBeDisabled();
+  });
+
+  it("clears the previous workspace's error banner on switch", async () => {
+    getWorkspaceDetails.mockRejectedValueOnce(new Error('backend unavailable'));
+    renderSwitchableWorkspace();
+    expect(await screen.findByText('backend unavailable')).toBeInTheDocument();
+
+    const releaseBeta = holdBetaDetails(
+      detailsFor(
+        { includeFiles: true },
+        { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n) }
+      )
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByText('Loading conversation…');
+
+    expect(screen.queryByText('backend unavailable')).toBeNull();
+
+    await releaseBeta();
+  });
+
+  it('ignores a failed details load for the workspace the user already left', async () => {
+    const alphaDetails = deferred<WorkspaceDetails>();
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      workspaceId === 'a'
+        ? alphaDetails.promise
+        : detailsFor(options, { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n) })
+    );
+    // Hold b's history so b is still hydrating when a's load fails.
+    const betaMessages = deferred<AssistantMessagePage>();
+    loadSessionMessagesPage.mockImplementation(() => betaMessages.promise);
+    renderSwitchableWorkspace();
+    await screen.findByText('Loading conversation…');
+
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByTitle('Click to rename');
+    expect(screen.getByText('Loading conversation…')).toBeInTheDocument();
+
+    await act(async () => {
+      alphaDetails.reject(new Error('alpha load failed'));
+    });
+
+    expect(screen.queryByText('alpha load failed')).toBeNull();
+    // b's first load is still in flight: the placeholder must hold rather
+    // than flip to the empty-conversation invite.
+    expect(screen.getByText('Loading conversation…')).toBeInTheDocument();
+    expect(screen.queryByText('Start a conversation')).toBeNull();
+
+    await act(async () => {
+      betaMessages.resolve(messagePage([]));
+    });
   });
 });
 

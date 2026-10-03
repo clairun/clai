@@ -1583,6 +1583,27 @@ const ChatFirstLayout = ({
   );
 };
 
+// State kept per workspace. The page instance is reused across workspaces, so
+// each value lives in its workspace's slot, and the setter is bound to the
+// workspace of the render that created it: a late write from a left workspace
+// lands in that workspace's slot and never shows in, blocks or overwrites
+// another. Values survive a switch and show again on returning.
+function useByWorkspace<T>(workspaceId: string, empty: T) {
+  const [byId, setById] = useState<ReadonlyMap<string, T>>(() => new Map());
+  const set = useCallback(
+    (value: T) =>
+      setById((prev) => {
+        if ((prev.get(workspaceId) ?? empty) === value) return prev;
+        const next = new Map(prev);
+        if (value === empty) next.delete(workspaceId);
+        else next.set(workspaceId, value);
+        return next;
+      }),
+    [empty, workspaceId]
+  );
+  return [byId.get(workspaceId) ?? empty, set] as const;
+}
+
 const Workspace = () => {
   const params = useParams();
   // Provided by FleetLayout's <Outlet>; lets us refresh the workspace rail
@@ -1616,7 +1637,7 @@ const Workspace = () => {
   // second round-trip after the details load, so messages are briefly
   // empty even on a conversation that has history).
   const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [error, setError] = useByWorkspace(workspaceId, '');
   // The drawer chip that's open plus its contextual slide-out panel. The
   // Workspace component instance is REUSED across workspace→workspace
   // navigations (both routes resolve to the same element), so a plain useState
@@ -1723,12 +1744,12 @@ const Workspace = () => {
   const [settingsSelection, setSettingsSelection] = useState<SettingsSelection>({
     kind: 'general',
   });
-  const [agentBusy, setAgentBusy] = useState('');
-  const [agentError, setAgentError] = useState('');
+  const [agentBusy, setAgentBusy] = useByWorkspace(workspaceId, '');
+  const [agentError, setAgentError] = useByWorkspace(workspaceId, '');
   const [artifactAddMenu, setArtifactAddMenu] = useState<{
     style: React.CSSProperties;
   } | null>(null);
-  const [artifactImportBusy, setArtifactImportBusy] = useState(false);
+  const [artifactImportBusy, setArtifactImportBusy] = useByWorkspace(workspaceId, false);
   const artifactAddMenuOpen = !!artifactAddMenu;
   const artifactAddTriggerRef = useRef<HTMLButtonElement | null>(null);
   const artifactAddMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1880,13 +1901,12 @@ const Workspace = () => {
           }
         }
       } catch (err) {
-        if (currentWorkspaceIdRef.current !== workspaceId) return;
         setError(errorMessage(err, 'Failed to load workspace.'));
       } finally {
         if (currentWorkspaceIdRef.current === workspaceId) setIsLoading(false);
       }
     },
-    [workspaceId]
+    [setError, workspaceId]
   );
 
   // Delete the file currently open in the preview panel (artifacts only —
@@ -1907,11 +1927,14 @@ const Workspace = () => {
   }, [previewEntry, workspaceId, patchWorkspaceUi, loadDetails]);
 
   // ── Workspace Settings modal openers ───────────────────────────────────
-  const openSettings = useCallback((selection?: SettingsSelection | null) => {
-    setSettingsSelection(selection || { kind: 'general' });
-    setSettingsOpen(true);
-    setAgentError('');
-  }, []);
+  const openSettings = useCallback(
+    (selection?: SettingsSelection | null) => {
+      setSettingsSelection(selection || { kind: 'general' });
+      setSettingsOpen(true);
+      setAgentError('');
+    },
+    [setAgentError]
+  );
 
   const openAgentEdit = useCallback(
     (workspaceAgentId: string) => {
@@ -1944,7 +1967,7 @@ const Workspace = () => {
   // Schedule controls — Run / Pause / Resume. Mirror Fleet.jsx so the
   // workspace page can drive the periodic schedule without the user having
   // to jump back to the Fleet view.
-  const [runNowBusy, setRunNowBusy] = useState(false);
+  const [runNowBusy, setRunNowBusy] = useByWorkspace(workspaceId, false);
   // Reflect an inline title rename immediately on the page, then refresh the
   // Fleet rail so its row updates at once rather than on the next 5s poll.
   const handleTitleSaved = useCallback(
@@ -1969,7 +1992,7 @@ const Workspace = () => {
     } finally {
       setRunNowBusy(false);
     }
-  }, [loadDetails, runNowBusy, workspaceId]);
+  }, [loadDetails, runNowBusy, setError, setRunNowBusy, workspaceId]);
 
   // Track the run id we asked to cancel so the Stop button stays in a
   // "stopping…" state until the details confirm the run flipped to a
@@ -1977,7 +2000,7 @@ const Workspace = () => {
   // token — the engine flips RunStatus on its next checkpoint — so
   // clearing busy on resolve would re-arm the button while the run is
   // still streaming.
-  const [cancellingRunId, setCancellingRunId] = useState<string | null>(null);
+  const [cancellingRunId, setCancellingRunId] = useByWorkspace<string | null>(workspaceId, null);
   const handleStop = useCallback(
     async (runId: string | null) => {
       if (!runId || cancellingRunId) return;
@@ -1991,10 +2014,10 @@ const Workspace = () => {
         setCancellingRunId(null);
       }
     },
-    [cancellingRunId, loadDetails]
+    [cancellingRunId, loadDetails, setCancellingRunId, setError]
   );
 
-  const [pauseBusy, setPauseBusy] = useState(false);
+  const [pauseBusy, setPauseBusy] = useByWorkspace(workspaceId, false);
   const handleTogglePause = useCallback(
     async (nextPaused: boolean) => {
       if (pauseBusy) return;
@@ -2018,7 +2041,7 @@ const Workspace = () => {
         setPauseBusy(false);
       }
     },
-    [loadDetails, pauseBusy, workspaceId]
+    [loadDetails, pauseBusy, setError, setPauseBusy, workspaceId]
   );
 
   const handleAgentRemove = useCallback(
@@ -2035,7 +2058,7 @@ const Workspace = () => {
         setAgentBusy('');
       }
     },
-    [agentBusy, loadDetails, workspaceId]
+    [agentBusy, loadDetails, setAgentBusy, setAgentError, workspaceId]
   );
 
   useEffect(() => {
@@ -2197,7 +2220,7 @@ const Workspace = () => {
     return () => {
       cancelled = true;
     };
-  }, [loadDetails, details, workspaceId]);
+  }, [loadDetails, details, setError, workspaceId]);
 
   const tasks = details?.tasks || [];
 
@@ -2291,15 +2314,15 @@ const Workspace = () => {
   }, [workspaceId, isStreaming]);
   // Clear the "stopping…" lock once the cancelled run leaves the active
   // set. The cancel propagation is async (engine checkpoints), so we
-  // can't clear on the cancel call returning.
+  // can't clear on the cancel call returning, nor before the details load
+  // on returning to the workspace.
   useEffect(() => {
-    if (!cancellingRunId) return;
-    const stillActive = (details?.runs || []).some(
+    if (!cancellingRunId || !details) return;
+    const stillActive = (details.runs || []).some(
       (run) => run.id === cancellingRunId && ACTIVE_RUN_STATUSES.includes(run.status)
     );
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Clears the 'stopping…' lock once the cancelled run leaves the active set; the cancel propagation is async (engine checkpoints) so the clear has to observe details.runs in an effect.
     if (!stillActive) setCancellingRunId(null);
-  }, [details, cancellingRunId]);
+  }, [details, cancellingRunId, setCancellingRunId]);
   const stopBusy = cancellingRunId !== null;
 
   // Drawer header actions for the artifacts panel: hand the workspace
@@ -2314,7 +2337,7 @@ const Workspace = () => {
         setError(errorMessage(err, `Failed to open the workspace in the ${target}.`));
       }
     },
-    [workspaceId]
+    [setError, workspaceId]
   );
 
   // Select an artifact: binary/rich files (viewer === 'external') can't be
@@ -2330,7 +2353,7 @@ const Workspace = () => {
       }
       openPreviewEntry({ kind: 'artifact', entry });
     },
-    [workspaceId, openPreviewEntry]
+    [workspaceId, openPreviewEntry, setError]
   );
 
   const handleAddArtifacts = useCallback(
@@ -2366,7 +2389,14 @@ const Workspace = () => {
         setArtifactImportBusy(false);
       }
     },
-    [artifactImportBusy, closeArtifactAddMenu, workspaceId, loadDetails]
+    [
+      artifactImportBusy,
+      closeArtifactAddMenu,
+      workspaceId,
+      loadDetails,
+      setArtifactImportBusy,
+      setError,
+    ]
   );
 
   return (
