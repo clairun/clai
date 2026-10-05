@@ -119,6 +119,16 @@ openSUSE: `sudo zypper ar -f https://download.clai.run/rpm clai && sudo zypper i
 repository automatically; see `packaging/linux-repo/README.md`, including
 the opt-outs.)
 
+On macOS, the builds are not yet signed or notarized with an Apple
+Developer ID, so after downloading macOS may say "clai is damaged and
+can't be opened". The app is not damaged. Move `clai.app` to
+Applications, run this once in Terminal to remove the download
+quarantine flag, then open it normally:
+
+```bash
+xattr -cr /Applications/clai.app
+```
+
 ## Getting started
 
 1. **Add a provider** — In Settings, connect an API provider or point CLAI at
