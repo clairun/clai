@@ -3667,10 +3667,9 @@ pub async fn workspace_delete(
         }
         // Not restored: the workspace is out of the index for good and the
         // user cannot reach it any more, so its runtime state has to go even
-        // though the directory survived. Leaving scheduler instances behind
-        // wedges the runner — the next tick claims one, the agent lookup
-        // fails, and nothing releases the claim, so no scheduled run fires
-        // again in any workspace until restart.
+        // though the directory survived. Scheduler instances left behind
+        // would fail their agent lookup on every fire and be retried every
+        // five minutes until restart.
     }
 
     // Drop scheduler entries for every agent the workspace owned. Any

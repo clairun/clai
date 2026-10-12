@@ -121,6 +121,10 @@ fn load_workspace_agent_as_config(
 /// How often to check for ready agents (in seconds).
 const CHECK_INTERVAL_SECS: u64 = 5;
 
+/// How long a scheduled fire that failed to start (no enabled provider,
+/// config or DB error, ...) waits before it is retried.
+const START_FAILURE_RETRY_MS: i64 = 5 * 60 * 1000;
+
 // =============================================================================
 // Runner
 // =============================================================================
@@ -168,55 +172,85 @@ pub fn start_agent_runner(app_handle: AppHandle, scheduler: SharedScheduler) {
 /// 2. Gets the next ready agent (if any)
 /// 3. Executes the agent
 /// 4. Marks it complete
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 107 against a budget of 25"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 143 lines against a 100-line budget; split it, do not raise the budget"
-)]
 async fn run_next_agent(
     app_handle: &AppHandle,
     scheduler: &SharedScheduler,
 ) -> Result<(), RunnerError> {
-    // Get app state
-    let state = app_handle.state::<AppState>();
-
-    // Note: pre-refactor this guard waited on a global `DbPool` in
-    // managed state. After the move to per-workspace SQLite that pool
-    // no longer exists — the per-workspace pool is loaded on demand
-    // below via `state.workspace_db(...)`. Leaving the guard in caused
-    // every tick to exit early, so scheduled workspaces never ran.
-
-    // Check for a ready agent
-    let instance_id = {
-        let mut sched = scheduler.lock().await;
-
-        // Log scheduler state
-        let instance_count = sched.instance_count();
-        let state = sched.state();
-        let running_agent = sched.running_instance();
-        tracing::debug!(
-            instance_count,
-            scheduler_state = ?state,
-            running_agent = ?running_agent,
-            "Scheduler status"
-        );
-
-        // Check if scheduler is paused
-        if matches!(state, SchedulerState::Paused { .. }) {
-            tracing::debug!("Scheduler is paused");
-            return Ok(());
-        }
-
-        sched.next_ready()
-    };
-
-    let Some(instance_id) = instance_id else {
+    let Some(instance_id) = claim_next_instance(scheduler).await else {
         tracing::debug!("No agents ready");
         return Ok(());
     };
+    release_slot_on_error(
+        scheduler,
+        &instance_id,
+        run_claimed_instance(app_handle, scheduler, &instance_id),
+    )
+    .await
+}
+
+/// Claims the next ready instance, marking it running in the scheduler.
+async fn claim_next_instance(scheduler: &SharedScheduler) -> Option<String> {
+    let mut sched = scheduler.lock().await;
+
+    let instance_count = sched.instance_count();
+    let state = sched.state();
+    let running_agent = sched.running_instance();
+    tracing::debug!(
+        instance_count,
+        scheduler_state = ?state,
+        running_agent = ?running_agent,
+        "Scheduler status"
+    );
+
+    if matches!(state, SchedulerState::Paused { .. }) {
+        tracing::debug!("Scheduler is paused");
+        return None;
+    }
+
+    sched.next_ready()
+}
+
+/// Awaits `body` for a claimed instance and, if it fails while the instance
+/// still holds the scheduler's single running slot, releases the slot with a
+/// retry after [`START_FAILURE_RETRY_MS`]. Without this an early error left
+/// the instance marked running, blocking every later scheduled run. A missing
+/// agent is retried too rather than removed: a failed workspace delete
+/// restores the workspace and expects its scheduler entries intact, while a
+/// successful delete removes them itself. The error is returned unchanged for
+/// the runner loop to log.
+async fn release_slot_on_error(
+    scheduler: &SharedScheduler,
+    instance_id: &str,
+    body: impl std::future::Future<Output = Result<(), RunnerError>>,
+) -> Result<(), RunnerError> {
+    let result = body.await;
+    if result.is_err() {
+        let mut sched = scheduler.lock().await;
+        if sched.running_instance().map(String::as_str) == Some(instance_id) {
+            let retry_at = chrono::Utc::now().timestamp_millis() + START_FAILURE_RETRY_MS;
+            sched.complete_agent(instance_id, false, retry_at);
+        }
+    }
+    result
+}
+
+/// Runs an instance already claimed by [`claim_next_instance`]. Every `Ok`
+/// path releases the scheduler slot itself; errors are released by
+/// [`release_slot_on_error`].
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 85 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 113 lines against a 100-line budget; split it, do not raise the budget"
+)]
+async fn run_claimed_instance(
+    app_handle: &AppHandle,
+    scheduler: &SharedScheduler,
+    instance_id: &str,
+) -> Result<(), RunnerError> {
+    let state = app_handle.state::<AppState>();
 
     tracing::info!(instance_id = %instance_id, "Running agent");
 
@@ -224,8 +258,8 @@ async fn run_next_agent(
     let agent_id = {
         let sched = scheduler.lock().await;
         let instance = sched
-            .get_instance(&instance_id)
-            .ok_or_else(|| RunnerError::InstanceNotFound(instance_id.clone()))?;
+            .get_instance(instance_id)
+            .ok_or_else(|| RunnerError::InstanceNotFound(instance_id.to_string()))?;
 
         instance.agent_id.clone()
     };
@@ -249,7 +283,7 @@ async fn run_next_agent(
         // Remove the instance from scheduler
         {
             let mut sched = scheduler.lock().await;
-            sched.remove_instance(&instance_id);
+            sched.remove_instance(instance_id);
         }
 
         return Ok(());
@@ -280,7 +314,7 @@ async fn run_next_agent(
                 "Workspace session is busy with an active run; deferring scheduled tick"
             );
             let mut sched = scheduler.lock().await;
-            sched.defer_running_instance(&instance_id);
+            sched.defer_running_instance(instance_id);
             return Ok(());
         }
     }
@@ -338,13 +372,13 @@ async fn run_next_agent(
         // scheduler parks the instance indefinitely. The user has to
         // fix the schedule via the UI before it ticks again.
         sched.complete_agent(
-            &instance_id,
+            instance_id,
             success,
             next_run_at_unix_ms.unwrap_or(i64::MAX),
         );
 
         // Log next run time
-        if let Some(instance) = sched.get_instance(&instance_id) {
+        if let Some(instance) = sched.get_instance(instance_id) {
             let seconds_until_next = instance.seconds_until_next_run();
             tracing::info!(
                 instance_id = %instance_id,
@@ -596,5 +630,57 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("No provider configured"));
         assert!(text.contains("agent-1"));
+    }
+
+    #[tokio::test]
+    async fn failed_start_releases_scheduler_slot() {
+        let scheduler = crate::agents::create_shared_scheduler();
+        let instance_id = {
+            let mut sched = scheduler.lock().await;
+            sched.register_definition(crate::agents::AgentDefinition::new("agent-1", "Agent"));
+            sched.create_instance("agent-1").unwrap()
+        };
+
+        let claimed = claim_next_instance(&scheduler).await;
+        assert_eq!(claimed.as_deref(), Some(instance_id.as_str()));
+
+        let result = release_slot_on_error(&scheduler, &instance_id, async {
+            Err(RunnerError::NoProviderConfigured("agent-1".to_string()))
+        })
+        .await;
+        assert!(matches!(result, Err(RunnerError::NoProviderConfigured(_))));
+
+        let mut sched = scheduler.lock().await;
+        assert!(!sched.is_running());
+        let instance = sched.get_instance(&instance_id).unwrap();
+        assert!(!instance.is_running);
+        // Retried later, not hot-looped on every tick.
+        assert!(instance.next_run_at.is_some());
+        assert_eq!(sched.next_ready(), None);
+
+        sched.set_instance_next_run_at(&instance_id, None);
+        assert_eq!(sched.next_ready(), Some(instance_id));
+    }
+
+    #[tokio::test]
+    async fn start_for_missing_agent_keeps_instance_for_retry() {
+        let scheduler = crate::agents::create_shared_scheduler();
+        let instance_id = {
+            let mut sched = scheduler.lock().await;
+            sched.register_definition(crate::agents::AgentDefinition::new("agent-1", "Agent"));
+            sched.create_instance("agent-1").unwrap()
+        };
+        claim_next_instance(&scheduler).await;
+
+        let result = release_slot_on_error(&scheduler, &instance_id, async {
+            Err(RunnerError::AgentNotFound("agent-1".to_string()))
+        })
+        .await;
+        assert!(matches!(result, Err(RunnerError::AgentNotFound(_))));
+
+        let sched = scheduler.lock().await;
+        assert!(!sched.is_running());
+        let instance = sched.get_instance(&instance_id).unwrap();
+        assert!(instance.next_run_at.is_some());
     }
 }
