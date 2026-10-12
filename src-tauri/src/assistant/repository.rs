@@ -832,7 +832,7 @@ pub async fn get_active_run(
         FROM assistant_runs
         WHERE session_id = ?
           AND status IN {ACTIVE_RUN_STATUSES}
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, id DESC
         LIMIT 1
         "#
     );
@@ -1803,5 +1803,36 @@ mod tests {
                 "manual local_summary completed".to_string(),
             )
         );
+    }
+
+    #[tokio::test]
+    async fn active_run_started_at_ties_break_by_highest_id() {
+        let (_tmp, pool) = workspace_pool().await;
+        insert_session(&pool, "s").await;
+        // Higher id inserted first so insertion order alone cannot pass.
+        for (id, status) in [("run-b", "queued"), ("run-a", "running")] {
+            sqlx::query(
+                r#"
+                INSERT INTO assistant_runs
+                    (id, session_id, status, "trigger", connection_id, protocol_id, model_id, started_at)
+                VALUES (?, 's', ?, 'user_message', 'c', 'openai', 'm', 100)
+                "#,
+            )
+            .bind(id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let active = get_active_run(&pool, "s").await.unwrap().unwrap();
+        assert_eq!(active.id, "run-b");
+        let current: Vec<String> = current_runs(&pool, "s")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(current, vec!["run-b".to_string()]);
     }
 }
