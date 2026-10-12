@@ -145,8 +145,8 @@ describe('TaskCard', () => {
     expect(cardActivity('queued')).toBe('none');
     expect(cardActivity('running')).toBe('none');
     expect(cardActivity('completed')).toBe('none');
-    // A stop that is not a clean finish keeps the static attention ring — no
-    // acknowledgement fields travel in a tool payload.
+    // A stop that is not a clean finish keeps the static attention ring: the
+    // payload's acknowledgement is as frozen as its status.
     expect(cardActivity('failed')).toBe('attention');
     expect(cardActivity('blocked')).toBe('attention');
     expect(cardActivity('who-knows')).toBe('none');

@@ -8,6 +8,7 @@ use crate::assistant::repository;
 use crate::assistant::types::{
     AssistantRun, AssistantSession, ContentPart, SessionContext, WorkspaceAgentSummary,
 };
+use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
 use crate::config::workspace_config::{AgentAvatarRef, WorkspaceAssignment};
 use crate::config::{
@@ -18,7 +19,6 @@ use crate::db::DbPool;
 use crate::workspace_index::{WorkspaceIndex, WorkspaceLocator};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -315,38 +315,6 @@ pub struct WorkspaceAgentResponse {
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
-pub struct WorkspaceTaskResponse {
-    pub id: String,
-    pub workspace_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by_workspace_agent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by_display_name: Option<String>,
-    pub assigned_to_workspace_agent_id: String,
-    pub assigned_agent_definition_id: String,
-    pub assigned_agent_display_name: String,
-    pub title: String,
-    pub instructions: String,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attention_acknowledged_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
 pub struct WorkspaceSessionBinding {
     pub session: AssistantSession,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -426,25 +394,36 @@ struct WorkspaceProviderSelection {
     preferred_connection_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-struct WorkspaceAgentRow {
-    id: String,
-    workspace_id: String,
-    /// Legacy: foreign key into `ClaiConfig.agents`. Will be dropped in Phase 1.7.
-    agent_definition_id: String,
-    /// Legacy: replaced by `workspaces.default_workspace_agent_id` in Phase 1.6.
-    role: String,
-    enabled: bool,
-    // Inline agent fields (Phase 1.2 writes them, Phase 1.4 reads them).
-    name: String,
-    description: String,
-    selected_skill_ids: Vec<String>,
-    selected_mcp_server_ids: Vec<String>,
-    provider_connection_ids: Vec<String>,
-    execution: ExecutionCapabilityConfig,
-    avatar: Option<AgentAvatarRef>,
-    created_at: i64,
-    updated_at: i64,
+#[derive(Debug, Clone, Default)]
+pub(crate) struct WorkspaceAgentRow {
+    pub(crate) id: String,
+    pub(crate) workspace_id: String,
+    /// The shared definition for a teammate, the local id for the Main.
+    /// Callers address agents by `id`; this is provenance only.
+    pub(crate) agent_definition_id: String,
+    pub(crate) role: String,
+    pub(crate) enabled: bool,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) selected_skill_ids: Vec<String>,
+    pub(crate) selected_mcp_server_ids: Vec<String>,
+    pub(crate) provider_connection_ids: Vec<String>,
+    pub(crate) execution: ExecutionCapabilityConfig,
+    pub(crate) avatar: Option<AgentAvatarRef>,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+}
+
+impl WorkspaceAgentRow {
+    /// The name shown for this agent everywhere — crew list, prompt roster,
+    /// task cards, tool output: its own name, or the definition id when blank.
+    pub(crate) fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.agent_definition_id
+        } else {
+            &self.name
+        }
+    }
 }
 
 // ===============================================================================
@@ -1220,7 +1199,7 @@ fn workspace_default_agent_id(
     Ok(config.main_agent.as_ref().map(|agent| agent.id.clone()))
 }
 
-fn load_workspace_agent_rows(
+pub(crate) fn load_workspace_agent_rows(
     state: &AppState,
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
@@ -1229,7 +1208,7 @@ fn load_workspace_agent_rows(
     Ok(workspace_agent_rows_from(&app_config, &config, &roster))
 }
 
-fn workspace_agent_rows_from(
+pub(crate) fn workspace_agent_rows_from(
     app_config: &AppConfig,
     config: &WorkspaceConfig,
     roster: &[ResolvedAgent],
@@ -1238,7 +1217,8 @@ fn workspace_agent_rows_from(
         .iter()
         .map(|resolved| workspace_agent_row_from_config(app_config, config, resolved))
         .collect();
-    rows.sort_by_key(|row| (if row.role == "manager" { 0 } else { 1 }, row.created_at));
+    // Main first, then teammates in the order they joined.
+    rows.sort_by_key(|row| (row.role != "manager", row.created_at));
     rows
 }
 
@@ -1277,11 +1257,7 @@ fn workspace_agent_response_from_row(
     row: WorkspaceAgentRow,
     default_workspace_agent_id: Option<&str>,
 ) -> WorkspaceAgentResponse {
-    let display_name = if row.name.trim().is_empty() {
-        row.agent_definition_id.clone()
-    } else {
-        row.name.clone()
-    };
+    let display_name = row.display_name().to_string();
 
     let agent_name = if row.name.trim().is_empty() {
         None
@@ -1314,7 +1290,7 @@ fn workspace_agent_response_from_row(
     }
 }
 
-fn concise_agent_description(description: Option<String>) -> Option<String> {
+pub(crate) fn concise_agent_description(description: Option<String>) -> Option<String> {
     let text = description?;
     let first_line = text
         .lines()
@@ -1349,99 +1325,19 @@ fn list_workspace_agent_responses(
     Ok((responses, default_workspace_agent_id))
 }
 
-/// Columns every `workspace_tasks` → [`WorkspaceTaskResponse`] query selects.
-/// Written once so the list query and the single-task lookup cannot drift into
-/// selecting different sets while sharing one row mapper.
-const WORKSPACE_TASK_COLUMNS: &str = "
-            task.id,
-            task.created_by_workspace_agent_id,
-            task.assigned_to_workspace_agent_id,
-            task.assigned_agent_definition_id,
-            task.title,
-            task.instructions,
-            task.status,
-            task.result_summary,
-            task.error,
-            task.session_id,
-            task.run_id,
-            task.created_at,
-            task.updated_at,
-            task.completed_at,
-            task.attention_acknowledged_at";
-
-fn workspace_task_response_from_row(
-    row: &sqlx::sqlite::SqliteRow,
+/// Workspace-agent id → display name, for naming a task's assignee and
+/// creator. Roster failures degrade to raw ids rather than failing the task read.
+pub(crate) fn workspace_agent_display_names(
+    state: &AppState,
     workspace_id: &str,
-    agent_names: &HashMap<String, String>,
-) -> WorkspaceTaskResponse {
-    let assigned_agent_definition_id: String = row.get("assigned_agent_definition_id");
-    let assigned_agent_id: String = row.get("assigned_to_workspace_agent_id");
-    // An agent removed from the roster leaves its tasks behind: fall back to the
-    // definition id so the row still renders with something identifying.
-    let assigned_agent_display_name = agent_names
-        .get(&assigned_agent_id)
-        .cloned()
-        .unwrap_or_else(|| assigned_agent_definition_id.clone());
-    let created_by_workspace_agent_id: Option<String> = row.get("created_by_workspace_agent_id");
-    let created_by_display_name = created_by_workspace_agent_id
-        .as_ref()
-        .and_then(|id| agent_names.get(id).cloned());
-
-    WorkspaceTaskResponse {
-        id: row.get("id"),
-        workspace_id: workspace_id.to_string(),
-        created_by_workspace_agent_id,
-        created_by_display_name,
-        assigned_to_workspace_agent_id: assigned_agent_id,
-        assigned_agent_definition_id,
-        assigned_agent_display_name,
-        title: row.get("title"),
-        instructions: row.get("instructions"),
-        status: row.get("status"),
-        result_summary: row.get("result_summary"),
-        error: row.get("error"),
-        session_id: row.get("session_id"),
-        run_id: row.get("run_id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        completed_at: row.get("completed_at"),
-        attention_acknowledged_at: row.get("attention_acknowledged_at"),
-    }
+) -> HashMap<String, String> {
+    agent_display_names(&load_workspace_agent_rows(state, workspace_id).unwrap_or_default())
 }
 
-/// Workspace-agent id → the agent's name, for resolving the assignee and
-/// creator names a task response carries. The name is passed through raw: a
-/// blank one stays blank here, where the agent response mapper substitutes the
-/// definition id. Roster failures degrade to raw ids rather than failing the
-/// task read.
-fn workspace_agent_display_names(state: &AppState, workspace_id: &str) -> HashMap<String, String> {
-    load_workspace_agent_rows(state, workspace_id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|agent| (agent.id, agent.name))
+pub(crate) fn agent_display_names(rows: &[WorkspaceAgentRow]) -> HashMap<String, String> {
+    rows.iter()
+        .map(|agent| (agent.id.clone(), agent.display_name().to_string()))
         .collect()
-}
-
-async fn load_workspace_task_response(
-    pool: &DbPool,
-    workspace_id: &str,
-    task_id: &str,
-    agent_names: &HashMap<String, String>,
-) -> Result<Option<WorkspaceTaskResponse>, String> {
-    let row = sqlx::query(&format!(
-        r#"
-        SELECT {}
-        FROM workspace_tasks task
-        WHERE task.id = ?
-        "#,
-        WORKSPACE_TASK_COLUMNS
-    ))
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load workspace task: {}", e))?;
-
-    Ok(row.map(|row| workspace_task_response_from_row(&row, workspace_id, agent_names)))
 }
 
 async fn list_workspace_task_responses(
@@ -1450,22 +1346,10 @@ async fn list_workspace_task_responses(
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceTaskResponse>, String> {
     let agent_names = workspace_agent_display_names(state, workspace_id);
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT {}
-        FROM workspace_tasks task
-        ORDER BY task.updated_at DESC, task.created_at DESC
-        LIMIT 50
-        "#,
-        WORKSPACE_TASK_COLUMNS
-    ))
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load workspace tasks: {}", e))?;
-
-    Ok(rows
+    Ok(workspace_tasks_repo::list_recent_tasks(pool, 50)
+        .await?
         .into_iter()
-        .map(|row| workspace_task_response_from_row(&row, workspace_id, &agent_names))
+        .map(|task| task.into_response(workspace_id, &agent_names))
         .collect())
 }
 
@@ -2859,7 +2743,9 @@ pub async fn workspace_task_by_id(
     let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
     let pool = state.workspace_db(&workspace_id).await?;
     let agent_names = workspace_agent_display_names(state.inner(), &workspace_id);
-    load_workspace_task_response(&pool, &workspace_id, &request.task_id, &agent_names).await
+    Ok(workspace_tasks_repo::load_task(&pool, &request.task_id)
+        .await?
+        .map(|task| task.into_response(&workspace_id, &agent_names)))
 }
 
 // =============================================================================
@@ -5786,141 +5672,132 @@ mod tests {
         assert_eq!(response.agent_name, None);
     }
 
-    // -----------------------------------------------------------------------
-    // Single-task lookup (`workspace_task_by_id`)
-    //
-    // The `#[tauri::command]` wrapper needs a `State<AppState>`, which this
-    // module has no fixture for; these drive the query + mapper it delegates
-    // to, against the real migrated schema.
-    // -----------------------------------------------------------------------
+    #[test]
+    fn workspace_agent_rows_put_the_main_first_then_teammates_by_join_time() {
+        let teammate = |id: &str, created_at: i64| {
+            let mut agent = WorkspaceAgent::new_manager(id.to_string(), created_at);
+            agent.name = id.to_string();
+            ResolvedAgent {
+                agent,
+                source: AgentSource::Shared {
+                    definition_id: format!("def-{id}"),
+                    revision: 1,
+                },
+            }
+        };
+        let main = ResolvedAgent {
+            agent: WorkspaceAgent::new_manager(MGR.to_string(), 50),
+            source: AgentSource::Main,
+        };
+        // Ids sort opposite to join time, so an id-ordered roster would fail.
+        let roster = vec![teammate("a-late", 30), main, teammate("z-early", 10)];
+        let workspace = WorkspaceConfig::new(WS.to_string(), "W".to_string(), 1, MGR.to_string());
 
-    fn agent_names(entries: &[(&str, &str)]) -> HashMap<String, String> {
-        entries
-            .iter()
-            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
-            .collect()
+        let ids: Vec<_> = workspace_agent_rows_from(&AppConfig::default(), &workspace, &roster)
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+
+        assert_eq!(ids, [MGR, "z-early", "a-late"]);
     }
 
-    #[tokio::test]
-    async fn load_workspace_task_response_returns_existing_task_with_session_id() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        crate::db::test_support::insert_task(&pool, "task-1", "completed", Some("sess-1"), None)
-            .await;
+    #[test]
+    fn display_name_is_the_name_or_the_definition_id_when_blank() {
+        let mut row = WorkspaceAgentRow {
+            agent_definition_id: "def-1".to_string(),
+            name: "Reviewer".to_string(),
+            ..WorkspaceAgentRow::default()
+        };
+        assert_eq!(row.display_name(), "Reviewer");
 
-        let task =
-            load_workspace_task_response(&pool, WS, "task-1", &agent_names(&[("agent-1", "Rust")]))
-                .await
-                .expect("query failed")
-                .expect("task-1 should exist");
-
-        assert_eq!(task.id, "task-1");
-        assert_eq!(task.workspace_id, WS);
-        assert_eq!(task.session_id, Some("sess-1".to_string()));
-        assert_eq!(task.status, "completed");
-        assert_eq!(task.title, "Title");
-        assert_eq!(task.instructions, "Do it");
-        assert_eq!(task.assigned_to_workspace_agent_id, "agent-1");
-        assert_eq!(task.assigned_agent_display_name, "Rust");
-        assert_eq!(task.created_by_workspace_agent_id, None);
-        assert_eq!(task.error, None);
+        row.name = "  ".to_string();
+        assert_eq!(row.display_name(), "def-1");
     }
 
-    #[tokio::test]
-    async fn load_workspace_task_response_returns_none_for_unknown_id() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        crate::db::test_support::insert_task(&pool, "task-1", "completed", None, None).await;
+    #[test]
+    fn agent_display_names_label_blank_names_with_the_definition_id() {
+        let rows = [
+            WorkspaceAgentRow {
+                id: "agent-1".to_string(),
+                agent_definition_id: "def-1".to_string(),
+                name: "Reviewer".to_string(),
+                ..WorkspaceAgentRow::default()
+            },
+            WorkspaceAgentRow {
+                id: "agent-2".to_string(),
+                agent_definition_id: "def-2".to_string(),
+                name: String::new(),
+                ..WorkspaceAgentRow::default()
+            },
+        ];
 
-        let missing = load_workspace_task_response(&pool, WS, "task-404", &agent_names(&[]))
-            .await
-            .expect("a missing task is not an error");
+        let names = agent_display_names(&rows);
 
-        assert!(missing.is_none());
+        assert_eq!(names.len(), 2);
+        assert_eq!(names["agent-1"], "Reviewer");
+        assert_eq!(names["agent-2"], "def-2");
     }
 
-    /// The shared `insert_task` fixture writes one id into both agent columns,
-    /// which cannot tell the assignee apart from the definition it fell back
-    /// to. These tests need distinct ids, so they write their own row.
-    async fn insert_task_with_agents(
-        pool: &DbPool,
-        id: &str,
-        created_by: Option<&str>,
-        assigned_to: &str,
-        definition_id: &str,
-    ) {
-        sqlx::query(
-            r#"
-            INSERT INTO workspace_tasks
-                (id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
-                 assigned_agent_definition_id, title, instructions, status, error,
-                 session_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'Title', 'Do it', 'failed', 'boom', NULL, 1, 1)
-            "#,
-        )
-        .bind(id)
-        .bind(created_by)
-        .bind(assigned_to)
-        .bind(definition_id)
-        .execute(pool)
-        .await
-        .expect("failed to insert workspace_tasks row");
+    // -----------------------------------------------------------------
+    // concise_agent_description
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn concise_agent_description_none_returns_none() {
+        assert_eq!(concise_agent_description(None), None);
     }
 
-    #[tokio::test]
-    async fn load_workspace_task_response_falls_back_to_definition_id_for_unknown_agent() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        insert_task_with_agents(&pool, "task-1", None, "wa-gone", "rust-expert").await;
-
-        let task = load_workspace_task_response(&pool, WS, "task-1", &agent_names(&[]))
-            .await
-            .expect("query failed")
-            .expect("task-1 should exist");
-
-        assert_eq!(task.assigned_to_workspace_agent_id, "wa-gone");
-        assert_eq!(task.assigned_agent_display_name, "rust-expert");
-        assert_eq!(task.error, Some("boom".to_string()));
+    #[test]
+    fn concise_agent_description_empty_returns_none() {
+        assert_eq!(concise_agent_description(Some("".to_string())), None);
     }
 
-    #[tokio::test]
-    async fn load_workspace_task_response_names_the_creator_only_while_it_is_on_the_roster() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        insert_task_with_agents(
-            &pool,
-            "task-known",
-            Some("wa-manager"),
-            "wa-1",
-            "rust-expert",
-        )
-        .await;
-        insert_task_with_agents(
-            &pool,
-            "task-gone",
-            Some("wa-removed"),
-            "wa-1",
-            "rust-expert",
-        )
-        .await;
-        let names = agent_names(&[("wa-manager", "Manager"), ("wa-1", "Rust")]);
-
-        let known = load_workspace_task_response(&pool, WS, "task-known", &names)
-            .await
-            .expect("query failed")
-            .expect("task-known should exist");
+    #[test]
+    fn concise_agent_description_whitespace_only_returns_none() {
         assert_eq!(
-            known.created_by_workspace_agent_id,
-            Some("wa-manager".to_string())
+            concise_agent_description(Some("   \n\t  ".to_string())),
+            None
         );
-        assert_eq!(known.created_by_display_name, Some("Manager".to_string()));
+    }
 
-        // A creator off the roster keeps its raw id but gets no name: unlike
-        // the assignee, there is no definition id to fall back to.
-        let gone = load_workspace_task_response(&pool, WS, "task-gone", &names)
-            .await
-            .expect("query failed")
-            .expect("task-gone should exist");
+    #[test]
+    fn concise_agent_description_short_single_line() {
+        let input = Some("A short description.".to_string());
         assert_eq!(
-            gone.created_by_workspace_agent_id,
-            Some("wa-removed".to_string())
+            concise_agent_description(input),
+            Some("A short description.".to_string())
         );
-        assert_eq!(gone.created_by_display_name, None);
+    }
+
+    #[test]
+    fn concise_agent_description_takes_first_non_empty_line() {
+        let input = Some("\n\nSecond line is first non-empty.\nThird line.".to_string());
+        assert_eq!(
+            concise_agent_description(input),
+            Some("Second line is first non-empty.".to_string())
+        );
+    }
+
+    #[test]
+    fn concise_agent_description_trims_leading_whitespace() {
+        let input = Some("   \t  Trimmed description.".to_string());
+        assert_eq!(
+            concise_agent_description(input),
+            Some("Trimmed description.".to_string())
+        );
+    }
+
+    #[test]
+    fn concise_agent_description_truncates_long_line() {
+        let long = "x".repeat(300);
+        let result = concise_agent_description(Some(long));
+        let expected = "x".repeat(240) + "...";
+        assert_eq!(result, Some(expected));
+    }
+
+    #[test]
+    fn concise_agent_description_exactly_max_length_passes_through() {
+        let exact = "x".repeat(240);
+        assert_eq!(concise_agent_description(Some(exact.clone())), Some(exact));
     }
 }

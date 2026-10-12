@@ -27,6 +27,7 @@ pub mod token_estimate;
 pub mod tools;
 mod turn_common;
 pub mod types;
+pub mod workspace_tasks_repo;
 
 #[cfg(test)]
 mod repository_tests;
