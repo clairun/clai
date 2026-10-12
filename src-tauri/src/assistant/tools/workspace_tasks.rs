@@ -499,18 +499,10 @@ fn resolve_first_connection(
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .get_provider_connections();
-    for id in &config.provider_connection_ids {
-        if let Some(connection) = all
-            .iter()
-            .find(|connection| &connection.id == id && connection.enabled)
-        {
-            return Ok(connection.clone());
-        }
-    }
-    Err(format!(
-        "Agent '{}' has no active provider connection.",
-        config.name
-    ))
+    config
+        .first_enabled_connection(&all)
+        .cloned()
+        .ok_or_else(|| format!("Agent '{}' has no active provider connection.", config.name))
 }
 
 fn concise_agent_description(description: Option<String>) -> Option<String> {

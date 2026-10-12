@@ -647,6 +647,20 @@ impl AgentConfig {
         }
     }
 
+    /// First entry of `provider_connection_ids` that resolves to an enabled
+    /// connection. Scheduled and task runs use exactly this one; there is no
+    /// fallback to the rest of the list.
+    pub fn first_enabled_connection<'c>(
+        &self,
+        connections: &'c [ProviderConnection],
+    ) -> Option<&'c ProviderConnection> {
+        self.provider_connection_ids.iter().find_map(|id| {
+            connections
+                .iter()
+                .find(|connection| &connection.id == id && connection.enabled)
+        })
+    }
+
     /// Returns the static list of required built-in tool namespaces.
     pub fn required_tools(&self) -> Vec<&'static str> {
         let mut tools = vec!["dashboard", "tabs"];
@@ -781,6 +795,62 @@ pub type ClaiConfig = AppConfig;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::AuthMode;
+
+    fn connection(id: &str, enabled: bool) -> ProviderConnection {
+        ProviderConnection {
+            id: id.to_string(),
+            name: format!("conn-{id}"),
+            protocol_id: "claude-code".to_string(),
+            provider_id: "claude-code".to_string(),
+            auth_mode: AuthMode::SubscriptionLogin,
+            base_url: None,
+            secret_ref: format!("provider-connection::{id}"),
+            model_id: String::new(),
+            account_label: None,
+            enabled,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn agent_with_connections(ids: &[&str]) -> AgentConfig {
+        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
+        agent.provider_connection_ids = ids.iter().map(|id| (*id).to_string()).collect();
+        agent
+    }
+
+    #[test]
+    fn scheduled_run_uses_first_enabled_connection_only() {
+        let all = vec![connection("a", true), connection("b", true)];
+        let chosen = agent_with_connections(&["a", "b"]).first_enabled_connection(&all);
+        assert_eq!(chosen.map(|c| c.id.as_str()), Some("a"));
+
+        let all = vec![connection("a", false), connection("b", true)];
+        let chosen = agent_with_connections(&["a", "b"]).first_enabled_connection(&all);
+        assert_eq!(chosen.map(|c| c.id.as_str()), Some("b"));
+
+        let all = vec![connection("b", true), connection("c", true)];
+        let chosen = agent_with_connections(&["dangling", "c", "b"]).first_enabled_connection(&all);
+        assert_eq!(chosen.map(|c| c.id.as_str()), Some("c"));
+    }
+
+    #[test]
+    fn scheduled_run_with_no_enabled_connection_fails_instance() {
+        let all = vec![connection("a", false), connection("b", false)];
+        assert!(agent_with_connections(&["a", "b"])
+            .first_enabled_connection(&all)
+            .is_none());
+        assert!(agent_with_connections(&[])
+            .first_enabled_connection(&all)
+            .is_none());
+        assert!(agent_with_connections(&["unknown"])
+            .first_enabled_connection(&all)
+            .is_none());
+        assert!(agent_with_connections(&["a"])
+            .first_enabled_connection(&[])
+            .is_none());
+    }
 
     fn restricted_with(prefixes: &[&str]) -> ShellCapabilityConfig {
         ShellCapabilityConfig {

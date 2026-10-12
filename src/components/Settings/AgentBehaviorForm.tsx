@@ -683,6 +683,9 @@ export const AgentBehaviorForm = ({
         <label className={styles.label}>
           Provider connections <span className={styles.required}>*</span>
         </label>
+        <span className={styles.hint}>
+          The first enabled connection is the one this agent runs on. The others are kept but not used — there is no automatic fallback.
+        </span>
         {providerConnectionIds.length > 0 && (
           <div className={styles.chipList}>
             {providerConnectionIds.map((id) => {

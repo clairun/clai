@@ -44,8 +44,7 @@ use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository::{self, CreateRunParams, CreateSessionParams};
 use crate::assistant::runtime;
 use crate::assistant::types::{
-    AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
-    SessionContext, SessionKind,
+    ProviderConnection, RunStatus, RunTrigger, SessionContext, SessionKind,
 };
 use crate::config::{workspace_config, AgentConfig};
 use crate::db::DbPool;
@@ -285,14 +284,12 @@ async fn run_next_agent(
         }
     }
 
-    let connections = resolve_agent_connections(state.inner(), &agent_config)?;
+    let connection = resolve_agent_connection(state.inner(), &agent_config)?;
 
     let session =
         ensure_workspace_manager_session(app_handle, &workspace_pool, &agent_config).await?;
 
-    let result =
-        run_scheduled_agent_with_fallback(app_handle, &workspace_pool, &session, &connections)
-            .await;
+    let result = run_scheduled_agent(app_handle, &workspace_pool, &session, &connection).await;
 
     // Mark agent complete
     let success = match &result {
@@ -578,143 +575,81 @@ async fn find_manager_session(
         .find(|session| session.context.automation_id.as_deref() == Some(agent_config.id.as_str())))
 }
 
-fn resolve_agent_connections(
+fn resolve_agent_connection(
     state: &AppState,
-    agent_config: &crate::config::AgentConfig,
-) -> Result<Vec<ProviderConnection>, RunnerError> {
+    agent_config: &AgentConfig,
+) -> Result<ProviderConnection, RunnerError> {
     let all_connections = state
         .config_manager
         .lock()
         .map_err(|e| RunnerError::AssistantPersistence(format!("Lock error: {}", e)))?
         .get_provider_connections();
 
-    let mut resolved = Vec::new();
-    for connection_id in &agent_config.provider_connection_ids {
-        match all_connections
-            .iter()
-            .find(|connection| connection.id == *connection_id)
-        {
-            Some(connection) if connection.enabled => resolved.push(connection.clone()),
-            Some(connection) => {
-                tracing::warn!(
-                    agent_id = %agent_config.id,
-                    connection_id = %connection.id,
-                    "Skipping disabled provider connection"
-                );
-            }
-            None => {
-                tracing::warn!(
-                    agent_id = %agent_config.id,
-                    connection_id = %connection_id,
-                    "Skipping missing provider connection"
-                );
-            }
-        }
+    let connection = agent_config
+        .first_enabled_connection(&all_connections)
+        .ok_or_else(|| RunnerError::NoProviderConfigured(agent_config.id.clone()))?;
+
+    if agent_config.provider_connection_ids.first() != Some(&connection.id) {
+        tracing::warn!(
+            agent_id = %agent_config.id,
+            connection_id = %connection.id,
+            "First configured provider connection is disabled or missing; using the first enabled one"
+        );
     }
 
-    if resolved.is_empty() {
-        return Err(RunnerError::NoProviderConfigured(agent_config.id.clone()));
-    }
-
-    Ok(resolved)
+    Ok(connection.clone())
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 38 against a budget of 25"
-)]
-async fn run_scheduled_agent_with_fallback(
+async fn run_scheduled_agent(
     app_handle: &AppHandle,
     pool: &DbPool,
     session: &crate::assistant::types::AssistantSession,
-    connections: &[ProviderConnection],
+    connection: &ProviderConnection,
 ) -> Result<(), RunnerError> {
     let deps = AssistantDeps {
         pool: pool.clone(),
         app: app_handle.clone(),
     };
-    let mut last_error: Option<String> = None;
 
-    for (index, connection) in connections.iter().enumerate() {
-        tracing::info!(
-            session_id = %session.id,
-            connection_id = %connection.id,
-            protocol_id = %connection.protocol_id,
-            model_id = %connection.model_id,
-            fallback_index = index,
-            "Starting scheduled assistant run"
-        );
+    tracing::info!(
+        session_id = %session.id,
+        connection_id = %connection.id,
+        protocol_id = %connection.protocol_id,
+        model_id = %connection.model_id,
+        "Starting scheduled assistant run"
+    );
 
-        let run = repository::create_run(
-            pool,
-            CreateRunParams {
-                session_id: session.id.clone(),
-                status: RunStatus::Queued,
-                trigger: RunTrigger::Scheduled,
-                connection_id: connection.id.clone(),
-                protocol_id: connection.protocol_id.clone(),
-                model_id: connection.model_id.clone(),
-                error: None,
-            },
-        )
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
-
-        // Register the cancel token under the DB run.id (the same key the
-        // chat and workspace-task paths use). Previously this was a
-        // synthetic `scheduled:{instance_id}:{uuid}` string, which meant
-        // `assistant_cancel_run(run.id)` couldn't find the token and
-        // scheduled runs were effectively un-cancellable from the UI.
-        let run_registration = runtime::register_run(&run.id);
-        let cancel_token = run_registration.token();
-        let input = RunTurnInput {
+    let run = repository::create_run(
+        pool,
+        CreateRunParams {
             session_id: session.id.clone(),
-            run_id: Some(run.id.clone()),
+            status: RunStatus::Queued,
             trigger: RunTrigger::Scheduled,
             connection_id: connection.id.clone(),
-            cancel_token,
-            inter_agent_call_depth: None,
-            trigger_message_id: None,
-        };
-        let result = engine::run_session_turn(&deps, input).await;
-        drop(run_registration);
+            protocol_id: connection.protocol_id.clone(),
+            model_id: connection.model_id.clone(),
+            error: None,
+        },
+    )
+    .await
+    .map_err(RunnerError::AssistantPersistence)?;
 
-        match result {
-            Ok(()) => {
-                if let Err(error) = crate::commands::assistant::start_queued_followup_if_idle(
-                    pool.clone(),
-                    app_handle.clone(),
-                    session.id.clone(),
-                )
-                .await
-                {
-                    tracing::error!(
-                        session_id = %session.id,
-                        error = %error,
-                        "Failed to start queued assistant follow-up after scheduled run"
-                    );
-                }
-                return Ok(());
-            }
-            Err(error) => {
-                let error_text = error.to_string();
-                last_error = Some(error_text.clone());
-                let can_fallback = run_allows_fallback(pool, session.id.as_str(), &run).await?;
-
-                tracing::warn!(
-                    run_id = %run.id,
-                    connection_id = %connection.id,
-                    can_fallback,
-                    error = %error_text,
-                    "Scheduled assistant run failed"
-                );
-
-                if !can_fallback {
-                    break;
-                }
-            }
-        }
-    }
+    // Register the cancel token under the DB run.id (the same key the
+    // chat and workspace-task paths use) so `assistant_cancel_run(run.id)`
+    // can find it.
+    let run_registration = runtime::register_run(&run.id);
+    let cancel_token = run_registration.token();
+    let input = RunTurnInput {
+        session_id: session.id.clone(),
+        run_id: Some(run.id.clone()),
+        trigger: RunTrigger::Scheduled,
+        connection_id: connection.id.clone(),
+        cancel_token,
+        inter_agent_call_depth: None,
+        trigger_message_id: None,
+    };
+    let result = engine::run_session_turn(&deps, input).await;
+    drop(run_registration);
 
     if let Err(error) = crate::commands::assistant::start_queued_followup_if_idle(
         pool.clone(),
@@ -726,50 +661,18 @@ async fn run_scheduled_agent_with_fallback(
         tracing::error!(
             session_id = %session.id,
             error = %error,
-            "Failed to start queued assistant follow-up after failed scheduled run"
+            "Failed to start queued assistant follow-up after scheduled run"
         );
     }
 
-    Err(RunnerError::AssistantSession(
-        last_error.unwrap_or_else(|| "scheduled run failed".to_string()),
-    ))
-}
-
-async fn run_allows_fallback(
-    pool: &DbPool,
-    session_id: &str,
-    run: &AssistantRun,
-) -> Result<bool, RunnerError> {
-    let tool_calls = repository::list_tool_calls(pool, session_id, Some(&run.id))
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
-    if !tool_calls.is_empty() {
-        return Ok(false);
-    }
-
-    let messages = repository::list_messages(pool, session_id)
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
-    let completed_at = run.completed_at.unwrap_or(i64::MAX);
-    let has_assistant_output = messages.iter().any(|message| {
-        message.role == MessageRole::Assistant
-            && message.created_at >= run.started_at
-            && message.created_at <= completed_at
-            && message_contains_output(&message.content)
-    });
-
-    Ok(!has_assistant_output)
-}
-
-fn message_contains_output(content: &[ContentPart]) -> bool {
-    content.iter().any(|part| match part {
-        ContentPart::Text { text } => !text.trim().is_empty(),
-        ContentPart::ToolUse { .. } | ContentPart::ToolResult { .. } => true,
-        // Thinking alone doesn't count as user-visible output — it's
-        // the model's internal reasoning, not a deliverable.
-        ContentPart::Thinking { .. } => false,
-        // A user-attached image is visible, deliverable content.
-        ContentPart::Image { .. } => true,
+    result.map_err(|error| {
+        tracing::warn!(
+            run_id = %run.id,
+            connection_id = %connection.id,
+            error = %error,
+            "Scheduled assistant run failed"
+        );
+        RunnerError::AssistantSession(error.to_string())
     })
 }
 
@@ -788,5 +691,13 @@ mod tests {
 
         let err = RunnerError::AgentNotFound("test-agent".to_string());
         assert!(err.to_string().contains("test-agent"));
+    }
+
+    #[test]
+    fn no_provider_configured_error_names_agent() {
+        let err = RunnerError::NoProviderConfigured("agent-1".to_string());
+        let text = err.to_string();
+        assert!(text.contains("No provider configured"));
+        assert!(text.contains("agent-1"));
     }
 }
