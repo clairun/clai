@@ -86,9 +86,11 @@ pub fn resolve_run_context(
 mod tests {
     use super::*;
     use crate::assistant::repository;
+    use crate::assistant::tools::workspace_tasks::task_session_context;
+    use crate::assistant::types::{AssistantSession, SessionKind};
     use crate::config::global_agents::AgentDefinition;
     use crate::config::workspace_config::{McpRef, WorkspaceAssignment, WorkspaceConfig};
-    use crate::config::{AppConfig, ShellAccessMode};
+    use crate::config::{AppConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode};
     use crate::workspace_index::WorkspaceIndex;
 
     const WS: &str = "77777777-7777-4777-8777-777777777777";
@@ -253,6 +255,154 @@ mod tests {
             .update(|config| config.agent_definitions.clear())
             .expect("delete definition");
         assert!(resolve_run_context(&fx.state, WS, Some(MEMBER)).is_err());
+    }
+
+    fn grant(path: &str) -> FilesystemPathGrant {
+        FilesystemPathGrant {
+            path: path.to_string(),
+            access: FilesystemPathAccess::ReadOnly,
+            origin: None,
+        }
+    }
+
+    fn set_definition(fx: &Fixture, edit: impl FnOnce(&mut AgentDefinition)) {
+        fx.state
+            .config_manager
+            .lock()
+            .expect("config lock")
+            .update(|config| edit(&mut config.agent_definitions[0]))
+            .expect("edit definition");
+    }
+
+    /// A task session for MEMBER, created the way `assign_task` creates it.
+    async fn member_task_session(pool: &crate::db::DbPool) -> AssistantSession {
+        crate::db::test_support::insert_task(pool, "task-1", "queued", None, None).await;
+        repository::create_session_and_link_task(
+            pool,
+            repository::CreateSessionParams {
+                kind: SessionKind::BackgroundJob,
+                title: Some("Task: t".to_string()),
+                context: task_session_context(MEMBER),
+            },
+            "task-1",
+        )
+        .await
+        .expect("task session")
+    }
+
+    fn assign_member(fx: &Fixture, grants: Vec<FilesystemPathGrant>) {
+        fx.state
+            .update_workspace_config(WS, |config| {
+                let mut member = assignment(true);
+                member.filesystem_grants = grants;
+                config.assignments.push(member);
+                Ok(())
+            })
+            .expect("assign");
+    }
+
+    fn has_grant(run: &RunContext, path: &str) -> bool {
+        run.execution
+            .filesystem
+            .extra_paths
+            .iter()
+            .any(|grant| grant.path == path)
+    }
+
+    #[tokio::test]
+    async fn task_run_context_tracks_assignee_live_config() {
+        let fx = fixture(true);
+        set_definition(&fx, |definition| {
+            definition.behavior.selected_mcp_servers = mcp(&["m1"]);
+            definition.behavior.execution.shell.mode = ShellAccessMode::Full;
+        });
+        assign_member(&fx, vec![grant("/a")]);
+        let pool = fx.state.workspace_db(WS).await.expect("workspace db");
+        let session = member_task_session(&pool).await;
+        let before = context_json(&pool, &session.id).await;
+        let agent_id = session.context.automation_id.as_deref();
+
+        let run = resolve_run_context(&fx.state, WS, agent_id).expect("resolve");
+        assert_eq!(run.mcp_server_ids, vec!["m1".to_string()]);
+        assert!(has_grant(&run, "/a"));
+        assert_eq!(run.execution.shell.mode, ShellAccessMode::Full);
+
+        set_definition(&fx, |definition| {
+            definition.behavior.selected_mcp_servers = mcp(&["m2"]);
+            definition.behavior.execution.shell.mode = ShellAccessMode::Off;
+        });
+        fx.state
+            .update_workspace_config(WS, |config| {
+                config.assignments[0].filesystem_grants.clear();
+                Ok(())
+            })
+            .expect("revoke grant");
+
+        let run = resolve_run_context(&fx.state, WS, agent_id).expect("resolve");
+        assert_eq!(run.mcp_server_ids, vec!["m2".to_string()]);
+        assert!(!has_grant(&run, "/a"));
+        assert_eq!(run.execution.shell.mode, ShellAccessMode::Off);
+        assert_eq!(context_json(&pool, &session.id).await, before);
+    }
+
+    #[tokio::test]
+    async fn task_run_context_is_assignees_not_callers() {
+        let fx = fixture(true);
+        fx.state
+            .update_workspace_config(WS, |config| {
+                config
+                    .main_agent
+                    .as_mut()
+                    .expect("main")
+                    .selected_mcp_servers = mcp(&["main-only"]);
+                Ok(())
+            })
+            .expect("edit main");
+        assign_member(&fx, Vec::new());
+        let pool = fx.state.workspace_db(WS).await.expect("workspace db");
+        let session = member_task_session(&pool).await;
+
+        let run = resolve_run_context(&fx.state, WS, session.context.automation_id.as_deref())
+            .expect("resolve");
+        assert_eq!(run.automation_id.as_deref(), Some(MEMBER));
+        assert!(run.mcp_server_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn task_run_context_fails_after_unassign() {
+        let fx = fixture(true);
+        assign_member(&fx, Vec::new());
+        let pool = fx.state.workspace_db(WS).await.expect("workspace db");
+        let session = member_task_session(&pool).await;
+        let agent_id = session.context.automation_id.as_deref();
+        assert!(resolve_run_context(&fx.state, WS, agent_id).is_ok());
+
+        fx.state
+            .update_workspace_config(WS, |config| {
+                config.assignments.clear();
+                Ok(())
+            })
+            .expect("unassign");
+        let error = resolve_run_context(&fx.state, WS, agent_id).expect_err("unassigned");
+        assert!(error.contains(MEMBER), "{error}");
+    }
+
+    #[tokio::test]
+    async fn task_run_context_fails_after_definition_deleted() {
+        let fx = fixture(true);
+        assign_member(&fx, Vec::new());
+        let pool = fx.state.workspace_db(WS).await.expect("workspace db");
+        let session = member_task_session(&pool).await;
+        let agent_id = session.context.automation_id.as_deref();
+
+        fx.state
+            .config_manager
+            .lock()
+            .expect("config lock")
+            .update(|config| config.agent_definitions.clear())
+            .expect("delete definition");
+        let error = resolve_run_context(&fx.state, WS, agent_id).expect_err("definition gone");
+        assert!(error.contains(MEMBER), "{error}");
     }
 
     #[test]

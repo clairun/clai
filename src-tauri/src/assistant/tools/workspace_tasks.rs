@@ -8,7 +8,7 @@ use crate::assistant::types::{
     SessionContext, SessionKind,
 };
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
-use crate::config::{workspace_config, AgentConfig, AppConfig, WorkspaceConfig};
+use crate::config::{first_enabled_connection, WorkspaceConfig};
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -81,14 +81,9 @@ struct WorkspaceAgentRow {
     display_name: Option<String>,
     role: String,
     enabled: bool,
-    // Inline agent fields (Phase 1.4 — populated from workspace_agents columns;
-    // no more join with the global ClaiConfig.agents catalog).
     name: String,
     description: String,
-    selected_skill_ids: Vec<String>,
-    selected_mcp_server_ids: Vec<String>,
     provider_connection_ids: Vec<String>,
-    execution: crate::config::ExecutionCapabilityConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -149,8 +144,6 @@ fn list_agents(
         .into_iter()
         .filter(|row| params.include_disabled || row.enabled)
         .map(|row| {
-            // Phase 1.4: every field below comes from the workspace_agents row
-            // itself; no join with the global ClaiConfig.agents catalog.
             let display_name = agent_label(&row);
             serde_json::json!({
                 "id": row.id,
@@ -206,24 +199,6 @@ async fn assign_task(
         ));
     }
 
-    // Phase 1.4: build the target AgentConfig from the workspace_agents row
-    // inline fields — no global catalog lookup.
-    let target_config = AgentConfig {
-        id: target.id.clone(),
-        workspace_id: target.workspace_id.clone(),
-        name: target.name.clone(),
-        description: target.description.clone(),
-        schedule_enabled: false,
-        schedule_kind: crate::config::workspace_config::ScheduleKind::default(),
-        enabled: target.enabled,
-        selected_mcp_server_ids: target.selected_mcp_server_ids.clone(),
-        provider_connection_ids: target.provider_connection_ids.clone(),
-        selected_skill_ids: target.selected_skill_ids.clone(),
-        execution: target.execution.clone(),
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-
     let creator_workspace_agent_id = find_workspace_agent_for_definition(
         app_state.inner(),
         &workspace_id,
@@ -241,7 +216,7 @@ async fn assign_task(
     )
     .await?;
 
-    let connection = match resolve_first_connection(deps, &target_config) {
+    let connection = match resolve_first_connection(deps, &target) {
         Ok(connection) => connection,
         Err(message) => {
             update_task_status(
@@ -273,12 +248,7 @@ async fn assign_task(
         CreateSessionParams {
             kind: SessionKind::BackgroundJob,
             title: Some(format!("Task: {}", title)),
-            // The worker runs with its own configuration, resolved when the
-            // run starts — never the caller's capabilities.
-            context: SessionContext {
-                automation_id: Some(target_config.id.clone()),
-                ..SessionContext::default()
-            },
+            context: task_session_context(&target.id),
         },
         &task_id,
     )
@@ -458,9 +428,18 @@ fn spawn_task_run(
     });
 }
 
+/// The worker runs with its own configuration, resolved when each run starts —
+/// never the caller's capabilities.
+pub(crate) fn task_session_context(assignee_id: &str) -> SessionContext {
+    SessionContext {
+        automation_id: Some(assignee_id.to_string()),
+        ..SessionContext::default()
+    }
+}
+
 fn resolve_first_connection(
     deps: &AssistantDeps,
-    config: &AgentConfig,
+    agent: &WorkspaceAgentRow,
 ) -> Result<ProviderConnection, String> {
     let all = deps
         .app
@@ -469,10 +448,16 @@ fn resolve_first_connection(
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .get_provider_connections();
-    config
-        .first_enabled_connection(&all)
+    assignee_connection(agent, &all)
+}
+
+fn assignee_connection(
+    agent: &WorkspaceAgentRow,
+    connections: &[ProviderConnection],
+) -> Result<ProviderConnection, String> {
+    first_enabled_connection(&agent.provider_connection_ids, connections)
         .cloned()
-        .ok_or_else(|| format!("Agent '{}' has no active provider connection.", config.name))
+        .ok_or_else(|| format!("Agent '{}' has no active provider connection.", agent.name))
 }
 
 fn concise_agent_description(description: Option<String>) -> Option<String> {
@@ -497,15 +482,10 @@ fn load_workspace_agent_rows(
     state: &AppState,
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
-    let app_config = state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .get();
     let (config, roster) = state.resolve_workspace_roster(workspace_id)?;
     let mut rows: Vec<_> = roster
         .iter()
-        .map(|resolved| workspace_agent_row_from_config(&app_config, &config, resolved))
+        .map(|resolved| workspace_agent_row_from_config(&config, resolved))
         .collect();
     rows.sort_by_key(|row| (if row.role == "manager" { 0 } else { 1 }, row.id.clone()));
     Ok(rows)
@@ -593,7 +573,6 @@ fn find_workspace_agent_for_definition(
 }
 
 fn workspace_agent_row_from_config(
-    app_config: &AppConfig,
     workspace: &WorkspaceConfig,
     resolved: &ResolvedAgent,
 ) -> WorkspaceAgentRow {
@@ -616,10 +595,7 @@ fn workspace_agent_row_from_config(
         enabled: agent.enabled,
         name: agent.name.clone(),
         description: agent.description.clone(),
-        selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
-        selected_mcp_server_ids: workspace_config::enabled_mcp_ids(&agent.selected_mcp_servers),
         provider_connection_ids: agent.provider_connection_ids.clone(),
-        execution: agent.execution.clone(),
     }
 }
 
@@ -848,6 +824,33 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn task_session_persists_only_assignee_id() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        crate::db::test_support::insert_task(&pool, "task-1", "queued", None, None).await;
+        let session = repository::create_session_and_link_task(
+            &pool,
+            CreateSessionParams {
+                kind: SessionKind::BackgroundJob,
+                title: Some("Task: t".to_string()),
+                context: task_session_context("assignee"),
+            },
+            "task-1",
+        )
+        .await
+        .expect("session");
+        let stored: String =
+            sqlx::query_scalar("SELECT context_json FROM assistant_sessions WHERE id = ?")
+                .bind(&session.id)
+                .fetch_one(&pool)
+                .await
+                .expect("context_json");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).expect("json"),
+            serde_json::json!({ "automationId": "assignee" })
+        );
+    }
+
     // -----------------------------------------------------------------
     // unknown_workspace_agent_error
     // -----------------------------------------------------------------
@@ -862,11 +865,17 @@ mod tests {
             enabled: true,
             name: name.to_string(),
             description: String::new(),
-            selected_skill_ids: Vec::new(),
-            selected_mcp_server_ids: Vec::new(),
             provider_connection_ids: Vec::new(),
-            execution: Default::default(),
         }
+    }
+
+    #[test]
+    fn assignee_without_enabled_connection_names_agent_in_error() {
+        let error = assignee_connection(&agent_row("agent-2", "Code Reviewer"), &[]).unwrap_err();
+        assert_eq!(
+            error,
+            "Agent 'Code Reviewer' has no active provider connection."
+        );
     }
 
     #[test]

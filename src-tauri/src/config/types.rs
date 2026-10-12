@@ -594,10 +594,6 @@ pub struct AgentConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// User-selected MCP servers available to this automation.
-    #[serde(default)]
-    pub selected_mcp_server_ids: Vec<String>,
-
     /// Ordered provider connections for this automation.
     #[serde(default)]
     pub provider_connection_ids: Vec<String>,
@@ -606,10 +602,6 @@ pub struct AgentConfig {
     #[serde(default)]
     pub selected_skill_ids: Vec<String>,
 
-    /// Local execution capability policy for this automation.
-    #[serde(default)]
-    pub execution: ExecutionCapabilityConfig,
-
     /// When the automation was created (ISO 8601).
     pub created_at: String,
 
@@ -617,11 +609,21 @@ pub struct AgentConfig {
     pub updated_at: String,
 }
 
-// AgentConfig is the in-memory row shape for `workspace_agents`. The helpers
-// below are used by tests and by commands::workspace_agents validation logic
-// (via separate copies); marked `allow(dead_code)` because rustc can't see
-// across that boundary.
-#[allow(dead_code)]
+/// First entry of `provider_connection_ids` that resolves to an enabled
+/// connection. Scheduled and task runs use exactly this one; there is no
+/// fallback to the rest of the list.
+pub fn first_enabled_connection<'c>(
+    provider_connection_ids: &[String],
+    connections: &'c [ProviderConnection],
+) -> Option<&'c ProviderConnection> {
+    provider_connection_ids.iter().find_map(|id| {
+        connections
+            .iter()
+            .find(|connection| &connection.id == id && connection.enabled)
+    })
+}
+
+#[cfg(test)]
 impl AgentConfig {
     /// Creates a new workspace-local agent with a generated UUID.
     pub fn new(
@@ -638,39 +640,11 @@ impl AgentConfig {
             schedule_enabled: true,
             schedule_kind,
             enabled: false,
-            selected_mcp_server_ids: vec![],
             provider_connection_ids: vec![],
             selected_skill_ids: vec![],
-            execution: ExecutionCapabilityConfig::default(),
             created_at: now.clone(),
             updated_at: now,
         }
-    }
-
-    /// First entry of `provider_connection_ids` that resolves to an enabled
-    /// connection. Scheduled and task runs use exactly this one; there is no
-    /// fallback to the rest of the list.
-    pub fn first_enabled_connection<'c>(
-        &self,
-        connections: &'c [ProviderConnection],
-    ) -> Option<&'c ProviderConnection> {
-        self.provider_connection_ids.iter().find_map(|id| {
-            connections
-                .iter()
-                .find(|connection| &connection.id == id && connection.enabled)
-        })
-    }
-
-    /// Returns the static list of required built-in tool namespaces.
-    pub fn required_tools(&self) -> Vec<&'static str> {
-        let mut tools = vec!["dashboard", "tabs"];
-        if !matches!(self.execution.shell.mode, ShellAccessMode::Off) {
-            tools.push("bash");
-        }
-        if self.execution.web.enabled {
-            tools.push("web");
-        }
-        tools
     }
 
     /// Updates the global enabled state.
@@ -814,42 +788,33 @@ mod tests {
         }
     }
 
-    fn agent_with_connections(ids: &[&str]) -> AgentConfig {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
-        agent.provider_connection_ids = ids.iter().map(|id| (*id).to_string()).collect();
-        agent
+    fn first_of<'c>(ids: &[&str], all: &'c [ProviderConnection]) -> Option<&'c ProviderConnection> {
+        let ids: Vec<String> = ids.iter().map(|id| (*id).to_string()).collect();
+        first_enabled_connection(&ids, all)
     }
 
     #[test]
     fn scheduled_run_uses_first_enabled_connection_only() {
         let all = vec![connection("a", true), connection("b", true)];
-        let chosen = agent_with_connections(&["a", "b"]).first_enabled_connection(&all);
+        let chosen = first_of(&["a", "b"], &all);
         assert_eq!(chosen.map(|c| c.id.as_str()), Some("a"));
 
         let all = vec![connection("a", false), connection("b", true)];
-        let chosen = agent_with_connections(&["a", "b"]).first_enabled_connection(&all);
+        let chosen = first_of(&["a", "b"], &all);
         assert_eq!(chosen.map(|c| c.id.as_str()), Some("b"));
 
         let all = vec![connection("b", true), connection("c", true)];
-        let chosen = agent_with_connections(&["dangling", "c", "b"]).first_enabled_connection(&all);
+        let chosen = first_of(&["dangling", "c", "b"], &all);
         assert_eq!(chosen.map(|c| c.id.as_str()), Some("c"));
     }
 
     #[test]
     fn scheduled_run_with_no_enabled_connection_fails_instance() {
         let all = vec![connection("a", false), connection("b", false)];
-        assert!(agent_with_connections(&["a", "b"])
-            .first_enabled_connection(&all)
-            .is_none());
-        assert!(agent_with_connections(&[])
-            .first_enabled_connection(&all)
-            .is_none());
-        assert!(agent_with_connections(&["unknown"])
-            .first_enabled_connection(&all)
-            .is_none());
-        assert!(agent_with_connections(&["a"])
-            .first_enabled_connection(&[])
-            .is_none());
+        assert!(first_of(&["a", "b"], &all).is_none());
+        assert!(first_of(&[], &all).is_none());
+        assert!(first_of(&["unknown"], &all).is_none());
+        assert!(first_of(&["a"], &[]).is_none());
     }
 
     fn restricted_with(prefixes: &[&str]) -> ShellCapabilityConfig {
@@ -986,39 +951,6 @@ mod tests {
                 interval_minutes: 15
             }
         ));
-    }
-
-    #[test]
-    fn test_agent_required_tools() {
-        let agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
-        let tools = agent.required_tools();
-
-        assert!(tools.contains(&"dashboard"));
-        assert!(tools.contains(&"tabs"));
-        assert_eq!(tools, vec!["dashboard", "tabs"]);
-    }
-
-    #[test]
-    fn test_agent_required_tools_include_local_execution_when_enabled() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
-        agent.execution.shell.mode = ShellAccessMode::Restricted;
-
-        let tools = agent.required_tools();
-
-        assert!(tools.contains(&"bash"));
-    }
-
-    #[test]
-    fn test_agent_required_tools_include_web_when_enabled() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
-        agent.execution.web.enabled = true;
-
-        let tools = agent.required_tools();
-        assert!(tools.contains(&"web"));
-
-        agent.execution.web.enabled = false;
-        let tools = agent.required_tools();
-        assert!(!tools.contains(&"web"));
     }
 
     #[test]

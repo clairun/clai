@@ -9,10 +9,11 @@ pub mod types;
 pub mod workspace_config;
 
 pub use types::{
-    AgentConfig, AiProvider, AppConfig, ClaiConfig, ExecutionCapabilityConfig,
-    FilesystemCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, McpEnvVar,
-    McpServerAuth, McpServerConfig, McpServerTransport, SandboxNetworkConfig,
-    SandboxSessionBusConfig, ShellAccessMode, SkillSourceConfig, SkillSourceKind,
+    first_enabled_connection, AgentConfig, AiProvider, AppConfig, ClaiConfig,
+    ExecutionCapabilityConfig, FilesystemCapabilityConfig, FilesystemPathAccess,
+    FilesystemPathGrant, GrantOrigin, McpEnvVar, McpServerAuth, McpServerConfig,
+    McpServerTransport, SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
+    SkillSourceConfig, SkillSourceKind,
 };
 pub use workspace_config::{WorkspaceAgent, WorkspaceConfig};
 
