@@ -18,6 +18,8 @@
 //! workspace and calls `init_workspace_db`, and the lazy-open path goes
 //! through the same function. Both apply pending migrations.
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
@@ -109,8 +111,7 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
 ///
 /// `assistant_runs` and `assistant_tool_calls` are NOT touched here —
 /// `crate::assistant::repository::recover_stale_runs` already handles those
-/// at workspace-DB open, and its SQL uses the JSON-quoted enum format
-/// the column actually stores (e.g. `'"running"'`, not `'running'`).
+/// at workspace-DB open.
 pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -144,6 +145,24 @@ pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// A unit enum stored in a TEXT column: the bare string serde gives it
+/// (`RunStatus::Running` → `running`). Pair with [`parse_enum_text`].
+pub(crate) fn enum_text<T: Serialize>(value: &T) -> Result<String, String> {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(text)) => Ok(text),
+        Ok(other) => Err(format!("Expected a unit enum, got {other}")),
+        Err(e) => Err(format!("Failed to serialize enum: {e}")),
+    }
+}
+
+pub(crate) fn parse_enum_text<T: DeserializeOwned>(
+    text: String,
+    context: &str,
+) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(text))
+        .map_err(|e| format!("Failed to parse {context}: {e}"))
 }
 
 #[cfg(test)]
@@ -370,6 +389,140 @@ mod tests {
         );
         assert!(repository::get_session(&pool, "s").await.unwrap().is_some());
         assert!(repository::get_run(&pool, "r").await.unwrap().is_some());
+    }
+
+    /// `20261015000000_plain_enum_columns` unquotes JSON-string enums, leaves
+    /// already-plain values alone, and keeps every row loadable.
+    #[tokio::test]
+    async fn quoted_enum_columns_become_plain_text() {
+        use crate::assistant::repository;
+        use crate::assistant::types::{
+            CompactionStatus, MessageRole, RunStatus, RunTrigger, ToolCallStatus,
+        };
+
+        let pool = pool_migrated_before(20261015000000).await;
+        for statement in [
+            "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+             VALUES ('s', '{}', 1, 1)",
+            "INSERT INTO assistant_messages (id, session_id, role, content_json, created_at)
+             VALUES ('m1', 's', '\"user\"', '[]', 1), ('m2', 's', 'assistant', '[]', 2)",
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id, started_at)
+             VALUES ('r1', 's', '\"running\"', '\"scheduled\"', 'c', 'openai', 'm', 1),
+                    ('r2', 's', 'completed', 'user_message', 'c', 'openai', 'm', 2)",
+            "INSERT INTO assistant_tool_calls
+                 (id, run_id, session_id, tool_name, params_json, status, started_at)
+             VALUES ('t1', 'r1', 's', 'x', '{}', '\"pending\"', 1),
+                    ('t2', 'r2', 's', 'x', '{}', 'completed', 2)",
+            "INSERT INTO assistant_compactions
+                 (id, session_id, \"trigger\", strategy, status, source_to_message_id,
+                  summary_message_id, protocol_id, model_id, created_at, completed_at)
+             VALUES ('c1', 's', '\"automatic\"', '\"local_summary\"', '\"completed\"', 'm1', 'm2',
+                     'openai', 'm', 1, 1)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let stored: Vec<String> = sqlx::query_scalar(
+            "SELECT role FROM assistant_messages
+             UNION ALL SELECT status || ' ' || \"trigger\" FROM assistant_runs
+             UNION ALL SELECT status FROM assistant_tool_calls
+             UNION ALL SELECT \"trigger\" || ' ' || strategy || ' ' || status
+                       FROM assistant_compactions",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            [
+                "user",
+                "assistant",
+                "running scheduled",
+                "completed user_message",
+                "pending",
+                "completed",
+                "automatic local_summary completed",
+            ]
+        );
+
+        let roles: Vec<MessageRole> = repository::list_messages(&pool, "s")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|message| message.role)
+            .collect();
+        assert_eq!(roles, [MessageRole::User, MessageRole::Assistant]);
+        let run = repository::get_run(&pool, "r1").await.unwrap().unwrap();
+        assert_eq!(
+            (run.status, run.trigger),
+            (RunStatus::Running, RunTrigger::Scheduled)
+        );
+        assert!(repository::session_has_active_run(&pool, "s")
+            .await
+            .unwrap());
+        let tool_call = repository::get_tool_call_for_session(&pool, "s", "t1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tool_call.status, ToolCallStatus::Pending);
+        let compaction = repository::latest_completed_compaction(&pool, "s")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(compaction.status, CompactionStatus::Completed);
+
+        let quoted = sqlx::query(
+            "INSERT INTO assistant_compactions
+                 (id, session_id, \"trigger\", strategy, status, protocol_id, model_id, created_at)
+             VALUES ('c2', 's', 'manual', 'local_summary', '\"completed\"', 'openai', 'm', 2)",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            quoted.is_err(),
+            "the rebuilt CHECK must reject quoted values"
+        );
+    }
+
+    /// The same migration rebuilds `assistant_compactions`; the rebuilt table
+    /// keeps its indexes and foreign keys.
+    #[tokio::test]
+    async fn plain_enum_rebuild_keeps_compaction_indexes_and_foreign_keys() {
+        let pool = pool_migrated_before(20261015000000).await;
+        let compaction_foreign_keys = || async {
+            sqlx::query_as::<_, (String, String, String, String, String)>(
+                "SELECT \"table\", \"from\", \"to\", on_update, on_delete
+                 FROM pragma_foreign_key_list('assistant_compactions')
+                 ORDER BY \"from\"",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        let original_foreign_keys = compaction_foreign_keys().await;
+        assert_eq!(original_foreign_keys.len(), 5);
+
+        run_all_migrations(&pool).await;
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'assistant_compactions' AND sql IS NOT NULL
+             ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            indexes,
+            [
+                "idx_assistant_compactions_session_created",
+                "idx_assistant_compactions_session_status",
+            ]
+        );
+        assert_eq!(compaction_foreign_keys().await, original_foreign_keys);
     }
 
     #[tokio::test]

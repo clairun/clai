@@ -9,7 +9,7 @@ use crate::assistant::types::{
     CompactionStrategy, CompactionTrigger, ContentPart, MessageRole, RunStatus, RunTrigger,
     SessionContext, ToolCallStatus, ToolInvocation,
 };
-use crate::db::DbPool;
+use crate::db::{enum_text, parse_enum_text, DbPool};
 
 pub struct CreateMessageParams {
     pub session_id: String,
@@ -67,6 +67,9 @@ fn parse_json<T: DeserializeOwned>(value: &str, context: &str) -> Result<T, Stri
     serde_json::from_str(value).map_err(|e| format!("Failed to parse {}: {}", context, e))
 }
 
+/// Non-terminal run statuses, for `status IN` clauses.
+const ACTIVE_RUN_STATUSES: &str = "('queued', 'running', 'waiting_for_tool')";
+
 fn parse_optional_json<T: DeserializeOwned>(
     value: Option<String>,
     context: &str,
@@ -90,7 +93,7 @@ fn map_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantMessage, St
     Ok(AssistantMessage {
         id: row.get("id"),
         session_id: row.get("session_id"),
-        role: parse_json::<MessageRole>(&row.get::<String, _>("role"), "message role")?,
+        role: parse_enum_text::<MessageRole>(row.get::<String, _>("role"), "message role")?,
         content: parse_json::<Vec<ContentPart>>(
             &row.get::<String, _>("content_json"),
             "message content",
@@ -114,8 +117,8 @@ fn map_run_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantRun, String> {
     Ok(AssistantRun {
         id: row.get("id"),
         session_id: row.get("session_id"),
-        status: parse_json::<RunStatus>(&row.get::<String, _>("status"), "run status")?,
-        trigger: parse_json::<RunTrigger>(&row.get::<String, _>("trigger"), "run trigger")?,
+        status: parse_enum_text::<RunStatus>(row.get::<String, _>("status"), "run status")?,
+        trigger: parse_enum_text::<RunTrigger>(row.get::<String, _>("trigger"), "run trigger")?,
         connection_id: row.get("connection_id"),
         protocol_id: row.get("protocol_id"),
         model_id: row.get("model_id"),
@@ -129,16 +132,16 @@ fn map_compaction_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantCompacti
     Ok(AssistantCompaction {
         id: row.get("id"),
         session_id: row.get("session_id"),
-        trigger: parse_json::<CompactionTrigger>(
-            &row.get::<String, _>("trigger"),
+        trigger: parse_enum_text::<CompactionTrigger>(
+            row.get::<String, _>("trigger"),
             "compaction trigger",
         )?,
-        strategy: parse_json::<CompactionStrategy>(
-            &row.get::<String, _>("strategy"),
+        strategy: parse_enum_text::<CompactionStrategy>(
+            row.get::<String, _>("strategy"),
             "compaction strategy",
         )?,
-        status: parse_json::<CompactionStatus>(
-            &row.get::<String, _>("status"),
+        status: parse_enum_text::<CompactionStatus>(
+            row.get::<String, _>("status"),
             "compaction status",
         )?,
         source_from_message_id: row.get("source_from_message_id"),
@@ -605,7 +608,7 @@ pub async fn create_message(
     )
     .bind(&message.id)
     .bind(&message.session_id)
-    .bind(to_json_string(&message.role)?)
+    .bind(enum_text(&message.role)?)
     .bind(to_json_string(&message.content)?)
     .bind(
         message
@@ -675,7 +678,7 @@ pub async fn create_user_message_with_content(
     )
     .bind(&message.id)
     .bind(&message.session_id)
-    .bind(to_json_string(&message.role)?)
+    .bind(enum_text(&message.role)?)
     .bind(to_json_string(&message.content)?)
     .bind(Option::<String>::None)
     .bind(message.created_at)
@@ -737,8 +740,8 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
     )
     .bind(&run.id)
     .bind(&run.session_id)
-    .bind(to_json_string(&run.status)?)
-    .bind(to_json_string(&run.trigger)?)
+    .bind(enum_text(&run.status)?)
+    .bind(enum_text(&run.trigger)?)
     .bind(&run.connection_id)
     .bind(&run.protocol_id)
     .bind(&run.model_id)
@@ -786,14 +789,14 @@ pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<Assista
 /// or waiting for a tool). Used by message queueing and follow-up scheduling
 /// to preserve one active run per session.
 pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<bool, String> {
-    let (count,): (i64,) = sqlx::query_as(
+    let (count,): (i64,) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)
         FROM assistant_runs
         WHERE session_id = ?
-          AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
-        "#,
-    )
+          AND status IN {ACTIVE_RUN_STATUSES}
+        "#
+    ))
     .bind(session_id)
     .fetch_one(pool)
     .await
@@ -805,13 +808,13 @@ pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<b
 /// Whether the workspace database contains any non-terminal run. Workspace
 /// deletion uses this as a coarse guard before removing the root directory.
 pub async fn workspace_has_active_run(pool: &DbPool) -> Result<bool, String> {
-    let (count,): (i64,) = sqlx::query_as(
+    let (count,): (i64,) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)
         FROM assistant_runs
-        WHERE status IN ('"queued"', '"running"', '"waiting_for_tool"')
-        "#,
-    )
+        WHERE status IN {ACTIVE_RUN_STATUSES}
+        "#
+    ))
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to check workspace for active runs: {}", e))?;
@@ -823,20 +826,21 @@ pub async fn get_active_run(
     pool: &DbPool,
     session_id: &str,
 ) -> Result<Option<AssistantRun>, String> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
-          AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
+          AND status IN {ACTIVE_RUN_STATUSES}
         ORDER BY started_at DESC
         LIMIT 1
-        "#,
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load active run: {}", e))?;
+        "#
+    );
+    let row = sqlx::query(&sql)
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to load active run: {}", e))?;
 
     row.as_ref().map(map_run_row).transpose()
 }
@@ -988,7 +992,7 @@ pub async fn update_run_status(
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&status)?)
+    .bind(enum_text(&status)?)
     .bind(error)
     .bind(completed_at)
     .bind(run_id)
@@ -1028,7 +1032,7 @@ pub async fn complete_run(
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&status)?)
+    .bind(enum_text(&status)?)
     .bind(error)
     .bind(completed_at)
     .bind(run_id)
@@ -1120,9 +1124,9 @@ pub async fn create_compaction(
     )
     .bind(&compaction.id)
     .bind(&compaction.session_id)
-    .bind(to_json_string(&compaction.trigger)?)
-    .bind(to_json_string(&compaction.strategy)?)
-    .bind(to_json_string(&compaction.status)?)
+    .bind(enum_text(&compaction.trigger)?)
+    .bind(enum_text(&compaction.strategy)?)
+    .bind(enum_text(&compaction.status)?)
     .bind(&compaction.source_from_message_id)
     .bind(&compaction.source_to_message_id)
     .bind(&compaction.summary_message_id)
@@ -1154,7 +1158,7 @@ pub async fn complete_compaction(
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&CompactionStatus::Completed)?)
+    .bind(enum_text(&CompactionStatus::Completed)?)
     .bind(summary_message_id)
     .bind(completed_at)
     .bind(compaction_id)
@@ -1201,7 +1205,7 @@ pub async fn latest_completed_compaction(
                model_id, input_message_count, created_at, completed_at, error
         FROM assistant_compactions
         WHERE session_id = ?
-          AND status = '"completed"'
+          AND status = 'completed'
           AND summary_message_id IS NOT NULL
           AND source_to_message_id IS NOT NULL
         ORDER BY completed_at DESC, created_at DESC
@@ -1223,7 +1227,10 @@ fn map_tool_call_row(row: &sqlx::sqlite::SqliteRow) -> Result<ToolInvocation, St
         session_id: row.get("session_id"),
         tool_name: row.get("tool_name"),
         params: parse_json(&row.get::<String, _>("params_json"), "tool call params")?,
-        status: parse_json::<ToolCallStatus>(&row.get::<String, _>("status"), "tool call status")?,
+        status: parse_enum_text::<ToolCallStatus>(
+            row.get::<String, _>("status"),
+            "tool call status",
+        )?,
         result: parse_optional_json(row.get("result_json"), "tool call result")?,
         result_summary: None,
         has_full_result: false,
@@ -1266,7 +1273,7 @@ pub async fn create_tool_call(
     .bind(&tc.session_id)
     .bind(&tc.tool_name)
     .bind(to_json_string(&tc.params)?)
-    .bind(to_json_string(&tc.status)?)
+    .bind(enum_text(&tc.status)?)
     .bind::<Option<String>>(None)
     .bind::<Option<String>>(None)
     .bind(tc.started_at)
@@ -1295,7 +1302,7 @@ pub async fn update_tool_call(
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&status)?)
+    .bind(enum_text(&status)?)
     .bind(result.map(to_json_string).transpose()?)
     .bind(error)
     .bind(completed_at)
@@ -1374,7 +1381,7 @@ pub async fn fail_running_tool_calls_for_run(
         r#"
         SELECT id
         FROM assistant_tool_calls
-        WHERE run_id = ? AND status IN ('"pending"', '"running"')
+        WHERE run_id = ? AND status IN ('pending', 'running')
         ORDER BY started_at ASC
         "#,
     )
@@ -1407,13 +1414,13 @@ async fn touch_session(pool: &DbPool, session_id: &str) -> Result<(), String> {
 pub async fn recover_stale_runs(pool: &DbPool) -> Result<u64, String> {
     let now = now_ms();
 
-    let run_result = sqlx::query(
+    let run_result = sqlx::query(&format!(
         r#"
         UPDATE assistant_runs
-        SET status = '"failed"', error = 'App restarted while running', completed_at = ?
-        WHERE status IN ('"queued"', '"running"', '"waiting_for_tool"')
-        "#,
-    )
+        SET status = 'failed', error = 'App restarted while running', completed_at = ?
+        WHERE status IN {ACTIVE_RUN_STATUSES}
+        "#
+    ))
     .bind(now)
     .execute(pool)
     .await
@@ -1422,8 +1429,8 @@ pub async fn recover_stale_runs(pool: &DbPool) -> Result<u64, String> {
     let tc_result = sqlx::query(
         r#"
         UPDATE assistant_tool_calls
-        SET status = '"failed"', error = 'App restarted while running'
-        WHERE status IN ('"pending"', '"running"')
+        SET status = 'failed', error = 'App restarted while running'
+        WHERE status IN ('pending', 'running')
         "#,
     )
     .execute(pool)
@@ -1636,6 +1643,165 @@ mod tests {
         assert_eq!(
             message_text(&pool, &direct.id).await.as_deref(),
             Some("direct")
+        );
+    }
+
+    #[test]
+    fn enum_text_round_trips_every_stored_enum_without_quotes() {
+        fn check<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(values: &[T]) {
+            for value in values {
+                let text = enum_text(value).unwrap();
+                assert!(!text.contains('"'), "{text}");
+                assert_eq!(&parse_enum_text::<T>(text, "enum").unwrap(), value);
+            }
+        }
+        check(&[
+            MessageRole::System,
+            MessageRole::User,
+            MessageRole::Assistant,
+            MessageRole::Tool,
+        ]);
+        check(&ALL_RUN_STATUSES);
+        check(&[
+            RunTrigger::UserMessage,
+            RunTrigger::Scheduled,
+            RunTrigger::ManualAutomation,
+            RunTrigger::WorkspaceTask,
+        ]);
+        check(&[
+            ToolCallStatus::Pending,
+            ToolCallStatus::Running,
+            ToolCallStatus::Completed,
+            ToolCallStatus::Failed,
+        ]);
+        check(&[
+            CompactionTrigger::Manual,
+            CompactionTrigger::Automatic,
+            CompactionTrigger::ErrorRecovery,
+        ]);
+        check(&[
+            CompactionStrategy::LocalSummary,
+            CompactionStrategy::SessionRotationSummary,
+        ]);
+        check(&[
+            CompactionStatus::Running,
+            CompactionStatus::Completed,
+            CompactionStatus::Failed,
+        ]);
+    }
+
+    const ALL_RUN_STATUSES: [RunStatus; 7] = [
+        RunStatus::Queued,
+        RunStatus::Running,
+        RunStatus::WaitingForTool,
+        RunStatus::Completed,
+        RunStatus::CompletedWithWarnings,
+        RunStatus::Failed,
+        RunStatus::Cancelled,
+    ];
+
+    #[test]
+    fn active_run_statuses_are_the_non_terminal_ones() {
+        let is_active = |status: &RunStatus| match status {
+            RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool => true,
+            RunStatus::Completed
+            | RunStatus::CompletedWithWarnings
+            | RunStatus::Failed
+            | RunStatus::Cancelled => false,
+        };
+        let active: Vec<String> = ALL_RUN_STATUSES
+            .iter()
+            .filter(|status| is_active(status))
+            .map(|status| format!("'{}'", enum_text(status).unwrap()))
+            .collect();
+        assert_eq!(ACTIVE_RUN_STATUSES, format!("({})", active.join(", ")));
+    }
+
+    #[tokio::test]
+    async fn enum_columns_are_written_as_plain_text() {
+        let (_tmp, pool) = workspace_pool().await;
+        insert_session(&pool, "s").await;
+        let message = create_message(
+            &pool,
+            CreateMessageParams {
+                session_id: "s".to_string(),
+                role: MessageRole::User,
+                content: Vec::new(),
+                provider_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        let run = create_run(
+            &pool,
+            CreateRunParams {
+                session_id: "s".to_string(),
+                status: RunStatus::Queued,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "c".to_string(),
+                protocol_id: "openai".to_string(),
+                model_id: "m".to_string(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        update_run_status(&pool, &run.id, RunStatus::WaitingForTool, None)
+            .await
+            .unwrap();
+        create_tool_call(
+            &pool,
+            CreateToolCallParams {
+                id: "tc".to_string(),
+                run_id: run.id.clone(),
+                session_id: "s".to_string(),
+                tool_name: "t".to_string(),
+                params: serde_json::json!({}),
+                status: ToolCallStatus::Pending,
+            },
+        )
+        .await
+        .unwrap();
+        let compaction = create_compaction(
+            &pool,
+            CreateCompactionParams {
+                session_id: "s".to_string(),
+                trigger: CompactionTrigger::Manual,
+                strategy: CompactionStrategy::LocalSummary,
+                source_from_message_id: None,
+                source_to_message_id: None,
+                created_run_id: None,
+                protocol_id: "openai".to_string(),
+                model_id: "m".to_string(),
+                input_message_count: 0,
+            },
+        )
+        .await
+        .unwrap();
+        complete_compaction(&pool, &compaction.id, &message.id)
+            .await
+            .unwrap();
+
+        let stored: (String, String, String, String) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT role FROM assistant_messages),
+                (SELECT status || ' ' || "trigger" FROM assistant_runs),
+                (SELECT status FROM assistant_tool_calls),
+                (SELECT "trigger" || ' ' || strategy || ' ' || status FROM assistant_compactions)
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            (
+                "user".to_string(),
+                "waiting_for_tool user_message".to_string(),
+                "pending".to_string(),
+                "manual local_summary completed".to_string(),
+            )
         );
     }
 }

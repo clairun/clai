@@ -764,7 +764,7 @@ async fn test_list_messages_orders_same_timestamp_by_insertion() {
     for id in inserted {
         sqlx::query(
             "INSERT INTO assistant_messages (id, session_id, role, content_json, provider_metadata_json, created_at) \
-             VALUES (?, ?, '\"user\"', '[]', NULL, 1000)",
+             VALUES (?, ?, 'user', '[]', NULL, 1000)",
         )
         .bind(id)
         .bind(&session.id)
