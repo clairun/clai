@@ -381,7 +381,6 @@ async fn start_api_turn(
         workspace_root: run_context.workspace_root.clone(),
         automation_id: run_context.automation_id.clone(),
         workspace_agents: run_context.workspace_agents.clone(),
-        inter_agent_call_depth: input.inter_agent_call_depth,
         execution: run_context.execution.clone(),
         notices,
         session_grants,
@@ -1882,12 +1881,7 @@ mod tests {
     #[test]
     fn build_trigger_message_returns_none_for_user_driven_triggers() {
         let session = run_context(Some("ignored"));
-        for trigger in &[
-            RunTrigger::UserMessage,
-            RunTrigger::Retry,
-            RunTrigger::InterAgentCall,
-            RunTrigger::WorkspaceTask,
-        ] {
+        for trigger in &[RunTrigger::UserMessage, RunTrigger::WorkspaceTask] {
             assert!(
                 build_trigger_message(&session, trigger).is_none(),
                 "expected None for {:?}",

@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantRun, AssistantSession, CompactionStatus,
-    CompactionStrategy, CompactionTrigger, ContentPart, MessageRole, RunNotice, RunStatus,
-    RunTrigger, SessionContext, SessionKind, ToolCallStatus, ToolInvocation,
+    CompactionStrategy, CompactionTrigger, ContentPart, MessageRole, RunStatus, RunTrigger,
+    SessionContext, SessionKind, ToolCallStatus, ToolInvocation,
 };
 use crate::db::DbPool;
 
@@ -130,8 +130,6 @@ fn map_run_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantRun, String> {
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
         error: row.get("error"),
-        notices: parse_optional_json::<Vec<RunNotice>>(row.get("notices_json"), "run notices")?
-            .unwrap_or_default(),
     })
 }
 
@@ -750,14 +748,13 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
         started_at: now_ms(),
         completed_at: None,
         error: params.error,
-        notices: Vec::new(),
     };
 
     sqlx::query(
         r#"
         INSERT INTO assistant_runs
-            (id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&run.id)
@@ -768,7 +765,6 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
     .bind(&run.protocol_id)
     .bind(&run.model_id)
     .bind(&run.error)
-    .bind(Option::<String>::None) // notices_json — empty on creation
     .bind(run.started_at)
     .bind(run.completed_at)
     .execute(pool)
@@ -783,7 +779,7 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
 pub async fn list_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
         ORDER BY started_at DESC
@@ -840,7 +836,7 @@ pub async fn get_active_run(
 ) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
           AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
@@ -971,7 +967,7 @@ pub async fn mark_queued_messages_delivered(
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1013,7 +1009,7 @@ pub async fn update_run_status(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1033,25 +1029,18 @@ pub async fn complete_run(
     run_id: &str,
     status: RunStatus,
     error: Option<&str>,
-    notices: &[RunNotice],
 ) -> Result<AssistantRun, String> {
     let completed_at = now_ms();
-    let notices_json = if notices.is_empty() {
-        None
-    } else {
-        Some(to_json_string(&notices)?)
-    };
 
     sqlx::query(
         r#"
         UPDATE assistant_runs
-        SET status = ?, error = ?, notices_json = COALESCE(?, notices_json), completed_at = ?
+        SET status = ?, error = ?, completed_at = ?
         WHERE id = ?
         "#,
     )
     .bind(to_json_string(&status)?)
     .bind(error)
-    .bind(notices_json)
     .bind(completed_at)
     .bind(run_id)
     .execute(pool)
@@ -1060,7 +1049,7 @@ pub async fn complete_run(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,

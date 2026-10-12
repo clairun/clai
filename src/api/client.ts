@@ -37,77 +37,6 @@ const handleApiError = (error: unknown, operation: string): never => {
 };
 
 // ============================================================================
-// AI Provider Functions
-// ============================================================================
-
-/**
- * Get the currently configured AI provider.
- */
-export const getAiProvider = async (): Promise<unknown> => {
-  try {
-    return await invoke('get_ai_provider');
-  } catch (error) {
-    return handleApiError(error, 'Failed to get AI provider');
-  }
-};
-
-/**
- * Set the AI provider (e.g., { type: 'claude' }).
- */
-export const setAiProvider = async (provider: unknown): Promise<unknown> => {
-  try {
-    return await invoke('set_ai_provider', { provider });
-  } catch (error) {
-    throw new Error(`Failed to set AI provider: ${error}`);
-  }
-};
-
-/**
- * Clear the AI provider configuration.
- */
-export const clearAiProvider = async (): Promise<void> => {
-  try {
-    await invoke('clear_ai_provider');
-  } catch (error) {
-    throw new Error(`Failed to clear AI provider: ${error}`);
-  }
-};
-
-/**
- * Get all available AI providers on the system.
- */
-export const getAvailableAiProviders = async (): Promise<unknown> => {
-  try {
-    return await invoke('get_available_ai_providers');
-  } catch (error) {
-    return handleApiError(error, 'Failed to get available AI providers');
-  }
-};
-
-/**
- * Validate a specific AI provider.
- * @throws If the provider is not available
- */
-export const validateAiProvider = async (provider: unknown): Promise<unknown> => {
-  try {
-    return await invoke('validate_ai_provider', { provider });
-  } catch (error) {
-    throw new Error(`Provider not available: ${error}`);
-  }
-};
-
-/**
- * Get available models for a provider type ('opencode', 'claude', 'gemini', 'codex').
- */
-export const getProviderModels = async (providerType: string): Promise<unknown> => {
-  try {
-    return await invoke('get_provider_models', { providerType });
-  } catch (error) {
-    return handleApiError(error, 'Failed to get provider models');
-  }
-};
-
-// ============================================================================
 // Shared agent library (app-level definitions)
 // ============================================================================
 
@@ -357,14 +286,6 @@ export const workspaceAgentDefaultExecution = async (): Promise<unknown> => {
 // Skill Catalog
 // ============================================================================
 
-export const getSkillSources = async (): Promise<SkillSourceResponse[]> => {
-  try {
-    return await invoke('skill_sources_list');
-  } catch (error) {
-    return handleApiError(error, 'Failed to get skill sources');
-  }
-};
-
 export const getSkills = async (): Promise<SkillDefinition[]> => {
   try {
     return await invoke('skills_list');
@@ -425,14 +346,6 @@ export const getMcpServers = async (): Promise<McpServerResponse[]> => {
     return await invoke('get_mcp_servers');
   } catch (error) {
     return handleApiError(error, 'Failed to get MCP servers');
-  }
-};
-
-export const getMcpServer = async (id: string): Promise<McpServerResponse> => {
-  try {
-    return await invoke('get_mcp_server', { id });
-  } catch (error) {
-    return handleApiError(error, 'Failed to get MCP server');
   }
 };
 

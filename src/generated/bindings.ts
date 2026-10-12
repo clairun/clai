@@ -71,7 +71,7 @@ export type AssistantMessagePage = { messages: Array<AssistantMessage>, toolCall
  */
 totalCount: number, };
 
-export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, error: string | null, notices?: Array<RunNotice>, };
+export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, error: string | null, };
 
 export type AssistantSession = { id: string, kind: SessionKind, title: string | null, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
 
@@ -334,7 +334,7 @@ export type RunNoticeKind = "command_denied" | "path_denied" | "sandbox_unavaila
 
 export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" | "completed_with_warnings" | "failed" | "cancelled";
 
-export type RunTrigger = "user_message" | "retry" | "scheduled" | "manual_automation" | "inter_agent_call" | "workspace_task";
+export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task";
 
 /**
  * Discriminated union describing *how* the manager's next run is

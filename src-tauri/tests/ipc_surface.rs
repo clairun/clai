@@ -90,9 +90,9 @@ fn registered_commands() -> BTreeSet<String> {
         .collect();
 
     // A floor, not a count: it catches a parser that silently stopped working
-    // without failing on every new command. 109 commands as of this test.
+    // without failing on every new command. 100 commands as of this test.
     assert!(
-        commands.len() > 100,
+        commands.len() > 80,
         "parsed only {} commands from generate_handler!; the macro's shape probably changed",
         commands.len()
     );

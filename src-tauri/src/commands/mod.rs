@@ -10,7 +10,6 @@ pub mod global_agents;
 pub mod mcp_servers;
 pub mod path_grants;
 pub mod permissions;
-pub mod provider;
 pub mod provider_connections;
 pub mod skills;
 pub mod system_apps;

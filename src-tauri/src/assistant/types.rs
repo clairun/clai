@@ -98,10 +98,8 @@ pub struct RunNotice {
 #[ts(export, export_to = "bindings.ts")]
 pub enum RunTrigger {
     UserMessage,
-    Retry,
     Scheduled,
     ManualAutomation,
-    InterAgentCall,
     WorkspaceTask,
 }
 
@@ -269,8 +267,6 @@ pub struct AssistantRun {
     pub completed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notices: Vec<RunNotice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]

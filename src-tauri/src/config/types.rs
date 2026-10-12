@@ -146,43 +146,6 @@ impl AiProvider {
             AiProvider::Custom { command, .. } => command,
         }
     }
-
-    /// Returns the selected model (if any).
-    pub fn model(&self) -> Option<&str> {
-        match self {
-            AiProvider::OpenCode { model } => model.as_deref(),
-            AiProvider::Claude { model } => model.as_deref(),
-            AiProvider::Gemini { model } => model.as_deref(),
-            AiProvider::Codex { model } => model.as_deref(),
-            AiProvider::Custom { model, .. } => model.as_deref(),
-        }
-    }
-
-    /// Returns a new provider with the specified model.
-    pub fn with_model(self, model: Option<String>) -> Self {
-        match self {
-            AiProvider::OpenCode { .. } => AiProvider::OpenCode { model },
-            AiProvider::Claude { .. } => AiProvider::Claude { model },
-            AiProvider::Gemini { .. } => AiProvider::Gemini { model },
-            AiProvider::Codex { .. } => AiProvider::Codex { model },
-            AiProvider::Custom { command, args, .. } => AiProvider::Custom {
-                command,
-                args,
-                model,
-            },
-        }
-    }
-
-    /// Returns the provider type as a string.
-    pub fn provider_type(&self) -> &str {
-        match self {
-            AiProvider::OpenCode { .. } => "opencode",
-            AiProvider::Claude { .. } => "claude",
-            AiProvider::Gemini { .. } => "gemini",
-            AiProvider::Codex { .. } => "codex",
-            AiProvider::Custom { .. } => "custom",
-        }
-    }
 }
 
 // =============================================================================
@@ -705,10 +668,6 @@ pub struct AppConfig {
     #[serde(default = "default_workspace_dirs")]
     pub workspace_dirs: Vec<PathBuf>,
 
-    /// Global AI provider for all automations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ai_provider: Option<AiProvider>,
-
     /// User-configured MCP servers.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -741,7 +700,6 @@ impl Default for AppConfig {
             agent_definitions: Vec::new(),
             version: default_app_config_version(),
             workspace_dirs: default_workspace_dirs(),
-            ai_provider: None,
             mcp_servers: Vec::new(),
             skill_sources: Vec::new(),
             provider_connections: Vec::new(),
@@ -864,18 +822,26 @@ mod tests {
     #[test]
     fn test_clai_config_serialization() {
         let config = ClaiConfig {
-            ai_provider: Some(AiProvider::Claude { model: None }),
+            scheduler_paused: true,
             ..ClaiConfig::default()
         };
 
         let json = serde_json::to_string_pretty(&config).unwrap();
-        assert!(json.contains("claude"));
-
         let parsed: ClaiConfig = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            parsed.ai_provider,
-            Some(AiProvider::Claude { .. })
-        ));
+        assert!(parsed.scheduler_paused);
+    }
+
+    #[test]
+    fn config_with_the_removed_ai_provider_key_still_loads() {
+        let legacy = r#"{
+            "aiProvider": {"type": "claude"},
+            "schedulerPaused": true
+        }"#;
+        let parsed: ClaiConfig = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.scheduler_paused);
+        assert!(!serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("aiProvider"));
     }
 
     #[test]

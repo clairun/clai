@@ -388,7 +388,6 @@ pub async fn run_session_turn(
         session_id: session.id.clone(),
         run_id: run_id.clone(),
         cancel_token: input.cancel_token.clone(),
-        inter_agent_call_depth: input.inter_agent_call_depth,
         notices: notices.clone(),
         session_grants,
         session_allowed_command_prefixes,

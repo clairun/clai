@@ -14,7 +14,11 @@ vi.mock('./AboutSettings', () => ({ default: () => <div /> }));
 vi.mock('./AgentLibrarySettings', () => ({
   // Mirrors the real library: the initial id is read once per mount, so a
   // second deep link only lands if this shell remounts it.
-  default: ({ initialAgentDefinitionId }: { initialAgentDefinitionId?: string | null }) => {
+  default: function LibraryStub({
+    initialAgentDefinitionId,
+  }: {
+    initialAgentDefinitionId?: string | null;
+  }) {
     const [consumed] = useState(initialAgentDefinitionId ?? 'gallery');
     return <div data-testid="library">{consumed}</div>;
   },

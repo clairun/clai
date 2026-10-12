@@ -456,7 +456,6 @@ pub fn run() {
             commands::global_agents::workspace_save_team_policy,
             // MCP server commands
             commands::mcp_servers::get_mcp_servers,
-            commands::mcp_servers::get_mcp_server,
             commands::mcp_servers::get_mcp_server_catalog,
             commands::mcp_servers::create_mcp_server,
             commands::mcp_servers::update_mcp_server,
@@ -466,12 +465,6 @@ pub fn run() {
             commands::mcp_servers::cancel_mcp_oauth_login,
             commands::mcp_servers::disconnect_mcp_oauth,
             // Provider commands
-            commands::provider::get_ai_provider,
-            commands::provider::set_ai_provider,
-            commands::provider::clear_ai_provider,
-            commands::provider::get_available_ai_providers,
-            commands::provider::validate_ai_provider,
-            commands::provider::get_provider_models,
             // Provider connection commands for app-owned assistant runtime
             commands::provider_connections::provider_connection_list_available,
             commands::provider_connections::provider_catalog_list,
@@ -479,14 +472,11 @@ pub fn run() {
             commands::provider_connections::provider_connection_create,
             commands::provider_connections::provider_connection_update,
             commands::provider_connections::provider_connection_delete,
-            commands::provider_connections::provider_connection_get,
             commands::provider_connections::provider_connection_list,
             commands::provider_connections::provider_connection_secret_hint,
-            commands::provider_connections::provider_connection_list_models,
             commands::provider_connections::provider_descriptor_models,
             commands::provider_connections::provider_connection_test,
             // Skill catalog commands
-            commands::skills::skill_sources_list,
             commands::skills::skills_list,
             commands::skills::skills_catalog,
             commands::skills::skill_source_add,

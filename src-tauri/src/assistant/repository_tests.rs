@@ -591,7 +591,6 @@ async fn test_create_and_get_run() {
     assert_eq!(run.trigger, RunTrigger::UserMessage);
     assert_eq!(run.connection_id, "conn-1");
     assert!(run.completed_at.is_none());
-    assert!(run.notices.is_empty());
 
     // Assert on the *stored* row, not the struct `create_run` returned: the
     // INSERT binds `protocol_id` and `model_id` as adjacent strings, so only a
@@ -643,7 +642,7 @@ async fn test_list_runs_ordered_by_started_at_desc() {
         CreateRunParams {
             session_id: session.id.clone(),
             status: RunStatus::Failed,
-            trigger: RunTrigger::Retry,
+            trigger: RunTrigger::UserMessage,
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
             model_id: "gpt-4".to_string(),
@@ -737,7 +736,7 @@ async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
 }
 
 #[tokio::test]
-async fn test_complete_run_with_notices() {
+async fn test_complete_run_with_warnings() {
     let (_tmp, pool) = workspace_pool().await;
 
     let session = create_session(
@@ -766,24 +765,11 @@ async fn test_complete_run_with_notices() {
     .await
     .unwrap();
 
-    let notices = vec![RunNotice {
-        kind: RunNoticeKind::CommandDenied,
-        message: "sudo denied".to_string(),
-        timestamp: 1234567890,
-    }];
-
-    let completed = complete_run(
-        &pool,
-        &run.id,
-        RunStatus::CompletedWithWarnings,
-        None,
-        &notices,
-    )
-    .await
-    .unwrap();
+    let completed = complete_run(&pool, &run.id, RunStatus::CompletedWithWarnings, None)
+        .await
+        .unwrap();
 
     assert_eq!(completed.status, RunStatus::CompletedWithWarnings);
-    assert_eq!(completed.notices.len(), 1);
     assert!(completed.completed_at.is_some());
 }
 
@@ -839,7 +825,7 @@ async fn test_full_session_lifecycle() {
     .unwrap();
 
     // 4. Complete the run
-    complete_run(&pool, &run.id, RunStatus::Completed, None, &[])
+    complete_run(&pool, &run.id, RunStatus::Completed, None)
         .await
         .unwrap();
 

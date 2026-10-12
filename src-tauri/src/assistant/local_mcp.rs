@@ -73,7 +73,6 @@ pub struct ToolBinding {
     pub session_id: String,
     pub run_id: String,
     pub cancel_token: CancellationToken,
-    pub inter_agent_call_depth: Option<u32>,
     pub notices: Arc<Mutex<Vec<RunNotice>>>,
     /// Run-scoped grants accepted via `fs_request_grant`. Shared with the
     /// host engine so a session grant accepted during a CLI-provider run is
@@ -407,7 +406,6 @@ async fn execute_bound_tool(
         workspace_root: run_context.workspace_root.clone(),
         automation_id: run_context.automation_id.clone(),
         workspace_agents: run_context.workspace_agents.clone(),
-        inter_agent_call_depth: binding.inter_agent_call_depth,
         execution: run_context.execution.clone(),
         notices: binding.notices.clone(),
         session_grants: binding.session_grants.clone(),
@@ -541,7 +539,6 @@ mod tests {
             session_id: "session-1".to_string(),
             run_id: "run-1".to_string(),
             cancel_token: CancellationToken::new(),
-            inter_agent_call_depth: None,
             notices: Arc::new(Mutex::new(Vec::new())),
             session_grants: Arc::new(Mutex::new(Vec::new())),
             session_allowed_command_prefixes: Arc::new(Mutex::new(Vec::new())),

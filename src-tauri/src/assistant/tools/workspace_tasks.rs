@@ -363,7 +363,6 @@ fn spawn_task_run(
             trigger: RunTrigger::WorkspaceTask,
             connection_id,
             cancel_token,
-            inter_agent_call_depth: None,
             trigger_message_id: None,
         };
 

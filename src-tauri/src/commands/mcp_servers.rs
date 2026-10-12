@@ -450,21 +450,6 @@ pub fn get_mcp_servers(state: State<'_, AppState>) -> Result<Vec<McpServerRespon
 }
 
 #[tauri::command]
-pub fn get_mcp_server(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<Option<McpServerResponse>, String> {
-    let config_manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-
-    Ok(config_manager
-        .get_mcp_server(&id)
-        .map(McpServerResponse::from_config))
-}
-
-#[tauri::command]
 pub fn get_mcp_server_catalog() -> Vec<oauth::McpCatalogEntry> {
     oauth::catalog_entries()
 }

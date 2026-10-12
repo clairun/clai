@@ -445,18 +445,6 @@ pub async fn provider_connection_delete(
 }
 
 #[tauri::command]
-pub async fn provider_connection_get(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<Option<ProviderConnection>, String> {
-    Ok(state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .get_provider_connection(&id))
-}
-
-#[tauri::command]
 pub async fn provider_connection_list(
     state: State<'_, AppState>,
 ) -> Result<Vec<ProviderConnection>, String> {
@@ -500,29 +488,6 @@ pub async fn provider_connection_secret_hint(
 pub async fn provider_descriptor_models(provider_id: String) -> Result<Vec<ModelInfo>, String> {
     cli::models_for_provider(&provider_id)
         .ok_or_else(|| format!("No static model list for provider '{}'", provider_id))
-}
-
-#[tauri::command]
-pub async fn provider_connection_list_models(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<Vec<ModelInfo>, String> {
-    let connection = state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .get_provider_connection(&id)
-        .ok_or_else(|| format!("Provider connection not found: {}", id))?;
-
-    if let Some(models) = cli::models_for_provider(&connection.protocol_id) {
-        return Ok(models);
-    }
-
-    let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| e.to_string())?;
-    adapter
-        .list_models(&connection)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

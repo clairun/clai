@@ -225,6 +225,91 @@ mod tests {
         );
     }
 
+    /// Legacy `retry`/`inter_agent_call` rows, quoted or not, must still
+    /// deserialize once `20261013000000_drop_dead_run_triggers` has run.
+    #[tokio::test]
+    async fn dead_run_triggers_are_mapped_to_live_ones() {
+        use crate::assistant::repository::{self, CreateRunParams, CreateSessionParams};
+        use crate::assistant::types::{RunStatus, RunTrigger, SessionContext, SessionKind};
+
+        const MIGRATION: i64 = 20261013000000;
+        // One connection: every connection to `:memory:` is its own database.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await
+            .unwrap();
+        let mut before = sqlx::migrate!("./migrations/workspace");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < MIGRATION)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        before.run(&pool).await.unwrap();
+
+        let session = repository::create_session(
+            &pool,
+            CreateSessionParams {
+                kind: SessionKind::Interactive,
+                title: None,
+                context: SessionContext::default(),
+            },
+        )
+        .await
+        .unwrap();
+        for legacy in [
+            "\"retry\"",
+            "retry",
+            "\"inter_agent_call\"",
+            "inter_agent_call",
+        ] {
+            let run = repository::create_run(
+                &pool,
+                CreateRunParams {
+                    session_id: session.id.clone(),
+                    status: RunStatus::Completed,
+                    trigger: RunTrigger::UserMessage,
+                    connection_id: "c".into(),
+                    protocol_id: "openai".into(),
+                    model_id: "m".into(),
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+            sqlx::query("UPDATE assistant_runs SET \"trigger\" = ? WHERE id = ?")
+                .bind(legacy)
+                .bind(&run.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        sqlx::migrate!("./migrations/workspace")
+            .run(&pool)
+            .await
+            .unwrap();
+
+        let mut triggers: Vec<RunTrigger> = repository::list_runs(&pool, &session.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|run| run.trigger)
+            .collect();
+        triggers.sort_by_key(|trigger| format!("{trigger:?}"));
+        assert_eq!(
+            triggers,
+            [
+                RunTrigger::UserMessage,
+                RunTrigger::UserMessage,
+                RunTrigger::WorkspaceTask,
+                RunTrigger::WorkspaceTask,
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn sweep_marks_running_rows_as_failed() {
         let (_tmp, pool) = workspace_pool().await;

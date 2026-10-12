@@ -577,7 +577,6 @@ async fn run_scheduled_agent(
         trigger: RunTrigger::Scheduled,
         connection_id: connection.id.clone(),
         cancel_token,
-        inter_agent_call_depth: None,
         trigger_message_id: None,
     };
     let result = engine::run_session_turn(&deps, input).await;

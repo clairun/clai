@@ -606,7 +606,6 @@ mod tests {
             workspace_root,
             automation_id: None,
             workspace_agents: vec![],
-            inter_agent_call_depth: None,
             execution: Default::default(),
             notices: Arc::new(Mutex::new(vec![])),
             session_grants: Arc::new(Mutex::new(vec![])),

@@ -143,10 +143,6 @@ export async function getProviderSecretHint(id: string): Promise<string | null> 
   return invoke('provider_connection_secret_hint', { id });
 }
 
-export async function getProviderConnection(id: string): Promise<ProviderConnection | null> {
-  return invoke('provider_connection_get', { id });
-}
-
 export async function createProviderConnection(
   request: CreateProviderConnectionRequest,
 ): Promise<ProviderConnection> {
@@ -161,10 +157,6 @@ export async function updateProviderConnection(
 
 export async function deleteProviderConnection(id: string): Promise<void> {
   return invoke('provider_connection_delete', { id });
-}
-
-export async function listProviderModels(id: string): Promise<ModelInfo[]> {
-  return invoke('provider_connection_list_models', { id });
 }
 
 export async function listProviderDescriptorModels(providerId: string): Promise<ModelInfo[]> {

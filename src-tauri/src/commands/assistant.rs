@@ -728,7 +728,6 @@ pub(crate) fn spawn_run_task(
             trigger,
             connection_id,
             cancel_token,
-            inter_agent_call_depth: None,
             trigger_message_id,
         };
         if let Err(e) = engine::run_session_turn(&deps, input).await {

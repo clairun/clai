@@ -1568,7 +1568,6 @@ mod tests {
             workspace_root: workspace_root.to_path_buf(),
             automation_id: Some("agent".to_string()),
             workspace_agents: Vec::new(),
-            inter_agent_call_depth: None,
             execution,
             notices: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

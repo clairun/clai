@@ -8,15 +8,9 @@ import prettier from 'eslint-config-prettier';
 /**
  * ESLint flat config for CLAI frontend.
  *
- * React 19 strict hooks rules (all 7 sub-rules of
- * eslint-plugin-react-hooks v7) are enforced as ERRORS as of
- * 2026-06-12. They were introduced as warnings between 2026-06-05
- * and 2026-06-07 (clai#5), the violations were cleaned up across
- * focused PRs (see clai#5 for the per-rule inventory and the sub-PR
- * series), and the rules were promoted to `error` once the codebase
- * reached zero violations. The handful of deliberate exceptions are
- * suppressed inline with `eslint-disable-next-line` comments that
- * carry their own justification.
+ * `rules-of-hooks` and the React 19 compiler rules of
+ * eslint-plugin-react-hooks v7 are errors. Deliberate exceptions are
+ * suppressed inline with `eslint-disable-next-line` and a justification.
  *
  * Keep the two rule blocks (TS and JS) in sync when changing rules.
  */
@@ -46,6 +40,7 @@ export default [
       'react/no-unescaped-entities': 'off',
       'no-unused-vars': 'off',
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'react-hooks/rules-of-hooks': 'error',
       'react-hooks/set-state-in-effect': 'error',
       'react-hooks/exhaustive-deps': 'error',
       'react-hooks/preserve-manual-memoization': 'error',
@@ -84,6 +79,7 @@ export default [
       'react/display-name': 'off',
       'react/no-unescaped-entities': 'off',
       'no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+      'react-hooks/rules-of-hooks': 'error',
       'react-hooks/set-state-in-effect': 'error',
       'react-hooks/exhaustive-deps': 'error',
       'react-hooks/preserve-manual-memoization': 'error',

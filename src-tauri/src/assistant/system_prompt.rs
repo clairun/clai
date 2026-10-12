@@ -241,17 +241,12 @@ pub(crate) fn build_system_prompt(
                  decide what needs to be refreshed, and communicate the result clearly.\n",
             );
         }
-        RunTrigger::InterAgentCall => {
-            prompt.push_str(
-                "This is a synchronous inter-agent call. The caller is waiting for your response.\n",
-            );
-        }
         RunTrigger::WorkspaceTask => {
             prompt.push_str(
                 "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked by missing capability, context, permission, or runtime failure, start with `BLOCKED:` and state the specific manager or user action needed. If you specifically need user feedback or approval, start with `NEEDS_USER_INPUT:` and state the decision needed.\n",
             );
         }
-        RunTrigger::UserMessage | RunTrigger::Retry => {
+        RunTrigger::UserMessage => {
             prompt.push_str(
                 "This is a user-driven run. Prioritize the user's latest message and use prior context only as support.\n",
             );
@@ -318,16 +313,6 @@ pub(crate) fn build_system_prompt(
             prompt.push_str(description);
             prompt.push('\n');
         }
-    }
-
-    if matches!(trigger, RunTrigger::InterAgentCall) {
-        prompt.push_str(
-            "\n## Inter-Agent Call\n\
-             You have been called by another agent. The latest user message includes the request parameters, the required JSON output schema, and a trace ID.\n\
-             Return exactly one JSON object that matches the output schema.\n\
-             Do not wrap the response in markdown fences.\n\
-             Do not ask follow-up questions because you will not receive answers.\n",
-        );
     }
 
     prompt.push_str("\n## Local Execution Capabilities\n");
@@ -612,10 +597,7 @@ fn push_agent_memory(prompt: &mut String, trigger: &RunTrigger) {
                  10. Prune stale entries: if a knowledge entry or checkpoint is no longer relevant, remove it.\n",
             );
         }
-        RunTrigger::InterAgentCall
-        | RunTrigger::WorkspaceTask
-        | RunTrigger::UserMessage
-        | RunTrigger::Retry => {
+        RunTrigger::WorkspaceTask | RunTrigger::UserMessage => {
             prompt.push_str(
                 "### Memory in user-driven runs\n\
                  - Do NOT read memory unless the user's request specifically needs historical context.\n\

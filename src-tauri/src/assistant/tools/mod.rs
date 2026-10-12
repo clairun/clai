@@ -79,7 +79,6 @@ pub struct ToolExecutionContext {
     pub workspace_root: PathBuf,
     pub automation_id: Option<String>,
     pub workspace_agents: Vec<WorkspaceAgentSummary>,
-    pub inter_agent_call_depth: Option<u32>,
     pub execution: ExecutionCapabilityConfig,
     pub notices: Arc<Mutex<Vec<RunNotice>>>,
     /// Run-scoped filesystem grants accepted via `fs_request_grant` modal.

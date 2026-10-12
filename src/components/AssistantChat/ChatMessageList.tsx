@@ -14,7 +14,6 @@ import VirtualizedList from '../common/VirtualizedList';
 import type {
   AssistantMessage,
   ContentPart,
-  RunNotice,
   ToolInvocation,
   WorkspaceAgentResponse,
 } from '../../generated/bindings';
@@ -1484,39 +1483,4 @@ const ToolRow = memo(({ workspaceId, toolName, params, status, error, call }: To
   );
 });
 
-/**
- * NoticesBanner — expandable banner showing policy warnings for a run
- */
-const NoticesBanner = memo(({ notices }: { notices: RunNotice[] | undefined }) => {
-  const [expanded, setExpanded] = useState(false);
-
-  if (!notices || notices.length === 0) return null;
-
-  return (
-    <div
-      className={styles.noticesBanner}
-      onClick={() => setExpanded((prev) => !prev)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => e.key === 'Enter' && setExpanded((prev) => !prev)}
-    >
-      <span>⚠</span>
-      <span>
-        {notices.length} policy warning{notices.length > 1 ? 's' : ''}
-        {!expanded && ' — click to expand'}
-      </span>
-      {expanded && (
-        <div className={styles.noticesList}>
-          {notices.map((notice, i) => (
-            <div key={i} className={styles.noticeItem}>
-              {notice.message}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-});
-
-export { NoticesBanner };
 export default ChatMessageList;

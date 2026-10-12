@@ -29,7 +29,6 @@ pub struct RunTurnInput {
     pub trigger: RunTrigger,
     pub connection_id: String,
     pub cancel_token: CancellationToken,
-    pub inter_agent_call_depth: Option<u32>,
     /// Id of the user message that triggered this run (Some only for the
     /// direct send path). If the run fails before the provider produces
     /// anything, this message is discarded — see
@@ -161,7 +160,6 @@ mod tests {
             trigger: RunTrigger::UserMessage,
             connection_id: "connection".into(),
             cancel_token: CancellationToken::new(),
-            inter_agent_call_depth: None,
             trigger_message_id: Some(trigger_message_id.to_string()),
         }
     }

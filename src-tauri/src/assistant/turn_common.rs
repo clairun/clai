@@ -33,10 +33,7 @@ pub(crate) fn build_trigger_message(
              Run the automation {} now and report the current findings.",
             now, automation_name
         )),
-        RunTrigger::InterAgentCall
-        | RunTrigger::WorkspaceTask
-        | RunTrigger::UserMessage
-        | RunTrigger::Retry => None,
+        RunTrigger::WorkspaceTask | RunTrigger::UserMessage => None,
     }?;
 
     Some(ProviderInputMessage {
