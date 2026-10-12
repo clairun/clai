@@ -35,6 +35,9 @@ export default function WorkspaceTaskTranscriptPanel({
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] : null
   );
+  const streamingText = useAssistantStore(
+    (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
+  );
   const [bootstrapError, setBootstrapError] = useState('');
   const [bootstrapping, setBootstrapping] = useState(false);
 
@@ -116,9 +119,6 @@ export default function WorkspaceTaskTranscriptPanel({
 
   const messages = sessionState?.messages || EMPTY_MESSAGES;
   const toolCalls = sessionState?.toolCalls || EMPTY_TOOL_CALLS;
-  const streamingText = useAssistantStore(
-    (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
-  );
   const isStreaming = !!sessionState?.isStreaming;
   const hasOlderMessages = !!sessionState?.hasOlderMessages;
   const isLoadingOlderMessages = !!sessionState?.isLoadingOlderMessages;

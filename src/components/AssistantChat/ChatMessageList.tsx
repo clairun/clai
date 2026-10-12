@@ -870,6 +870,24 @@ const MessageBlock = memo(
     // Local draft state for editing a queued message in-place. `null` = not
     // editing; a string = the working draft seeded from the message text.
     const [editDraft, setEditDraft] = useState<string | null>(null);
+    // Walk message.content in order, grouping consecutive same-type
+    // parts into segments. This preserves the interleaving (text → tool
+    // → text → tool …) the assistant actually produced, rather than
+    // collapsing all text to the top and all tools to the bottom.
+    // streamingText is appended as a trailing segment because by
+    // definition it represents the *current* in-flight text block,
+    // which sits after everything already persisted. Memoized so
+    // ToolCallGroup's prop reference is stable across re-renders when
+    // nothing actually changed — its memo only helps if its toolUses
+    // array reference doesn't churn. Only assistant turns render it.
+    const segments = useMemo(() => {
+      if (role !== 'assistant') return [];
+      const base = groupAssistantContent(message.content, toolCallsById);
+      if (streamingText) {
+        base.push({ kind: 'text', text: streamingText, streaming: true });
+      }
+      return base;
+    }, [role, message.content, toolCallsById, streamingText]);
 
     if (role === 'user') {
       const textContent = getTextContent(message);
@@ -986,24 +1004,6 @@ const MessageBlock = memo(
     }
 
     if (role === 'assistant') {
-      // Walk message.content in order, grouping consecutive same-type
-      // parts into segments. This preserves the interleaving (text → tool
-      // → text → tool …) the assistant actually produced, rather than
-      // collapsing all text to the top and all tools to the bottom.
-      // streamingText is appended as a trailing segment because by
-      // definition it represents the *current* in-flight text block,
-      // which sits after everything already persisted. Memoized so
-      // ToolCallGroup's prop reference is stable across re-renders when
-      // nothing actually changed — its memo only helps if its toolUses
-      // array reference doesn't churn.
-      const segments = useMemo(() => {
-        const base = groupAssistantContent(message.content, toolCallsById);
-        if (streamingText) {
-          base.push({ kind: 'text', text: streamingText, streaming: true });
-        }
-        return base;
-      }, [message.content, toolCallsById, streamingText]);
-
       return (
         <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
           {!isContinuation && (
