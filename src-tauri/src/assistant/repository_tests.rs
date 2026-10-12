@@ -641,6 +641,33 @@ async fn test_complete_run_with_warnings() {
     assert!(completed.completed_at.is_some());
 }
 
+#[tokio::test]
+async fn update_run_status_to_completed_with_warnings_sets_completed_at() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
+    let run = create_run(
+        &pool,
+        CreateRunParams {
+            session_id: session.id.clone(),
+            status: RunStatus::Running,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "c1".to_string(),
+            protocol_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let updated = update_run_status(&pool, &run.id, RunStatus::CompletedWithWarnings, None)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.status, RunStatus::CompletedWithWarnings);
+    assert!(updated.completed_at.is_some());
+}
+
 // ---------------------------------------------------------------------------
 // Integration: session → messages → runs end-to-end
 // ---------------------------------------------------------------------------

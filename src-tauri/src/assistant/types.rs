@@ -59,6 +59,19 @@ pub enum RunStatus {
     Cancelled,
 }
 
+impl RunStatus {
+    pub fn is_active(&self) -> bool {
+        match self {
+            Self::Queued | Self::Running | Self::WaitingForTool => true,
+            Self::Completed | Self::CompletedWithWarnings | Self::Failed | Self::Cancelled => false,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        !self.is_active()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "bindings.ts")]
@@ -488,6 +501,25 @@ pub enum ProviderEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finished_run_statuses_are_terminal() {
+        for status in [
+            RunStatus::Completed,
+            RunStatus::CompletedWithWarnings,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ] {
+            assert!(status.is_terminal(), "{status:?}");
+        }
+        for status in [
+            RunStatus::Queued,
+            RunStatus::Running,
+            RunStatus::WaitingForTool,
+        ] {
+            assert!(!status.is_terminal(), "{status:?}");
+        }
+    }
 
     #[test]
     fn image_content_part_round_trips_with_type_tag() {

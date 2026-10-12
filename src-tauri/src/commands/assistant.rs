@@ -677,10 +677,7 @@ pub async fn assistant_cancel_run(
 ) -> Result<AssistantRun, String> {
     let (target_pool, run) = run_in_workspace(&state, &workspace_id, &run_id).await?;
 
-    if matches!(
-        run.status,
-        RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
-    ) {
+    if run.status.is_terminal() {
         return Ok(run);
     }
 

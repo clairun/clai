@@ -979,11 +979,7 @@ pub async fn update_run_status(
     status: RunStatus,
     error: Option<&str>,
 ) -> Result<AssistantRun, String> {
-    let is_terminal = matches!(
-        status,
-        RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
-    );
-    let completed_at = if is_terminal { Some(now_ms()) } else { None };
+    let completed_at = status.is_terminal().then(now_ms);
 
     sqlx::query(
         r#"
@@ -1702,16 +1698,9 @@ mod tests {
 
     #[test]
     fn active_run_statuses_are_the_non_terminal_ones() {
-        let is_active = |status: &RunStatus| match status {
-            RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool => true,
-            RunStatus::Completed
-            | RunStatus::CompletedWithWarnings
-            | RunStatus::Failed
-            | RunStatus::Cancelled => false,
-        };
         let active: Vec<String> = ALL_RUN_STATUSES
             .iter()
-            .filter(|status| is_active(status))
+            .filter(|status| status.is_active())
             .map(|status| format!("'{}'", enum_text(status).unwrap()))
             .collect();
         assert_eq!(ACTIVE_RUN_STATUSES, format!("({})", active.join(", ")));
