@@ -45,6 +45,7 @@ vi.mock('../api/client', async (importOriginal) => ({
 }));
 
 vi.mock('../assistant/client', () => ({
+  getSession: vi.fn(async () => null),
   loadSessionMessagesPage: vi.fn(),
   listRuns: vi.fn(),
   cancelRun: vi.fn(async () => {}),
@@ -1050,5 +1051,38 @@ describe('Workspace file preview', () => {
 
     expect(await screen.findByRole('region', { name: 'Memory: notes.md' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
+  });
+});
+
+describe('Workspace task transcript', () => {
+  it('follows the polled task status after the panel opened', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const running: WorkspaceTaskResponse = {
+      ...FAILED_TASK,
+      status: 'running',
+      error: null,
+      completedAt: null,
+      sessionId: 'sess-task-a',
+    };
+    let task = running;
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [task] })
+    );
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /1 tasks/ }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open the log of "${running.title}"` })
+    );
+    const panel = await screen.findByRole('region', { name: `Transcript for ${running.title}` });
+    expect(panel).toHaveTextContent('Running');
+
+    task = { ...running, status: 'completed', completedAt: 2n, updatedAt: 2n };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    await waitFor(() => expect(panel).toHaveTextContent('Completed'));
+    expect(panel).not.toHaveTextContent('Running');
   });
 });

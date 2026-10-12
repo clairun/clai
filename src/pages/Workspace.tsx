@@ -2069,6 +2069,13 @@ const Workspace = () => {
   }, [loadDetails]);
 
   const memories = useMemo(() => details?.memories || [], [details?.memories]);
+  // `viewingTask` is a snapshot from when the panel opened; follow the polled
+  // copy so status and session stay live. A task fetched by id may not be listed yet.
+  const liveViewingTask = useMemo(
+    () =>
+      viewingTask ? (details?.tasks?.find((t) => t.id === viewingTask.id) ?? viewingTask) : null,
+    [viewingTask, details?.tasks]
+  );
   const artifactCount = Number(details?.artifactCount ?? 0);
   const artifactCountCapped = details?.artifactCountCapped ?? false;
 
@@ -2470,9 +2477,9 @@ const Workspace = () => {
           />
         )}
 
-        {activePanel === 'tasks' && viewingTask && (
+        {activePanel === 'tasks' && liveViewingTask && (
           <WorkspaceTaskTranscriptPanel
-            task={viewingTask}
+            task={liveViewingTask}
             roster={chatRoster}
             onClose={closeTaskTranscript}
           />
