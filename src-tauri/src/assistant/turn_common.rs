@@ -92,6 +92,7 @@ pub(crate) async fn discard_unanswered_run_input(
         |message_id| {
             let _ = emit_event(
                 &deps.app,
+                &deps.workspace_id,
                 session,
                 Some(run_id),
                 AssistantUiEvent::MessageDeleted { message_id },

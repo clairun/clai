@@ -630,7 +630,7 @@ async fn await_user_permission(
     use tauri::{Emitter, Manager};
 
     let app_state = deps.app.state::<crate::AppState>();
-    let workspace_id = context.workspace_id.clone();
+    let workspace_id = Some(deps.workspace_id.clone());
     let agent_id = context.automation_id.clone();
 
     // The constructor resolves where an "always" decision would be saved — in
@@ -777,7 +777,7 @@ async fn execute_fs_request_grant(
 
     let request = crate::commands::path_grants::PathGrantRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
-        workspace_id: context.workspace_id.clone(),
+        workspace_id: Some(deps.workspace_id.clone()),
         agent_id: context.automation_id.clone(),
         agent_name: None,
         requested_path: canonical_str.clone(),
@@ -954,7 +954,7 @@ async fn await_path_grant_decision(
     use tauri::{Emitter, Manager};
 
     let app_state = deps.app.state::<crate::AppState>();
-    let workspace_id = context.workspace_id.clone();
+    let workspace_id = Some(deps.workspace_id.clone());
     let request_id = request.request_id.clone();
 
     // Supersede a stale orphaned request for the same run + path + access
@@ -1567,9 +1567,7 @@ mod tests {
             run_id: "run".to_string(),
             tool_call_id: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
-            workspace_id: Some("ws".to_string()),
             mcp_server_ids: Vec::new(),
-            agent_workspace_id: None,
             workspace_root: Some(workspace_root.to_path_buf()),
             automation_id: Some("agent".to_string()),
             workspace_agents: Vec::new(),

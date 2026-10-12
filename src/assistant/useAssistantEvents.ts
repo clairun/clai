@@ -58,16 +58,12 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
     case 'run_cancelled': {
       store.setRunStatus(sessionId, event.payload.run);
       // Mirror run lifecycle into the global fleet-activity store so Fleet
-      // cards/counter reflect in-flight runs and survive navigation. Keyed
-      // by the envelope's workspace id (set for workspace/agent sessions).
-      const workspaceId = envelope.workspaceId;
-      if (workspaceId) {
-        const fleet = useFleetActivityStore.getState();
-        if (event.type === 'run_queued' || event.type === 'run_started') {
-          fleet.markRunStarted(workspaceId, event.payload.run.id);
-        } else {
-          fleet.markRunEnded(workspaceId, event.payload.run.id);
-        }
+      // cards/counter reflect in-flight runs and survive navigation.
+      const fleet = useFleetActivityStore.getState();
+      if (event.type === 'run_queued' || event.type === 'run_started') {
+        fleet.markRunStarted(envelope.workspaceId, event.payload.run.id);
+      } else {
+        fleet.markRunEnded(envelope.workspaceId, event.payload.run.id);
       }
       break;
     }

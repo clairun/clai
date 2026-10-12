@@ -292,7 +292,14 @@ async fn run_next_agent(
     let session =
         ensure_workspace_manager_session(app_handle, &workspace_pool, &agent_config).await?;
 
-    let result = run_scheduled_agent(app_handle, &workspace_pool, &session, &connection).await;
+    let result = run_scheduled_agent(
+        app_handle,
+        &agent_config.workspace_id,
+        &workspace_pool,
+        &session,
+        &connection,
+    )
+    .await;
 
     // Mark agent complete
     let success = match &result {
@@ -482,19 +489,11 @@ async fn ensure_workspace_manager_session(
             })
     };
     let desired_context = SessionContext {
-        workspace_id: Some(agent_config.workspace_id.clone()),
         mcp_server_ids: agent_config.selected_mcp_server_ids.clone(),
         execution: agent_config.execution.clone(),
         cli_session_id: None,
         cli_session_provider: None,
         automation_id: Some(agent_config.id.clone()),
-        // Despite the misleading name, `agent_workspace_id` is the *workspace*
-        // id the tools use to derive the on-disk working directory. Setting it
-        // to the agent's own id meant periodic runs wrote to a per-agent dir
-        // that the workspace UI never enumerates — manifesting as the
-        // "0 memories" inconsistency. On-demand chats already pass workspace_id
-        // here via `desired_workspace_context`; this matches them.
-        agent_workspace_id: Some(agent_config.workspace_id.clone()),
         automation_name: Some(agent_config.name.clone()),
         workspace_agents,
     };
@@ -526,6 +525,7 @@ async fn ensure_workspace_manager_session(
 
         emit_event(
             app_handle,
+            &agent_config.workspace_id,
             &session,
             None,
             AssistantUiEvent::SessionCreated {
@@ -552,6 +552,7 @@ async fn ensure_workspace_manager_session(
 
     emit_event(
         app_handle,
+        &agent_config.workspace_id,
         &session,
         None,
         AssistantUiEvent::SessionCreated {
@@ -590,11 +591,13 @@ fn resolve_agent_connection(
 
 async fn run_scheduled_agent(
     app_handle: &AppHandle,
+    workspace_id: &str,
     pool: &DbPool,
     session: &crate::assistant::types::AssistantSession,
     connection: &ProviderConnection,
 ) -> Result<(), RunnerError> {
     let deps = AssistantDeps {
+        workspace_id: workspace_id.to_string(),
         pool: pool.clone(),
         app: app_handle.clone(),
     };
@@ -639,12 +642,9 @@ async fn run_scheduled_agent(
     let result = engine::run_session_turn(&deps, input).await;
     drop(run_registration);
 
-    if let Err(error) = crate::commands::assistant::start_queued_followup_if_idle(
-        pool.clone(),
-        app_handle.clone(),
-        session.id.clone(),
-    )
-    .await
+    if let Err(error) =
+        crate::commands::assistant::start_queued_followup_if_idle(deps.clone(), session.id.clone())
+            .await
     {
         tracing::error!(
             session_id = %session.id,

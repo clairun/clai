@@ -85,6 +85,7 @@ pub(crate) async fn fail_run(
     {
         let _ = emit_event(
             &deps.app,
+            &deps.workspace_id,
             session,
             Some(run_id),
             AssistantUiEvent::ToolCallFailed { tool_call },
@@ -94,6 +95,7 @@ pub(crate) async fn fail_run(
         .await?;
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         AssistantUiEvent::RunFailed { run },
@@ -115,6 +117,7 @@ pub(crate) async fn cancel_run(
     {
         let _ = emit_event(
             &deps.app,
+            &deps.workspace_id,
             session,
             Some(run_id),
             AssistantUiEvent::ToolCallFailed { tool_call },
@@ -123,6 +126,7 @@ pub(crate) async fn cancel_run(
     let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, None, &[]).await?;
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         AssistantUiEvent::RunCancelled { run },
@@ -155,6 +159,7 @@ pub(crate) async fn complete_run_with_notices(
         repository::complete_run(&deps.pool, run_id, final_status(notices), None, notices).await?;
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         AssistantUiEvent::RunCompleted { run },
@@ -192,6 +197,7 @@ pub(crate) async fn record_tool_call_started(
 
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         AssistantUiEvent::ToolCallStarted {
@@ -312,6 +318,7 @@ pub(crate) async fn record_tool_call_result(
     let completed_at = updated.completed_at;
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         completion_event(status, updated),
@@ -339,6 +346,7 @@ pub(crate) async fn record_tool_call_result(
 
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         AssistantUiEvent::MessageCreated { message },

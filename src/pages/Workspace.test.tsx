@@ -86,13 +86,11 @@ const sessionFor = (workspaceId: string, updatedAt: bigint): AssistantSession =>
   kind: 'interactive',
   title: null,
   context: {
-    workspaceId,
     mcpServerIds: [],
     execution: {},
     cliSessionId: null,
     cliSessionProvider: null,
     automationId: null,
-    agentWorkspaceId: null,
     automationName: null,
     workspaceAgents: [],
   },

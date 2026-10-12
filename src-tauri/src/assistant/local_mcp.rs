@@ -62,9 +62,10 @@ struct BoundRun {
 
 #[derive(Clone)]
 pub struct ToolBinding {
-    /// The workspace-scoped DB pool this run's session lives in. Carried
+    /// The workspace this run's session lives in, and its DB pool. Carried
     /// per-binding because the local MCP runtime is a process singleton
     /// while pools are per-workspace.
+    pub workspace_id: String,
     pub pool: DbPool,
     pub session_id: String,
     pub run_id: String,
@@ -289,7 +290,16 @@ impl ServerHandler for ClaiMcpService {
                     .list_tools_for_servers(&session.context.mcp_server_ids)
                     .await
             };
-            let tool_defs = tools::available_tools(&session.context, &external_tools);
+            let workspace_root = self
+                .runtime
+                .app
+                .try_state::<AppState>()
+                .and_then(|state| state.workspace_root(&binding.workspace_id));
+            let tool_defs = tools::available_tools(
+                &session.context,
+                workspace_root.as_deref(),
+                &external_tools,
+            );
             Ok(ListToolsResult {
                 meta: None,
                 tools: tool_defs.into_iter().map(tool_definition_to_mcp).collect(),
@@ -388,6 +398,7 @@ async fn execute_bound_tool(
     // app handle, so downstream `tools::execute_tool` keeps its existing
     // `&AssistantDeps` API but operates on the correct workspace DB.
     let deps = AssistantDeps {
+        workspace_id: binding.workspace_id.clone(),
         pool: binding.pool.clone(),
         app: app.clone(),
     };
@@ -395,15 +406,10 @@ async fn execute_bound_tool(
     let session = repository::get_session(&deps.pool, &binding.session_id)
         .await?
         .ok_or_else(|| format!("Assistant session not found: {}", binding.session_id))?;
-    let workspace_root = session
-        .context
-        .agent_workspace_id
-        .as_deref()
-        .and_then(|workspace_id| {
-            deps.app
-                .try_state::<AppState>()
-                .and_then(|state| state.workspace_root(workspace_id))
-        });
+    let workspace_root = deps
+        .app
+        .try_state::<AppState>()
+        .and_then(|state| state.workspace_root(&deps.workspace_id));
 
     let tool_context = ToolExecutionContext {
         session_id: binding.session_id.clone(),
@@ -414,9 +420,7 @@ async fn execute_bound_tool(
         // tool still executes correctly.
         tool_call_id: None,
         cancel_token: binding.cancel_token.clone(),
-        workspace_id: session.context.workspace_id.clone(),
         mcp_server_ids: session.context.mcp_server_ids.clone(),
-        agent_workspace_id: session.context.agent_workspace_id.clone(),
         workspace_root,
         automation_id: session.context.automation_id.clone(),
         workspace_agents: session.context.workspace_agents.clone(),
@@ -548,6 +552,7 @@ mod tests {
 
     fn test_binding() -> ToolBinding {
         ToolBinding {
+            workspace_id: "ws-1".to_string(),
             pool: sqlx::Pool::connect_lazy("sqlite::memory:").expect("lazy pool"),
             session_id: "session-1".to_string(),
             run_id: "run-1".to_string(),

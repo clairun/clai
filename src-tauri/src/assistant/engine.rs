@@ -12,6 +12,8 @@ use crate::AppState;
 
 #[derive(Clone)]
 pub struct AssistantDeps {
+    /// The workspace that owns `pool`.
+    pub workspace_id: String,
     pub pool: DbPool,
     pub app: AppHandle,
 }
@@ -69,21 +71,15 @@ pub async fn run_session_turn(
                 .get_provider_connection(&input.connection_id)
         })
         .ok_or_else(|| AssistantEngineError::ProviderNotConfigured(input.connection_id.clone()))?;
-    let workspace_root = match session.context.agent_workspace_id.as_deref() {
-        Some(workspace_id) => {
-            let root = app_state
-                .as_ref()
-                .and_then(|state| state.workspace_root(workspace_id));
-            if root.is_none() {
-                return Err(AssistantEngineError::Persistence(format!(
-                    "workspace {} no longer exists or failed to load",
-                    workspace_id
-                )));
-            }
-            root
-        }
-        None => None,
-    };
+    let workspace_root = app_state
+        .as_ref()
+        .and_then(|state| state.workspace_root(&deps.workspace_id));
+    if workspace_root.is_none() {
+        return Err(AssistantEngineError::Persistence(format!(
+            "workspace {} no longer exists or failed to load",
+            deps.workspace_id
+        )));
+    }
 
     if providers::is_cli_provider(&connection.protocol_id) {
         local_agent::run_session_turn(deps, input, session, connection).await

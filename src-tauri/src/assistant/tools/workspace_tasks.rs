@@ -121,7 +121,7 @@ pub async fn execute(
         "workspace_listAgents" => {
             let params: ListWorkspaceAgentsParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_listAgents params: {}", e))?;
-            list_agents(deps, context, params)
+            list_agents(deps, params)
         }
         "workspace_assignTask" => {
             let params: AssignWorkspaceTaskParams = serde_json::from_value(params)
@@ -131,7 +131,7 @@ pub async fn execute(
         "workspace_getTaskResult" => {
             let params: GetWorkspaceTaskResultParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_getTaskResult params: {}", e))?;
-            get_task_result(deps, context, params).await
+            get_task_result(deps, params).await
         }
         _ => Err(format!("Unknown workspace task tool: {}", tool_name)),
     }
@@ -139,10 +139,9 @@ pub async fn execute(
 
 fn list_agents(
     deps: &AssistantDeps,
-    context: &ToolExecutionContext,
     params: ListWorkspaceAgentsParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_id = workspace_id_from_context(context)?;
+    let workspace_id = deps.workspace_id.clone();
     let app_state = deps.app.state::<AppState>();
     let rows = load_workspace_agent_rows(app_state.inner(), &workspace_id)?;
 
@@ -182,7 +181,7 @@ async fn assign_task(
     context: &ToolExecutionContext,
     params: AssignWorkspaceTaskParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_id = workspace_id_from_context(context)?;
+    let workspace_id = deps.workspace_id.clone();
     let title = params.title.trim();
     let instructions = params.instructions.trim();
     if title.is_empty() {
@@ -274,7 +273,7 @@ async fn assign_task(
         CreateSessionParams {
             kind: SessionKind::BackgroundJob,
             title: Some(format!("Task: {}", title)),
-            context: task_session_context(deps, context, &workspace_id, &target_config),
+            context: task_session_context(deps, context, &target_config),
         },
         &task_id,
     )
@@ -348,10 +347,9 @@ async fn assign_task(
 
 async fn get_task_result(
     deps: &AssistantDeps,
-    context: &ToolExecutionContext,
     params: GetWorkspaceTaskResultParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_id = workspace_id_from_context(context)?;
+    let workspace_id = deps.workspace_id.clone();
     let task = load_task(&deps.pool, &workspace_id, &params.task_id).await?;
 
     Ok(serde_json::json!({
@@ -455,18 +453,9 @@ fn spawn_task_run(
     });
 }
 
-fn workspace_id_from_context(context: &ToolExecutionContext) -> Result<String, String> {
-    context
-        .workspace_id
-        .clone()
-        .or_else(|| context.agent_workspace_id.clone())
-        .ok_or_else(|| "Workspace task tools require a workspace context.".to_string())
-}
-
 fn task_session_context(
     _deps: &AssistantDeps,
     context: &ToolExecutionContext,
-    workspace_id: &str,
     target_config: &AgentConfig,
 ) -> SessionContext {
     // The worker's tools are its own. This used to prefer the caller's session
@@ -476,13 +465,11 @@ fn task_session_context(
     let mcp_server_ids = target_config.selected_mcp_server_ids.clone();
 
     SessionContext {
-        workspace_id: Some(workspace_id.to_string()),
         mcp_server_ids,
         execution: target_config.execution.clone(),
         cli_session_id: None,
         cli_session_provider: None,
         automation_id: Some(target_config.id.clone()),
-        agent_workspace_id: Some(workspace_id.to_string()),
         automation_name: Some(target_config.name.clone()),
         workspace_agents: context.workspace_agents.clone(),
     }

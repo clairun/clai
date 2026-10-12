@@ -1652,27 +1652,18 @@ fn desired_workspace_context(
         .agent_id
         .clone()
         .or_else(|| workspace_manager.map(|agent| agent.id.clone()));
-    let agent_workspace_id = descriptor.agent_id.clone().or_else(|| {
-        if descriptor.root_path.is_some() {
-            Some(descriptor.workspace_id.clone())
-        } else {
-            None
-        }
-    });
     let automation_name = descriptor
         .automation_name
         .clone()
         .or_else(|| workspace_manager.map(|agent| agent.name.clone()));
 
     SessionContext {
-        workspace_id: Some(descriptor.workspace_id.clone()),
         mcp_server_ids,
         execution,
         cli_session_id: existing_session.and_then(|session| session.context.cli_session_id.clone()),
         cli_session_provider: existing_session
             .and_then(|session| session.context.cli_session_provider.clone()),
         automation_id,
-        agent_workspace_id,
         automation_name,
         workspace_agents,
     }
@@ -2991,10 +2982,6 @@ pub async fn workspace_update_session_mcp(
         if let Some(manager) = workspace_manager.as_ref() {
             updated.context.execution = manager.execution.clone();
             updated.context.automation_id = Some(manager.id.clone());
-            updated.context.agent_workspace_id = descriptor
-                .root_path
-                .as_ref()
-                .map(|_| descriptor.workspace_id.clone());
             updated.context.automation_name = Some(manager.name.clone());
         }
 
@@ -4119,7 +4106,6 @@ mod tests {
         id: &str,
         kind: SessionKind,
         automation_id: &str,
-        workspace_id: &str,
         updated_at: i64,
     ) -> AssistantSession {
         AssistantSession {
@@ -4127,7 +4113,6 @@ mod tests {
             kind,
             title: None,
             context: SessionContext {
-                workspace_id: Some(workspace_id.to_string()),
                 automation_id: Some(automation_id.to_string()),
                 ..Default::default()
             },
@@ -4874,7 +4859,7 @@ mod tests {
     fn desired_workspace_context_general_workspaces_take_mcp_from_config() {
         // The workspace config (via the descriptor) is the canonical store:
         // its enabled list wins over whatever the session row carries.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
         existing.context.mcp_server_ids = vec!["stale".into()];
 
         let mut desc = descriptor(None);
@@ -4897,7 +4882,7 @@ mod tests {
         // With a manager row present, selected=[] + disabled=[b] means
         // "every attached server toggled off" — the fallback must not
         // resurrect the session's list.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
         existing.context.mcp_server_ids = vec!["stale".into()];
 
         let mut desc = descriptor(None);
@@ -4912,7 +4897,7 @@ mod tests {
         // Without a manager row the config cannot record an enabled
         // selection, so the session's list stays canonical — but the
         // config-level disabled toggle still applies to it.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
         existing.context.mcp_server_ids = vec!["a".into(), "b".into()];
 
         let mut desc = descriptor(None);
@@ -4926,7 +4911,7 @@ mod tests {
         // With a manager row present, an empty ref list is authoritative:
         // a Settings remove-all (or a pre-mirror legacy session) yields no
         // MCP servers instead of resurrecting the session's stale list.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
+        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
         existing.context.mcp_server_ids = vec!["legacy".into()];
 
         let manager = manager_config();
@@ -5864,7 +5849,6 @@ mod tests {
             seed_session_with_run(
                 &pool,
                 SessionContext {
-                    workspace_id: Some(DETAILS_WORKSPACE_ID.to_string()),
                     automation_id: Some(automation_id.to_string()),
                     ..Default::default()
                 },

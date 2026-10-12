@@ -269,6 +269,7 @@ pub async fn run_session_turn(
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         &session,
         Some(&run_id),
         AssistantUiEvent::RunStarted { run },
@@ -321,9 +322,9 @@ pub async fn run_session_turn(
     let mut conversation = compaction_service::load_with_pending(&deps.pool, &session.id).await?;
     let run_input =
         run_input_messages(deps, &session, &run_id, &input.trigger, &conversation).await?;
-    let system_prompt = system_prompt_text(&deps.app, &session, &input.trigger);
+    let system_prompt = system_prompt_text(deps, &session, &input.trigger);
     if compaction::should_auto_compact(&conversation, &system_prompt, &[]) {
-        let summary_working_dir = workspace_root_for_session(deps, &session);
+        let summary_working_dir = run_workspace_root(deps);
         match compaction_service::compact_conversation(
             &deps.pool,
             &session,
@@ -341,6 +342,7 @@ pub async fn run_session_turn(
                 reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
                 let _ = emit_event(
                     &deps.app,
+                    &deps.workspace_id,
                     &session,
                     Some(&run_id),
                     AssistantUiEvent::SessionCompacted {
@@ -372,6 +374,7 @@ pub async fn run_session_turn(
     // drop, including on panic or early return. Keep it alive until
     // after the CLI subprocess has finished making MCP calls.
     let binding_guard = mcp_runtime.bind_run(ToolBinding {
+        workspace_id: deps.workspace_id.clone(),
         pool: deps.pool.clone(),
         session_id: session.id.clone(),
         run_id: run_id.clone(),
@@ -514,7 +517,7 @@ pub async fn run_session_turn(
                     "{} reported a context limit; compacting local history and restarting with a fresh session",
                     provider_runtime.display_name()
                 );
-                let summary_working_dir = workspace_root_for_session(deps, &session);
+                let summary_working_dir = run_workspace_root(deps);
                 match compaction_service::compact_for_context_limit_recovery(
                     &deps.pool,
                     &session,
@@ -530,6 +533,7 @@ pub async fn run_session_turn(
                         reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
                         let _ = emit_event(
                             &deps.app,
+                            &deps.workspace_id,
                             &session,
                             Some(&run_id),
                             AssistantUiEvent::SessionCompacted {
@@ -802,6 +806,7 @@ async fn ensure_assistant_message_slot(
         .await?;
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         AssistantUiEvent::MessageCreated {
@@ -1083,7 +1088,7 @@ async fn try_deliver_queued_to_claude(
     // like the initial turn, so they must ride a stream-json content-block
     // array, not the text-only line (otherwise the image is silently dropped
     // while the queue is marked delivered).
-    let root = workspace_root_for_session(deps, session);
+    let root = run_workspace_root(deps);
     let mut user_lines = String::new();
     let mut message_ids = Vec::with_capacity(matching.len());
     for queued in &matching {
@@ -1126,6 +1131,7 @@ async fn try_deliver_queued_to_claude(
     } else {
         let _ = emit_event(
             &deps.app,
+            &deps.workspace_id,
             session,
             Some(run_id),
             AssistantUiEvent::QueuedMessagesDelivered {
@@ -1221,16 +1227,8 @@ async fn run_claude_turn(
     // Pin the subprocess cwd to the agent's workspace root. Without it, Claude
     // Code inherits CLAI's launch cwd (the repo on a dev box) and its
     // auto-memory loader pulls in unrelated projects' memory. Skipped when the
-    // session has no workspace_id or the workspace isn't in the index.
-    let working_dir = session
-        .context
-        .workspace_id
-        .as_deref()
-        .and_then(|workspace_id| {
-            deps.app
-                .state::<crate::AppState>()
-                .workspace_root(workspace_id)
-        });
+    // workspace isn't in the index.
+    let working_dir = run_workspace_root(deps);
     // Env for the Claude Code process — see `claude_code_host_env`. Injected
     // via the host-command helper so it survives the `flatpak-spawn` hop (the
     // host CLI runs in the host's environment).
@@ -1311,7 +1309,7 @@ async fn run_claude_turn(
             // stream-json carries image content blocks on the user turn; the
             // legacy `-p` text path can't, so images only ride the modern
             // (default-on) mid-run input mode.
-            let images = resolve_cli_user_images(deps, session, run_input).await;
+            let images = resolve_cli_user_images(deps, run_input).await;
             claude_stream_json_user_message(&prompt, &images)
         } else {
             prompt
@@ -1625,7 +1623,7 @@ async fn run_codex_turn(
         .unwrap_or("codex");
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
-    let workspace_root = workspace_root_for_session(deps, session);
+    let workspace_root = run_workspace_root(deps);
     // Env (MCP token + timeout) goes through the helper so it survives the
     // `flatpak-spawn --host` hop — under Flatpak the host CLI runs in the
     // host's environment, not the sandbox's.
@@ -1666,7 +1664,7 @@ async fn run_codex_turn(
     // fresh `exec` (via shared options) and `exec resume` (ResumeArgsRaw.images)
     // paths; codex reads the files itself. Only present on the turn the user
     // actually sent them, so no per-turn re-send.
-    for image_path in resolve_codex_image_paths(deps, session, run_input) {
+    for image_path in resolve_codex_image_paths(deps, run_input) {
         command.arg("--image").arg(image_path);
     }
     command
@@ -1863,7 +1861,7 @@ async fn run_codex_turn_app_server(
         .unwrap_or("codex");
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
-    let workspace_root = workspace_root_for_session(deps, session);
+    let workspace_root = run_workspace_root(deps);
 
     let command = crate::providers::build_host_cli_command(
         &binary,
@@ -1941,7 +1939,7 @@ async fn run_codex_turn_app_server(
     // Fire the turn. We do not block on its response; the turn is tracked via
     // notifications in the loop below.
     let mut input = vec![aps::text_user_input(&prompt)];
-    for image_path in resolve_codex_image_paths(deps, session, run_input) {
+    for image_path in resolve_codex_image_paths(deps, run_input) {
         input.push(aps::local_image_user_input(&image_path.to_string_lossy()));
     }
     transport
@@ -2411,6 +2409,7 @@ async fn split_codex_assistant_message(
         let _ = conversation.delete_message(&deps.pool, &current.id).await;
         let _ = emit_event(
             &deps.app,
+            &deps.workspace_id,
             session,
             Some(run_id),
             AssistantUiEvent::MessageDeleted {
@@ -2462,6 +2461,7 @@ async fn resolve_codex_steer_response(
         Ok(()) => {
             let _ = emit_event(
                 &deps.app,
+                &deps.workspace_id,
                 session,
                 Some(run_id),
                 AssistantUiEvent::QueuedMessagesDelivered {
@@ -2631,7 +2631,7 @@ async fn run_opencode_turn(
         .unwrap_or("opencode");
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
-    let workspace_root = workspace_root_for_session(deps, session);
+    let workspace_root = run_workspace_root(deps);
     let config_content = opencode_config_content(mcp_url, mcp_token)?;
 
     // Env (incl. the MCP config blob) goes through the helper so it survives
@@ -2792,16 +2792,10 @@ fn opencode_turn_prompt(system_prompt: &str, prompt: &str) -> String {
     )
 }
 
-fn workspace_root_for_session(deps: &AssistantDeps, session: &AssistantSession) -> Option<PathBuf> {
-    session
-        .context
-        .workspace_id
-        .as_deref()
-        .and_then(|workspace_id| {
-            deps.app
-                .state::<crate::AppState>()
-                .workspace_root(workspace_id)
-        })
+fn run_workspace_root(deps: &AssistantDeps) -> Option<PathBuf> {
+    deps.app
+        .state::<crate::AppState>()
+        .workspace_root(&deps.workspace_id)
 }
 
 /// `(media_type, base64_data)` for each image on the most recent user message,
@@ -2836,14 +2830,13 @@ fn image_parts_from_contents(contents: Vec<Vec<ContentPart>>) -> Vec<ContentPart
 
 async fn resolve_cli_user_images(
     deps: &AssistantDeps,
-    session: &AssistantSession,
     run_input: &[AssistantMessage],
 ) -> Vec<(String, String)> {
     let parts = turn_image_parts(run_input);
     if parts.is_empty() {
         return Vec::new();
     }
-    let Some(root) = workspace_root_for_session(deps, session) else {
+    let Some(root) = run_workspace_root(deps) else {
         tracing::warn!("CLI image: no workspace root for session; sending text only");
         return Vec::new();
     };
@@ -2891,11 +2884,7 @@ async fn resolve_cli_image_parts(
 /// [`turn_image_parts`]). Codex ingests images as files
 /// (`codex exec [resume] --image`), so it gets paths rather than base64.
 /// Non-store paths and missing files are skipped (text still sends).
-fn resolve_codex_image_paths(
-    deps: &AssistantDeps,
-    session: &AssistantSession,
-    run_input: &[AssistantMessage],
-) -> Vec<PathBuf> {
+fn resolve_codex_image_paths(deps: &AssistantDeps, run_input: &[AssistantMessage]) -> Vec<PathBuf> {
     let rels: Vec<String> = turn_image_parts(run_input)
         .into_iter()
         .filter_map(|part| match part {
@@ -2906,7 +2895,7 @@ fn resolve_codex_image_paths(
     if rels.is_empty() {
         return Vec::new();
     }
-    let Some(root) = workspace_root_for_session(deps, session) else {
+    let Some(root) = run_workspace_root(deps) else {
         tracing::warn!("Codex image: no workspace root for session; sending text only");
         return Vec::new();
     };
@@ -3076,6 +3065,7 @@ async fn prepare_prompt(
             .await?;
         let _ = emit_event(
             &deps.app,
+            &deps.workspace_id,
             session,
             Some(run_id),
             AssistantUiEvent::MessageCreated {
@@ -3372,22 +3362,17 @@ fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
 }
 
 fn system_prompt_text(
-    app: &tauri::AppHandle,
+    deps: &AssistantDeps,
     session: &AssistantSession,
     trigger: &crate::assistant::types::RunTrigger,
 ) -> String {
-    let tool_defs = crate::assistant::tools::available_tools(&session.context, &[]);
-    let description = live_agent_description(app, &session.context);
-    let workspace_root = session
-        .context
-        .agent_workspace_id
-        .as_deref()
-        .and_then(|id| {
-            app.try_state::<crate::AppState>()
-                .and_then(|state| state.workspace_root(id))
-        });
+    let workspace_root = run_workspace_root(deps);
+    let tool_defs =
+        crate::assistant::tools::available_tools(&session.context, workspace_root.as_deref(), &[]);
+    let description = live_agent_description(&deps.app, &deps.workspace_id, &session.context);
     provider_message_text(&build_system_prompt(
         &session.context,
+        &deps.workspace_id,
         description.as_deref(),
         &tool_defs,
         trigger,
@@ -3516,6 +3501,7 @@ fn emit_assistant_update(
     if let Some(message) = message {
         let _ = emit_event(
             &deps.app,
+            &deps.workspace_id,
             session,
             Some(run_id),
             AssistantUiEvent::AssistantMessageUpdated { message },
@@ -3535,7 +3521,7 @@ fn emit_assistant_delta(
     text: &str,
 ) {
     for event in delta_events(throttle, std::time::Instant::now(), message_id, text) {
-        let _ = emit_event(&deps.app, session, Some(run_id), event);
+        let _ = emit_event(&deps.app, &deps.workspace_id, session, Some(run_id), event);
     }
 }
 
@@ -3718,6 +3704,7 @@ async fn handle_opencode_event(
                 });
                 let _ = emit_event(
                     &deps.app,
+                    &deps.workspace_id,
                     session,
                     Some(run_id),
                     AssistantUiEvent::AssistantThinkingDelta {
@@ -4048,6 +4035,7 @@ async fn handle_codex_item(
                 });
                 let _ = emit_event(
                     &deps.app,
+                    &deps.workspace_id,
                     session,
                     Some(run_id),
                     AssistantUiEvent::AssistantThinkingDelta {
@@ -4081,6 +4069,7 @@ async fn handle_codex_item(
                 });
                 let _ = emit_event(
                     &deps.app,
+                    &deps.workspace_id,
                     session,
                     Some(run_id),
                     AssistantUiEvent::AssistantThinkingDelta {
@@ -4596,6 +4585,7 @@ async fn handle_stream_event(
                         }
                         let _ = emit_event(
                             &deps.app,
+                            &deps.workspace_id,
                             session,
                             Some(run_id),
                             AssistantUiEvent::AssistantThinkingDelta {
@@ -4992,6 +4982,7 @@ async fn finalize_assistant_message_from_parts(
         .await?;
     let _ = emit_event(
         &deps.app,
+        &deps.workspace_id,
         session,
         Some(run_id),
         AssistantUiEvent::AssistantMessageCompleted { message: updated },

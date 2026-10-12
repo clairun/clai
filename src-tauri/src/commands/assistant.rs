@@ -90,17 +90,10 @@ fn provider_connection(
 
 fn fresh_execution_for_session(
     state: &AppState,
+    workspace_id: &str,
     session: &AssistantSession,
 ) -> Result<Option<crate::config::ExecutionCapabilityConfig>, String> {
     let Some(agent_id) = session.context.automation_id.as_deref() else {
-        return Ok(None);
-    };
-    let workspace_id = session
-        .context
-        .workspace_id
-        .as_deref()
-        .or(session.context.agent_workspace_id.as_deref());
-    let Some(workspace_id) = workspace_id else {
         return Ok(None);
     };
     if state.workspace_root(workspace_id).is_none() {
@@ -128,7 +121,7 @@ pub async fn assistant_delete_session(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let (target_pool, session) =
+    let (target_pool, _session) =
         session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     // Hard clear: the schema cascades messages/runs/tool calls/compactions.
     // Refuse while a run is in flight — the engine would keep writing rows
@@ -151,7 +144,7 @@ pub async fn assistant_delete_session(
     let image_paths = collect_session_image_paths(&target_pool, &session_id).await?;
     let deleted = repository::delete_session(&target_pool, &session_id).await?;
     if deleted {
-        sweep_session_images(state.inner(), &session, image_paths).await;
+        sweep_session_images(state.inner(), &workspace_id, &session_id, image_paths).await;
     }
     Ok(deleted)
 }
@@ -316,20 +309,13 @@ fn resolve_session_image_files(root: &Path, paths: &HashSet<String>) -> Vec<Path
 /// skipped — never blocks the user-facing clear result.
 async fn sweep_session_images(
     state: &AppState,
-    session: &AssistantSession,
+    workspace_id: &str,
+    session_id: &str,
     paths: HashSet<String>,
 ) {
     if paths.is_empty() {
         return;
     }
-    let Some(workspace_id) = session
-        .context
-        .workspace_id
-        .as_deref()
-        .or(session.context.agent_workspace_id.as_deref())
-    else {
-        return;
-    };
     let Some(root): Option<PathBuf> = state.workspace_root(workspace_id) else {
         return;
     };
@@ -339,7 +325,7 @@ async fn sweep_session_images(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 tracing::warn!(
-                    session_id = %session.id,
+                    session_id = %session_id,
                     file = %file.display(),
                     error = %error,
                     "Clear: failed to remove orphaned image file; ignoring"
@@ -422,7 +408,8 @@ pub async fn assistant_send_message(
         // If tied to a workspace agent (manager), sync execution config with the
         // latest workspace_agents row so config changes take effect immediately.
         // Phase 1.4: the row's inline `execution` column is the source of truth.
-        let needs_execution_update = fresh_execution_for_session(state.inner(), &session)?;
+        let needs_execution_update =
+            fresh_execution_for_session(state.inner(), &workspace_id, &session)?;
         if let Some(fresh_execution) = needs_execution_update {
             session.context.execution = fresh_execution;
             session.updated_at = chrono::Utc::now().timestamp_millis();
@@ -444,6 +431,7 @@ pub async fn assistant_send_message(
     if let Some(run) = active_run {
         emit_event(
             &app,
+            &workspace_id,
             &session,
             Some(&run.id),
             AssistantUiEvent::MessageCreated {
@@ -462,6 +450,7 @@ pub async fn assistant_send_message(
     if has_pending_queue {
         emit_event(
             &app,
+            &workspace_id,
             &session,
             None,
             AssistantUiEvent::MessageCreated {
@@ -469,9 +458,15 @@ pub async fn assistant_send_message(
             },
         )?;
 
-        let run =
-            start_queued_followup_if_idle(target_pool.clone(), app.clone(), session.id.clone())
-                .await?;
+        let run = start_queued_followup_if_idle(
+            AssistantDeps {
+                workspace_id: workspace_id.clone(),
+                pool: target_pool.clone(),
+                app: app.clone(),
+            },
+            session.id.clone(),
+        )
+        .await?;
 
         return Ok(AssistantSendMessageResult {
             session,
@@ -497,6 +492,7 @@ pub async fn assistant_send_message(
 
     emit_event(
         &app,
+        &workspace_id,
         &session,
         Some(&run.id),
         AssistantUiEvent::MessageCreated {
@@ -505,14 +501,18 @@ pub async fn assistant_send_message(
     )?;
     emit_event(
         &app,
+        &workspace_id,
         &session,
         Some(&run.id),
         AssistantUiEvent::RunQueued { run: run.clone() },
     )?;
 
     spawn_run_task(
-        target_pool.clone(),
-        app.clone(),
+        AssistantDeps {
+            workspace_id,
+            pool: target_pool.clone(),
+            app: app.clone(),
+        },
         session.id.clone(),
         run.id.clone(),
         RunTrigger::UserMessage,
@@ -543,11 +543,7 @@ pub async fn assistant_compact_session(
         return Err("Wait for the current assistant run to finish before compacting.".to_string());
     }
 
-    let summary_working_dir = session
-        .context
-        .workspace_id
-        .as_deref()
-        .and_then(|workspace_id| state.workspace_root(workspace_id));
+    let summary_working_dir = state.workspace_root(&workspace_id);
     // No run owns this session's conversation while it is idle, so the manual
     // command loads it once and compacts through the same core the runs use.
     let mut conversation =
@@ -577,6 +573,7 @@ pub async fn assistant_compact_session(
 
     emit_event(
         &app,
+        &workspace_id,
         &session,
         None,
         AssistantUiEvent::SessionCompacted {
@@ -615,6 +612,7 @@ pub async fn assistant_delete_queued_message(
     }
     emit_event(
         &app,
+        &workspace_id,
         &session,
         None,
         AssistantUiEvent::MessageDeleted { message_id },
@@ -653,6 +651,7 @@ pub async fn assistant_edit_queued_message(
     };
     emit_event(
         &app,
+        &workspace_id,
         &session,
         None,
         AssistantUiEvent::AssistantMessageUpdated { message },
@@ -726,6 +725,7 @@ pub async fn assistant_cancel_run(
 
     emit_event(
         &app,
+        &workspace_id,
         &session,
         Some(&run_id),
         AssistantUiEvent::RunCancelled {
@@ -737,8 +737,7 @@ pub async fn assistant_cancel_run(
 }
 
 pub(crate) fn spawn_run_task(
-    pool: DbPool,
-    app: AppHandle,
+    deps: AssistantDeps,
     session_id: String,
     run_id: String,
     trigger: RunTrigger,
@@ -753,10 +752,6 @@ pub(crate) fn spawn_run_task(
     let cancel_token = run_registration.token();
     tauri::async_runtime::spawn(async move {
         let _run_registration = run_registration;
-        let deps = AssistantDeps {
-            pool: pool.clone(),
-            app: app.clone(),
-        };
         let input = RunTurnInput {
             session_id: session_id.clone(),
             run_id: Some(run_id.clone()),
@@ -769,9 +764,7 @@ pub(crate) fn spawn_run_task(
         if let Err(e) = engine::run_session_turn(&deps, input).await {
             tracing::error!("Assistant engine error for run {}: {}", run_id, e);
         }
-        if let Err(e) =
-            start_queued_followup_if_idle(pool.clone(), app.clone(), session_id.clone()).await
-        {
+        if let Err(e) = start_queued_followup_if_idle(deps, session_id.clone()).await {
             tracing::error!(
                 session_id = %session_id,
                 error = %e,
@@ -782,10 +775,14 @@ pub(crate) fn spawn_run_task(
 }
 
 pub(crate) async fn start_queued_followup_if_idle(
-    pool: DbPool,
-    app: AppHandle,
+    deps: AssistantDeps,
     session_id: String,
 ) -> Result<Option<AssistantRun>, String> {
+    let AssistantDeps {
+        workspace_id,
+        pool,
+        app,
+    } = deps;
     if repository::session_has_active_run(&pool, &session_id).await? {
         return Ok(None);
     }
@@ -800,7 +797,9 @@ pub(crate) async fn start_queued_followup_if_idle(
         .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
 
     let app_state = app.state::<AppState>();
-    if let Some(fresh_execution) = fresh_execution_for_session(app_state.inner(), &session)? {
+    if let Some(fresh_execution) =
+        fresh_execution_for_session(app_state.inner(), &workspace_id, &session)?
+    {
         session.context.execution = fresh_execution;
         session.updated_at = chrono::Utc::now().timestamp_millis();
         session = repository::update_session(&pool, &session).await?;
@@ -838,6 +837,7 @@ pub(crate) async fn start_queued_followup_if_idle(
     // "Queued" chips in the FE.
     let _ = emit_event(
         &app,
+        &workspace_id,
         &session,
         Some(&run.id),
         AssistantUiEvent::QueuedMessagesDelivered {
@@ -847,14 +847,18 @@ pub(crate) async fn start_queued_followup_if_idle(
 
     emit_event(
         &app,
+        &workspace_id,
         &session,
         Some(&run.id),
         AssistantUiEvent::RunQueued { run: run.clone() },
     )?;
 
     spawn_run_task(
-        pool,
-        app,
+        AssistantDeps {
+            workspace_id,
+            pool,
+            app,
+        },
         session.id,
         run.id.clone(),
         RunTrigger::UserMessage,

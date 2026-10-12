@@ -19,14 +19,13 @@ use crate::AppState;
 /// Resolve the live agent description for the session's owning agent.
 ///
 /// Returns the user-set description plus assembled skill content read fresh
-/// from disk on each call. `None` when the session has no workspace/agent
-/// binding, AppState is unavailable, or the workspace/agent has been
-/// deleted — all "no agent instructions" scenarios.
+/// from disk on each call. `None` when the session has no owning agent,
+/// AppState is unavailable, or the workspace/agent has been deleted — all "no agent instructions" scenarios.
 pub(crate) fn live_agent_description(
     app: &AppHandle,
+    workspace_id: &str,
     context: &crate::assistant::types::SessionContext,
 ) -> Option<String> {
-    let workspace_id = context.workspace_id.as_deref()?;
     let agent_id = context.automation_id.as_deref()?;
     let state = app.try_state::<AppState>()?;
     crate::commands::workspace::workspace_agent_runtime_description(
@@ -54,6 +53,7 @@ pub(crate) fn live_agent_description(
 )]
 pub(crate) fn build_system_prompt(
     context: &crate::assistant::types::SessionContext,
+    workspace_id: &str,
     agent_description: Option<&str>,
     tool_defs: &[crate::assistant::types::ToolDefinition],
     trigger: &RunTrigger,
@@ -354,7 +354,7 @@ pub(crate) fn build_system_prompt(
         );
     }
 
-    if let Some(workspace_id) = context.agent_workspace_id.as_deref() {
+    if workspace_root.is_some() {
         prompt.push_str("\n## Local Execution Capabilities\n");
         if shell_enabled && !can_write_files {
             prompt.push_str(&format!(
@@ -696,7 +696,18 @@ mod tests {
         }
     }
 
+    /// A session outside any resolved workspace root.
     fn build_system_prompt(
+        context: &SessionContext,
+        description: Option<&str>,
+        tools: &[crate::assistant::types::ToolDefinition],
+        trigger: &RunTrigger,
+    ) -> ProviderInputMessage {
+        super::build_system_prompt(context, "ws-test", description, tools, trigger, None)
+    }
+
+    fn build_workspace_prompt(
+        workspace_id: &str,
         context: &SessionContext,
         description: Option<&str>,
         tools: &[crate::assistant::types::ToolDefinition],
@@ -704,6 +715,7 @@ mod tests {
     ) -> ProviderInputMessage {
         super::build_system_prompt(
             context,
+            workspace_id,
             description,
             tools,
             trigger,
@@ -714,12 +726,12 @@ mod tests {
     #[test]
     fn build_system_prompt_includes_agent_memory_guidance_for_automations() {
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -763,12 +775,12 @@ mod tests {
     #[test]
     fn build_system_prompt_tells_user_runs_to_recover_lost_context_from_memory() {
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -798,12 +810,12 @@ mod tests {
     #[test]
     fn build_system_prompt_makes_agent_self_aware_of_clai_workspace_model() {
         let context = SessionContext {
-            agent_workspace_id: Some("ws-abc".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("ws-abc", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -825,11 +837,11 @@ mod tests {
     #[test]
     fn build_system_prompt_routes_charts_through_create_vega_chart() {
         let context = SessionContext {
-            agent_workspace_id: Some("ws-abc".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("ws-abc", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -881,12 +893,12 @@ mod tests {
     #[test]
     fn build_system_prompt_documents_readonly_conversation_history_db() {
         let context = SessionContext {
-            agent_workspace_id: Some("ws-abc".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("ws-abc", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -932,12 +944,12 @@ mod tests {
             origin: None,
         }];
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution,
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -969,12 +981,12 @@ mod tests {
         // agent has no filesystem: instructing it to obey a path boundary or to
         // keep `.clai/memory/` up to date asks for work it cannot perform.
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution: ExecutionCapabilityConfig::default(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1021,7 +1033,6 @@ mod tests {
             .collect();
 
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             // An automation, so the "save durable outputs as files" line is
             // reachable — otherwise reverting its gate survives this test.
             automation_name: Some("Nightly review".to_string()),
@@ -1029,7 +1040,8 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1060,12 +1072,12 @@ mod tests {
             vec!["cargo check".to_string(), "tee".to_string()];
 
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution,
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1191,12 +1203,12 @@ mod tests {
     #[test]
     fn build_system_prompt_describes_autonomous_run_mode() {
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1215,12 +1227,12 @@ mod tests {
     #[test]
     fn build_system_prompt_describes_user_driven_run_mode() {
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1453,13 +1465,12 @@ mod tests {
     #[test]
     fn build_system_prompt_memory_guardrails_present_in_both_modes() {
         let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
             execution: shell_execution(),
             ..Default::default()
         };
 
         for trigger in &[RunTrigger::Scheduled, RunTrigger::UserMessage] {
-            let message = build_system_prompt(&context, None, &[], trigger);
+            let message = build_workspace_prompt("agent-123", &context, None, &[], trigger);
             let text = match &message.content[0] {
                 ContentPart::Text { text } => text,
                 other => panic!("expected text content, got {:?}", other),

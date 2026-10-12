@@ -124,8 +124,6 @@ pub struct WorkspaceAgentSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct SessionContext {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
     // ExecutionCapabilityConfig has a deep tree (sandbox/fs/shell/web
@@ -145,8 +143,6 @@ pub struct SessionContext {
     pub cli_session_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automation_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -587,14 +583,14 @@ mod tests {
     #[test]
     fn session_context_ignores_removed_keys() {
         let with_removed: SessionContext = serde_json::from_str(
-            r#"{"workspaceId":"ws-1","mcpServerIds":["clai"],
+            r#"{"workspaceId":"ws-1","agentWorkspaceId":"ws-1","mcpServerIds":["clai"],
                 "toolScopes":["web"],
                 "interAgentCall":{"callerAgentId":"a","depth":1}}"#,
         )
         .unwrap();
-        let without: SessionContext =
-            serde_json::from_str(r#"{"workspaceId":"ws-1","mcpServerIds":["clai"]}"#).unwrap();
+        let without: SessionContext = serde_json::from_str(r#"{"mcpServerIds":["clai"]}"#).unwrap();
         assert_eq!(with_removed, without);
-        assert_eq!(with_removed.workspace_id.as_deref(), Some("ws-1"));
+        let rewritten = serde_json::to_string(&with_removed).unwrap();
+        assert!(!rewritten.contains("orkspaceId"), "{rewritten}");
     }
 }

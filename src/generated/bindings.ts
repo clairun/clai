@@ -57,7 +57,7 @@ export type AssistantEventEnvelope = { sessionId: string, runId: string | null,
  * run-lifecycle events (RunStarted/RunCompleted) back to a
  * workspace card without having to track session→workspace itself.
  */
-workspaceId: string | null, timestamp: bigint, event: AssistantUiEvent, };
+workspaceId: string, timestamp: bigint, event: AssistantUiEvent, };
 
 export type AssistantMessage = { id: string, sessionId: string, role: MessageRole, content: Array<ContentPart>, createdAt: bigint, providerMetadata: JsonValue | null, };
 
@@ -368,14 +368,14 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { workspaceId: string | null, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
+export type SessionContext = { mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
 /**
  * The CLI provider that owns `cli_session_id`. A session id is
  * provider-specific (Claude generates its own UUID; Codex returns a
  * server-side thread id), so switching providers must NOT reuse it.
  * `None` for sessions created before this was tracked.
  */
-cliSessionProvider: string | null, automationId: string | null, agentWorkspaceId: string | null, automationName: string | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
+cliSessionProvider: string | null, automationId: string | null, automationName: string | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
 
 export type SessionKind = "interactive" | "background_job";
 

@@ -13,13 +13,11 @@ use crate::db::test_support::{insert_task, workspace_pool};
 
 fn sample_context() -> SessionContext {
     SessionContext {
-        workspace_id: Some("ws-1".to_string()),
         mcp_server_ids: vec![],
         execution: ExecutionCapabilityConfig::default(),
         cli_session_id: None,
         cli_session_provider: None,
         automation_id: None,
-        agent_workspace_id: None,
         automation_name: None,
         workspace_agents: vec![],
     }
@@ -46,7 +44,7 @@ async fn test_create_and_get_session() {
 
     assert_eq!(session.kind, SessionKind::Interactive);
     assert_eq!(session.title, Some("Test Session".to_string()));
-    assert_eq!(session.context.workspace_id, Some("ws-1".to_string()));
+    assert_eq!(session.context, sample_context());
     assert!(session.created_at > 0);
 
     let fetched = get_session(&pool, &session.id).await.unwrap();
@@ -247,14 +245,14 @@ async fn test_update_session_title_and_context() {
 
     let mut updated = session.clone();
     updated.title = Some("New".to_string());
-    updated.context.workspace_id = Some("ws-2".to_string());
+    updated.context.automation_name = Some("Renamed".to_string());
 
     let result = update_session(&pool, &updated).await.unwrap();
     assert_eq!(result.title, Some("New".to_string()));
 
     let fetched = get_session(&pool, &session.id).await.unwrap().unwrap();
     assert_eq!(fetched.title, Some("New".to_string()));
-    assert_eq!(fetched.context.workspace_id, Some("ws-2".to_string()));
+    assert_eq!(fetched.context.automation_name.as_deref(), Some("Renamed"));
 }
 
 // ---------------------------------------------------------------------------
