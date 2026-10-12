@@ -15,7 +15,6 @@ const agent = (over: Partial<WorkspaceAgentResponse>): WorkspaceAgentResponse =>
   workspaceId: 'ws-1',
   agentDefinitionId: 'def',
   displayName: 'Agent',
-  role: 'member',
   enabled: true,
   isDefault: false,
   agentName: null,

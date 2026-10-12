@@ -238,14 +238,14 @@ fn web_fetch_def() -> ToolDefinition {
 }
 
 fn is_workspace_manager_context(context: &RunContext) -> bool {
-    let Some(current_agent_definition_id) = context.automation_id.as_deref() else {
+    let Some(automation_id) = context.automation_id.as_deref() else {
         return false;
     };
 
     context
         .workspace_agents
         .iter()
-        .any(|agent| agent.is_default && agent.agent_definition_id == current_agent_definition_id)
+        .any(|agent| agent.is_default && agent.id == automation_id)
 }
 
 /// Build a ToolDefinition from a schemars-annotated param type.

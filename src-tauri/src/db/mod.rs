@@ -294,13 +294,11 @@ mod tests {
 
         run_all_migrations(&pool).await;
 
-        let mut triggers: Vec<RunTrigger> = repository::list_runs(&pool, "s")
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|run| run.trigger)
-            .collect();
-        triggers.sort_by_key(|trigger| format!("{trigger:?}"));
+        let mut triggers = Vec::new();
+        for id in ["r1", "r2", "r3", "r4"] {
+            let run = repository::get_run(&pool, id).await.unwrap().unwrap();
+            triggers.push(run.trigger);
+        }
         assert_eq!(
             triggers,
             [

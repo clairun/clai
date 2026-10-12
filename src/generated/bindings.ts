@@ -456,7 +456,7 @@ export type UpdateProviderConnectionRequest = { id: string, name: string, protoc
  */
 providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 
-export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, role: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
+export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
 /**
  * MCP server IDs selected for this agent. Surfaced so the Fleet
  * chat input (which routes messages to the workspace's default
@@ -476,7 +476,7 @@ execution: unknown,
  */
 avatar?: AgentAvatarRef | null, createdAt: bigint, updatedAt: bigint, };
 
-export type WorkspaceAgentSummary = { id: string, agentDefinitionId: string, displayName: string, role: string, isDefault: boolean, description?: string | null, };
+export type WorkspaceAgentSummary = { id: string, displayName: string, isDefault: boolean, description?: string | null, };
 
 export type WorkspaceDetails = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, 
 /**
@@ -485,7 +485,11 @@ export type WorkspaceDetails = { workspaceId: string, kind: string, title: strin
  * config (the canonical store). Disjoint from
  * `selected_mcp_server_ids`, which is the effective enabled set.
  */
-disabledMcpServerIds: Array<string>, session: AssistantSession | null, runs: Array<AssistantRun>, memories: Array<WorkspaceFileEntry>, 
+disabledMcpServerIds: Array<string>, session: AssistantSession | null, 
+/**
+ * The newest run and the active run, if different; never the full history.
+ */
+runs: Array<AssistantRun>, memories: Array<WorkspaceFileEntry>, 
 /**
  * True recursive artifact count for the workspace root, independent of
  * any list cap. The artifacts panel lazy-loads its tree one directory

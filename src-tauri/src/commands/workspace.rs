@@ -207,6 +207,7 @@ pub struct WorkspaceDetails {
     pub disabled_mcp_server_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<AssistantSession>,
+    /// The newest run and the active run, if different; never the full history.
     #[serde(default)]
     pub runs: Vec<AssistantRun>,
     #[serde(default)]
@@ -281,7 +282,6 @@ pub struct WorkspaceAgentResponse {
     pub workspace_id: String,
     pub agent_definition_id: String,
     pub display_name: String,
-    pub role: String,
     pub enabled: bool,
     pub is_default: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1115,12 +1115,6 @@ pub(crate) fn resolve_workspace_descriptor(
         root_path: Some(root_path),
         provider_connection_ids: manager
             .map(|agent| agent.provider_connection_ids.clone())
-            .or_else(|| {
-                config
-                    .preferred_provider_connection_id
-                    .clone()
-                    .map(|id| vec![id])
-            })
             .unwrap_or_default(),
         selected_mcp_server_ids,
         disabled_mcp_server_ids,
@@ -1275,7 +1269,6 @@ fn workspace_agent_response_from_row(
         workspace_id: row.workspace_id,
         agent_definition_id: row.agent_definition_id,
         display_name,
-        role: row.role,
         enabled: row.enabled,
         is_default: default_workspace_agent_id == Some(row.id.as_str()),
         agent_name,
@@ -1364,13 +1357,8 @@ pub(crate) fn workspace_agent_summaries_from(
         .into_iter()
         .map(|row| workspace_agent_response_from_row(row, default_workspace_agent_id))
         .map(|agent| WorkspaceAgentSummary {
-            // Phase 1.5: the LLM-visible "agent id" for inter-agent calls is the
-            // workspace-local row id. The legacy global `agent_definition_id`
-            // column is no longer surfaced (and will be dropped in Phase 1.7).
-            agent_definition_id: agent.id.clone(),
             id: agent.id,
             display_name: agent.display_name,
-            role: agent.role,
             is_default: agent.is_default,
             description: concise_agent_description(agent.agent_description),
         })
@@ -1488,9 +1476,9 @@ async fn workspace_details(
     let provider_selection = resolve_workspace_provider_selection(state, &descriptor)?;
 
     let session = find_workspace_session(&workspace_pool, state, &descriptor).await?;
-    // One small row each, and the workspace header reads them on every poll.
+    // Bounded to the newest and active run: the header polls this.
     let runs = match &session {
-        Some(session) => repository::list_runs(&workspace_pool, &session.id).await?,
+        Some(session) => repository::current_runs(&workspace_pool, &session.id).await?,
         None => Vec::new(),
     };
     // Cheap single-table query, so it rides along even on lightweight polls —
@@ -2632,6 +2620,9 @@ pub async fn workspace_update_session_mcp(
     update_main_mcp_selection(state.inner(), &request)
 }
 
+/// Returned by commands that write the Main's settings when there is no Main.
+const NO_MAIN_AGENT: &str = "Set up a main agent for this workspace first.";
+
 fn update_main_mcp_selection(
     state: &AppState,
     request: &WorkspaceUpdateMcpRequest,
@@ -2641,7 +2632,7 @@ fn update_main_mcp_selection(
         let main = config
             .main_agent
             .as_mut()
-            .ok_or_else(|| "Set up a main agent for this workspace first.".to_string())?;
+            .ok_or_else(|| NO_MAIN_AGENT.to_string())?;
         main.selected_mcp_servers = enabled_mcp_ids
             .iter()
             .map(|id| workspace_config::McpRef {
@@ -2661,24 +2652,32 @@ fn update_main_mcp_selection(
     Ok(())
 }
 
-/// Set the preferred provider connection for a workspace.
+/// Set the manager agent's provider connection.
 #[tauri::command]
 pub async fn workspace_set_provider(
     workspace_id: String,
     provider_connection_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-    state.update_workspace_config(&workspace_id, |config| {
-        config.preferred_provider_connection_id = Some(provider_connection_id.clone());
-        if let Some(manager) = config.main_agent.as_mut() {
-            manager.provider_connection_ids = vec![provider_connection_id];
-            manager.updated_at = now;
-        }
+    set_main_provider(state.inner(), &workspace_id, provider_connection_id)
+}
+
+fn set_main_provider(
+    state: &AppState,
+    workspace_id: &str,
+    provider_connection_id: String,
+) -> Result<(), String> {
+    state.update_workspace_config(workspace_id, |config| {
+        let main = config
+            .main_agent
+            .as_mut()
+            .ok_or_else(|| NO_MAIN_AGENT.to_string())?;
+        main.provider_connection_ids = vec![provider_connection_id];
+        let now = chrono::Utc::now().timestamp_millis();
+        main.updated_at = now;
         config.updated_at = now;
         Ok(())
     })?;
-
     Ok(())
 }
 
@@ -2981,8 +2980,7 @@ pub async fn workspace_fork(
         main_agent,
         assignments,
         filesystem_grants: forkable_grants(&source_config.filesystem_grants, &source_root),
-        // Carries version + preferred_provider_connection_id (+ any future
-        // top-level config fields) over unchanged.
+        // Carries version (+ any future top-level config fields) over unchanged.
         ..source_config.clone()
     };
 
@@ -5431,6 +5429,32 @@ mod tests {
             .expect("drop main");
         let error = update_main_mcp_selection(&workspace.state, &request).unwrap_err();
         assert!(error.contains("main agent"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn provider_pick_writes_the_main_and_fails_without_a_main() {
+        let workspace = DetailsWorkspace::new().await;
+        set_main_provider(&workspace.state, DETAILS_WORKSPACE_ID, "conn-b".into())
+            .expect("set provider");
+        let (config, _) = workspace
+            .state
+            .resolve_workspace_roster(DETAILS_WORKSPACE_ID)
+            .expect("config");
+        assert_eq!(
+            config.main_agent.expect("main").provider_connection_ids,
+            vec!["conn-b".to_string()]
+        );
+
+        workspace
+            .state
+            .update_workspace_config(DETAILS_WORKSPACE_ID, |config| {
+                config.main_agent = None;
+                Ok(())
+            })
+            .expect("drop main");
+        let error =
+            set_main_provider(&workspace.state, DETAILS_WORKSPACE_ID, "conn-c".into()).unwrap_err();
+        assert_eq!(error, NO_MAIN_AGENT);
     }
 
     /// The command's own wiring: the file walk is opt-in, and the opting in

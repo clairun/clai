@@ -33,6 +33,7 @@ export interface PendingAskUser {
 export interface SessionState {
   session: AssistantSession;
   messages: AssistantMessage[];
+  /** Newest + active run from the backend plus runs upserted by live events; not the full history. */
   runs: AssistantRun[];
   toolCalls: ToolInvocation[];
   /** True while a run is queued/running/waiting_for_tool. Drives the chat activity indicator. */

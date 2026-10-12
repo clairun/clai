@@ -478,17 +478,17 @@ async fn test_create_and_get_run() {
     assert_eq!(fetched.connection_id, "conn-1");
 }
 
-#[tokio::test]
-async fn test_list_runs_ordered_by_started_at_desc() {
-    let (_tmp, pool) = workspace_pool().await;
-
-    let session = create_session(&pool, sample_context()).await.unwrap();
-
-    let run1 = create_run(
-        &pool,
+async fn insert_run_at(
+    pool: &crate::db::DbPool,
+    session_id: &str,
+    status: RunStatus,
+    started_at: i64,
+) -> String {
+    let run = create_run(
+        pool,
         CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Completed,
+            session_id: session_id.to_string(),
+            status,
             trigger: RunTrigger::UserMessage,
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
@@ -498,28 +498,59 @@ async fn test_list_runs_ordered_by_started_at_desc() {
     )
     .await
     .unwrap();
+    sqlx::query("UPDATE assistant_runs SET started_at = ? WHERE id = ?")
+        .bind(started_at)
+        .bind(&run.id)
+        .execute(pool)
+        .await
+        .unwrap();
+    run.id
+}
 
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+async fn current_run_ids(pool: &crate::db::DbPool, session_id: &str) -> Vec<String> {
+    current_runs(pool, session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|run| run.id)
+        .collect()
+}
 
-    let run2 = create_run(
-        &pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Failed,
-            trigger: RunTrigger::UserMessage,
-            connection_id: "c1".to_string(),
-            protocol_id: "openai".to_string(),
-            model_id: "gpt-4".to_string(),
-            error: Some("Timeout".to_string()),
-        },
-    )
-    .await
-    .unwrap();
+#[tokio::test]
+async fn test_current_runs_returns_latest_and_older_active_run() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
-    let runs = list_runs(&pool, &session.id).await.unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].id, run2.id); // newest first
-    assert_eq!(runs[1].id, run1.id);
+    insert_run_at(&pool, &session.id, RunStatus::Completed, 1).await;
+    let running = insert_run_at(&pool, &session.id, RunStatus::Running, 2).await;
+    let latest = insert_run_at(&pool, &session.id, RunStatus::Completed, 3).await;
+
+    assert_eq!(current_run_ids(&pool, &session.id).await, [latest, running]);
+}
+
+#[tokio::test]
+async fn test_current_runs_returns_only_latest_when_idle() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
+    assert!(current_run_ids(&pool, &session.id).await.is_empty());
+
+    for started_at in 1..=2 {
+        insert_run_at(&pool, &session.id, RunStatus::Completed, started_at).await;
+    }
+    let latest = insert_run_at(&pool, &session.id, RunStatus::Failed, 3).await;
+
+    assert_eq!(current_run_ids(&pool, &session.id).await, [latest]);
+}
+
+#[tokio::test]
+async fn test_current_runs_lists_active_latest_run_once() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
+
+    insert_run_at(&pool, &session.id, RunStatus::Completed, 1).await;
+    let active = insert_run_at(&pool, &session.id, RunStatus::Queued, 2).await;
+
+    assert_eq!(current_run_ids(&pool, &session.id).await, [active]);
 }
 
 #[tokio::test]
@@ -658,7 +689,7 @@ async fn test_full_session_lifecycle() {
         .unwrap();
 
     // 5. Verify everything is linked
-    let runs = list_runs(&pool, &session.id).await.unwrap();
+    let runs = current_runs(&pool, &session.id).await.unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, RunStatus::Completed);
 

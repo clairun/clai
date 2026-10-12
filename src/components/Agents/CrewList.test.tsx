@@ -19,7 +19,6 @@ const agent = (over: Partial<WorkspaceAgentResponse>): WorkspaceAgentResponse =>
   workspaceId: 'ws-1',
   agentDefinitionId: 'def',
   displayName: 'Agent',
-  role: 'member',
   enabled: true,
   isDefault: false,
   agentName: null,
@@ -60,7 +59,6 @@ const MAIN = agent({
   id: 'wa-main',
   agentDefinitionId: 'def-main',
   isDefault: true,
-  role: 'manager',
 });
 const REVIEWER = agent({
   id: 'wa-review',

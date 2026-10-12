@@ -90,8 +90,8 @@ pub(crate) fn build_system_prompt(
                     .filter(|d| !d.trim().is_empty())
                     .unwrap_or("(no description)");
                 prompt.push_str(&format!(
-                    "- **{}** ({}) — `workspaceAgentId`: `{}` — {}\n",
-                    agent.display_name, agent.role, agent.id, summary
+                    "- **{}** (member) — `workspaceAgentId`: `{}` — {}\n",
+                    agent.display_name, agent.id, summary
                 ));
             }
             // Self-tasking is offered below as the way to parallelize work, so
@@ -265,7 +265,7 @@ pub(crate) fn build_system_prompt(
             let role = if agent.is_default {
                 "manager"
             } else {
-                agent.role.as_str()
+                "member"
             };
             if let Some(description) = agent
                 .description
@@ -1162,17 +1162,13 @@ mod tests {
             workspace_agents: vec![
                 WorkspaceAgentSummary {
                     id: "workspace-agent-manager".to_string(),
-                    agent_definition_id: "manager-definition".to_string(),
                     display_name: "Manager".to_string(),
-                    role: "manager".to_string(),
                     is_default: true,
                     description: Some("Coordinates workspace tasks.".to_string()),
                 },
                 WorkspaceAgentSummary {
                     id: "workspace-agent-reviewer".to_string(),
-                    agent_definition_id: "reviewer-definition".to_string(),
                     display_name: "Code Reviewer".to_string(),
-                    role: "member".to_string(),
                     is_default: false,
                     description: Some("Reviews source changes.".to_string()),
                 },
@@ -1221,12 +1217,7 @@ mod tests {
     fn manager_summary() -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             id: "workspace-agent-manager".to_string(),
-            // Deliberately different from `id`: the roster must render the
-            // workspace agent id (what `workspace_assignTask` matches on),
-            // and identical fixtures would hide a swap between the two.
-            agent_definition_id: "manager-definition".to_string(),
             display_name: "Manager".to_string(),
-            role: "manager".to_string(),
             is_default: true,
             description: Some("Coordinates workspace tasks.".to_string()),
         }
@@ -1235,9 +1226,7 @@ mod tests {
     fn member_summary() -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             id: "workspace-agent-reviewer".to_string(),
-            agent_definition_id: "reviewer-definition".to_string(),
             display_name: "Code Reviewer".to_string(),
-            role: "member".to_string(),
             is_default: false,
             description: Some("Reviews source changes.".to_string()),
         }

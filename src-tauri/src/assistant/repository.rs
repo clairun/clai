@@ -754,21 +754,32 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
     Ok(run)
 }
 
-pub async fn list_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
-    let rows = sqlx::query(
+/// At most two rows, newest first: the newest run and, if different, the
+/// newest non-terminal run. Older history is never returned.
+pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
+    let latest = sqlx::query(
         r#"
         SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
         "#,
     )
     .bind(session_id)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("Failed to list assistant runs: {}", e))?;
+    .map_err(|e| format!("Failed to load latest assistant run: {}", e))?;
+    let Some(latest) = latest.as_ref().map(map_run_row).transpose()? else {
+        return Ok(Vec::new());
+    };
 
-    rows.iter().map(map_run_row).collect()
+    let active = get_active_run(pool, session_id).await?;
+    let mut runs = vec![latest];
+    if let Some(active) = active.filter(|active| active.id != runs[0].id) {
+        runs.push(active);
+    }
+    Ok(runs)
 }
 
 /// Whether the session currently has a non-terminal run (queued, running,

@@ -74,9 +74,7 @@ pub enum RunTrigger {
 #[ts(export, export_to = "bindings.ts")]
 pub struct WorkspaceAgentSummary {
     pub id: String,
-    pub agent_definition_id: String,
     pub display_name: String,
-    pub role: String,
     pub is_default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,

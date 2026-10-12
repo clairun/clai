@@ -8,7 +8,6 @@ const agent = (id: string, over: Partial<WorkspaceAgentResponse> = {}): Workspac
   workspaceId: 'ws-1',
   agentDefinitionId: `def-${id}`,
   displayName: id,
-  role: 'member',
   enabled: true,
   isDefault: false,
   agentName: null,

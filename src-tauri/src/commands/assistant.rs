@@ -206,6 +206,8 @@ fn build_message_page(
     (newest_first, has_more, next_cursor)
 }
 
+/// Returns only the session's newest run plus its active run (if older),
+/// newest first — not the run history.
 #[tauri::command]
 pub async fn assistant_list_runs(
     workspace_id: String,
@@ -214,7 +216,7 @@ pub async fn assistant_list_runs(
 ) -> Result<Vec<AssistantRun>, String> {
     let (target_pool, _session) =
         session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
-    repository::list_runs(&target_pool, &session_id).await
+    repository::current_runs(&target_pool, &session_id).await
 }
 
 #[tauri::command]

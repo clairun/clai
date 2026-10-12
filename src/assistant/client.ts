@@ -100,6 +100,7 @@ export async function editQueuedMessage(
   return invoke('assistant_edit_queued_message', { workspaceId, sessionId, messageId, text });
 }
 
+/** Only the newest run plus the active run (if older), newest first — not the run history. */
 export async function listRuns(workspaceId: string, sessionId: string): Promise<AssistantRun[]> {
   return invoke('assistant_list_runs', { workspaceId, sessionId });
 }

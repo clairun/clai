@@ -397,6 +397,23 @@ mod tests {
         assert!(error.contains(MEMBER), "{error}");
     }
 
+    /// The roster's default entry carries the Main's local id, so only a run
+    /// as the Main gets the manager tools.
+    #[test]
+    fn manager_tools_are_offered_only_to_the_main_agent() {
+        let fx = fixture(true);
+        assign_member(&fx, Vec::new());
+        let offers_assign = |agent_id: &str| {
+            let run = resolve_run_context(&fx.state, WS, Some(agent_id)).expect("resolve");
+            crate::assistant::tools::registry::available_tools(&run, &[])
+                .iter()
+                .any(|tool| tool.name == "workspace_assignTask")
+        };
+
+        assert!(offers_assign(MAIN));
+        assert!(!offers_assign(MEMBER));
+    }
+
     #[test]
     fn run_context_without_main_has_web_and_no_mcp() {
         let fx = fixture(false);

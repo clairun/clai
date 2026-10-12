@@ -189,7 +189,6 @@ const formatSchedulePill = (details: WorkspaceDetails | null): string | null => 
 
 const getLastRunInfo = (runs: AssistantRun[] | null | undefined): AssistantRun | null => {
   if (!runs || runs.length === 0) return null;
-  // runs are sorted newest first from backend
   const last = [...runs].sort(
     (a, b) => (toNumber(b.startedAt) || 0) - (toNumber(a.startedAt) || 0)
   )[0];
@@ -2270,8 +2269,8 @@ const Workspace = () => {
   });
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
-  // `details.runs` is sorted newest-first by the backend; pick the first
-  // non-terminal entry so we cancel the most recent activation.
+  // `details.runs` holds only the newest run and the newest non-terminal
+  // run (if older), so the first non-terminal entry is the one to cancel.
   const activeRun =
     (details?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
