@@ -1104,8 +1104,8 @@ const WorkspaceHeader = ({
   // Title from the rail's workspace list, shown until `details` land.
   listTitle: string | undefined;
   isGenericWorkspace: boolean;
-  // Total messages in the conversation (including not-yet-loaded history
-  // and rotation ancestors), not just the loaded window.
+  // Total messages in the conversation (including not-yet-loaded history),
+  // not just the loaded window.
   messageCount: number;
   memories: WorkspaceFileEntry[];
   artifactCount: number;
@@ -1880,7 +1880,6 @@ const Workspace = () => {
               assistantClient.loadSessionMessagesPage({
                 sessionId: nextDetails.session.id,
                 limit: MESSAGE_PAGE_LIMIT,
-                includeAncestors: true,
               }),
               assistantClient.listRuns(nextDetails.session.id),
             ]);
@@ -2157,7 +2156,6 @@ const Workspace = () => {
         sessionId,
         before: current.olderMessageCursor,
         limit: MESSAGE_PAGE_LIMIT,
-        includeAncestors: true,
       })
       .then((page) => {
         useAssistantStore

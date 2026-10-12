@@ -586,17 +586,17 @@ describe('ChatMessageList', () => {
     );
   });
 
-  it('fetches an ancestor-session call from its own session', async () => {
-    fullResults.set('tc-1', { exitCode: 0, stdout: 'from the parent', stderr: '' });
+  it("fetches the call's result using the call's own sessionId", async () => {
+    fullResults.set('tc-1', { exitCode: 0, stdout: 'from the other session', stderr: '' });
     const { messages, toolCalls } = singleCall({
       toolName: 'bash_exec',
       params: { command: 'ls' },
-      sessionId: 'sess-parent',
+      sessionId: 'sess-other',
     });
     render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
     fireEvent.click(screen.getByText('Bash'));
-    expect(await screen.findByText('from the parent')).toBeInTheDocument();
-    expect(getToolCallResult).toHaveBeenCalledWith('sess-parent', 'tc-1');
+    expect(await screen.findByText('from the other session')).toBeInTheDocument();
+    expect(getToolCallResult).toHaveBeenCalledWith('sess-other', 'tc-1');
   });
 
   it('offers Retry when the output fails to load, and recovers', async () => {
@@ -745,10 +745,10 @@ describe('ChatMessageList', () => {
       );
     });
 
-    it('fetches an ancestor-session input from its own session and retries a failure', async () => {
+    it("fetches the input using the call's own sessionId and retries a failure", async () => {
       getToolCallInput.mockRejectedValueOnce(new Error('database is locked'));
-      fullInputs.set('tc-1', { path: 'report.md', content: 'from the parent' });
-      const { messages, toolCalls } = writeCall({ sessionId: 'sess-parent' });
+      fullInputs.set('tc-1', { path: 'report.md', content: 'from the other session' });
+      const { messages, toolCalls } = writeCall({ sessionId: 'sess-other' });
       render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
       fireEvent.click(screen.getByText('Write'));
       fireEvent.click(screen.getByRole('button', { name: 'Input' }));
@@ -756,10 +756,10 @@ describe('ChatMessageList', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
       await waitFor(() =>
-        expect(markdownText().some((text) => text.includes('from the parent'))).toBe(true)
+        expect(markdownText().some((text) => text.includes('from the other session'))).toBe(true)
       );
       expect(getToolCallInput).toHaveBeenCalledTimes(2);
-      expect(getToolCallInput).toHaveBeenLastCalledWith('sess-parent', 'tc-1');
+      expect(getToolCallInput).toHaveBeenLastCalledWith('sess-other', 'tc-1');
     });
 
     it('waits for completion before fetching the input an Output view draws from', async () => {

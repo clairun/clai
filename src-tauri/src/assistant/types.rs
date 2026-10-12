@@ -282,10 +282,9 @@ pub struct AssistantMessagePage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<AssistantMessageCursor>,
     pub has_more: bool,
-    /// Total number of messages in the conversation (the requested session
-    /// plus, when ancestors were included, its whole rotation chain) — not
-    /// just this page. Lets the UI show a true conversation count while only
-    /// a window of messages is loaded.
+    /// Total number of messages in the session — not just this page. Lets the
+    /// UI show a true conversation count while only a window of messages is
+    /// loaded.
     #[serde(default)]
     pub total_count: u32,
 }

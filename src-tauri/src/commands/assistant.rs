@@ -29,8 +29,6 @@ pub struct CreateAssistantSessionRequest {
     pub title: Option<String>,
     #[serde(default)]
     pub context: SessionContext,
-    #[serde(default)]
-    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,8 +66,6 @@ pub struct LoadSessionMessagesPageRequest {
     pub before: Option<AssistantMessageCursor>,
     #[serde(default)]
     pub limit: Option<u32>,
-    #[serde(default)]
-    pub include_ancestors: bool,
 }
 
 const DEFAULT_MESSAGE_PAGE_LIMIT: u32 = 100;
@@ -167,17 +163,6 @@ pub async fn assistant_create_session(
     app: AppHandle,
 ) -> Result<AssistantSession, String> {
     let target_pool = pool_for_new_session(state.inner(), &request.context).await?;
-    if let Some(parent_session_id) = request.parent_session_id.as_deref() {
-        if repository::get_session(&target_pool, parent_session_id)
-            .await?
-            .is_none()
-        {
-            return Err(format!(
-                "Parent assistant session not found in this workspace: {}",
-                parent_session_id
-            ));
-        }
-    }
     let session = repository::create_session(
         &target_pool,
         CreateSessionParams {
@@ -187,11 +172,6 @@ pub async fn assistant_create_session(
         },
     )
     .await?;
-
-    if let Some(parent_session_id) = request.parent_session_id.as_deref() {
-        repository::create_session_rotation_link(&target_pool, &session.id, parent_session_id)
-            .await?;
-    }
 
     emit_event(
         &app,
@@ -281,10 +261,6 @@ pub async fn assistant_load_session_messages(
 }
 
 #[tauri::command]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 105 lines against a 100-line budget; split it, do not raise the budget"
-)]
 pub async fn assistant_load_session_messages_page(
     request: LoadSessionMessagesPageRequest,
     state: State<'_, AppState>,
@@ -294,81 +270,18 @@ pub async fn assistant_load_session_messages_page(
         .limit
         .unwrap_or(DEFAULT_MESSAGE_PAGE_LIMIT)
         .clamp(1, MAX_MESSAGE_PAGE_LIMIT) as usize;
-    let mut remaining = limit;
-    let mut cursor = request.before;
-    let mut current_session_id = cursor
+    let before = request
+        .before
         .as_ref()
-        .map(|cursor| cursor.session_id.clone())
-        .unwrap_or_else(|| request.session_id.clone());
-    let mut segments: Vec<Vec<AssistantMessage>> = Vec::new();
-    let mut next_cursor: Option<AssistantMessageCursor> = None;
-    let mut has_more = false;
-
-    while remaining > 0 {
-        let before = cursor
-            .as_ref()
-            .filter(|cursor| cursor.session_id == current_session_id)
-            .map(|cursor| (cursor.created_at, cursor.message_id.as_str()));
-        let mut newest_first = repository::list_messages_before(
-            &target_pool,
-            &current_session_id,
-            before,
-            remaining as i64 + 1,
-        )
-        .await?;
-
-        if newest_first.len() > remaining {
-            newest_first.truncate(remaining);
-            has_more = true;
-        }
-
-        let mut segment = newest_first;
-        segment.reverse();
-        if let Some(oldest) = segment.first() {
-            next_cursor = Some(AssistantMessageCursor {
-                session_id: oldest.session_id.clone(),
-                created_at: oldest.created_at,
-                message_id: oldest.id.clone(),
-            });
-        }
-        remaining = remaining.saturating_sub(segment.len());
-        if !segment.is_empty() {
-            segments.push(segment);
-        }
-
-        if has_more || !request.include_ancestors {
-            break;
-        }
-
-        if remaining == 0 {
-            if repository::parent_session_id(&target_pool, &current_session_id)
-                .await?
-                .is_some()
-            {
-                has_more = true;
-            }
-            break;
-        }
-
-        match repository::parent_session_id(&target_pool, &current_session_id).await? {
-            Some(parent_session_id) => {
-                current_session_id = parent_session_id;
-                cursor = None;
-            }
-            None => {
-                next_cursor = None;
-                break;
-            }
-        }
-    }
-
-    let mut messages = Vec::new();
-    for segment in segments.into_iter().rev() {
-        messages.extend(segment);
-    }
-    if messages.is_empty() || !has_more {
-        next_cursor = None;
-    }
+        .map(|cursor| (cursor.created_at, cursor.message_id.as_str()));
+    let newest_first = repository::list_messages_before(
+        &target_pool,
+        &request.session_id,
+        before,
+        limit as i64 + 1,
+    )
+    .await?;
+    let (messages, has_more, next_cursor) = build_message_page(newest_first, limit);
 
     let mut tool_call_ids: Vec<String> = Vec::new();
     for message in &messages {
@@ -388,15 +301,7 @@ pub async fn assistant_load_session_messages_page(
     }
     let tool_calls = repository::list_tool_calls_by_ids(&target_pool, &tool_call_ids).await?;
 
-    // Counted from the *requested* session (not the cursor's), so the total
-    // always covers the full conversation regardless of how deep into the
-    // chain pagination has walked.
-    let total_count = repository::count_session_chain_messages(
-        &target_pool,
-        &request.session_id,
-        request.include_ancestors,
-    )
-    .await?;
+    let total_count = repository::count_session_messages(&target_pool, &request.session_id).await?;
 
     Ok(display::page(AssistantMessagePage {
         messages,
@@ -405,6 +310,27 @@ pub async fn assistant_load_session_messages_page(
         has_more,
         total_count,
     }))
+}
+
+/// Turns `limit + 1` newest-first rows into an ascending page: the extra row
+/// only signals `has_more`, and the cursor points at the oldest returned row.
+fn build_message_page(
+    mut newest_first: Vec<AssistantMessage>,
+    limit: usize,
+) -> (Vec<AssistantMessage>, bool, Option<AssistantMessageCursor>) {
+    let has_more = newest_first.len() > limit;
+    newest_first.truncate(limit);
+    newest_first.reverse();
+    let next_cursor =
+        newest_first
+            .first()
+            .filter(|_| has_more)
+            .map(|oldest| AssistantMessageCursor {
+                session_id: oldest.session_id.clone(),
+                created_at: oldest.created_at,
+                message_id: oldest.id.clone(),
+            });
+    (newest_first, has_more, next_cursor)
 }
 
 #[tauri::command]
@@ -1118,6 +1044,54 @@ mod tests {
             width: None,
             height: None,
         }
+    }
+
+    fn message(created_at: i64) -> AssistantMessage {
+        AssistantMessage {
+            id: format!("msg-{created_at}"),
+            session_id: "sess-1".into(),
+            role: crate::assistant::types::MessageRole::User,
+            content: Vec::new(),
+            created_at,
+            provider_metadata: None,
+        }
+    }
+
+    fn ids(page: &[AssistantMessage]) -> Vec<&str> {
+        page.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[test]
+    fn build_message_page_marks_has_more_from_the_extra_row() {
+        let newest_first = vec![message(5), message(4), message(3), message(2)];
+        let (page, has_more, cursor) = build_message_page(newest_first, 3);
+        assert!(has_more);
+        assert_eq!(ids(&page), ["msg-3", "msg-4", "msg-5"]);
+        assert_eq!(
+            cursor,
+            Some(AssistantMessageCursor {
+                session_id: "sess-1".into(),
+                created_at: 3,
+                message_id: "msg-3".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn build_message_page_without_extra_row_is_the_last_page() {
+        let newest_first = vec![message(3), message(2), message(1)];
+        let (page, has_more, cursor) = build_message_page(newest_first, 3);
+        assert!(!has_more);
+        assert_eq!(cursor, None);
+        assert_eq!(ids(&page), ["msg-1", "msg-2", "msg-3"]);
+    }
+
+    #[test]
+    fn build_message_page_of_empty_session() {
+        let (page, has_more, cursor) = build_message_page(Vec::new(), 3);
+        assert!(page.is_empty());
+        assert!(!has_more);
+        assert_eq!(cursor, None);
     }
 
     #[test]

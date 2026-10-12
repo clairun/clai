@@ -66,7 +66,6 @@ export default function WorkspaceTaskTranscriptPanel({
           assistantClient.loadSessionMessagesPage({
             sessionId,
             limit: MESSAGE_PAGE_LIMIT,
-            includeAncestors: true,
           }),
           assistantClient.listRuns(sessionId),
         ]);
@@ -136,7 +135,6 @@ export default function WorkspaceTaskTranscriptPanel({
         sessionId,
         before: current.olderMessageCursor,
         limit: MESSAGE_PAGE_LIMIT,
-        includeAncestors: true,
       })
       .then((page) => {
         useAssistantStore

@@ -32,7 +32,6 @@ export async function createSession(params: {
   kind?: 'interactive' | 'background_job';
   title?: string;
   context?: Record<string, unknown>;
-  parentSessionId?: string | null;
 }): Promise<AssistantSession> {
   return invoke('assistant_create_session', { request: params });
 }
@@ -57,14 +56,12 @@ export async function loadSessionMessagesPage(params: {
   sessionId: string;
   before?: AssistantMessageCursor | null;
   limit?: number;
-  includeAncestors?: boolean;
 }): Promise<AssistantMessagePage> {
   return invoke('assistant_load_session_messages_page', {
     request: {
       sessionId: params.sessionId,
       before: params.before ?? null,
       limit: params.limit ?? null,
-      includeAncestors: params.includeAncestors ?? true,
     },
   });
 }
@@ -134,8 +131,9 @@ export async function listToolCalls(
 
 /**
  * Full result of one tool call. Live events and message pages carry only a
- * compact view of it, so the expanded row fetches the rest on demand. Pass the
- * call's own `sessionId`: an ancestor session's call lives in that session.
+ * compact view of it, so the expanded row fetches the rest on demand. The
+ * lookup is keyed on the tool call's own `sessionId`, not the session being
+ * viewed.
  */
 export async function getToolCallResult(sessionId: string, toolCallId: string): Promise<unknown> {
   return invoke('assistant_get_tool_call_result', { sessionId, toolCallId });
@@ -143,7 +141,7 @@ export async function getToolCallResult(sessionId: string, toolCallId: string): 
 
 /**
  * Full input of one tool call; events and message pages carry a projection of
- * it. Pass the call's own `sessionId`, as for `getToolCallResult`.
+ * it. Keyed on the tool call's own `sessionId`, as for `getToolCallResult`.
  */
 export async function getToolCallInput(sessionId: string, toolCallId: string): Promise<unknown> {
   return invoke('assistant_get_tool_call_input', { sessionId, toolCallId });

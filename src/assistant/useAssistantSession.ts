@@ -79,7 +79,6 @@ export function useAssistantSession(tabId: string) {
             client.loadSessionMessagesPage({
               sessionId: matching.id,
               limit: 100,
-              includeAncestors: true,
             }),
             client.listRuns(matching.id),
           ]);

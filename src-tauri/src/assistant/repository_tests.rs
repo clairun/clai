@@ -186,114 +186,41 @@ async fn test_delete_session() {
 }
 
 #[tokio::test]
-async fn test_create_session_rotation_link_loads_parent() {
+async fn test_count_session_messages() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let parent = create_session(
+    let session = create_session(
         &pool,
         CreateSessionParams {
             kind: SessionKind::Interactive,
-            title: Some("Parent".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-    let child = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Child".to_string()),
+            title: Some("Counted".to_string()),
             context: sample_context(),
         },
     )
     .await
     .unwrap();
 
-    assert_eq!(parent_session_id(&pool, &child.id).await.unwrap(), None);
+    assert_eq!(count_session_messages(&pool, &session.id).await.unwrap(), 0);
 
-    create_session_rotation_link(&pool, &child.id, &parent.id)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        parent_session_id(&pool, &child.id).await.unwrap(),
-        Some(parent.id)
-    );
-}
-
-#[tokio::test]
-async fn test_count_session_chain_messages() {
-    let (_tmp, pool) = workspace_pool().await;
-
-    // grandparent ← parent ← child rotation chain, with messages at each level.
-    let mut chain_ids = Vec::new();
-    for title in ["Grandparent", "Parent", "Child"] {
-        let session = create_session(
+    for n in 0..3 {
+        create_message(
             &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: Some(title.to_string()),
-                context: sample_context(),
+            CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: format!("msg {}", n),
+                }],
+                provider_metadata: None,
             },
         )
         .await
         .unwrap();
-        chain_ids.push(session.id);
-    }
-    create_session_rotation_link(&pool, &chain_ids[1], &chain_ids[0])
-        .await
-        .unwrap();
-    create_session_rotation_link(&pool, &chain_ids[2], &chain_ids[1])
-        .await
-        .unwrap();
-
-    // 3 messages in grandparent, 2 in parent, 1 in child.
-    for (idx, session_id) in chain_ids.iter().enumerate() {
-        for n in 0..(3 - idx) {
-            create_message(
-                &pool,
-                CreateMessageParams {
-                    session_id: session_id.clone(),
-                    role: MessageRole::User,
-                    content: vec![ContentPart::Text {
-                        text: format!("msg {}", n),
-                    }],
-                    provider_metadata: None,
-                },
-            )
-            .await
-            .unwrap();
-        }
     }
 
-    // Child alone vs. child + ancestors.
-    assert_eq!(
-        count_session_chain_messages(&pool, &chain_ids[2], false)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        count_session_chain_messages(&pool, &chain_ids[2], true)
-            .await
-            .unwrap(),
-        6
-    );
-    // Mid-chain: parent + grandparent, not the child below it.
-    assert_eq!(
-        count_session_chain_messages(&pool, &chain_ids[1], true)
-            .await
-            .unwrap(),
-        5
-    );
+    assert_eq!(count_session_messages(&pool, &session.id).await.unwrap(), 3);
     // Unknown session: zero, not an error.
-    assert_eq!(
-        count_session_chain_messages(&pool, "missing", true)
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(count_session_messages(&pool, "missing").await.unwrap(), 0);
 }
 
 #[tokio::test]

@@ -4191,9 +4191,7 @@ async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &
         return 0;
     };
 
-    // COUNT(*) instead of loading every row just to take .len(). Counts the
-    // head session only (unchanged behavior); ancestors are excluded.
-    repository::count_session_chain_messages(pool, &session.id, false)
+    repository::count_session_messages(pool, &session.id)
         .await
         .map(|n| n as i64)
         .unwrap_or(0)

@@ -48,14 +48,14 @@ export interface SessionState {
    *  the session-scoped `deliveredQueuedMessageIds` tombstones so a delivery
    *  that raced hydration or the send round trip cannot be undone. */
   queuedMessageIds: string[];
-  /** Cursor for loading older messages. Can point at an ancestor session. */
+  /** Cursor for loading older messages. */
   olderMessageCursor: AssistantMessageCursor | null;
   hasOlderMessages: boolean;
   isLoadingOlderMessages: boolean;
-  /** Total messages in the whole conversation (session + rotation ancestors),
-   *  not just the loaded window. Seeded from the backend's page responses and
-   *  kept live by add/removeMessage; null until the first page load reports it
-   *  (fall back to messages.length). */
+  /** Total messages in the whole conversation, not just the loaded window.
+   *  Seeded from the backend's page responses and kept live by
+   *  add/removeMessage; null until the first page load reports it (fall back
+   *  to messages.length). */
   totalMessageCount: number | null;
 }
 

@@ -65,10 +65,9 @@ export type AssistantMessageCursor = { sessionId: string, createdAt: bigint, mes
 
 export type AssistantMessagePage = { messages: Array<AssistantMessage>, toolCalls: Array<ToolInvocation>, nextCursor: AssistantMessageCursor | null, hasMore: boolean, 
 /**
- * Total number of messages in the conversation (the requested session
- * plus, when ancestors were included, its whole rotation chain) — not
- * just this page. Lets the UI show a true conversation count while only
- * a window of messages is loaded.
+ * Total number of messages in the session — not just this page. Lets the
+ * UI show a true conversation count while only a window of messages is
+ * loaded.
  */
 totalCount: number, };
 

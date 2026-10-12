@@ -432,82 +432,16 @@ pub async fn list_messages_before(
     rows.iter().map(map_message_row).collect()
 }
 
-pub async fn parent_session_id(
-    pool: &DbPool,
-    child_session_id: &str,
-) -> Result<Option<String>, String> {
-    sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT parent_session_id
-        FROM assistant_session_links
-        WHERE child_session_id = ?
-        "#,
+pub async fn count_session_messages(pool: &DbPool, session_id: &str) -> Result<u32, String> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM assistant_messages WHERE session_id = ?",
     )
-    .bind(child_session_id)
-    .fetch_optional(pool)
+    .bind(session_id)
+    .fetch_one(pool)
     .await
-    .map_err(|e| format!("Failed to load assistant session parent: {}", e))
-}
-
-/// Count every message in a session's conversation: the session itself plus —
-/// when `include_ancestors` is set — all ancestors reachable through rotation
-/// links (compaction/rotation chains). One recursive-CTE round trip; UNION
-/// (not UNION ALL) so a malformed link cycle terminates instead of recursing
-/// forever.
-pub async fn count_session_chain_messages(
-    pool: &DbPool,
-    session_id: &str,
-    include_ancestors: bool,
-) -> Result<u32, String> {
-    let count = if include_ancestors {
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            WITH RECURSIVE chain(session_id) AS (
-                SELECT ?
-                UNION
-                SELECT l.parent_session_id
-                FROM assistant_session_links l
-                JOIN chain c ON l.child_session_id = c.session_id
-            )
-            SELECT COUNT(*)
-            FROM assistant_messages
-            WHERE session_id IN (SELECT session_id FROM chain)
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(pool)
-        .await
-    } else {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assistant_messages WHERE session_id = ?")
-            .bind(session_id)
-            .fetch_one(pool)
-            .await
-    }
     .map_err(|e| format!("Failed to count assistant messages: {}", e))?;
 
     Ok(count.max(0) as u32)
-}
-
-pub async fn create_session_rotation_link(
-    pool: &DbPool,
-    child_session_id: &str,
-    parent_session_id: &str,
-) -> Result<(), String> {
-    sqlx::query(
-        r#"
-        INSERT INTO assistant_session_links
-            (child_session_id, parent_session_id, kind, created_at)
-        VALUES (?, ?, 'rotation', ?)
-        "#,
-    )
-    .bind(child_session_id)
-    .bind(parent_session_id)
-    .bind(now_ms())
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to create assistant session rotation link: {}", e))?;
-
-    Ok(())
 }
 
 pub async fn get_message(
