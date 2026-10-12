@@ -45,11 +45,13 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
   const [isAgent, setIsAgent] = useState(false);
   const [agentMcpServerIds, setAgentMcpServerIds] = useState<string[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState('');
+  const [mcpError, setMcpError] = useState<string | null>(null);
 
   // Load workspace details to determine type and MCP config
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
+    setMcpError(null);
 
     const loadDetails = async () => {
       try {
@@ -60,21 +62,11 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
         if (agent) {
           setAgentMcpServerIds(details?.selectedMcpServerIds || []);
         } else {
-          // The workspace config is the canonical MCP store: the details'
-          // selectedMcpServerIds carries the *effective* (enabled) set and
-          // disabledMcpServerIds the toggled-off remainder; badges show the
-          // union. Mirror the backend's precedence exactly: when a manager
-          // row exists (defaultWorkspaceAgentId is set) the config-derived
-          // lists are authoritative even when empty — a Settings remove-all
-          // must not resurrect the session's stale list. Only manager-less
-          // workspaces, where the config cannot record a selection, fall
-          // back to the session context's enabled list.
-          const configEnabled = details?.selectedMcpServerIds || [];
+          // The Main's config is the only MCP store: selectedMcpServerIds is
+          // the enabled set, disabledMcpServerIds the toggled-off remainder;
+          // badges show the union.
+          const enabled = details?.selectedMcpServerIds || [];
           const disabled = details?.disabledMcpServerIds || [];
-          const enabled =
-            details?.defaultWorkspaceAgentId || configEnabled.length || disabled.length
-              ? configEnabled
-              : details?.session?.context?.mcpServerIds || [];
           setLocalMcpServerIds([...enabled, ...disabled.filter((id) => !enabled.includes(id))]);
           setLocalDisabledIds(disabled);
         }
@@ -153,6 +145,7 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
       const prevDisabled = localDisabledIds;
       setLocalMcpServerIds(attachedIds);
       setLocalDisabledIds(disabledIds);
+      setMcpError(null);
       try {
         // The backend receives the effective (enabled) list plus the
         // disabled remainder, so the toggle persists across restarts and
@@ -164,6 +157,8 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
         );
       } catch (err) {
         console.error('[WorkspaceContextBar] Failed to persist MCP change:', err);
+        // e.g. a workspace without a main agent has nowhere to store the selection.
+        setMcpError(err instanceof Error ? err.message : String(err));
         // Roll back the optimistic update so the badges reflect what the
         // backend actually has — but only if no newer update has replaced
         // this request's state in the meantime (identity check against the
@@ -337,6 +332,12 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
             onClick={() => setShowMcpSelector(true)}
             clickable={true}
           />
+        )}
+
+        {mcpError && (
+          <span className={styles.mcpError} role="alert">
+            {mcpError}
+          </span>
         )}
       </div>
 

@@ -46,7 +46,7 @@ use tauri::Manager;
 use tokio::sync::Mutex as AsyncMutex;
 
 #[doc(hidden)]
-pub use commands::workspace::workspace_agent_runtime_description;
+pub use assistant::run_context::resolve_run_context;
 #[doc(hidden)]
 pub use config::global_agents::{AgentDefinition, AgentSource, ResolvedAgent};
 pub use config::{workspace_config, AppConfig, ConfigManager, SkillSourceConfig, WorkspaceConfig};

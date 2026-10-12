@@ -76,7 +76,7 @@ pub struct ToolExecutionContext {
     pub tool_call_id: Option<ToolCallId>,
     pub cancel_token: CancellationToken,
     pub mcp_server_ids: Vec<String>,
-    pub workspace_root: Option<PathBuf>,
+    pub workspace_root: PathBuf,
     pub automation_id: Option<String>,
     pub workspace_agents: Vec<WorkspaceAgentSummary>,
     pub inter_agent_call_depth: Option<u32>,

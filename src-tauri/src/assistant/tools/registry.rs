@@ -1,19 +1,17 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::assistant::run_context::RunContext;
 use crate::assistant::tools::ask_user::AskUserParams;
 use crate::assistant::tools::workspace_tasks::{
     AssignWorkspaceTaskParams, GetWorkspaceTaskResultParams, ListWorkspaceAgentsParams,
 };
-use crate::assistant::types::{SessionContext, ToolDefinition};
+use crate::assistant::types::ToolDefinition;
 use crate::config::ShellAccessMode;
 
-/// Returns all tool definitions available for the given session context.
-/// Workspace-bound tools require the run's resolved `workspace_root`.
+/// Returns all tool definitions available to a run.
 pub fn available_tools(
-    context: &SessionContext,
-    workspace_root: Option<&Path>,
+    context: &RunContext,
     external_tools: &[ToolDefinition],
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![];
@@ -25,23 +23,18 @@ pub fn available_tools(
         tools.push(ask_user_def());
     }
 
-    let has_workspace = workspace_root.is_some();
-    if has_workspace {
-        tools.push(history_query_def());
-        tools.push(create_vega_chart_def());
-    }
+    tools.push(history_query_def());
+    tools.push(create_vega_chart_def());
 
     // `bash_exec` is the only consumer of a path grant, so with the shell off
     // there is nothing for `fs_request_grant` to unlock: offering it would only
     // invite the agent to ask the user for access it still cannot use.
-    if has_workspace && !matches!(context.execution.shell.mode, ShellAccessMode::Off) {
+    if !matches!(context.execution.shell.mode, ShellAccessMode::Off) {
         tools.push(fs_request_grant_def());
         tools.push(bash_exec_def());
     }
 
-    // Web tools: always available outside a workspace, opt-in inside one.
-    let web_enabled = !has_workspace || context.execution.web.enabled;
-    if web_enabled {
+    if context.execution.web.enabled {
         tools.push(web_search_def());
         tools.push(web_fetch_def());
     }
@@ -244,7 +237,7 @@ fn web_fetch_def() -> ToolDefinition {
     }
 }
 
-fn is_workspace_manager_context(context: &SessionContext) -> bool {
+fn is_workspace_manager_context(context: &RunContext) -> bool {
     let Some(current_agent_definition_id) = context.automation_id.as_deref() else {
         return false;
     };
@@ -309,10 +302,10 @@ mod tests {
 
     #[test]
     fn workspace_tools_use_bash_instead_of_operational_fs_tools() {
-        let mut context = SessionContext::default();
+        let mut context = RunContext::default();
 
-        let names = |context: &SessionContext| {
-            available_tools(context, Some(Path::new("/workspace")), &[])
+        let names = |context: &RunContext| {
+            available_tools(context, &[])
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>()
@@ -336,48 +329,22 @@ mod tests {
         assert!(shell_on.contains(&"fs_request_grant".to_string()));
     }
 
-    fn tool_names(context: &SessionContext, workspace_root: Option<&Path>) -> Vec<String> {
-        available_tools(context, workspace_root, &[])
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect()
-    }
-
     #[test]
-    fn workspace_tools_require_a_resolved_workspace_root() {
-        let mut context = SessionContext::default();
-        context.execution.shell.mode = ShellAccessMode::Restricted;
-        context.execution.web.enabled = false;
+    fn web_tools_are_off_unless_granted() {
+        let mut context = RunContext::default();
+        let has_web = |context: &RunContext| {
+            let names: Vec<String> = available_tools(context, &[])
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            let search = names.contains(&"web_search".to_string());
+            assert_eq!(search, names.contains(&"web_fetch".to_string()));
+            search
+        };
 
-        let without_root = tool_names(&context, None);
-        for name in [
-            "history_query",
-            "create_vega_chart",
-            "bash_exec",
-            "fs_request_grant",
-        ] {
-            assert!(!without_root.contains(&name.to_string()), "{name}");
-        }
-        // Web tools ignore the execution toggle outside a workspace.
-        assert!(without_root.contains(&"web_search".to_string()));
-        assert!(without_root.contains(&"web_fetch".to_string()));
-
-        let with_root = tool_names(&context, Some(Path::new("/workspace")));
-        for name in [
-            "history_query",
-            "create_vega_chart",
-            "bash_exec",
-            "fs_request_grant",
-        ] {
-            assert!(with_root.contains(&name.to_string()), "{name}");
-        }
-        assert!(!with_root.contains(&"web_search".to_string()));
-        assert!(!with_root.contains(&"web_fetch".to_string()));
-
+        assert!(!has_web(&context));
         context.execution.web.enabled = true;
-        let with_web = tool_names(&context, Some(Path::new("/workspace")));
-        assert!(with_web.contains(&"web_search".to_string()));
-        assert!(with_web.contains(&"web_fetch".to_string()));
+        assert!(has_web(&context));
     }
 
     #[test]

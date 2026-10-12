@@ -441,8 +441,8 @@ pub fn discover_skills_with_diagnostics(
 
 /// Build the "system prompt seed" for an agent: the user-set description
 /// plus content of every selected skill, rendered as a single string.
-/// Called fresh on each turn at prompt-build time — see
-/// [`crate::commands::workspace::workspace_agent_runtime_description`].
+/// Called when each run starts — see
+/// [`crate::assistant::run_context::resolve_run_context`].
 pub fn compose_agent_instructions(
     config: &ClaiConfig,
     description: &str,

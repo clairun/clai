@@ -314,6 +314,32 @@ pub async fn find_manager_session(
     row.as_ref().map(map_session_row).transpose()
 }
 
+/// The manager's canonical session, created on first use. An existing row is
+/// returned untouched: the agent's configuration is resolved per run, so there
+/// is nothing to refresh, and a write here could clobber a CLI session id saved
+/// by a concurrent run.
+pub async fn find_or_create_manager_session(
+    pool: &DbPool,
+    manager_id: &str,
+    title: Option<String>,
+) -> Result<AssistantSession, String> {
+    if let Some(session) = find_manager_session(pool, manager_id).await? {
+        return Ok(session);
+    }
+    create_session(
+        pool,
+        CreateSessionParams {
+            kind: SessionKind::Interactive,
+            title,
+            context: SessionContext {
+                automation_id: Some(manager_id.to_string()),
+                ..SessionContext::default()
+            },
+        },
+    )
+    .await
+}
+
 pub async fn delete_session(pool: &DbPool, session_id: &str) -> Result<bool, String> {
     let result = sqlx::query("DELETE FROM assistant_sessions WHERE id = ?")
         .bind(session_id)

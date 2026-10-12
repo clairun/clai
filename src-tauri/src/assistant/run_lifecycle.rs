@@ -27,6 +27,7 @@ use crate::assistant::types::{
     AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice, RunStatus,
     ToolCallStatus, ToolInvocation,
 };
+use crate::db::DbPool;
 use serde_json::Value;
 
 /// Reuse the run the caller was handed, or open a new one.
@@ -80,26 +81,24 @@ pub(crate) async fn fail_run(
     run_id: &str,
     error_msg: &str,
 ) -> Result<(), AssistantEngineError> {
-    for tool_call in
-        repository::fail_running_tool_calls_for_run(&deps.pool, run_id, error_msg).await?
-    {
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
-            session,
-            Some(run_id),
-            AssistantUiEvent::ToolCallFailed { tool_call },
-        );
+    fail_run_with_sink(&deps.pool, run_id, error_msg, |event| {
+        let _ = emit_event(&deps.app, &deps.workspace_id, session, Some(run_id), event);
+    })
+    .await
+}
+
+pub(crate) async fn fail_run_with_sink(
+    pool: &DbPool,
+    run_id: &str,
+    error_msg: &str,
+    mut emit: impl FnMut(AssistantUiEvent),
+) -> Result<(), AssistantEngineError> {
+    for tool_call in repository::fail_running_tool_calls_for_run(pool, run_id, error_msg).await? {
+        emit(AssistantUiEvent::ToolCallFailed { tool_call });
     }
-    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Failed, Some(error_msg), &[])
-        .await?;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunFailed { run },
-    );
+    let run =
+        repository::complete_run(pool, run_id, RunStatus::Failed, Some(error_msg), &[]).await?;
+    emit(AssistantUiEvent::RunFailed { run });
     Ok(())
 }
 

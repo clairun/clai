@@ -8,19 +8,10 @@
 
 use super::repository::*;
 use super::types::*;
-use crate::config::ExecutionCapabilityConfig;
 use crate::db::test_support::{insert_task, workspace_pool};
 
 fn sample_context() -> SessionContext {
-    SessionContext {
-        mcp_server_ids: vec![],
-        execution: ExecutionCapabilityConfig::default(),
-        cli_session_id: None,
-        cli_session_provider: None,
-        automation_id: None,
-        automation_name: None,
-        workspace_agents: vec![],
-    }
+    SessionContext::default()
 }
 
 // ---------------------------------------------------------------------------
@@ -245,14 +236,14 @@ async fn test_update_session_title_and_context() {
 
     let mut updated = session.clone();
     updated.title = Some("New".to_string());
-    updated.context.automation_name = Some("Renamed".to_string());
+    updated.context.cli_session_id = Some("cli-1".to_string());
 
     let result = update_session(&pool, &updated).await.unwrap();
     assert_eq!(result.title, Some("New".to_string()));
 
     let fetched = get_session(&pool, &session.id).await.unwrap().unwrap();
     assert_eq!(fetched.title, Some("New".to_string()));
-    assert_eq!(fetched.context.automation_name.as_deref(), Some("Renamed"));
+    assert_eq!(fetched.context.cli_session_id.as_deref(), Some("cli-1"));
 }
 
 // ---------------------------------------------------------------------------

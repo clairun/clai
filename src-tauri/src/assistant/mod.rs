@@ -18,6 +18,7 @@ pub mod local_agent;
 pub mod local_mcp;
 pub mod providers;
 pub mod repository;
+pub mod run_context;
 pub mod run_lifecycle;
 pub mod runtime;
 pub mod sandbox;

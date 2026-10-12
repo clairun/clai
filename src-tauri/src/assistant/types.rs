@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::config::ExecutionCapabilityConfig;
-
 pub type SessionId = String;
 pub type MessageId = String;
 pub type RunId = String;
@@ -124,29 +122,18 @@ pub struct WorkspaceAgentSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct SessionContext {
-    #[serde(default)]
-    pub mcp_server_ids: Vec<String>,
-    // ExecutionCapabilityConfig has a deep tree (sandbox/fs/shell/web
-    // configs each with sub-types). The FE doesn't deeply consume it in
-    // event payloads, so we erase it to `unknown` here to avoid pulling
-    // the entire config module into the generated bindings.
-    #[serde(default)]
-    #[ts(type = "unknown")]
-    pub execution: ExecutionCapabilityConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The agent that owns this session; its configuration is resolved when
+    /// each run starts (`assistant::run_context`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<String>,
     /// The CLI provider that owns `cli_session_id`. A session id is
     /// provider-specific (Claude generates its own UUID; Codex returns a
     /// server-side thread id), so switching providers must NOT reuse it.
     /// `None` for sessions created before this was tracked.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub automation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub automation_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_agents: Vec<WorkspaceAgentSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -584,13 +571,23 @@ mod tests {
     fn session_context_ignores_removed_keys() {
         let with_removed: SessionContext = serde_json::from_str(
             r#"{"workspaceId":"ws-1","agentWorkspaceId":"ws-1","mcpServerIds":["clai"],
-                "toolScopes":["web"],
+                "toolScopes":["web"],"execution":{"web":{"enabled":true}},
+                "automationId":"main","automationName":"Main",
+                "workspaceAgents":[{"id":"a","agentDefinitionId":"a","displayName":"A",
+                    "role":"member","isDefault":false}],
+                "cliSessionId":"cli-1","cliSessionProvider":"claude",
                 "interAgentCall":{"callerAgentId":"a","depth":1}}"#,
         )
         .unwrap();
-        let without: SessionContext = serde_json::from_str(r#"{"mcpServerIds":["clai"]}"#).unwrap();
+        let without: SessionContext = serde_json::from_str(
+            r#"{"automationId":"main","cliSessionId":"cli-1","cliSessionProvider":"claude"}"#,
+        )
+        .unwrap();
         assert_eq!(with_removed, without);
         let rewritten = serde_json::to_string(&with_removed).unwrap();
-        assert!(!rewritten.contains("orkspaceId"), "{rewritten}");
+        assert_eq!(
+            rewritten,
+            r#"{"automationId":"main","cliSessionId":"cli-1","cliSessionProvider":"claude"}"#
+        );
     }
 }

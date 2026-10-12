@@ -16,13 +16,9 @@ const SESSION: AssistantSession = {
   kind: 'interactive',
   title: 'Test',
   context: {
-    mcpServerIds: [],
-    execution: {},
     cliSessionId: null,
     cliSessionProvider: null,
     automationId: null,
-    automationName: null,
-    workspaceAgents: [],
   },
   createdAt: 0n,
   updatedAt: 0n,

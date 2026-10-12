@@ -41,11 +41,9 @@ use tauri::{AppHandle, Manager};
 use crate::agents::{SchedulerState, SharedScheduler};
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
-use crate::assistant::repository::{self, CreateRunParams, CreateSessionParams};
+use crate::assistant::repository::{self, CreateRunParams};
 use crate::assistant::runtime;
-use crate::assistant::types::{
-    ProviderConnection, RunStatus, RunTrigger, SessionContext, SessionKind,
-};
+use crate::assistant::types::{ProviderConnection, RunStatus, RunTrigger};
 use crate::config::{workspace_config, AgentConfig};
 use crate::db::DbPool;
 use crate::AppState;
@@ -444,111 +442,22 @@ impl std::error::Error for RunnerError {}
 /// scheduled run.
 ///
 /// This is the **same** session row that the workspace card-click path
-/// resolves via `commands::workspace::find_workspace_session`: the resolver
-/// returns the most-recent non-task session for this manager in this
-/// workspace, and the workspace itself only owns one such session, which
-/// this helper creates as Interactive. User chats and scheduler ticks both
-/// write here, so the user sees one continuous thread regardless of how
-/// the turn was triggered.
-///
-/// Reconcile rules: title and most context fields track the live agent
-/// config; **dynamic per-run fields are preserved** when an existing row
-/// is found:
-/// - `cli_session_id`: the Claude Code CLI session id, set on first turn
-///   and reused across ticks so the model has its own conversation state
-///   to resume. Wiping this on every reconcile would force a fresh CLI
-///   session every 5 min — i.e. the model loses its prior reasoning.
+/// resolves via `commands::workspace::find_workspace_session`, so the user
+/// sees one continuous thread regardless of how a turn was triggered. The
+/// agent's configuration is resolved when the run starts, so an existing row
+/// is used as-is.
 async fn ensure_workspace_manager_session(
     app_handle: &AppHandle,
     pool: &DbPool,
     agent_config: &crate::config::AgentConfig,
 ) -> Result<crate::assistant::types::AssistantSession, RunnerError> {
-    let state = app_handle.state::<AppState>();
-
-    // Load the workspace's agent roster so the manager session knows
-    // who it can delegate to. Without this, `is_workspace_manager_context`
-    // returns false (empty Vec → no `is_default` entry matches), the
-    // four `workspace_*` tools never get added to the tool list, and
-    // the periodic manager run cannot poll, assign, or request user
-    // input. The on-demand chat path already populates this via
-    // `desired_workspace_context` — this matches that behavior for
-    // scheduled runs. On failure we fall back to an empty Vec rather
-    // than crashing the run; the manager will then act as a solo
-    // agent (current pre-fix behavior).
-    let workspace_agents = if agent_config.workspace_id.is_empty() {
-        Vec::new()
-    } else {
-        crate::commands::workspace::workspace_agent_summaries(&state, &agent_config.workspace_id)
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    workspace_id = %agent_config.workspace_id,
-                    "Failed to load workspace agent summaries for scheduled run: {} — manager tools will be unavailable for this run",
-                    e
-                );
-                Vec::new()
-            })
-    };
-    let desired_context = SessionContext {
-        mcp_server_ids: agent_config.selected_mcp_server_ids.clone(),
-        execution: agent_config.execution.clone(),
-        cli_session_id: None,
-        cli_session_provider: None,
-        automation_id: Some(agent_config.id.clone()),
-        automation_name: Some(agent_config.name.clone()),
-        workspace_agents,
-    };
-
-    let existing = repository::find_manager_session(pool, &agent_config.id)
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
-
-    if let Some(session) = existing {
-        // Preserve dynamic per-run fields that aren't part of the "config
-        // reconcile" — see the doc comment above.
-        let mut merged = desired_context.clone();
-        merged.cli_session_id = session.context.cli_session_id.clone();
-        merged.cli_session_provider = session.context.cli_session_provider.clone();
-
-        let session = if session.title.as_deref() != Some(agent_config.name.as_str())
-            || session.context != merged
-        {
-            let mut updated = session;
-            updated.title = Some(agent_config.name.clone());
-            updated.context = merged;
-            updated.updated_at = chrono::Utc::now().timestamp_millis();
-            repository::update_session(pool, &updated)
-                .await
-                .map_err(RunnerError::AssistantPersistence)?
-        } else {
-            session
-        };
-
-        emit_event(
-            app_handle,
-            &agent_config.workspace_id,
-            &session,
-            None,
-            AssistantUiEvent::SessionCreated {
-                session: Box::new(session.clone()),
-            },
-        )
-        .map_err(RunnerError::AssistantSession)?;
-
-        return Ok(session);
-    }
-
-    let session = repository::create_session(
+    let session = repository::find_or_create_manager_session(
         pool,
-        CreateSessionParams {
-            // Interactive — the user can type into this same session from
-            // the workspace's chat UI. See the doc comment above.
-            kind: SessionKind::Interactive,
-            title: Some(agent_config.name.clone()),
-            context: desired_context,
-        },
+        &agent_config.id,
+        Some(agent_config.name.clone()),
     )
     .await
-    .map_err(RunnerError::AssistantSession)?;
+    .map_err(RunnerError::AssistantPersistence)?;
 
     emit_event(
         app_handle,

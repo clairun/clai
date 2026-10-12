@@ -1421,7 +1421,6 @@ mod tests {
             update_pending_queued_message,
         };
         use crate::assistant::types::{SessionContext, SessionKind};
-        use crate::config::ExecutionCapabilityConfig;
         use crate::db::test_support::workspace_pool;
         use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::{Arc, Mutex};
@@ -1445,15 +1444,7 @@ mod tests {
         }
 
         fn sample_context() -> SessionContext {
-            SessionContext {
-                mcp_server_ids: vec![],
-                execution: ExecutionCapabilityConfig::default(),
-                cli_session_id: None,
-                cli_session_provider: None,
-                automation_id: None,
-                automation_name: None,
-                workspace_agents: vec![],
-            }
+            SessionContext::default()
         }
 
         async fn db_session() -> (tempfile::TempDir, crate::db::DbPool, AssistantSession) {

@@ -368,14 +368,19 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
+export type SessionContext = { 
+/**
+ * The agent that owns this session; its configuration is resolved when
+ * each run starts (`assistant::run_context`).
+ */
+automationId?: string | null, cliSessionId?: string | null, 
 /**
  * The CLI provider that owns `cli_session_id`. A session id is
  * provider-specific (Claude generates its own UUID; Codex returns a
  * server-side thread id), so switching providers must NOT reuse it.
  * `None` for sessions created before this was tracked.
  */
-cliSessionProvider: string | null, automationId: string | null, automationName: string | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
+cliSessionProvider?: string | null, };
 
 export type SessionKind = "interactive" | "background_job";
 

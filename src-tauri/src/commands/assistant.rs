@@ -88,23 +88,6 @@ fn provider_connection(
         .ok_or_else(|| format!("Provider connection not found: {}", connection_id))
 }
 
-fn fresh_execution_for_session(
-    state: &AppState,
-    workspace_id: &str,
-    session: &AssistantSession,
-) -> Result<Option<crate::config::ExecutionCapabilityConfig>, String> {
-    let Some(agent_id) = session.context.automation_id.as_deref() else {
-        return Ok(None);
-    };
-    if state.workspace_root(workspace_id).is_none() {
-        return Ok(None);
-    }
-    Ok(state
-        .resolve_workspace_agent(workspace_id, agent_id)?
-        .map(|resolved| resolved.agent.execution)
-        .filter(|execution| execution != &session.context.execution))
-}
-
 #[tauri::command]
 pub async fn assistant_get_session(
     workspace_id: String,
@@ -396,26 +379,13 @@ pub async fn assistant_send_message(
     // frontend can't smuggle tool/assistant content into a user message.
     let images = images.unwrap_or_default();
     validate_send_images(&images)?;
-    let (target_pool, mut session) =
+    let (target_pool, session) =
         session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let connection = provider_connection(state.inner(), &connection_id)?;
     let active_run = repository::get_active_run(&target_pool, &session.id).await?;
     let has_pending_queue = !repository::list_pending_queued_messages(&target_pool, &session.id)
         .await?
         .is_empty();
-
-    if active_run.is_none() {
-        // If tied to a workspace agent (manager), sync execution config with the
-        // latest workspace_agents row so config changes take effect immediately.
-        // Phase 1.4: the row's inline `execution` column is the source of truth.
-        let needs_execution_update =
-            fresh_execution_for_session(state.inner(), &workspace_id, &session)?;
-        if let Some(fresh_execution) = needs_execution_update {
-            session.context.execution = fresh_execution;
-            session.updated_at = chrono::Utc::now().timestamp_millis();
-            session = repository::update_session(&target_pool, &session).await?;
-        }
-    }
 
     let queue_message = active_run.is_some() || has_pending_queue;
     let mut content = vec![ContentPart::Text { text: message }];
@@ -792,18 +762,11 @@ pub(crate) async fn start_queued_followup_if_idle(
         return Ok(None);
     }
 
-    let mut session = repository::get_session(&pool, &session_id)
+    let session = repository::get_session(&pool, &session_id)
         .await?
         .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
 
     let app_state = app.state::<AppState>();
-    if let Some(fresh_execution) =
-        fresh_execution_for_session(app_state.inner(), &workspace_id, &session)?
-    {
-        session.context.execution = fresh_execution;
-        session.updated_at = chrono::Utc::now().timestamp_millis();
-        session = repository::update_session(&pool, &session).await?;
-    }
 
     let connection_id = pending[0].connection_id.clone();
     let connection = provider_connection(app_state.inner(), &connection_id)?;

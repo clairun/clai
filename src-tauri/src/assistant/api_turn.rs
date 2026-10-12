@@ -3,7 +3,6 @@ use crate::assistant::{
     providers::types::is_context_limit_error,
 };
 use futures::StreamExt;
-use std::path::PathBuf;
 use tauri::Manager;
 
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
@@ -12,11 +11,12 @@ use crate::assistant::providers;
 use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::repository;
 use crate::assistant::repository::CreateMessageParams;
+use crate::assistant::run_context::RunContext;
 use crate::assistant::run_lifecycle::{
     cancel_run, complete_run_with_notices, fail_run, record_tool_call_result,
     record_tool_call_started, resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
-use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
+use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::turn_common::{
     build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
@@ -27,7 +27,6 @@ use crate::assistant::types::{
     ToolDefinition, ToolInvocationDraft,
 };
 use crate::assistant::{compaction, compaction_service};
-use crate::AppState;
 
 #[allow(
     clippy::cognitive_complexity,
@@ -41,11 +40,11 @@ pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
     session: AssistantSession,
+    run_context: &RunContext,
     connection: ProviderConnection,
-    workspace_root: Option<PathBuf>,
 ) -> Result<(), AssistantEngineError> {
     let Some((run_id, system_message, tool_defs, mut state, adapter)) =
-        start_api_turn(deps, &input, &session, &connection, workspace_root).await?
+        start_api_turn(deps, &input, &session, run_context, &connection).await?
     else {
         return Ok(());
     };
@@ -318,8 +317,8 @@ async fn start_api_turn(
     deps: &AssistantDeps,
     input: &RunTurnInput,
     session: &AssistantSession,
+    run_context: &RunContext,
     connection: &ProviderConnection,
-    workspace_root: Option<PathBuf>,
 ) -> Result<
     Option<(
         String,
@@ -355,11 +354,10 @@ async fn start_api_turn(
         let state = deps.app.state::<crate::AppState>();
         let mut manager = state.mcp_client_manager.lock().await;
         manager
-            .list_tools_for_servers(&session.context.mcp_server_ids)
+            .list_tools_for_servers(&run_context.mcp_server_ids)
             .await
     };
-    let tool_defs =
-        tools::available_tools(&session.context, workspace_root.as_deref(), &external_tools);
+    let tool_defs = tools::available_tools(run_context, &external_tools);
 
     // Build execution context for tool calls
     let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -371,30 +369,20 @@ async fn start_api_turn(
 
     // === Tool execution loop ===
     // Build system prompt (prepended to every API call, not persisted).
-    // The agent description (user-set seed + skill content) is computed
-    // fresh from the workspace config on every turn — see
-    // workspace_agent_runtime_description for the rationale.
-    let agent_description = live_agent_description(&deps.app, &deps.workspace_id, &session.context);
-    let system_message = build_system_prompt(
-        &session.context,
-        &deps.workspace_id,
-        agent_description.as_deref(),
-        &tool_defs,
-        &input.trigger,
-        workspace_root.as_deref(),
-    );
+    let system_message =
+        build_system_prompt(run_context, &deps.workspace_id, &tool_defs, &input.trigger);
 
     let tool_context = ToolExecutionContext {
         session_id: session.id.clone(),
         run_id: run_id.clone(),
         tool_call_id: None,
         cancel_token: input.cancel_token.clone(),
-        mcp_server_ids: session.context.mcp_server_ids.clone(),
-        workspace_root: workspace_root.clone(),
-        automation_id: session.context.automation_id.clone(),
-        workspace_agents: session.context.workspace_agents.clone(),
+        mcp_server_ids: run_context.mcp_server_ids.clone(),
+        workspace_root: run_context.workspace_root.clone(),
+        automation_id: run_context.automation_id.clone(),
+        workspace_agents: run_context.workspace_agents.clone(),
         inter_agent_call_depth: input.inter_agent_call_depth,
-        execution: session.context.execution.clone(),
+        execution: run_context.execution.clone(),
         notices,
         session_grants,
         session_allowed_command_prefixes,
@@ -414,7 +402,7 @@ async fn start_api_turn(
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
     // tool results from prior runs and may skip re-running tools.
-    if let Some(trigger_content) = build_trigger_message(session, &input.trigger) {
+    if let Some(trigger_content) = build_trigger_message(run_context, &input.trigger) {
         let boundary_msg = state
             .conversation
             .create_message(
@@ -536,7 +524,7 @@ async fn prepare_api_request(
     // CLI providers ingest images via their own mechanism (file paths in the
     // CLI invocation), not this HTTP request, so they don't need inlining.
     let images = if supports_images && !providers::is_cli_provider(&connection.protocol_id) {
-        resolve_request_images(deps, &provider_messages).await
+        resolve_request_images(&state.tool_context.workspace_root, &provider_messages).await
     } else {
         std::collections::HashMap::new()
     };
@@ -826,15 +814,7 @@ mod tests {
             CreateSessionParams {
                 kind: SessionKind::Interactive,
                 title: None,
-                context: SessionContext {
-                    mcp_server_ids: vec![],
-                    execution: Default::default(),
-                    cli_session_id: None,
-                    cli_session_provider: None,
-                    automation_id: None,
-                    automation_name: None,
-                    workspace_agents: vec![],
-                },
+                context: SessionContext::default(),
             },
         )
         .await
@@ -883,15 +863,7 @@ mod tests {
             CreateSessionParams {
                 kind: SessionKind::Interactive,
                 title: None,
-                context: SessionContext {
-                    mcp_server_ids: vec![],
-                    execution: Default::default(),
-                    cli_session_id: None,
-                    cli_session_provider: None,
-                    automation_id: None,
-                    automation_name: None,
-                    workspace_agents: vec![],
-                },
+                context: SessionContext::default(),
             },
         )
         .await
@@ -1450,17 +1422,10 @@ mod tests {
         }
     }
 
-    fn make_session(automation_name: Option<&str>) -> crate::assistant::types::AssistantSession {
-        crate::assistant::types::AssistantSession {
-            id: "session".to_string(),
-            kind: SessionKind::BackgroundJob,
-            title: None,
-            context: SessionContext {
-                automation_name: automation_name.map(str::to_string),
-                ..Default::default()
-            },
-            created_at: 0,
-            updated_at: 0,
+    fn run_context(automation_name: Option<&str>) -> RunContext {
+        RunContext {
+            automation_name: automation_name.map(str::to_string),
+            ..RunContext::default()
         }
     }
 
@@ -1871,7 +1836,7 @@ mod tests {
 
     #[test]
     fn build_trigger_message_scheduled_emits_user_marker_with_automation_name() {
-        let session = make_session(Some("Health Monitor"));
+        let session = run_context(Some("Health Monitor"));
         let message = build_trigger_message(&session, &RunTrigger::Scheduled)
             .expect("scheduled returns Some");
 
@@ -1888,7 +1853,7 @@ mod tests {
     fn build_trigger_message_scheduled_falls_back_when_automation_name_missing() {
         // No automation_name → fallback string "automation" appears in the
         // marker.
-        let session = make_session(None);
+        let session = run_context(None);
         let message = build_trigger_message(&session, &RunTrigger::Scheduled)
             .expect("scheduled returns Some");
 
@@ -1901,7 +1866,7 @@ mod tests {
 
     #[test]
     fn build_trigger_message_manual_automation_emits_manual_marker() {
-        let session = make_session(Some("Daily Report"));
+        let session = run_context(Some("Daily Report"));
         let message = build_trigger_message(&session, &RunTrigger::ManualAutomation)
             .expect("manual returns Some");
 
@@ -1916,7 +1881,7 @@ mod tests {
 
     #[test]
     fn build_trigger_message_returns_none_for_user_driven_triggers() {
-        let session = make_session(Some("ignored"));
+        let session = run_context(Some("ignored"));
         for trigger in &[
             RunTrigger::UserMessage,
             RunTrigger::Retry,
@@ -2040,19 +2005,12 @@ fn normalized_assistant_parts(parts: &[ContentPart]) -> Vec<ContentPart> {
 /// logged and skipped (the adapter then omits that image block but still sends
 /// the surrounding text). Only called for image-capable API connections.
 async fn resolve_request_images(
-    deps: &AssistantDeps,
+    root: &std::path::Path,
     messages: &[ProviderInputMessage],
 ) -> std::collections::HashMap<String, crate::assistant::types::ResolvedImage> {
     use base64::Engine as _;
     let mut out: std::collections::HashMap<String, crate::assistant::types::ResolvedImage> =
         std::collections::HashMap::new();
-    let Some(root) = deps
-        .app
-        .state::<AppState>()
-        .workspace_root(&deps.workspace_id)
-    else {
-        return out;
-    };
     for message in messages {
         for part in &message.content {
             if let ContentPart::Image {
@@ -2070,7 +2028,7 @@ async fn resolve_request_images(
                 // Resolve through symlinks and refuse anything that escapes the
                 // store (a non-store ref, a missing file, or a symlinked entry
                 // pre-planted to point outside `.clai/images/`).
-                let Some(full) = crate::assistant::image_store::resolve_store_path(&root, path)
+                let Some(full) = crate::assistant::image_store::resolve_store_path(root, path)
                 else {
                     tracing::warn!(image_id = %id, %path, "Rejecting non-store/escaping image path; skipping");
                     continue;

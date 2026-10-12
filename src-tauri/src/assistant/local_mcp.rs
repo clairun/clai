@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::assistant::engine::AssistantDeps;
-use crate::assistant::repository;
+use crate::assistant::run_context::RunContext;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::types::{RunNotice, ToolDefinition};
 use crate::db::DbPool;
@@ -66,6 +66,9 @@ pub struct ToolBinding {
     /// per-binding because the local MCP runtime is a process singleton
     /// while pools are per-workspace.
     pub workspace_id: String,
+    /// The agent configuration resolved when the run started. Every tool
+    /// list and call in the run reads this one snapshot.
+    pub run_context: Arc<RunContext>,
     pub pool: DbPool,
     pub session_id: String,
     pub run_id: String,
@@ -278,28 +281,14 @@ impl ServerHandler for ClaiMcpService {
     ) -> impl Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
         async move {
             let binding = self.runtime.binding_from_request(&context)?.binding;
-            let session = repository::get_session(&binding.pool, &binding.session_id)
-                .await
-                .map_err(|e| McpError::internal_error(e, None))?
-                .ok_or_else(|| McpError::invalid_request("assistant session not found", None))?;
-
             let external_tools = {
                 let state = self.runtime.app.state::<AppState>();
                 let mut manager = state.mcp_client_manager.lock().await;
                 manager
-                    .list_tools_for_servers(&session.context.mcp_server_ids)
+                    .list_tools_for_servers(&binding.run_context.mcp_server_ids)
                     .await
             };
-            let workspace_root = self
-                .runtime
-                .app
-                .try_state::<AppState>()
-                .and_then(|state| state.workspace_root(&binding.workspace_id));
-            let tool_defs = tools::available_tools(
-                &session.context,
-                workspace_root.as_deref(),
-                &external_tools,
-            );
+            let tool_defs = tools::available_tools(&binding.run_context, &external_tools);
             Ok(ListToolsResult {
                 meta: None,
                 tools: tool_defs.into_iter().map(tool_definition_to_mcp).collect(),
@@ -403,13 +392,7 @@ async fn execute_bound_tool(
         app: app.clone(),
     };
 
-    let session = repository::get_session(&deps.pool, &binding.session_id)
-        .await?
-        .ok_or_else(|| format!("Assistant session not found: {}", binding.session_id))?;
-    let workspace_root = deps
-        .app
-        .try_state::<AppState>()
-        .and_then(|state| state.workspace_root(&deps.workspace_id));
+    let run_context = &binding.run_context;
 
     let tool_context = ToolExecutionContext {
         session_id: binding.session_id.clone(),
@@ -420,12 +403,12 @@ async fn execute_bound_tool(
         // tool still executes correctly.
         tool_call_id: None,
         cancel_token: binding.cancel_token.clone(),
-        mcp_server_ids: session.context.mcp_server_ids.clone(),
-        workspace_root,
-        automation_id: session.context.automation_id.clone(),
-        workspace_agents: session.context.workspace_agents.clone(),
+        mcp_server_ids: run_context.mcp_server_ids.clone(),
+        workspace_root: run_context.workspace_root.clone(),
+        automation_id: run_context.automation_id.clone(),
+        workspace_agents: run_context.workspace_agents.clone(),
         inter_agent_call_depth: binding.inter_agent_call_depth,
-        execution: session.context.execution.clone(),
+        execution: run_context.execution.clone(),
         notices: binding.notices.clone(),
         session_grants: binding.session_grants.clone(),
         session_allowed_command_prefixes: binding.session_allowed_command_prefixes.clone(),
@@ -553,6 +536,7 @@ mod tests {
     fn test_binding() -> ToolBinding {
         ToolBinding {
             workspace_id: "ws-1".to_string(),
+            run_context: Arc::default(),
             pool: sqlx::Pool::connect_lazy("sqlite::memory:").expect("lazy pool"),
             session_id: "session-1".to_string(),
             run_id: "run-1".to_string(),

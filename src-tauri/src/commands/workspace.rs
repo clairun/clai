@@ -11,8 +11,8 @@ use crate::assistant::types::{
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
 use crate::config::workspace_config::{AgentAvatarRef, WorkspaceAssignment};
 use crate::config::{
-    workspace_config, AgentConfig, AppConfig, ExecutionCapabilityConfig,
-    FilesystemCapabilityConfig, FilesystemPathGrant, GrantOrigin, WorkspaceAgent, WorkspaceConfig,
+    workspace_config, AppConfig, ExecutionCapabilityConfig, FilesystemCapabilityConfig,
+    FilesystemPathGrant, GrantOrigin, WorkspaceAgent, WorkspaceConfig,
 };
 use crate::db::DbPool;
 use crate::workspace_index::{WorkspaceIndex, WorkspaceLocator};
@@ -421,8 +421,6 @@ pub(crate) struct WorkspaceDescriptor {
     provider_connection_ids: Vec<String>,
     selected_mcp_server_ids: Vec<String>,
     disabled_mcp_server_ids: Vec<String>,
-    execution: ExecutionCapabilityConfig,
-    automation_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1124,12 +1122,6 @@ pub(crate) fn resolve_workspace_descriptor(
         .iter()
         .find(|resolved| matches!(resolved.source, AgentSource::Main))
         .map(|resolved| &resolved.agent);
-    let mut execution = manager
-        .map(|agent| agent.execution.clone())
-        .unwrap_or_default();
-    if manager.is_none() {
-        execution.web.enabled = true;
-    }
     // Both partitions come from the manager row's refs: `disabled: true`
     // marks a server attached to the conversation but toggled off in the
     // context bar; everything else is the effective enabled set.
@@ -1157,8 +1149,6 @@ pub(crate) fn resolve_workspace_descriptor(
             .unwrap_or_default(),
         selected_mcp_server_ids,
         disabled_mcp_server_ids,
-        execution,
-        automation_name: manager.map(|agent| agent.name.clone()),
     })
 }
 
@@ -1226,33 +1216,6 @@ fn resolve_workspace_provider_selection(
     })
 }
 
-/// Live-compute the system-prompt seed for a workspace agent, reading the
-/// current workspace config + the user's enabled skills. Returns `None` when
-/// the workspace or agent has been deleted (the session is half-broken; the
-/// engine treats it as "no agent instructions" rather than panicking).
-///
-/// This is the canonical lookup used at prompt-build time. Skills are no
-/// longer snapshotted onto `SessionContext.automation_description`; we read
-/// fresh on every turn so toggling a skill in the workspace settings
-/// modal is immediately visible to the model on the next message.
-pub fn workspace_agent_runtime_description(
-    state: &AppState,
-    workspace_id: &str,
-    agent_id: &str,
-) -> Option<String> {
-    let agent = &state
-        .resolve_workspace_agent(workspace_id, agent_id)
-        .ok()??
-        .agent;
-    let app_cfg = state.config_manager.lock().ok()?.get();
-    let selected_skill_ids = workspace_config::refs_to_skill_ids(&app_cfg, &agent.selected_skills);
-    Some(crate::config::compose_agent_instructions(
-        &app_cfg,
-        &agent.description,
-        &selected_skill_ids,
-    ))
-}
-
 fn workspace_default_agent_id(
     state: &AppState,
     workspace_id: &str,
@@ -1267,12 +1230,20 @@ fn load_workspace_agent_rows(
 ) -> Result<Vec<WorkspaceAgentRow>, String> {
     let app_config = app_config(state)?;
     let (config, roster) = state.resolve_workspace_roster(workspace_id)?;
+    Ok(workspace_agent_rows_from(&app_config, &config, &roster))
+}
+
+fn workspace_agent_rows_from(
+    app_config: &AppConfig,
+    config: &WorkspaceConfig,
+    roster: &[ResolvedAgent],
+) -> Vec<WorkspaceAgentRow> {
     let mut rows: Vec<_> = roster
         .iter()
-        .map(|resolved| workspace_agent_row_from_config(&app_config, &config, resolved))
+        .map(|resolved| workspace_agent_row_from_config(app_config, config, resolved))
         .collect();
     rows.sort_by_key(|row| (if row.role == "manager" { 0 } else { 1 }, row.created_at));
-    Ok(rows)
+    rows
 }
 
 fn workspace_agent_row_from_config(
@@ -1506,14 +1477,16 @@ async fn list_workspace_task_responses(
         .collect())
 }
 
-pub(crate) fn workspace_agent_summaries(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Vec<WorkspaceAgentSummary>, String> {
-    let (agents, _) = list_workspace_agent_responses(state, workspace_id)?;
-
-    Ok(agents
+/// The team roster as agents see it in their prompt and tool context.
+pub(crate) fn workspace_agent_summaries_from(
+    app_config: &AppConfig,
+    config: &WorkspaceConfig,
+    roster: &[ResolvedAgent],
+) -> Vec<WorkspaceAgentSummary> {
+    let default_workspace_agent_id = config.main_agent.as_ref().map(|agent| agent.id.as_str());
+    workspace_agent_rows_from(app_config, config, roster)
         .into_iter()
+        .map(|row| workspace_agent_response_from_row(row, default_workspace_agent_id))
         .map(|agent| WorkspaceAgentSummary {
             // Phase 1.5: the LLM-visible "agent id" for inter-agent calls is the
             // workspace-local row id. The legacy global `agent_definition_id`
@@ -1525,63 +1498,7 @@ pub(crate) fn workspace_agent_summaries(
             is_default: agent.is_default,
             description: concise_agent_description(agent.agent_description),
         })
-        .collect())
-}
-
-/// Build a transient `AgentConfig` from a workspace_agents row's inline fields.
-///
-/// Phase 1.4: the row carries the full configuration locally; no global
-/// catalog lookup is needed.
-/// Build a transient `AgentConfig` from a workspace_agents row's inline fields.
-/// Schedule fields are populated only for the workspace's default (manager)
-/// agent, sourced from the workspace-level `schedule` config; sub-agents
-/// never schedule themselves.
-fn agent_config_from_row(
-    row: &WorkspaceAgentRow,
-    schedule: Option<&workspace_config::WorkspaceSchedule>,
-) -> AgentConfig {
-    let created_at = chrono::DateTime::from_timestamp_millis(row.created_at)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default();
-    let updated_at = chrono::DateTime::from_timestamp_millis(row.updated_at)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default();
-    AgentConfig {
-        id: row.id.clone(),
-        workspace_id: row.workspace_id.clone(),
-        name: row.name.clone(),
-        description: row.description.clone(),
-        schedule_enabled: schedule.map(|s| s.enabled).unwrap_or(false),
-        schedule_kind: schedule.map(|s| s.kind.clone()).unwrap_or_default(),
-        enabled: row.enabled,
-        selected_mcp_server_ids: row.selected_mcp_server_ids.clone(),
-        provider_connection_ids: row.provider_connection_ids.clone(),
-        selected_skill_ids: row.selected_skill_ids.clone(),
-        execution: row.execution.clone(),
-        created_at,
-        updated_at,
-    }
-}
-
-fn resolve_workspace_manager_agent(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Option<AgentConfig>, String> {
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let workspace = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    let default_id = workspace.main_agent.as_ref().map(|agent| agent.id.clone());
-    let rows = load_workspace_agent_rows(state, workspace_id)?;
-
-    let manager_row = if let Some(default_id) = default_id.as_deref() {
-        rows.iter().find(|row| row.id == default_id)
-    } else {
-        // Legacy fallback: if no default pointer, prefer role='manager'.
-        rows.iter().find(|row| row.role == "manager")
-    };
-
-    Ok(manager_row.map(|row| agent_config_from_row(row, Some(&workspace.schedule))))
+        .collect()
 }
 
 // assign_workspace_agent_row: removed. Workspace agents are created directly
@@ -1600,73 +1517,6 @@ async fn find_workspace_session(
         return Ok(None);
     };
     repository::find_manager_session(pool, &manager_id).await
-}
-
-fn desired_workspace_context(
-    descriptor: &WorkspaceDescriptor,
-    existing_session: Option<&AssistantSession>,
-    workspace_agents: Vec<WorkspaceAgentSummary>,
-    workspace_manager: Option<&AgentConfig>,
-) -> SessionContext {
-    // The workspace config is the canonical store for a general workspace's
-    // MCP selection: the manager row's `selected_mcp_servers` holds every
-    // attached server, and each ref's `disabled` flag records the context-bar
-    // toggle (the descriptor surfaces the two partitions).
-    // Sessions only ever receive the derived enabled list. When a manager row
-    // exists, its refs are authoritative even when empty — "no refs" means
-    // "no MCP servers", so a Settings remove-all clears live sessions too.
-    // Session lists from before the config mirror are intentionally dropped;
-    // re-attach the servers once to migrate.
-    let mcp_server_ids = if descriptor.agent_id.is_some() {
-        // Agent workspaces: MCP comes from agent config (descriptor)
-        descriptor.selected_mcp_server_ids.clone()
-    } else if workspace_manager.is_none() {
-        // No manager row: the config cannot record any MCP selection (both
-        // partitions live on the manager's `selected_mcp_servers`), so the
-        // session's list stays canonical. The disabled filter is defensive —
-        // without a manager row the descriptor's disabled list is empty.
-        existing_session
-            .map(|session| {
-                session
-                    .context
-                    .mcp_server_ids
-                    .iter()
-                    .filter(|id| !descriptor.disabled_mcp_server_ids.contains(*id))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        descriptor.selected_mcp_server_ids.clone()
-    };
-
-    let execution = if descriptor.agent_id.is_some() {
-        descriptor.execution.clone()
-    } else if let Some(manager) = workspace_manager {
-        manager.execution.clone()
-    } else {
-        descriptor.execution.clone()
-    };
-
-    let automation_id = descriptor
-        .agent_id
-        .clone()
-        .or_else(|| workspace_manager.map(|agent| agent.id.clone()));
-    let automation_name = descriptor
-        .automation_name
-        .clone()
-        .or_else(|| workspace_manager.map(|agent| agent.name.clone()));
-
-    SessionContext {
-        mcp_server_ids,
-        execution,
-        cli_session_id: existing_session.and_then(|session| session.context.cli_session_id.clone()),
-        cli_session_provider: existing_session
-            .and_then(|session| session.context.cli_session_provider.clone()),
-        automation_id,
-        automation_name,
-        workspace_agents,
-    }
 }
 
 fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
@@ -2036,49 +1886,26 @@ pub async fn workspace_get_or_create_session(
     let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
     let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
     let provider_connection_id = provider_selection.preferred_connection_id;
-    let existing = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let workspace_agents = workspace_agent_summaries(state.inner(), &descriptor.workspace_id)?;
-    let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)?;
-    let session = if let Some(existing) = existing {
-        let desired_context = desired_workspace_context(
-            &descriptor,
-            Some(&existing),
-            workspace_agents.clone(),
-            workspace_manager.as_ref(),
-        );
-        if existing.title.as_deref() != Some(descriptor.title.as_str())
-            || existing.context != desired_context
-        {
-            let mut updated = existing;
-            updated.title = Some(descriptor.title.clone());
-            updated.context = desired_context;
-            updated.updated_at = chrono::Utc::now().timestamp_millis();
-            repository::update_session(&workspace_pool, &updated).await?
-        } else {
-            existing
+    // One Interactive session per (workspace, manager); user chats and
+    // scheduled ticks share it. Task delegations get their own BackgroundJob
+    // rows (`tools::workspace_tasks`). Without a Main there is nothing to look
+    // up by, so each call starts a fresh unowned session.
+    let title = Some(descriptor.title.clone());
+    let session = match workspace_default_agent_id(state.inner(), &descriptor.workspace_id)? {
+        Some(manager_id) => {
+            repository::find_or_create_manager_session(&workspace_pool, &manager_id, title).await?
         }
-    } else {
-        // One Interactive session per (workspace, manager). Both
-        // user-typed chats and scheduled ticks land here — there is no
-        // separate BackgroundJob row for the manager. Sub-agent task
-        // delegations still get their own BackgroundJob rows via
-        // `tools::workspace_tasks` (they're owned by the assignee, not
-        // the manager).
-        repository::create_session(
-            &workspace_pool,
-            repository::CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: Some(descriptor.title.clone()),
-                context: desired_workspace_context(
-                    &descriptor,
-                    None,
-                    workspace_agents,
-                    workspace_manager.as_ref(),
-                ),
-            },
-        )
-        .await?
+        None => {
+            repository::create_session(
+                &workspace_pool,
+                repository::CreateSessionParams {
+                    kind: SessionKind::Interactive,
+                    title,
+                    context: SessionContext::default(),
+                },
+            )
+            .await?
+        }
     };
 
     Ok(WorkspaceSessionBinding {
@@ -2927,101 +2754,45 @@ fn sanitize_mcp_selection(request: &WorkspaceUpdateMcpRequest) -> (Vec<String>, 
 // MCP & provider selection — session MCP toggles, default provider
 // ===============================================================================
 
-/// Update the MCP server IDs for a workspace session.
+/// Update the workspace conversation's MCP selection.
 ///
-/// For the general workspace, this is the only way to configure MCP servers
-/// (agent workspaces get their MCP servers from the agent config).
+/// The selection lives on the Main's `selected_mcp_servers`: every attached
+/// server, with toggled-off ones carrying `disabled: true`. Runs read it when
+/// they start, so no session is touched here.
 #[tauri::command]
 pub async fn workspace_update_session_mcp(
     request: WorkspaceUpdateMcpRequest,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let descriptor =
-        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
-    let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
-    let existing = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let workspace_agents = workspace_agent_summaries(state.inner(), &descriptor.workspace_id)?;
-    let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)?;
+    update_main_mcp_selection(state.inner(), &request)
+}
 
-    let session = if let Some(session) = existing {
-        session
-    } else {
-        // No session yet — create one so MCP preferences are persisted
-        // before the user sends their first message.
-        repository::create_session(
-            &workspace_pool,
-            repository::CreateSessionParams {
-                // Always Interactive: this row IS the canonical workspace
-                // conversation that find_workspace_session resolves. The
-                // resolver selects the most-recent non-task session for the
-                // manager; the workspace itself only ever owns one such
-                // session, so we keep it Interactive to match the historical
-                // shape (and so any non-task BackgroundJob rows from older
-                // scheduled-run code paths resolve ahead of this one only
-                // because they were updated more recently, not by virtue of
-                // their kind).
-                kind: SessionKind::Interactive,
-                title: Some(descriptor.title.clone()),
-                context: desired_workspace_context(
-                    &descriptor,
-                    None,
-                    workspace_agents.clone(),
-                    workspace_manager.as_ref(),
-                ),
-            },
-        )
-        .await?
-    };
-
-    let (enabled_mcp_ids, disabled_mcp_ids) = sanitize_mcp_selection(&request);
-    let mut updated = session;
-    updated.context.mcp_server_ids = enabled_mcp_ids.clone();
-    updated.context.workspace_agents = workspace_agents;
-    if descriptor.agent_id.is_none() {
-        if let Some(manager) = workspace_manager.as_ref() {
-            updated.context.execution = manager.execution.clone();
-            updated.context.automation_id = Some(manager.id.clone());
-            updated.context.automation_name = Some(manager.name.clone());
-        }
-
-        // Persist the MCP selection into the workspace config — the canonical
-        // store. The manager row's `selected_mcp_servers` records every
-        // attached server; toggled-off ones carry `disabled: true` so the
-        // context-bar toggle survives app restarts while sessions and
-        // scheduled runs consume only the enabled refs. Without a manager
-        // row nothing persists — consistent with the enabled set, which also
-        // only lives on the manager row.
-        let manager_id = workspace_manager.as_ref().map(|manager| manager.id.clone());
-        state.update_workspace_config(&descriptor.workspace_id, |config| {
-            let now = chrono::Utc::now().timestamp_millis();
-            if let Some(manager_id) = manager_id.as_deref() {
-                if let Some(agent) = config
-                    .main_agent
-                    .as_mut()
-                    .filter(|agent| agent.id == manager_id)
-                {
-                    agent.selected_mcp_servers = enabled_mcp_ids
-                        .iter()
-                        .map(|id| workspace_config::McpRef {
-                            id: id.clone(),
-                            disabled: false,
-                        })
-                        .chain(disabled_mcp_ids.iter().map(|id| workspace_config::McpRef {
-                            id: id.clone(),
-                            disabled: true,
-                        }))
-                        .collect();
-                    agent.updated_at = now;
-                    config.updated_at = now;
-                }
-            }
-            Ok(())
-        })?;
-    }
-    updated.updated_at = chrono::Utc::now().timestamp_millis();
-    repository::update_session(&workspace_pool, &updated).await?;
-
+fn update_main_mcp_selection(
+    state: &AppState,
+    request: &WorkspaceUpdateMcpRequest,
+) -> Result<(), String> {
+    let (enabled_mcp_ids, disabled_mcp_ids) = sanitize_mcp_selection(request);
+    state.update_workspace_config(&request.workspace_id, |config| {
+        let main = config
+            .main_agent
+            .as_mut()
+            .ok_or_else(|| "Set up a main agent for this workspace first.".to_string())?;
+        main.selected_mcp_servers = enabled_mcp_ids
+            .iter()
+            .map(|id| workspace_config::McpRef {
+                id: id.clone(),
+                disabled: false,
+            })
+            .chain(disabled_mcp_ids.iter().map(|id| workspace_config::McpRef {
+                id: id.clone(),
+                disabled: true,
+            }))
+            .collect();
+        let now = chrono::Utc::now().timestamp_millis();
+        main.updated_at = now;
+        config.updated_at = now;
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -4102,25 +3873,6 @@ mod tests {
     const WS: &str = "ws-1";
     const MGR: &str = "mgr-1";
 
-    fn session(
-        id: &str,
-        kind: SessionKind,
-        automation_id: &str,
-        updated_at: i64,
-    ) -> AssistantSession {
-        AssistantSession {
-            id: id.to_string(),
-            kind,
-            title: None,
-            context: SessionContext {
-                automation_id: Some(automation_id.to_string()),
-                ..Default::default()
-            },
-            created_at: 0,
-            updated_at,
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn fork_grants_exclude_resolved_source_paths_and_unresolvable_aliases() {
@@ -4814,21 +4566,6 @@ mod tests {
         assert!(resolve_copy_source(root.path(), "outdir/secret").is_err());
     }
 
-    fn descriptor(agent_id: Option<&str>) -> WorkspaceDescriptor {
-        WorkspaceDescriptor {
-            workspace_id: WS.to_string(),
-            kind: "general".to_string(),
-            title: "Test".to_string(),
-            agent_id: agent_id.map(str::to_string),
-            root_path: None,
-            provider_connection_ids: vec![],
-            selected_mcp_server_ids: vec![],
-            disabled_mcp_server_ids: vec![],
-            execution: ExecutionCapabilityConfig::default(),
-            automation_name: None,
-        }
-    }
-
     #[test]
     fn sanitize_mcp_selection_keeps_lists_disjoint() {
         let request = WorkspaceUpdateMcpRequest {
@@ -4853,71 +4590,6 @@ mod tests {
         let (enabled, disabled) = sanitize_mcp_selection(&request);
         assert_eq!(enabled, vec!["a".to_string(), "b".to_string()]);
         assert!(disabled.is_empty());
-    }
-
-    #[test]
-    fn desired_workspace_context_general_workspaces_take_mcp_from_config() {
-        // The workspace config (via the descriptor) is the canonical store:
-        // its enabled list wins over whatever the session row carries.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
-        existing.context.mcp_server_ids = vec!["stale".into()];
-
-        let mut desc = descriptor(None);
-        desc.selected_mcp_server_ids = vec!["a".into()];
-        let manager = manager_config();
-        let context = desired_workspace_context(&desc, Some(&existing), vec![], Some(&manager));
-        assert_eq!(context.mcp_server_ids, vec!["a".to_string()]);
-    }
-
-    fn manager_config() -> crate::config::AgentConfig {
-        crate::config::AgentConfig::new(
-            "Manager".to_string(),
-            String::new(),
-            crate::config::workspace_config::ScheduleKind::default(),
-        )
-    }
-
-    #[test]
-    fn desired_workspace_context_all_disabled_config_beats_stale_session() {
-        // With a manager row present, selected=[] + disabled=[b] means
-        // "every attached server toggled off" — the fallback must not
-        // resurrect the session's list.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
-        existing.context.mcp_server_ids = vec!["stale".into()];
-
-        let mut desc = descriptor(None);
-        desc.disabled_mcp_server_ids = vec!["b".into()];
-        let manager = manager_config();
-        let context = desired_workspace_context(&desc, Some(&existing), vec![], Some(&manager));
-        assert!(context.mcp_server_ids.is_empty());
-    }
-
-    #[test]
-    fn desired_workspace_context_manager_less_keeps_session_minus_disabled() {
-        // Without a manager row the config cannot record an enabled
-        // selection, so the session's list stays canonical — but the
-        // config-level disabled toggle still applies to it.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
-        existing.context.mcp_server_ids = vec!["a".into(), "b".into()];
-
-        let mut desc = descriptor(None);
-        desc.disabled_mcp_server_ids = vec!["b".into()];
-        let context = desired_workspace_context(&desc, Some(&existing), vec![], None);
-        assert_eq!(context.mcp_server_ids, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn desired_workspace_context_empty_manager_config_clears_session_mcp() {
-        // With a manager row present, an empty ref list is authoritative:
-        // a Settings remove-all (or a pre-mirror legacy session) yields no
-        // MCP servers instead of resurrecting the session's stale list.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, 1);
-        existing.context.mcp_server_ids = vec!["legacy".into()];
-
-        let manager = manager_config();
-        let context =
-            desired_workspace_context(&descriptor(None), Some(&existing), vec![], Some(&manager));
-        assert!(context.mcp_server_ids.is_empty());
     }
 
     #[test]
@@ -5867,6 +5539,40 @@ mod tests {
             .await
             .expect("details")
         }
+    }
+
+    #[tokio::test]
+    async fn mcp_toggle_writes_the_main_refs_and_fails_without_a_main() {
+        let workspace = DetailsWorkspace::new().await;
+        let request = WorkspaceUpdateMcpRequest {
+            workspace_id: DETAILS_WORKSPACE_ID.to_string(),
+            mcp_server_ids: vec!["a".into(), "b".into()],
+            disabled_mcp_server_ids: vec!["b".into()],
+        };
+        update_main_mcp_selection(&workspace.state, &request).expect("toggle");
+        let (config, _) = workspace
+            .state
+            .resolve_workspace_roster(DETAILS_WORKSPACE_ID)
+            .expect("config");
+        let refs = &config.main_agent.expect("main").selected_mcp_servers;
+        assert_eq!(
+            workspace_config::enabled_mcp_ids(refs),
+            vec!["a".to_string()]
+        );
+        assert_eq!(
+            workspace_config::disabled_mcp_ids(refs),
+            vec!["b".to_string()]
+        );
+
+        workspace
+            .state
+            .update_workspace_config(DETAILS_WORKSPACE_ID, |config| {
+                config.main_agent = None;
+                Ok(())
+            })
+            .expect("drop main");
+        let error = update_main_mcp_selection(&workspace.state, &request).unwrap_err();
+        assert!(error.contains("main agent"), "{error}");
     }
 
     /// The command's own wiring: the file walk is opt-in, and the opting in

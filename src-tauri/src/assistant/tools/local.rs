@@ -246,10 +246,7 @@ fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesyst
 }
 
 fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
-    let workspace_root = context.workspace_root.clone().ok_or_else(|| {
-        "Agent workspace is unavailable because this session is not tied to an automation"
-            .to_string()
-    })?;
+    let workspace_root = context.workspace_root.clone();
 
     // Create workspace root and pre-seed .clai/memory/ (including journal/)
     // so agents can use it immediately without spending a tool call.
@@ -1568,7 +1565,7 @@ mod tests {
             tool_call_id: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             mcp_server_ids: Vec::new(),
-            workspace_root: Some(workspace_root.to_path_buf()),
+            workspace_root: workspace_root.to_path_buf(),
             automation_id: Some("agent".to_string()),
             workspace_agents: Vec::new(),
             inter_agent_call_depth: None,

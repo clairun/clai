@@ -273,7 +273,12 @@ async fn assign_task(
         CreateSessionParams {
             kind: SessionKind::BackgroundJob,
             title: Some(format!("Task: {}", title)),
-            context: task_session_context(deps, context, &target_config),
+            // The worker runs with its own configuration, resolved when the
+            // run starts — never the caller's capabilities.
+            context: SessionContext {
+                automation_id: Some(target_config.id.clone()),
+                ..SessionContext::default()
+            },
         },
         &task_id,
     )
@@ -451,28 +456,6 @@ fn spawn_task_run(
             }
         }
     });
-}
-
-fn task_session_context(
-    _deps: &AssistantDeps,
-    context: &ToolExecutionContext,
-    target_config: &AgentConfig,
-) -> SessionContext {
-    // The worker's tools are its own. This used to prefer the caller's session
-    // MCP selection when it had one, which handed a delegated agent servers its
-    // own settings never granted — a task inherits its workspace and the
-    // instructions it was given, not the caller's capabilities.
-    let mcp_server_ids = target_config.selected_mcp_server_ids.clone();
-
-    SessionContext {
-        mcp_server_ids,
-        execution: target_config.execution.clone(),
-        cli_session_id: None,
-        cli_session_provider: None,
-        automation_id: Some(target_config.id.clone()),
-        automation_name: Some(target_config.name.clone()),
-        workspace_agents: context.workspace_agents.clone(),
-    }
 }
 
 fn resolve_first_connection(

@@ -4,14 +4,13 @@ use crate::assistant::{
     providers::types::is_context_limit_error,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 const STDERR_TAIL_LINES: usize = 20;
 
 use serde_json::Value;
-use tauri::Manager;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
@@ -25,11 +24,12 @@ use crate::assistant::providers::cli::{
     CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
 };
 use crate::assistant::repository::{self, CreateMessageParams};
+use crate::assistant::run_context::RunContext;
 use crate::assistant::run_lifecycle::{
     cancel_run, complete_run_with_notices, fail_run, record_tool_call_result,
     record_tool_call_started, resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
-use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
+use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::turn_common::{
     build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
@@ -262,8 +262,10 @@ pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
     mut session: AssistantSession,
+    run_context: RunContext,
     connection: ProviderConnection,
 ) -> Result<(), AssistantEngineError> {
+    let run_context = Arc::new(run_context);
     let run_id = resolve_run_id(deps, &session, &connection, &input).await?;
 
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
@@ -320,16 +322,22 @@ pub async fn run_session_turn(
     // them without re-reading history. Native CLI sessions are resumed with
     // only the new input; the conversation feeds fresh/rotated sessions.
     let mut conversation = compaction_service::load_with_pending(&deps.pool, &session.id).await?;
-    let run_input =
-        run_input_messages(deps, &session, &run_id, &input.trigger, &conversation).await?;
-    let system_prompt = system_prompt_text(deps, &session, &input.trigger);
+    let trigger_message = build_trigger_message(&run_context, &input.trigger);
+    let run_input = run_input_messages(
+        deps,
+        &session,
+        &run_id,
+        trigger_message.is_some(),
+        &conversation,
+    )
+    .await?;
+    let system_prompt = system_prompt_text(deps, &run_context, &input.trigger);
     if compaction::should_auto_compact(&conversation, &system_prompt, &[]) {
-        let summary_working_dir = run_workspace_root(deps);
         match compaction_service::compact_conversation(
             &deps.pool,
             &session,
             &connection,
-            summary_working_dir.as_deref(),
+            Some(&run_context.workspace_root),
             CompactionTrigger::Automatic,
             Some(&run_id),
             compaction::verbatim_tail_tokens(&system_prompt, &[]),
@@ -375,6 +383,7 @@ pub async fn run_session_turn(
     // after the CLI subprocess has finished making MCP calls.
     let binding_guard = mcp_runtime.bind_run(ToolBinding {
         workspace_id: deps.workspace_id.clone(),
+        run_context: run_context.clone(),
         pool: deps.pool.clone(),
         session_id: session.id.clone(),
         run_id: run_id.clone(),
@@ -418,6 +427,7 @@ pub async fn run_session_turn(
                     };
                 let result = run_claude_turn(
                     deps,
+                    &run_context.workspace_root,
                     &session,
                     &connection,
                     &run_id,
@@ -425,7 +435,7 @@ pub async fn run_session_turn(
                     is_new_session,
                     &mcp_config_path,
                     &input.cancel_token,
-                    &input.trigger,
+                    trigger_message.as_ref(),
                     &system_prompt,
                     &mut assistant_slot,
                     &mut conversation,
@@ -439,13 +449,14 @@ pub async fn run_session_turn(
                 if codex_app_server::app_server_enabled() {
                     run_codex_turn_app_server(
                         deps,
+                        &run_context.workspace_root,
                         &mut session,
                         &connection,
                         &run_id,
                         mcp_runtime.url(),
                         binding_guard.token(),
                         &input.cancel_token,
-                        &input.trigger,
+                        trigger_message.as_ref(),
                         &system_prompt,
                         &mut assistant_slot,
                         &mut conversation,
@@ -455,13 +466,14 @@ pub async fn run_session_turn(
                 } else {
                     run_codex_turn(
                         deps,
+                        &run_context.workspace_root,
                         &mut session,
                         &connection,
                         &run_id,
                         mcp_runtime.url(),
                         binding_guard.token(),
                         &input.cancel_token,
-                        &input.trigger,
+                        trigger_message.as_ref(),
                         &system_prompt,
                         &mut assistant_slot,
                         &mut conversation,
@@ -473,13 +485,14 @@ pub async fn run_session_turn(
             CliProviderRuntime::OpenCode => {
                 run_opencode_turn(
                     deps,
+                    &run_context.workspace_root,
                     &mut session,
                     &connection,
                     &run_id,
                     mcp_runtime.url(),
                     binding_guard.token(),
                     &input.cancel_token,
-                    &input.trigger,
+                    trigger_message.as_ref(),
                     &system_prompt,
                     &mut assistant_slot,
                     &mut conversation,
@@ -517,12 +530,11 @@ pub async fn run_session_turn(
                     "{} reported a context limit; compacting local history and restarting with a fresh session",
                     provider_runtime.display_name()
                 );
-                let summary_working_dir = run_workspace_root(deps);
                 match compaction_service::compact_for_context_limit_recovery(
                     &deps.pool,
                     &session,
                     &connection,
-                    summary_working_dir.as_deref(),
+                    Some(&run_context.workspace_root),
                     &run_id,
                     &mut conversation,
                 )
@@ -621,10 +633,10 @@ async fn run_input_messages(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    trigger: &crate::assistant::types::RunTrigger,
+    is_automation_trigger: bool,
     conversation: &RunConversation,
 ) -> Result<Vec<AssistantMessage>, AssistantEngineError> {
-    if build_trigger_message(session, trigger).is_some() {
+    if is_automation_trigger {
         return Ok(Vec::new());
     }
     let queued =
@@ -1053,6 +1065,7 @@ fn build_midrun_payload(user_lines: String, turn_active: bool) -> MidRunPayload 
 #[allow(clippy::too_many_arguments)]
 async fn try_deliver_queued_to_claude(
     deps: &AssistantDeps,
+    workspace_root: &Path,
     session: &AssistantSession,
     run_id: &str,
     connection_id: &str,
@@ -1084,19 +1097,15 @@ async fn try_deliver_queued_to_claude(
         return MidRunDelivery::NONE;
     }
 
-    // Resolve the workspace root once; mid-run messages can carry images just
-    // like the initial turn, so they must ride a stream-json content-block
-    // array, not the text-only line (otherwise the image is silently dropped
-    // while the queue is marked delivered).
-    let root = run_workspace_root(deps);
+    // Mid-run messages can carry images just like the initial turn, so they
+    // must ride a stream-json content-block array, not the text-only line
+    // (otherwise the image is silently dropped while the queue is marked
+    // delivered).
     let mut user_lines = String::new();
     let mut message_ids = Vec::with_capacity(matching.len());
     for queued in &matching {
         let text = message_text(&queued.message);
-        let images = match &root {
-            Some(root) => resolve_cli_image_parts(root, &queued.message.content).await,
-            None => Vec::new(),
-        };
+        let images = resolve_cli_image_parts(workspace_root, &queued.message.content).await;
         if !text.trim().is_empty() || !images.is_empty() {
             user_lines.push_str(&claude_stream_json_user_message(&text, &images));
         }
@@ -1177,6 +1186,7 @@ async fn try_deliver_queued_to_claude(
 )]
 async fn run_claude_turn(
     deps: &AssistantDeps,
+    workspace_root: &Path,
     session: &AssistantSession,
     connection: &ProviderConnection,
     run_id: &str,
@@ -1184,7 +1194,7 @@ async fn run_claude_turn(
     is_new_session: bool,
     mcp_config_path: &PathBuf,
     cancel_token: &CancellationToken,
-    trigger: &crate::assistant::types::RunTrigger,
+    trigger_message: Option<&ProviderInputMessage>,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut RunConversation,
@@ -1194,7 +1204,7 @@ async fn run_claude_turn(
         deps,
         session,
         run_id,
-        trigger,
+        trigger_message,
         CliProviderRuntime::ClaudeCode.metadata_source(),
         CliProviderRuntime::ClaudeCode.display_name(),
         is_new_session,
@@ -1226,9 +1236,7 @@ async fn run_claude_turn(
         .unwrap_or_else(|| configured_binary.to_string());
     // Pin the subprocess cwd to the agent's workspace root. Without it, Claude
     // Code inherits CLAI's launch cwd (the repo on a dev box) and its
-    // auto-memory loader pulls in unrelated projects' memory. Skipped when the
-    // workspace isn't in the index.
-    let working_dir = run_workspace_root(deps);
+    // auto-memory loader pulls in unrelated projects' memory.
     // Env for the Claude Code process — see `claude_code_host_env`. Injected
     // via the host-command helper so it survives the `flatpak-spawn` hop (the
     // host CLI runs in the host's environment).
@@ -1238,7 +1246,7 @@ async fn run_claude_turn(
     let mut command = crate::providers::build_host_cli_command(
         &binary,
         &claude_code_host_env(&idle_ms),
-        working_dir.as_deref(),
+        Some(workspace_root),
     );
     command
         .arg("-p")
@@ -1309,7 +1317,7 @@ async fn run_claude_turn(
             // stream-json carries image content blocks on the user turn; the
             // legacy `-p` text path can't, so images only ride the modern
             // (default-on) mid-run input mode.
-            let images = resolve_cli_user_images(deps, run_input).await;
+            let images = resolve_cli_user_images(workspace_root, run_input).await;
             claude_stream_json_user_message(&prompt, &images)
         } else {
             prompt
@@ -1387,6 +1395,7 @@ async fn run_claude_turn(
                 };
                 let outcome = try_deliver_queued_to_claude(
                     deps,
+                    workspace_root,
                     session,
                     run_id,
                     &connection.id,
@@ -1491,6 +1500,7 @@ async fn run_claude_turn(
                     if let Some(stdin) = live_stdin.as_mut() {
                         let outcome = try_deliver_queued_to_claude(
                             deps,
+                            workspace_root,
                             session,
                             run_id,
                             &connection.id,
@@ -1571,13 +1581,14 @@ async fn run_claude_turn(
 )]
 async fn run_codex_turn(
     deps: &AssistantDeps,
+    workspace_root: &Path,
     session: &mut AssistantSession,
     connection: &ProviderConnection,
     run_id: &str,
     mcp_url: &str,
     mcp_token: &str,
     cancel_token: &CancellationToken,
-    trigger: &crate::assistant::types::RunTrigger,
+    trigger_message: Option<&ProviderInputMessage>,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut RunConversation,
@@ -1588,7 +1599,7 @@ async fn run_codex_turn(
         deps,
         session,
         run_id,
-        trigger,
+        trigger_message,
         CliProviderRuntime::Codex.metadata_source(),
         CliProviderRuntime::Codex.display_name(),
         existing_thread_id.is_none(),
@@ -1623,7 +1634,6 @@ async fn run_codex_turn(
         .unwrap_or("codex");
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
-    let workspace_root = run_workspace_root(deps);
     // Env (MCP token + timeout) goes through the helper so it survives the
     // `flatpak-spawn --host` hop — under Flatpak the host CLI runs in the
     // host's environment, not the sandbox's.
@@ -1633,7 +1643,7 @@ async fn run_codex_turn(
             (CODEX_MCP_TOKEN_ENV, mcp_token),
             ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
         ],
-        workspace_root.as_deref(),
+        Some(workspace_root),
     );
     command.arg("exec");
     match existing_thread_id.as_deref() {
@@ -1645,7 +1655,7 @@ async fn run_codex_turn(
                 mcp_url,
                 &developer_instructions,
                 false,
-                None,
+                workspace_root,
             );
             command.arg(thread_id);
         }
@@ -1656,7 +1666,7 @@ async fn run_codex_turn(
                 mcp_url,
                 &developer_instructions,
                 true,
-                workspace_root.as_ref(),
+                workspace_root,
             );
         }
     }
@@ -1664,7 +1674,7 @@ async fn run_codex_turn(
     // fresh `exec` (via shared options) and `exec resume` (ResumeArgsRaw.images)
     // paths; codex reads the files itself. Only present on the turn the user
     // actually sent them, so no per-turn re-send.
-    for image_path in resolve_codex_image_paths(deps, run_input) {
+    for image_path in resolve_codex_image_paths(workspace_root, run_input) {
         command.arg("--image").arg(image_path);
     }
     command
@@ -1807,13 +1817,14 @@ async fn run_codex_turn(
 )]
 async fn run_codex_turn_app_server(
     deps: &AssistantDeps,
+    workspace_root: &Path,
     session: &mut AssistantSession,
     connection: &ProviderConnection,
     run_id: &str,
     mcp_url: &str,
     mcp_token: &str,
     cancel_token: &CancellationToken,
-    trigger: &crate::assistant::types::RunTrigger,
+    trigger_message: Option<&ProviderInputMessage>,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut RunConversation,
@@ -1826,7 +1837,7 @@ async fn run_codex_turn_app_server(
         deps,
         session,
         run_id,
-        trigger,
+        trigger_message,
         CliProviderRuntime::Codex.metadata_source(),
         CliProviderRuntime::Codex.display_name(),
         existing_thread_id.is_none(),
@@ -1861,15 +1872,13 @@ async fn run_codex_turn_app_server(
         .unwrap_or("codex");
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
-    let workspace_root = run_workspace_root(deps);
-
     let command = crate::providers::build_host_cli_command(
         &binary,
         &[
             (CODEX_MCP_TOKEN_ENV, mcp_token),
             ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
         ],
-        workspace_root.as_deref(),
+        Some(workspace_root),
     );
     let mut transport =
         aps::AppServerTransport::spawn(command).map_err(LocalAgentRunError::failed)?;
@@ -1890,9 +1899,7 @@ async fn run_codex_turn_app_server(
         let m = connection.model_id.trim();
         (!m.is_empty() && m != "default").then_some(m)
     };
-    let cwd = workspace_root
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+    let cwd = Some(workspace_root.to_string_lossy().into_owned());
     let tool_timeout = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs();
 
     // Handshake: initialize -> thread/start|resume. Startup notifications are
@@ -1939,7 +1946,7 @@ async fn run_codex_turn_app_server(
     // Fire the turn. We do not block on its response; the turn is tracked via
     // notifications in the loop below.
     let mut input = vec![aps::text_user_input(&prompt)];
-    for image_path in resolve_codex_image_paths(deps, run_input) {
+    for image_path in resolve_codex_image_paths(workspace_root, run_input) {
         input.push(aps::local_image_user_input(&image_path.to_string_lossy()));
     }
     transport
@@ -2586,13 +2593,14 @@ fn codex_input_too_large_message(actual_chars: usize) -> String {
 )]
 async fn run_opencode_turn(
     deps: &AssistantDeps,
+    workspace_root: &Path,
     session: &mut AssistantSession,
     connection: &ProviderConnection,
     run_id: &str,
     mcp_url: &str,
     mcp_token: &str,
     cancel_token: &CancellationToken,
-    trigger: &crate::assistant::types::RunTrigger,
+    trigger_message: Option<&ProviderInputMessage>,
     system_prompt: &str,
     assistant_slot: &mut Option<AssistantMessage>,
     conversation: &mut RunConversation,
@@ -2603,7 +2611,7 @@ async fn run_opencode_turn(
         deps,
         session,
         run_id,
-        trigger,
+        trigger_message,
         CliProviderRuntime::OpenCode.metadata_source(),
         CliProviderRuntime::OpenCode.display_name(),
         existing_session_id.is_none(),
@@ -2631,7 +2639,6 @@ async fn run_opencode_turn(
         .unwrap_or("opencode");
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
-    let workspace_root = run_workspace_root(deps);
     let config_content = opencode_config_content(mcp_url, mcp_token)?;
 
     // Env (incl. the MCP config blob) goes through the helper so it survives
@@ -2650,7 +2657,7 @@ async fn run_opencode_turn(
             ("OPENCODE_DISABLE_LSP_DOWNLOAD", "true"),
             ("MCP_TIMEOUT", "3600000"),
         ],
-        workspace_root.as_deref(),
+        Some(workspace_root),
     );
     command
         .arg("--pure")
@@ -2667,9 +2674,7 @@ async fn run_opencode_turn(
     if !model.is_empty() && model != "default" {
         command.arg("--model").arg(model);
     }
-    if let Some(root) = workspace_root.as_ref() {
-        command.arg("--dir").arg(root);
-    }
+    command.arg("--dir").arg(workspace_root);
 
     let mut child = command.spawn().map_err(|e| {
         LocalAgentRunError::failed(format!(
@@ -2792,17 +2797,6 @@ fn opencode_turn_prompt(system_prompt: &str, prompt: &str) -> String {
     )
 }
 
-fn run_workspace_root(deps: &AssistantDeps) -> Option<PathBuf> {
-    deps.app
-        .state::<crate::AppState>()
-        .workspace_root(&deps.workspace_id)
-}
-
-/// `(media_type, base64_data)` for each image on the most recent user message,
-/// read from the workspace image store. Empty when the latest user turn had no
-/// images, the session has no workspace root, or a file can't be read (each
-/// failure is logged and skipped — a missing image never fails the turn, the
-/// surrounding text is still sent).
 /// Image `ContentPart`s contributing to this turn's prompt: every image on the
 /// run's input messages (the FULL delivered queued batch when present, so a
 /// batched follow-up does not drop all but the newest image), oldest-first,
@@ -2828,19 +2822,19 @@ fn image_parts_from_contents(contents: Vec<Vec<ContentPart>>) -> Vec<ContentPart
         .collect()
 }
 
+/// `(media_type, base64_data)` for each image on this turn's input, read from
+/// the workspace image store. Empty when the turn had no images or a file
+/// can't be read (each failure is logged and skipped — a missing image never
+/// fails the turn, the surrounding text is still sent).
 async fn resolve_cli_user_images(
-    deps: &AssistantDeps,
+    workspace_root: &Path,
     run_input: &[AssistantMessage],
 ) -> Vec<(String, String)> {
     let parts = turn_image_parts(run_input);
     if parts.is_empty() {
         return Vec::new();
     }
-    let Some(root) = run_workspace_root(deps) else {
-        tracing::warn!("CLI image: no workspace root for session; sending text only");
-        return Vec::new();
-    };
-    resolve_cli_image_parts(&root, &parts).await
+    resolve_cli_image_parts(workspace_root, &parts).await
 }
 
 /// Read the image parts on a message's content into `(media_type, base64)`
@@ -2884,7 +2878,10 @@ async fn resolve_cli_image_parts(
 /// [`turn_image_parts`]). Codex ingests images as files
 /// (`codex exec [resume] --image`), so it gets paths rather than base64.
 /// Non-store paths and missing files are skipped (text still sends).
-fn resolve_codex_image_paths(deps: &AssistantDeps, run_input: &[AssistantMessage]) -> Vec<PathBuf> {
+fn resolve_codex_image_paths(
+    workspace_root: &Path,
+    run_input: &[AssistantMessage],
+) -> Vec<PathBuf> {
     let rels: Vec<String> = turn_image_parts(run_input)
         .into_iter()
         .filter_map(|part| match part {
@@ -2895,16 +2892,12 @@ fn resolve_codex_image_paths(deps: &AssistantDeps, run_input: &[AssistantMessage
     if rels.is_empty() {
         return Vec::new();
     }
-    let Some(root) = run_workspace_root(deps) else {
-        tracing::warn!("Codex image: no workspace root for session; sending text only");
-        return Vec::new();
-    };
     let mut out = Vec::with_capacity(rels.len());
     for rel in rels {
         // Defense-in-depth: resolve through symlinks and refuse store
         // escapes before handing codex a path to read. `resolve_store_path`
         // canonicalizes (so it also rejects a missing file).
-        match crate::assistant::image_store::resolve_store_path(&root, &rel) {
+        match crate::assistant::image_store::resolve_store_path(workspace_root, &rel) {
             Some(abs) => out.push(abs),
             None => {
                 tracing::warn!(path = %rel, "Codex image: non-store/escaping/missing path rejected; skipping");
@@ -2920,7 +2913,7 @@ fn add_codex_common_args(
     mcp_url: &str,
     developer_instructions: &str,
     include_new_session_flags: bool,
-    workspace_root: Option<&PathBuf>,
+    workspace_root: &Path,
 ) {
     command
         .arg("--json")
@@ -2972,9 +2965,7 @@ fn add_codex_common_args(
     }
 
     if include_new_session_flags {
-        if let Some(root) = workspace_root {
-            command.arg("--cd").arg(root);
-        }
+        command.arg("--cd").arg(workspace_root);
     }
 }
 
@@ -3042,14 +3033,14 @@ async fn prepare_prompt(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    trigger: &crate::assistant::types::RunTrigger,
+    trigger_message: Option<&ProviderInputMessage>,
     metadata_source: &str,
     provider_display_name: &str,
     include_fresh_session_context: bool,
     conversation: &mut RunConversation,
     run_input: &[AssistantMessage],
 ) -> Result<String, LocalAgentRunError> {
-    let prompt = if let Some(trigger_content) = build_trigger_message(session, trigger) {
+    let prompt = if let Some(trigger_content) = trigger_message {
         let boundary_msg = conversation
             .create_message(
                 &deps.pool,
@@ -3072,7 +3063,7 @@ async fn prepare_prompt(
                 message: boundary_msg,
             },
         );
-        provider_message_text(&trigger_content)
+        provider_message_text(trigger_content)
     } else if run_input.is_empty() {
         return Err(LocalAgentRunError::failed(format!(
             "No user message found for {} run",
@@ -3363,20 +3354,15 @@ fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
 
 fn system_prompt_text(
     deps: &AssistantDeps,
-    session: &AssistantSession,
+    run_context: &RunContext,
     trigger: &crate::assistant::types::RunTrigger,
 ) -> String {
-    let workspace_root = run_workspace_root(deps);
-    let tool_defs =
-        crate::assistant::tools::available_tools(&session.context, workspace_root.as_deref(), &[]);
-    let description = live_agent_description(&deps.app, &deps.workspace_id, &session.context);
+    let tool_defs = crate::assistant::tools::available_tools(run_context, &[]);
     provider_message_text(&build_system_prompt(
-        &session.context,
+        run_context,
         &deps.workspace_id,
-        description.as_deref(),
         &tool_defs,
         trigger,
-        workspace_root.as_deref(),
     ))
 }
 
