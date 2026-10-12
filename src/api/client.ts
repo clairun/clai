@@ -8,7 +8,6 @@ import type {
   SkillDefinition,
   SkillSourceResponse,
   StartMcpOAuthLoginRequest,
-  WorkspaceAgentResponse,
 } from '../generated/bindings';
 
 /**
@@ -252,10 +251,48 @@ export const saveWorkspaceTeamPolicy = async (
 // Workspace-Scoped Agent CRUD
 // ============================================================================
 
+// Mirrors Rust `WorkspaceAgentDetail` and `ExecutionCapabilityConfig`, which
+// have no ts-rs binding yet. Enum-valued fields are widened to `string`.
+export interface GrantOrigin {
+  kind: string;
+  grantedAtUnixMs?: number;
+  reason?: string;
+}
+export interface PathGrant {
+  path: string;
+  access: string;
+  origin?: GrantOrigin | null;
+}
+export interface ExecutionConfig {
+  sandbox: { network: string; sessionBus: string };
+  filesystem: { extraPaths: PathGrant[] };
+  shell: {
+    mode: string;
+    allowedCommandPrefixes: string[];
+    blockedCommandPrefixes: string[];
+  };
+  web: { enabled: boolean };
+}
+export interface WorkspaceAgentDetail {
+  id: string;
+  workspaceId: string;
+  name: string;
+  description: string;
+  selectedSkillIds: string[];
+  selectedMcpServerIds: string[];
+  providerConnectionIds: string[];
+  execution: ExecutionConfig;
+  enabled: boolean;
+  isDefault: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+
 export const workspaceGetAgent = async (
   workspaceId: string,
   agentId: string
-): Promise<WorkspaceAgentResponse> => {
+): Promise<WorkspaceAgentDetail | null> => {
   try {
     return await invoke('workspace_get_agent', { workspaceId, agentId });
   } catch (error) {
@@ -265,7 +302,7 @@ export const workspaceGetAgent = async (
 
 export const workspaceCreateAgent = async (
   request: unknown
-): Promise<WorkspaceAgentResponse> => {
+): Promise<WorkspaceAgentDetail> => {
   try {
     return await invoke('workspace_create_agent', { request });
   } catch (error) {
@@ -275,7 +312,7 @@ export const workspaceCreateAgent = async (
 
 export const workspaceUpdateAgent = async (
   request: unknown
-): Promise<WorkspaceAgentResponse> => {
+): Promise<WorkspaceAgentDetail> => {
   try {
     return await invoke('workspace_update_agent', { request });
   } catch (error) {

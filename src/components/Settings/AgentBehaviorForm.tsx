@@ -16,6 +16,9 @@ import {
   workspaceDeleteAgent,
   workspaceGetAgent,
   workspaceUpdateAgent,
+  type ExecutionConfig,
+  type GrantOrigin,
+  type PathGrant,
 } from '../../api/client';
 import SkillPicker from './SkillPicker';
 import type { ProviderConnection, WorkspaceDetails } from '../../generated/bindings';
@@ -23,33 +26,6 @@ import type { SectionHandle } from './sectionHandle';
 // Shares the modal's stylesheet on purpose: the form is rendered inside the
 // modal's content pane and must match its fields, toggles and chips exactly.
 import styles from './WorkspaceSettingsModal.module.css';
-
-// ──────────────────────────────────────────────────────────────────────────
-// Shapes. The execution-config tree and agent payloads are ad-hoc (sourced
-// from untyped api/client.js commands); modeled loosely here rather than
-// dragging the full config module into the FE types.
-// ──────────────────────────────────────────────────────────────────────────
-
-interface GrantOrigin {
-  kind: string;
-  grantedAtUnixMs?: number;
-  reason?: string;
-}
-interface PathGrant {
-  path: string;
-  access: string;
-  origin?: GrantOrigin | null;
-}
-interface ExecutionConfig {
-  sandbox: { network: string; sessionBus: string };
-  filesystem: { extraPaths: PathGrant[] };
-  shell: {
-    mode: string;
-    allowedCommandPrefixes: string[];
-    blockedCommandPrefixes: string[];
-  };
-  web: { enabled: boolean };
-}
 
 interface NamedRef {
   id: string;
@@ -73,7 +49,8 @@ export interface AgentBehaviorPayload {
   enabled: boolean;
 }
 
-// Agent detail loaded from workspaceGetAgent (untyped command).
+// The agent the form edits: a `WorkspaceAgentDetail` from `workspaceGetAgent`,
+// or a library definition the host passes as `initialAgent`.
 export interface AgentDetail {
   id: string;
   name?: string;
@@ -306,9 +283,13 @@ export const AgentBehaviorForm = ({
     setError(null);
     (initialAgent ? Promise.resolve(initialAgent) : workspaceGetAgent(workspaceId, agentId))
       .then((detail) => {
-        if (cancelled || !detail) return;
+        if (cancelled) return;
+        if (detail === null) {
+          setError('Agent not found.');
+          return;
+        }
         lastFetchedId.current = agentId;
-        setAgent(detail as unknown as AgentDetail);
+        setAgent(detail);
       })
       .catch((err) => {
         if (cancelled) return;

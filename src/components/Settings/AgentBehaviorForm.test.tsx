@@ -289,4 +289,13 @@ describe('AgentBehaviorForm', () => {
     expect(screen.queryByLabelText('Description')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Delete agent' })).not.toBeInTheDocument();
   });
+
+  it('says the agent is gone when the backend finds no such agent', async () => {
+    api.workspaceGetAgent.mockResolvedValue(null);
+    renderForm({ agentId: 'agent-1' });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Agent not found.');
+    expect(screen.queryByLabelText(/^Name/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete agent' })).not.toBeInTheDocument();
+  });
 });
