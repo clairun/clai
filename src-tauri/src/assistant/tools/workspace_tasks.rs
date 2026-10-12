@@ -1,11 +1,9 @@
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
-use crate::assistant::repository::{
-    self, CreateMessageParams, CreateRunParams, CreateSessionParams,
-};
+use crate::assistant::repository::{self, CreateMessageParams, CreateRunParams};
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
     AssistantMessage, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
-    SessionContext, SessionKind,
+    SessionContext,
 };
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
 use crate::config::{first_enabled_connection, WorkspaceConfig};
@@ -52,7 +50,6 @@ struct WorkspaceTaskResponse {
     instructions: String,
     status: String,
     result_summary: Option<String>,
-    result_json: Option<serde_json::Value>,
     error: Option<String>,
     session_id: Option<String>,
     run_id: Option<String>,
@@ -97,7 +94,6 @@ struct WorkspaceTaskRow {
     instructions: String,
     status: String,
     result_summary: Option<String>,
-    result_json: Option<String>,
     error: Option<String>,
     session_id: Option<String>,
     run_id: Option<String>,
@@ -227,7 +223,6 @@ async fn assign_task(
                 None,
                 Some(&message),
                 None,
-                None,
                 true,
             )
             .await?;
@@ -235,7 +230,7 @@ async fn assign_task(
             let task = load_task(&deps.pool, &workspace_id, &task_id).await?;
             return Ok(serde_json::json!({
                 "ok": true,
-                "task": task_to_response(task)?,
+                "task": task_to_response(task),
             }));
         }
     };
@@ -245,11 +240,7 @@ async fn assign_task(
     // before the task row links to it (see create_session_and_link_task).
     let session = repository::create_session_and_link_task(
         &deps.pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some(format!("Task: {}", title)),
-            context: task_session_context(&target.id),
-        },
+        task_session_context(&target.id),
         &task_id,
     )
     .await?;
@@ -299,7 +290,6 @@ async fn assign_task(
         Some(&run.id),
         None,
         None,
-        None,
         false,
     )
     .await?;
@@ -316,7 +306,7 @@ async fn assign_task(
     let task = load_task(&deps.pool, &workspace_id, &task_id).await?;
     Ok(serde_json::json!({
         "ok": true,
-        "task": task_to_response(task)?,
+        "task": task_to_response(task),
     }))
 }
 
@@ -329,7 +319,7 @@ async fn get_task_result(
 
     Ok(serde_json::json!({
         "ok": true,
-        "task": task_to_response(task)?,
+        "task": task_to_response(task),
     }))
 }
 
@@ -348,7 +338,6 @@ fn spawn_task_run(
             "running",
             Some(&session_id),
             Some(&run_id),
-            None,
             None,
             None,
             false,
@@ -386,9 +375,6 @@ fn spawn_task_run(
                     .unwrap_or(None);
                 let status = classify_worker_status(summary.as_deref(), status);
                 let error = run.and_then(|run| run.error);
-                let result_json = summary
-                    .as_ref()
-                    .map(|summary| serde_json::json!({ "summary": summary }));
                 let _ = update_task_status(
                     &deps.pool,
                     &task_id,
@@ -397,7 +383,6 @@ fn spawn_task_run(
                     Some(&run_id),
                     error.as_deref(),
                     summary.as_deref(),
-                    result_json.as_ref(),
                     true,
                 )
                 .await;
@@ -415,7 +400,6 @@ fn spawn_task_run(
                     Some(&session_id),
                     Some(&run_id),
                     Some(&error.to_string()),
-                    None,
                     None,
                     true,
                 )
@@ -639,7 +623,6 @@ async fn update_task_status(
     run_id: Option<&str>,
     error: Option<&str>,
     result_summary: Option<&str>,
-    result_json: Option<&serde_json::Value>,
     terminal: bool,
 ) -> Result<(), String> {
     let now = now_ms();
@@ -651,7 +634,6 @@ async fn update_task_status(
             run_id = COALESCE(?, run_id),
             error = ?,
             result_summary = COALESCE(?, result_summary),
-            result_json = COALESCE(?, result_json),
             updated_at = ?,
             completed_at = COALESCE(?, completed_at)
         WHERE id = ?
@@ -662,7 +644,6 @@ async fn update_task_status(
     .bind(run_id)
     .bind(error)
     .bind(result_summary)
-    .bind(result_json.map(|value| value.to_string()))
     .bind(now)
     .bind(if terminal { Some(now) } else { None })
     .bind(task_id)
@@ -682,7 +663,7 @@ async fn load_task(
         r#"
         SELECT id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
                assigned_agent_definition_id, title, instructions, status, result_summary,
-               result_json, error, session_id, run_id, created_at, updated_at, completed_at
+               error, session_id, run_id, created_at, updated_at, completed_at
         FROM workspace_tasks
         WHERE id = ?
         "#,
@@ -707,7 +688,6 @@ fn map_task_row(row: &sqlx::sqlite::SqliteRow, workspace_id: &str) -> WorkspaceT
         instructions: row.get("instructions"),
         status: row.get("status"),
         result_summary: row.get("result_summary"),
-        result_json: row.get("result_json"),
         error: row.get("error"),
         session_id: row.get("session_id"),
         run_id: row.get("run_id"),
@@ -717,8 +697,8 @@ fn map_task_row(row: &sqlx::sqlite::SqliteRow, workspace_id: &str) -> WorkspaceT
     }
 }
 
-fn task_to_response(task: WorkspaceTaskRow) -> Result<WorkspaceTaskResponse, String> {
-    Ok(WorkspaceTaskResponse {
+fn task_to_response(task: WorkspaceTaskRow) -> WorkspaceTaskResponse {
+    WorkspaceTaskResponse {
         id: task.id,
         workspace_id: task.workspace_id,
         created_by_workspace_agent_id: task.created_by_workspace_agent_id,
@@ -728,18 +708,13 @@ fn task_to_response(task: WorkspaceTaskRow) -> Result<WorkspaceTaskResponse, Str
         instructions: task.instructions,
         status: task.status,
         result_summary: task.result_summary,
-        result_json: task
-            .result_json
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
-            .map_err(|e| format!("Failed to parse task result JSON: {}", e))?,
         error: task.error,
         session_id: task.session_id,
         run_id: task.run_id,
         created_at: task.created_at,
         updated_at: task.updated_at,
         completed_at: task.completed_at,
-    })
+    }
 }
 
 async fn emit_task_attention_event(
@@ -829,11 +804,7 @@ mod tests {
         crate::db::test_support::insert_task(&pool, "task-1", "queued", None, None).await;
         let session = repository::create_session_and_link_task(
             &pool,
-            CreateSessionParams {
-                kind: SessionKind::BackgroundJob,
-                title: Some("Task: t".to_string()),
-                context: task_session_context("assignee"),
-            },
+            task_session_context("assignee"),
             "task-1",
         )
         .await

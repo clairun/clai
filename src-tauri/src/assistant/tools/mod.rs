@@ -13,14 +13,13 @@ pub use registry::available_tools;
 pub use router::execute_tool;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::assistant::types::{
-    RunId, RunNotice, RunNoticeKind, SessionId, ToolCallId, WorkspaceAgentSummary,
-};
+use crate::assistant::types::{RunId, SessionId, ToolCallId, WorkspaceAgentSummary};
 use crate::config::{ExecutionCapabilityConfig, FilesystemPathGrant};
 
 /// Terminal human-wait handling: if a CLAI-owned prompt for user input or
@@ -80,7 +79,10 @@ pub struct ToolExecutionContext {
     pub automation_id: Option<String>,
     pub workspace_agents: Vec<WorkspaceAgentSummary>,
     pub execution: ExecutionCapabilityConfig,
-    pub notices: Arc<Mutex<Vec<RunNotice>>>,
+    /// Set when something the user should know about happened without
+    /// failing the run (a denied command or grant, an unavailable sandbox, a
+    /// granted path); the run then completes with warnings.
+    pub had_warnings: Arc<AtomicBool>,
     /// Run-scoped filesystem grants accepted via `fs_request_grant` modal.
     /// These live alongside the durable grants in `execution.filesystem.
     /// extra_paths` and the credentials-preset paths; they vanish when the
@@ -112,23 +114,12 @@ pub struct ToolExecutionContext {
 }
 
 impl ToolExecutionContext {
-    /// Record a policy notice (e.g. command denied) on this run.
-    pub fn add_notice(&self, kind: RunNoticeKind, message: String) {
-        if let Ok(mut notices) = self.notices.lock() {
-            notices.push(RunNotice {
-                kind,
-                message,
-                timestamp: chrono::Utc::now().timestamp_millis(),
-            });
-        }
+    pub fn note_warning(&self) {
+        self.had_warnings.store(true, Ordering::Relaxed);
     }
 
-    /// Drain all accumulated notices.
-    pub fn take_notices(&self) -> Vec<RunNotice> {
-        self.notices
-            .lock()
-            .map(|mut n| std::mem::take(&mut *n))
-            .unwrap_or_default()
+    pub fn had_warnings(&self) -> bool {
+        self.had_warnings.load(Ordering::Relaxed)
     }
 
     /// Append a run-scoped grant. Idempotent on (path, access) — duplicate

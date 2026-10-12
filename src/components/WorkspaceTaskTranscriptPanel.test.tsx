@@ -60,8 +60,6 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   updatedAt: 0n,
   completedAt: null,
   attentionAcknowledgedAt: null,
-  userResponse: null,
-  userResponseAt: null,
   ...over,
 });
 

@@ -6,6 +6,7 @@ use crate::assistant::{
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -26,8 +27,8 @@ use crate::assistant::providers::cli::{
 use crate::assistant::repository::{self, CreateMessageParams};
 use crate::assistant::run_context::RunContext;
 use crate::assistant::run_lifecycle::{
-    cancel_run, complete_run_with_notices, fail_run, record_tool_call_result,
-    record_tool_call_started, resolve_run_id, MissingToolCall, ToolCallOutcome,
+    cancel_run, complete_run, fail_run, record_tool_call_result, record_tool_call_started,
+    resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
@@ -36,7 +37,7 @@ use crate::assistant::turn_common::{
 };
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
-    ProviderConnection, ProviderInputMessage, RunNotice, RunStatus,
+    ProviderConnection, ProviderInputMessage, RunStatus,
 };
 use crate::assistant::{compaction, compaction_service};
 
@@ -374,7 +375,7 @@ pub async fn run_session_turn(
     }
 
     let mcp_runtime = local_mcp::ensure_started(&deps.app).await?;
-    let notices = Arc::new(Mutex::new(Vec::<RunNotice>::new()));
+    let had_warnings = Arc::new(AtomicBool::new(false));
     let session_grants = Arc::new(Mutex::new(Vec::new()));
     let session_allowed_command_prefixes = Arc::new(Mutex::new(Vec::new()));
     let session_blocked_command_prefixes = Arc::new(Mutex::new(Vec::new()));
@@ -388,7 +389,7 @@ pub async fn run_session_turn(
         session_id: session.id.clone(),
         run_id: run_id.clone(),
         cancel_token: input.cancel_token.clone(),
-        notices: notices.clone(),
+        had_warnings: had_warnings.clone(),
         session_grants,
         session_allowed_command_prefixes,
         session_blocked_command_prefixes,
@@ -583,11 +584,8 @@ pub async fn run_session_turn(
 
     match run_result {
         Ok(()) => {
-            let notices = notices
-                .lock()
-                .map(|mut n| std::mem::take(&mut *n))
-                .unwrap_or_default();
-            complete_run_with_notices(deps, &session, &run_id, &notices).await
+            let had_warnings = had_warnings.load(Ordering::Relaxed);
+            complete_run(deps, &session, &run_id, had_warnings).await
         }
         Err(LocalAgentRunError::Cancelled) => cancel_run(deps, &session, &run_id).await,
         Err(LocalAgentRunError::Failed { message }) => {
@@ -5345,16 +5343,10 @@ mod tests {
         use crate::db::test_support::workspace_pool;
 
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            repository::CreateSessionParams {
-                kind: crate::assistant::types::SessionKind::Interactive,
-                title: None,
-                context: crate::assistant::types::SessionContext::default(),
-            },
-        )
-        .await
-        .unwrap();
+        let session =
+            repository::create_session(&pool, crate::assistant::types::SessionContext::default())
+                .await
+                .unwrap();
         repository::create_user_message(&pool, session.id.clone(), "current task".into(), None)
             .await
             .unwrap();

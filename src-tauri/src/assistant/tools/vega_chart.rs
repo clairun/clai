@@ -607,7 +607,7 @@ mod tests {
             automation_id: None,
             workspace_agents: vec![],
             execution: Default::default(),
-            notices: Arc::new(Mutex::new(vec![])),
+            had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(vec![])),
             session_allowed_command_prefixes: Arc::new(Mutex::new(vec![])),
             session_blocked_command_prefixes: Arc::new(Mutex::new(vec![])),

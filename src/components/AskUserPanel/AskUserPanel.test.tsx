@@ -13,8 +13,6 @@ import type { AssistantSession } from '../../generated/bindings';
 
 const SESSION: AssistantSession = {
   id: 'sess-1',
-  kind: 'interactive',
-  title: 'Test',
   context: {
     cliSessionId: null,
     cliSessionProvider: null,

@@ -24,8 +24,6 @@ const { useAssistantEvents } = await import('./useAssistantEvents');
 
 const SESSION = {
   id: 'sess-1',
-  kind: 'interactive',
-  title: 'T',
 } as unknown as AssistantSession & { tabId?: string | null };
 const fire = (event: unknown, runId: string | null = null) => {
   capturedHandler?.({

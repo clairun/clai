@@ -159,7 +159,7 @@ export const agentActivity = (
 
 export type TaskActivitySource = Pick<
   WorkspaceTaskResponse,
-  'assignedToWorkspaceAgentId' | 'status' | 'attentionAcknowledgedAt' | 'userResponseAt'
+  'assignedToWorkspaceAgentId' | 'status' | 'attentionAcknowledgedAt'
 >;
 
 /**

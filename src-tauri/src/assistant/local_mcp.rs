@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ use uuid::Uuid;
 use crate::assistant::engine::AssistantDeps;
 use crate::assistant::run_context::RunContext;
 use crate::assistant::tools::{self, ToolExecutionContext};
-use crate::assistant::types::{RunNotice, ToolDefinition};
+use crate::assistant::types::ToolDefinition;
 use crate::db::DbPool;
 use crate::AppState;
 
@@ -73,7 +74,7 @@ pub struct ToolBinding {
     pub session_id: String,
     pub run_id: String,
     pub cancel_token: CancellationToken,
-    pub notices: Arc<Mutex<Vec<RunNotice>>>,
+    pub had_warnings: Arc<AtomicBool>,
     /// Run-scoped grants accepted via `fs_request_grant`. Shared with the
     /// host engine so a session grant accepted during a CLI-provider run is
     /// visible to the same run's subsequent tool calls.
@@ -407,7 +408,7 @@ async fn execute_bound_tool(
         automation_id: run_context.automation_id.clone(),
         workspace_agents: run_context.workspace_agents.clone(),
         execution: run_context.execution.clone(),
-        notices: binding.notices.clone(),
+        had_warnings: binding.had_warnings.clone(),
         session_grants: binding.session_grants.clone(),
         session_allowed_command_prefixes: binding.session_allowed_command_prefixes.clone(),
         session_blocked_command_prefixes: binding.session_blocked_command_prefixes.clone(),
@@ -539,7 +540,7 @@ mod tests {
             session_id: "session-1".to_string(),
             run_id: "run-1".to_string(),
             cancel_token: CancellationToken::new(),
-            notices: Arc::new(Mutex::new(Vec::new())),
+            had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(Vec::new())),
             session_allowed_command_prefixes: Arc::new(Mutex::new(Vec::new())),
             session_blocked_command_prefixes: Arc::new(Mutex::new(Vec::new())),

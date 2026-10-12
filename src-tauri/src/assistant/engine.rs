@@ -149,8 +149,8 @@ async fn close_unstarted_run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::repository::{CreateRunParams, CreateSessionParams};
-    use crate::assistant::types::{ContentPart, RunStatus, SessionContext, SessionKind};
+    use crate::assistant::repository::CreateRunParams;
+    use crate::assistant::types::{ContentPart, RunStatus, SessionContext};
     use crate::db::test_support::workspace_pool;
 
     fn input(run_id: &str, trigger_message_id: &str) -> RunTurnInput {
@@ -167,16 +167,9 @@ mod tests {
     #[tokio::test]
     async fn start_failure_fails_the_queued_run_and_returns_the_original_error() {
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context: SessionContext::default(),
-            },
-        )
-        .await
-        .unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
         let run = repository::create_run(
             &pool,
             CreateRunParams {

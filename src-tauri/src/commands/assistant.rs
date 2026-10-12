@@ -843,16 +843,9 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let (_a_tmp, a) = crate::db::test_support::workspace_pool().await;
         let (_b_tmp, b) = crate::db::test_support::workspace_pool().await;
-        let session = repository::create_session(
-            &b,
-            repository::CreateSessionParams {
-                kind: crate::assistant::types::SessionKind::Interactive,
-                title: None,
-                context: Default::default(),
-            },
-        )
-        .await
-        .expect("session");
+        let session = repository::create_session(&b, Default::default())
+            .await
+            .expect("session");
         let run = repository::create_run(
             &b,
             CreateRunParams {

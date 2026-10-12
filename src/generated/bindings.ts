@@ -73,7 +73,7 @@ totalCount: number, };
 
 export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, error: string | null, };
 
-export type AssistantSession = { id: string, kind: SessionKind, title: string | null, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
+export type AssistantSession = { id: string, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
 
 export type AssistantUiEvent = { "type": "session_created", "payload": { session: AssistantSession, } } | { "type": "message_created", "payload": { message: AssistantMessage, } } | { "type": "message_deleted", "payload": { message_id: string, } } | { "type": "queued_messages_delivered", "payload": { message_ids: Array<string>, } } | { "type": "session_compacted", "payload": { compaction: AssistantCompaction, summary_message: AssistantMessage, } } | { "type": "run_queued", "payload": { run: AssistantRun, } } | { "type": "run_started", "payload": { run: AssistantRun, } } | { "type": "assistant_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_thinking_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_message_completed", "payload": { message: AssistantMessage, } } | { "type": "assistant_message_updated", "payload": { message: AssistantMessage, } } | { "type": "tool_call_started", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_completed", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_failed", "payload": { tool_call: ToolInvocation, } } | { "type": "run_completed", "payload": { run: AssistantRun, } } | { "type": "run_failed", "payload": { run: AssistantRun, } } | { "type": "run_cancelled", "payload": { run: AssistantRun, } } | { "type": "ask_user_requested", "payload": { pending_id: string, question: string, options: Array<AskUserOption> | null, 
 /**
@@ -328,10 +328,6 @@ providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: strin
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
-export type RunNotice = { kind: RunNoticeKind, message: string, timestamp: bigint, };
-
-export type RunNoticeKind = "command_denied" | "path_denied" | "sandbox_unavailable" | "path_granted" | "path_grant_denied";
-
 export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" | "completed_with_warnings" | "failed" | "cancelled";
 
 export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task";
@@ -381,8 +377,6 @@ automationId?: string | null, cliSessionId?: string | null,
  * `None` for sessions created before this was tracked.
  */
 cliSessionProvider?: string | null, };
-
-export type SessionKind = "interactive" | "background_job";
 
 export type SetSkillSourceEnabledRequest = { id: string, enabled: boolean, };
 
@@ -604,4 +598,4 @@ starred: boolean, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 
-export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: string, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, userResponse: string | null, userResponseAt: bigint | null, };
+export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: string, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };

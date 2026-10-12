@@ -1420,7 +1420,7 @@ mod tests {
             list_pending_queued_messages, mark_queued_messages_delivered,
             update_pending_queued_message,
         };
-        use crate::assistant::types::{SessionContext, SessionKind};
+        use crate::assistant::types::SessionContext;
         use crate::db::test_support::workspace_pool;
         use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::{Arc, Mutex};
@@ -1449,16 +1449,7 @@ mod tests {
 
         async fn db_session() -> (tempfile::TempDir, crate::db::DbPool, AssistantSession) {
             let (tmp, pool) = workspace_pool().await;
-            let session = create_session(
-                &pool,
-                crate::assistant::repository::CreateSessionParams {
-                    kind: SessionKind::Interactive,
-                    title: None,
-                    context: sample_context(),
-                },
-            )
-            .await
-            .unwrap();
+            let session = create_session(&pool, sample_context()).await.unwrap();
             (tmp, pool, session)
         }
 
@@ -2230,16 +2221,7 @@ mod tests {
         async fn load_falls_back_to_raw_history_for_a_degenerate_compaction_row() {
             let (_tmp, pool, session) = db_session().await;
             let m1 = add_text(&pool, &session.id, "one").await;
-            let other = create_session(
-                &pool,
-                crate::assistant::repository::CreateSessionParams {
-                    kind: SessionKind::Interactive,
-                    title: None,
-                    context: sample_context(),
-                },
-            )
-            .await
-            .unwrap();
+            let other = create_session(&pool, sample_context()).await.unwrap();
             let foreign = add_text(&pool, &other.id, "elsewhere").await;
             let compaction = create_compaction(
                 &pool,

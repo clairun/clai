@@ -6,7 +6,7 @@
 use crate::agents::types::AgentInstance;
 use crate::assistant::repository;
 use crate::assistant::types::{
-    AssistantRun, AssistantSession, ContentPart, SessionContext, SessionKind, WorkspaceAgentSummary,
+    AssistantRun, AssistantSession, ContentPart, SessionContext, WorkspaceAgentSummary,
 };
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
 use crate::config::workspace_config::{AgentAvatarRef, WorkspaceAssignment};
@@ -342,10 +342,6 @@ pub struct WorkspaceTaskResponse {
     pub completed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attention_acknowledged_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_response: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_response_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -1371,9 +1367,7 @@ const WORKSPACE_TASK_COLUMNS: &str = "
             task.created_at,
             task.updated_at,
             task.completed_at,
-            task.attention_acknowledged_at,
-            task.user_response,
-            task.user_response_at";
+            task.attention_acknowledged_at";
 
 fn workspace_task_response_from_row(
     row: &sqlx::sqlite::SqliteRow,
@@ -1412,8 +1406,6 @@ fn workspace_task_response_from_row(
         updated_at: row.get("updated_at"),
         completed_at: row.get("completed_at"),
         attention_acknowledged_at: row.get("attention_acknowledged_at"),
-        user_response: row.get("user_response"),
-        user_response_at: row.get("user_response_at"),
     }
 }
 
@@ -1886,26 +1878,15 @@ pub async fn workspace_get_or_create_session(
     let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
     let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
     let provider_connection_id = provider_selection.preferred_connection_id;
-    // One Interactive session per (workspace, manager); user chats and
-    // scheduled ticks share it. Task delegations get their own BackgroundJob
-    // rows (`tools::workspace_tasks`). Without a Main there is nothing to look
-    // up by, so each call starts a fresh unowned session.
-    let title = Some(descriptor.title.clone());
+    // One manager session per (workspace, manager); user chats and scheduled
+    // ticks share it. Task delegations get their own task sessions
+    // (`tools::workspace_tasks`). Without a Main there is nothing to look up
+    // by, so each call starts a fresh unowned session.
     let session = match workspace_default_agent_id(state.inner(), &descriptor.workspace_id)? {
         Some(manager_id) => {
-            repository::find_or_create_manager_session(&workspace_pool, &manager_id, title).await?
+            repository::find_or_create_manager_session(&workspace_pool, &manager_id).await?
         }
-        None => {
-            repository::create_session(
-                &workspace_pool,
-                repository::CreateSessionParams {
-                    kind: SessionKind::Interactive,
-                    title,
-                    context: SessionContext::default(),
-                },
-            )
-            .await?
-        }
+        None => repository::create_session(&workspace_pool, SessionContext::default()).await?,
     };
 
     Ok(WorkspaceSessionBinding {
@@ -3798,8 +3779,8 @@ async fn workspace_task_attention_summary(
         r#"
         SELECT
             COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'blocked' AND attention_acknowledged_at IS NULL AND user_response_at IS NULL THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'failed' AND attention_acknowledged_at IS NULL AND user_response_at IS NULL THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN status = 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'failed' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0)
         FROM workspace_tasks
         "#,
     )
@@ -3815,7 +3796,6 @@ async fn workspace_task_attention_summary(
             FROM workspace_tasks
             WHERE status IN ('blocked', 'failed')
                 AND attention_acknowledged_at IS NULL
-                AND user_response_at IS NULL
             ORDER BY
                 CASE status
                     WHEN 'blocked' THEN 0
@@ -5385,16 +5365,9 @@ mod tests {
     /// A session carrying one run — the only conversation row the details
     /// payload still reports.
     async fn seed_session_with_run(pool: &DbPool, context: SessionContext) -> String {
-        let session = repository::create_session(
-            pool,
-            repository::CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context,
-            },
-        )
-        .await
-        .expect("failed to create session");
+        let session = repository::create_session(pool, context)
+            .await
+            .expect("failed to create session");
         repository::create_run(
             pool,
             repository::CreateRunParams {

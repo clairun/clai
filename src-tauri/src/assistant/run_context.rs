@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::assistant::repository;
     use crate::assistant::tools::workspace_tasks::task_session_context;
-    use crate::assistant::types::{AssistantSession, SessionKind};
+    use crate::assistant::types::AssistantSession;
     use crate::config::global_agents::AgentDefinition;
     use crate::config::workspace_config::{McpRef, WorkspaceAssignment, WorkspaceConfig};
     use crate::config::{AppConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode};
@@ -177,7 +177,7 @@ mod tests {
     async fn run_context_follows_config_edit_without_reconcile() {
         let fx = fixture(true);
         let pool = fx.state.workspace_db(WS).await.expect("workspace db");
-        let session = repository::find_or_create_manager_session(&pool, MAIN, None)
+        let session = repository::find_or_create_manager_session(&pool, MAIN)
             .await
             .expect("session");
         let before = context_json(&pool, &session.id).await;
@@ -213,7 +213,7 @@ mod tests {
     async fn get_or_create_does_not_rewrite_existing_session() {
         let fx = fixture(true);
         let pool = fx.state.workspace_db(WS).await.expect("workspace db");
-        let first = repository::find_or_create_manager_session(&pool, MAIN, None)
+        let first = repository::find_or_create_manager_session(&pool, MAIN)
             .await
             .expect("session");
         let before = context_json(&pool, &first.id).await;
@@ -227,7 +227,7 @@ mod tests {
                 Ok(())
             })
             .expect("edit config");
-        let second = repository::find_or_create_manager_session(&pool, MAIN, None)
+        let second = repository::find_or_create_manager_session(&pool, MAIN)
             .await
             .expect("session");
         assert_eq!(second.id, first.id);
@@ -277,17 +277,9 @@ mod tests {
     /// A task session for MEMBER, created the way `assign_task` creates it.
     async fn member_task_session(pool: &crate::db::DbPool) -> AssistantSession {
         crate::db::test_support::insert_task(pool, "task-1", "queued", None, None).await;
-        repository::create_session_and_link_task(
-            pool,
-            repository::CreateSessionParams {
-                kind: SessionKind::BackgroundJob,
-                title: Some("Task: t".to_string()),
-                context: task_session_context(MEMBER),
-            },
-            "task-1",
-        )
-        .await
-        .expect("task session")
+        repository::create_session_and_link_task(pool, task_session_context(MEMBER), "task-1")
+            .await
+            .expect("task session")
     }
 
     fn assign_member(fx: &Fixture, grants: Vec<FilesystemPathGrant>) {

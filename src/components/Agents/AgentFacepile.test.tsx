@@ -75,7 +75,6 @@ describe('AgentFacepile', () => {
       assignedToWorkspaceAgentId: 'b',
       status: 'blocked',
       attentionAcknowledgedAt: null,
-      userResponseAt: null,
     } as WorkspaceTaskResponse;
     const { container } = render(
       <AgentFacepile agents={[agent('a'), agent('b')]} tasks={[blocked]} />

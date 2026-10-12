@@ -481,13 +481,9 @@ async fn ensure_workspace_manager_session(
     pool: &DbPool,
     agent_config: &crate::config::AgentConfig,
 ) -> Result<crate::assistant::types::AssistantSession, RunnerError> {
-    let session = repository::find_or_create_manager_session(
-        pool,
-        &agent_config.id,
-        Some(agent_config.name.clone()),
-    )
-    .await
-    .map_err(RunnerError::AssistantPersistence)?;
+    let session = repository::find_or_create_manager_session(pool, &agent_config.id)
+        .await
+        .map_err(RunnerError::AssistantPersistence)?;
 
     emit_event(
         app_handle,

@@ -39,14 +39,6 @@ impl std::fmt::Display for AuthMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "bindings.ts")]
-pub enum SessionKind {
-    Interactive,
-    BackgroundJob,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "bindings.ts")]
 pub enum MessageRole {
     System,
     User,
@@ -65,32 +57,6 @@ pub enum RunStatus {
     CompletedWithWarnings,
     Failed,
     Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "bindings.ts")]
-pub enum RunNoticeKind {
-    CommandDenied,
-    PathDenied,
-    SandboxUnavailable,
-    /// A `fs_request_grant` was approved by the user. Carries the granted
-    /// path and access level in the message so the run record shows what
-    /// was extended.
-    PathGranted,
-    /// A `fs_request_grant` was denied (explicit deny, timeout, or channel
-    /// close). Same shape as the existing `PathDenied` but distinguishes
-    /// "path was outside grants" from "grant request was refused."
-    PathGrantDenied,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct RunNotice {
-    pub kind: RunNoticeKind,
-    pub message: String,
-    pub timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -139,9 +105,6 @@ pub struct SessionContext {
 #[ts(export, export_to = "bindings.ts")]
 pub struct AssistantSession {
     pub id: SessionId,
-    pub kind: SessionKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
     pub context: SessionContext,
     pub created_at: i64,
     pub updated_at: i64,

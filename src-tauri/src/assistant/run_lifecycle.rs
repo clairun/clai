@@ -24,8 +24,8 @@ use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
 use crate::assistant::types::{
-    AssistantSession, ContentPart, MessageRole, ProviderConnection, RunNotice, RunStatus,
-    ToolCallStatus, ToolInvocation,
+    AssistantSession, ContentPart, MessageRole, ProviderConnection, RunStatus, ToolCallStatus,
+    ToolInvocation,
 };
 use crate::db::DbPool;
 use serde_json::Value;
@@ -132,28 +132,25 @@ pub(crate) async fn cancel_run(
     Ok(())
 }
 
-/// A run that produced notices completes *with warnings*.
-///
-/// Notices are the record of something the user should know about but that did
-/// not fail the turn — a denied command, an unavailable sandbox, a granted
-/// path. The distinction is only visible through this function, so it is kept
-/// pure and tested rather than re-derived at each completion site.
-pub(crate) fn final_status(notices: &[RunNotice]) -> RunStatus {
-    if notices.is_empty() {
-        RunStatus::Completed
-    } else {
+/// A run that raised a warning (see `ToolExecutionContext::had_warnings`)
+/// completes *with warnings*.
+pub(crate) fn final_status(had_warnings: bool) -> RunStatus {
+    if had_warnings {
         RunStatus::CompletedWithWarnings
+    } else {
+        RunStatus::Completed
     }
 }
 
-/// Close a run that finished on its own terms, carrying its notices.
-pub(crate) async fn complete_run_with_notices(
+/// Close a run that finished on its own terms.
+pub(crate) async fn complete_run(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    notices: &[RunNotice],
+    had_warnings: bool,
 ) -> Result<(), AssistantEngineError> {
-    let run = repository::complete_run(&deps.pool, run_id, final_status(notices), None).await?;
+    let run =
+        repository::complete_run(&deps.pool, run_id, final_status(had_warnings), None).await?;
     let _ = emit_event(
         &deps.app,
         &deps.workspace_id,
@@ -355,19 +352,9 @@ pub(crate) async fn record_tool_call_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::RunNoticeKind;
-
-    fn notice() -> RunNotice {
-        RunNotice {
-            kind: RunNoticeKind::CommandDenied,
-            message: "denied".to_string(),
-            timestamp: 0,
-        }
-    }
-
     #[test]
-    fn a_run_without_notices_completes_cleanly() {
-        assert!(matches!(final_status(&[]), RunStatus::Completed));
+    fn a_run_without_warnings_completes_cleanly() {
+        assert!(matches!(final_status(false), RunStatus::Completed));
     }
 
     fn invocation(status: ToolCallStatus) -> ToolInvocation {
@@ -452,9 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn a_single_notice_is_enough_to_complete_with_warnings() {
+    fn a_run_with_warnings_completes_with_warnings() {
         assert!(matches!(
-            final_status(&[notice()]),
+            final_status(true),
             RunStatus::CompletedWithWarnings
         ));
     }

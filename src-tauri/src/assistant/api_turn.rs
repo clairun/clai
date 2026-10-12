@@ -13,8 +13,8 @@ use crate::assistant::repository;
 use crate::assistant::repository::CreateMessageParams;
 use crate::assistant::run_context::RunContext;
 use crate::assistant::run_lifecycle::{
-    cancel_run, complete_run_with_notices, fail_run, record_tool_call_result,
-    record_tool_call_started, resolve_run_id, MissingToolCall, ToolCallOutcome,
+    cancel_run, complete_run, fail_run, record_tool_call_result, record_tool_call_started,
+    resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{self, ToolExecutionContext};
@@ -162,8 +162,7 @@ pub async fn run_session_turn(
         state.iteration += 1;
     }
 
-    let notices = state.tool_context.take_notices();
-    complete_run_with_notices(deps, &session, &run_id, &notices).await?;
+    complete_run(deps, &session, &run_id, state.tool_context.had_warnings()).await?;
 
     Ok(())
 }
@@ -360,7 +359,6 @@ async fn start_api_turn(
     let tool_defs = tools::available_tools(run_context, &external_tools);
 
     // Build execution context for tool calls
-    let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // Run-scoped filesystem grants accepted via fs_request_grant stay visible
     // to subsequent tool calls through this shared context.
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -382,7 +380,7 @@ async fn start_api_turn(
         automation_id: run_context.automation_id.clone(),
         workspace_agents: run_context.workspace_agents.clone(),
         execution: run_context.execution.clone(),
-        notices,
+        had_warnings: Default::default(),
         session_grants,
         session_allowed_command_prefixes,
         session_blocked_command_prefixes,
@@ -799,25 +797,16 @@ mod tests {
     use crate::assistant::types::ContentPart;
     use crate::assistant::types::RunTrigger;
     use crate::assistant::types::SessionContext;
-    use crate::assistant::types::SessionKind;
 
     #[tokio::test]
     async fn partial_assistant_output_survives_database_reload() {
-        use crate::assistant::repository::CreateSessionParams;
         use crate::assistant::types::SessionContext;
         use crate::db::test_support::workspace_pool;
 
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context: SessionContext::default(),
-            },
-        )
-        .await
-        .unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
         let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
         let placeholder = conversation
             .create_message(
@@ -853,20 +842,12 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_text_and_tool_result_replay_in_order() {
-        use crate::assistant::repository::CreateSessionParams;
         use crate::db::test_support::workspace_pool;
 
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context: SessionContext::default(),
-            },
-        )
-        .await
-        .unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
         let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
         let assistant = conversation
             .create_message(

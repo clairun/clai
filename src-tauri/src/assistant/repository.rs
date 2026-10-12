@@ -7,15 +7,9 @@ use uuid::Uuid;
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantRun, AssistantSession, CompactionStatus,
     CompactionStrategy, CompactionTrigger, ContentPart, MessageRole, RunStatus, RunTrigger,
-    SessionContext, SessionKind, ToolCallStatus, ToolInvocation,
+    SessionContext, ToolCallStatus, ToolInvocation,
 };
 use crate::db::DbPool;
-
-pub struct CreateSessionParams {
-    pub kind: SessionKind,
-    pub title: Option<String>,
-    pub context: SessionContext,
-}
 
 pub struct CreateMessageParams {
     pub session_id: String,
@@ -83,8 +77,6 @@ fn parse_optional_json<T: DeserializeOwned>(
 fn map_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantSession, String> {
     Ok(AssistantSession {
         id: row.get("id"),
-        kind: parse_json::<SessionKind>(&row.get::<String, _>("kind"), "session kind")?,
-        title: row.get("title"),
         context: parse_json::<SessionContext>(
             &row.get::<String, _>("context_json"),
             "session context",
@@ -164,15 +156,13 @@ fn map_compaction_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantCompacti
 
 pub async fn create_session(
     pool: &DbPool,
-    params: CreateSessionParams,
+    context: SessionContext,
 ) -> Result<AssistantSession, String> {
     let now = now_ms();
 
     let session = AssistantSession {
         id: Uuid::new_v4().to_string(),
-        kind: params.kind,
-        title: params.title,
-        context: params.context,
+        context,
         created_at: now,
         updated_at: now,
     };
@@ -180,13 +170,11 @@ pub async fn create_session(
     sqlx::query(
         r#"
         INSERT INTO assistant_sessions
-            (id, kind, title, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, context_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
         "#,
     )
     .bind(&session.id)
-    .bind(to_json_string(&session.kind)?)
-    .bind(&session.title)
     .bind(to_json_string(&session.context)?)
     .bind(session.created_at)
     .bind(session.updated_at)
@@ -201,7 +189,7 @@ pub async fn create_session(
 /// single SQLite transaction.
 ///
 /// `assignTask` creates the task row first (with `session_id = NULL`), then the
-/// `BackgroundJob` session that runs the task, then later UPDATEs the task row
+/// session that runs the task, then later UPDATEs the task row
 /// to stamp the session id. Between the session INSERT and that UPDATE there is
 /// a window where the new session is visible to `find_manager_session` but has
 /// no `workspace_tasks.session_id` link, so a self-assigned task's session
@@ -211,15 +199,13 @@ pub async fn create_session(
 /// points at it, so the anti-join excludes it.
 pub async fn create_session_and_link_task(
     pool: &DbPool,
-    params: CreateSessionParams,
+    context: SessionContext,
     task_id: &str,
 ) -> Result<AssistantSession, String> {
     let now = now_ms();
     let session = AssistantSession {
         id: Uuid::new_v4().to_string(),
-        kind: params.kind,
-        title: params.title,
-        context: params.context,
+        context,
         created_at: now,
         updated_at: now,
     };
@@ -232,13 +218,11 @@ pub async fn create_session_and_link_task(
     sqlx::query(
         r#"
         INSERT INTO assistant_sessions
-            (id, kind, title, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, context_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
         "#,
     )
     .bind(&session.id)
-    .bind(to_json_string(&session.kind)?)
-    .bind(&session.title)
     .bind(to_json_string(&session.context)?)
     .bind(session.created_at)
     .bind(session.updated_at)
@@ -270,7 +254,7 @@ pub async fn get_session(
 ) -> Result<Option<AssistantSession>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, kind, title, context_json, created_at, updated_at
+        SELECT id, context_json, created_at, updated_at
         FROM assistant_sessions
         WHERE id = ?
         "#,
@@ -284,7 +268,7 @@ pub async fn get_session(
 }
 
 /// Canonical conversation session for a workspace manager: the newest session
-/// whose `automationId` is `manager_id`, regardless of kind, excluding sessions
+/// whose `automationId` is `manager_id`, excluding sessions
 /// linked from `workspace_tasks.session_id` (a self-assigned task carries the
 /// manager's automation id). `NOT EXISTS` keeps task rows with a NULL
 /// `session_id` harmless. Ties on `updated_at` are broken by `id DESC`.
@@ -294,7 +278,7 @@ pub async fn find_manager_session(
 ) -> Result<Option<AssistantSession>, String> {
     let row = sqlx::query(
         r#"
-        SELECT s.id, s.kind, s.title, s.context_json, s.created_at, s.updated_at
+        SELECT s.id, s.context_json, s.created_at, s.updated_at
         FROM assistant_sessions AS s
         WHERE json_extract(s.context_json, '$.automationId') = ?
           AND NOT EXISTS (
@@ -319,20 +303,15 @@ pub async fn find_manager_session(
 pub async fn find_or_create_manager_session(
     pool: &DbPool,
     manager_id: &str,
-    title: Option<String>,
 ) -> Result<AssistantSession, String> {
     if let Some(session) = find_manager_session(pool, manager_id).await? {
         return Ok(session);
     }
     create_session(
         pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title,
-            context: SessionContext {
-                automation_id: Some(manager_id.to_string()),
-                ..SessionContext::default()
-            },
+        SessionContext {
+            automation_id: Some(manager_id.to_string()),
+            ..SessionContext::default()
         },
     )
     .await
@@ -355,11 +334,10 @@ pub async fn update_session(
     sqlx::query(
         r#"
         UPDATE assistant_sessions
-        SET title = ?, context_json = ?, updated_at = ?
+        SET context_json = ?, updated_at = ?
         WHERE id = ?
         "#,
     )
-    .bind(&session.title)
     .bind(to_json_string(&session.context)?)
     .bind(session.updated_at)
     .bind(&session.id)
@@ -1461,8 +1439,8 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO assistant_sessions
-                (id, kind, title, context_json, created_at, updated_at)
-            VALUES (?, '"chat"', 'Test', '{}', 1, 1)
+                (id, context_json, created_at, updated_at)
+            VALUES (?, '{}', 1, 1)
             "#,
         )
         .bind(id)

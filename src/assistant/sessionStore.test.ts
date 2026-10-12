@@ -6,8 +6,6 @@ import type { AssistantMessage, AssistantRun, AssistantSession } from '../genera
 // cast partial shapes rather than spell out every required field.
 const SESSION = {
   id: 'sess-1',
-  kind: 'interactive',
-  title: 'Test session',
   tabId: null,
 } as unknown as AssistantSession & { tabId?: string | null };
 

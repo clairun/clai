@@ -170,8 +170,8 @@ pub(crate) async fn discard_unanswered_run_input_with_sink(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::repository::{CreateRunParams, CreateSessionParams};
-    use crate::assistant::types::{RunStatus, SessionContext, SessionKind};
+    use crate::assistant::repository::CreateRunParams;
+    use crate::assistant::types::{RunStatus, SessionContext};
     use crate::db::test_support::workspace_pool;
 
     fn image() -> ContentPart {
@@ -204,16 +204,9 @@ mod tests {
     #[tokio::test]
     async fn unanswered_input_discards_text_but_keeps_images_and_pending_queue() {
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context: SessionContext::default(),
-            },
-        )
-        .await
-        .unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
         let run = repository::create_run(
             &pool,
             CreateRunParams {

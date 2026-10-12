@@ -83,8 +83,6 @@ const MEMORY: WorkspaceFileEntry = {
 
 const sessionFor = (workspaceId: string, updatedAt: bigint): AssistantSession => ({
   id: `sess-${workspaceId}`,
-  kind: 'interactive',
-  title: null,
   context: {
     cliSessionId: null,
     cliSessionProvider: null,
@@ -252,8 +250,6 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   updatedAt: 1n,
   completedAt: 1n,
   attentionAcknowledgedAt: null,
-  userResponse: null,
-  userResponseAt: null,
 };
 
 const renderWorkspace = () =>

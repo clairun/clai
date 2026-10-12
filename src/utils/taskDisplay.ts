@@ -35,11 +35,9 @@ export const taskStatusLabel = (status: string): string => TASK_STATUS_LABEL[sta
 
 /** A task the user has not yet looked at after it stopped on a problem. */
 export const isTaskAttention = (
-  task: Pick<WorkspaceTaskResponse, 'status' | 'attentionAcknowledgedAt' | 'userResponseAt'>
+  task: Pick<WorkspaceTaskResponse, 'status' | 'attentionAcknowledgedAt'>
 ): boolean =>
-  (task.status === 'blocked' || task.status === 'failed') &&
-  !task.attentionAcknowledgedAt &&
-  !task.userResponseAt;
+  (task.status === 'blocked' || task.status === 'failed') && !task.attentionAcknowledgedAt;
 
 export const isTaskActive = (task: Pick<WorkspaceTaskResponse, 'status'>): boolean =>
   task.status === 'running' || task.status === 'queued';
