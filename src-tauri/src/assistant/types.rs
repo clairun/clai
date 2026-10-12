@@ -107,21 +107,6 @@ pub enum RunTrigger {
     WorkspaceTask,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct InterAgentCallContext {
-    pub call_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub caller_agent_id: Option<String>,
-    pub caller_session_id: String,
-    pub caller_run_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub caller_tool_call_id: Option<String>,
-    pub callee_agent_id: String,
-    pub exposed_tool_name: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -141,8 +126,6 @@ pub struct WorkspaceAgentSummary {
 pub struct SessionContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
-    #[serde(default)]
-    pub tool_scopes: Vec<String>,
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
     // ExecutionCapabilityConfig has a deep tree (sandbox/fs/shell/web
@@ -166,8 +149,6 @@ pub struct SessionContext {
     pub agent_workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automation_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inter_agent_call: Option<InterAgentCallContext>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_agents: Vec<WorkspaceAgentSummary>,
 }
@@ -601,5 +582,19 @@ mod tests {
             }
             other => panic!("expected Image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_context_ignores_removed_keys() {
+        let with_removed: SessionContext = serde_json::from_str(
+            r#"{"workspaceId":"ws-1","mcpServerIds":["clai"],
+                "toolScopes":["web"],
+                "interAgentCall":{"callerAgentId":"a","depth":1}}"#,
+        )
+        .unwrap();
+        let without: SessionContext =
+            serde_json::from_str(r#"{"workspaceId":"ws-1","mcpServerIds":["clai"]}"#).unwrap();
+        assert_eq!(with_removed, without);
+        assert_eq!(with_removed.workspace_id.as_deref(), Some("ws-1"));
     }
 }

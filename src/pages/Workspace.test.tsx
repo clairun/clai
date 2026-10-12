@@ -86,7 +86,6 @@ const sessionFor = (workspaceId: string, updatedAt: bigint): AssistantSession =>
   title: null,
   context: {
     workspaceId,
-    toolScopes: [],
     mcpServerIds: [],
     execution: {},
     cliSessionId: null,
@@ -94,7 +93,6 @@ const sessionFor = (workspaceId: string, updatedAt: bigint): AssistantSession =>
     automationId: null,
     agentWorkspaceId: null,
     automationName: null,
-    interAgentCall: null,
     workspaceAgents: [],
   },
   createdAt: 0n,

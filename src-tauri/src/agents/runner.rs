@@ -451,10 +451,6 @@ impl std::error::Error for RunnerError {}
 ///   and reused across ticks so the model has its own conversation state
 ///   to resume. Wiping this on every reconcile would force a fresh CLI
 ///   session every 5 min — i.e. the model loses its prior reasoning.
-/// - `inter_agent_call`: only meaningful inside a synchronous inter-agent
-///   call frame; outside one it's already `None`, and overwriting an
-///   in-flight value here would be a data race anyway (this function is
-///   called between turns, never during one).
 async fn ensure_workspace_manager_session(
     app_handle: &AppHandle,
     pool: &DbPool,
@@ -487,11 +483,6 @@ async fn ensure_workspace_manager_session(
     };
     let desired_context = SessionContext {
         workspace_id: Some(agent_config.workspace_id.clone()),
-        tool_scopes: agent_config
-            .required_tools()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
         mcp_server_ids: agent_config.selected_mcp_server_ids.clone(),
         execution: agent_config.execution.clone(),
         cli_session_id: None,
@@ -505,7 +496,6 @@ async fn ensure_workspace_manager_session(
         // here via `desired_workspace_context`; this matches them.
         agent_workspace_id: Some(agent_config.workspace_id.clone()),
         automation_name: Some(agent_config.name.clone()),
-        inter_agent_call: None,
         workspace_agents,
     };
 
@@ -517,7 +507,6 @@ async fn ensure_workspace_manager_session(
         let mut merged = desired_context.clone();
         merged.cli_session_id = session.context.cli_session_id.clone();
         merged.cli_session_provider = session.context.cli_session_provider.clone();
-        merged.inter_agent_call = session.context.inter_agent_call.clone();
 
         let session = if session.title.as_deref() != Some(agent_config.name.as_str())
             || session.context != merged

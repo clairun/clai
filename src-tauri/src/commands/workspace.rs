@@ -422,7 +422,6 @@ pub(crate) struct WorkspaceDescriptor {
     selected_mcp_server_ids: Vec<String>,
     disabled_mcp_server_ids: Vec<String>,
     execution: ExecutionCapabilityConfig,
-    tool_scopes: Vec<String>,
     automation_name: Option<String>,
 }
 
@@ -1159,7 +1158,6 @@ pub(crate) fn resolve_workspace_descriptor(
         selected_mcp_server_ids,
         disabled_mcp_server_ids,
         execution,
-        tool_scopes: vec!["web".to_string()],
         automation_name: manager.map(|agent| agent.name.clone()),
     })
 }
@@ -1732,7 +1730,6 @@ fn desired_workspace_context(
 
     SessionContext {
         workspace_id: Some(descriptor.workspace_id.clone()),
-        tool_scopes: descriptor.tool_scopes.clone(),
         mcp_server_ids,
         execution,
         cli_session_id: existing_session.and_then(|session| session.context.cli_session_id.clone()),
@@ -1741,8 +1738,6 @@ fn desired_workspace_context(
         automation_id,
         agent_workspace_id,
         automation_name,
-        inter_agent_call: existing_session
-            .and_then(|session| session.context.inter_agent_call.clone()),
         workspace_agents,
     }
 }
@@ -4967,7 +4962,6 @@ mod tests {
             selected_mcp_server_ids: vec![],
             disabled_mcp_server_ids: vec![],
             execution: ExecutionCapabilityConfig::default(),
-            tool_scopes: vec![],
             automation_name: None,
         }
     }

@@ -14,7 +14,6 @@ use crate::db::test_support::{insert_task, workspace_pool};
 fn sample_context() -> SessionContext {
     SessionContext {
         workspace_id: Some("ws-1".to_string()),
-        tool_scopes: vec![],
         mcp_server_ids: vec![],
         execution: ExecutionCapabilityConfig::default(),
         cli_session_id: None,
@@ -22,7 +21,6 @@ fn sample_context() -> SessionContext {
         automation_id: None,
         agent_workspace_id: None,
         automation_name: None,
-        inter_agent_call: None,
         workspace_agents: vec![],
     }
 }

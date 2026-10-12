@@ -115,8 +115,6 @@ providerId: string | null, apiKey: string | null, authMode: AuthMode | null, bas
 
 export type FilesystemPathAccess = "read_only" | "read_write";
 
-export type InterAgentCallContext = { callId: string, callerAgentId: string | null, callerSessionId: string, callerRunId: string, callerToolCallId: string | null, calleeAgentId: string, exposedToolName: string, };
-
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
 /**
@@ -370,14 +368,14 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
+export type SessionContext = { workspaceId: string | null, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
 /**
  * The CLI provider that owns `cli_session_id`. A session id is
  * provider-specific (Claude generates its own UUID; Codex returns a
  * server-side thread id), so switching providers must NOT reuse it.
  * `None` for sessions created before this was tracked.
  */
-cliSessionProvider: string | null, automationId: string | null, agentWorkspaceId: string | null, automationName: string | null, interAgentCall: InterAgentCallContext | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
+cliSessionProvider: string | null, automationId: string | null, agentWorkspaceId: string | null, automationName: string | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
 
 export type SessionKind = "interactive" | "background_job";
 

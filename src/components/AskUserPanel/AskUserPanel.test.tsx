@@ -17,7 +17,6 @@ const SESSION: AssistantSession = {
   title: 'Test',
   context: {
     workspaceId: 'ws-1',
-    toolScopes: [],
     mcpServerIds: [],
     execution: {},
     cliSessionId: null,
@@ -25,7 +24,6 @@ const SESSION: AssistantSession = {
     automationId: null,
     agentWorkspaceId: null,
     automationName: null,
-    interAgentCall: null,
     workspaceAgents: [],
   },
   createdAt: 0n,

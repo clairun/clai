@@ -821,7 +821,6 @@ mod tests {
                 title: None,
                 context: SessionContext {
                     workspace_id: None,
-                    tool_scopes: vec![],
                     mcp_server_ids: vec![],
                     execution: Default::default(),
                     cli_session_id: None,
@@ -829,7 +828,6 @@ mod tests {
                     automation_id: None,
                     agent_workspace_id: None,
                     automation_name: None,
-                    inter_agent_call: None,
                     workspace_agents: vec![],
                 },
             },
@@ -882,7 +880,6 @@ mod tests {
                 title: None,
                 context: SessionContext {
                     workspace_id: None,
-                    tool_scopes: vec![],
                     mcp_server_ids: vec![],
                     execution: Default::default(),
                     cli_session_id: None,
@@ -890,7 +887,6 @@ mod tests {
                     automation_id: None,
                     agent_workspace_id: None,
                     automation_name: None,
-                    inter_agent_call: None,
                     workspace_agents: vec![],
                 },
             },

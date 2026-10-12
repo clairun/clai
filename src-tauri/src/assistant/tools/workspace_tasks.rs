@@ -477,11 +477,6 @@ fn task_session_context(
 
     SessionContext {
         workspace_id: Some(workspace_id.to_string()),
-        tool_scopes: target_config
-            .required_tools()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
         mcp_server_ids,
         execution: target_config.execution.clone(),
         cli_session_id: None,
@@ -489,7 +484,6 @@ fn task_session_context(
         automation_id: Some(target_config.id.clone()),
         agent_workspace_id: Some(workspace_id.to_string()),
         automation_name: Some(target_config.name.clone()),
-        inter_agent_call: None,
         workspace_agents: context.workspace_agents.clone(),
     }
 }
