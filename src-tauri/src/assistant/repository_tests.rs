@@ -64,98 +64,107 @@ async fn test_get_session_missing_returns_none() {
 }
 
 #[tokio::test]
-async fn test_list_sessions_ordered_by_updated_at_desc() {
+async fn test_find_manager_session_ignores_newer_self_task() {
     let (_tmp, pool) = workspace_pool().await;
-
-    let s1 = create_session(
+    let context = |manager: &str| SessionContext {
+        automation_id: Some(manager.to_string()),
+        ..sample_context()
+    };
+    let create = |kind, context| CreateSessionParams {
+        kind,
+        title: None,
+        context,
+    };
+    let conversation = create_session(&pool, create(SessionKind::Interactive, context("manager")))
+        .await
+        .unwrap();
+    let self_task = create_session(
         &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("First".to_string()),
-            context: sample_context(),
-        },
+        create(SessionKind::BackgroundJob, context("manager")),
     )
     .await
     .unwrap();
-
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    let s2 = create_session(
+    insert_task(&pool, "self-task", "running", Some(&self_task.id), None).await;
+    insert_task(&pool, "pending-task", "queued", None, None).await;
+    let other = create_session(&pool, create(SessionKind::Interactive, context("other")))
+        .await
+        .unwrap();
+    for (id, updated_at) in [
+        (&conversation.id, 10_i64),
+        (&self_task.id, 30),
+        (&other.id, 40),
+    ] {
+        sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
+            .bind(updated_at)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        conversation.id
+    );
+    let scheduled = create_session(
         &pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some("Second".to_string()),
-            context: sample_context(),
-        },
+        create(SessionKind::BackgroundJob, context("manager")),
     )
     .await
     .unwrap();
-
-    let all = list_sessions(&pool).await.unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].id, s2.id); // newest first
-    assert_eq!(all[1].id, s1.id);
+    sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
+        .bind(20_i64)
+        .bind(&scheduled.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        scheduled.id
+    );
+    assert!(find_manager_session(&pool, "missing")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
-async fn test_list_non_task_sessions_excludes_task_sessions() {
+async fn test_find_manager_session_breaks_updated_at_tie_by_id_desc() {
     let (_tmp, pool) = workspace_pool().await;
-    // The interactive chat (canonical conversation).
-    let convo = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Conversation".to_string()),
-            context: sample_context(),
+    let params = || CreateSessionParams {
+        kind: SessionKind::Interactive,
+        title: None,
+        context: SessionContext {
+            automation_id: Some("manager".to_string()),
+            ..sample_context()
         },
-    )
-    .await
-    .unwrap();
-
-    // A task-delegation session: BackgroundJob + a workspace_tasks row.
-    let task = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some("Task A".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-    insert_task(&pool, "task-1", "running", Some(&task.id), None).await;
-
-    // A task with no session yet (NULL session_id) must not nuke the result
-    // set via NOT IN / NULL semantics.
-    insert_task(&pool, "task-pending", "queued", None, None).await;
-
-    // A non-task BackgroundJob session (e.g. a scheduled-run conversation).
-    let scheduled = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some("Scheduled".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let result = list_non_task_sessions(&pool).await.unwrap();
-    let ids: Vec<&str> = result.iter().map(|s| s.id.as_str()).collect();
-    assert!(
-        ids.contains(&convo.id.as_str()),
-        "interactive conversation kept"
+    };
+    // SQLite's order for equal sort keys is unspecified; `id DESC` is the
+    // explicit tie-break.
+    for id in ["session-a", "session-b"] {
+        let session = create_session(&pool, params()).await.unwrap();
+        sqlx::query("UPDATE assistant_sessions SET id = ?, updated_at = 10 WHERE id = ?")
+            .bind(id)
+            .bind(&session.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "session-b"
     );
-    assert!(
-        ids.contains(&scheduled.id.as_str()),
-        "non-task background session kept"
-    );
-    assert!(
-        !ids.contains(&task.id.as_str()),
-        "task-linked session excluded"
-    );
-    assert_eq!(result.len(), 2);
 }
 
 #[tokio::test]
@@ -871,22 +880,23 @@ async fn test_create_session_and_link_task_links_atomically() {
     insert_task(&pool, "task-1", "queued", None, None).await;
 
     // The atomic helper should INSERT the session AND stamp session_id in one
-    // transaction, so list_non_task_sessions (run before/after) reflects the
-    // final state on both sides.
+    // transaction, so find_manager_session never sees it unlinked.
     let session = create_session_and_link_task(
         &pool,
         CreateSessionParams {
             kind: SessionKind::BackgroundJob,
             title: Some("Self-task".to_string()),
-            context: sample_context(),
+            context: SessionContext {
+                automation_id: Some("manager".to_string()),
+                ..sample_context()
+            },
         },
         "task-1",
     )
     .await
     .unwrap();
 
-    // The task row must now point at the session — the anti-join will exclude
-    // it, so a concurrent resolver cannot hijack the conversation view.
+    // The task row must now point at the session, so the anti-join excludes it.
     let linked: Option<String> =
         sqlx::query_scalar("SELECT session_id FROM workspace_tasks WHERE id = ?")
             .bind("task-1")
@@ -899,16 +909,12 @@ async fn test_create_session_and_link_task_links_atomically() {
     let fetched = get_session(&pool, &session.id).await.unwrap();
     assert!(fetched.is_some(), "session row exists after commit");
 
-    // And it must be invisible to list_non_task_sessions — the resolver
-    // property the whole fix hinges on.
-    let non_task_ids: Vec<String> = list_non_task_sessions(&pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    // And it must never be taken as the manager conversation.
     assert!(
-        !non_task_ids.contains(&session.id),
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .is_none(),
         "task-linked session excluded by anti-join"
     );
 }

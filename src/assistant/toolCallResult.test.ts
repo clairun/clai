@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getToolCallResult = vi.hoisted(() =>
-  vi.fn((_sessionId: string, toolCallId: string) => Promise.resolve(`output of ${toolCallId}`)),
+  vi.fn((_workspaceId: string, _sessionId: string, toolCallId: string) => Promise.resolve(`output of ${toolCallId}`)),
 );
 vi.mock('./client', () => ({ getToolCallResult, getToolCallInput: vi.fn() }));
 
@@ -22,16 +22,16 @@ describe('useToolCallResult', () => {
   });
 
   it('keeps a value found in the cache after the entry is evicted', async () => {
-    const first = renderHook(() => useToolCallResult(call('tc-0'), true));
+    const first = renderHook(() => useToolCallResult('ws-1', call('tc-0'), true));
     await waitFor(() => expect(first.result.current.state).toBe('ready'));
     first.unmount();
 
-    const remounted = renderHook(() => useToolCallResult(call('tc-0'), true));
+    const remounted = renderHook(() => useToolCallResult('ws-1', call('tc-0'), true));
     expect(remounted.result.current).toMatchObject({ state: 'ready', value: 'output of tc-0' });
     expect(getToolCallResult).toHaveBeenCalledTimes(1);
 
     const others = Array.from({ length: 30 }, (_, i) =>
-      renderHook(() => useToolCallResult(call(`tc-${i + 1}`), true)),
+      renderHook(() => useToolCallResult('ws-1', call(`tc-${i + 1}`), true)),
     );
     for (const other of others) {
       await waitFor(() => expect(other.result.current.state).toBe('ready'));

@@ -1878,10 +1878,11 @@ const Workspace = () => {
           if (shouldHydrateSession) {
             const [messagePage, runs] = await Promise.all([
               assistantClient.loadSessionMessagesPage({
+                workspaceId,
                 sessionId: nextDetails.session.id,
                 limit: MESSAGE_PAGE_LIMIT,
               }),
-              assistantClient.listRuns(nextDetails.session.id),
+              assistantClient.listRuns(workspaceId, nextDetails.session.id),
             ]);
             if (currentWorkspaceIdRef.current !== workspaceId) return;
 
@@ -2005,7 +2006,7 @@ const Workspace = () => {
       if (!runId || cancellingRunId) return;
       setCancellingRunId(runId);
       try {
-        await assistantClient.cancelRun(runId);
+        await assistantClient.cancelRun(workspaceId, runId);
         setError('');
         await loadDetails(false);
       } catch (err) {
@@ -2013,7 +2014,7 @@ const Workspace = () => {
         setCancellingRunId(null);
       }
     },
-    [cancellingRunId, loadDetails, setCancellingRunId, setError]
+    [cancellingRunId, loadDetails, setCancellingRunId, setError, workspaceId]
   );
 
   const [pauseBusy, setPauseBusy] = useByWorkspace(workspaceId, false);
@@ -2125,11 +2126,11 @@ const Workspace = () => {
       // MessageDeleted from the backend removes it from the store; on a
       // lost race ("already picked up") the chip clears via
       // queued_messages_delivered instead, so both outcomes self-resolve.
-      assistantClient.deleteQueuedMessage(sessionId, messageId).catch((err) => {
+      assistantClient.deleteQueuedMessage(workspaceId, sessionId, messageId).catch((err) => {
         console.error('[Workspace] Failed to delete queued message:', err);
       });
     },
-    [sessionId]
+    [sessionId, workspaceId]
   );
   const handleEditQueuedMessage = useCallback(
     async (messageId: string, text: string) => {
@@ -2138,12 +2139,12 @@ const Workspace = () => {
       // store. On a lost race ("already picked up") the edit errors and the
       // original text is left untouched.
       try {
-        await assistantClient.editQueuedMessage(sessionId, messageId, text);
+        await assistantClient.editQueuedMessage(workspaceId, sessionId, messageId, text);
       } catch (err) {
         console.error('[Workspace] Failed to edit queued message:', err);
       }
     },
-    [sessionId]
+    [sessionId, workspaceId]
   );
   const handleLoadOlderMessages = useCallback(() => {
     if (!sessionId) return;
@@ -2160,6 +2161,7 @@ const Workspace = () => {
     store.setOlderMessagesLoading(sessionId, true);
     assistantClient
       .loadSessionMessagesPage({
+        workspaceId,
         sessionId,
         before: current.olderMessageCursor,
         limit: MESSAGE_PAGE_LIMIT,
@@ -2180,7 +2182,7 @@ const Workspace = () => {
         console.error('[Workspace] Failed to load older messages:', err);
         useAssistantStore.getState().setOlderMessagesLoading(sessionId, false);
       });
-  }, [sessionId]);
+  }, [sessionId, workspaceId]);
 
   const forkPromptStartedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -2206,7 +2208,7 @@ const Workspace = () => {
         store.initSession(binding.session);
         store.setActiveSessionForTab(`workspace:${workspaceId}`, binding.session.id);
 
-        const result = await assistantClient.sendMessage(binding.session.id, prompt, connectionId);
+        const result = await assistantClient.sendMessage(workspaceId, binding.session.id, prompt, connectionId);
         if (cancelled) return;
 
         store.addMessage(binding.session.id, result.message);
@@ -2479,6 +2481,7 @@ const Workspace = () => {
 
         {activePanel === 'tasks' && liveViewingTask && (
           <WorkspaceTaskTranscriptPanel
+            workspaceId={workspaceId}
             task={liveViewingTask}
             roster={chatRoster}
             onClose={closeTaskTranscript}

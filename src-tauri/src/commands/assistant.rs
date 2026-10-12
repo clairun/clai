@@ -7,29 +7,17 @@ use crate::assistant::display;
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository;
-use crate::assistant::repository::{CreateRunParams, CreateSessionParams};
+use crate::assistant::repository::CreateRunParams;
 use crate::assistant::runtime;
 use crate::assistant::tools::ask_user::{self, AskUserAnswer};
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantMessageCursor, AssistantMessagePage,
     AssistantRun, AssistantSession, CompactionTrigger, ContentPart, RunStatus, RunTrigger,
-    SessionContext, SessionKind, ToolInvocation,
 };
 use crate::db::DbPool;
 use crate::AppState;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateAssistantSessionRequest {
-    #[serde(default)]
-    pub kind: Option<SessionKind>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub context: SessionContext,
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,15 +40,8 @@ pub struct AssistantCompactionResult {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ListToolCallsRequest {
-    pub session_id: String,
-    #[serde(default)]
-    pub run_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct LoadSessionMessagesPageRequest {
+    pub workspace_id: String,
     pub session_id: String,
     #[serde(default)]
     pub before: Option<AssistantMessageCursor>,
@@ -71,53 +52,28 @@ pub struct LoadSessionMessagesPageRequest {
 const DEFAULT_MESSAGE_PAGE_LIMIT: u32 = 100;
 const MAX_MESSAGE_PAGE_LIMIT: u32 = 500;
 
-async fn session_pool(
+async fn session_in_workspace(
     state: &AppState,
+    workspace_id: &str,
     session_id: &str,
 ) -> Result<(DbPool, AssistantSession), String> {
-    let locators = state
-        .workspace_index
-        .read()
-        .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .locators_sorted();
-    for locator in locators {
-        let pool = state.workspace_db(&locator.id).await?;
-        if let Some(session) = repository::get_session(&pool, session_id).await? {
-            return Ok((pool, session));
-        }
-    }
-
-    Err(format!("Assistant session not found: {}", session_id))
+    let pool = state.workspace_db(workspace_id).await?;
+    let session = repository::get_session(&pool, session_id)
+        .await?
+        .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
+    Ok((pool, session))
 }
 
-async fn run_pool(state: &AppState, run_id: &str) -> Result<(DbPool, AssistantRun), String> {
-    let locators = state
-        .workspace_index
-        .read()
-        .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .locators_sorted();
-    for locator in locators {
-        let pool = state.workspace_db(&locator.id).await?;
-        if let Some(run) = repository::get_run(&pool, run_id).await? {
-            return Ok((pool, run));
-        }
-    }
-
-    Err(format!("Assistant run not found: {}", run_id))
-}
-
-async fn pool_for_new_session(
+async fn run_in_workspace(
     state: &AppState,
-    context: &SessionContext,
-) -> Result<DbPool, String> {
-    let workspace_id = context
-        .workspace_id
-        .as_deref()
-        .or(context.agent_workspace_id.as_deref())
-        .ok_or_else(|| {
-            "Cannot create assistant session: session context has no workspace_id".to_string()
-        })?;
-    state.workspace_db(workspace_id).await
+    workspace_id: &str,
+    run_id: &str,
+) -> Result<(DbPool, AssistantRun), String> {
+    let pool = state.workspace_db(workspace_id).await?;
+    let run = repository::get_run(&pool, run_id)
+        .await?
+        .ok_or_else(|| format!("Assistant run not found: {}", run_id))?;
+    Ok((pool, run))
 }
 
 fn provider_connection(
@@ -157,70 +113,23 @@ fn fresh_execution_for_session(
 }
 
 #[tauri::command]
-pub async fn assistant_create_session(
-    request: CreateAssistantSessionRequest,
-    state: State<'_, AppState>,
-    app: AppHandle,
-) -> Result<AssistantSession, String> {
-    let target_pool = pool_for_new_session(state.inner(), &request.context).await?;
-    let session = repository::create_session(
-        &target_pool,
-        CreateSessionParams {
-            kind: request.kind.unwrap_or(SessionKind::Interactive),
-            title: request.title,
-            context: request.context,
-        },
-    )
-    .await?;
-
-    emit_event(
-        &app,
-        &session,
-        None,
-        AssistantUiEvent::SessionCreated {
-            session: Box::new(session.clone()),
-        },
-    )?;
-
-    Ok(session)
-}
-
-#[tauri::command]
 pub async fn assistant_get_session(
+    workspace_id: String,
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<AssistantSession>, String> {
-    match session_pool(state.inner(), &session_id).await {
-        Ok((_pool, session)) => Ok(Some(session)),
-        Err(message) if message.starts_with("Assistant session not found") => Ok(None),
-        Err(message) => Err(message),
-    }
-}
-
-#[tauri::command]
-pub async fn assistant_list_sessions(
-    state: State<'_, AppState>,
-) -> Result<Vec<AssistantSession>, String> {
-    let mut sessions = Vec::new();
-    let locators = state
-        .workspace_index
-        .read()
-        .map_err(|e| format!("Workspace index lock error: {}", e))?
-        .locators_sorted();
-    for locator in locators {
-        let workspace_pool = state.workspace_db(&locator.id).await?;
-        sessions.extend(repository::list_sessions(&workspace_pool).await?);
-    }
-    sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
-    Ok(sessions)
+    let pool = state.workspace_db(&workspace_id).await?;
+    repository::get_session(&pool, &session_id).await
 }
 
 #[tauri::command]
 pub async fn assistant_delete_session(
+    workspace_id: String,
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let (target_pool, session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     // Hard clear: the schema cascades messages/runs/tool calls/compactions.
     // Refuse while a run is in flight — the engine would keep writing rows
     // for (and emitting events about) a session that no longer exists.
@@ -248,24 +157,12 @@ pub async fn assistant_delete_session(
 }
 
 #[tauri::command]
-pub async fn assistant_load_session_messages(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<Vec<AssistantMessage>, String> {
-    let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
-    Ok(repository::list_messages(&target_pool, &session_id)
-        .await?
-        .into_iter()
-        .map(display::message)
-        .collect())
-}
-
-#[tauri::command]
 pub async fn assistant_load_session_messages_page(
     request: LoadSessionMessagesPageRequest,
     state: State<'_, AppState>,
 ) -> Result<AssistantMessagePage, String> {
-    let (target_pool, _session) = session_pool(state.inner(), &request.session_id).await?;
+    let (target_pool, _session) =
+        session_in_workspace(state.inner(), &request.workspace_id, &request.session_id).await?;
     let limit = request
         .limit
         .unwrap_or(DEFAULT_MESSAGE_PAGE_LIMIT)
@@ -335,35 +232,24 @@ fn build_message_page(
 
 #[tauri::command]
 pub async fn assistant_list_runs(
+    workspace_id: String,
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<AssistantRun>, String> {
-    let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, _session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     repository::list_runs(&target_pool, &session_id).await
 }
 
 #[tauri::command]
-pub async fn assistant_list_tool_calls(
-    request: ListToolCallsRequest,
-    state: State<'_, AppState>,
-) -> Result<Vec<ToolInvocation>, String> {
-    let (target_pool, _session) = session_pool(state.inner(), &request.session_id).await?;
-    Ok(
-        repository::list_tool_calls(&target_pool, &request.session_id, request.run_id.as_deref())
-            .await?
-            .into_iter()
-            .map(display::tool_call)
-            .collect(),
-    )
-}
-
-#[tauri::command]
 pub async fn assistant_get_tool_call_input(
+    workspace_id: String,
     session_id: String,
     tool_call_id: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, _session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     repository::get_tool_call_for_session(&target_pool, &session_id, &tool_call_id)
         .await?
         .map(|call| call.params)
@@ -372,11 +258,13 @@ pub async fn assistant_get_tool_call_input(
 
 #[tauri::command]
 pub async fn assistant_get_tool_call_result(
+    workspace_id: String,
     session_id: String,
     tool_call_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<serde_json::Value>, String> {
-    let (target_pool, _session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, _session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     repository::get_tool_call_for_session(&target_pool, &session_id, &tool_call_id)
         .await?
         .map(|call| call.result)
@@ -510,6 +398,7 @@ pub async fn assistant_connection_supports_images(
     reason = "lint debt: 105 lines against a 100-line budget; split it, do not raise the budget"
 )]
 pub async fn assistant_send_message(
+    workspace_id: String,
     session_id: String,
     message: String,
     connection_id: String,
@@ -521,7 +410,8 @@ pub async fn assistant_send_message(
     // frontend can't smuggle tool/assistant content into a user message.
     let images = images.unwrap_or_default();
     validate_send_images(&images)?;
-    let (target_pool, mut session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, mut session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let connection = provider_connection(state.inner(), &connection_id)?;
     let active_run = repository::get_active_run(&target_pool, &session.id).await?;
     let has_pending_queue = !repository::list_pending_queued_messages(&target_pool, &session.id)
@@ -640,12 +530,14 @@ pub async fn assistant_send_message(
 
 #[tauri::command]
 pub async fn assistant_compact_session(
+    workspace_id: String,
     session_id: String,
     connection_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AssistantCompactionResult, String> {
-    let (target_pool, mut session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, mut session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let connection = provider_connection(state.inner(), &connection_id)?;
     if repository::session_has_active_run(&target_pool, &session.id).await? {
         return Err("Wait for the current assistant run to finish before compacting.".to_string());
@@ -705,12 +597,14 @@ pub async fn assistant_compact_session(
 /// `MessageDeleted` on success so every open view drops it.
 #[tauri::command]
 pub async fn assistant_delete_queued_message(
+    workspace_id: String,
     session_id: String,
     message_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let (target_pool, session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let deleted =
         repository::delete_pending_queued_message(&target_pool, &session.id, &message_id).await?;
     if !deleted {
@@ -735,6 +629,7 @@ pub async fn assistant_delete_queued_message(
 /// open view swaps in the new text.
 #[tauri::command]
 pub async fn assistant_edit_queued_message(
+    workspace_id: String,
     session_id: String,
     message_id: String,
     text: String,
@@ -745,7 +640,8 @@ pub async fn assistant_edit_queued_message(
     if text.is_empty() {
         return Err("A queued message can't be empty — delete it instead.".to_string());
     }
-    let (target_pool, session) = session_pool(state.inner(), &session_id).await?;
+    let (target_pool, session) =
+        session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let updated =
         repository::update_pending_queued_message(&target_pool, &session.id, &message_id, text)
             .await?;
@@ -802,61 +698,13 @@ pub async fn assistant_submit_user_input(
 }
 
 #[tauri::command]
-pub async fn assistant_retry_run(
-    run_id: String,
-    connection_id: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<AssistantRun, String> {
-    let (target_pool, previous_run) = run_pool(state.inner(), &run_id).await?;
-
-    let session = repository::get_session(&target_pool, &previous_run.session_id)
-        .await?
-        .ok_or_else(|| format!("Assistant session not found: {}", previous_run.session_id))?;
-
-    let connection = provider_connection(state.inner(), &connection_id)?;
-
-    let run = repository::create_run(
-        &target_pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Queued,
-            trigger: RunTrigger::Retry,
-            connection_id: connection_id.clone(),
-            protocol_id: connection.protocol_id.clone(),
-            model_id: connection.model_id.clone(),
-            error: None,
-        },
-    )
-    .await?;
-
-    emit_event(
-        &app,
-        &session,
-        Some(&run.id),
-        AssistantUiEvent::RunQueued { run: run.clone() },
-    )?;
-
-    spawn_run_task(
-        target_pool.clone(),
-        app,
-        session.id,
-        run.id.clone(),
-        RunTrigger::Retry,
-        connection_id,
-        None,
-    );
-
-    Ok(run)
-}
-
-#[tauri::command]
 pub async fn assistant_cancel_run(
+    workspace_id: String,
     run_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AssistantRun, String> {
-    let (target_pool, run) = run_pool(state.inner(), &run_id).await?;
+    let (target_pool, run) = run_in_workspace(&state, &workspace_id, &run_id).await?;
 
     if matches!(
         run.status,
@@ -1023,6 +871,59 @@ pub(crate) async fn start_queued_followup_if_idle(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn session_and_run_lookups_read_only_the_named_workspace() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (_a_tmp, a) = crate::db::test_support::workspace_pool().await;
+        let (_b_tmp, b) = crate::db::test_support::workspace_pool().await;
+        let session = repository::create_session(
+            &b,
+            repository::CreateSessionParams {
+                kind: crate::assistant::types::SessionKind::Interactive,
+                title: None,
+                context: Default::default(),
+            },
+        )
+        .await
+        .expect("session");
+        let run = repository::create_run(
+            &b,
+            CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Running,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn".to_string(),
+                protocol_id: "claude-code".to_string(),
+                model_id: String::new(),
+                error: None,
+            },
+        )
+        .await
+        .expect("run");
+        let mut index = crate::workspace_index::WorkspaceIndex::default();
+        index.attach_pool("ws-a".to_string(), a);
+        index.attach_pool("ws-b".to_string(), b);
+        let config_manager = crate::ConfigManager::new_for_tests(
+            Default::default(),
+            temp.path().join("config.json"),
+        );
+        let state = AppState::new_for_tests(config_manager, index).expect("app state");
+
+        let missing = session_in_workspace(&state, "ws-a", &session.id).await;
+        assert!(missing.is_err(), "workspace A must not find B's session");
+        let (_, found) = session_in_workspace(&state, "ws-b", &session.id)
+            .await
+            .expect("workspace B owns the session");
+        assert_eq!(found.id, session.id);
+
+        let missing = run_in_workspace(&state, "ws-a", &run.id).await;
+        assert!(missing.is_err(), "workspace A must not find B's run");
+        let (_, found) = run_in_workspace(&state, "ws-b", &run.id)
+            .await
+            .expect("workspace B owns the run");
+        assert_eq!(found.id, run.id);
+    }
 
     fn image() -> ContentPart {
         ContentPart::Image {

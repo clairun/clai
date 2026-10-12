@@ -434,14 +434,10 @@ pub fn run() {
             commands::app_updates::check_for_app_update,
             commands::app_updates::install_app_update,
             // Assistant runtime commands
-            commands::assistant::assistant_create_session,
             commands::assistant::assistant_get_session,
-            commands::assistant::assistant_list_sessions,
             commands::assistant::assistant_delete_session,
-            commands::assistant::assistant_load_session_messages,
             commands::assistant::assistant_load_session_messages_page,
             commands::assistant::assistant_list_runs,
-            commands::assistant::assistant_list_tool_calls,
             commands::assistant::assistant_get_tool_call_result,
             commands::assistant::assistant_get_tool_call_input,
             commands::assistant::assistant_send_message,
@@ -450,7 +446,6 @@ pub fn run() {
             commands::assistant::assistant_delete_queued_message,
             commands::assistant::assistant_edit_queued_message,
             commands::assistant::assistant_submit_user_input,
-            commands::assistant::assistant_retry_run,
             commands::assistant::assistant_cancel_run,
             // App-level agent library and workspace assignments.
             commands::global_agents::agent_definitions_list,

@@ -1588,19 +1588,7 @@ fn resolve_workspace_manager_agent(
 // by commands::workspace_agents::workspace_create_agent or seeded by
 // workspace_create's empty-Manager INSERT.
 
-/// Find the canonical session for a workspace's manager agent.
-///
-/// There is exactly one such session per (workspace, manager) — both
-/// user-typed chats and scheduled ticks read/write the same row. Selection
-/// is now kind-agnostic: the resolver excludes task-linked sessions via an
-/// SQL anti-join on `workspace_tasks.session_id` (see
-/// `list_non_task_sessions` in `assistant::repository`), so neither the
-/// interactive chat nor a non-task `BackgroundJob` session is missed and a
-/// task's own `BackgroundJob` row never hijacks the conversation view.
-///
-/// The actual selection lives in [`select_workspace_session`] so it can be
-/// unit-tested without a database; see the regression tests there for why
-/// excluding task sessions — not filtering by `kind` — is load-bearing.
+/// Find the canonical session for this workspace's manager in its selected DB.
 async fn find_workspace_session(
     pool: &DbPool,
     state: &AppState,
@@ -1611,59 +1599,7 @@ async fn find_workspace_session(
     else {
         return Ok(None);
     };
-
-    // Candidate conversations = all of this manager's sessions EXCEPT task
-    // delegations. Task sessions (workspace_tasks.session_id) are excluded in
-    // SQL, so resolution stays independent of task volume and a self-assigned
-    // task can't hijack the view. The canonical conversation is then the
-    // most-recently-updated remaining session: the interactive chat in the
-    // common case, or a non-task BackgroundJob session for workspaces whose
-    // scheduled-run conversation was forked into its own row.
-    Ok(select_workspace_session(
-        repository::list_non_task_sessions(pool).await?,
-        &manager_id,
-        &descriptor.workspace_id,
-        descriptor.agent_id.as_deref(),
-    ))
-}
-
-/// Pure selection logic behind [`find_workspace_session`], split out so it
-/// is unit-testable without a database or `AppState`.
-///
-/// Picks the single canonical conversation for `(workspace, manager)` as the
-/// most-recently-updated session that:
-/// - belongs to this workspace's manager (`automation_id == manager`), and
-/// - belongs to this workspace (by workspace / agent id).
-///
-/// Callers pass only NON-task sessions (see
-/// [`repository::list_non_task_sessions`]). Sub-agent task delegations run in
-/// separate `BackgroundJob` sessions recorded in `workspace_tasks`, and a
-/// self-assigned task even carries the manager's own `automation_id`, so they
-/// are excluded *upstream* rather than by kind here. Selecting by recency (not
-/// by kind) is deliberate: a workspace whose scheduled-run conversation lives
-/// in its own non-task `BackgroundJob` session still resolves to that live
-/// conversation instead of an abandoned interactive stub.
-fn select_workspace_session(
-    sessions: Vec<AssistantSession>,
-    manager_id: &str,
-    workspace_id: &str,
-    agent_id: Option<&str>,
-) -> Option<AssistantSession> {
-    let belongs_to_workspace = |session: &AssistantSession| -> bool {
-        session.context.workspace_id.as_deref() == Some(workspace_id)
-            || agent_id
-                .map(|aid| {
-                    session.context.agent_workspace_id.as_deref() == Some(aid)
-                        || session.context.automation_id.as_deref() == Some(aid)
-                })
-                .unwrap_or(false)
-    };
-
-    sessions
-        .into_iter()
-        .filter(|session| session.context.automation_id.as_deref() == Some(manager_id))
-        .filter(belongs_to_workspace)
-        .max_by_key(|session| session.updated_at)
+    repository::find_manager_session(pool, &manager_id).await
 }
 
 fn desired_workspace_context(
@@ -3495,7 +3431,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         // is already on the in-memory locator. Reaching for the config here
         // cost five full read+parse cycles per workspace on every 5s poll.
         let message_count =
-            count_session_messages(&workspace_pool, &id, &locator.default_agent_id).await;
+            count_session_messages(&workspace_pool, &locator.default_agent_id).await;
         let task_attention = workspace_task_attention_summary(&workspace_pool, &id).await?;
         let schedule = locator.schedule;
         let next_run_in_seconds = schedule
@@ -4155,37 +4091,11 @@ async fn workspace_task_attention_summary(
     Ok(summary)
 }
 
-/// Count messages on the canonical workspace session — the *exact* same row
-/// the card-click path loads via [`find_workspace_session`]. Both now route
-/// through [`select_workspace_session`], so the card number and the
-/// conversation length reference the same session by construction and can
-/// never drift. (Previously this duplicated the selection inline and omitted
-/// the `kind == Interactive` filter, so a self-task `BackgroundJob` session
-/// could inflate the card count while the chat view showed the real
-/// Interactive conversation.)
-///
-/// Takes `manager_id` from the caller rather than re-deriving it. The only
-/// caller, `workspace_list`, already holds it on the in-memory
-/// `WorkspaceLocator`; resolving it here read and parsed `config.json` twice
-/// per workspace on every 5s rail poll (once via `resolve_workspace_descriptor`
-/// and once via `workspace_default_agent_id`) to recover a value the caller had
-/// in a local variable.
-///
-/// `select_workspace_session`'s `agent_id` argument is passed as `None`
-/// because it only ever received `WorkspaceDescriptor::agent_id`, which
-/// `resolve_workspace_descriptor` hardcodes to `None`. That argument exists for
-/// agent-workspace assets, which `workspace_list` does not enumerate — it emits
-/// `kind: "general"` entries only. If it ever does, this call needs the real
-/// agent id back or the count will miss sessions matched by
-/// `agent_workspace_id` / `automation_id`.
-async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &str) -> i64 {
-    let sessions = repository::list_non_task_sessions(pool)
-        .await
-        .unwrap_or_default();
-    let Some(session) = select_workspace_session(sessions, manager_id, workspace_id, None) else {
+/// Count messages on the same canonical session used by the workspace view.
+async fn count_session_messages(pool: &DbPool, manager_id: &str) -> i64 {
+    let Ok(Some(session)) = repository::find_manager_session(pool, manager_id).await else {
         return 0;
     };
-
     repository::count_session_messages(pool, &session.id)
         .await
         .map(|n| n as i64)
@@ -4514,38 +4424,6 @@ mod tests {
 
         assert!(remove_workspace_root(&index, &loc).is_ok());
         assert!(index.read().unwrap().locator("ws-1").is_none());
-    }
-
-    // A workspace whose scheduled-run conversation was forked into its own
-    // (non-task) BackgroundJob session must resolve to that live session, not
-    // an older abandoned interactive stub. Selection is kind-agnostic: task
-    // sessions are excluded upstream (list_non_task_sessions), so by the time
-    // selection runs a newer background session here is a real conversation.
-    #[test]
-    fn picks_most_recent_non_task_session_regardless_of_kind() {
-        let interactive_stub = session("stub", SessionKind::Interactive, MGR, WS, 100);
-        let scheduled = session("scheduled", SessionKind::BackgroundJob, MGR, WS, 999);
-        let chosen = select_workspace_session(vec![interactive_stub, scheduled], MGR, WS, None);
-        assert_eq!(chosen.map(|s| s.id), Some("scheduled".to_string()));
-    }
-
-    #[test]
-    fn ignores_sessions_owned_by_other_automations() {
-        let other = session("other", SessionKind::Interactive, "someone-else", WS, 100);
-        assert!(select_workspace_session(vec![other], MGR, WS, None).is_none());
-    }
-
-    #[test]
-    fn picks_most_recent_interactive_when_several_match() {
-        let older = session("old", SessionKind::Interactive, MGR, WS, 10);
-        let newer = session("new", SessionKind::Interactive, MGR, WS, 20);
-        let chosen = select_workspace_session(vec![older, newer], MGR, WS, None);
-        assert_eq!(chosen.map(|s| s.id), Some("new".to_string()));
-    }
-
-    #[test]
-    fn returns_none_when_nothing_matches() {
-        assert!(select_workspace_session(vec![], MGR, WS, None).is_none());
     }
 
     // Pin the skip list for `copy_workspace_durable_files`. Image
@@ -5947,7 +5825,7 @@ mod tests {
         }
 
         /// Same workspace, but the one session's `automation_id` is not the
-        /// manager's, so [`select_workspace_session`]'s first filter drops it
+        /// manager's, so the manager lookup excludes it
         /// and [`find_workspace_session`] resolves nothing. The owner is
         /// deliberately not on the roster: resolution never reads it.
         async fn without_a_manager_conversation() -> Self {

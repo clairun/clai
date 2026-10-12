@@ -205,13 +205,12 @@ pub async fn create_session(
 /// `assignTask` creates the task row first (with `session_id = NULL`), then the
 /// `BackgroundJob` session that runs the task, then later UPDATEs the task row
 /// to stamp the session id. Between the session INSERT and that UPDATE there is
-/// a window where the new session is visible to `list_non_task_sessions` but
-/// has no `workspace_tasks.session_id` link, so the resolver would treat it as
-/// the most-recent non-task session and briefly hijack the conversation view
-/// for self-assigned tasks (manager→manager). Bundling the two writes into one
-/// transaction closes that window: the session only becomes visible to a
-/// concurrent resolver after the task row already points at it, so the anti-join
-/// excludes it.
+/// a window where the new session is visible to `find_manager_session` but has
+/// no `workspace_tasks.session_id` link, so a self-assigned task's session
+/// (manager→manager) would briefly be taken as the manager conversation.
+/// Bundling the two writes into one transaction closes that window: the session
+/// only becomes visible to a concurrent reader after the task row already
+/// points at it, so the anti-join excludes it.
 pub async fn create_session_and_link_task(
     pool: &DbPool,
     params: CreateSessionParams,
@@ -286,53 +285,33 @@ pub async fn get_session(
     row.as_ref().map(map_session_row).transpose()
 }
 
-pub async fn list_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, String> {
-    let rows = sqlx::query(
+/// Canonical conversation session for a workspace manager: the newest session
+/// whose `automationId` is `manager_id`, regardless of kind, excluding sessions
+/// linked from `workspace_tasks.session_id` (a self-assigned task carries the
+/// manager's automation id). `NOT EXISTS` keeps task rows with a NULL
+/// `session_id` harmless. Ties on `updated_at` are broken by `id DESC`.
+pub async fn find_manager_session(
+    pool: &DbPool,
+    manager_id: &str,
+) -> Result<Option<AssistantSession>, String> {
+    let row = sqlx::query(
         r#"
-        SELECT id, kind, title, context_json, created_at, updated_at
-        FROM assistant_sessions
-        ORDER BY updated_at DESC
+        SELECT s.id, s.kind, s.title, s.context_json, s.created_at, s.updated_at
+        FROM assistant_sessions AS s
+        WHERE json_extract(s.context_json, '$.automationId') = ?
+          AND NOT EXISTS (
+              SELECT 1 FROM workspace_tasks AS t WHERE t.session_id = s.id
+          )
+        ORDER BY s.updated_at DESC, s.id DESC
+        LIMIT 1
         "#,
     )
-    .fetch_all(pool)
+    .bind(manager_id)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("Failed to list assistant sessions: {}", e))?;
+    .map_err(|e| format!("Failed to find manager session: {}", e))?;
 
-    rows.iter().map(map_session_row).collect()
-}
-
-/// Sessions that are NOT task delegations.
-///
-/// `workspace_assignTask` runs each delegated task in its own `BackgroundJob`
-/// session whose id is recorded in `workspace_tasks.session_id`. Such sessions
-/// must never be mistaken for a workspace's canonical conversation — and when a
-/// manager assigns a task to *itself* the task session even carries the
-/// manager's own `automation_id`, so an `automation_id` filter alone would not
-/// exclude it. Excluding task-linked sessions here, in SQL, keeps resolution
-/// independent of task volume (the unbounded set of task rows is never loaded)
-/// and leaves exactly the candidate conversations: the interactive chat plus
-/// any non-task `BackgroundJob` session (e.g. a scheduled-run conversation that
-/// older builds forked into its own row).
-///
-/// The `session_id IS NOT NULL` guard in the subquery is required: a `NULL` in
-/// a `NOT IN (...)` set makes the whole predicate `NULL` (never true) in SQL,
-/// which would otherwise return zero rows whenever any task has no session yet.
-pub async fn list_non_task_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, String> {
-    let rows = sqlx::query(
-        r#"
-        SELECT id, kind, title, context_json, created_at, updated_at
-        FROM assistant_sessions
-        WHERE id NOT IN (
-            SELECT session_id FROM workspace_tasks WHERE session_id IS NOT NULL
-        )
-        ORDER BY updated_at DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to list non-task assistant sessions: {}", e))?;
-
-    rows.iter().map(map_session_row).collect()
+    row.as_ref().map(map_session_row).transpose()
 }
 
 pub async fn delete_session(pool: &DbPool, session_id: &str) -> Result<bool, String> {
@@ -1350,43 +1329,6 @@ pub async fn get_tool_call_for_session(
     .await
     .map_err(|e| format!("Failed to load assistant tool call: {}", e))?;
     row.as_ref().map(map_tool_call_row).transpose()
-}
-
-pub async fn list_tool_calls(
-    pool: &DbPool,
-    session_id: &str,
-    run_id: Option<&str>,
-) -> Result<Vec<ToolInvocation>, String> {
-    let rows = if let Some(run_id) = run_id {
-        sqlx::query(
-            r#"
-            SELECT id, run_id, session_id, tool_name, params_json, status, result_json, error, started_at, completed_at
-            FROM assistant_tool_calls
-            WHERE session_id = ? AND run_id = ?
-            ORDER BY started_at ASC
-            "#,
-        )
-        .bind(session_id)
-        .bind(run_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to list assistant tool calls: {}", e))?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT id, run_id, session_id, tool_name, params_json, status, result_json, error, started_at, completed_at
-            FROM assistant_tool_calls
-            WHERE session_id = ?
-            ORDER BY started_at ASC
-            "#,
-        )
-        .bind(session_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to list assistant tool calls: {}", e))?
-    };
-
-    rows.iter().map(map_tool_call_row).collect()
 }
 
 pub async fn list_tool_calls_by_ids(

@@ -268,7 +268,10 @@ async fn run_next_agent(
     // in the workspace. Defer instead: release the instance back to
     // ready-now (without consuming the schedule) so a later tick fires once
     // the workspace is idle.
-    if let Some(existing) = find_manager_session(&workspace_pool, &agent_config).await? {
+    if let Some(existing) = repository::find_manager_session(&workspace_pool, &agent_config.id)
+        .await
+        .map_err(RunnerError::AssistantPersistence)?
+    {
         let busy = repository::session_has_active_run(&workspace_pool, &existing.id)
             .await
             .map_err(RunnerError::AssistantPersistence)?;
@@ -496,7 +499,9 @@ async fn ensure_workspace_manager_session(
         workspace_agents,
     };
 
-    let existing = find_manager_session(pool, agent_config).await?;
+    let existing = repository::find_manager_session(pool, &agent_config.id)
+        .await
+        .map_err(RunnerError::AssistantPersistence)?;
 
     if let Some(session) = existing {
         // Preserve dynamic per-run fields that aren't part of the "config
@@ -556,23 +561,6 @@ async fn ensure_workspace_manager_session(
     .map_err(RunnerError::AssistantSession)?;
 
     Ok(session)
-}
-
-/// Look up the canonical (workspace, manager) session by `automation_id`.
-///
-/// Kind is intentionally not part of the filter: legacy rows may still be
-/// `BackgroundJob` and we want to keep using them rather than creating a
-/// parallel Interactive row. Going forward, new rows are created Interactive
-/// (see `ensure_workspace_manager_session`).
-async fn find_manager_session(
-    pool: &DbPool,
-    agent_config: &crate::config::AgentConfig,
-) -> Result<Option<crate::assistant::types::AssistantSession>, RunnerError> {
-    Ok(repository::list_sessions(pool)
-        .await
-        .map_err(RunnerError::AssistantPersistence)?
-        .into_iter()
-        .find(|session| session.context.automation_id.as_deref() == Some(agent_config.id.as_str())))
 }
 
 fn resolve_agent_connection(
@@ -635,7 +623,7 @@ async fn run_scheduled_agent(
     .map_err(RunnerError::AssistantPersistence)?;
 
     // Register the cancel token under the DB run.id (the same key the
-    // chat and workspace-task paths use) so `assistant_cancel_run(run.id)`
+    // chat and workspace-task paths use) so `assistant_cancel_run(workspace_id, run.id)`
     // can find it.
     let run_registration = runtime::register_run(&run.id);
     let cancel_token = run_registration.token();

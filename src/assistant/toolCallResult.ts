@@ -41,7 +41,7 @@ const remember = (key: string, value: unknown) => {
   }
 };
 
-const fetchDetail = (detail: Detail, call: ToolCallRef): Promise<unknown> => {
+const fetchDetail = (detail: Detail, workspaceId: string, call: ToolCallRef): Promise<unknown> => {
   const key = detailKey(detail, call);
   if (cache.has(key)) {
     const value = cache.get(key);
@@ -51,7 +51,7 @@ const fetchDetail = (detail: Detail, call: ToolCallRef): Promise<unknown> => {
   let pending = inflight.get(key);
   if (!pending) {
     const load = detail === 'input' ? getToolCallInput : getToolCallResult;
-    pending = load(call.sessionId, call.id)
+    pending = load(workspaceId, call.sessionId, call.id)
       .then((value) => {
         const result = value ?? null;
         remember(key, result);
@@ -83,6 +83,7 @@ const toErrorState = (detail: Detail, err: unknown): ToolCallDetailState => {
 
 const useToolCallDetail = (
   detail: Detail,
+  workspaceId: string,
   call: ToolCallRef | undefined,
   enabled: boolean,
 ): ToolCallDetailState & { retry: () => void } => {
@@ -99,7 +100,7 @@ const useToolCallDetail = (
     // the entry is evicted while it stays open.
     if (!key || sessionId === undefined || id === undefined || status === undefined) return;
     let cancelled = false;
-    fetchDetail(detail, { sessionId, id, status, completedAt: completedAt ?? null }).then(
+    fetchDetail(detail, workspaceId, { sessionId, id, status, completedAt: completedAt ?? null }).then(
       (value) => {
         if (!cancelled) setSettled({ key, value: { state: 'ready', value } });
       },
@@ -110,7 +111,7 @@ const useToolCallDetail = (
     return () => {
       cancelled = true;
     };
-  }, [detail, key, sessionId, id, status, completedAt, attempt]);
+  }, [detail, key, workspaceId, sessionId, id, status, completedAt, attempt]);
 
   const retry = () => {
     setSettled(null);
@@ -124,9 +125,9 @@ const useToolCallDetail = (
 };
 
 /** The full result of `call` while `enabled`. Errors are not cached: `retry` fetches again. */
-export const useToolCallResult = (call: ToolCallRef | undefined, enabled: boolean) =>
-  useToolCallDetail('result', call, enabled);
+export const useToolCallResult = (workspaceId: string, call: ToolCallRef | undefined, enabled: boolean) =>
+  useToolCallDetail('result', workspaceId, call, enabled);
 
 /** The full input of `call` while `enabled`. Errors are not cached: `retry` fetches again. */
-export const useToolCallInput = (call: ToolCallRef | undefined, enabled: boolean) =>
-  useToolCallDetail('input', call, enabled);
+export const useToolCallInput = (workspaceId: string, call: ToolCallRef | undefined, enabled: boolean) =>
+  useToolCallDetail('input', workspaceId, call, enabled);

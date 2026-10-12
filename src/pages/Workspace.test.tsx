@@ -851,7 +851,7 @@ describe('Workspace switch with a call in flight', () => {
         : detailsFor(options, { runs: [ACTIVE_RUN] })
     );
     const alphaStop = deferred<never>();
-    cancelRun.mockImplementation((runId) =>
+    cancelRun.mockImplementation((_workspaceId, runId) =>
       runId === 'run-a' ? alphaStop.promise : new Promise<never>(() => {})
     );
     renderSwitchableWorkspace();

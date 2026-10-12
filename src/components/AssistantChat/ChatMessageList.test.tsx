@@ -76,13 +76,13 @@ vi.mock('../../workspace/client', () => ({
 // expand. Tests seed it per call id.
 const fullResults = vi.hoisted(() => new Map<string, unknown>());
 const getToolCallResult = vi.hoisted(() =>
-  vi.fn(async (_sessionId: string, toolCallId: string): Promise<unknown> =>
+  vi.fn(async (_workspaceId: string, _sessionId: string, toolCallId: string): Promise<unknown> =>
     fullResults.get(toolCallId) ?? null
   )
 );
 const fullInputs = vi.hoisted(() => new Map<string, unknown>());
 const getToolCallInput = vi.hoisted(() =>
-  vi.fn(async (_sessionId: string, toolCallId: string): Promise<unknown> =>
+  vi.fn(async (_workspaceId: string, _sessionId: string, toolCallId: string): Promise<unknown> =>
     fullInputs.get(toolCallId) ?? null
   )
 );
@@ -120,7 +120,7 @@ describe('ChatMessageList', () => {
       msg({ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello there' }] }),
       msg({ id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'general kenobi' }] }),
     ];
-    render(<ChatMessageList messages={messages} userLabel="You" />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} userLabel="You" />);
     expect(screen.getByText('hello there')).toBeInTheDocument();
     expect(screen.getByText('general kenobi')).toBeInTheDocument();
     expect(screen.getByText('You')).toBeInTheDocument();
@@ -158,7 +158,7 @@ describe('ChatMessageList', () => {
         completedAt: 1n,
       },
     ];
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     // cleanToolName strips the mcp.<id>. prefix.
     expect(screen.getByText('get_metric_data')).toBeInTheDocument();
   });
@@ -220,7 +220,7 @@ describe('ChatMessageList', () => {
       hasFullResult: false,
       completedAt: null,
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByRole('button', { name: /Q3 Revenue/ })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('running…')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Open chart/ })).toBeNull();
@@ -234,7 +234,7 @@ describe('ChatMessageList', () => {
       hasFullResult: false,
       error: 'The spec is not a valid Vega-Lite chart',
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     const row = screen.getByRole('button', { name: /Q3 Revenue/ });
     expect(row).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByText(/Open chart/)).toBeNull();
@@ -315,7 +315,7 @@ describe('ChatMessageList', () => {
       { tool: 'workspace_assignTask', result: taskPayload() },
     ]);
     render(
-      <ChatMessageList
+      <ChatMessageList workspaceId="ws-1"
         messages={messages}
         toolCalls={toolCalls}
         taskRoster={[]}
@@ -337,7 +337,7 @@ describe('ChatMessageList', () => {
     ]);
     toolCalls[0]!.status = 'failed';
     toolCalls[0]!.error = 'workspaceAgentId must be one of the workspace agent ids';
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('workspace_assignTask')).toBeInTheDocument();
     expect(screen.queryByText('Round 3 review')).toBeNull();
   });
@@ -354,7 +354,7 @@ describe('ChatMessageList', () => {
         result: taskPayload({ status: 'completed', resultSummary: 'Found 3 issues.' }),
       },
     ]);
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
 
     // Six identical "still running" lines collapse down to the last four.
     expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
@@ -378,7 +378,7 @@ describe('ChatMessageList', () => {
       { tool: 'workspace_assignTask', result: taskPayload({ id: 'task-10', title: 'Round 4 review' }) },
     ]);
     const { container } = render(
-      <ChatMessageList messages={messages} toolCalls={toolCalls} taskRoster={[]} />
+      <ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />
     );
     const text = container.textContent ?? '';
     const at = (needle: string) => {
@@ -403,7 +403,7 @@ describe('ChatMessageList', () => {
         ],
       }),
     ];
-    render(<ChatMessageList messages={messages} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} />);
     expect(screen.getByText('Thinking')).toBeInTheDocument();
     expect(screen.getByText('the answer is 42')).toBeInTheDocument();
   });
@@ -417,7 +417,7 @@ describe('ChatMessageList', () => {
       }),
       msg({ id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'visible reply' }] }),
     ];
-    render(<ChatMessageList messages={messages} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} />);
     expect(screen.queryByText(/New scheduled run/)).toBeNull();
     expect(screen.getByText('visible reply')).toBeInTheDocument();
   });
@@ -451,7 +451,7 @@ describe('ChatMessageList', () => {
 
   it('renders each tool as its own one-line row when under the cap', () => {
     const { messages, toolCalls } = toolGroup(3);
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('tool_0')).toBeInTheDocument();
     expect(screen.getByText('tool_2')).toBeInTheDocument();
     expect(screen.queryByText(/earlier/)).toBeNull();
@@ -459,7 +459,7 @@ describe('ChatMessageList', () => {
 
   it('caps a large tool group at 4 rows behind a "show earlier" toggle', () => {
     const { messages, toolCalls } = toolGroup(6);
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     // 6 - 4 = 2 hidden behind the toggle; only the last 4 render.
     expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
     expect(screen.queryByText('tool_0')).toBeNull();
@@ -479,7 +479,7 @@ describe('ChatMessageList', () => {
       params: { title: 'Q3 Revenue', spec: {} },
       result: { ok: true, path: 'charts/q3-revenue.vl.json' },
     };
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
     expect(screen.queryByText('Q3 Revenue')).toBeNull();
     fireEvent.click(screen.getByText('Show 2 earlier calls'));
@@ -521,7 +521,7 @@ describe('ChatMessageList', () => {
       params: { command: 'npm run build' },
       resultSummary: { text: 'exit 0', tone: 'neutral' },
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('Bash')).toBeInTheDocument();
     expect(screen.getByText('npm run build')).toBeInTheDocument();
     expect(screen.getByText('exit 0')).toBeInTheDocument();
@@ -539,13 +539,13 @@ describe('ChatMessageList', () => {
       params: { command: 'ls' },
       resultSummary: { text: 'exit 0', tone: 'neutral' },
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
 
     fireEvent.click(screen.getByText('Bash'));
     expect(screen.getByRole('status')).toHaveTextContent('Loading output…');
     // The terminal block shows the command's output, not the raw envelope.
     expect(await screen.findByText('Build complete')).toBeInTheDocument();
-    expect(getToolCallResult).toHaveBeenCalledWith('sess-1', 'tc-1');
+    expect(getToolCallResult).toHaveBeenCalledWith('ws-1', 'sess-1', 'tc-1');
   });
 
   it('shows file content from an MCP-enveloped fs_read result', async () => {
@@ -557,7 +557,7 @@ describe('ChatMessageList', () => {
       params: { path: '/main.rs' },
       resultSummary: { text: '1 line', tone: 'neutral' },
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('1 line')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('Read'));
@@ -575,7 +575,7 @@ describe('ChatMessageList', () => {
       toolName: 'fs_glob',
       params: { pattern: '**/*.rs' },
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     fireEvent.click(screen.getByText('Glob'));
     await waitFor(() =>
       expect(
@@ -593,10 +593,10 @@ describe('ChatMessageList', () => {
       params: { command: 'ls' },
       sessionId: 'sess-other',
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     fireEvent.click(screen.getByText('Bash'));
     expect(await screen.findByText('from the other session')).toBeInTheDocument();
-    expect(getToolCallResult).toHaveBeenCalledWith('sess-other', 'tc-1');
+    expect(getToolCallResult).toHaveBeenCalledWith('ws-1', 'sess-other', 'tc-1');
   });
 
   it('offers Retry when the output fails to load, and recovers', async () => {
@@ -606,7 +606,7 @@ describe('ChatMessageList', () => {
       toolName: 'bash_exec',
       params: { command: 'ls' },
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     fireEvent.click(screen.getByText('Bash'));
     expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load output");
 
@@ -621,7 +621,7 @@ describe('ChatMessageList', () => {
       toolName: 'bash_exec',
       params: { command: 'ls' },
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     fireEvent.click(screen.getByText('Bash'));
     expect(await screen.findByRole('alert')).toHaveTextContent('Output no longer available');
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
@@ -637,7 +637,7 @@ describe('ChatMessageList', () => {
       completedAt: null,
     });
     const { rerender } = render(
-      <ChatMessageList messages={running.messages} toolCalls={running.toolCalls} />
+      <ChatMessageList workspaceId="ws-1" messages={running.messages} toolCalls={running.toolCalls} />
     );
     fireEvent.click(screen.getByText('Bash'));
     expect(screen.getByText('Executing…')).toBeInTheDocument();
@@ -648,7 +648,7 @@ describe('ChatMessageList', () => {
       params: { command: 'make' },
       resultSummary: { text: 'exit 0', tone: 'neutral' },
     });
-    rerender(<ChatMessageList messages={running.messages} toolCalls={done.toolCalls} />);
+    rerender(<ChatMessageList workspaceId="ws-1" messages={running.messages} toolCalls={done.toolCalls} />);
     expect(await screen.findByText('finished')).toBeInTheDocument();
     expect(getToolCallResult).toHaveBeenCalledTimes(1);
   });
@@ -659,7 +659,7 @@ describe('ChatMessageList', () => {
       toolName: 'bash_exec',
       params: { command: 'ls' },
     });
-    render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     fireEvent.click(screen.getByText('Bash'));
     expect(await screen.findByText('cached')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Bash'));
@@ -685,7 +685,7 @@ describe('ChatMessageList', () => {
       fullInputs.set('tc-1', { path: 'report.md', content: LARGE });
       fullResults.set('tc-1', { path: 'report.md', bytesWritten: LARGE.length });
       const { messages, toolCalls } = writeCall();
-      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
 
       expect(screen.getByText('report.md')).toBeInTheDocument();
       expect(document.body.textContent).not.toContain('large payload line');
@@ -700,14 +700,14 @@ describe('ChatMessageList', () => {
         )
       );
       expect(getToolCallInput).toHaveBeenCalledTimes(1);
-      expect(getToolCallInput).toHaveBeenCalledWith('sess-1', 'tc-1');
+      expect(getToolCallInput).toHaveBeenCalledWith('ws-1', 'sess-1', 'tc-1');
     });
 
     it('draws the written content in the Output tab from the full input', async () => {
       fullInputs.set('tc-1', { path: 'main.rs', content: 'fn main() {}' });
       fullResults.set('tc-1', { path: 'main.rs', bytesWritten: 12 });
       const { messages, toolCalls } = writeCall({ params: { path: 'main.rs' } });
-      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
       fireEvent.click(screen.getByText('Write'));
       await waitFor(() => expect(markdownText()).toContain('```rust\nfn main() {}\n```'));
 
@@ -723,7 +723,7 @@ describe('ChatMessageList', () => {
         params: { pattern: '**/*.rs' },
         hasFullInput: false,
       });
-      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
       fireEvent.click(screen.getByText('Glob'));
       fireEvent.click(screen.getByRole('button', { name: 'Input' }));
       expect(markdownText()).toContain('```json\n{\n  "pattern": "**/*.rs"\n}\n```');
@@ -737,7 +737,7 @@ describe('ChatMessageList', () => {
         params: {},
         hasFullInput: true,
       });
-      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
       fireEvent.click(screen.getByText('custom_tool'));
       fireEvent.click(screen.getByRole('button', { name: 'Input' }));
       await waitFor(() =>
@@ -749,7 +749,7 @@ describe('ChatMessageList', () => {
       getToolCallInput.mockRejectedValueOnce(new Error('database is locked'));
       fullInputs.set('tc-1', { path: 'report.md', content: 'from the other session' });
       const { messages, toolCalls } = writeCall({ sessionId: 'sess-other' });
-      render(<ChatMessageList messages={messages} toolCalls={toolCalls} />);
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
       fireEvent.click(screen.getByText('Write'));
       fireEvent.click(screen.getByRole('button', { name: 'Input' }));
       expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't load input");
@@ -759,7 +759,7 @@ describe('ChatMessageList', () => {
         expect(markdownText().some((text) => text.includes('from the other session'))).toBe(true)
       );
       expect(getToolCallInput).toHaveBeenCalledTimes(2);
-      expect(getToolCallInput).toHaveBeenLastCalledWith('sess-other', 'tc-1');
+      expect(getToolCallInput).toHaveBeenLastCalledWith('ws-1', 'sess-other', 'tc-1');
     });
 
     it('waits for completion before fetching the input an Output view draws from', async () => {
@@ -776,14 +776,14 @@ describe('ChatMessageList', () => {
         completedAt: null,
       });
       const { rerender } = render(
-        <ChatMessageList messages={running.messages} toolCalls={running.toolCalls} />
+        <ChatMessageList workspaceId="ws-1" messages={running.messages} toolCalls={running.toolCalls} />
       );
       fireEvent.click(screen.getByText('Bash'));
       expect(screen.getByText('Executing…')).toBeInTheDocument();
       expect(getToolCallInput).not.toHaveBeenCalled();
 
       const done = singleCall({ toolName: 'bash_exec', params: projected, hasFullInput: true });
-      rerender(<ChatMessageList messages={running.messages} toolCalls={done.toolCalls} />);
+      rerender(<ChatMessageList workspaceId="ws-1" messages={running.messages} toolCalls={done.toolCalls} />);
       expect(await screen.findByText('finished')).toBeInTheDocument();
       expect(screen.getByText(`$ ${command}`)).toBeInTheDocument();
       expect(getToolCallInput).toHaveBeenCalledTimes(1);
@@ -801,14 +801,14 @@ describe('ChatMessageList', () => {
       msg({ id: 'm2', role: 'assistant', content: [{ type: 'text', text: '' }] }),
     ];
     const { rerender } = render(
-      <ChatMessageList messages={messages} isStreaming runningIdentity={RUNNING_IDENTITY} />
+      <ChatMessageList workspaceId="ws-1" messages={messages} isStreaming runningIdentity={RUNNING_IDENTITY} />
     );
     expect(screen.getByTestId('virtual-list').children).toHaveLength(2); // user item + footer
     expect(screen.queryByText('Clai')).toBeNull();
 
     // First streamed delta for the placeholder makes it visible.
     rerender(
-      <ChatMessageList
+      <ChatMessageList workspaceId="ws-1"
         messages={messages}
         isStreaming
         runningIdentity={RUNNING_IDENTITY}
@@ -851,35 +851,6 @@ describe('ChatMessageList', () => {
     expect(markdown.dataset.base).toBe('');
   });
 
-  it('provides no workspace location when workspaceId is absent', () => {
-    const messages: AssistantMessage[] = [
-      msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'hello' }] }),
-    ];
-    render(<ChatMessageList messages={messages} userLabel="You" />);
-    expect(screen.getByTestId('markdown').dataset.workspace).toBe('');
-  });
-
-  it('hides image parts when no workspaceId is provided', () => {
-    const messages: AssistantMessage[] = [
-      msg({
-        id: 'm1',
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            id: 'img-1',
-            path: '.clai/images/abc.png',
-            media_type: 'image/png',
-            filename: 'shot.png',
-          },
-        ],
-      }),
-    ];
-    // No workspaceId → cannot resolve the store, so the image is not rendered.
-    render(<ChatMessageList messages={messages} userLabel="You" />);
-    expect(screen.queryByAltText('shot.png')).toBeNull();
-  });
-
   it('opens a zoom lightbox when a transcript image is clicked, and closes on Escape', async () => {
     const messages: AssistantMessage[] = [
       msg({
@@ -913,7 +884,7 @@ describe('ChatMessageList', () => {
       msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'working…' }] }),
     ];
     render(
-      <ChatMessageList
+      <ChatMessageList workspaceId="ws-1"
         messages={messages}
         isStreaming
         runStartedAt={Date.now() - 8000}
@@ -940,7 +911,7 @@ describe('ChatMessageList', () => {
     const messages: AssistantMessage[] = [
       msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'working…' }] }),
     ];
-    render(<ChatMessageList messages={messages} isStreaming runStartedAt={Date.now() - 8000} />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} isStreaming runStartedAt={Date.now() - 8000} />);
     // The transcript still renders — only the footer is gone.
     expect(screen.getByText('working…')).toBeInTheDocument();
     expect(screen.queryByRole('img', { name: 'Working' })).toBeNull();
