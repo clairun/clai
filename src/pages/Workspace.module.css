@@ -269,7 +269,8 @@
   color: var(--color-critical);
 }
 
-.taskStatus_blocked {
+.taskStatus_blocked,
+.taskStatus_input_required {
   background: color-mix(in srgb, var(--color-warning) 14%, transparent);
   color: var(--color-warning);
 }

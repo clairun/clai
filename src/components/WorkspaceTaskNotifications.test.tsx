@@ -1,19 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-
 import type { WorkspaceTaskResponse } from '../generated/bindings';
-
-type Handler = (event: { payload: unknown }) => void;
-let handler: Handler | null = null;
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async (_name: string, next: Handler) => {
-    handler = next;
-    return () => {};
-  }),
-}));
-
-const { default: WorkspaceTaskNotifications } = await import('./WorkspaceTaskNotifications');
+import WorkspaceTaskNotifications from './WorkspaceTaskNotifications';
+import { useTaskStore } from '../workspace/taskStore';
 
 const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse => ({
   id: 'task-1',
@@ -43,18 +33,9 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   ...over,
 });
 
+// What `useAssistantEvents` does with a `task_updated` event.
 const emitTaskUpdated = (updated: WorkspaceTaskResponse) =>
-  act(() =>
-    handler?.({
-      payload: {
-        sessionId: updated.sessionId,
-        runId: updated.runId,
-        workspaceId: updated.workspaceId,
-        timestamp: 0,
-        event: { type: 'task_updated', payload: { task: updated } },
-      },
-    })
-  );
+  act(() => useTaskStore.getState().upsertTask(updated));
 
 const renderNotifications = async () => {
   render(
@@ -67,7 +48,7 @@ const renderNotifications = async () => {
 
 describe('WorkspaceTaskNotifications', () => {
   beforeEach(() => {
-    handler = null;
+    useTaskStore.setState({ tasks: {}, seeded: {} });
   });
 
   it('task_updated with input_required raises one toast per cycle', async () => {

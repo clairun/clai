@@ -323,3 +323,28 @@ describe('TaskList', () => {
     expect(onViewTask).not.toHaveBeenCalled();
   });
 });
+
+describe('task status display', () => {
+  const props = { workspaceId: 'ws-1', roster: ROSTER, onChanged: vi.fn() };
+
+  it('failed+blocked shows Blocked pill and Mark reviewed', () => {
+    render(<TaskList {...props} tasks={[WRITE_TASK]} />);
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
+    expect(screen.queryByText('Failed')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeInTheDocument();
+  });
+
+  it('legacy blocked status maps to Blocked', () => {
+    const legacy = task({ id: 't-old', status: 'blocked' as WorkspaceTaskResponse['status'] });
+    render(<TaskList {...props} tasks={[legacy]} />);
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeInTheDocument();
+  });
+
+  it('failed+restart reads Failed · interrupted', () => {
+    render(
+      <TaskList {...props} tasks={[task({ id: 't-r', status: 'failed', failureReason: 'restart' })]} />
+    );
+    expect(screen.getByText('Failed · interrupted')).toBeInTheDocument();
+  });
+});

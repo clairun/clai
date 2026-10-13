@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router';
 import useAssistantStore from './sessionStore';
 import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
 import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
+import { useTaskStore } from '../workspace/taskStore';
 import type { AssistantSession } from '../generated/bindings';
 
 type EventHandler = (event: { payload: unknown }) => void;
@@ -213,5 +214,59 @@ describe('useAssistantEvents — run_skipped', () => {
     const state = useFleetActivityStore.getState();
     expect(state.runNowSkipped).toEqual(['ws-2']);
     expect(state.activeRunsByWorkspace).toEqual({ 'ws-1': [optimisticRunNowId('ws-1')] });
+  });
+});
+
+describe('useAssistantEvents — task_updated', () => {
+  // As the Rust side serializes it: camelCase inside `task`, bigints as numbers.
+  const wireTask = {
+    id: 'task-1',
+    workspaceId: 'ws-1',
+    createdByWorkspaceAgentId: 'wa-main',
+    createdByDisplayName: 'Main',
+    assignedToWorkspaceAgentId: 'wa-coder',
+    assignedAgentDefinitionId: 'def-coder',
+    assignedAgentDisplayName: 'Coder',
+    title: 'Fix flaky test',
+    instructions: 'fix it',
+    status: 'failed',
+    failureReason: 'blocked',
+    resultSummary: null,
+    error: 'Need repo access',
+    sessionId: 'sess-1',
+    runId: 'run-1',
+    parentSessionId: 'sess-main',
+    parentRunId: 'run-main',
+    parentTaskId: null,
+    depth: 0,
+    cycleNo: 2,
+    createdAt: 1,
+    updatedAt: 9,
+    completedAt: 9,
+    attentionAcknowledgedAt: null,
+  };
+
+  beforeEach(() => useTaskStore.setState({ tasks: {}, seeded: {} }));
+
+  it('task_updated upserts store', async () => {
+    mount();
+    await Promise.resolve();
+    fire({ type: 'task_updated', payload: { task: { ...wireTask, status: 'running' } } });
+    expect(useTaskStore.getState().tasks['ws-1']?.['task-1']?.status).toBe('running');
+    fire({ type: 'task_updated', payload: { task: { ...wireTask, updatedAt: 10 } } });
+    expect(useTaskStore.getState().tasks['ws-1']?.['task-1']?.status).toBe('failed');
+  });
+
+  it('task_updated payload parsed camelCase', async () => {
+    mount();
+    await Promise.resolve();
+    fire({ type: 'task_updated', payload: { task: wireTask } });
+    const task = useTaskStore.getState().tasks['ws-1']?.['task-1'];
+    expect(task).toMatchObject({
+      workspaceId: 'ws-1',
+      failureReason: 'blocked',
+      parentSessionId: 'sess-main',
+      cycleNo: 2,
+    });
   });
 });

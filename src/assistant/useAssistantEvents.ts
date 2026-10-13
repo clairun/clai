@@ -12,6 +12,7 @@ import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import useAssistantStore from './sessionStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
+import { useTaskStore } from '../workspace/taskStore';
 import type { AssistantEventEnvelope, AssistantUiEvent } from '../generated/bindings';
 
 const ASSISTANT_EVENT_NAME = 'assistant://event';
@@ -110,7 +111,7 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
       break;
 
     case 'task_updated':
-      // Task status changes; the task UI consumes them in a later commit.
+      useTaskStore.getState().upsertTask(event.payload.task);
       break;
 
     case 'run_skipped':

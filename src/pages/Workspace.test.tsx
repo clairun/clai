@@ -8,6 +8,8 @@ import Workspace from './Workspace';
 import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import styles from './Workspace.module.css';
 import useAssistantStore from '../assistant/sessionStore';
+import { useAssistantEvents } from '../assistant/useAssistantEvents';
+import { useTaskStore } from '../workspace/taskStore';
 import type {
   AssistantMessage,
   AssistantMessagePage,
@@ -286,6 +288,7 @@ beforeEach(() => {
   // hydrates that same session id — a leftover accumulator would render a
   // phantom assistant turn in an unrelated test.
   useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingText: {} });
+  useTaskStore.setState({ tasks: {}, seeded: {} });
   getWorkspaceDetails.mockImplementation(async (_workspaceId, options) => detailsFor(options));
   getOrCreateWorkspaceSession.mockResolvedValue({
     session: sessionFor('a', 10n),
@@ -1094,6 +1097,11 @@ describe('Workspace task transcript', () => {
   });
 });
 
+const AssistantEvents = () => {
+  useAssistantEvents();
+  return null;
+};
+
 describe('Workspace open task from toast or banner', () => {
   const LocationProbe = () => {
     const location = useLocation();
@@ -1103,6 +1111,7 @@ describe('Workspace open task from toast or banner', () => {
   const renderWithToasts = (entry = '/workspace/a') =>
     render(
       <MemoryRouter initialEntries={[entry]}>
+        <AssistantEvents />
         <WorkspaceTaskNotifications />
         <LocationProbe />
         <Routes>
@@ -1182,8 +1191,79 @@ describe('Workspace open task from toast or banner', () => {
     );
     renderWithToasts();
 
-    // The banner carries it; no event arrived, so no toast.
+    // The banner carries it; the first load is the baseline, so no toast.
     expect(await screen.findByRole('button', { name: FAILED_TASK.title })).toBeInTheDocument();
+    // Re-announcing the same failure does not toast either.
+    emitTaskUpdated({ ...FAILED_TASK, updatedAt: 2n });
     expect(screen.queryByRole('button', { name: 'Open task' })).toBeNull();
+
+    // A new failure after the baseline does.
+    emitTaskUpdated({ ...FAILED_TASK, cycleNo: 1n, updatedAt: 3n });
+    expect(await screen.findByRole('button', { name: 'Open task' })).toBeInTheDocument();
+  });
+});
+
+describe('Workspace task store', () => {
+  const RUNNING: WorkspaceTaskResponse = {
+    ...FAILED_TASK,
+    status: 'running',
+    error: null,
+    completedAt: null,
+    sessionId: 'sess-task-a',
+  };
+
+  beforeEach(() => eventHandlers.clear());
+
+  it('open panel status follows event without poll', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [RUNNING] })
+    );
+    render(
+      <MemoryRouter initialEntries={['/workspace/a']}>
+        <AssistantEvents />
+        <Routes>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /1 tasks/ }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open the log of "${RUNNING.title}"` })
+    );
+    const panel = await screen.findByRole('region', { name: `Transcript for ${RUNNING.title}` });
+    expect(panel).toHaveTextContent('Running');
+    const polls = getWorkspaceDetails.mock.calls.length;
+
+    act(() => {
+      for (const handler of eventHandlers.get('assistant://event') ?? []) {
+        handler({
+          payload: {
+            sessionId: 'sess-task-a',
+            runId: null,
+            workspaceId: 'a',
+            timestamp: 0,
+            event: {
+              type: 'task_updated',
+              payload: { task: { ...RUNNING, status: 'completed', updatedAt: 2n } },
+            },
+          },
+        });
+      }
+    });
+
+    expect(panel).toHaveTextContent('Completed');
+    expect(getWorkspaceDetails.mock.calls.length).toBe(polls);
+  });
+
+  it('first details load shows restart-stopped task without event', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [{ ...RUNNING, status: 'stopped' }] })
+    );
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /1 tasks/ }));
+    expect(await screen.findByText('Stopped')).toBeInTheDocument();
+    expect(useTaskStore.getState().tasks.a?.[RUNNING.id]?.status).toBe('stopped');
   });
 });

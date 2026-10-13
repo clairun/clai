@@ -13,7 +13,7 @@ import {
   formatRelativeTime,
   isTaskActive,
   isTaskAttention,
-  taskStatusLabel,
+  taskDisplayStatus,
 } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import { identityFor, taskIdentity, type AgentActivity, type AgentIdentity } from './agentIdentity';
@@ -179,6 +179,7 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
           {visible.map((task) => {
             const detail = task.error || task.resultSummary || task.instructions;
             const needsAttention = isTaskAttention(task);
+            const status = taskDisplayStatus(task);
             const creator = roster.find((entry) => entry.id === task.createdByWorkspaceAgentId);
             const creatorName = nameOf(task.createdByWorkspaceAgentId, task.createdByDisplayName);
             const assigneeName = nameOf(
@@ -228,8 +229,8 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                 <div className={styles.taskMain}>
                   <div className={styles.titleRow}>
                     <span className={styles.title}>{task.title}</span>
-                    <span className={`${styles.status} ${styles[`status_${task.status}`] || ''}`}>
-                      {taskStatusLabel(task.status)}
+                    <span className={`${styles.status} ${styles[`status_${status.key}`] || ''}`}>
+                      {status.label}
                     </span>
                   </div>
                   <div className={styles.meta}>

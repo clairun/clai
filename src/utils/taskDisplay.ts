@@ -26,18 +26,45 @@ export const formatRelativeTime = (timestamp: NumericTimestamp): string => {
 export const TASK_STATUS_LABEL: Record<string, string> = {
   queued: 'Queued',
   running: 'Running',
+  input_required: 'Needs an answer',
+  stopping: 'Stopping…',
+  stopped: 'Stopped',
   completed: 'Completed',
   failed: 'Failed',
+  // Rows written before `blocked` became a failure reason.
   blocked: 'Blocked',
 };
 
 export const taskStatusLabel = (status: string): string => TASK_STATUS_LABEL[status] || status;
 
-/** A task the user has not yet looked at after it stopped on a problem. */
+const FAILED_LABEL: Record<string, string> = {
+  restart: 'Failed · interrupted',
+  connection_unavailable: 'Failed · no connection',
+};
+
+/**
+ * How a live task's status reads: `key` picks the pill style, `label` its
+ * text. A blocked task is a failure with reason `blocked`, shown as its own pill.
+ */
+export const taskDisplayStatus = (task: {
+  status: string;
+  failureReason?: string | null;
+}): { key: string; label: string } => {
+  if (task.status === 'failed' && task.failureReason === 'blocked') {
+    return { key: 'blocked', label: 'Blocked' };
+  }
+  if (task.status === 'failed') {
+    return { key: 'failed', label: FAILED_LABEL[task.failureReason ?? ''] ?? 'Failed' };
+  }
+  return { key: task.status, label: taskStatusLabel(task.status) };
+};
+
+/** A task waiting on someone: it failed, was blocked, or asked a question, and is not yet reviewed. */
 export const isTaskAttention = (
-  task: Pick<WorkspaceTaskResponse, 'status' | 'attentionAcknowledgedAt'>
+  task: Pick<WorkspaceTaskResponse, 'attentionAcknowledgedAt'> & { status: string }
 ): boolean =>
-  task.status === 'failed' && !task.attentionAcknowledgedAt;
+  (task.status === 'failed' || task.status === 'input_required' || task.status === 'blocked') &&
+  !task.attentionAcknowledgedAt;
 
 export const isTaskActive = (task: { status: string }): boolean =>
-  task.status === 'running' || task.status === 'queued';
+  task.status === 'running' || task.status === 'queued' || task.status === 'input_required';

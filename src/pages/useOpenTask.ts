@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react';
 import type { WorkspaceTaskResponse } from '../generated/bindings';
 import { getWorkspaceTask } from '../workspace/client';
+import { useTaskStore } from '../workspace/taskStore';
 
 /** What the open-a-task rule needs to see before it may change anything. */
 export interface TaskView {
@@ -68,6 +69,7 @@ export const useOpenTask = ({
             onNotFound?.();
             return;
           }
+          useTaskStore.getState().upsertTask(task);
           updateViewingTask((current) =>
             current.activePanel === 'tasks' && current.viewingTask === null
               ? { viewingTask: task }

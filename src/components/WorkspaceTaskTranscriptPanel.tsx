@@ -11,7 +11,7 @@ import AskUserPanel from './AskUserPanel/AskUserPanel';
 import { resolveSessionOwner } from './AssistantChat/messageSender';
 import AgentAvatar from './Agents/AgentAvatar';
 import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
-import { isTaskActive, isTaskAttention, taskStatusLabel } from '../utils/taskDisplay';
+import { isTaskActive, isTaskAttention, taskDisplayStatus } from '../utils/taskDisplay';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
 
 const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
@@ -126,8 +126,8 @@ export default function WorkspaceTaskTranscriptPanel({
 
   if (!task) return null;
 
-  const statusLabel = taskStatusLabel(task.status);
-  const statusClass = styles[`status_${task.status}`] || '';
+  const { key: statusKey, label: statusLabel } = taskDisplayStatus(task);
+  const statusClass = styles[`status_${statusKey}`] || '';
   // The header face carries the task's state, so the transcript below doesn't
   // have to: its running footer is deliberately off (see `runningIdentity`).
   const headerActivity: AgentActivity = isTaskActive(task)

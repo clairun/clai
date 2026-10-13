@@ -11,6 +11,7 @@ import TaskList from '../components/Agents/TaskList';
 import AgentFacepile from '../components/Agents/AgentFacepile';
 import { useStableRoster } from '../components/Agents/useStableRoster';
 import { useOpenTask, type TaskView } from './useOpenTask';
+import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
 import { useCancelRun } from '../assistant/useCancelRun';
@@ -50,7 +51,7 @@ import {
   formatRelativeTime,
   isTaskActive,
   isTaskAttention,
-  taskStatusLabel,
+  taskDisplayStatus,
   toNumber,
   type NumericTimestamp,
 } from '../utils/taskDisplay';
@@ -1063,8 +1064,11 @@ const WorkspaceAttentionBanner = ({
   }
 
   const primary = attentionTasks[0]!;
-  const statusLabel = taskStatusLabel(primary.status);
-  const detail = primary.error || primary.resultSummary || primary.instructions;
+  const status = taskDisplayStatus(primary);
+  const detail =
+    primary.status === 'input_required'
+      ? `${primary.assignedAgentDisplayName || 'The agent'} needs an answer`
+      : primary.error || primary.resultSummary || primary.instructions;
 
   return (
     <section className={styles.attentionBanner} aria-label="Workspace attention">
@@ -1072,8 +1076,8 @@ const WorkspaceAttentionBanner = ({
         <span className={styles.attentionBannerTitle}>
           {attentionTasks.length} task{attentionTasks.length === 1 ? '' : 's'} need attention
         </span>
-        <span className={`${styles.taskStatus} ${styles[`taskStatus_${primary.status}`] || ''}`}>
-          {statusLabel}
+        <span className={`${styles.taskStatus} ${styles[`taskStatus_${status.key}`] || ''}`}>
+          {status.label}
         </span>
       </div>
       <button
@@ -1875,6 +1879,7 @@ const Workspace = () => {
       try {
         const nextDetails = await getWorkspaceDetails(workspaceId, DETAILS_WITH_FILES);
         if (currentWorkspaceIdRef.current !== workspaceId) return;
+        useTaskStore.getState().seedTasks(workspaceId, nextDetails.tasks);
         setDetails(nextDetails);
         setError('');
 
@@ -2062,13 +2067,11 @@ const Workspace = () => {
   }, [loadDetails]);
 
   const memories = useMemo(() => details?.memories || [], [details?.memories]);
-  // `viewingTask` is a snapshot from when the panel opened; follow the polled
-  // copy so status and session stay live. A task fetched by id may not be listed yet.
-  const liveViewingTask = useMemo(
-    () =>
-      viewingTask ? (details?.tasks?.find((t) => t.id === viewingTask.id) ?? viewingTask) : null,
-    [viewingTask, details?.tasks]
-  );
+  // `viewingTask` is a snapshot from when the panel opened; follow the store's
+  // copy (polls and `task_updated`) so status and session stay live. The
+  // snapshot covers a task the store has not seen yet.
+  const storedViewingTask = useTask(workspaceId, viewingTask?.id);
+  const liveViewingTask = viewingTask ? (storedViewingTask ?? viewingTask) : null;
   const artifactCount = Number(details?.artifactCount ?? 0);
   const artifactCountCapped = details?.artifactCountCapped ?? false;
 
@@ -2221,7 +2224,13 @@ const Workspace = () => {
     };
   }, [loadDetails, details, setError, workspaceId]);
 
-  const tasks = details?.tasks || [];
+  // The details' window and order, each task at its newest known copy.
+  const storedTasks = useWorkspaceTasks(workspaceId);
+  const detailsTasks = details?.tasks;
+  const tasks = useMemo(
+    () => (detailsTasks || EMPTY_TASKS).map((task) => storedTasks?.[task.id] ?? task),
+    [detailsTasks, storedTasks]
+  );
 
   // The chat's delegated-task cards are frozen at the moment of their tool
   // call — the tasks drawer owns what is happening now. So the chat gets no

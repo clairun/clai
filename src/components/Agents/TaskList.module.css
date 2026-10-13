@@ -186,6 +186,10 @@
   composes: pill_blocked from './taskStatus.module.css';
 }
 
+.status_input_required {
+  composes: pill_input_required from './taskStatus.module.css';
+}
+
 .meta {
   display: flex;
   align-items: center;

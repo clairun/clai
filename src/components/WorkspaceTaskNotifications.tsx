@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { useNavigate } from 'react-router';
-import type { AssistantEventEnvelope, WorkspaceTaskResponse } from '../generated/bindings';
+import type { WorkspaceTaskResponse } from '../generated/bindings';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
+import { isTaskAttention, taskDisplayStatus } from '../utils/taskDisplay';
+import { useTaskStore } from '../workspace/taskStore';
 import styles from './WorkspaceTaskNotifications.module.css';
 
-const ASSISTANT_EVENT = 'assistant://event';
 const MAX_NOTIFICATIONS = 4;
 const AUTO_DISMISS_MS = 10000;
 
@@ -18,13 +18,21 @@ interface NotificationItem {
   text: string;
 }
 
-/** The statuses that toast, and how they read; null for the rest. */
-const attentionStatus = (task: WorkspaceTaskResponse): NotificationItem['status'] | null => {
-  if (task.status === 'input_required') return { key: 'input_required', label: 'Needs an answer' };
-  if (task.status !== 'failed') return null;
-  return task.failureReason === 'blocked'
-    ? { key: 'blocked', label: 'Blocked' }
-    : { key: 'failed', label: 'Failed' };
+/** The tasks that changed between two snapshots, with whether this is their workspace's first load. */
+const changedTasks = (
+  state: ReturnType<typeof useTaskStore.getState>,
+  prev: ReturnType<typeof useTaskStore.getState>
+): { task: WorkspaceTaskResponse; firstLoad: boolean }[] => {
+  const changed = [];
+  for (const [workspaceId, tasks] of Object.entries(state.tasks)) {
+    const before = prev.tasks[workspaceId];
+    if (tasks === before) continue;
+    const firstLoad = !!state.seeded[workspaceId] && !prev.seeded[workspaceId];
+    for (const task of Object.values(tasks)) {
+      if (task !== before?.[task.id]) changed.push({ task, firstLoad });
+    }
+  }
+  return changed;
 };
 
 const WorkspaceTaskNotifications = () => {
@@ -50,24 +58,16 @@ const WorkspaceTaskNotifications = () => {
     // (e.g. by switching to useState/useReducer).
     const timers = timersRef.current;
     // A task reaching attention toasts once per cycle and status. Tasks
-    // already in attention when the app starts emit nothing, so they never
+    // already in attention at their workspace's first details load never
     // toast; the workspace banner shows them.
     const seen = seenRef.current;
-    const unlistenPromise = listen<AssistantEventEnvelope>(ASSISTANT_EVENT, (event) => {
-      if (event.payload.event.type !== 'task_updated') return;
-      const task = event.payload.event.payload.task;
-      const status = attentionStatus(task);
-      if (!status) return;
-      const id = `${task.id}:${task.cycleNo}:${task.status}`;
-      if (seen.has(id)) return;
-      seen.add(id);
-
+    const notify = (task: WorkspaceTaskResponse, id: string) => {
       const item: NotificationItem = {
         id,
         taskId: task.id,
         workspaceId: task.workspaceId,
         title: task.title || 'Workspace task',
-        status,
+        status: taskDisplayStatus(task),
         text: task.error || task.resultSummary || 'Open the task to see what it needs.',
       };
 
@@ -76,10 +76,20 @@ const WorkspaceTaskNotifications = () => {
         ...current.filter((existing) => existing.taskId !== item.taskId),
       ].slice(0, MAX_NOTIFICATIONS));
       timersRef.current.set(id, window.setTimeout(() => dismiss(id), AUTO_DISMISS_MS));
+    };
+
+    const unsubscribe = useTaskStore.subscribe((state, prev) => {
+      for (const { task, firstLoad } of changedTasks(state, prev)) {
+        if (!isTaskAttention(task)) continue;
+        const id = `${task.id}:${task.cycleNo}:${task.status}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        if (!firstLoad) notify(task, id);
+      }
     });
 
     return () => {
-      unlistenPromise.then((unlisten) => unlisten());
+      unsubscribe();
       for (const timer of timers.values()) {
         window.clearTimeout(timer);
       }

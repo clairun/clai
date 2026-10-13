@@ -35,7 +35,8 @@
   color: var(--color-critical);
 }
 
-.pill_blocked {
+.pill_blocked,
+.pill_input_required {
   background: color-mix(in srgb, var(--color-warning) 14%, transparent);
   color: var(--color-warning);
 }
