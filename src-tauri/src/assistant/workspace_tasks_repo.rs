@@ -1,7 +1,7 @@
 //! The `workspace_tasks` table: one row shape, one column list, and the one
 //! response every reader (the UI and the agents' task tools) gets.
 
-use crate::assistant::signals::SignalRef;
+use crate::assistant::signals::{self, SignalRef};
 use crate::assistant::types::{AssistantMessage, AssistantRun, MessageOrigin};
 use crate::db::{enum_text, parse_enum_text, DbPool};
 use serde::{Deserialize, Serialize};
@@ -297,7 +297,20 @@ pub(crate) struct NewTask<'a> {
     pub(crate) lineage: TaskLineage,
 }
 
+/// Tasks nest at most this deep: a root task has depth 0.
+const MAX_TASK_DEPTH: i64 = 4;
+/// Assignments one run may make.
+const MAX_ASSIGNMENTS_PER_RUN: i64 = 4;
+/// Unfinished tasks one workspace agent may have created.
+const MAX_ACTIVE_TASKS_PER_CREATOR: i64 = 12;
+
+/// Inserts a `queued` task, unless it would break a delegation limit.
 pub(crate) async fn create_task_row(pool: &DbPool, task: NewTask<'_>) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start task creation transaction: {}", e))?;
+    ensure_within_limits(&mut tx, &task).await?;
     let now = now_ms();
     sqlx::query(
         r#"
@@ -321,9 +334,53 @@ pub(crate) async fn create_task_row(pool: &DbPool, task: NewTask<'_>) -> Result<
     .bind(task.lineage.depth)
     .bind(now)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to create workspace task: {}", e))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit task creation transaction: {}", e))
+}
+
+async fn ensure_within_limits(
+    conn: &mut SqliteConnection,
+    task: &NewTask<'_>,
+) -> Result<(), String> {
+    if task.lineage.depth >= MAX_TASK_DEPTH {
+        return Err(format!(
+            "depth_exceeded: tasks nest at most {MAX_TASK_DEPTH} levels deep; do this work yourself."
+        ));
+    }
+    if let Some(run_id) = &task.lineage.parent_run_id {
+        let assigned: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workspace_tasks WHERE parent_run_id = ?")
+                .bind(run_id)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|e| format!("Failed to count assigned tasks: {}", e))?;
+        if assigned >= MAX_ASSIGNMENTS_PER_RUN {
+            return Err(format!(
+                "fan_out_exceeded: one turn may assign at most {MAX_ASSIGNMENTS_PER_RUN} tasks; end your turn and wait for results."
+            ));
+        }
+    }
+    if let Some(creator) = task.created_by_workspace_agent_id {
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM workspace_tasks
+             WHERE created_by_workspace_agent_id = ?
+               AND status IN ('queued', 'running', 'input_required', 'stopping')",
+        )
+        .bind(creator)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| format!("Failed to count active tasks: {}", e))?;
+        if active >= MAX_ACTIVE_TASKS_PER_CREATOR {
+            return Err(format!(
+                "fan_out_exceeded: you already have {MAX_ACTIVE_TASKS_PER_CREATOR} unfinished tasks; wait for some to finish."
+            ));
+        }
+        signals::ensure_sender_budget(conn, creator).await?;
+    }
     Ok(())
 }
 

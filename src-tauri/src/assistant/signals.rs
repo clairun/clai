@@ -198,6 +198,37 @@ pub(crate) async fn insert_event(
     Ok(Some(message))
 }
 
+/// Agent-to-agent messages one workspace agent may send per rolling hour.
+pub(crate) const AGENT_SENDS_PER_HOUR: i64 = 40;
+const HOUR_MS: i64 = 60 * 60 * 1000;
+
+/// Fails with `budget_exceeded` when `sender_id` already sent
+/// [`AGENT_SENDS_PER_HOUR`] agent messages in the last hour. Call inside the
+/// transaction that would write the next one.
+pub(crate) async fn ensure_sender_budget(
+    conn: &mut SqliteConnection,
+    sender_id: &str,
+) -> Result<(), String> {
+    let sent: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM session_signals
+        WHERE created_at > ? AND kind = 'agent_message'
+          AND json_extract(origin_json, '$.agent.workspaceAgentId') = ?
+        "#,
+    )
+    .bind(now_ms() - HOUR_MS)
+    .bind(sender_id)
+    .fetch_one(conn)
+    .await
+    .map_err(|e| format!("Failed to count agent messages: {}", e))?;
+    if sent >= AGENT_SENDS_PER_HOUR {
+        return Err(format!(
+            "budget_exceeded: you already sent {AGENT_SENDS_PER_HOUR} task messages and assignments in the last hour; nothing was sent. Wait for results or ask the user."
+        ));
+    }
+    Ok(())
+}
+
 /// The signal carrying `message_id`.
 pub(crate) async fn signal_for_message(
     pool: &DbPool,

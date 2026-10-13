@@ -15,6 +15,8 @@ use crate::AppState;
 #[derive(Debug, Clone, Default)]
 pub struct RunContext {
     pub automation_id: Option<String>,
+    /// The owning agent is enabled on the roster, so it may use the task tools.
+    pub agent_enabled: bool,
     pub automation_name: Option<String>,
     /// The agent's description with its skills' instructions folded in.
     pub agent_description: Option<String>,
@@ -72,6 +74,7 @@ pub fn resolve_run_context(
 
     Ok(RunContext {
         automation_id: Some(agent.id.clone()),
+        agent_enabled: agent.enabled,
         automation_name: Some(agent.name.clone()),
         agent_description: Some(crate::config::compose_agent_instructions(
             &app_config,
@@ -400,20 +403,55 @@ mod tests {
         assert!(error.contains(MEMBER), "{error}");
     }
 
-    /// The roster's default entry carries the Main's local id, so only a run
-    /// as the Main gets the manager tools.
-    #[test]
-    fn manager_tools_are_offered_only_to_the_main_agent() {
+    #[tokio::test]
+    async fn member_can_assign_member() {
+        const OTHER: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
         let fx = fixture(true);
         assign_member(&fx, Vec::new());
+        fx.state
+            .update_workspace_config(WS, |config| {
+                let mut other = assignment(true);
+                other.id = OTHER.to_string();
+                config.assignments.push(other);
+                Ok(())
+            })
+            .expect("assign other");
         let offers_assign = |agent_id: &str| {
             let run = resolve_run_context(&fx.state, WS, Some(agent_id)).expect("resolve");
             crate::assistant::tools::registry::available_tools(&run, &[])
                 .iter()
                 .any(|tool| tool.name == "workspace_assignTask")
         };
-
         assert!(offers_assign(MAIN));
+        assert!(offers_assign(MEMBER));
+
+        let roster = crate::assistant::workspace_agents::load_workspace_agent_rows(&fx.state, WS)
+            .expect("roster");
+        let caller =
+            crate::assistant::tools::workspace_tasks::authorize_caller(&roster, Some(MEMBER))
+                .expect("a member may delegate");
+        let pool = fx.state.workspace_db(WS).await.expect("workspace db");
+        crate::assistant::workspace_tasks_repo::create_task_row(
+            &pool,
+            crate::assistant::workspace_tasks_repo::NewTask {
+                id: "task-1",
+                created_by_workspace_agent_id: Some(caller),
+                assigned_to_workspace_agent_id: OTHER,
+                assigned_agent_definition_id: DEFINITION,
+                title: "Review",
+                instructions: "Review it",
+                lineage: Default::default(),
+            },
+        )
+        .await
+        .expect("member assigns member");
+
+        fx.state
+            .update_workspace_config(WS, |config| {
+                config.assignments[0].enabled = false;
+                Ok(())
+            })
+            .expect("disable member");
         assert!(!offers_assign(MEMBER));
     }
 

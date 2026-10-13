@@ -69,16 +69,19 @@ pub async fn execute(
     tool_name: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let roster =
+        load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)?;
+    let caller = authorize_caller(&roster, context.run_context.automation_id.as_deref())?;
     match tool_name {
         "workspace_listAgents" => {
             let params: ListWorkspaceAgentsParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_listAgents params: {}", e))?;
-            list_agents(deps, params)
+            Ok(list_agents(&deps.workspace_id, roster, params))
         }
         "workspace_assignTask" => {
             let params: AssignWorkspaceTaskParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_assignTask params: {}", e))?;
-            assign_task(deps, context, params).await
+            assign_task(deps, context, &roster, caller, params).await
         }
         "workspace_getTaskResult" => {
             let params: GetWorkspaceTaskResultParams = serde_json::from_value(params)
@@ -110,20 +113,8 @@ pub async fn execute(
         "workspace_sendTaskMessage" => {
             let params: SendWorkspaceTaskMessageParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_sendTaskMessage params: {}", e))?;
-            let roster = load_workspace_agent_rows(
-                deps.app.state::<AppState>().inner(),
-                &deps.workspace_id,
-            )?;
             let origin = MessageOrigin::Agent {
-                agent: agent_snapshot(
-                    &roster,
-                    context
-                        .run_context
-                        .automation_id
-                        .as_deref()
-                        .unwrap_or("unknown"),
-                    None,
-                ),
+                agent: agent_snapshot(&roster, caller, None),
                 session_id: Some(context.session_id.clone()),
                 run_id: Some(context.run_id.clone()),
             };
@@ -140,13 +131,10 @@ pub async fn execute(
 }
 
 fn list_agents(
-    deps: &AssistantDeps,
+    workspace_id: &str,
+    rows: Vec<WorkspaceAgentRow>,
     params: ListWorkspaceAgentsParams,
-) -> Result<serde_json::Value, String> {
-    let workspace_id = deps.workspace_id.clone();
-    let app_state = deps.app.state::<AppState>();
-    let rows = load_workspace_agent_rows(app_state.inner(), &workspace_id)?;
-
+) -> serde_json::Value {
     let agents: Vec<serde_json::Value> = rows
         .into_iter()
         .filter(|row| params.include_disabled || row.enabled)
@@ -164,45 +152,47 @@ fn list_agents(
         })
         .collect();
 
-    Ok(serde_json::json!({
+    serde_json::json!({
         "ok": true,
         "workspaceId": workspace_id,
         "agents": agents,
-    }))
+    })
 }
 
 async fn assign_task(
     deps: &AssistantDeps,
     context: &ToolExecutionContext,
+    rows: &[WorkspaceAgentRow],
+    caller: &str,
     params: AssignWorkspaceTaskParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_id = deps.workspace_id.clone();
     let title = params.title.trim();
     let instructions = params.instructions.trim();
     if title.is_empty() {
-        return Err("Task title is required.".to_string());
+        return Err("invalid_input: task title is required.".to_string());
     }
     if instructions.is_empty() {
-        return Err("Task instructions are required.".to_string());
+        return Err("invalid_input: task instructions are required.".to_string());
     }
 
-    let app_state = deps.app.state::<AppState>();
-    let rows = load_workspace_agent_rows(app_state.inner(), &workspace_id)?;
     let target = rows
         .iter()
         .find(|row| row.id == params.workspace_agent_id)
         .cloned()
-        .ok_or_else(|| unknown_workspace_agent_error(&params.workspace_agent_id, &rows))?;
+        .ok_or_else(|| {
+            format!(
+                "not_found: {}",
+                unknown_workspace_agent_error(&params.workspace_agent_id, rows)
+            )
+        })?;
 
     if !target.enabled {
-        return Err(disabled_workspace_agent_error(
-            &params.workspace_agent_id,
-            &rows,
+        return Err(format!(
+            "agent_disabled: {}",
+            disabled_workspace_agent_error(&params.workspace_agent_id, rows)
         ));
     }
 
-    let automation_id = context.run_context.automation_id.as_deref();
-    let creator = creator_workspace_agent_id(&rows, automation_id);
     let lineage =
         workspace_tasks_repo::lineage_for_caller(&deps.pool, &context.session_id, &context.run_id)
             .await?;
@@ -212,7 +202,7 @@ async fn assign_task(
         &deps.pool,
         NewTask {
             id: &task_id,
-            created_by_workspace_agent_id: creator,
+            created_by_workspace_agent_id: Some(caller),
             assigned_to_workspace_agent_id: &target.id,
             assigned_agent_definition_id: &target.agent_definition_id,
             title,
@@ -226,18 +216,17 @@ async fn assign_task(
         Ok(connection) => connection,
         Err(message) => {
             workspace_tasks_repo::fail_unstarted(&deps.pool, &task_id, &message).await?;
-            return task_result(deps, &task_id, &agent_display_names(&rows)).await;
+            return task_result(deps, &task_id, &agent_display_names(rows)).await;
         }
     };
 
-    let caller = agent_snapshot(&rows, automation_id.unwrap_or("unknown"), None);
     let session = enqueue_assignment(
         &deps.pool,
         &task_id,
         &target.id,
         assignment_text(&task_id, title, instructions),
         MessageOrigin::Agent {
-            agent: caller,
+            agent: agent_snapshot(rows, caller, None),
             session_id: Some(context.session_id.clone()),
             run_id: Some(context.run_id.clone()),
         },
@@ -246,7 +235,7 @@ async fn assign_task(
     .await?;
 
     // Read before the kick so the caller gets the queued placeholder.
-    let result = task_result(deps, &task_id, &agent_display_names(&rows)).await;
+    let result = task_result(deps, &task_id, &agent_display_names(rows)).await;
     dispatcher::kick_logged(deps, &session.id).await;
     result
 }
@@ -292,7 +281,7 @@ pub(crate) async fn enqueue_assignment(
 
 fn assignment_text(task_id: &str, title: &str, instructions: &str) -> String {
     format!(
-        "You have been assigned a workspace-local task by the manager.\n\n\
+        "You have been assigned a workspace-local task by a workspace agent.\n\n\
          Task ID: {}\n\
          Task title: {}\n\n\
          Instructions:\n{}\n\n\
@@ -329,7 +318,7 @@ async fn load_task(
 ) -> Result<workspace_tasks_repo::WorkspaceTaskRow, String> {
     workspace_tasks_repo::load_task(pool, task_id)
         .await?
-        .ok_or_else(|| format!("Workspace task not found: {}", task_id))
+        .ok_or_else(|| not_found(task_id))
 }
 
 /// Emits `task_updated` for `task` on its own session.
@@ -657,7 +646,7 @@ pub(crate) async fn deliver_task_message(
     }
     let task = workspace_tasks_repo::load_task(pool, task_id)
         .await?
-        .ok_or_else(|| format!("not_found: workspace task {task_id} does not exist."))?;
+        .ok_or_else(|| not_found(task_id))?;
     let session_id = task.session_id.clone().ok_or_else(|| {
         format!("invalid_input: task {task_id} never started, so it cannot take messages.")
     })?;
@@ -676,6 +665,9 @@ pub(crate) async fn deliver_task_message(
         .begin()
         .await
         .map_err(|e| format!("Failed to start task message transaction: {}", e))?;
+    if let MessageOrigin::Agent { agent, .. } = &origin {
+        signals::ensure_sender_budget(&mut tx, &agent.workspace_agent_id).await?;
+    }
     let message = signals::insert_event(
         &mut tx,
         NewEvent {
@@ -864,7 +856,7 @@ pub(crate) async fn request_stop(
 ) -> Result<StopOutcome, String> {
     let (task, changed) = workspace_tasks_repo::request_stop(pool, task_id)
         .await?
-        .ok_or_else(|| format!("Workspace task not found: {}", task_id))?;
+        .ok_or_else(|| not_found(task_id))?;
     if !changed {
         return Ok(if task.status.is_terminal() {
             StopOutcome::AlreadyTerminal(task)
@@ -1002,16 +994,30 @@ fn disabled_workspace_agent_error(requested: &str, rows: &[WorkspaceAgentRow]) -
     )
 }
 
-/// The caller's own workspace agent id, if it is one: a run's
+/// Only an enabled agent of this workspace may use the task tools. A run's
 /// `automation_id` is the workspace agent id of the agent running it.
-fn creator_workspace_agent_id<'rows>(
+pub(crate) fn authorize_caller<'rows>(
     rows: &'rows [WorkspaceAgentRow],
     automation_id: Option<&str>,
-) -> Option<&'rows str> {
-    let automation_id = automation_id?;
-    rows.iter()
-        .find(|row| row.id == automation_id)
-        .map(|row| row.id.as_str())
+) -> Result<&'rows str, String> {
+    let caller = automation_id
+        .and_then(|id| rows.iter().find(|row| row.id == id))
+        .ok_or_else(|| {
+            "not_member: only agents of this workspace can use task tools.".to_string()
+        })?;
+    if !caller.enabled {
+        return Err(format!(
+            "agent_disabled: {} is disabled in this workspace.",
+            caller.display_name()
+        ));
+    }
+    Ok(&caller.id)
+}
+
+/// Tasks are per workspace database, so another workspace's task id is
+/// simply unknown here.
+fn not_found(task_id: &str) -> String {
+    format!("not_found: workspace task {task_id} does not exist.")
 }
 
 /// A worker reply that starts with `BLOCKED:` ends its cycle as
@@ -1150,17 +1156,21 @@ mod tests {
     }
 
     #[test]
-    fn creator_is_the_calling_workspace_agent_when_it_is_on_the_roster() {
-        let rows = vec![agent_row("agent-1", "Manager")];
+    fn only_enabled_roster_agents_are_authorized() {
+        let mut disabled = agent_row("agent-2", "Code Reviewer");
+        disabled.enabled = false;
+        let rows = vec![agent_row("agent-1", "Manager"), disabled];
 
-        assert_eq!(
-            creator_workspace_agent_id(&rows, Some("agent-1")),
-            Some("agent-1")
-        );
+        assert_eq!(authorize_caller(&rows, Some("agent-1")), Ok("agent-1"));
+        assert!(authorize_caller(&rows, Some("agent-2"))
+            .unwrap_err()
+            .starts_with("agent_disabled:"));
         // A definition id is never a run's automation id, so it does not match.
-        assert_eq!(creator_workspace_agent_id(&rows, Some("def-agent-1")), None);
-        assert_eq!(creator_workspace_agent_id(&rows, Some("gone")), None);
-        assert_eq!(creator_workspace_agent_id(&rows, None), None);
+        for outsider in [Some("def-agent-1"), Some("gone"), None] {
+            assert!(authorize_caller(&rows, outsider)
+                .unwrap_err()
+                .starts_with("not_member:"));
+        }
     }
 
     #[test]
@@ -2283,5 +2293,177 @@ mod tests {
                 .unwrap(),
             Kick::Busy { .. }
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // delegation limits
+    // -----------------------------------------------------------------
+
+    /// A task assigned from `caller_session`'s run `run_id`, with the
+    /// lineage `assign_task` computes. Returns the task's session.
+    async fn delegate(
+        pool: &DbPool,
+        caller_session: &str,
+        run_id: &str,
+        task_id: &str,
+    ) -> Result<String, String> {
+        let lineage = workspace_tasks_repo::lineage_for_caller(pool, caller_session, run_id)
+            .await
+            .unwrap();
+        create_task_row(
+            pool,
+            NewTask {
+                id: task_id,
+                created_by_workspace_agent_id: Some("wa-mgr"),
+                assigned_to_workspace_agent_id: "wa-1",
+                assigned_agent_definition_id: "def-1",
+                title: "Review",
+                instructions: "Review it",
+                lineage,
+            },
+        )
+        .await?;
+        Ok(enqueue_assignment(
+            pool,
+            task_id,
+            "wa-1",
+            "Review it".to_string(),
+            parent_agent(),
+            "conn",
+        )
+        .await
+        .unwrap()
+        .id)
+    }
+
+    async fn task_count(pool: &DbPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM workspace_tasks")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn message_count(pool: &DbPool) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM assistant_messages),
+                    (SELECT COUNT(*) FROM session_signals)",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cross_workspace_task_id_hidden() {
+        let (_tmp, pool) = workspace_pool().await;
+        let (_other_tmp, other_pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        running(&pool, &parent, "task-1").await;
+
+        let sent = deliver_task_message(&other_pool, "task-1", "hi", parent_agent())
+            .await
+            .unwrap_err();
+        assert!(sent.starts_with("not_found:"), "{sent}");
+        let stopped = request_stop(&other_pool, "ws-other", "task-1", &[])
+            .await
+            .unwrap_err();
+        assert!(stopped.starts_with("not_found:"), "{stopped}");
+        let read = load_task(&other_pool, "task-1").await.unwrap_err();
+        assert!(read.starts_with("not_found:"), "{read}");
+        assert_eq!(message_count(&other_pool).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn depth_four_allowed_five_rejected() {
+        let (_tmp, pool) = workspace_pool().await;
+        let mut caller = parent_session(&pool).await;
+        for level in 1..=4 {
+            caller = delegate(
+                &pool,
+                &caller,
+                &format!("run-{level}"),
+                &format!("task-{level}"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("level {level}: {error}"));
+        }
+        let fourth = workspace_tasks_repo::load_task(&pool, "task-4")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fourth.depth, 3);
+
+        let error = delegate(&pool, &caller, "run-5", "task-5")
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("depth_exceeded:"), "{error}");
+        assert_eq!(task_count(&pool).await, 4);
+    }
+
+    #[tokio::test]
+    async fn per_run_fanout_cap() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        for n in 1..=4 {
+            delegate(&pool, &parent, "run-1", &format!("task-{n}"))
+                .await
+                .unwrap();
+        }
+
+        let error = delegate(&pool, &parent, "run-1", "task-5")
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("fan_out_exceeded:"), "{error}");
+        assert_eq!(task_count(&pool).await, 4);
+        // The cap is per run: the caller's next turn may assign again.
+        delegate(&pool, &parent, "run-2", "task-5").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_task_cap_per_creator() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        for n in 1..=12 {
+            delegate(&pool, &parent, &format!("run-{n}"), &format!("task-{n}"))
+                .await
+                .unwrap();
+        }
+
+        let error = delegate(&pool, &parent, "run-13", "task-13")
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("fan_out_exceeded:"), "{error}");
+        sqlx::query("UPDATE workspace_tasks SET status = 'completed' WHERE id = 'task-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        delegate(&pool, &parent, "run-13", "task-13").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn forty_first_agent_send_rejected_budget_exceeded_nothing_stored() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        // The assignment is the sender's first agent message of the hour.
+        running(&pool, &parent, "task-1").await;
+        for n in 2..=signals::AGENT_SENDS_PER_HOUR {
+            send(&pool, "task-1", &format!("note {n}"), parent_agent()).await;
+        }
+        let before = message_count(&pool).await;
+
+        let error = deliver_task_message(&pool, "task-1", "one more", parent_agent())
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("budget_exceeded:"), "{error}");
+        let error = delegate(&pool, &parent, "run-2", "task-2")
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert_eq!(message_count(&pool).await, before);
+        assert_eq!(task_count(&pool).await, 1);
+
+        // Human sends are never counted.
+        send(&pool, "task-1", "from the human", MessageOrigin::User).await;
+        assert_eq!(message_count(&pool).await, (before.0 + 1, before.1 + 1));
     }
 }

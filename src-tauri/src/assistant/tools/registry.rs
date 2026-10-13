@@ -17,7 +17,7 @@ pub fn available_tools(
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![];
 
-    if is_workspace_manager_context(context) {
+    if context.agent_enabled {
         tools.push(workspace_list_agents_def());
         tools.push(workspace_assign_task_def());
         tools.push(workspace_get_task_result_def());
@@ -123,7 +123,7 @@ fn workspace_list_agents_def() -> ToolDefinition {
 fn workspace_assign_task_def() -> ToolDefinition {
     tool::<AssignWorkspaceTaskParams>(
         "workspace_assignTask",
-        "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained.",
+        "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained. Delegation is limited: 4 assignments per turn, 12 unfinished tasks at a time, 4 levels of nesting, 40 assignments and task messages per hour.",
     )
 }
 
@@ -254,17 +254,6 @@ fn web_fetch_def() -> ToolDefinition {
             "additionalProperties": false
         }),
     }
-}
-
-fn is_workspace_manager_context(context: &RunContext) -> bool {
-    let Some(automation_id) = context.automation_id.as_deref() else {
-        return false;
-    };
-
-    context
-        .workspace_agents
-        .iter()
-        .any(|agent| agent.is_default && agent.id == automation_id)
 }
 
 /// Build a ToolDefinition from a schemars-annotated param type.
