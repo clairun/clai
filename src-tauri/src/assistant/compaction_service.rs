@@ -43,7 +43,7 @@ pub async fn commit_compaction(
             strategy: strategy.clone(),
             source_from_message_id: Some(source_from_message_id.clone()),
             source_to_message_id: Some(source_to_message_id.clone()),
-            created_run_id,
+            created_run_id: created_run_id.clone(),
             protocol_id,
             model_id,
             input_message_count,
@@ -65,6 +65,7 @@ pub async fn commit_compaction(
                 "sourceToMessageId": source_to_message_id,
                 "createdAt": chrono::Utc::now().timestamp_millis(),
             })),
+            run_id: created_run_id,
         },
     )
     .await?;

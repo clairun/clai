@@ -60,6 +60,12 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   updatedAt: 0n,
   completedAt: null,
   attentionAcknowledgedAt: null,
+  failureReason: null,
+  parentSessionId: null,
+  parentRunId: null,
+  parentTaskId: null,
+  depth: 0n,
+  cycleNo: 0n,
   ...over,
 });
 
@@ -70,6 +76,7 @@ const message: AssistantMessage = {
   content: [{ type: 'text', text: 'porting the reducer' }],
   createdAt: 0n,
   providerMetadata: null,
+  origin: { kind: 'user' },
 };
 
 // Only the fields the panel reads; `session` and the rest of SessionState are

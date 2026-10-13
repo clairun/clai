@@ -72,7 +72,7 @@ describe('AgentFacepile', () => {
     const blocked = {
       id: 't-b',
       assignedToWorkspaceAgentId: 'b',
-      status: 'blocked',
+      status: 'failed',
       attentionAcknowledgedAt: null,
     } as WorkspaceTaskResponse;
     const { container } = render(

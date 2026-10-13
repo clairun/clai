@@ -3509,8 +3509,8 @@ async fn workspace_task_attention_summary(
         r#"
         SELECT
             COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'failed' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN status = 'failed' AND failure_reason = 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'failed' AND failure_reason IS NOT 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0)
         FROM workspace_tasks
         "#,
     )
@@ -3522,17 +3522,13 @@ async fn workspace_task_attention_summary(
     let latest: Option<(String, String, String, Option<String>, Option<String>, i64)> =
         sqlx::query_as(
             r#"
-            SELECT id, title, status, result_summary, error, updated_at
+            SELECT id, title,
+                   CASE failure_reason WHEN 'blocked' THEN 'blocked' ELSE status END,
+                   result_summary, error, updated_at
             FROM workspace_tasks
-            WHERE status IN ('blocked', 'failed')
+            WHERE status = 'failed'
                 AND attention_acknowledged_at IS NULL
-            ORDER BY
-                CASE status
-                    WHEN 'blocked' THEN 0
-                    WHEN 'failed' THEN 1
-                    ELSE 2
-                END,
-                updated_at DESC
+            ORDER BY failure_reason IS NOT 'blocked', updated_at DESC
             LIMIT 1
             "#,
         )
@@ -5564,5 +5560,38 @@ mod tests {
 
         assert_eq!(response.display_name, "def-1");
         assert_eq!(response.agent_name, None);
+    }
+
+    #[tokio::test]
+    async fn attention_summary_counts_failed_blocked_as_blocked() {
+        use crate::db::test_support::{insert_task, workspace_pool};
+        let (_tmp, pool) = workspace_pool().await;
+        for (id, status, reason, updated_at) in [
+            ("blocked", "failed", Some("blocked"), 1),
+            ("errored", "failed", Some("error"), 2),
+            ("done", "completed", None, 3),
+        ] {
+            insert_task(&pool, id, status, None, Some("why")).await;
+            sqlx::query(
+                "UPDATE workspace_tasks SET failure_reason = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(reason)
+            .bind(updated_at)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let summary = workspace_task_attention_summary(&pool, WS).await.unwrap();
+
+        assert_eq!(summary.blocked_task_count, 1);
+        assert_eq!(summary.failed_task_count, 1);
+        // Blocked ranks first even though the error is newer.
+        assert_eq!(summary.latest_attention_task_id.as_deref(), Some("blocked"));
+        assert_eq!(
+            summary.latest_attention_task_status.as_deref(),
+            Some("blocked")
+        );
     }
 }

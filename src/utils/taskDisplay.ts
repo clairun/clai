@@ -37,7 +37,7 @@ export const taskStatusLabel = (status: string): string => TASK_STATUS_LABEL[sta
 export const isTaskAttention = (
   task: Pick<WorkspaceTaskResponse, 'status' | 'attentionAcknowledgedAt'>
 ): boolean =>
-  (task.status === 'blocked' || task.status === 'failed') && !task.attentionAcknowledgedAt;
+  task.status === 'failed' && !task.attentionAcknowledgedAt;
 
-export const isTaskActive = (task: Pick<WorkspaceTaskResponse, 'status'>): boolean =>
+export const isTaskActive = (task: { status: string }): boolean =>
   task.status === 'running' || task.status === 'queued';

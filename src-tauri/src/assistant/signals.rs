@@ -1,17 +1,32 @@
 //! `session_signals`: the durable record of input a session still owes a run.
 //! A content signal points at the message row written in the same
-//! transaction; the message itself stays in `assistant_messages`. Only
-//! `user_message` signals exist so far.
+//! transaction; the message itself stays in `assistant_messages`.
 //!
 //! Lifecycle: `pending` → `claimed` by the run [`crate::assistant::dispatcher`]
 //! starts for it, or `pending` → `consumed` when a live run takes it mid-run.
+//! A signal whose message was deleted before delivery is `dropped`.
 
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection};
 use uuid::Uuid;
 
 use crate::assistant::repository::{map_message_row, now_ms};
-use crate::assistant::types::{AssistantMessage, ContentPart, MessageRole};
-use crate::db::DbPool;
+use crate::assistant::types::{AssistantMessage, ContentPart, MessageOrigin, MessageRole};
+use crate::db::{enum_text, DbPool};
+
+/// What a signal carries. Every kind so far is content: it has a message
+/// row and reaches the model.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalKind {
+    UserMessage,
+    /// Another agent wrote to this session, e.g. a task assignment.
+    AgentMessage,
+    /// A task this session assigned finished a cycle.
+    TaskResult,
+    /// A task this session assigned failed a cycle.
+    TaskFailed,
+}
 
 /// A content signal and its message.
 #[derive(Debug, Clone)]
@@ -22,7 +37,7 @@ pub struct SignalContent {
 }
 
 const CONTENT_COLUMNS: &str = "m.id, m.session_id, m.role, m.content_json, \
-     m.provider_metadata_json, m.created_at, s.connection_id";
+     m.provider_metadata_json, m.origin_json, m.created_at, s.connection_id";
 
 fn map_content_row(row: &sqlx::sqlite::SqliteRow) -> Result<SignalContent, String> {
     Ok(SignalContent {
@@ -38,22 +53,123 @@ pub(crate) async fn insert_user_message_signal(
     message: &AssistantMessage,
     connection_id: &str,
 ) -> Result<(), String> {
+    insert_signal(
+        conn,
+        SignalKind::UserMessage,
+        message,
+        None,
+        None,
+        Some(connection_id),
+    )
+    .await
+}
+
+async fn insert_signal(
+    conn: &mut SqliteConnection,
+    kind: SignalKind,
+    message: &AssistantMessage,
+    payload: Option<&serde_json::Value>,
+    delivery_key: Option<&str>,
+    connection_id: Option<&str>,
+) -> Result<(), String> {
     sqlx::query(
         r#"
         INSERT INTO session_signals
-            (id, target_session_id, kind, lane, message_id, connection_id, status, created_at)
-        VALUES (?, ?, 'user_message', 1, ?, ?, 'pending', ?)
+            (id, target_session_id, kind, lane, message_id, payload_json, origin_json,
+             delivery_key, connection_id, status, created_at)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 'pending', ?)
         "#,
     )
     .bind(Uuid::new_v4().to_string())
     .bind(&message.session_id)
+    .bind(enum_text(&kind)?)
     .bind(&message.id)
+    .bind(payload.map(serde_json::Value::to_string))
+    .bind(json_text(&message.origin)?)
+    .bind(delivery_key)
     .bind(connection_id)
     .bind(message.created_at)
     .execute(conn)
     .await
     .map_err(|e| format!("Failed to insert session signal: {}", e))?;
     Ok(())
+}
+
+fn json_text<T: Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| format!("Failed to serialize JSON: {}", e))
+}
+
+/// An automated event for a session: a user-role message with a non-user
+/// origin plus its content signal.
+pub(crate) struct NewEvent<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) kind: SignalKind,
+    pub(crate) text: String,
+    pub(crate) origin: MessageOrigin,
+    pub(crate) payload: serde_json::Value,
+    /// At most one event is ever written per key.
+    pub(crate) delivery_key: Option<String>,
+    pub(crate) connection_id: Option<&'a str>,
+}
+
+/// Writes the event's message and signal. `None`, writing nothing, when an
+/// event with the same delivery key already exists — even if its message
+/// was deleted since. Call inside a transaction.
+pub(crate) async fn insert_event(
+    conn: &mut SqliteConnection,
+    event: NewEvent<'_>,
+) -> Result<Option<AssistantMessage>, String> {
+    if let Some(key) = &event.delivery_key {
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM session_signals WHERE delivery_key = ?")
+                .bind(key)
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|e| format!("Failed to read session signal: {}", e))?;
+        if exists.is_some() {
+            return Ok(None);
+        }
+    }
+
+    let message = AssistantMessage {
+        id: Uuid::new_v4().to_string(),
+        session_id: event.session_id.to_string(),
+        role: MessageRole::User,
+        content: vec![ContentPart::Text { text: event.text }],
+        created_at: now_ms(),
+        provider_metadata: None,
+        origin: event.origin,
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO assistant_messages (id, session_id, role, content_json, origin_json, created_at)
+        VALUES (?, ?, 'user', ?, ?, ?)
+        "#,
+    )
+    .bind(&message.id)
+    .bind(&message.session_id)
+    .bind(json_text(&message.content)?)
+    .bind(json_text(&message.origin)?)
+    .bind(message.created_at)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| format!("Failed to create event message: {}", e))?;
+    insert_signal(
+        conn,
+        event.kind,
+        &message,
+        Some(&event.payload),
+        event.delivery_key.as_deref(),
+        event.connection_id,
+    )
+    .await?;
+    sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
+        .bind(message.created_at)
+        .bind(&message.session_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("Failed to update assistant session timestamp: {}", e))?;
+    Ok(Some(message))
 }
 
 /// Pending content signals of a session, oldest first. Claimed signals are
@@ -124,14 +240,14 @@ pub async fn list_content_for_run(
 
 /// Claims every pending content signal of the session that targets
 /// `connection_id` (or no connection) for `run_id`. Returns the claimed
-/// message ids.
+/// message ids, each stamped with `run_id`.
 pub(crate) async fn claim_batch(
     conn: &mut SqliteConnection,
     session_id: &str,
     run_id: &str,
     connection_id: &str,
 ) -> Result<Vec<String>, String> {
-    sqlx::query_scalar(
+    let message_ids: Vec<String> = sqlx::query_scalar(
         r#"
         UPDATE session_signals
         SET status = 'claimed', claimed_run_id = ?, claimed_at = ?
@@ -145,9 +261,28 @@ pub(crate) async fn claim_batch(
     .bind(now_ms())
     .bind(session_id)
     .bind(connection_id)
-    .fetch_all(conn)
+    .fetch_all(&mut *conn)
     .await
-    .map_err(|e| format!("Failed to claim session signals: {}", e))
+    .map_err(|e| format!("Failed to claim session signals: {}", e))?;
+    for message_id in &message_ids {
+        stamp_run(&mut *conn, message_id, run_id).await?;
+    }
+    Ok(message_ids)
+}
+
+/// Attributes a delivered message to the run that took it.
+async fn stamp_run(
+    conn: &mut SqliteConnection,
+    message_id: &str,
+    run_id: &str,
+) -> Result<(), String> {
+    sqlx::query("UPDATE assistant_messages SET run_id = ? WHERE id = ? AND run_id IS NULL")
+        .bind(run_id)
+        .bind(message_id)
+        .execute(conn)
+        .await
+        .map_err(|e| format!("Failed to attribute message to run: {}", e))?;
+    Ok(())
 }
 
 /// Marks the pending signals of `message_ids` consumed by a live run that
@@ -182,6 +317,7 @@ pub async fn consume(
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to consume session signal: {}", e))?;
+        stamp_run(&mut tx, message_id, run_id).await?;
     }
     tx.commit()
         .await
@@ -267,6 +403,7 @@ pub async fn edit_pending_user_message(
         content: vec![ContentPart::Text { text }],
         created_at,
         provider_metadata: None,
+        origin: MessageOrigin::User,
     };
     let content_json = serde_json::to_string(&message.content)
         .map_err(|e| format!("Failed to serialize JSON: {}", e))?;

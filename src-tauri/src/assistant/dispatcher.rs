@@ -1,7 +1,8 @@
-//! The one path that turns pending session signals into a run: every user
-//! send and every run end calls [`kick`]. Stateless; the durable state is
-//! `session_signals` and `idx_assistant_runs_one_active_per_session`, which
-//! arbitrates concurrent kicks.
+//! The one path that turns pending session signals into a run: every send,
+//! task assignment, task result and run end calls [`kick`]. Stateless; the
+//! durable state is `session_signals` and
+//! `idx_assistant_runs_one_active_per_session`, which arbitrates concurrent
+//! kicks. In a task session every claimed run is a new task cycle.
 
 use tauri::Manager;
 
@@ -10,9 +11,11 @@ use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository::{self, CreateRunParams};
 use crate::assistant::runtime;
 use crate::assistant::signals;
+use crate::assistant::tools::workspace_tasks;
 use crate::assistant::types::{
     AssistantRun, MessageId, ProviderConnection, RunId, RunStatus, RunTrigger,
 };
+use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskRow};
 use crate::db::DbPool;
 use crate::AppState;
 
@@ -25,6 +28,8 @@ pub enum Kick {
     Started {
         run: AssistantRun,
         message_ids: Vec<MessageId>,
+        /// The task whose new cycle this run is, in a task session.
+        task: Option<Box<WorkspaceTaskRow>>,
     },
     /// Signals are pending but their provider connection no longer exists.
     Deferred,
@@ -45,7 +50,12 @@ pub async fn kick(deps: &AssistantDeps, session_id: &str) -> Result<Kick, String
     })
     .await?;
 
-    if let Kick::Started { run, message_ids } = &outcome {
+    if let Kick::Started {
+        run,
+        message_ids,
+        task,
+    } = &outcome
+    {
         let _ = deps.emit(
             &session,
             Some(&run.id),
@@ -58,7 +68,11 @@ pub async fn kick(deps: &AssistantDeps, session_id: &str) -> Result<Kick, String
             Some(&run.id),
             AssistantUiEvent::RunQueued { run: run.clone() },
         );
-        spawn_run(deps.clone(), run);
+        let task_id = task.as_ref().map(|task| task.id.clone());
+        if let Some(task) = task {
+            workspace_tasks::emit_task_updated(deps, WorkspaceTaskRow::clone(task)).await;
+        }
+        spawn_run(deps.clone(), run, task_id);
     }
     Ok(outcome)
 }
@@ -78,16 +92,29 @@ pub(crate) async fn claim(
     if open.is_empty() {
         return Ok(Kick::Idle);
     }
-    let Some(connection) = open
+    // Signals without a connection (task events) run on the session's
+    // latest connection.
+    let connection_id = match open
         .iter()
-        .find_map(|content| content.connection_id.as_deref())
-        .and_then(&connection)
-    else {
+        .find_map(|content| content.connection_id.clone())
+    {
+        Some(connection_id) => Some(connection_id),
+        None => repository::latest_run_connection_id(pool, session_id).await?,
+    };
+    let Some(connection) = connection_id.as_deref().and_then(&connection) else {
         tracing::warn!(
             session_id,
             "Pending messages have no usable provider connection; leaving them pending"
         );
         return Ok(Kick::Deferred);
+    };
+
+    // A task session's runs keep the worker trigger: it selects the worker
+    // prompt.
+    let trigger = if workspace_tasks_repo::is_task_session(pool, session_id).await? {
+        RunTrigger::WorkspaceTask
+    } else {
+        RunTrigger::SignalWake
     };
 
     let mut tx = pool
@@ -99,7 +126,7 @@ pub(crate) async fn claim(
         CreateRunParams {
             session_id: session_id.to_string(),
             status: RunStatus::Queued,
-            trigger: RunTrigger::SignalWake,
+            trigger,
             connection_id: connection.id.clone(),
             protocol_id: connection.protocol_id.clone(),
             model_id: connection.model_id.clone(),
@@ -120,13 +147,18 @@ pub(crate) async fn claim(
         // Claimed by a run that started and ended since the read above.
         return Ok(Kick::Idle);
     }
+    let task = workspace_tasks_repo::open_cycle(&mut tx, session_id, &run.id).await?;
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit dispatch transaction: {}", e))?;
-    Ok(Kick::Started { run, message_ids })
+    Ok(Kick::Started {
+        run,
+        message_ids,
+        task: task.map(Box::new),
+    })
 }
 
-fn spawn_run(deps: AssistantDeps, run: &AssistantRun) {
+fn spawn_run(deps: AssistantDeps, run: &AssistantRun, task_id: Option<String>) {
     let run_registration = runtime::register_run(&run.id);
     let input = RunTurnInput {
         session_id: run.session_id.clone(),
@@ -141,15 +173,22 @@ fn spawn_run(deps: AssistantDeps, run: &AssistantRun) {
         let _run_registration = run_registration;
         let session_id = input.session_id.clone();
         let run_id = input.run_id.clone().unwrap_or_default();
+        if let Some(task_id) = &task_id {
+            workspace_tasks::start_task_cycle(&deps, task_id, &run_id).await;
+        }
         if let Err(e) = engine::run_session_turn(&deps, input).await {
             tracing::error!("Assistant engine error for run {}: {}", run_id, e);
         }
-        kick_after_run(&deps, &session_id).await;
+        if let Some(task_id) = &task_id {
+            workspace_tasks::finalize_task_cycle(&deps, task_id, &run_id).await;
+        }
+        kick_logged(&deps, &session_id).await;
     });
 }
 
-/// Every run end kicks its session so input that arrived meanwhile runs next.
-pub(crate) async fn kick_after_run(deps: &AssistantDeps, session_id: &str) {
+/// [`kick`] that logs instead of returning its error. Every run end calls it
+/// so input that arrived meanwhile runs next.
+pub(crate) async fn kick_logged(deps: &AssistantDeps, session_id: &str) {
     if let Err(error) = kick(deps, session_id).await {
         tracing::error!(
             session_id,
@@ -219,10 +258,11 @@ mod tests {
             .unwrap();
         let message_id = send(&pool, &session.id, "hello").await;
 
-        let Kick::Started { run, message_ids } =
-            claim(&pool, &session.id, |id| Some(connection(id)))
-                .await
-                .unwrap()
+        let Kick::Started {
+            run, message_ids, ..
+        } = claim(&pool, &session.id, |id| Some(connection(id)))
+            .await
+            .unwrap()
         else {
             panic!("an idle session with a pending message must start a run");
         };
@@ -288,6 +328,7 @@ mod tests {
         let Kick::Started {
             run,
             mut message_ids,
+            ..
         } = claim(&pool, &session.id, |id| Some(connection(id)))
             .await
             .unwrap()
@@ -359,5 +400,55 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(unaccounted, 0);
+    }
+
+    #[tokio::test]
+    async fn run_rows_carry_run_id_and_composer_row_stamped_at_claim() {
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        let composer = send(&pool, &session.id, "hello").await;
+        let run_id_of = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>(
+                    "SELECT run_id FROM assistant_messages WHERE id = ?",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(run_id_of(composer.clone()).await, None);
+
+        let Kick::Started { run, .. } = claim(&pool, &session.id, |id| Some(connection(id)))
+            .await
+            .unwrap()
+        else {
+            panic!("expected a run");
+        };
+        assert_eq!(run_id_of(composer).await.as_deref(), Some(run.id.as_str()));
+
+        // A row the run writes carries its id; so does input it takes mid-run.
+        let reply = repository::create_message(
+            &pool,
+            repository::CreateMessageParams {
+                session_id: session.id.clone(),
+                role: crate::assistant::types::MessageRole::Assistant,
+                content: vec![ContentPart::Text { text: "hi".into() }],
+                provider_metadata: None,
+                run_id: Some(run.id.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let midrun = send(&pool, &session.id, "one more thing").await;
+        signals::consume(&pool, &session.id, &run.id, std::slice::from_ref(&midrun))
+            .await
+            .unwrap();
+        assert_eq!(run_id_of(reply.id).await.as_deref(), Some(run.id.as_str()));
+        assert_eq!(run_id_of(midrun).await.as_deref(), Some(run.id.as_str()));
     }
 }

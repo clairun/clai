@@ -142,6 +142,7 @@ pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
         r#"
         UPDATE workspace_tasks
         SET status = 'failed',
+            failure_reason = 'restart',
             error = COALESCE(
                 error,
                 CASE status
@@ -348,6 +349,114 @@ mod tests {
                 RunTrigger::WorkspaceTask,
             ]
         );
+    }
+
+    /// `20261016001000_message_origin_task_lineage` marks the creator's
+    /// instruction — the first user row of a task session — and nothing else.
+    #[tokio::test]
+    async fn backfill_marks_first_instruction_only() {
+        let pool = pool_migrated_before(20261016001000).await;
+        for session in ["task-session", "manager-session"] {
+            sqlx::query(
+                "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+                 VALUES (?, '{}', 1, 1)",
+            )
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO workspace_tasks
+                 (id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
+                  assigned_agent_definition_id, title, instructions, status, session_id,
+                  created_at, updated_at)
+             VALUES ('t', 'wa-mgr', 'wa-1', 'def-1', 'T', 'I', 'completed', 'task-session', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, session, role, created_at) in [
+            ("instruction", "task-session", "user", 1),
+            ("reply", "task-session", "assistant", 2),
+            ("follow-up", "task-session", "user", 3),
+            ("manager-user", "manager-session", "user", 1),
+        ] {
+            sqlx::query(
+                "INSERT INTO assistant_messages (id, session_id, role, content_json, created_at)
+                 VALUES (?, ?, ?, '[]', ?)",
+            )
+            .bind(id)
+            .bind(session)
+            .bind(role)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let origins: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, origin_json FROM assistant_messages ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let user = r#"{"kind":"user"}"#;
+        for (id, origin) in &origins {
+            if id == "instruction" {
+                let origin: crate::assistant::types::MessageOrigin =
+                    serde_json::from_str(origin).unwrap();
+                let crate::assistant::types::MessageOrigin::Agent { agent, .. } = origin else {
+                    panic!("the instruction must be marked as the creator's: {origin:?}");
+                };
+                assert_eq!(agent.workspace_agent_id, "wa-mgr");
+                assert_eq!(agent.display_name, "wa-mgr");
+                assert!(!agent.is_default);
+            } else {
+                assert_eq!(origin, user, "{id} must stay a user row");
+            }
+        }
+    }
+
+    /// The same migration folds `blocked` into `failed{blocked}` and gives
+    /// every other failed row a reason.
+    #[tokio::test]
+    async fn migration_backfills_blocked_rows_and_labels_restart_failures() {
+        let pool = pool_migrated_before(20261016001000).await;
+        for (id, status, error) in [
+            ("blocked", "blocked", Some("BLOCKED: need a key")),
+            ("restart", "failed", Some("task interrupted by app restart")),
+            (
+                "never-ran",
+                "failed",
+                Some("task never started: the app restarted before it was dispatched"),
+            ),
+            ("error", "failed", Some("provider exploded")),
+            ("done", "completed", None),
+        ] {
+            insert_task(&pool, id, status, None, error).await;
+        }
+
+        run_all_migrations(&pool).await;
+
+        let rows: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT id, status, failure_reason FROM workspace_tasks ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let expected = [
+            ("blocked", "failed", Some("blocked")),
+            ("done", "completed", None),
+            ("error", "failed", Some("error")),
+            ("never-ran", "failed", Some("restart")),
+            ("restart", "failed", Some("restart")),
+        ];
+        let rows: Vec<(&str, &str, Option<&str>)> = rows
+            .iter()
+            .map(|(id, status, reason)| (id.as_str(), status.as_str(), reason.as_deref()))
+            .collect();
+        assert_eq!(rows, expected);
     }
 
     /// `20261014000000_drop_dead_columns` keeps answered tasks out of the
@@ -637,7 +746,11 @@ mod tests {
         let (_tmp, pool) = workspace_pool().await;
         insert_task(&pool, "done", "completed", None, None).await;
         insert_task(&pool, "fail", "failed", None, Some("original error")).await;
-        insert_task(&pool, "stuck", "blocked", None, Some("needs a decision")).await;
+        insert_task(&pool, "stuck", "failed", None, Some("needs a decision")).await;
+        sqlx::query("UPDATE workspace_tasks SET failure_reason = 'blocked' WHERE id = 'stuck'")
+            .execute(&pool)
+            .await
+            .unwrap();
 
         sweep_orphaned_task_state(&pool).await.unwrap();
 
@@ -651,8 +764,14 @@ mod tests {
         assert_eq!(rows[0].1, "completed");
         assert_eq!(rows[1].1, "failed");
         assert_eq!(rows[1].2.as_deref(), Some("original error"));
-        assert_eq!(rows[2].1, "blocked");
+        assert_eq!(rows[2].1, "failed");
         assert_eq!(rows[2].2.as_deref(), Some("needs a decision"));
+        let reason: Option<String> =
+            sqlx::query_scalar("SELECT failure_reason FROM workspace_tasks WHERE id = 'stuck'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reason.as_deref(), Some("blocked"));
         assert!(
             rows[2].3.is_none(),
             "a blocked task awaiting the user must not be completed by the sweep"

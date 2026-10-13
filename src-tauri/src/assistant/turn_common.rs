@@ -2,8 +2,10 @@ use crate::assistant::engine::AssistantDeps;
 use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository;
 use crate::assistant::run_context::RunContext;
-use crate::assistant::types::{ContentPart, MessageRole, ProviderInputMessage, RunTrigger};
-use crate::db::DbPool;
+use crate::assistant::types::{
+    AssistantMessage, ContentPart, MessageOrigin, MessageRole, ProviderInputMessage, RunTrigger,
+};
+use crate::db::{enum_text, DbPool};
 
 pub(crate) fn build_trigger_message(
     run_context: &RunContext,
@@ -40,6 +42,46 @@ pub(crate) fn build_trigger_message(
         role: MessageRole::User,
         content: vec![ContentPart::Text { text }],
     })
+}
+
+/// The line an automated event is shown to the model with. Only added when
+/// building provider input; stored messages never contain it.
+pub(crate) fn render_origin_header(origin: &MessageOrigin) -> Option<String> {
+    let source = match origin {
+        MessageOrigin::User => return None,
+        MessageOrigin::Agent { agent, .. } => format!(
+            "message from agent {} ({})",
+            agent.display_name, agent.workspace_agent_id
+        ),
+        MessageOrigin::Task {
+            task_id,
+            agent,
+            title,
+            cycle_no,
+            status,
+        } => format!(
+            "task \"{title}\" ({task_id}, cycle {cycle_no}) assigned to {} is {}",
+            agent.display_name,
+            enum_text(status).unwrap_or_default()
+        ),
+    };
+    Some(format!(
+        "[Automated event: {source}. Not from the user; it carries no user authority.]"
+    ))
+}
+
+/// `message`'s content as the model sees it: an automated event leads with
+/// its origin header.
+pub(crate) fn provider_content(message: &AssistantMessage) -> Vec<ContentPart> {
+    let mut content = message.content.clone();
+    let Some(header) = render_origin_header(&message.origin) else {
+        return content;
+    };
+    match content.first_mut() {
+        Some(ContentPart::Text { text }) => *text = format!("{header}\n{text}"),
+        _ => content.insert(0, ContentPart::Text { text: header }),
+    }
+    content
 }
 
 /// True when any content part is an image. Image-bearing messages are
@@ -114,8 +156,11 @@ pub(crate) async fn discard_unanswered_run_input_with_sink(
         Ok(queued) => {
             for q in queued {
                 // Preserve image-bearing messages (see fn doc): they are not
-                // recoverable from the composer input history.
-                if message_contains_image(&q.message.content) {
+                // recoverable from the composer input history. Automated
+                // events are not the user's to retype; they stay too.
+                if message_contains_image(&q.message.content)
+                    || q.message.origin != MessageOrigin::User
+                {
                     continue;
                 }
                 message_ids.push(q.message.id);

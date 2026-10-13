@@ -99,6 +99,7 @@ const userMessage = (sessionId: string, id: string, text: string): AssistantMess
   content: [{ type: 'text', text }],
   createdAt: 1n,
   providerMetadata: null,
+  origin: { kind: 'user' },
 });
 
 // An assistant turn whose text has not been persisted yet: the backend
@@ -112,6 +113,7 @@ const streamingAssistantMessage = (sessionId: string, id: string): AssistantMess
   content: [],
   createdAt: 2n,
   providerMetadata: null,
+  origin: { kind: 'user' },
 });
 
 const messagePage = (messages: AssistantMessage[]): AssistantMessagePage => ({
@@ -250,6 +252,12 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   updatedAt: 1n,
   completedAt: 1n,
   attentionAcknowledgedAt: null,
+  failureReason: null,
+  parentSessionId: null,
+  parentRunId: null,
+  parentTaskId: null,
+  depth: 0n,
+  cycleNo: 0n,
 };
 
 const renderWorkspace = () =>

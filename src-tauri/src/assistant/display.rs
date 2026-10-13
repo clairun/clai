@@ -300,6 +300,7 @@ mod tests {
     fn tool_message_payload_is_removed_from_live_event() {
         use crate::assistant::types::MessageRole;
         let message = AssistantMessage {
+            origin: Default::default(),
             id: "m".into(),
             session_id: "s".into(),
             role: MessageRole::Tool,
@@ -327,6 +328,7 @@ mod tests {
         let large = "payload".repeat(10_000);
         let full = json!({"path": "report.md", "content": large});
         let message = AssistantMessage {
+            origin: Default::default(),
             id: "m".into(),
             session_id: "s".into(),
             role: MessageRole::Assistant,
@@ -414,6 +416,7 @@ mod tests {
         let full = json!({"path": "report.md", "content": "private"});
         let displayed = page(AssistantMessagePage {
             messages: vec![AssistantMessage {
+                origin: Default::default(),
                 id: "m".into(),
                 session_id: "s".into(),
                 role: MessageRole::Assistant,

@@ -21,7 +21,7 @@ use crate::assistant::signals;
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::turn_common::{
-    build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
+    build_trigger_message, discard_unanswered_run_input, provider_content, run_produced_no_content,
 };
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, CompletionRequest, ContentPart,
@@ -295,6 +295,7 @@ async fn accept_api_stream(
                     text: String::new(),
                 }],
                 provider_metadata: None,
+                run_id: Some(run_id.to_string()),
             },
         )
         .await?;
@@ -397,6 +398,7 @@ async fn start_api_turn(
                     role: trigger_content.role.clone(),
                     content: trigger_content.content.clone(),
                     provider_metadata: None,
+                    run_id: Some(run_id.clone()),
                 },
             )
             .await?;
@@ -796,6 +798,7 @@ mod tests {
             .create_message(
                 &pool,
                 CreateMessageParams {
+                    run_id: None,
                     session_id: session.id.clone(),
                     role: MessageRole::Assistant,
                     content: vec![text("")],
@@ -837,6 +840,7 @@ mod tests {
             .create_message(
                 &pool,
                 CreateMessageParams {
+                    run_id: None,
                     session_id: session.id.clone(),
                     role: MessageRole::Assistant,
                     content: vec![text("")],
@@ -881,6 +885,7 @@ mod tests {
             .create_message(
                 &pool,
                 CreateMessageParams {
+                    run_id: None,
                     session_id: session.id.clone(),
                     role: MessageRole::Tool,
                     content: vec![ContentPart::ToolResult {
@@ -1103,6 +1108,7 @@ mod tests {
 
     fn user_message(text: &str) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-user-{}", text.len()),
             session_id: "session".to_string(),
             role: MessageRole::User,
@@ -1122,6 +1128,7 @@ mod tests {
 
     fn assistant_message_with_content(content: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-assistant-{}", content.len()),
             session_id: "session".to_string(),
             role: MessageRole::Assistant,
@@ -1133,6 +1140,7 @@ mod tests {
 
     fn tool_message(tool_call_id: &str) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-tool-{}", tool_call_id),
             session_id: "session".to_string(),
             role: MessageRole::Tool,
@@ -1375,6 +1383,7 @@ mod tests {
 
     fn system_message(text: &str) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-system-{}", text.len()),
             session_id: "session".to_string(),
             role: MessageRole::System,
@@ -1507,6 +1516,7 @@ mod tests {
         // Tool row with no ToolResult content (only stray text) — must be
         // dropped because we can't anchor it to an assistant tool_call_id.
         let bogus_tool = AssistantMessage {
+            origin: Default::default(),
             id: "msg-tool-bogus".to_string(),
             session_id: "session".to_string(),
             role: MessageRole::Tool,
@@ -2040,7 +2050,9 @@ fn strip_unsupported_images(messages: Vec<ProviderInputMessage>) -> Vec<Provider
     clippy::too_many_lines,
     reason = "lint debt: 123 lines against a 100-line budget; split it, do not raise the budget"
 )]
-fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<ProviderInputMessage> {
+pub(crate) fn normalize_history_for_provider(
+    messages: &[AssistantMessage],
+) -> Vec<ProviderInputMessage> {
     let mut out: Vec<ProviderInputMessage> = Vec::new();
 
     for msg in messages {
@@ -2135,15 +2147,16 @@ fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<Provider
                 }
             }
             MessageRole::User => {
+                let content = provider_content(msg);
                 if let Some(last) = out.last_mut() {
                     if last.role == MessageRole::User {
-                        append_text_with_separator(&mut last.content, &msg.content);
+                        append_text_with_separator(&mut last.content, &content);
                         continue;
                     }
                 }
                 out.push(ProviderInputMessage {
                     role: MessageRole::User,
-                    content: msg.content.clone(),
+                    content,
                 });
             }
             MessageRole::System => {

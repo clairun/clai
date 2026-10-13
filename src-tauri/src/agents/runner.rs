@@ -617,7 +617,7 @@ async fn run_scheduled_agent(
     let result = engine::run_session_turn(&deps, input).await;
     drop(run_registration);
 
-    dispatcher::kick_after_run(&deps, &session.id).await;
+    dispatcher::kick_logged(&deps, &session.id).await;
 
     result.map_err(|error| {
         tracing::warn!(

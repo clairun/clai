@@ -118,14 +118,14 @@ fn workspace_list_agents_def() -> ToolDefinition {
 fn workspace_assign_task_def() -> ToolDefinition {
     tool::<AssignWorkspaceTaskParams>(
         "workspace_assignTask",
-        "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs asynchronously in its own session; multiple tasks may run at once, even for the same agent. Returns immediately with a task ID to poll via workspace_getTaskResult. The assigning manager remains responsible for polling every task it spawned to a terminal status before sending a final response. The worker does not see this conversation, so instructions must be self-contained.",
+        "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained.",
     )
 }
 
 fn workspace_get_task_result_def() -> ToolDefinition {
     tool::<GetWorkspaceTaskResultParams>(
         "workspace_getTaskResult",
-        "Read the current status and result of a workspace-local task by task ID. The response includes sessionId/runId when available; use them with history_query to inspect a running subagent's transcript and tool calls when progress is unclear.",
+        "Read a task's current state and latest result. Inspection only; you do not need to poll. `status` is one of queued, running, input_required, stopping, stopped, completed, failed; `failed` carries `failureReason` (blocked = the worker needed something it could not get, error = run error, restart, connection_unavailable) and `error` text. The response includes sessionId/runId when available; use them with history_query to inspect a running worker's transcript.",
     )
 }
 

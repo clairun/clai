@@ -9,6 +9,7 @@ use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantRun, AssistantSession, MessageId, RunId,
     ToolInvocation,
 };
+use crate::assistant::workspace_tasks_repo::WorkspaceTaskResponse;
 
 pub const ASSISTANT_EVENT_NAME: &str = "assistant://event";
 
@@ -106,6 +107,11 @@ pub enum AssistantUiEvent {
     /// block can be cleared.
     AskUserResolved {
         pending_id: String,
+    },
+    /// A workspace task changed status. The envelope's session is the
+    /// task's own session.
+    TaskUpdated {
+        task: Box<WorkspaceTaskResponse>,
     },
     /// A manual "Run now" found the session busy and was skipped.
     #[serde(rename_all = "camelCase")]

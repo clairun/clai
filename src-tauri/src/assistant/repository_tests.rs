@@ -150,6 +150,7 @@ async fn test_count_session_messages() {
         create_message(
             &pool,
             CreateMessageParams {
+                run_id: None,
                 session_id: session.id.clone(),
                 role: MessageRole::User,
                 content: vec![ContentPart::Text {
@@ -195,6 +196,7 @@ async fn test_create_and_list_messages() {
     let _msg1 = create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::User,
             content: vec![ContentPart::Text {
@@ -209,6 +211,7 @@ async fn test_create_and_list_messages() {
     let _msg2 = create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::Assistant,
             content: vec![ContentPart::Text {
@@ -239,6 +242,7 @@ async fn test_update_message_content() {
     let msg = create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::Assistant,
             content: vec![ContentPart::Text {
@@ -685,6 +689,7 @@ async fn test_full_session_lifecycle() {
     create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::User,
             content: vec![ContentPart::Text {
@@ -909,6 +914,7 @@ async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
     create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: sessions[0].id.clone(),
             role: MessageRole::Assistant,
             content: vec![ContentPart::ToolUse {

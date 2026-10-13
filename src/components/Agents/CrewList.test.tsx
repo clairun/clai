@@ -52,6 +52,12 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   updatedAt: 1n,
   completedAt: null,
   attentionAcknowledgedAt: null,
+  failureReason: null,
+  parentSessionId: null,
+  parentRunId: null,
+  parentTaskId: null,
+  depth: 0n,
+  cycleNo: 0n,
   ...over,
 });
 
@@ -131,7 +137,7 @@ describe('crew rules', () => {
   it('derives ring and line from the tasks, with disabled winning and running before attention', () => {
     expect(crewStatus(REVIEWER, [])).toEqual({ activity: 'idle', line: null });
     expect(
-      crewStatus(REVIEWER, [task({ status: 'blocked' }), task({ id: 't2', status: 'queued' })])
+      crewStatus(REVIEWER, [task({ status: 'failed', failureReason: 'blocked' }), task({ id: 't2', status: 'queued' })])
     ).toEqual({
       activity: 'running',
       line: '1 task running',
@@ -151,7 +157,7 @@ describe('crew rules', () => {
 
   it('stops asking for review once the task was acknowledged, or belongs to someone else', () => {
     expect(
-      crewStatus(REVIEWER, [task({ status: 'blocked', attentionAcknowledgedAt: 3n })]).line
+      crewStatus(REVIEWER, [task({ status: 'failed', failureReason: 'blocked', attentionAcknowledgedAt: 3n })]).line
     ).toBeNull();
     expect(
       crewStatus(REVIEWER, [task({ assignedToWorkspaceAgentId: 'wa-other', status: 'running' })])

@@ -706,6 +706,7 @@ mod tests {
 
     fn message(created_at: i64) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-{created_at}"),
             session_id: "sess-1".into(),
             role: crate::assistant::types::MessageRole::User,

@@ -633,6 +633,7 @@ mod tests {
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: id.to_string(),
             session_id: "s".to_string(),
             role,
@@ -1463,6 +1464,7 @@ mod tests {
             let message = create_message(
                 pool,
                 crate::assistant::repository::CreateMessageParams {
+                    run_id: None,
                     session_id: session_id.to_string(),
                     role,
                     content,
@@ -1600,6 +1602,7 @@ mod tests {
             add_text(&pool, &session.id, "do the thing").await;
             let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
             let params = |role, content| crate::assistant::repository::CreateMessageParams {
+                run_id: None,
                 session_id: session.id.clone(),
                 role,
                 content,

@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantRun, AssistantSession, CompactionStatus,
-    CompactionStrategy, CompactionTrigger, ContentPart, MessageRole, RunStatus, RunTrigger,
-    SessionContext, ToolCallStatus, ToolInvocation,
+    CompactionStrategy, CompactionTrigger, ContentPart, MessageOrigin, MessageRole, RunStatus,
+    RunTrigger, SessionContext, ToolCallStatus, ToolInvocation,
 };
 use crate::db::{enum_text, parse_enum_text, DbPool};
 
@@ -16,6 +16,8 @@ pub struct CreateMessageParams {
     pub role: MessageRole,
     pub content: Vec<ContentPart>,
     pub provider_metadata: Option<serde_json::Value>,
+    /// The run writing the row; `None` for rows written outside a run.
+    pub run_id: Option<String>,
 }
 
 pub struct CreateRunParams {
@@ -98,6 +100,7 @@ pub(crate) fn map_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<Assistant
             row.get("provider_metadata_json"),
             "provider metadata",
         )?,
+        origin: parse_json(&row.get::<String, _>("origin_json"), "message origin")?,
     })
 }
 
@@ -345,7 +348,7 @@ pub async fn list_messages(
 ) -> Result<Vec<AssistantMessage>, String> {
     let rows = sqlx::query(
         r#"
-        SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
         FROM assistant_messages
         WHERE session_id = ?
         ORDER BY created_at ASC, rowid ASC
@@ -359,6 +362,47 @@ pub async fn list_messages(
     rows.iter().map(map_message_row).collect()
 }
 
+/// The rows `run` wrote, oldest first. Rows written before messages carried
+/// a run id have none; for a run with no attributed rows, those unattributed
+/// rows inside the run's time window stand in.
+pub async fn list_messages_for_run(
+    pool: &DbPool,
+    run: &AssistantRun,
+) -> Result<Vec<AssistantMessage>, String> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
+        FROM assistant_messages
+        WHERE session_id = ? AND run_id = ?
+        ORDER BY created_at ASC, rowid ASC
+        "#,
+    )
+    .bind(&run.session_id)
+    .bind(&run.id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load run messages: {}", e))?;
+    if !rows.is_empty() {
+        return rows.iter().map(map_message_row).collect();
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
+        FROM assistant_messages
+        WHERE session_id = ? AND run_id IS NULL AND created_at >= ? AND created_at <= ?
+        ORDER BY created_at ASC, rowid ASC
+        "#,
+    )
+    .bind(&run.session_id)
+    .bind(run.started_at)
+    .bind(run.completed_at.unwrap_or_else(now_ms))
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load run messages: {}", e))?;
+    rows.iter().map(map_message_row).collect()
+}
+
 pub async fn list_messages_before(
     pool: &DbPool,
     session_id: &str,
@@ -368,7 +412,7 @@ pub async fn list_messages_before(
     let rows = if let Some((before_created_at, before_message_id)) = before {
         sqlx::query(
             r#"
-            SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+            SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
             FROM assistant_messages
             WHERE session_id = ?
               AND (created_at < ? OR (created_at = ? AND id < ?))
@@ -387,7 +431,7 @@ pub async fn list_messages_before(
     } else {
         sqlx::query(
             r#"
-            SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+            SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
             FROM assistant_messages
             WHERE session_id = ?
             ORDER BY created_at DESC, id DESC
@@ -422,7 +466,7 @@ pub async fn get_message(
 ) -> Result<Option<AssistantMessage>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
         FROM assistant_messages
         WHERE id = ?
         "#,
@@ -435,12 +479,8 @@ pub async fn get_message(
     row.as_ref().map(map_message_row).transpose()
 }
 
-/// Permanently remove a message row and its `session_signals` rows.
-/// The signal rows are deleted explicitly rather than left to the schema's
-/// ON DELETE CASCADE, so the two deletes share one transaction and the
-/// intent is visible at the call site. (FK enforcement itself is
-/// guaranteed: `init_workspace_db` sets `foreign_keys` on every pooled
-/// connection.) Used to discard run input that never got an
+/// Permanently remove a message row and, in the same transaction, its
+/// `user_message` signal. Used to discard run input that never got an
 /// answer — a user message (and the empty assistant placeholder) of a run
 /// that failed before the provider produced anything.
 pub async fn delete_message(pool: &DbPool, message_id: &str) -> Result<(), String> {
@@ -449,11 +489,21 @@ pub async fn delete_message(pool: &DbPool, message_id: &str) -> Result<(), Strin
         .await
         .map_err(|e| format!("Failed to start message delete transaction: {}", e))?;
 
-    sqlx::query("DELETE FROM session_signals WHERE message_id = ?")
+    sqlx::query("DELETE FROM session_signals WHERE message_id = ? AND kind = 'user_message'")
         .bind(message_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to delete message signal: {}", e))?;
+    // Other signals keep their delivery key, so a retried producer cannot
+    // re-deliver; the foreign key nulls their message_id.
+    sqlx::query(
+        "UPDATE session_signals SET status = 'dropped'
+         WHERE message_id = ? AND status IN ('pending', 'claimed')",
+    )
+    .bind(message_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to drop message signal: {}", e))?;
 
     sqlx::query("DELETE FROM assistant_messages WHERE id = ?")
         .bind(message_id)
@@ -478,13 +528,14 @@ pub async fn create_message(
         content: params.content,
         created_at: now_ms(),
         provider_metadata: params.provider_metadata,
+        origin: MessageOrigin::User,
     };
 
     sqlx::query(
         r#"
         INSERT INTO assistant_messages
-            (id, session_id, role, content_json, provider_metadata_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, session_id, role, content_json, provider_metadata_json, run_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&message.id)
@@ -498,6 +549,7 @@ pub async fn create_message(
             .map(to_json_string)
             .transpose()?,
     )
+    .bind(params.run_id)
     .bind(message.created_at)
     .execute(pool)
     .await
@@ -543,6 +595,7 @@ pub async fn create_user_message_with_content(
         content,
         created_at: now,
         provider_metadata: None,
+        origin: MessageOrigin::User,
     };
 
     let mut tx = pool
@@ -751,6 +804,21 @@ pub async fn get_active_run(
     row.as_ref().map(map_run_row).transpose()
 }
 
+/// The provider connection of the session's most recent run.
+pub async fn latest_run_connection_id(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_scalar(
+        "SELECT connection_id FROM assistant_runs WHERE session_id = ?
+         ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load latest run connection: {}", e))
+}
+
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
@@ -867,7 +935,7 @@ pub async fn update_message_content(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, role, content_json, provider_metadata_json, created_at
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
         FROM assistant_messages
         WHERE id = ?
         "#,
@@ -1365,6 +1433,7 @@ mod tests {
         let message = create_message(
             &pool,
             CreateMessageParams {
+                run_id: None,
                 session_id: "s".to_string(),
                 role: MessageRole::User,
                 content: Vec::new(),

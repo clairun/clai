@@ -165,7 +165,8 @@ describe('taskIdentity', () => {
 });
 
 describe('activityFromTasks', () => {
-  const task = (over: Partial<Parameters<typeof activityFromTasks>[1][number]>) => ({
+  type Source = Parameters<typeof activityFromTasks>[1][number];
+  const task = (over: Partial<Source>): Source => ({
     assignedToWorkspaceAgentId: 'wa-1',
     status: 'completed',
     attentionAcknowledgedAt: null,
@@ -181,11 +182,11 @@ describe('activityFromTasks', () => {
 
   it('runs when any task is queued or running, even with attention pending elsewhere', () => {
     expect(
-      activityFromTasks('wa-1', [task({ status: 'blocked' }), task({ status: 'queued' })])
+      activityFromTasks('wa-1', [task({ status: 'failed' }), task({ status: 'queued' })])
     ).toBe('running');
     // Order must not matter: running wins even when attention was seen first.
     expect(
-      activityFromTasks('wa-1', [task({ status: 'queued' }), task({ status: 'blocked' })])
+      activityFromTasks('wa-1', [task({ status: 'queued' }), task({ status: 'failed' })])
     ).toBe('running');
     expect(
       activityFromTasks('wa-1', [task({ status: 'running' }), task({ status: 'failed' })])
@@ -195,7 +196,7 @@ describe('activityFromTasks', () => {
   it('asks for attention on an unacknowledged blocked or failed task only', () => {
     expect(activityFromTasks('wa-1', [task({ status: 'failed' })])).toBe('attention');
     expect(
-      activityFromTasks('wa-1', [task({ status: 'blocked', attentionAcknowledgedAt: 5n })])
+      activityFromTasks('wa-1', [task({ status: 'failed', attentionAcknowledgedAt: 5n })])
     ).toBe('idle');
   });
 });

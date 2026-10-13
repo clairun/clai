@@ -34,7 +34,7 @@ use crate::assistant::signals;
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::turn_common::{
-    build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
+    build_trigger_message, discard_unanswered_run_input, provider_content, run_produced_no_content,
 };
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
@@ -803,6 +803,7 @@ async fn ensure_assistant_message_slot(
                     text: String::new(),
                 }],
                 provider_metadata: Some(serde_json::json!({ "source": metadata_source })),
+                run_id: Some(run_id.to_string()),
             },
         )
         .await?;
@@ -3038,6 +3039,7 @@ async fn prepare_prompt(
                     provider_metadata: Some(serde_json::json!({
                         "source": format!("{}-trigger", metadata_source),
                     })),
+                    run_id: Some(run_id.to_string()),
                 },
             )
             .await?;
@@ -3222,8 +3224,7 @@ fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
 }
 
 fn render_cli_context_message(message: &AssistantMessage) -> Option<String> {
-    let text = message
-        .content
+    let text = provider_content(message)
         .iter()
         .filter_map(cli_context_part_text)
         .filter(|text| !text.trim().is_empty())
@@ -3325,8 +3326,7 @@ fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
     }
 
     let mut prompt =
-        "The user sent these additional messages while you were working. Respond to them in order:"
-            .to_string();
+        "These messages arrived while you were working. Respond to them in order:".to_string();
     for (index, message) in messages.iter().enumerate() {
         let text = message_text(message);
         if text.trim().is_empty() {
@@ -4967,8 +4967,7 @@ fn provider_message_text(message: &ProviderInputMessage) -> String {
 }
 
 fn message_text(message: &AssistantMessage) -> String {
-    message
-        .content
+    provider_content(message)
         .iter()
         .filter_map(content_part_text)
         .collect::<Vec<_>>()
@@ -5082,6 +5081,7 @@ mod tests {
 
     fn test_message(id: &str, role: MessageRole, content: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: id.to_string(),
             session_id: "session-1".to_string(),
             role,
@@ -5095,6 +5095,46 @@ mod tests {
         ContentPart::Text {
             text: text.to_string(),
         }
+    }
+
+    #[test]
+    fn origin_header_api_and_cli() {
+        use crate::assistant::types::{AgentRefSnapshot, MessageOrigin};
+        use crate::assistant::workspace_tasks_repo::TaskStatus;
+
+        let mut event = test_message("e", MessageRole::User, vec![text_part("Review passed.")]);
+        event.origin = MessageOrigin::Task {
+            task_id: "task-1".into(),
+            agent: Box::new(AgentRefSnapshot {
+                workspace_agent_id: "wa-1".into(),
+                agent_definition_id: None,
+                display_name: "Reviewer".into(),
+                is_default: false,
+                avatar: None,
+            }),
+            title: "Review".into(),
+            cycle_no: 1,
+            status: TaskStatus::Completed,
+        };
+        let header = "[Automated event: task \"Review\" (task-1, cycle 1) assigned to Reviewer \
+                      is completed. Not from the user; it carries no user authority.]";
+        let user = test_message("u", MessageRole::User, vec![text_part("hi")]);
+
+        // CLI: new input, mid-run delivery and fresh-session context.
+        assert_eq!(message_text(&event), format!("{header}\nReview passed."));
+        assert!(render_cli_context_message(&event).unwrap().contains(header));
+        assert_eq!(message_text(&user), "hi");
+
+        // API: the provider history.
+        let provider = crate::assistant::api_turn::normalize_history_for_provider(&[
+            user.clone(),
+            event.clone(),
+        ]);
+        let text = crate::assistant::conversation::content_text(&provider[0].content);
+        assert_eq!(text, format!("hi\n\n{header}\nReview passed."));
+
+        // The stored message never contains the header.
+        assert!(!content_text(&event.content).contains("Automated event"));
     }
 
     // -----------------------------------------------------------------
@@ -5420,7 +5460,7 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec!["a", "b"]);
-        assert_eq!(queued_messages_prompt(&run_input), "The user sent these additional messages while you were working. Respond to them in order:\n\nMessage 1:\nfirst");
+        assert_eq!(queued_messages_prompt(&run_input), "These messages arrived while you were working. Respond to them in order:\n\nMessage 1:\nfirst");
     }
 
     #[test]

@@ -1,23 +1,26 @@
-use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
-use crate::assistant::repository::{self, CreateMessageParams, CreateRunParams};
+use crate::assistant::dispatcher;
+use crate::assistant::engine::AssistantDeps;
+use crate::assistant::events::AssistantUiEvent;
+use crate::assistant::repository;
+use crate::assistant::signals::{self, NewEvent, SignalKind};
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
-    AssistantMessage, AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus,
-    RunTrigger, SessionContext,
+    AgentRefSnapshot, AssistantMessage, AssistantRun, AssistantSession, ContentPart, MessageOrigin,
+    MessageRole, ProviderConnection, RunStatus, SessionContext,
 };
 use crate::assistant::workspace_agents::{
     agent_display_names, concise_agent_description, load_workspace_agent_rows,
     workspace_agent_display_names, WorkspaceAgentRow,
 };
-use crate::assistant::workspace_tasks_repo::{self, create_task_row, update_task_status};
+use crate::assistant::workspace_tasks_repo::{
+    self, create_task_row, CycleOutcome, FailureReason, NewTask, TaskStatus, WorkspaceTaskRow,
+};
 use crate::config::first_enabled_connection;
-use crate::db::DbPool;
+use crate::db::{enum_text, DbPool};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tauri::{Emitter, Manager};
-
-pub const WORKSPACE_TASK_ATTENTION_EVENT_NAME: &str = "workspace://task-attention";
+use tauri::Manager;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,18 +43,6 @@ pub struct AssignWorkspaceTaskParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GetWorkspaceTaskResultParams {
     pub task_id: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WorkspaceTaskAttentionEvent {
-    task_id: String,
-    workspace_id: String,
-    title: String,
-    status: String,
-    summary: Option<String>,
-    error: Option<String>,
-    updated_at: i64,
 }
 
 pub async fn execute(
@@ -112,10 +103,6 @@ fn list_agents(
     }))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 145 lines against a 100-line budget; split it, do not raise the budget"
-)]
 async fn assign_task(
     deps: &AssistantDeps,
     context: &ToolExecutionContext,
@@ -146,108 +133,105 @@ async fn assign_task(
         ));
     }
 
-    let creator = creator_workspace_agent_id(&rows, context.run_context.automation_id.as_deref());
+    let automation_id = context.run_context.automation_id.as_deref();
+    let creator = creator_workspace_agent_id(&rows, automation_id);
+    let lineage =
+        workspace_tasks_repo::lineage_for_caller(&deps.pool, &context.session_id, &context.run_id)
+            .await?;
 
     let task_id = uuid::Uuid::new_v4().to_string();
     create_task_row(
         &deps.pool,
-        &task_id,
-        creator,
-        &target.id,
-        &target.agent_definition_id,
-        title,
-        instructions,
+        NewTask {
+            id: &task_id,
+            created_by_workspace_agent_id: creator,
+            assigned_to_workspace_agent_id: &target.id,
+            assigned_agent_definition_id: &target.agent_definition_id,
+            title,
+            instructions,
+            lineage,
+        },
     )
     .await?;
 
     let connection = match resolve_first_connection(deps, &target) {
         Ok(connection) => connection,
         Err(message) => {
-            update_task_status(
-                &deps.pool,
-                &task_id,
-                "blocked",
-                None,
-                None,
-                Some(&message),
-                None,
-                true,
-            )
-            .await?;
-            let _ = emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id).await;
+            workspace_tasks_repo::fail_unstarted(&deps.pool, &task_id, &message).await?;
             return task_result(deps, &task_id, &agent_display_names(&rows)).await;
         }
     };
 
+    let caller = agent_snapshot(&rows, automation_id.unwrap_or("unknown"), None);
+    let session = enqueue_assignment(
+        &deps.pool,
+        &task_id,
+        &target.id,
+        assignment_text(&task_id, title, instructions),
+        MessageOrigin::Agent {
+            agent: caller,
+            session_id: Some(context.session_id.clone()),
+            run_id: Some(context.run_id.clone()),
+        },
+        &connection.id,
+    )
+    .await?;
+
+    // Read before the kick so the caller gets the queued placeholder.
+    let result = task_result(deps, &task_id, &agent_display_names(&rows)).await;
+    dispatcher::kick_logged(deps, &session.id).await;
+    result
+}
+
+/// Creates the task's session and posts the instruction to it as a pending
+/// `agent_message`; the next kick starts the first cycle.
+pub(crate) async fn enqueue_assignment(
+    pool: &DbPool,
+    task_id: &str,
+    assignee_id: &str,
+    instruction: String,
+    origin: MessageOrigin,
+    connection_id: &str,
+) -> Result<AssistantSession, String> {
     // Insert the session and stamp its id on the workspace_tasks row in one
     // SQLite transaction so a concurrent resolver cannot observe the session
     // before the task row links to it (see create_session_and_link_task).
-    let session = repository::create_session_and_link_task(
-        &deps.pool,
-        task_session_context(&target.id),
-        &task_id,
-    )
-    .await?;
-
-    repository::create_message(
-        &deps.pool,
-        CreateMessageParams {
-            session_id: session.id.clone(),
-            role: MessageRole::User,
-            content: vec![ContentPart::Text {
-                text: format!(
-                    "You have been assigned a workspace-local task by the manager.\n\n\
-                     Task ID: {}\n\
-                     Task title: {}\n\n\
-                     Instructions:\n{}\n\n\
-                     Work only with the current workspace context and available tools. \
-                     Return a concise result summary. If blocked by missing capability, context, permission, or runtime failure, start your response with `BLOCKED:` and describe the blocker. If you need a human decision, call the `ask_user` tool directly — do not surface the question via your text response.",
-                    task_id, title, instructions
-                ),
-            }],
-            provider_metadata: None,
+    let session =
+        repository::create_session_and_link_task(pool, task_session_context(assignee_id), task_id)
+            .await?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start task assignment transaction: {}", e))?;
+    signals::insert_event(
+        &mut tx,
+        NewEvent {
+            session_id: &session.id,
+            kind: SignalKind::AgentMessage,
+            text: instruction,
+            origin,
+            payload: serde_json::json!({ "taskId": task_id, "assignment": true }),
+            delivery_key: None,
+            connection_id: Some(connection_id),
         },
     )
     .await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit task assignment transaction: {}", e))?;
+    Ok(session)
+}
 
-    let run = repository::create_run(
-        &deps.pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Queued,
-            trigger: RunTrigger::WorkspaceTask,
-            connection_id: connection.id.clone(),
-            protocol_id: connection.protocol_id.clone(),
-            model_id: connection.model_id.clone(),
-            error: None,
-        },
+fn assignment_text(task_id: &str, title: &str, instructions: &str) -> String {
+    format!(
+        "You have been assigned a workspace-local task by the manager.\n\n\
+         Task ID: {}\n\
+         Task title: {}\n\n\
+         Instructions:\n{}\n\n\
+         Work only with the current workspace context and available tools. \
+         Return a concise result summary. If blocked by missing capability, context, permission, or runtime failure, start your response with `BLOCKED:` and describe the blocker. If you need a human decision, call the `ask_user` tool directly — do not surface the question via your text response.",
+        task_id, title, instructions
     )
-    .await?;
-
-    // session_id was already stamped by create_session_and_link_task above;
-    // passing None here lets COALESCE preserve it while we set run_id + status.
-    update_task_status(
-        &deps.pool,
-        &task_id,
-        "queued",
-        None,
-        Some(&run.id),
-        None,
-        None,
-        false,
-    )
-    .await?;
-
-    spawn_task_run(
-        deps.clone(),
-        workspace_id.clone(),
-        task_id.clone(),
-        session.id.clone(),
-        run.id.clone(),
-        connection.id.clone(),
-    );
-
-    task_result(deps, &task_id, &agent_display_names(&rows)).await
 }
 
 async fn get_task_result(
@@ -280,112 +264,241 @@ async fn load_task(
         .ok_or_else(|| format!("Workspace task not found: {}", task_id))
 }
 
-fn spawn_task_run(
-    deps: AssistantDeps,
-    workspace_id: String,
-    task_id: String,
-    session_id: String,
-    run_id: String,
-    connection_id: String,
-) {
-    tauri::async_runtime::spawn(async move {
-        let _ = update_task_status(
-            &deps.pool,
-            &task_id,
-            "running",
-            Some(&session_id),
-            Some(&run_id),
-            None,
-            None,
-            false,
-        )
-        .await;
-
-        let run_registration = crate::assistant::runtime::register_run(&run_id);
-        let cancel_token = run_registration.token();
-        let input = RunTurnInput {
-            session_id: session_id.clone(),
-            run_id: Some(run_id.clone()),
-            trigger: RunTrigger::WorkspaceTask,
-            connection_id,
-            cancel_token,
-            trigger_message_id: None,
-        };
-
-        let result = engine::run_session_turn(&deps, input).await;
-        drop(run_registration);
-
-        match result {
-            Ok(()) => {
-                let summary = latest_assistant_text(&deps.pool, &session_id)
-                    .await
-                    .unwrap_or(None);
-                let (status, error) = finished_run_outcome(
-                    repository::get_run(&deps.pool, &run_id).await,
-                    summary.as_deref(),
-                );
-                let _ = update_task_status(
-                    &deps.pool,
-                    &task_id,
-                    status,
-                    Some(&session_id),
-                    Some(&run_id),
-                    error.as_deref(),
-                    summary.as_deref(),
-                    true,
-                )
-                .await;
-                if is_attention_status(status) {
-                    let _ =
-                        emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id)
-                            .await;
-                }
-            }
-            Err(error) => {
-                let _ = update_task_status(
-                    &deps.pool,
-                    &task_id,
-                    "failed",
-                    Some(&session_id),
-                    Some(&run_id),
-                    Some(&error.to_string()),
-                    None,
-                    true,
-                )
-                .await;
-                let _ =
-                    emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id).await;
-            }
-        }
-    });
+/// Emits `task_updated` for `task` on its own session.
+pub(crate) async fn emit_task_updated(deps: &AssistantDeps, task: WorkspaceTaskRow) {
+    let Some(session_id) = task.session_id.clone() else {
+        return;
+    };
+    let Ok(Some(session)) = repository::get_session(&deps.pool, &session_id).await else {
+        return;
+    };
+    let run_id = task.run_id.clone();
+    let agent_names =
+        workspace_agent_display_names(deps.app.state::<AppState>().inner(), &deps.workspace_id);
+    let _ = deps.emit(
+        &session,
+        run_id.as_deref(),
+        AssistantUiEvent::TaskUpdated {
+            task: Box::new(task.into_response(&deps.workspace_id, &agent_names)),
+        },
+    );
 }
 
-/// Task status and error for a worker run whose turn has returned. Nothing
-/// advances the task after this, so a run that is missing or still active
-/// fails the task instead of leaving it open; only a run that reached a
-/// terminal status can be reclassified by its `summary`.
-fn finished_run_outcome(
-    run: Result<Option<AssistantRun>, String>,
-    summary: Option<&str>,
-) -> (&'static str, Option<String>) {
-    match run {
-        Ok(Some(run)) => match run.status {
-            RunStatus::Completed | RunStatus::CompletedWithWarnings => {
-                (classify_worker_status(summary, "completed"), run.error)
-            }
-            RunStatus::Failed | RunStatus::Cancelled => {
-                (classify_worker_status(summary, "failed"), run.error)
-            }
-            status @ (RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool) => (
-                "failed",
-                Some(format!("Worker run ended while still {status:?}")),
+/// `queued → running` as the cycle's run starts.
+pub(crate) async fn start_task_cycle(deps: &AssistantDeps, task_id: &str, run_id: &str) {
+    match workspace_tasks_repo::mark_running(&deps.pool, task_id, run_id).await {
+        Ok(Some(task)) => emit_task_updated(deps, task).await,
+        Ok(None) => {}
+        Err(error) => tracing::error!(task_id, run_id, error, "Failed to mark task running"),
+    }
+}
+
+/// Ends the cycle of `run_id`, posts its result to the parent session and
+/// wakes the parent.
+pub(crate) async fn finalize_task_cycle(deps: &AssistantDeps, task_id: &str, run_id: &str) {
+    let roster =
+        load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)
+            .unwrap_or_default();
+    let finished = match finish_task_cycle(&deps.pool, task_id, run_id, &roster).await {
+        Ok(Some(finished)) => finished,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(task_id, run_id, error, "Failed to finalize task cycle");
+            return;
+        }
+    };
+    emit_task_updated(deps, finished.task).await;
+    let Some(message) = finished.result else {
+        return;
+    };
+    if let Ok(Some(parent)) = repository::get_session(&deps.pool, &message.session_id).await {
+        let _ = deps.emit(
+            &parent,
+            None,
+            AssistantUiEvent::MessageCreated {
+                message: message.clone(),
+            },
+        );
+    }
+    dispatcher::kick_logged(deps, &message.session_id).await;
+}
+
+pub(crate) struct FinishedCycle {
+    pub(crate) task: WorkspaceTaskRow,
+    /// The result message written to the parent session.
+    pub(crate) result: Option<AssistantMessage>,
+}
+
+/// The database half of [`finalize_task_cycle`]: the task's terminal update
+/// and its result event, in one transaction. `None` when the cycle was
+/// already finalized.
+pub(crate) async fn finish_task_cycle(
+    pool: &DbPool,
+    task_id: &str,
+    run_id: &str,
+    roster: &[WorkspaceAgentRow],
+) -> Result<Option<FinishedCycle>, String> {
+    let run = repository::get_run(pool, run_id).await;
+    let summary = match &run {
+        Ok(Some(run)) => final_assistant_text(&repository::list_messages_for_run(pool, run).await?),
+        _ => None,
+    };
+    let outcome = cycle_outcome(run, summary);
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start task finalize transaction: {}", e))?;
+    let Some(task) = workspace_tasks_repo::finish_cycle(&mut tx, task_id, run_id, &outcome).await?
+    else {
+        return Ok(None);
+    };
+    let result = match &task.parent_session_id {
+        Some(parent_session_id) => {
+            signals::insert_event(&mut tx, result_event(&task, parent_session_id, roster)?).await?
+        }
+        None => None,
+    };
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit task finalize transaction: {}", e))?;
+    Ok(Some(FinishedCycle { task, result }))
+}
+
+/// The automated event that tells the parent how a cycle ended.
+fn result_event<'a>(
+    task: &WorkspaceTaskRow,
+    parent_session_id: &'a str,
+    roster: &[WorkspaceAgentRow],
+) -> Result<NewEvent<'a>, String> {
+    let (kind, text, payload) = match task.failure_reason {
+        Some(reason) => (
+            SignalKind::TaskFailed,
+            format!(
+                "Failure reason: {}\n\n{}",
+                enum_text(&reason)?,
+                task.error.as_deref().unwrap_or("(no error text)")
             ),
-        },
-        Ok(None) => ("failed", Some("Worker run record not found".to_string())),
-        Err(error) => (
-            "failed",
-            Some(format!("Could not load worker run: {error}")),
+            serde_json::json!({
+                "taskId": task.id,
+                "cycleNo": task.cycle_no,
+                "failureReason": reason,
+                "error": task.error,
+            }),
         ),
+        None => (
+            SignalKind::TaskResult,
+            task.result_summary
+                .clone()
+                .unwrap_or_else(|| "(no output)".to_string()),
+            serde_json::json!({
+                "taskId": task.id,
+                "cycleNo": task.cycle_no,
+                "status": task.status,
+                "title": task.title,
+            }),
+        ),
+    };
+    Ok(NewEvent {
+        session_id: parent_session_id,
+        kind,
+        text,
+        origin: MessageOrigin::Task {
+            task_id: task.id.clone(),
+            agent: agent_snapshot(
+                roster,
+                &task.assigned_to_workspace_agent_id,
+                Some(&task.assigned_agent_definition_id),
+            ),
+            title: task.title.clone(),
+            cycle_no: task.cycle_no,
+            status: task.status,
+        },
+        payload,
+        delivery_key: Some(format!("task-result:{}:{}", task.id, task.cycle_no)),
+        connection_id: None,
+    })
+}
+
+/// `id` as the roster shows it now; an agent off the roster keeps its ids.
+fn agent_snapshot(
+    rows: &[WorkspaceAgentRow],
+    id: &str,
+    definition_id: Option<&str>,
+) -> Box<AgentRefSnapshot> {
+    Box::new(match rows.iter().find(|row| row.id == id) {
+        Some(row) => AgentRefSnapshot {
+            workspace_agent_id: row.id.clone(),
+            agent_definition_id: Some(row.agent_definition_id.clone()),
+            display_name: row.display_name().to_string(),
+            is_default: row.role == "manager",
+            avatar: row.avatar.clone(),
+        },
+        None => AgentRefSnapshot {
+            workspace_agent_id: id.to_string(),
+            agent_definition_id: definition_id.map(str::to_string),
+            display_name: definition_id.unwrap_or(id).to_string(),
+            is_default: false,
+            avatar: None,
+        },
+    })
+}
+
+/// How a cycle ended, from its run and the run's final text. A run that is
+/// missing or still active fails the task: nothing advances it after this.
+fn cycle_outcome(
+    run: Result<Option<AssistantRun>, String>,
+    summary: Option<String>,
+) -> CycleOutcome {
+    let failed = |reason, error: String| CycleOutcome {
+        status: TaskStatus::Failed,
+        failure_reason: Some(reason),
+        error: Some(error),
+        result_summary: summary.clone(),
+    };
+    let run = match run {
+        Ok(Some(run)) => run,
+        Ok(None) => {
+            return failed(
+                FailureReason::Error,
+                "Worker run record not found".to_string(),
+            )
+        }
+        Err(error) => {
+            return failed(
+                FailureReason::Error,
+                format!("Could not load worker run: {error}"),
+            )
+        }
+    };
+    match run.status {
+        status @ (RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool) => failed(
+            FailureReason::Error,
+            format!("Worker run ended while still {status:?}"),
+        ),
+        RunStatus::Cancelled => CycleOutcome {
+            status: TaskStatus::Stopped,
+            failure_reason: None,
+            error: run.error,
+            result_summary: summary,
+        },
+        RunStatus::Completed | RunStatus::CompletedWithWarnings | RunStatus::Failed => {
+            if let Some(reply) = summary.as_deref().filter(|text| is_blocked_reply(text)) {
+                failed(FailureReason::Blocked, reply.to_string())
+            } else if run.status == RunStatus::Failed {
+                failed(
+                    FailureReason::Error,
+                    run.error.unwrap_or_else(|| "Worker run failed".to_string()),
+                )
+            } else {
+                CycleOutcome {
+                    status: TaskStatus::Completed,
+                    failure_reason: None,
+                    error: run.error,
+                    result_summary: summary,
+                }
+            }
+        }
     }
 }
 
@@ -486,54 +599,14 @@ fn creator_workspace_agent_id<'rows>(
         .map(|row| row.id.as_str())
 }
 
-async fn emit_task_attention_event(
-    app: &tauri::AppHandle,
-    pool: &DbPool,
-    workspace_id: &str,
-    task_id: &str,
-) -> Result<(), String> {
-    let task = load_task(pool, task_id).await?;
-    if !is_attention_status(&task.status) {
-        return Ok(());
-    }
-
-    let event = WorkspaceTaskAttentionEvent {
-        task_id: task.id,
-        workspace_id: workspace_id.to_string(),
-        title: task.title,
-        status: task.status,
-        summary: task.result_summary,
-        error: task.error,
-        updated_at: task.updated_at,
-    };
-
-    app.emit(WORKSPACE_TASK_ATTENTION_EVENT_NAME, event)
-        .map_err(|e| format!("Failed to emit workspace task attention event: {}", e))
+/// A worker reply that starts with `BLOCKED:` ends its cycle as
+/// `failed{blocked}`.
+fn is_blocked_reply(text: &str) -> bool {
+    text.trim_start().starts_with("BLOCKED:")
 }
 
-fn is_attention_status(status: &str) -> bool {
-    matches!(status, "blocked" | "failed")
-}
-
-fn classify_worker_status(summary: Option<&str>, fallback: &'static str) -> &'static str {
-    let Some(summary) = summary.map(str::trim_start) else {
-        return fallback;
-    };
-
-    if summary.starts_with("BLOCKED:") {
-        "blocked"
-    } else {
-        fallback
-    }
-}
-
-async fn latest_assistant_text(pool: &DbPool, session_id: &str) -> Result<Option<String>, String> {
-    let messages = repository::list_messages(pool, session_id).await?;
-    Ok(final_assistant_text(&messages))
-}
-
-/// The last non-empty text the assistant produced in a session, used as the
-/// task's result summary and for BLOCKED-status classification.
+/// The last non-empty text the assistant produced in a run, used as the
+/// task's result summary and for `BLOCKED:` classification.
 ///
 /// Both messages AND the parts within a message are scanned newest-first.
 /// Some providers (Codex via the appserver) accumulate an entire run —
@@ -562,6 +635,7 @@ fn final_assistant_text(messages: &[AssistantMessage]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::RunTrigger;
 
     #[tokio::test]
     async fn task_session_persists_only_assignee_id() {
@@ -699,52 +773,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // is_attention_status
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn is_attention_status_blocked() {
-        assert!(is_attention_status("blocked"));
-    }
-
-    #[test]
-    fn is_attention_status_failed() {
-        assert!(is_attention_status("failed"));
-    }
-
-    #[test]
-    fn is_attention_status_needs_user_input_is_false() {
-        // `needs_user_input` is no longer a status — the `ask_user` tool
-        // blocks the run inline, so the row never enters that state.
-        assert!(!is_attention_status("needs_user_input"));
-    }
-
-    #[test]
-    fn is_attention_status_running_is_false() {
-        assert!(!is_attention_status("running"));
-    }
-
-    #[test]
-    fn is_attention_status_completed_is_false() {
-        assert!(!is_attention_status("completed"));
-    }
-
-    #[test]
-    fn is_attention_status_queued_is_false() {
-        assert!(!is_attention_status("queued"));
-    }
-
-    #[test]
-    fn is_attention_status_empty_is_false() {
-        assert!(!is_attention_status(""));
-    }
-
-    // -----------------------------------------------------------------
     // final_assistant_text
     // -----------------------------------------------------------------
 
     fn msg(role: MessageRole, content: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: "m".to_string(),
             session_id: "s".to_string(),
             role,
@@ -823,10 +857,7 @@ mod tests {
             vec![text("Starting work."), text("BLOCKED: missing API key")],
         )];
         let summary = final_assistant_text(&messages);
-        assert_eq!(
-            classify_worker_status(summary.as_deref(), "completed"),
-            "blocked"
-        );
+        assert!(is_blocked_reply(summary.as_deref().unwrap()));
     }
 
     #[test]
@@ -841,60 +872,13 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------
-    // classify_worker_status
-    // -----------------------------------------------------------------
-
     #[test]
-    fn classify_worker_status_none_returns_fallback() {
-        assert_eq!(classify_worker_status(None, "completed"), "completed");
-    }
-
-    #[test]
-    fn classify_worker_status_needs_user_input_prefix_falls_through() {
-        // The NEEDS_USER_INPUT prefix is no longer special-cased — the
-        // `ask_user` tool is the only channel for human-input questions.
-        assert_eq!(
-            classify_worker_status(Some("NEEDS_USER_INPUT: Please review."), "completed"),
-            "completed"
-        );
-    }
-
-    #[test]
-    fn classify_worker_status_blocked_prefix() {
-        assert_eq!(
-            classify_worker_status(Some("BLOCKED: Missing API key."), "completed"),
-            "blocked"
-        );
-    }
-
-    #[test]
-    fn classify_worker_status_normal_summary_returns_fallback() {
-        assert_eq!(
-            classify_worker_status(Some("Task completed successfully."), "completed"),
-            "completed"
-        );
-    }
-
-    #[test]
-    fn classify_worker_status_trims_leading_whitespace() {
-        assert_eq!(
-            classify_worker_status(Some("  BLOCKED: Whitespace before."), "running"),
-            "blocked"
-        );
-    }
-
-    #[test]
-    fn classify_worker_status_empty_string_returns_fallback() {
-        assert_eq!(classify_worker_status(Some(""), "completed"), "completed");
-    }
-
-    #[test]
-    fn classify_worker_status_whitespace_only_returns_fallback() {
-        assert_eq!(
-            classify_worker_status(Some("   \n  "), "completed"),
-            "completed"
-        );
+    fn is_blocked_reply_needs_the_prefix_after_leading_whitespace() {
+        assert!(is_blocked_reply("BLOCKED: Missing API key."));
+        assert!(is_blocked_reply("  BLOCKED: Whitespace before."));
+        assert!(!is_blocked_reply("NEEDS_USER_INPUT: Please review."));
+        assert!(!is_blocked_reply("Task completed successfully."));
+        assert!(!is_blocked_reply(""));
     }
 
     fn run_with(status: RunStatus, error: Option<&str>) -> AssistantRun {
@@ -912,51 +896,443 @@ mod tests {
         }
     }
 
-    const BLOCKED: Option<&str> = Some("BLOCKED: need a key");
+    const BLOCKED: &str = "BLOCKED: need a key";
 
     #[test]
-    fn finished_run_outcome_maps_terminal_statuses() {
+    fn cycle_outcome_maps_terminal_statuses() {
         for status in [RunStatus::Completed, RunStatus::CompletedWithWarnings] {
-            assert_eq!(
-                finished_run_outcome(Ok(Some(run_with(status, None))), None),
-                ("completed", None)
-            );
+            let outcome = cycle_outcome(Ok(Some(run_with(status, None))), Some("done".into()));
+            assert_eq!(outcome.status, TaskStatus::Completed);
+            assert_eq!(outcome.failure_reason, None);
+            assert_eq!(outcome.result_summary.as_deref(), Some("done"));
         }
-        for status in [RunStatus::Failed, RunStatus::Cancelled] {
-            assert_eq!(
-                finished_run_outcome(Ok(Some(run_with(status, Some("boom")))), None),
-                ("failed", Some("boom".to_string()))
-            );
-        }
+        let cancelled = cycle_outcome(
+            Ok(Some(run_with(RunStatus::Cancelled, None))),
+            Some(BLOCKED.to_string()),
+        );
+        assert_eq!(cancelled.status, TaskStatus::Stopped);
+        assert_eq!(cancelled.failure_reason, None);
     }
 
     #[test]
-    fn finished_run_outcome_fails_a_run_that_is_still_active_or_missing() {
+    fn cycle_outcome_fails_a_run_that_is_still_active_or_missing() {
         for status in [
             RunStatus::Queued,
             RunStatus::Running,
             RunStatus::WaitingForTool,
         ] {
-            let (task_status, error) =
-                finished_run_outcome(Ok(Some(run_with(status, None))), BLOCKED);
-            assert_eq!(task_status, "failed");
-            assert!(error.unwrap().contains("still"));
+            let outcome =
+                cycle_outcome(Ok(Some(run_with(status, None))), Some(BLOCKED.to_string()));
+            assert_eq!(outcome.status, TaskStatus::Failed);
+            assert_eq!(outcome.failure_reason, Some(FailureReason::Error));
+            assert!(outcome.error.unwrap().contains("still"));
         }
-        let (task_status, error) = finished_run_outcome(Ok(None), BLOCKED);
-        assert_eq!(task_status, "failed");
-        assert!(error.unwrap().contains("not found"));
-        let (task_status, error) = finished_run_outcome(Err("db gone".to_string()), BLOCKED);
-        assert_eq!(task_status, "failed");
-        assert!(error.unwrap().contains("db gone"));
+        let missing = cycle_outcome(Ok(None), Some(BLOCKED.to_string()));
+        assert_eq!(missing.failure_reason, Some(FailureReason::Error));
+        assert!(missing.error.unwrap().contains("not found"));
+        let unreadable = cycle_outcome(Err("db gone".to_string()), Some(BLOCKED.to_string()));
+        assert_eq!(unreadable.failure_reason, Some(FailureReason::Error));
+        assert!(unreadable.error.unwrap().contains("db gone"));
     }
 
-    #[test]
-    fn finished_run_outcome_blocks_a_terminal_run_that_reports_blocked() {
-        for status in [RunStatus::Completed, RunStatus::Failed] {
-            assert_eq!(
-                finished_run_outcome(Ok(Some(run_with(status, None))), BLOCKED).0,
-                "blocked"
-            );
+    // -----------------------------------------------------------------
+    // task cycles end to end, against the database
+    // -----------------------------------------------------------------
+
+    use crate::assistant::dispatcher::{claim, Kick};
+    use crate::assistant::repository::CreateRunParams;
+    use crate::assistant::workspace_tasks_repo::TaskLineage;
+    use crate::db::test_support::workspace_pool;
+
+    fn connection(id: &str) -> ProviderConnection {
+        ProviderConnection {
+            id: id.to_string(),
+            name: id.to_string(),
+            protocol_id: "openai".into(),
+            provider_id: "openai".into(),
+            auth_mode: crate::assistant::types::AuthMode::DeveloperApiKey,
+            base_url: None,
+            secret_ref: String::new(),
+            model_id: "model".into(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
         }
+    }
+
+    async fn run_in(pool: &DbPool, session_id: &str, status: RunStatus) -> AssistantRun {
+        repository::create_run(
+            pool,
+            CreateRunParams {
+                session_id: session_id.to_string(),
+                status,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn".into(),
+                protocol_id: "openai".into(),
+                model_id: "model".into(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A manager session that has run once, so its connection is known.
+    async fn parent_session(pool: &DbPool) -> String {
+        let session = repository::create_session(pool, SessionContext::default())
+            .await
+            .unwrap();
+        run_in(pool, &session.id, RunStatus::Completed).await;
+        session.id
+    }
+
+    /// What `assign_task` writes, minus the roster: the task row, its
+    /// session and the pending instruction.
+    async fn assign(pool: &DbPool, parent_session_id: &str, task_id: &str) -> String {
+        create_task_row(
+            pool,
+            NewTask {
+                id: task_id,
+                created_by_workspace_agent_id: Some("wa-mgr"),
+                assigned_to_workspace_agent_id: "wa-1",
+                assigned_agent_definition_id: "def-1",
+                title: "Review",
+                instructions: "Review it",
+                lineage: TaskLineage {
+                    parent_session_id: Some(parent_session_id.to_string()),
+                    ..TaskLineage::default()
+                },
+            },
+        )
+        .await
+        .unwrap();
+        enqueue_assignment(
+            pool,
+            task_id,
+            "wa-1",
+            "Review it".to_string(),
+            MessageOrigin::Agent {
+                agent: agent_snapshot(&[], "wa-mgr", None),
+                session_id: Some(parent_session_id.to_string()),
+                run_id: None,
+            },
+            "conn",
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    /// The dispatcher claim that opens a cycle.
+    async fn open(pool: &DbPool, session_id: &str) -> (AssistantRun, WorkspaceTaskRow) {
+        match claim(pool, session_id, |id| Some(connection(id)))
+            .await
+            .unwrap()
+        {
+            Kick::Started {
+                run,
+                task: Some(task),
+                ..
+            } => (run, *task),
+            other => panic!("expected a task cycle to start, got {other:?}"),
+        }
+    }
+
+    /// The run writes `reply` and ends with `status`.
+    async fn end_run(pool: &DbPool, run: &AssistantRun, reply: &str, status: RunStatus) {
+        repository::create_message(
+            pool,
+            repository::CreateMessageParams {
+                session_id: run.session_id.clone(),
+                role: MessageRole::Assistant,
+                content: vec![text(reply)],
+                provider_metadata: None,
+                run_id: Some(run.id.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        let error = (status == RunStatus::Failed).then_some("boom");
+        repository::update_run_status(pool, &run.id, status, error)
+            .await
+            .unwrap();
+    }
+
+    async fn finish(pool: &DbPool, task_id: &str, run: &AssistantRun) -> Option<FinishedCycle> {
+        finish_task_cycle(pool, task_id, &run.id, &[])
+            .await
+            .unwrap()
+    }
+
+    async fn signals_of(pool: &DbPool, session_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT kind, status FROM session_signals WHERE target_session_id = ?
+             ORDER BY created_at, id",
+        )
+        .bind(session_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn signal(kind: &str, status: &str) -> (String, String) {
+        (kind.to_string(), status.to_string())
+    }
+
+    #[tokio::test]
+    async fn assign_returns_queued_and_parent_gets_result_once() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let task_session = assign(&pool, &parent, "task-1").await;
+
+        let queued = load_task(&pool, "task-1").await.unwrap();
+        assert_eq!(queued.status, TaskStatus::Queued);
+        assert_eq!(queued.cycle_no, 0);
+        assert_eq!(queued.run_id, None);
+        assert_eq!(
+            signals_of(&pool, &task_session).await,
+            [signal("agent_message", "pending")]
+        );
+
+        let (run, task) = open(&pool, &task_session).await;
+        assert_eq!(run.trigger, RunTrigger::WorkspaceTask);
+        assert_eq!((task.status, task.cycle_no), (TaskStatus::Queued, 1));
+        end_run(&pool, &run, "All good.", RunStatus::Completed).await;
+
+        let finished = finish(&pool, "task-1", &run).await.expect("first finalize");
+        assert_eq!(finished.task.status, TaskStatus::Completed);
+        let result = finished.result.expect("a result for the parent");
+        assert_eq!(result.session_id, parent);
+        assert_eq!(result.content.len(), 1);
+        assert!(matches!(&result.content[0], ContentPart::Text { text } if text == "All good."));
+        assert!(matches!(
+            &result.origin,
+            MessageOrigin::Task { task_id, cycle_no: 1, status: TaskStatus::Completed, .. }
+                if task_id == "task-1"
+        ));
+
+        // A second finalize of the same cycle writes nothing.
+        assert!(finish(&pool, "task-1", &run).await.is_none());
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_result", "pending")]
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_parent_batches_two_results_in_one_block() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let parent_run = run_in(&pool, &parent, RunStatus::Running).await;
+        for (task_id, reply) in [("task-1", "first done"), ("task-2", "second done")] {
+            let session = assign(&pool, &parent, task_id).await;
+            let (run, _) = open(&pool, &session).await;
+            end_run(&pool, &run, reply, RunStatus::Completed).await;
+            finish(&pool, task_id, &run).await.unwrap();
+        }
+        assert!(matches!(
+            claim(&pool, &parent, |id| Some(connection(id)))
+                .await
+                .unwrap(),
+            Kick::Busy { .. }
+        ));
+
+        repository::update_run_status(&pool, &parent_run.id, RunStatus::Completed, None)
+            .await
+            .unwrap();
+        let Kick::Started {
+            message_ids, task, ..
+        } = claim(&pool, &parent, |id| Some(connection(id)))
+            .await
+            .unwrap()
+        else {
+            panic!("the parent must wake once its run ended");
+        };
+        assert_eq!(message_ids.len(), 2, "both results go to one run");
+        assert!(task.is_none());
+
+        let history = repository::list_messages(&pool, &parent).await.unwrap();
+        let provider = crate::assistant::api_turn::normalize_history_for_provider(&history);
+        assert_eq!(provider.len(), 1, "one user block: {provider:?}");
+        let block = crate::assistant::conversation::content_text(&provider[0].content);
+        assert_eq!(block.matches("[Automated event: task").count(), 2);
+        assert!(block.contains("first done") && block.contains("second done"));
+    }
+
+    #[tokio::test]
+    async fn result_message_deleted_does_not_duplicate() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        end_run(&pool, &run, "done", RunStatus::Completed).await;
+        let result = finish(&pool, "task-1", &run).await.unwrap().result.unwrap();
+
+        repository::delete_message(&pool, &result.id).await.unwrap();
+        // A retried finalizer for the same cycle.
+        sqlx::query("UPDATE workspace_tasks SET status = 'running' WHERE id = 'task-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let retried = finish(&pool, "task-1", &run).await.unwrap();
+
+        assert!(retried.result.is_none());
+        assert!(repository::list_messages(&pool, &parent)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_result", "dropped")]
+        );
+    }
+
+    #[tokio::test]
+    async fn task_cycle_reads_only_own_output() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (first, _) = open(&pool, &session).await;
+        end_run(&pool, &first, "first cycle answer", RunStatus::Completed).await;
+        finish(&pool, "task-1", &first).await.unwrap();
+
+        // A second cycle whose run writes no text of its own.
+        repository::create_user_message(&pool, session.clone(), "again".into(), Some("conn"))
+            .await
+            .unwrap();
+        let (second, task) = open(&pool, &session).await;
+        assert_eq!(task.cycle_no, 2);
+        repository::update_run_status(&pool, &second.id, RunStatus::Completed, None)
+            .await
+            .unwrap();
+        let finished = finish(&pool, "task-1", &second).await.unwrap();
+
+        assert_eq!(finished.task.cycle_no, 2);
+        assert_eq!(finished.task.result_summary, None);
+        let result = finished.result.unwrap();
+        assert!(matches!(&result.content[0], ContentPart::Text { text } if text == "(no output)"));
+    }
+
+    #[tokio::test]
+    async fn legacy_null_run_id_rows_fall_back_to_window() {
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        let mut run = run_in(&pool, &session.id, RunStatus::Completed).await;
+        run.started_at = 100;
+        run.completed_at = Some(200);
+        for (id, created_at) in [("before", 50), ("inside", 150), ("after", 250)] {
+            sqlx::query(
+                "INSERT INTO assistant_messages (id, session_id, role, content_json, created_at)
+                 VALUES (?, ?, 'assistant', '[]', ?)",
+            )
+            .bind(id)
+            .bind(&session.id)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let ids = |messages: Vec<AssistantMessage>| -> Vec<String> {
+            messages.into_iter().map(|message| message.id).collect()
+        };
+
+        let legacy = repository::list_messages_for_run(&pool, &run)
+            .await
+            .unwrap();
+        assert_eq!(ids(legacy), ["inside"]);
+
+        // Once the run has attributed rows, the window is not consulted.
+        sqlx::query("UPDATE assistant_messages SET run_id = ? WHERE id = 'after'")
+            .bind(&run.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let attributed = repository::list_messages_for_run(&pool, &run)
+            .await
+            .unwrap();
+        assert_eq!(ids(attributed), ["after"]);
+    }
+
+    #[tokio::test]
+    async fn every_task_transition_emits_task_updated_without_signal_row() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+
+        // Each transition hands back the row its caller emits as
+        // `task_updated`: claim (kick), run start, finalize.
+        let (run, queued) = open(&pool, &session).await;
+        assert_eq!(queued.status, TaskStatus::Queued);
+        let running = workspace_tasks_repo::mark_running(&pool, "task-1", &run.id)
+            .await
+            .unwrap()
+            .expect("running transition");
+        assert_eq!(running.status, TaskStatus::Running);
+        end_run(&pool, &run, "done", RunStatus::Completed).await;
+        let finished = finish(&pool, "task-1", &run).await.unwrap();
+        assert_eq!(finished.task.status, TaskStatus::Completed);
+
+        // Status changes write no signals: only the instruction and the result exist.
+        let kinds: Vec<String> =
+            sqlx::query_scalar("SELECT kind FROM session_signals ORDER BY created_at")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(kinds, ["agent_message", "task_result"]);
+    }
+
+    #[tokio::test]
+    async fn blocked_reply_finalizes_as_failed_with_reason_blocked() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        end_run(
+            &pool,
+            &run,
+            "BLOCKED: need an API key",
+            RunStatus::Completed,
+        )
+        .await;
+
+        let finished = finish(&pool, "task-1", &run).await.unwrap();
+
+        assert_eq!(finished.task.status, TaskStatus::Failed);
+        assert_eq!(finished.task.failure_reason, Some(FailureReason::Blocked));
+        assert_eq!(
+            finished.task.error.as_deref(),
+            Some("BLOCKED: need an API key")
+        );
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_failed", "pending")]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_failure_finalizes_with_reason_error_and_run_error_text() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        end_run(&pool, &run, "partial work", RunStatus::Failed).await;
+
+        let finished = finish(&pool, "task-1", &run).await.unwrap();
+
+        assert_eq!(finished.task.status, TaskStatus::Failed);
+        assert_eq!(finished.task.failure_reason, Some(FailureReason::Error));
+        assert_eq!(finished.task.error.as_deref(), Some("boom"));
+        assert_eq!(
+            finished.task.result_summary.as_deref(),
+            Some("partial work")
+        );
+        let result = finished.result.unwrap();
+        assert!(matches!(
+            &result.content[0],
+            ContentPart::Text { text } if text == "Failure reason: error\n\nboom"
+        ));
     }
 }

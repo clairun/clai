@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::assistant::workspace_tasks_repo::TaskStatus;
+use crate::config::workspace_config::AgentAvatarRef;
+
 pub type SessionId = String;
 pub type MessageId = String;
 pub type RunId = String;
@@ -199,6 +202,53 @@ pub struct AssistantMessage {
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub origin: MessageOrigin,
+}
+
+/// Who wrote a message. Everything a person typed, and every row a run
+/// writes, is `User`; agent and task origins mark automated events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export, export_to = "bindings.ts")]
+pub enum MessageOrigin {
+    #[default]
+    User,
+    /// Written by another agent's run, e.g. a task assignment.
+    Agent {
+        agent: Box<AgentRefSnapshot>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
+    /// The outcome of one cycle of a task this session assigned.
+    Task {
+        task_id: String,
+        agent: Box<AgentRefSnapshot>,
+        title: String,
+        cycle_no: i64,
+        status: TaskStatus,
+    },
+}
+
+/// An agent as it was when the message was written; never regenerated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct AgentRefSnapshot {
+    pub workspace_agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_definition_id: Option<String>,
+    pub display_name: String,
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<AgentAvatarRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]

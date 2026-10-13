@@ -103,6 +103,7 @@ const msg = (
   sessionId: 'sess-1',
   createdAt: 0n,
   providerMetadata: null,
+  origin: { kind: 'user' },
   ...over,
 });
 

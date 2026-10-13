@@ -109,6 +109,10 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
       store.clearAskUserPending(sessionId, event.payload.pending_id);
       break;
 
+    case 'task_updated':
+      // Task status changes; the task UI consumes them in a later commit.
+      break;
+
     case 'run_skipped':
       // Only a manual "Run now" on a busy session emits this.
       useFleetActivityStore.getState().markRunNowSkipped(envelope.workspaceId);
