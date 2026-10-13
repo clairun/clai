@@ -128,3 +128,29 @@ export const senderGroupKey = (sender: MessageSender): string | null => {
   if (sender.kind === 'agent') return `agent:${sender.agent.workspaceAgentId}`;
   return null;
 };
+
+/** Where a task's question stands, read from the live task: still open, or how it closed. */
+export type QuestionState = { open: true } | { open: false; label: string };
+
+const ENDED_WITHOUT_ANSWER = new Set(['stopping', 'stopped', 'failed']);
+
+/** `null` when the live task is unknown, so the card claims nothing. */
+export const questionState = (
+  sender: Extract<MessageSender, { kind: 'task' }>,
+  liveTask: WorkspaceTaskResponse | null,
+  roster: readonly WorkspaceAgentResponse[]
+): QuestionState | null => {
+  if (!liveTask) return null;
+  const liveCycle = Number(liveTask.cycleNo);
+  if (liveCycle > sender.cycleNo) return { open: false, label: 'Answered' };
+  if (liveTask.status === 'input_required') return { open: true };
+  const answeredBy = liveTask.answeredBy;
+  if (answeredBy?.kind === 'user') return { open: false, label: 'Answered by you' };
+  if (answeredBy?.kind === 'agent' || answeredBy?.kind === 'task') {
+    return { open: false, label: `Answered by ${resolveAgent(answeredBy.agent, roster).name}` };
+  }
+  if (!answeredBy && ENDED_WITHOUT_ANSWER.has(liveTask.status)) {
+    return { open: false, label: 'Not answered · task stopped' };
+  }
+  return { open: false, label: 'Answered' };
+};

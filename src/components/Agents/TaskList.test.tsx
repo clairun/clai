@@ -250,6 +250,16 @@ describe('TaskList', () => {
     expect(within(write).queryByRole('button', { name: /Open the log/ })).toBeNull();
   });
 
+  it('input_required row offers Answer, which opens its log', async () => {
+    const asking = { ...REVIEW_TASK, status: 'input_required' as const };
+    const onViewTask = vi.fn();
+    render(<TaskList {...props} onViewTask={onViewTask} tasks={[asking, WRITE_TASK]} />);
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Answer Review PR' }));
+    expect(onViewTask).toHaveBeenCalledTimes(1);
+    expect(onViewTask).toHaveBeenCalledWith(asking);
+    expect(screen.getAllByRole('button', { name: /^Answer / })).toHaveLength(1);
+  });
+
   it('leaves the row inert when nobody is listening for the log', () => {
     render(<TaskList {...props} tasks={[REVIEW_TASK]} />);
     expect(screen.queryByRole('button', { name: /Open the log/ })).toBeNull();

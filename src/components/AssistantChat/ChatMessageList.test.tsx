@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 // VirtualizedList windows its children by scroll geometry, which jsdom
 // doesn't have (zero heights). Replace it with a plain list that renders
@@ -91,11 +91,13 @@ vi.mock('../../assistant/client', () => ({ getToolCallResult, getToolCallInput }
 import ChatMessageList from './ChatMessageList';
 import { clearToolCallResultCache } from '../../assistant/toolCallResult';
 import { mainIdentity } from '../Agents/agentIdentity';
+import { useTaskStore } from '../../workspace/taskStore';
 import type {
   AgentRefSnapshot,
   AssistantMessage,
   ToolInvocation,
   WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
 } from '../../generated/bindings';
 
 // Whose face the in-flight footer wears. A module constant, the way call
@@ -1159,6 +1161,120 @@ describe('ChatMessageList', () => {
       expect(screen.queryByText('Queued')).toBeNull();
       expect(screen.queryByRole('button', { name: 'Remove queued message' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Edit queued message' })).toBeNull();
+    });
+
+    describe('question cards', () => {
+      const question = msg({
+        id: 'q1',
+        role: 'user',
+        content: [{ type: 'text', text: 'Should I also review the generated bindings?' }],
+        origin: {
+          kind: 'task',
+          taskId: 'task-1',
+          agent: reviewer,
+          title: 'Review PR #231',
+          cycleNo: 1n,
+          status: 'input_required',
+        },
+      });
+      const liveTask = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse => ({
+        id: 'task-1',
+        workspaceId: 'ws-1',
+        createdByWorkspaceAgentId: 'wa-main',
+        createdByDisplayName: 'Manager',
+        assignedToWorkspaceAgentId: 'wa-rev',
+        assignedAgentDefinitionId: 'def-rev',
+        assignedAgentDisplayName: 'Reviewer',
+        title: 'Review PR #231',
+        instructions: 'review',
+        status: 'input_required',
+        resultSummary: null,
+        error: null,
+        sessionId: 'sess-rev',
+        runId: 'run-1',
+        createdAt: 0n,
+        updatedAt: 1n,
+        completedAt: null,
+        attentionAcknowledgedAt: null,
+        failureReason: null,
+        parentSessionId: null,
+        parentRunId: null,
+        parentTaskId: null,
+        depth: 0n,
+        cycleNo: 1n,
+        stopRequestedAt: null,
+        answeredBy: null,
+        ...over,
+      });
+      const card = (state: string) =>
+        screen.getByRole('article', {
+          name: `Question from Reviewer: Review PR #231, ${state}`,
+        });
+
+      beforeEach(() => {
+        useTaskStore.setState({ tasks: {}, seeded: {} });
+      });
+
+      it('question card shows Answer while task input_required', () => {
+        useTaskStore.getState().upsertTask(liveTask());
+        list([question], { onOpenTask: vi.fn() });
+        const open = card('open');
+        expect(within(open).getByText('Should I also review the generated bindings?')).toBeInTheDocument();
+        expect(within(open).getByText(/needs an answer/)).toBeInTheDocument();
+        expect(within(open).getByRole('button', { name: 'Answer Review PR #231' })).toBeInTheDocument();
+      });
+
+      it('Answer opens task panel focused on AskUserPanel', () => {
+        // The task panel's AskUserPanel focuses itself on a pending question
+        // (see WorkspaceTaskTranscriptPanel tests); the card only opens it.
+        useTaskStore.getState().upsertTask(liveTask());
+        const onOpenTask = vi.fn();
+        list([question], { onOpenTask });
+        fireEvent.click(screen.getByRole('button', { name: 'Answer Review PR #231' }));
+        expect(onOpenTask).toHaveBeenCalledWith('task-1');
+      });
+
+      it('parent answer labels card Answered by Main from task.answeredBy', () => {
+        useTaskStore.getState().upsertTask(liveTask());
+        list([question]);
+        act(() => {
+          useTaskStore.getState().upsertTask(
+            liveTask({
+              status: 'running',
+              updatedAt: 2n,
+              answeredBy: { kind: 'agent', agent: owner },
+            })
+          );
+        });
+        // The default agent reads "Main" everywhere.
+        expect(within(card('Answered by Main')).getByText('Answered by Main')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Answer Review PR #231' })).toBeNull();
+      });
+
+      it('human answer first labels Answered by you', () => {
+        useTaskStore
+          .getState()
+          .upsertTask(liveTask({ status: 'running', answeredBy: { kind: 'user' } }));
+        list([question]);
+        expect(within(card('Answered by you')).getByText('Answered by you')).toBeInTheDocument();
+      });
+
+      it('answeredBy survives reload', () => {
+        // After a reload the only source is the details load; no events.
+        useTaskStore.getState().seedTasks('ws-1', [
+          liveTask({ status: 'completed', answeredBy: { kind: 'user' } }),
+        ]);
+        list([question]);
+        expect(card('Answered by you')).toBeInTheDocument();
+      });
+
+      it('stopped before answer shows not answered', () => {
+        useTaskStore.getState().upsertTask(liveTask({ status: 'stopped' }));
+        list([question]);
+        expect(
+          within(card('Not answered · task stopped')).getByText('Not answered · task stopped')
+        ).toBeInTheDocument();
+      });
     });
   });
 });

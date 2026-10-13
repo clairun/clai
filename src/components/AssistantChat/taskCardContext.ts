@@ -14,6 +14,8 @@ import type { WorkspaceAgentResponse } from '../../generated/bindings';
  * a transcript rendered without a provider still draws its cards, inert.
  */
 export interface TaskCardSurface {
+  /** Where the cards' tasks live, to read their current state. */
+  workspaceId?: string;
   roster: readonly WorkspaceAgentResponse[];
   /** Open a task's own log. Omit to render cards inert. */
   onOpenTask?: (taskId: string) => void;

@@ -35,6 +35,7 @@ import { identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import {
   resolveAgent,
+  questionState,
   resolveMessageSender,
   senderGroupKey,
   type MessageSender,
@@ -42,6 +43,7 @@ import {
   type SessionOwner,
 } from './messageSender';
 import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './taskCardContext';
+import { useTask } from '../../workspace/taskStore';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
@@ -812,8 +814,8 @@ const ChatMessageList = ({
   const handleApproachTop = hasOlderMessages ? onLoadOlderMessages : undefined;
 
   const taskCardSurface = useMemo<TaskCardSurface>(
-    () => ({ roster: taskRoster, onOpenTask }),
-    [taskRoster, onOpenTask]
+    () => ({ workspaceId, roster: taskRoster, onOpenTask }),
+    [workspaceId, taskRoster, onOpenTask]
   );
 
   // Footer rendered inside the scroll area, right after the last message.
@@ -1070,8 +1072,18 @@ const TaskResultBlock = ({
   message: AssistantMessage;
   sender: Extract<MessageSender, { kind: 'task' }>;
 }) => {
-  const { onOpenTask } = useTaskCardSurface();
-  return <TaskResultCard sender={sender} body={getTextContent(message)} onOpen={onOpenTask} />;
+  const { workspaceId = '', roster, onOpenTask } = useTaskCardSurface();
+  const liveTask = useTask(workspaceId, sender.status === 'input_required' ? sender.taskId : null);
+  const question =
+    sender.status === 'input_required' ? questionState(sender, liveTask, roster) : undefined;
+  return (
+    <TaskResultCard
+      sender={sender}
+      body={getTextContent(message)}
+      question={question}
+      onOpen={onOpenTask}
+    />
+  );
 };
 
 /**

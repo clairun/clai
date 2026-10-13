@@ -305,6 +305,16 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                         : 'Send a message to resume'}
                     </p>
                   )}
+                  {task.status === 'input_required' && open && (
+                    <button
+                      type="button"
+                      className={styles.action}
+                      aria-label={`Answer ${task.title}`}
+                      onClick={open}
+                    >
+                      Answer
+                    </button>
+                  )}
                   {needsAttention && (
                     <button
                       type="button"
