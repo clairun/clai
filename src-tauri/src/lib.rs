@@ -251,7 +251,9 @@ impl AppState {
         let root = self
             .workspace_root(workspace_id)
             .ok_or_else(|| format!("Workspace {} not found", workspace_id))?;
-        let pool = db::init_workspace_db(&root).await?;
+        let roster = assistant::workspace_agents::load_workspace_agent_rows(self, workspace_id)
+            .unwrap_or_default();
+        let pool = db::init_workspace_db(&root, &roster).await?;
         self.workspace_index
             .write()
             .map_err(|e| format!("Workspace index lock error: {}", e))?
@@ -596,7 +598,7 @@ async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Res
         config::workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(root.join(".clai").join("memory").join("journal"))
             .map_err(|e| format!("Failed to prepare default workspace: {}", e))?;
-        let pool = db::init_workspace_db(&root).await?;
+        let pool = db::init_workspace_db(&root, &[]).await?;
         let mut index = state
             .workspace_index
             .write()
@@ -615,10 +617,12 @@ async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Res
     const MAX_WORKSPACE_DB_INIT_CONCURRENCY: usize = 8;
     let mut pending = tokio::task::JoinSet::new();
     for locator in locators {
+        let roster = assistant::workspace_agents::load_workspace_agent_rows(state, &locator.id)
+            .unwrap_or_default();
         pending.spawn(async move {
             let id = locator.id;
             let root_path = locator.root_path;
-            let result = db::init_workspace_db(&root_path).await;
+            let result = db::init_workspace_db(&root_path, &roster).await;
             (id, root_path, result)
         });
 

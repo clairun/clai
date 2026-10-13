@@ -18,6 +18,7 @@
 //! workspace and calls `init_workspace_db`, and the lazy-open path goes
 //! through the same function. Both apply pending migrations.
 
+use crate::assistant::workspace_agents::WorkspaceAgentRow;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -54,8 +55,12 @@ fn open_gate(db_path: &Path) -> OpenGate {
 /// Opens of the same file are serialized, and recovery runs only on the
 /// first open in this process: the eager startup fan-out and a lazy open can
 /// both open a workspace, and a second sweep would fail runs and tasks this
-/// process already has in flight.
-pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> {
+/// process already has in flight. `roster` names the agents in the result
+/// events recovery posts.
+pub(crate) async fn init_workspace_db(
+    workspace_root: &Path,
+    roster: &[WorkspaceAgentRow],
+) -> Result<DbPool, String> {
     let db_path = crate::config::workspace_config::data_path(workspace_root);
     let parent = db_path
         .parent()
@@ -103,7 +108,7 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
         .map_err(|e| format!("Workspace DB migration failed: {}", e))?;
 
     if !*recovered {
-        crate::assistant::tools::workspace_tasks::recover_interrupted_tasks(&pool).await?;
+        crate::assistant::tools::workspace_tasks::recover_interrupted_tasks(&pool, roster).await?;
         crate::assistant::repository::recover_stale_runs(&pool).await?;
         *recovered = true;
     }
@@ -167,10 +172,10 @@ mod tests {
     #[tokio::test]
     async fn workspace_init_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let _pool = init_workspace_db(tmp.path()).await.unwrap();
+        let _pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
         // Second open of the same workspace must succeed and not double-
         // apply migrations. sqlx::migrate! tracks via _sqlx_migrations.
-        let _pool = init_workspace_db(tmp.path()).await.unwrap();
+        let _pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
     }
 
     #[tokio::test]
@@ -626,7 +631,7 @@ mod tests {
         insert_task(&pool, "t2", "running", None, None).await;
         pool.close().await;
 
-        let pool = init_workspace_db(tmp.path()).await.unwrap();
+        let pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
         let statuses: Vec<String> =
             sqlx::query_scalar("SELECT status FROM workspace_tasks ORDER BY id")
                 .fetch_all(&pool)
@@ -644,7 +649,7 @@ mod tests {
         let mut opens = tokio::task::JoinSet::new();
         for _ in 0..8 {
             let root = tmp.path().to_path_buf();
-            opens.spawn(async move { init_workspace_db(&root).await });
+            opens.spawn(async move { init_workspace_db(&root, &[]).await });
         }
         while let Some(opened) = opens.join_next().await {
             opened.unwrap().expect("every concurrent open must succeed");
@@ -659,7 +664,7 @@ mod tests {
         use crate::assistant::types::{RunStatus, RunTrigger, SessionContext};
 
         let tmp = tempfile::tempdir().unwrap();
-        let pool = init_workspace_db(tmp.path()).await.unwrap();
+        let pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
         let session = repository::create_session(&pool, SessionContext::default())
             .await
             .unwrap();
@@ -679,7 +684,7 @@ mod tests {
         .unwrap();
         insert_task(&pool, "t1", "running", Some(&session.id), None).await;
 
-        let second = init_workspace_db(tmp.path()).await.unwrap();
+        let second = init_workspace_db(tmp.path(), &[]).await.unwrap();
 
         let stored = repository::get_run(&second, &run.id)
             .await

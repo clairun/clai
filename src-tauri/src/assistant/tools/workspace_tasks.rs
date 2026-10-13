@@ -7,8 +7,8 @@ use crate::assistant::signals::{self, NewEvent, SignalKind};
 use crate::assistant::tools::ask_user::{self, AskUserAnswer, AskUserParams};
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
-    AgentRefSnapshot, AssistantMessage, AssistantRun, AssistantSession, ContentPart, MessageOrigin,
-    MessageRole, ProviderConnection, RunStatus, SessionContext,
+    AgentRefSnapshot, AssistantMessage, AssistantRun, ContentPart, MessageOrigin, MessageRole,
+    ProviderConnection, RunStatus, SessionContext,
 };
 use crate::assistant::workspace_agents::{
     agent_display_names, concise_agent_description, load_workspace_agent_rows,
@@ -198,9 +198,10 @@ async fn assign_task(
             .await?;
 
     let task_id = uuid::Uuid::new_v4().to_string();
-    create_task_row(
+    let connection = resolve_first_connection(deps, &target);
+    let session_id = create_assignment(
         &deps.pool,
-        NewTask {
+        &NewTask {
             id: &task_id,
             created_by_workspace_agent_id: Some(caller),
             assigned_to_workspace_agent_id: &target.id,
@@ -209,74 +210,70 @@ async fn assign_task(
             instructions,
             lineage,
         },
-    )
-    .await?;
-
-    let connection = match resolve_first_connection(deps, &target) {
-        Ok(connection) => connection,
-        Err(message) => {
-            workspace_tasks_repo::fail_unstarted(&deps.pool, &task_id, &message).await?;
-            return task_result(deps, &task_id, &agent_display_names(rows)).await;
-        }
-    };
-
-    let session = enqueue_assignment(
-        &deps.pool,
-        &task_id,
-        &target.id,
-        assignment_text(&task_id, title, instructions),
+        connection
+            .as_ref()
+            .map(|connection| connection.id.as_str())
+            .map_err(String::as_str),
         MessageOrigin::Agent {
             agent: agent_snapshot(rows, caller, None),
             session_id: Some(context.session_id.clone()),
             run_id: Some(context.run_id.clone()),
         },
-        &connection.id,
     )
     .await?;
 
     // Read before the kick so the caller gets the queued placeholder.
     let result = task_result(deps, &task_id, &agent_display_names(rows)).await;
-    dispatcher::kick_logged(deps, &session.id).await;
+    if let Some(session_id) = session_id {
+        dispatcher::kick_logged(deps, &session_id).await;
+    }
     result
 }
 
-/// Creates the task's session and posts the instruction to it as a pending
-/// `agent_message`; the next kick starts the first cycle.
-pub(crate) async fn enqueue_assignment(
+/// Writes an assignment in one transaction: the task row and, given the
+/// assignee's connection, its session and the instruction as a pending
+/// `agent_message` for the next kick. Without a connection (`Err` carries
+/// why) the task is stored failed. Returns the task session.
+pub(crate) async fn create_assignment(
     pool: &DbPool,
-    task_id: &str,
-    assignee_id: &str,
-    instruction: String,
+    task: &NewTask<'_>,
+    connection: Result<&str, &str>,
     origin: MessageOrigin,
-    connection_id: &str,
-) -> Result<AssistantSession, String> {
-    // Insert the session and stamp its id on the workspace_tasks row in one
-    // SQLite transaction so a concurrent resolver cannot observe the session
-    // before the task row links to it (see create_session_and_link_task).
-    let session =
-        repository::create_session_and_link_task(pool, task_session_context(assignee_id), task_id)
-            .await?;
+) -> Result<Option<String>, String> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| format!("Failed to start task assignment transaction: {}", e))?;
-    signals::insert_event(
-        &mut tx,
-        NewEvent {
-            session_id: &session.id,
-            kind: SignalKind::AgentMessage,
-            text: instruction,
-            origin,
-            payload: serde_json::json!({ "taskId": task_id, "assignment": true }),
-            delivery_key: None,
-            connection_id: Some(connection_id),
-        },
-    )
-    .await?;
+    create_task_row(&mut tx, task, connection.err()).await?;
+    let session_id = match connection {
+        Ok(connection_id) => {
+            let session = repository::create_session_and_link_task(
+                &mut tx,
+                task_session_context(task.assigned_to_workspace_agent_id),
+                task.id,
+            )
+            .await?;
+            signals::insert_event(
+                &mut tx,
+                NewEvent {
+                    session_id: &session.id,
+                    kind: SignalKind::AgentMessage,
+                    text: assignment_text(task.id, task.title, task.instructions),
+                    origin,
+                    payload: serde_json::json!({ "taskId": task.id, "assignment": true }),
+                    delivery_key: None,
+                    connection_id: Some(connection_id),
+                },
+            )
+            .await?;
+            Some(session.id)
+        }
+        Err(_) => None,
+    };
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit task assignment transaction: {}", e))?;
-    Ok(session)
+    Ok(session_id)
 }
 
 fn assignment_text(task_id: &str, title: &str, instructions: &str) -> String {
@@ -339,15 +336,6 @@ pub(crate) async fn emit_task_updated(deps: &AssistantDeps, task: WorkspaceTaskR
             task: Box::new(task.into_response(&deps.workspace_id, &agent_names)),
         },
     );
-}
-
-/// `queued → running` as the cycle's run starts.
-pub(crate) async fn start_task_cycle(deps: &AssistantDeps, task_id: &str, run_id: &str) {
-    match workspace_tasks_repo::mark_running(&deps.pool, task_id, run_id).await {
-        Ok(Some(task)) => emit_task_updated(deps, task).await,
-        Ok(None) => {}
-        Err(error) => tracing::error!(task_id, run_id, error, "Failed to mark task running"),
-    }
 }
 
 /// Ends the cycle of `run_id`, posts its result to the parent session and
@@ -883,9 +871,12 @@ pub(crate) async fn request_stop(
 /// Restart recovery, once per process per workspace database, before
 /// `recover_stale_runs`: input of runs that never started is handed back,
 /// interrupted tasks end `stopped`, and each stopped task's parent gets the
-/// usual result event (one per cycle, by delivery key). Emits nothing: no
-/// window is listening yet.
-pub(crate) async fn recover_interrupted_tasks(pool: &DbPool) -> Result<(), String> {
+/// usual result event (one per cycle, by delivery key), naming the agent
+/// from `roster`. Emits nothing: no window is listening yet.
+pub(crate) async fn recover_interrupted_tasks(
+    pool: &DbPool,
+    roster: &[WorkspaceAgentRow],
+) -> Result<(), String> {
     let mut tx = pool
         .begin()
         .await
@@ -894,7 +885,7 @@ pub(crate) async fn recover_interrupted_tasks(pool: &DbPool) -> Result<(), Strin
     let stopped = workspace_tasks_repo::stop_interrupted(&mut tx).await?;
     for task in &stopped {
         if let Some(parent_session_id) = &task.parent_session_id {
-            signals::insert_event(&mut tx, result_event(task, parent_session_id, &[])?).await?;
+            signals::insert_event(&mut tx, result_event(task, parent_session_id, roster)?).await?;
         }
     }
     tx.commit()
@@ -1063,7 +1054,7 @@ mod tests {
         let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
         crate::db::test_support::insert_task(&pool, "task-1", "queued", None, None).await;
         let session = repository::create_session_and_link_task(
-            &pool,
+            &mut pool.acquire().await.unwrap(),
             task_session_context("assignee"),
             "task-1",
         )
@@ -1364,10 +1355,10 @@ mod tests {
     // task cycles end to end, against the database
     // -----------------------------------------------------------------
 
-    use crate::assistant::dispatcher::{claim, Kick};
+    use crate::assistant::dispatcher::{claim, start_cycle, CycleStart, Kick};
     use crate::assistant::repository::CreateRunParams;
     use crate::assistant::workspace_tasks_repo::TaskLineage;
-    use crate::db::test_support::workspace_pool;
+    use crate::db::test_support::{restart, workspace_pool};
 
     fn connection(id: &str) -> ProviderConnection {
         ProviderConnection {
@@ -1412,46 +1403,41 @@ mod tests {
         session.id
     }
 
+    const WS: &str = "ws-task-tests";
+
+    fn new_task<'a>(task_id: &'a str, lineage: TaskLineage) -> NewTask<'a> {
+        NewTask {
+            id: task_id,
+            created_by_workspace_agent_id: Some("wa-mgr"),
+            assigned_to_workspace_agent_id: "wa-1",
+            assigned_agent_definition_id: "def-1",
+            title: "Review",
+            instructions: "Review it",
+            lineage,
+        }
+    }
+
     /// What `assign_task` writes, minus the roster: the task row, its
     /// session and the pending instruction.
     async fn assign(pool: &DbPool, parent_session_id: &str, task_id: &str) -> String {
-        create_task_row(
+        let lineage = TaskLineage {
+            parent_session_id: Some(parent_session_id.to_string()),
+            ..TaskLineage::default()
+        };
+        create_assignment(
             pool,
-            NewTask {
-                id: task_id,
-                created_by_workspace_agent_id: Some("wa-mgr"),
-                assigned_to_workspace_agent_id: "wa-1",
-                assigned_agent_definition_id: "def-1",
-                title: "Review",
-                instructions: "Review it",
-                lineage: TaskLineage {
-                    parent_session_id: Some(parent_session_id.to_string()),
-                    ..TaskLineage::default()
-                },
-            },
-        )
-        .await
-        .unwrap();
-        enqueue_assignment(
-            pool,
-            task_id,
-            "wa-1",
-            "Review it".to_string(),
-            MessageOrigin::Agent {
-                agent: agent_snapshot(&[], "wa-mgr", None),
-                session_id: Some(parent_session_id.to_string()),
-                run_id: None,
-            },
-            "conn",
+            &new_task(task_id, lineage),
+            Ok("conn"),
+            parent_agent(),
         )
         .await
         .unwrap()
-        .id
+        .expect("a task with a connection gets a session")
     }
 
     /// The dispatcher claim that opens a cycle.
     async fn open(pool: &DbPool, session_id: &str) -> (AssistantRun, WorkspaceTaskRow) {
-        match claim(pool, session_id, |id| Some(connection(id)))
+        match claim(pool, WS, session_id, |id| Some(connection(id)))
             .await
             .unwrap()
         {
@@ -1557,7 +1543,7 @@ mod tests {
             finish(&pool, task_id, &run).await.unwrap();
         }
         assert!(matches!(
-            claim(&pool, &parent, |id| Some(connection(id)))
+            claim(&pool, WS, &parent, |id| Some(connection(id)))
                 .await
                 .unwrap(),
             Kick::Busy { .. }
@@ -1568,7 +1554,7 @@ mod tests {
             .unwrap();
         let Kick::Started {
             message_ids, task, ..
-        } = claim(&pool, &parent, |id| Some(connection(id)))
+        } = claim(&pool, WS, &parent, |id| Some(connection(id)))
             .await
             .unwrap()
         else {
@@ -1766,20 +1752,13 @@ mod tests {
     // -----------------------------------------------------------------
 
     async fn stop(pool: &DbPool, task_id: &str) -> StopOutcome {
-        request_stop(pool, "ws-stop-tests", task_id, &[])
-            .await
-            .unwrap()
+        request_stop(pool, WS, task_id, &[]).await.unwrap()
     }
 
     async fn set_run_status(pool: &DbPool, run: &AssistantRun, status: RunStatus) {
         repository::update_run_status(pool, &run.id, status, None)
             .await
             .unwrap();
-    }
-
-    async fn restart(pool: &DbPool) {
-        recover_interrupted_tasks(pool).await.unwrap();
-        repository::recover_stale_runs(pool).await.unwrap();
     }
 
     #[tokio::test]
@@ -1795,13 +1774,12 @@ mod tests {
         };
         assert_eq!(task.status, TaskStatus::Stopping);
 
-        // What the dispatcher does once it registers the run.
-        assert!(
-            workspace_tasks_repo::stop_requested(&pool, "task-1", &run.id)
-                .await
-                .unwrap()
-        );
-        set_run_status(&pool, &run, RunStatus::Cancelled).await;
+        let CycleStart::Cancelled(cancelled) =
+            start_cycle(&pool, Some("task-1"), &run.id).await.unwrap()
+        else {
+            panic!("the run sees the stop as it starts and never runs");
+        };
+        assert_eq!(cancelled.status, RunStatus::Cancelled);
         let finished = finish(&pool, "task-1", &run).await.unwrap();
 
         assert_eq!(finished.task.status, TaskStatus::Stopped);
@@ -1813,6 +1791,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn start_cycle_marks_an_unstopped_cycle_running() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+
+        let CycleStart::Run(Some(task)) =
+            start_cycle(&pool, Some("task-1"), &run.id).await.unwrap()
+        else {
+            panic!("an unstopped cycle runs");
+        };
+        assert_eq!(task.status, TaskStatus::Running);
+    }
+
+    #[tokio::test]
     async fn stop_during_tool_honoured_at_boundary() {
         let (_tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
@@ -1821,8 +1814,7 @@ mod tests {
         workspace_tasks_repo::mark_running(&pool, "task-1", &run.id)
             .await
             .unwrap();
-        let registration =
-            runtime::register_run(LiveRunKey::new("ws-stop-tests", &session), &run.id);
+        let registration = runtime::register_run(LiveRunKey::new(WS, &session), &run.id);
         set_run_status(&pool, &run, RunStatus::WaitingForTool).await;
 
         let StopOutcome::Requested(task) = stop(&pool, "task-1").await else {
@@ -1916,7 +1908,7 @@ mod tests {
 
         // The instruction predates the stop: no new cycle.
         assert!(matches!(
-            claim(&pool, &session, |id| Some(connection(id)))
+            claim(&pool, WS, &session, |id| Some(connection(id)))
                 .await
                 .unwrap(),
             Kick::Idle
@@ -1925,7 +1917,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_survives_restart() {
-        let (_tmp, pool) = workspace_pool().await;
+        let (tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
         let session = assign(&pool, &parent, "task-1").await;
         let (run, _) = open(&pool, &session).await;
@@ -1935,8 +1927,8 @@ mod tests {
         };
 
         // The process dies before the run winds down.
-        restart(&pool).await;
-        restart(&pool).await;
+        restart(tmp.path()).await;
+        let pool = restart(tmp.path()).await;
 
         let task = load_task(&pool, "task-1").await.unwrap();
         assert_eq!(task.status, TaskStatus::Stopped);
@@ -1949,7 +1941,7 @@ mod tests {
 
     #[tokio::test]
     async fn restart_marks_running_task_stopped_not_failed() {
-        let (_tmp, pool) = workspace_pool().await;
+        let (tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
         let session = assign(&pool, &parent, "task-1").await;
         let (run, _) = open(&pool, &session).await;
@@ -1958,7 +1950,7 @@ mod tests {
             .unwrap();
         set_run_status(&pool, &run, RunStatus::Running).await;
 
-        restart(&pool).await;
+        let pool = restart(tmp.path()).await;
 
         let task = load_task(&pool, "task-1").await.unwrap();
         assert_eq!(task.status, TaskStatus::Stopped);
@@ -1981,14 +1973,14 @@ mod tests {
 
     #[tokio::test]
     async fn restart_leaves_never_started_task_queued() {
-        let (_tmp, pool) = workspace_pool().await;
+        let (tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
         // Never claimed, and claimed by a run that never started.
         let unclaimed = assign(&pool, &parent, "task-1").await;
         let claimed = assign(&pool, &parent, "task-2").await;
         let (run, _) = open(&pool, &claimed).await;
 
-        restart(&pool).await;
+        let pool = restart(tmp.path()).await;
 
         for id in ["task-1", "task-2"] {
             assert_eq!(
@@ -2004,14 +1996,214 @@ mod tests {
         let stale = repository::get_run(&pool, &run.id).await.unwrap().unwrap();
         assert_eq!(stale.status, RunStatus::Failed);
 
-        // The next kick dispatches both again.
+        // The next kick dispatches both again, as their first cycle.
         for session in [&unclaimed, &claimed] {
-            let (rerun, _) = open(&pool, session).await;
+            let (rerun, task) = open(&pool, session).await;
+            assert_eq!(task.cycle_no, 1);
             let input = signals::list_content_for_run(&pool, session, &rerun.id)
                 .await
                 .unwrap();
             assert_eq!(input.len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn kick_between_run_end_and_finalize_waits_for_finalizer() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let (session, run) = running(&pool, &parent, "task-1").await;
+        end_run(&pool, &run, "cycle one done", RunStatus::Completed).await;
+
+        // Input arrives after the run ended, before its finalizer ran.
+        send(&pool, "task-1", "and another thing", parent_agent()).await;
+        assert!(matches!(
+            claim(&pool, WS, &session, |id| Some(connection(id)))
+                .await
+                .unwrap(),
+            Kick::Idle
+        ));
+
+        let finished = finish(&pool, "task-1", &run)
+            .await
+            .expect("cycle one is still the finalizer's to end");
+        assert_eq!(finished.task.status, TaskStatus::Completed);
+        assert_eq!(
+            finished.task.result_summary.as_deref(),
+            Some("cycle one done")
+        );
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_result", "pending")]
+        );
+        // The finalizer's own kick opens cycle two.
+        let (_, task) = open(&pool, &session).await;
+        assert_eq!(task.cycle_no, 2);
+    }
+
+    #[tokio::test]
+    async fn stop_between_claim_read_and_claim_commit_is_honoured() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+
+        // The claim has read the task as `queued`; the stop commits first.
+        let StopOutcome::Stopped(stopped) = stop(&pool, "task-1").await else {
+            panic!("no run yet: the stop ends the cycle");
+        };
+        // Then the claim's transaction runs.
+        let mut tx = pool.begin().await.unwrap();
+        let run = repository::insert_run_if_idle(
+            &mut tx,
+            CreateRunParams {
+                session_id: session.clone(),
+                status: RunStatus::Queued,
+                trigger: RunTrigger::WorkspaceTask,
+                connection_id: "conn".into(),
+                protocol_id: "openai".into(),
+                model_id: "model".into(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("the session is idle");
+        signals::claim_batch(&mut tx, &session, &run.id, "conn")
+            .await
+            .unwrap();
+        assert_eq!(
+            workspace_tasks_repo::open_cycle(&mut tx, &session, &run.id)
+                .await
+                .unwrap(),
+            None
+        );
+        drop(tx);
+
+        let task = load_task(&pool, "task-1").await.unwrap();
+        assert_eq!(task.status, TaskStatus::Stopped);
+        assert_eq!(task.stop_requested_at, stopped.task.stop_requested_at);
+    }
+
+    #[tokio::test]
+    async fn message_sent_while_stopping_resumes_after_the_stop() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let (session, run) = running(&pool, &parent, "task-1").await;
+        stop(&pool, "task-1").await;
+        set_run_status(&pool, &run, RunStatus::Cancelled).await;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // Sent while the cycle winds down: it waits for the finalizer.
+        let sent = send(&pool, "task-1", "then do this", MessageOrigin::User).await;
+        assert!(matches!(
+            claim(&pool, WS, &session, |id| Some(connection(id)))
+                .await
+                .unwrap(),
+            Kick::Idle
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let finished = finish(&pool, "task-1", &run).await.unwrap();
+        assert_eq!(finished.task.status, TaskStatus::Stopped);
+
+        let Kick::Started {
+            message_ids, task, ..
+        } = claim(&pool, WS, &session, |id| Some(connection(id)))
+            .await
+            .unwrap()
+        else {
+            panic!("input sent after the stop request resumes the stopped task");
+        };
+        assert_eq!(task.expect("a task cycle").cycle_no, 2);
+        assert_eq!(message_ids, [sent.message.id]);
+    }
+
+    #[tokio::test]
+    async fn stopped_task_not_resumed_by_child_result() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let (session, run) = running(&pool, &parent, "task-1").await;
+        let child_session = assign(&pool, &session, "child").await;
+        stop(&pool, "task-1").await;
+        set_run_status(&pool, &run, RunStatus::Cancelled).await;
+        finish(&pool, "task-1", &run).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        // Stop does not cascade: the child finishes and reports back.
+        let (child_run, _) = open(&pool, &child_session).await;
+        end_run(&pool, &child_run, "child done", RunStatus::Completed).await;
+        finish(&pool, "child", &child_run).await.unwrap();
+        assert!(matches!(
+            claim(&pool, WS, &session, |id| Some(connection(id)))
+                .await
+                .unwrap(),
+            Kick::Idle
+        ));
+
+        // Explicit input resumes it, and the result rides along.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        send(&pool, "task-1", "carry on", parent_agent()).await;
+        let Kick::Started { message_ids, .. } =
+            claim(&pool, WS, &session, |id| Some(connection(id)))
+                .await
+                .unwrap()
+        else {
+            panic!("explicit input resumes the task");
+        };
+        assert_eq!(message_ids.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn assignment_error_stores_nothing() {
+        let (_tmp, pool) = workspace_pool().await;
+        sqlx::query(
+            "CREATE TRIGGER no_signals BEFORE INSERT ON session_signals
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let sessions = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assistant_sessions")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let before = (sessions().await, message_count(&pool).await);
+
+        let error = create_assignment(
+            &pool,
+            &new_task("task-1", TaskLineage::default()),
+            Ok("conn"),
+            parent_agent(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("disk full"), "{error}");
+        assert_eq!(task_count(&pool).await, 0);
+        assert_eq!((sessions().await, message_count(&pool).await), before);
+    }
+
+    #[tokio::test]
+    async fn assignment_without_connection_is_stored_failed_without_session() {
+        let (_tmp, pool) = workspace_pool().await;
+
+        let session = create_assignment(
+            &pool,
+            &new_task("task-1", TaskLineage::default()),
+            Err("Agent 'x' has no active provider connection."),
+            parent_agent(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session, None);
+        let task = load_task(&pool, "task-1").await.unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(
+            task.failure_reason,
+            Some(FailureReason::ConnectionUnavailable)
+        );
+        assert_eq!(task.session_id, None);
     }
 
     // -----------------------------------------------------------------
@@ -2105,7 +2297,7 @@ mod tests {
         assert!(!sent.answered);
         assert_eq!(signal_status(&pool, &sent).await, SignalStatus::Pending);
         assert!(matches!(
-            claim(&pool, &session, |id| Some(connection(id))).await.unwrap(),
+            claim(&pool, WS, &session, |id| Some(connection(id))).await.unwrap(),
             Kick::Busy { run_id } if run_id == run.id
         ));
         assert_eq!(
@@ -2130,7 +2322,7 @@ mod tests {
         let sent = send(&pool, "task-1", "carry on", MessageOrigin::User).await;
         let Kick::Started {
             message_ids, task, ..
-        } = claim(&pool, &session, |id| Some(connection(id)))
+        } = claim(&pool, WS, &session, |id| Some(connection(id)))
             .await
             .unwrap()
         else {
@@ -2156,7 +2348,7 @@ mod tests {
         finish(&pool, "task-1", &run).await.unwrap();
 
         assert!(matches!(
-            claim(&pool, &session, |id| Some(connection(id)))
+            claim(&pool, WS, &session, |id| Some(connection(id)))
                 .await
                 .unwrap(),
             Kick::Idle
@@ -2166,9 +2358,10 @@ mod tests {
         // A new message resumes it, and the old one rides along.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         send(&pool, "task-1", "resume", parent_agent()).await;
-        let Kick::Started { message_ids, .. } = claim(&pool, &session, |id| Some(connection(id)))
-            .await
-            .unwrap()
+        let Kick::Started { message_ids, .. } =
+            claim(&pool, WS, &session, |id| Some(connection(id)))
+                .await
+                .unwrap()
         else {
             panic!("new input resumes the task");
         };
@@ -2288,7 +2481,7 @@ mod tests {
         assert_eq!(signal_status(&pool, &first).await, SignalStatus::Consumed);
         assert_eq!(signal_status(&pool, &second).await, SignalStatus::Pending);
         assert!(matches!(
-            claim(&pool, &session, |id| Some(connection(id)))
+            claim(&pool, WS, &session, |id| Some(connection(id)))
                 .await
                 .unwrap(),
             Kick::Busy { .. }
@@ -2310,30 +2503,14 @@ mod tests {
         let lineage = workspace_tasks_repo::lineage_for_caller(pool, caller_session, run_id)
             .await
             .unwrap();
-        create_task_row(
+        Ok(create_assignment(
             pool,
-            NewTask {
-                id: task_id,
-                created_by_workspace_agent_id: Some("wa-mgr"),
-                assigned_to_workspace_agent_id: "wa-1",
-                assigned_agent_definition_id: "def-1",
-                title: "Review",
-                instructions: "Review it",
-                lineage,
-            },
-        )
-        .await?;
-        Ok(enqueue_assignment(
-            pool,
-            task_id,
-            "wa-1",
-            "Review it".to_string(),
+            &new_task(task_id, lineage),
+            Ok("conn"),
             parent_agent(),
-            "conn",
         )
-        .await
-        .unwrap()
-        .id)
+        .await?
+        .expect("a task with a connection gets a session"))
     }
 
     async fn task_count(pool: &DbPool) -> i64 {

@@ -747,10 +747,8 @@ async fn test_create_session_and_link_task_links_atomically() {
     // Insert a workspace_tasks row first (assignTask's order) without a session_id.
     insert_task(&pool, "task-1", "queued", None, None).await;
 
-    // The atomic helper should INSERT the session AND stamp session_id in one
-    // transaction, so find_manager_session never sees it unlinked.
     let session = create_session_and_link_task(
-        &pool,
+        &mut pool.acquire().await.unwrap(),
         SessionContext {
             automation_id: Some("manager".to_string()),
             ..sample_context()

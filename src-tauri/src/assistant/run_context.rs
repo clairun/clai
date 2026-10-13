@@ -283,9 +283,13 @@ mod tests {
     /// A task session for MEMBER, created the way `assign_task` creates it.
     async fn member_task_session(pool: &crate::db::DbPool) -> AssistantSession {
         crate::db::test_support::insert_task(pool, "task-1", "queued", None, None).await;
-        repository::create_session_and_link_task(pool, task_session_context(MEMBER), "task-1")
-            .await
-            .expect("task session")
+        repository::create_session_and_link_task(
+            &mut pool.acquire().await.expect("connection"),
+            task_session_context(MEMBER),
+            "task-1",
+        )
+        .await
+        .expect("task session")
     }
 
     fn assign_member(fx: &Fixture, grants: Vec<FilesystemPathGrant>) {
@@ -432,8 +436,8 @@ mod tests {
                 .expect("a member may delegate");
         let pool = fx.state.workspace_db(WS).await.expect("workspace db");
         crate::assistant::workspace_tasks_repo::create_task_row(
-            &pool,
-            crate::assistant::workspace_tasks_repo::NewTask {
+            &mut pool.acquire().await.expect("connection"),
+            &crate::assistant::workspace_tasks_repo::NewTask {
                 id: "task-1",
                 created_by_workspace_agent_id: Some(caller),
                 assigned_to_workspace_agent_id: OTHER,
@@ -442,6 +446,7 @@ mod tests {
                 instructions: "Review it",
                 lineage: Default::default(),
             },
+            None,
         )
         .await
         .expect("member assigns member");

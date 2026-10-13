@@ -12,14 +12,13 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository::{self, CreateRunParams};
-use crate::assistant::run_lifecycle;
 use crate::assistant::runtime::{self, LiveRunKey};
 use crate::assistant::signals;
 use crate::assistant::tools::workspace_tasks;
 use crate::assistant::types::{
-    AssistantRun, MessageId, ProviderConnection, RunId, RunStatus, RunTrigger,
+    AssistantRun, MessageId, MessageOrigin, ProviderConnection, RunId, RunStatus, RunTrigger,
 };
-use crate::assistant::workspace_tasks_repo::{self, TaskStatus, WorkspaceTaskRow};
+use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskRow};
 use crate::db::DbPool;
 use crate::AppState;
 
@@ -97,18 +96,20 @@ async fn dispatch(
         .await?
         .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
     let app_state = deps.app.state::<AppState>();
-    let outcome = claim(&deps.pool, session_id, |connection_id| {
-        app_state
-            .config_manager
-            .lock()
-            .ok()?
-            .get_provider_connection(connection_id)
-    })
+    let outcome = claim(
+        &deps.pool,
+        &deps.workspace_id,
+        session_id,
+        |connection_id| {
+            app_state
+                .config_manager
+                .lock()
+                .ok()?
+                .get_provider_connection(connection_id)
+        },
+    )
     .await?;
 
-    if let Kick::Busy { .. } = &outcome {
-        runtime::notify_midrun(&LiveRunKey::new(&deps.workspace_id, session_id));
-    }
     if let Kick::Started {
         run,
         message_ids,
@@ -137,15 +138,21 @@ async fn dispatch(
 }
 
 /// The database half of [`kick`]: creates the run and claims the batch in
-/// one transaction. The run insert comes first so the transaction takes the
-/// write lock before it reads anything it depends on.
+/// one transaction, and wakes the active run when there is one. The run
+/// insert comes first so the transaction takes the write lock before it
+/// reads anything it depends on.
 pub(crate) async fn claim(
     pool: &DbPool,
+    workspace_id: &str,
     session_id: &str,
     connection: impl Fn(&str) -> Option<ProviderConnection>,
 ) -> Result<Kick, String> {
+    let busy = |run_id| {
+        runtime::notify_midrun(&LiveRunKey::new(workspace_id, session_id));
+        Kick::Busy { run_id }
+    };
     if let Some(run_id) = repository::active_run_id(pool, session_id).await? {
-        return Ok(Kick::Busy { run_id });
+        return Ok(busy(run_id));
     }
     let open = signals::list_open_content(pool, session_id).await?;
     if open.is_empty() {
@@ -168,31 +175,24 @@ pub(crate) async fn claim(
         return Ok(Kick::Deferred);
     };
 
-    let task = {
-        let mut conn = pool
-            .acquire()
-            .await
-            .map_err(|e| format!("Failed to acquire connection: {}", e))?;
-        workspace_tasks_repo::load_task_for_session(&mut conn, session_id).await?
-    };
-    if let Some(task) = &task {
-        // A stopping task waits for its finalizer; a stopped one resumes
-        // only for input sent after it stopped.
-        let resumes = match task.status {
-            TaskStatus::Stopping => false,
-            TaskStatus::Stopped => open
-                .iter()
-                .any(|content| content.message.created_at > task.updated_at),
-            _ => true,
-        };
-        if !resumes {
-            return Ok(Kick::Idle);
-        }
-    }
-    // A task session's runs keep the worker trigger: it selects the worker
-    // prompt.
-    let trigger = if task.is_some() {
+    // A task session is linked when it is created, so this read cannot go
+    // stale. Its runs keep the worker trigger: it selects the worker prompt.
+    let task_session = workspace_tasks_repo::task_of_session(pool, session_id)
+        .await?
+        .is_some();
+    let only_user_messages = open
+        .iter()
+        .filter(|content| {
+            content
+                .connection_id
+                .as_ref()
+                .is_none_or(|id| *id == connection.id)
+        })
+        .all(|content| content.message.origin == MessageOrigin::User);
+    let trigger = if task_session {
         RunTrigger::WorkspaceTask
+    } else if only_user_messages {
+        RunTrigger::UserMessage
     } else {
         RunTrigger::SignalWake
     };
@@ -218,7 +218,7 @@ pub(crate) async fn claim(
         drop(tx);
         // Another kick won; if its run already ended, its own kick took over.
         return Ok(match repository::active_run_id(pool, session_id).await? {
-            Some(run_id) => Kick::Busy { run_id },
+            Some(run_id) => busy(run_id),
             None => Kick::Idle,
         });
     };
@@ -228,6 +228,11 @@ pub(crate) async fn claim(
         return Ok(Kick::Idle);
     }
     let task = workspace_tasks_repo::open_cycle(&mut tx, session_id, &run.id).await?;
+    if task_session && task.is_none() {
+        // The task's cycle has not been finalized, and its finalizer kicks
+        // again; or it is stopped and nothing new asks it to resume.
+        return Ok(Kick::Idle);
+    }
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit dispatch transaction: {}", e))?;
@@ -254,22 +259,31 @@ fn spawn_run(
         trigger: run.trigger.clone(),
         connection_id: run.connection_id.clone(),
         cancel_token: run_registration.token(),
-        // The run's input is its claimed signals (`list_content_for_run`).
-        trigger_message_id: None,
     };
     tauri::async_runtime::spawn(async move {
         let _run_registration = run_registration;
         let _budget = budget;
         let session_id = input.session_id.clone();
         let run_id = input.run_id.clone().unwrap_or_default();
-        if stopped_before_start(&deps, task_id.as_deref(), &run_id).await {
-            cancel_unstarted(&deps, &session_id, &run_id).await;
-        } else {
-            if let Some(task_id) = &task_id {
-                workspace_tasks::start_task_cycle(&deps, task_id, &run_id).await;
+        match start_cycle(&deps.pool, task_id.as_deref(), &run_id).await {
+            Ok(CycleStart::Run(task)) => {
+                if let Some(task) = task {
+                    workspace_tasks::emit_task_updated(&deps, *task).await;
+                }
+                run_turn(&deps, input).await;
             }
-            if let Err(e) = engine::run_session_turn(&deps, input).await {
-                tracing::error!("Assistant engine error for run {}: {}", run_id, e);
+            Ok(CycleStart::Cancelled(run)) => {
+                if let Ok(Some(session)) = repository::get_session(&deps.pool, &session_id).await {
+                    let _ = deps.emit(
+                        &session,
+                        Some(&run_id),
+                        AssistantUiEvent::RunCancelled { run },
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(run_id, error, "Failed to start task cycle");
+                run_turn(&deps, input).await;
             }
         }
         if let Some(task_id) = &task_id {
@@ -279,30 +293,39 @@ fn spawn_run(
     });
 }
 
-/// Whether the task cycle of `run_id` was asked to stop before its run
-/// registered, so no cancel token could reach it.
-async fn stopped_before_start(deps: &AssistantDeps, task_id: Option<&str>, run_id: &str) -> bool {
-    let Some(task_id) = task_id else {
-        return false;
-    };
-    workspace_tasks_repo::stop_requested(&deps.pool, task_id, run_id)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::error!(task_id, run_id, error, "Failed to read task stop request");
-            false
-        })
+async fn run_turn(deps: &AssistantDeps, input: RunTurnInput) {
+    let run_id = input.run_id.clone().unwrap_or_default();
+    if let Err(e) = engine::run_session_turn(deps, input).await {
+        tracing::error!("Assistant engine error for run {}: {}", run_id, e);
+    }
 }
 
-async fn cancel_unstarted(deps: &AssistantDeps, session_id: &str, run_id: &str) {
-    let cancelled = match repository::get_session(&deps.pool, session_id).await {
-        Ok(Some(session)) => run_lifecycle::cancel_run(deps, &session, run_id)
-            .await
-            .map_err(|error| error.to_string()),
-        Ok(None) => Err(format!("Assistant session not found: {}", session_id)),
-        Err(error) => Err(error),
+#[derive(Debug)]
+pub(crate) enum CycleStart {
+    /// Start the turn; the task cycle, if any, is now `running`.
+    Run(Option<Box<WorkspaceTaskRow>>),
+    /// The task cycle was asked to stop before its run registered, so no
+    /// cancel token could reach it: the run is cancelled unstarted.
+    Cancelled(AssistantRun),
+}
+
+/// What a claimed run does before its turn. Call after `register_run`:
+/// `request_stop` writes the request before it reads the registry, so a
+/// stop either cancels the registered token or is seen here.
+pub(crate) async fn start_cycle(
+    pool: &DbPool,
+    task_id: Option<&str>,
+    run_id: &str,
+) -> Result<CycleStart, String> {
+    let Some(task_id) = task_id else {
+        return Ok(CycleStart::Run(None));
     };
-    if let Err(error) = cancelled {
-        tracing::error!(run_id, error, "Failed to cancel a stopped task's run");
+    // The cycle was opened `queued` for this run; only a stop moves it.
+    match workspace_tasks_repo::mark_running(pool, task_id, run_id).await? {
+        Some(task) => Ok(CycleStart::Run(Some(Box::new(task)))),
+        None => Ok(CycleStart::Cancelled(
+            repository::complete_run(pool, run_id, RunStatus::Cancelled, None).await?,
+        )),
     }
 }
 
@@ -322,7 +345,9 @@ pub(crate) async fn kick_logged(deps: &AssistantDeps, session_id: &str) {
 mod tests {
     use super::*;
     use crate::assistant::types::{ContentPart, SessionContext};
-    use crate::db::test_support::workspace_pool;
+    use crate::db::test_support::{restart, workspace_pool};
+
+    const WS: &str = "ws-dispatch-tests";
 
     fn connection(id: &str) -> ProviderConnection {
         ProviderConnection {
@@ -380,13 +405,13 @@ mod tests {
 
         let Kick::Started {
             run, message_ids, ..
-        } = claim(&pool, &session.id, |id| Some(connection(id)))
+        } = claim(&pool, WS, &session.id, |id| Some(connection(id)))
             .await
             .unwrap()
         else {
             panic!("an idle session with a pending message must start a run");
         };
-        assert_eq!(run.trigger, RunTrigger::SignalWake);
+        assert_eq!(run.trigger, RunTrigger::UserMessage);
         assert_eq!(run.status, RunStatus::Queued);
         assert_eq!(message_ids, vec![message_id.clone()]);
         let input = signals::list_content_for_run(&pool, &session.id, &run.id)
@@ -399,7 +424,7 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(matches!(
-            claim(&pool, &session.id, |id| Some(connection(id))).await.unwrap(),
+            claim(&pool, WS, &session.id, |id| Some(connection(id))).await.unwrap(),
             Kick::Busy { run_id } if run_id == run.id
         ));
     }
@@ -413,7 +438,7 @@ mod tests {
         let running = active_run(&pool, &session.id).await;
         let message_id = send(&pool, &session.id, "while you work").await;
 
-        let outcome = claim(&pool, &session.id, |id| Some(connection(id)))
+        let outcome = claim(&pool, WS, &session.id, |id| Some(connection(id)))
             .await
             .unwrap();
 
@@ -427,6 +452,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kick_wakes_the_active_run() {
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        let running = active_run(&pool, &session.id).await;
+        let key = LiveRunKey::new(WS, &session.id);
+        let _registration = runtime::register_run(key.clone(), &running.id);
+        let wake = runtime::midrun(&key, &running.id).unwrap();
+        send(&pool, &session.id, "while you work").await;
+
+        assert!(matches!(
+            claim(&pool, WS, &session.id, |id| Some(connection(id)))
+                .await
+                .unwrap(),
+            Kick::Busy { .. }
+        ));
+        tokio::time::timeout(std::time::Duration::from_millis(100), wake.notified())
+            .await
+            .expect("the kick wakes the active run for its mid-run input");
+    }
+
+    #[tokio::test]
+    async fn automated_events_wake_a_chat_with_the_signal_prompt() {
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        send(&pool, &session.id, "hello").await;
+        let mut tx = pool.begin().await.unwrap();
+        signals::insert_event(
+            &mut tx,
+            signals::NewEvent {
+                session_id: &session.id,
+                kind: signals::SignalKind::TaskResult,
+                text: "done".into(),
+                origin: MessageOrigin::Agent {
+                    agent: Box::new(crate::assistant::types::AgentRefSnapshot {
+                        workspace_agent_id: "wa-1".into(),
+                        agent_definition_id: None,
+                        display_name: "Worker".into(),
+                        is_default: false,
+                        avatar: None,
+                    }),
+                    session_id: None,
+                    run_id: None,
+                },
+                payload: serde_json::json!({}),
+                delivery_key: None,
+                connection_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let Kick::Started { run, .. } = claim(&pool, WS, &session.id, |id| Some(connection(id)))
+            .await
+            .unwrap()
+        else {
+            panic!("expected a run");
+        };
+        assert_eq!(run.trigger, RunTrigger::SignalWake);
+    }
+
+    #[tokio::test]
     async fn run_end_kicks_pending_user_messages() {
         let (_tmp, pool) = workspace_pool().await;
         let session = repository::create_session(&pool, SessionContext::default())
@@ -436,7 +527,7 @@ mod tests {
         let first = send(&pool, &session.id, "one").await;
         let second = send(&pool, &session.id, "two").await;
         assert!(matches!(
-            claim(&pool, &session.id, |id| Some(connection(id)))
+            claim(&pool, WS, &session.id, |id| Some(connection(id)))
                 .await
                 .unwrap(),
             Kick::Busy { .. }
@@ -449,7 +540,7 @@ mod tests {
             run,
             mut message_ids,
             ..
-        } = claim(&pool, &session.id, |id| Some(connection(id)))
+        } = claim(&pool, WS, &session.id, |id| Some(connection(id)))
             .await
             .unwrap()
         else {
@@ -471,7 +562,7 @@ mod tests {
             .unwrap();
         send(&pool, &session.id, "hello").await;
 
-        let outcome = claim(&pool, &session.id, |_| None).await.unwrap();
+        let outcome = claim(&pool, WS, &session.id, |_| None).await.unwrap();
 
         assert!(matches!(outcome, Kick::Deferred));
         assert!(repository::active_run_id(&pool, &session.id)
@@ -493,7 +584,7 @@ mod tests {
             let session_id = session.id.clone();
             sends.spawn(async move {
                 send(&pool, &session_id, &format!("message {index}")).await;
-                claim(&pool, &session_id, |id| Some(connection(id)))
+                claim(&pool, WS, &session_id, |id| Some(connection(id)))
                     .await
                     .unwrap()
             });
@@ -543,7 +634,7 @@ mod tests {
         };
         assert_eq!(run_id_of(composer.clone()).await, None);
 
-        let Kick::Started { run, .. } = claim(&pool, &session.id, |id| Some(connection(id)))
+        let Kick::Started { run, .. } = claim(&pool, WS, &session.id, |id| Some(connection(id)))
             .await
             .unwrap()
         else {
@@ -584,7 +675,7 @@ mod tests {
             let pool = pool.clone();
             let held = held.clone();
             async move {
-                let outcome = claim(&pool, &session_id, |id| Some(connection(id))).await;
+                let outcome = claim(&pool, WS, &session_id, |id| Some(connection(id))).await;
                 if let Ok(Kick::Started { run, .. }) = &outcome {
                     held.lock().unwrap().push((run.id.clone(), permit));
                 }
@@ -592,13 +683,6 @@ mod tests {
             }
         })
         .await;
-    }
-
-    async fn restart(pool: &DbPool) {
-        workspace_tasks::recover_interrupted_tasks(pool)
-            .await
-            .unwrap();
-        repository::recover_stale_runs(pool).await.unwrap();
     }
 
     async fn run_count(pool: &DbPool) -> i64 {
@@ -610,7 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_signals_resume_after_restart() {
-        let (_tmp, pool) = workspace_pool().await;
+        let (tmp, pool) = workspace_pool().await;
         let claimed = repository::create_session(&pool, SessionContext::default())
             .await
             .unwrap();
@@ -618,15 +702,16 @@ mod tests {
             .await
             .unwrap();
         send(&pool, &claimed.id, "claimed by a run that never started").await;
-        let Kick::Started { run: stale, .. } = claim(&pool, &claimed.id, |id| Some(connection(id)))
-            .await
-            .unwrap()
+        let Kick::Started { run: stale, .. } =
+            claim(&pool, WS, &claimed.id, |id| Some(connection(id)))
+                .await
+                .unwrap()
         else {
             panic!("expected a run");
         };
         send(&pool, &unclaimed.id, "never claimed").await;
 
-        restart(&pool).await;
+        let pool = restart(tmp.path()).await;
         let sessions = signals::sessions_with_pending(&pool).await.unwrap();
         assert_eq!(sessions, vec![claimed.id.clone(), unclaimed.id.clone()]);
         let held = Default::default();

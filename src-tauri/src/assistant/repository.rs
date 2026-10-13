@@ -179,20 +179,12 @@ pub async fn create_session(
     Ok(session)
 }
 
-/// Create a session AND record its id on the given `workspace_tasks` row, in a
-/// single SQLite transaction.
-///
-/// `assignTask` creates the task row first (with `session_id = NULL`), then the
-/// session that runs the task, then later UPDATEs the task row
-/// to stamp the session id. Between the session INSERT and that UPDATE there is
-/// a window where the new session is visible to `find_manager_session` but has
-/// no `workspace_tasks.session_id` link, so a self-assigned task's session
-/// (manager→manager) would briefly be taken as the manager conversation.
-/// Bundling the two writes into one transaction closes that window: the session
-/// only becomes visible to a concurrent reader after the task row already
-/// points at it, so the anti-join excludes it.
+/// Creates a session and records its id on the given `workspace_tasks` row.
+/// Call inside the assignment's transaction: a concurrent
+/// `find_manager_session` then never sees the session unlinked, which would
+/// make a manager→manager task session pass for the manager conversation.
 pub async fn create_session_and_link_task(
-    pool: &DbPool,
+    conn: &mut SqliteConnection,
     context: SessionContext,
     task_id: &str,
 ) -> Result<AssistantSession, String> {
@@ -203,11 +195,6 @@ pub async fn create_session_and_link_task(
         created_at: now,
         updated_at: now,
     };
-
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start session+task link transaction: {e}"))?;
 
     sqlx::query(
         r#"
@@ -220,7 +207,7 @@ pub async fn create_session_and_link_task(
     .bind(to_json_string(&session.context)?)
     .bind(session.created_at)
     .bind(session.updated_at)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(|e| format!("Failed to create assistant session: {e}"))?;
 
@@ -231,13 +218,9 @@ pub async fn create_session_and_link_task(
     )
     .bind(&session.id)
     .bind(task_id)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await
     .map_err(|e| format!("Failed to link session to workspace task: {e}"))?;
-
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit session+task link transaction: {e}"))?;
 
     Ok(session)
 }

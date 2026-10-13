@@ -304,22 +304,25 @@ const MAX_ASSIGNMENTS_PER_RUN: i64 = 4;
 /// Unfinished tasks one workspace agent may have created.
 const MAX_ACTIVE_TASKS_PER_CREATOR: i64 = 12;
 
-/// Inserts a `queued` task, unless it would break a delegation limit.
-pub(crate) async fn create_task_row(pool: &DbPool, task: NewTask<'_>) -> Result<(), String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start task creation transaction: {}", e))?;
-    ensure_within_limits(&mut tx, &task).await?;
+/// Inserts a `queued` task, or with `error` one that failed for want of a
+/// provider connection, unless it would break a delegation limit.
+pub(crate) async fn create_task_row(
+    conn: &mut SqliteConnection,
+    task: &NewTask<'_>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    ensure_within_limits(conn, task).await?;
     let now = now_ms();
+    let failed = error.is_some();
     sqlx::query(
         r#"
         INSERT INTO workspace_tasks (
             id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
-            assigned_agent_definition_id, title, instructions, status,
-            parent_session_id, parent_run_id, parent_task_id, depth, created_at, updated_at
+            assigned_agent_definition_id, title, instructions, status, failure_reason, error,
+            parent_session_id, parent_run_id, parent_task_id, depth, created_at, updated_at,
+            completed_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(task.id)
@@ -328,18 +331,20 @@ pub(crate) async fn create_task_row(pool: &DbPool, task: NewTask<'_>) -> Result<
     .bind(task.assigned_agent_definition_id)
     .bind(task.title)
     .bind(task.instructions)
-    .bind(task.lineage.parent_session_id)
-    .bind(task.lineage.parent_run_id)
-    .bind(task.lineage.parent_task_id)
+    .bind(if failed { "failed" } else { "queued" })
+    .bind(failed.then_some("connection_unavailable"))
+    .bind(error)
+    .bind(&task.lineage.parent_session_id)
+    .bind(&task.lineage.parent_run_id)
+    .bind(&task.lineage.parent_task_id)
     .bind(task.lineage.depth)
     .bind(now)
     .bind(now)
-    .execute(&mut *tx)
+    .bind(failed.then_some(now))
+    .execute(conn)
     .await
     .map_err(|e| format!("Failed to create workspace task: {}", e))?;
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit task creation transaction: {}", e))
+    Ok(())
 }
 
 async fn ensure_within_limits(
@@ -404,8 +409,11 @@ pub(crate) async fn lineage_for_caller(
 }
 
 /// Opens the next cycle of the task owning `session_id` for `run_id`, the
-/// run the dispatcher just claimed. `None` when the session is not a task
-/// session. Call inside the claim transaction.
+/// run the dispatcher just claimed its input for. Only a finished task opens
+/// one: a new task, a completed or failed one, or a stopped one that `run_id`
+/// claimed a message for that was sent after the stop. `None` when the
+/// session is not a task session or the task is not finished. Call inside
+/// the claim transaction, after the claim.
 pub(crate) async fn open_cycle(
     conn: &mut SqliteConnection,
     session_id: &str,
@@ -418,12 +426,19 @@ pub(crate) async fn open_cycle(
             result_summary = NULL, error = NULL, completed_at = NULL,
             stop_requested_at = NULL, input_answered_by_json = NULL, updated_at = ?
         WHERE session_id = ?
+          AND (status IN ('completed', 'failed')
+               OR (status = 'queued' AND run_id IS NULL)
+               OR (status = 'stopped' AND EXISTS (
+                   SELECT 1 FROM session_signals s
+                   WHERE s.claimed_run_id = ? AND s.kind IN ('user_message', 'agent_message')
+                     AND s.created_at > COALESCE(workspace_tasks.stop_requested_at, workspace_tasks.updated_at))))
         RETURNING {TASK_COLUMNS}
         "#
     ))
     .bind(run_id)
     .bind(now_ms())
     .bind(session_id)
+    .bind(run_id)
     .fetch_optional(conn)
     .await
     .map_err(|e| format!("Failed to open task cycle: {}", e))?;
@@ -579,29 +594,11 @@ pub(crate) async fn request_stop(
     }
 }
 
-/// Whether a stop was requested for the cycle of `run_id`.
-pub(crate) async fn stop_requested(
-    pool: &DbPool,
-    task_id: &str,
-    run_id: &str,
-) -> Result<bool, String> {
-    let found: Option<i64> = sqlx::query_scalar(
-        "SELECT 1 FROM workspace_tasks
-         WHERE id = ? AND run_id = ? AND stop_requested_at IS NOT NULL",
-    )
-    .bind(task_id)
-    .bind(run_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to read task stop request: {}", e))?;
-    Ok(found.is_some())
-}
-
 /// Restart recovery for tasks the previous process left mid-cycle: a task
-/// that got a session but whose run never started stays `queued` for the
-/// next kick; one with no session can never be dispatched and fails; every
-/// other unfinished cycle ends `stopped`. Returns the stopped tasks. Run
-/// before `recover_stale_runs`, which closes the runs this reads.
+/// whose run never started is `queued` again without a run, for the next
+/// kick; one with no session can never be dispatched and fails; every other
+/// unfinished cycle ends `stopped`. Returns the stopped tasks. Run before
+/// `recover_stale_runs`, which closes the runs this reads.
 pub(crate) async fn stop_interrupted(
     conn: &mut SqliteConnection,
 ) -> Result<Vec<WorkspaceTaskRow>, String> {
@@ -621,14 +618,24 @@ pub(crate) async fn stop_interrupted(
     .await
     .map_err(|e| format!("Failed to fail undispatched workspace tasks: {}", e))?;
 
+    sqlx::query(
+        r#"
+        UPDATE workspace_tasks SET run_id = NULL, cycle_no = cycle_no - 1
+        WHERE status = 'queued'
+          AND run_id IN (SELECT id FROM assistant_runs WHERE status = 'queued')
+        "#,
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| format!("Failed to requeue unstarted workspace tasks: {}", e))?;
+
     let rows = sqlx::query(&format!(
         r#"
         UPDATE workspace_tasks
         SET status = 'stopped', error = 'task interrupted by app restart',
             stop_requested_at = COALESCE(stop_requested_at, ?), updated_at = ?, completed_at = ?
         WHERE status IN ('running', 'input_required', 'stopping')
-           OR (status = 'queued' AND run_id IS NOT NULL
-               AND run_id NOT IN (SELECT id FROM assistant_runs WHERE status = 'queued'))
+           OR (status = 'queued' AND run_id IS NOT NULL)
         RETURNING {TASK_COLUMNS}
         "#
     ))
@@ -639,32 +646,6 @@ pub(crate) async fn stop_interrupted(
     .await
     .map_err(|e| format!("Failed to stop interrupted workspace tasks: {}", e))?;
     rows.iter().map(WorkspaceTaskRow::from_sql).collect()
-}
-
-/// Fails a task that never got a run because its assignee has no usable
-/// provider connection.
-pub(crate) async fn fail_unstarted(
-    pool: &DbPool,
-    task_id: &str,
-    error: &str,
-) -> Result<(), String> {
-    let now = now_ms();
-    sqlx::query(
-        r#"
-        UPDATE workspace_tasks
-        SET status = 'failed', failure_reason = 'connection_unavailable', error = ?,
-            updated_at = ?, completed_at = ?
-        WHERE id = ?
-        "#,
-    )
-    .bind(error)
-    .bind(now)
-    .bind(now)
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to update workspace task: {}", e))?;
-    Ok(())
 }
 
 fn now_ms() -> i64 {
@@ -690,6 +671,13 @@ mod tests {
             .unwrap_or_else(|| panic!("{id} should exist"))
     }
 
+    async fn insert(pool: &DbPool, task: NewTask<'_>, error: Option<&str>) {
+        let mut conn = pool.acquire().await.expect("connection");
+        create_task_row(&mut conn, &task, error)
+            .await
+            .expect("insert");
+    }
+
     fn new_task<'a>(id: &'a str, creator: Option<&'a str>, assignee: &'a str) -> NewTask<'a> {
         NewTask {
             id,
@@ -705,12 +693,12 @@ mod tests {
     #[tokio::test]
     async fn created_task_round_trips_through_load() {
         let (_tmp, pool) = workspace_pool().await;
-        create_task_row(&pool, new_task("task-1", Some("wa-mgr"), "wa-1"))
-            .await
-            .expect("insert");
-        fail_unstarted(&pool, "task-1", "boom")
-            .await
-            .expect("update");
+        insert(
+            &pool,
+            new_task("task-1", Some("wa-mgr"), "wa-1"),
+            Some("boom"),
+        )
+        .await;
 
         let row = task(&pool, "task-1").await;
 
@@ -782,9 +770,7 @@ mod tests {
     #[tokio::test]
     async fn response_names_agents_from_the_roster() {
         let (_tmp, pool) = workspace_pool().await;
-        create_task_row(&pool, new_task("task-1", Some("wa-mgr"), "wa-1"))
-            .await
-            .expect("insert");
+        insert(&pool, new_task("task-1", Some("wa-mgr"), "wa-1"), None).await;
 
         let response = task(&pool, "task-1")
             .await
@@ -798,9 +784,12 @@ mod tests {
     #[tokio::test]
     async fn response_for_agents_off_the_roster() {
         let (_tmp, pool) = workspace_pool().await;
-        create_task_row(&pool, new_task("task-1", Some("wa-removed"), "wa-gone"))
-            .await
-            .expect("insert");
+        insert(
+            &pool,
+            new_task("task-1", Some("wa-removed"), "wa-gone"),
+            None,
+        )
+        .await;
 
         let response = task(&pool, "task-1")
             .await
@@ -820,12 +809,12 @@ mod tests {
     #[tokio::test]
     async fn task_updated_payload_is_camel_case() {
         let (_tmp, pool) = workspace_pool().await;
-        create_task_row(&pool, new_task("task-1", Some("wa-mgr"), "wa-1"))
-            .await
-            .expect("insert");
-        fail_unstarted(&pool, "task-1", "no connection")
-            .await
-            .expect("fail");
+        insert(
+            &pool,
+            new_task("task-1", Some("wa-mgr"), "wa-1"),
+            Some("no connection"),
+        )
+        .await;
         let task = task(&pool, "task-1")
             .await
             .into_response("ws-1", &names(&[]));

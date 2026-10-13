@@ -289,7 +289,7 @@ pub async fn run_session_turn(
             connection.protocol_id
         );
         fail_run(deps, &session, &run_id, &message).await?;
-        discard_if_unanswered(deps, &session, &run_id, &input, &None).await;
+        discard_if_unanswered(deps, &session, &run_id, &None).await;
         return Err(AssistantEngineError::Provider(
             crate::assistant::providers::types::ProviderError::RequestFailed(message),
         ));
@@ -412,8 +412,7 @@ pub async fn run_session_turn(
                         Err(error) => {
                             let message = error.message();
                             fail_run(deps, &session, &run_id, &message).await?;
-                            discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot)
-                                .await;
+                            discard_if_unanswered(deps, &session, &run_id, &assistant_slot).await;
                             return Err(AssistantEngineError::Provider(
                                 crate::assistant::providers::types::ProviderError::RequestFailed(
                                     message,
@@ -607,7 +606,7 @@ pub async fn run_session_turn(
                 );
             }
             fail_run(deps, &session, &run_id, &message).await?;
-            discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot).await;
+            discard_if_unanswered(deps, &session, &run_id, &assistant_slot).await;
             Err(AssistantEngineError::Provider(
                 crate::assistant::providers::types::ProviderError::RequestFailed(message),
             ))
@@ -651,7 +650,6 @@ async fn discard_if_unanswered(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    input: &crate::assistant::engine::RunTurnInput,
     assistant_slot: &Option<AssistantMessage>,
 ) {
     let placeholder_id = match assistant_slot.as_ref() {
@@ -666,14 +664,7 @@ async fn discard_if_unanswered(
             _ => return,
         },
     };
-    discard_unanswered_run_input(
-        deps,
-        session,
-        run_id,
-        input.trigger_message_id.as_deref(),
-        placeholder_id,
-    )
-    .await;
+    discard_unanswered_run_input(deps, session, run_id, placeholder_id).await;
 }
 
 fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) -> bool {

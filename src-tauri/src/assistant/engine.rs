@@ -42,11 +42,6 @@ pub struct RunTurnInput {
     pub trigger: RunTrigger,
     pub connection_id: String,
     pub cancel_token: CancellationToken,
-    /// Id of the user message that triggered this run (Some only for the
-    /// direct send path). If the run fails before the provider produces
-    /// anything, this message is discarded — see
-    /// `discard_unanswered_run_input`.
-    pub trigger_message_id: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -147,14 +142,9 @@ async fn close_unstarted_run(
     {
         tracing::warn!(run_id, error = %close_error, "could not mark unstarted run failed");
     }
-    discard_unanswered_run_input_with_sink(
-        pool,
-        session_id,
-        run_id,
-        input.trigger_message_id.as_deref(),
-        None,
-        |message_id| emit(run_id, AssistantUiEvent::MessageDeleted { message_id }),
-    )
+    discard_unanswered_run_input_with_sink(pool, session_id, run_id, None, |message_id| {
+        emit(run_id, AssistantUiEvent::MessageDeleted { message_id });
+    })
     .await;
     Err(error)
 }
@@ -166,14 +156,13 @@ mod tests {
     use crate::assistant::types::{ContentPart, RunStatus, SessionContext};
     use crate::db::test_support::workspace_pool;
 
-    fn input(run_id: &str, trigger_message_id: &str) -> RunTurnInput {
+    fn input(run_id: &str) -> RunTurnInput {
         RunTurnInput {
             session_id: String::new(),
             run_id: Some(run_id.to_string()),
             trigger: RunTrigger::UserMessage,
             connection_id: "connection".into(),
             cancel_token: CancellationToken::new(),
-            trigger_message_id: Some(trigger_message_id.to_string()),
         }
     }
 
@@ -203,7 +192,15 @@ mod tests {
             vec![ContentPart::Text {
                 text: "hello".into(),
             }],
-            None,
+            Some("connection"),
+        )
+        .await
+        .unwrap();
+        crate::assistant::signals::consume(
+            &pool,
+            &session.id,
+            &run.id,
+            std::slice::from_ref(&trigger.id),
         )
         .await
         .unwrap();
@@ -213,7 +210,7 @@ mod tests {
         let result = close_unstarted_run(
             &pool,
             &session.id,
-            &input(&run.id, &trigger.id),
+            &input(&run.id),
             start_error(),
             |_, event| events.push(event),
         )
@@ -238,7 +235,7 @@ mod tests {
         let unknown = close_unstarted_run(
             &pool,
             &session.id,
-            &input("missing-run", "missing-message"),
+            &input("missing-run"),
             start_error(),
             |_, _| {},
         )

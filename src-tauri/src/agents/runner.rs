@@ -304,6 +304,7 @@ async fn run_claimed_instance(
         },
     )
     .await?;
+    let ran = run.is_some();
     let result = match run {
         Some(run) => {
             run_scheduled_agent(
@@ -333,15 +334,16 @@ async fn run_claimed_instance(
     let next_run_at_unix_ms = complete_tick(scheduler, instance_id, success, &agent_config).await;
 
     // Persist the new next-run wall-clock time (so an app restart
-    // resumes the schedule instead of firing immediately) and the
-    // run-completion stamp (so the workspace rail can flag the result
-    // as unread until the user opens the workspace). Best-effort: a
+    // resumes the schedule instead of firing immediately) and, when the
+    // tick ran, the run-completion stamp (so the workspace rail can flag the
+    // result as unread until the user opens the workspace). Best-effort: a
     // write failure here only loses the restart-survival guarantee
     // for this one workspace until the next successful tick.
     if let Err(e) = persist_workspace_run_completion(
         state.inner(),
         &agent_config.workspace_id,
         next_run_at_unix_ms,
+        ran,
     ) {
         tracing::warn!(
             workspace_id = %agent_config.workspace_id,
@@ -461,15 +463,17 @@ async fn start_tick_run(
 
 /// Persist a run's completion to the workspace config: the new
 /// `schedule.next_run_at_unix_ms` anchor (`None` parks the schedule) and
-/// `last_run_completed_at`, which the workspace rail compares against
-/// `last_opened_at` to show the "unread" indicator. Refreshes the
-/// in-memory workspace index so subsequent loads see both. Failed runs
-/// stamp completion too — a failure the user hasn't seen is exactly the
-/// kind of activity the unread marker exists for.
+/// `last_run_completed_at` when the tick `ran`, which the workspace rail
+/// compares against `last_opened_at` to show the "unread" indicator; a
+/// skipped tick produced nothing to read. Refreshes the in-memory workspace
+/// index so subsequent loads see both. Failed runs stamp completion too — a
+/// failure the user hasn't seen is exactly the kind of activity the unread
+/// marker exists for.
 pub(crate) fn persist_workspace_run_completion(
     state: &AppState,
     workspace_id: &str,
     next_run_at_unix_ms: Option<i64>,
+    ran: bool,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
     // Atomic RMW: `workspace_mark_opened` fires from the FE the moment a
@@ -479,7 +483,9 @@ pub(crate) fn persist_workspace_run_completion(
     // re-fired on every app restart).
     state.update_workspace_config(workspace_id, |config| {
         config.schedule.next_run_at_unix_ms = next_run_at_unix_ms;
-        config.last_run_completed_at = now;
+        if ran {
+            config.last_run_completed_at = now;
+        }
         config.updated_at = now;
         Ok(())
     })?;
@@ -612,7 +618,6 @@ async fn run_scheduled_agent(
         trigger: RunTrigger::Scheduled,
         connection_id: connection.id.clone(),
         cancel_token,
-        trigger_message_id: None,
     };
     let result = engine::run_session_turn(&deps, input).await;
     drop(run_registration);

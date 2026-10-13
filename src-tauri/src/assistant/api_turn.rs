@@ -88,7 +88,7 @@ pub async fn run_session_turn(
                         continue;
                     }
                 }
-                return fail_opening_api_stream(deps, &input, &session, &run_id, &state, e).await;
+                return fail_opening_api_stream(deps, &session, &run_id, &state, e).await;
             }
         };
 
@@ -121,7 +121,6 @@ pub async fn run_session_turn(
             StreamExit::ProviderReported { message } => {
                 fail_terminal_api_stream(
                     deps,
-                    &input,
                     &session,
                     &run_id,
                     &state,
@@ -134,7 +133,6 @@ pub async fn run_session_turn(
             StreamExit::StreamFailed { message } => {
                 let message = fail_terminal_api_stream(
                     deps,
-                    &input,
                     &session,
                     &run_id,
                     &state,
@@ -202,7 +200,6 @@ async fn consume_and_finalize_api_stream(
 
 async fn fail_opening_api_stream(
     deps: &AssistantDeps,
-    input: &RunTurnInput,
     session: &AssistantSession,
     run_id: &str,
     state: &ApiTurnState,
@@ -213,21 +210,13 @@ async fn fail_opening_api_stream(
         failure_message_with_compaction_context(&provider_message, &state.compaction_attempt);
     fail_run(deps, session, run_id, &failure).await?;
     if state.iteration == 0 {
-        discard_unanswered_run_input(
-            deps,
-            session,
-            run_id,
-            input.trigger_message_id.as_deref(),
-            None,
-        )
-        .await;
+        discard_unanswered_run_input(deps, session, run_id, None).await;
     }
     Err(provider_error_with_compaction_context(error, &provider_message, failure).into())
 }
 
 async fn fail_terminal_api_stream(
     deps: &AssistantDeps,
-    input: &RunTurnInput,
     session: &AssistantSession,
     run_id: &str,
     state: &ApiTurnState,
@@ -238,14 +227,7 @@ async fn fail_terminal_api_stream(
         failure_message_with_compaction_context(provider_message, &state.compaction_attempt);
     fail_run(deps, session, run_id, &message).await?;
     if state.iteration == 0 && assistant_message.1 {
-        discard_unanswered_run_input(
-            deps,
-            session,
-            run_id,
-            input.trigger_message_id.as_deref(),
-            Some(assistant_message.0),
-        )
-        .await;
+        discard_unanswered_run_input(deps, session, run_id, Some(assistant_message.0)).await;
     }
     Ok(message)
 }

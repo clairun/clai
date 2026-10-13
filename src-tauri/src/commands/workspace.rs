@@ -2766,7 +2766,7 @@ pub async fn workspace_create(
     // can start chatting / scheduling without a detour to Settings.
     config.attach_default_provider(&app_config(state.inner())?.provider_connections, now);
     workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
-    let workspace_pool = crate::db::init_workspace_db(&root).await?;
+    let workspace_pool = crate::db::init_workspace_db(&root, &[]).await?;
     state
         .workspace_index
         .write()
@@ -2909,7 +2909,7 @@ pub async fn workspace_fork(
         .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
 
     workspace_config::save(&root, &forked).map_err(|e| e.to_string())?;
-    let workspace_pool = crate::db::init_workspace_db(&root).await?;
+    let workspace_pool = crate::db::init_workspace_db(&root, &[]).await?;
     copy_workspace_durable_files(&source_root, &root)?;
     workspace_config::save(&root, &forked).map_err(|e| e.to_string())?;
     write_fork_marker(
