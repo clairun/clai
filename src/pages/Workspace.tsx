@@ -103,6 +103,8 @@ type WorkspaceUiState = {
   activePanel: ActivePanel;
   previewEntry: PreviewEntry | null;
   viewingTask: WorkspaceTaskResponse | null;
+  // The logs a nested task was opened from, oldest first, for Back.
+  previousTasks: readonly WorkspaceTaskResponse[];
   // The Agents drawer's inline "Add to crew" picker; the drawer header carries
   // the toggle, so the flag lives with the drawer, not inside the list.
   crewPickerOpen: boolean;
@@ -119,6 +121,7 @@ const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
   previewEntry: null,
   viewingTask: null,
+  previousTasks: EMPTY_TASKS,
   crewPickerOpen: false,
 };
 type SettingsSelection = { kind: 'general' } | { kind: 'agent'; agentId: string };
@@ -1668,7 +1671,7 @@ const Workspace = () => {
   //   - viewingTask:  task object — task transcript log
   // Only one slide-out may be open at a time; opening one clears the other.
   const [uiByWorkspace, setUiByWorkspace] = useState<Record<string, WorkspaceUiState>>({});
-  const { activePanel, previewEntry, viewingTask, crewPickerOpen } =
+  const { activePanel, previewEntry, viewingTask, previousTasks, crewPickerOpen } =
     uiByWorkspace[workspaceId] ?? EMPTY_WORKSPACE_UI;
 
   const patchWorkspaceUi = useCallback(
@@ -1695,6 +1698,7 @@ const Workspace = () => {
             activePanel: next,
             previewEntry: next === 'memories' || next === 'artifacts' ? current.previewEntry : null,
             viewingTask: next === 'tasks' ? current.viewingTask : null,
+            previousTasks: next === 'tasks' ? current.previousTasks : EMPTY_TASKS,
             crewPickerOpen: next === 'agents' ? current.crewPickerOpen : false,
           },
         };
@@ -1712,7 +1716,7 @@ const Workspace = () => {
 
   const openTaskTranscript = useCallback(
     (task: WorkspaceTaskResponse) => {
-      patchWorkspaceUi({ previewEntry: null, viewingTask: task });
+      patchWorkspaceUi({ previewEntry: null, viewingTask: task, previousTasks: EMPTY_TASKS });
     },
     [patchWorkspaceUi]
   );
@@ -1722,7 +1726,7 @@ const Workspace = () => {
     [patchWorkspaceUi]
   );
   const closeTaskTranscript = useCallback(
-    () => patchWorkspaceUi({ viewingTask: null }),
+    () => patchWorkspaceUi({ viewingTask: null, previousTasks: EMPTY_TASKS }),
     [patchWorkspaceUi]
   );
 
@@ -2271,6 +2275,28 @@ const Workspace = () => {
     updateViewingTask,
     onNotFound: handleTaskNotFound,
   });
+  // From the chat or the banner: nothing to go Back to.
+  const openTask = useCallback(
+    (taskId: string) => {
+      patchWorkspaceUi({ previousTasks: EMPTY_TASKS });
+      openTaskById(taskId);
+    },
+    [openTaskById, patchWorkspaceUi]
+  );
+  // From inside a task's log: Back returns to it.
+  const openNestedTask = useCallback(
+    (taskId: string) => {
+      if (viewingTask) patchWorkspaceUi({ previousTasks: [...previousTasks, viewingTask] });
+      openTaskById(taskId);
+    },
+    [openTaskById, patchWorkspaceUi, previousTasks, viewingTask]
+  );
+  const backToPreviousTask = useCallback(() => {
+    const previous = previousTasks[previousTasks.length - 1];
+    if (previous) {
+      patchWorkspaceUi({ viewingTask: previous, previousTasks: previousTasks.slice(0, -1) });
+    }
+  }, [patchWorkspaceUi, previousTasks]);
   // A toast's "Open task" lands here as `?task=<id>`: open it once the
   // details are in (so a recent task opens without a fetch), then drop the
   // param so it does not reopen.
@@ -2459,7 +2485,7 @@ const Workspace = () => {
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <WorkspaceAttentionBanner tasks={tasks} onOpenTask={openTaskById} />
+      <WorkspaceAttentionBanner tasks={tasks} onOpenTask={openTask} />
 
       <div className={styles.workspaceBody}>
         {/* Keyed by workspace so a switch applies the new workspace's panel
@@ -2491,7 +2517,7 @@ const Workspace = () => {
             isLoadingOlderMessages={isLoadingOlderMessages}
             onLoadOlderMessages={handleLoadOlderMessages}
             taskRoster={chatRoster}
-            onOpenTask={openTaskById}
+            onOpenTask={openTask}
           />
         </div>
 
@@ -2512,6 +2538,8 @@ const Workspace = () => {
             task={liveViewingTask}
             roster={chatRoster}
             onClose={closeTaskTranscript}
+            onOpenTask={openNestedTask}
+            onBack={previousTasks.length > 0 ? backToPreviousTask : undefined}
           />
         )}
 

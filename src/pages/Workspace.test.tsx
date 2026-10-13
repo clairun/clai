@@ -1,6 +1,6 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router';
 
@@ -1265,5 +1265,88 @@ describe('Workspace task store', () => {
     await userEvent.click(await screen.findByRole('button', { name: /1 tasks/ }));
     expect(await screen.findByText('Stopped')).toBeInTheDocument();
     expect(useTaskStore.getState().tasks.a?.[RUNNING.id]?.status).toBe('stopped');
+  });
+});
+
+describe('Workspace nested task logs', () => {
+  const PARENT: WorkspaceTaskResponse = {
+    ...FAILED_TASK,
+    id: 'task-parent',
+    title: 'Review PR',
+    status: 'running',
+    error: null,
+    sessionId: 'sess-parent',
+  };
+  const CHILD: WorkspaceTaskResponse = {
+    ...PARENT,
+    id: 'task-child',
+    title: 'Fix parse',
+    status: 'completed',
+    sessionId: 'sess-child',
+    parentTaskId: PARENT.id,
+    depth: 1n,
+  };
+  const seedLog = (sessionId: string, messages: AssistantMessage[]) =>
+    useAssistantStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [sessionId]: { messages, toolCalls: [], isStreaming: false, runStartedAt: null },
+      },
+    }) as never);
+
+  it('nested card in task log opens child and back returns', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [PARENT, CHILD] })
+    );
+    seedLog('sess-parent', [
+      {
+        id: 'result-1',
+        sessionId: 'sess-parent',
+        role: 'user',
+        content: [{ type: 'text', text: 'parse() fixed' }],
+        createdAt: 1n,
+        providerMetadata: null,
+        origin: {
+          kind: 'task',
+          taskId: CHILD.id,
+          agent: { workspaceAgentId: 'wa-1', displayName: 'Helper', isDefault: false },
+          title: CHILD.title,
+          cycleNo: 1n,
+          status: 'completed',
+        },
+      },
+    ]);
+    seedLog('sess-child', [
+      {
+        id: 'child-1',
+        sessionId: 'sess-child',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'child log' }],
+        createdAt: 1n,
+        providerMetadata: null,
+        origin: { kind: 'user' },
+      },
+    ]);
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /2 tasks/ }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open the log of "${PARENT.title}"` })
+    );
+    const parentLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+
+    await userEvent.click(within(parentLog).getByRole('button', { name: 'Open task' }));
+    const childLog = await screen.findByRole('region', { name: `Transcript for ${CHILD.title}` });
+    expect(childLog).toHaveTextContent('child log');
+    expect(
+      within(childLog).getByRole('navigation', { name: 'Task ancestry' })
+    ).toHaveTextContent(PARENT.title);
+
+    await userEvent.click(within(childLog).getByRole('button', { name: 'Back' }));
+    expect(
+      await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` })
+    ).toHaveTextContent('parse() fixed');
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 });

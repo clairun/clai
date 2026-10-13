@@ -15,6 +15,7 @@ import {
   isTaskAttention,
   taskDisplayStatus,
 } from '../../utils/taskDisplay';
+import { buildTaskTree, type TaskNode } from '../../utils/taskTree';
 import AgentAvatar from './AgentAvatar';
 import { identityFor, taskIdentity, type AgentActivity, type AgentIdentity } from './agentIdentity';
 import styles from './TaskList.module.css';
@@ -47,6 +48,26 @@ const errorMessage = (error: unknown, fallback: string): string => {
 /** The ring a task row draws: what the task is doing, not the agent overall. */
 export const taskActivity = (task: WorkspaceTaskResponse): AgentActivity =>
   isTaskActive(task) ? 'running' : isTaskAttention(task) ? 'attention' : 'none';
+
+interface TaskRow {
+  task: WorkspaceTaskResponse;
+  depth: number;
+  childCount: number;
+}
+
+/** The tree as indented rows, skipping the subtasks of collapsed tasks. */
+const flattenTree = (
+  nodes: readonly TaskNode[],
+  collapsed: ReadonlySet<string>,
+  depth = 0,
+  rows: TaskRow[] = []
+): TaskRow[] => {
+  for (const node of nodes) {
+    rows.push({ task: node.task, depth, childCount: node.children.length });
+    if (!collapsed.has(node.task.id)) flattenTree(node.children, collapsed, depth + 1, rows);
+  }
+  return rows;
+};
 
 export interface FilterFace {
   agentId: string;
@@ -95,6 +116,15 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
   );
   const visible =
     active.size === 0 ? tasks : tasks.filter((task) => active.has(task.assignedToWorkspaceAgentId));
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const rows = useMemo(() => flattenTree(buildTaskTree(visible), collapsed), [visible, collapsed]);
+  const toggleCollapsed = (taskId: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
 
   // Forget a pick once its face has left the row; otherwise the filter would
   // spring back on its own the next time that agent gets a task.
@@ -176,7 +206,7 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
 
       {visible.length > 0 ? (
         <ul className={styles.list}>
-          {visible.map((task) => {
+          {rows.map(({ task, depth, childCount }) => {
             const detail = task.error || task.resultSummary || task.instructions;
             const needsAttention = isTaskAttention(task);
             const status = taskDisplayStatus(task);
@@ -195,6 +225,7 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
               <li
                 key={task.id}
                 className={`${styles.task} ${open ? styles.openable : ''}`}
+                style={depth ? { marginLeft: `${depth * 16}px` } : undefined}
                 // The row itself is the click target, so the text inside it
                 // stays selectable; "Mark reviewed" keeps its own click
                 // because `opensTheRow` hands a control its click back.
@@ -244,6 +275,17 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                     <span>{assigneeName}</span>
                     <span className={styles.metaTime}>{formatRelativeTime(task.updatedAt)}</span>
                   </div>
+                  {childCount > 0 && (
+                    <button
+                      type="button"
+                      className={styles.subtasks}
+                      aria-expanded={!collapsed.has(task.id)}
+                      onClick={() => toggleCollapsed(task.id)}
+                    >
+                      <span aria-hidden="true">{collapsed.has(task.id) ? '▸ ' : '▾ '}</span>
+                      {childCount} subtask{childCount === 1 ? '' : 's'}
+                    </button>
+                  )}
                   {detail && <p className={styles.summary}>{detail}</p>}
                   {needsAttention && (
                     <button

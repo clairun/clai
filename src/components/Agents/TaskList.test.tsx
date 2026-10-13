@@ -348,3 +348,21 @@ describe('task status display', () => {
     expect(screen.getByText('Failed · interrupted')).toBeInTheDocument();
   });
 });
+
+describe('task tree', () => {
+  it('nests subtasks under their parent and collapses them', async () => {
+    const parent = task({ id: 't-p', title: 'Parent' });
+    const child = task({ id: 't-c', title: 'Child', parentTaskId: 't-p' });
+    render(
+      <TaskList workspaceId="ws-1" roster={ROSTER} onChanged={vi.fn()} tasks={[child, parent]} />
+    );
+    const titles = () => screen.getAllByText(/^(Parent|Child)$/).map((el) => el.textContent);
+    expect(titles()).toEqual(['Parent', 'Child']);
+
+    const toggle = screen.getByRole('button', { name: '1 subtask' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(titles()).toEqual(['Parent']);
+  });
+});

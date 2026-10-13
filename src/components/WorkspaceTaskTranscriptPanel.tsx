@@ -10,6 +10,7 @@ import ChatMessageList from './AssistantChat/ChatMessageList';
 import AskUserPanel from './AskUserPanel/AskUserPanel';
 import { resolveSessionOwner } from './AssistantChat/messageSender';
 import AgentAvatar from './Agents/AgentAvatar';
+import TaskBreadcrumb from './Agents/TaskBreadcrumb';
 import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
 import { isTaskActive, isTaskAttention, taskDisplayStatus } from '../utils/taskDisplay';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
@@ -26,6 +27,10 @@ interface WorkspaceTaskTranscriptPanelProps {
   /** The crew, so the header shows the assignee's face; empty is fine. */
   roster?: readonly WorkspaceAgentResponse[];
   onClose: () => void;
+  /** Open another task's log from this one: a card in it, or an ancestor. */
+  onOpenTask?: (taskId: string) => void;
+  /** Return to the log this one was opened from; omit when there is none. */
+  onBack?: () => void;
 }
 
 export default function WorkspaceTaskTranscriptPanel({
@@ -34,6 +39,8 @@ export default function WorkspaceTaskTranscriptPanel({
   // A constant, not a fresh `[]` per render: the cards below memoize on it.
   roster = EMPTY_ROSTER,
   onClose,
+  onOpenTask,
+  onBack,
 }: WorkspaceTaskTranscriptPanelProps) {
   const sessionId = task?.sessionId || null;
   const sessionState = useAssistantStore((state) =>
@@ -182,6 +189,17 @@ export default function WorkspaceTaskTranscriptPanel({
     >
       <div className={styles.header}>
         <div className={styles.headerLeft}>
+          {onBack && (
+            <button
+              type="button"
+              className={styles.closeButton}
+              onClick={onBack}
+              aria-label="Back"
+              title="Back"
+            >
+              ←
+            </button>
+          )}
           <AgentAvatar
             identity={taskIdentity(task, roster)}
             size={20}
@@ -203,6 +221,11 @@ export default function WorkspaceTaskTranscriptPanel({
       </div>
 
       <div className={styles.body}>
+        {task.parentTaskId && onOpenTask && (
+          <div className={styles.bodyMeta}>
+            <TaskBreadcrumb task={task} onOpenTask={onOpenTask} />
+          </div>
+        )}
         {(task.assignedAgentDisplayName || sessionId) && (
           <div className={styles.bodyMeta}>
             {task.assignedAgentDisplayName && (
@@ -253,10 +276,9 @@ export default function WorkspaceTaskTranscriptPanel({
               isLoadingOlderMessages={isLoadingOlderMessages}
               onLoadOlderMessages={handleLoadOlderMessages}
               // A sub-agent can delegate further; its task cards get faces
-              // from the same crew. No open handler: this panel already is a
-              // task's log, and swapping the task under the reader would lose
-              // their place.
+              // from the same crew and open the child's log, with Back.
               taskRoster={roster}
+              onOpenTask={onOpenTask}
               owner={owner}
             />
           </div>
