@@ -407,6 +407,7 @@ pub fn run() {
                     if let Err(e) = initialize_workspace_storage(&state).await {
                         tracing::warn!("Failed to initialize workspace storage: {}", e);
                     }
+                    resume_open_workspaces(&app_handle, state.inner());
                     agents::init::populate_scheduler_from_workspace_agents(
                         &post_db_scheduler,
                         state.inner(),
@@ -633,6 +634,25 @@ async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Res
         attach_workspace_db_result(state, joined)?;
     }
     Ok(())
+}
+
+/// Re-dispatches what restart recovery left pending in every open workspace.
+/// Workspaces opened later are new, or resume on their next kick.
+fn resume_open_workspaces(app: &tauri::AppHandle, state: &AppState) {
+    let Ok(index) = state.workspace_index.read() else {
+        return;
+    };
+    for locator in index.locators_sorted() {
+        let Some(pool) = index.pool(&locator.id) else {
+            continue;
+        };
+        let deps = assistant::engine::AssistantDeps {
+            workspace_id: locator.id,
+            pool,
+            app: app.clone(),
+        };
+        tauri::async_runtime::spawn(assistant::dispatcher::resume_workspace(deps));
+    }
 }
 
 fn attach_workspace_db_result(

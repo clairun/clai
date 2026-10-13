@@ -269,6 +269,22 @@ pub async fn list_open_content(
     rows.iter().map(map_content_row).collect()
 }
 
+/// Sessions with pending content signals, the one waiting longest first.
+pub async fn sessions_with_pending(pool: &DbPool) -> Result<Vec<String>, String> {
+    sqlx::query_scalar(
+        r#"
+        SELECT target_session_id
+        FROM session_signals
+        WHERE lane = 1 AND status = 'pending'
+        GROUP BY target_session_id
+        ORDER BY MIN(created_at) ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to list sessions with pending signals: {}", e))
+}
+
 /// Message ids of [`list_open_content`].
 pub async fn list_open_message_ids(pool: &DbPool, session_id: &str) -> Result<Vec<String>, String> {
     sqlx::query_scalar(

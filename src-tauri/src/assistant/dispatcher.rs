@@ -4,7 +4,10 @@
 //! `idx_assistant_runs_one_active_per_session`, which arbitrates concurrent
 //! kicks. In a task session every claimed run is a new task cycle.
 
+use std::future::Future;
+
 use tauri::Manager;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::AssistantUiEvent;
@@ -37,8 +40,59 @@ pub enum Kick {
     Deferred,
 }
 
+/// Runs [`resume_workspace`] may have in flight at once, across workspaces,
+/// so a restart does not start every waiting session together.
+static STARTUP_RESUME_BUDGET: Semaphore = Semaphore::const_new(3);
+
 /// Starts a run for the session's pending signals when it has no active run.
 pub async fn kick(deps: &AssistantDeps, session_id: &str) -> Result<Kick, String> {
+    dispatch(deps, session_id, None).await
+}
+
+/// Restart: kicks every session restart recovery left with pending signals.
+/// Each run started here holds a [`STARTUP_RESUME_BUDGET`] permit until it
+/// ends; the rest wait for one.
+pub async fn resume_workspace(deps: AssistantDeps) {
+    let sessions = match signals::sessions_with_pending(&deps.pool).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::error!(
+                workspace_id = deps.workspace_id,
+                error,
+                "Failed to resume workspace"
+            );
+            return;
+        }
+    };
+    resume_sessions(sessions, &STARTUP_RESUME_BUDGET, |session_id, permit| {
+        let deps = deps.clone();
+        async move { dispatch(&deps, &session_id, Some(permit)).await }
+    })
+    .await;
+}
+
+async fn resume_sessions<F, Fut>(sessions: Vec<String>, budget: &'static Semaphore, kick: F)
+where
+    F: Fn(String, SemaphorePermit<'static>) -> Fut,
+    Fut: Future<Output = Result<Kick, String>>,
+{
+    for session_id in sessions {
+        let Ok(permit) = budget.acquire().await else {
+            return;
+        };
+        if let Err(error) = kick(session_id.clone(), permit).await {
+            tracing::error!(session_id, error, "Failed to resume session");
+        }
+    }
+}
+
+/// [`kick`]; a started run holds `budget` until it ends, any other outcome
+/// releases it.
+async fn dispatch(
+    deps: &AssistantDeps,
+    session_id: &str,
+    budget: Option<SemaphorePermit<'static>>,
+) -> Result<Kick, String> {
     let session = repository::get_session(&deps.pool, session_id)
         .await?
         .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
@@ -77,7 +131,7 @@ pub async fn kick(deps: &AssistantDeps, session_id: &str) -> Result<Kick, String
         if let Some(task) = task {
             workspace_tasks::emit_task_updated(deps, WorkspaceTaskRow::clone(task)).await;
         }
-        spawn_run(deps.clone(), run, task_id);
+        spawn_run(deps.clone(), run, task_id, budget);
     }
     Ok(outcome)
 }
@@ -184,7 +238,12 @@ pub(crate) async fn claim(
     })
 }
 
-fn spawn_run(deps: AssistantDeps, run: &AssistantRun, task_id: Option<String>) {
+fn spawn_run(
+    deps: AssistantDeps,
+    run: &AssistantRun,
+    task_id: Option<String>,
+    budget: Option<SemaphorePermit<'static>>,
+) {
     let run_registration = runtime::register_run(
         LiveRunKey::new(&deps.workspace_id, &run.session_id),
         &run.id,
@@ -200,6 +259,7 @@ fn spawn_run(deps: AssistantDeps, run: &AssistantRun, task_id: Option<String>) {
     };
     tauri::async_runtime::spawn(async move {
         let _run_registration = run_registration;
+        let _budget = budget;
         let session_id = input.session_id.clone();
         let run_id = input.run_id.clone().unwrap_or_default();
         if stopped_before_start(&deps, task_id.as_deref(), &run_id).await {
@@ -510,5 +570,158 @@ mod tests {
             .unwrap();
         assert_eq!(run_id_of(reply.id).await.as_deref(), Some(run.id.as_str()));
         assert_eq!(run_id_of(midrun).await.as_deref(), Some(run.id.as_str()));
+    }
+
+    /// Resumes `sessions` through [`resume_sessions`] with `claim` as the
+    /// kick, keeping the permits of started runs so they hold the budget.
+    async fn resume(
+        pool: &DbPool,
+        sessions: Vec<String>,
+        budget: &'static Semaphore,
+        held: std::sync::Arc<std::sync::Mutex<Vec<(RunId, SemaphorePermit<'static>)>>>,
+    ) {
+        resume_sessions(sessions, budget, |session_id, permit| {
+            let pool = pool.clone();
+            let held = held.clone();
+            async move {
+                let outcome = claim(&pool, &session_id, |id| Some(connection(id))).await;
+                if let Ok(Kick::Started { run, .. }) = &outcome {
+                    held.lock().unwrap().push((run.id.clone(), permit));
+                }
+                outcome
+            }
+        })
+        .await;
+    }
+
+    async fn restart(pool: &DbPool) {
+        workspace_tasks::recover_interrupted_tasks(pool)
+            .await
+            .unwrap();
+        repository::recover_stale_runs(pool).await.unwrap();
+    }
+
+    async fn run_count(pool: &DbPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM assistant_runs WHERE status = 'queued'")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pending_signals_resume_after_restart() {
+        let (_tmp, pool) = workspace_pool().await;
+        let claimed = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        let unclaimed = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        send(&pool, &claimed.id, "claimed by a run that never started").await;
+        let Kick::Started { run: stale, .. } = claim(&pool, &claimed.id, |id| Some(connection(id)))
+            .await
+            .unwrap()
+        else {
+            panic!("expected a run");
+        };
+        send(&pool, &unclaimed.id, "never claimed").await;
+
+        restart(&pool).await;
+        let sessions = signals::sessions_with_pending(&pool).await.unwrap();
+        assert_eq!(sessions, vec![claimed.id.clone(), unclaimed.id.clone()]);
+        let held = Default::default();
+        resume(
+            &pool,
+            sessions,
+            Box::leak(Box::new(Semaphore::new(3))),
+            held,
+        )
+        .await;
+
+        for session in [&claimed, &unclaimed] {
+            let run_id = repository::active_run_id(&pool, &session.id)
+                .await
+                .unwrap()
+                .expect("a pending session must be dispatched on resume");
+            assert_ne!(run_id, stale.id);
+            assert!(signals::list_open_message_ids(&pool, &session.id)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_budget_holds_fourth_session_until_a_run_ends() {
+        let (_tmp, pool) = workspace_pool().await;
+        let mut sessions = Vec::new();
+        for index in 0..4 {
+            let session = repository::create_session(&pool, SessionContext::default())
+                .await
+                .unwrap();
+            send(&pool, &session.id, &format!("message {index}")).await;
+            sessions.push(session.id);
+        }
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resuming = tokio::spawn({
+            let pool = pool.clone();
+            let held = held.clone();
+            async move {
+                resume(
+                    &pool,
+                    sessions,
+                    Box::leak(Box::new(Semaphore::new(3))),
+                    held,
+                )
+                .await;
+            }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            run_count(&pool).await,
+            3,
+            "the fourth session waits for a permit"
+        );
+        assert!(!resuming.is_finished());
+
+        let (run_id, permit) = held.lock().unwrap().remove(0);
+        repository::update_run_status(&pool, &run_id, RunStatus::Completed, None)
+            .await
+            .unwrap();
+        drop(permit);
+        tokio::time::timeout(std::time::Duration::from_secs(5), resuming)
+            .await
+            .expect("the fourth session must start once a resumed run ends")
+            .unwrap();
+        assert_eq!(run_count(&pool).await, 3);
+        assert!(signals::sessions_with_pending(&pool)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_opens_do_not_double_dispatch() {
+        let (_tmp, pool) = workspace_pool().await;
+        for index in 0..3 {
+            let session = repository::create_session(&pool, SessionContext::default())
+                .await
+                .unwrap();
+            send(&pool, &session.id, &format!("message {index}")).await;
+        }
+        let sessions = signals::sessions_with_pending(&pool).await.unwrap();
+        let budget: &'static Semaphore = Box::leak(Box::new(Semaphore::new(6)));
+
+        tokio::join!(
+            resume(&pool, sessions.clone(), budget, Default::default()),
+            resume(&pool, sessions, budget, Default::default()),
+        );
+
+        let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM assistant_runs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(runs, 3, "one run per session");
     }
 }
