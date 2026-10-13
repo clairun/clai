@@ -2,9 +2,10 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
+import { MemoryRouter, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
+import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import styles from './Workspace.module.css';
 import useAssistantStore from '../assistant/sessionStore';
 import type {
@@ -23,8 +24,16 @@ import type {
 // subscribe to Tauri events on mount. Without a window bridge those
 // subscriptions reject; stub the boundary so the page can render its
 // conversation under jsdom.
+// Handlers are kept per event name so a test can emit an `assistant://event`.
+type EventHandler = (event: { payload: unknown }) => void;
+const eventHandlers = vi.hoisted(() => new Map<string, Set<EventHandler>>());
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async () => () => {}),
+  listen: vi.fn(async (name: string, handler: EventHandler) => {
+    const handlers = eventHandlers.get(name) ?? new Set<EventHandler>();
+    handlers.add(handler);
+    eventHandlers.set(name, handlers);
+    return () => handlers.delete(handler);
+  }),
 }));
 
 vi.mock('../workspace/client', async (importOriginal) => ({
@@ -37,6 +46,7 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   runWorkspaceNow: vi.fn(async () => {}),
   setWorkspaceSchedulePaused: vi.fn(async () => {}),
   importWorkspaceFiles: vi.fn(async () => []),
+  getWorkspaceTask: vi.fn(async () => null),
 }));
 
 vi.mock('../api/client', async (importOriginal) => ({
@@ -61,6 +71,7 @@ const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
 const runWorkspaceNow = vi.mocked(workspaceClient.runWorkspaceNow);
 const setWorkspaceSchedulePaused = vi.mocked(workspaceClient.setWorkspaceSchedulePaused);
 const importWorkspaceFiles = vi.mocked(workspaceClient.importWorkspaceFiles);
+const getWorkspaceTask = vi.mocked(workspaceClient.getWorkspaceTask);
 const workspaceDeleteAgent = vi.mocked((await import('../api/client')).workspaceDeleteAgent);
 // Taken through `vi.mocked` on the real module, so the fixtures below are
 // checked against the command's actual return types: a page missing
@@ -1080,5 +1091,99 @@ describe('Workspace task transcript', () => {
 
     await waitFor(() => expect(panel).toHaveTextContent('Completed'));
     expect(panel).not.toHaveTextContent('Running');
+  });
+});
+
+describe('Workspace open task from toast or banner', () => {
+  const LocationProbe = () => {
+    const location = useLocation();
+    return <div data-testid="location">{location.pathname + location.search}</div>;
+  };
+
+  const renderWithToasts = (entry = '/workspace/a') =>
+    render(
+      <MemoryRouter initialEntries={[entry]}>
+        <WorkspaceTaskNotifications />
+        <LocationProbe />
+        <Routes>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+  const emitTaskUpdated = (task: WorkspaceTaskResponse) =>
+    act(() => {
+      for (const handler of eventHandlers.get('assistant://event') ?? []) {
+        handler({
+          payload: {
+            sessionId: 'sess-task-a',
+            runId: null,
+            workspaceId: task.workspaceId,
+            timestamp: 0,
+            event: { type: 'task_updated', payload: { task } },
+          },
+        });
+      }
+    });
+
+  const transcript = (title: string) => screen.queryByRole('region', { name: `Transcript for ${title}` });
+
+  beforeEach(() => {
+    eventHandlers.clear();
+    getWorkspaceTask.mockReset();
+    getWorkspaceTask.mockResolvedValue(null);
+  });
+
+  it('banner title opens task', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [FAILED_TASK] })
+    );
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: FAILED_TASK.title }));
+
+    expect(await screen.findByRole('region', { name: `Transcript for ${FAILED_TASK.title}` })).toBeInTheDocument();
+  });
+
+  it('toast Open task navigates with ?task= and opens once', async () => {
+    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
+      workspaceId === 'b'
+        ? detailsFor(options, { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n) })
+        : detailsFor(options, { tasks: [FAILED_TASK] })
+    );
+    renderWithToasts('/workspace/b');
+    await screen.findByText('Beta');
+
+    emitTaskUpdated({ ...FAILED_TASK, updatedAt: 2n });
+    await userEvent.click(await screen.findByRole('button', { name: 'Open task' }));
+
+    expect(await screen.findByRole('region', { name: `Transcript for ${FAILED_TASK.title}` })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspace\/a$/));
+
+    // Closing it stays closed: the param that opened it is gone.
+    await userEvent.click(screen.getByRole('button', { name: 'Close transcript' }));
+    await act(async () => {});
+    expect(transcript(FAILED_TASK.title)).toBeNull();
+    expect(getWorkspaceTask).not.toHaveBeenCalled();
+  });
+
+  it('unknown task param shows not-found error', async () => {
+    renderWithToasts('/workspace/a?task=task-gone');
+
+    expect(await screen.findByText('Task not found.')).toBeInTheDocument();
+    expect(getWorkspaceTask).toHaveBeenCalledTimes(1);
+    expect(getWorkspaceTask).toHaveBeenCalledWith('a', 'task-gone');
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspace\/a$/));
+  });
+
+  it('tasks attention-state at first details load do not toast', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [FAILED_TASK] })
+    );
+    renderWithToasts();
+
+    // The banner carries it; no event arrived, so no toast.
+    expect(await screen.findByRole('button', { name: FAILED_TASK.title })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open task' })).toBeNull();
   });
 });

@@ -1,44 +1,37 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useNavigate } from 'react-router';
+import type { AssistantEventEnvelope, WorkspaceTaskResponse } from '../generated/bindings';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import styles from './WorkspaceTaskNotifications.module.css';
 
-const WORKSPACE_TASK_ATTENTION_EVENT = 'workspace://task-attention';
+const ASSISTANT_EVENT = 'assistant://event';
 const MAX_NOTIFICATIONS = 4;
 const AUTO_DISMISS_MS = 10000;
-
-const STATUS_LABEL: Record<string, string> = {
-  blocked: 'Blocked',
-  failed: 'Failed',
-};
-
-interface TaskAttentionPayload {
-  taskId?: string;
-  workspaceId?: string;
-  updatedAt?: number;
-  title?: string;
-  status?: string;
-  error?: string;
-  summary?: string;
-}
 
 interface NotificationItem {
   id: string;
   taskId: string;
   workspaceId: string;
   title: string;
-  status: string;
+  status: { key: string; label: string };
   text: string;
 }
 
-const notificationText = (payload: TaskAttentionPayload): string =>
-  payload?.error || payload?.summary || 'Open the workspace to inspect the task.';
+/** The statuses that toast, and how they read; null for the rest. */
+const attentionStatus = (task: WorkspaceTaskResponse): NotificationItem['status'] | null => {
+  if (task.status === 'input_required') return { key: 'input_required', label: 'Needs an answer' };
+  if (task.status !== 'failed') return null;
+  return task.failureReason === 'blocked'
+    ? { key: 'blocked', label: 'Blocked' }
+    : { key: 'failed', label: 'Failed' };
+};
 
 const WorkspaceTaskNotifications = () => {
   const navigate = useNavigate();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const timersRef = useRef(new Map<string, number>());
+  const seenRef = useRef(new Set<string>());
   const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped);
   const dismissRunNowSkipped = useFleetActivityStore((state) => state.dismissRunNowSkipped);
 
@@ -56,31 +49,32 @@ const WorkspaceTaskNotifications = () => {
     // the timers this effect set up, even if the ref is later swapped out
     // (e.g. by switching to useState/useReducer).
     const timers = timersRef.current;
-    const unlistenPromise = listen<TaskAttentionPayload>(WORKSPACE_TASK_ATTENTION_EVENT, (event) => {
-      const payload = event.payload;
-      if (!payload?.taskId || !payload?.workspaceId) {
-        return;
-      }
+    // A task reaching attention toasts once per cycle and status. Tasks
+    // already in attention when the app starts emit nothing, so they never
+    // toast; the workspace banner shows them.
+    const seen = seenRef.current;
+    const unlistenPromise = listen<AssistantEventEnvelope>(ASSISTANT_EVENT, (event) => {
+      if (event.payload.event.type !== 'task_updated') return;
+      const task = event.payload.event.payload.task;
+      const status = attentionStatus(task);
+      if (!status) return;
+      const id = `${task.id}:${task.cycleNo}:${task.status}`;
+      if (seen.has(id)) return;
+      seen.add(id);
 
-      const id = `${payload.taskId}:${payload.updatedAt || Date.now()}`;
       const item: NotificationItem = {
         id,
-        taskId: payload.taskId,
-        workspaceId: payload.workspaceId,
-        title: payload.title || 'Workspace task',
-        status: payload.status || 'blocked',
-        text: notificationText(payload),
+        taskId: task.id,
+        workspaceId: task.workspaceId,
+        title: task.title || 'Workspace task',
+        status,
+        text: task.error || task.resultSummary || 'Open the task to see what it needs.',
       };
 
       setNotifications((current) => [
         item,
         ...current.filter((existing) => existing.taskId !== item.taskId),
       ].slice(0, MAX_NOTIFICATIONS));
-
-      const existingTimer = timersRef.current.get(id);
-      if (existingTimer) {
-        window.clearTimeout(existingTimer);
-      }
       timersRef.current.set(id, window.setTimeout(() => dismiss(id), AUTO_DISMISS_MS));
     });
 
@@ -132,8 +126,8 @@ const WorkspaceTaskNotifications = () => {
         <div key={item.id} className={styles.toast}>
           <div className={styles.toastHeader}>
             <span className={styles.title}>{item.title}</span>
-            <span className={`${styles.status} ${styles[`status_${item.status}`] || ''}`}>
-              {STATUS_LABEL[item.status] || item.status}
+            <span className={`${styles.status} ${styles[`status_${item.status.key}`] || ''}`}>
+              {item.status.label}
             </span>
           </div>
           <p className={styles.body}>{item.text}</p>
@@ -142,11 +136,11 @@ const WorkspaceTaskNotifications = () => {
               type="button"
               className={styles.openButton}
               onClick={() => {
-                navigate(`/workspace/${item.workspaceId}`);
+                navigate(`/workspace/${item.workspaceId}?task=${encodeURIComponent(item.taskId)}`);
                 dismiss(item.id);
               }}
             >
-              Open workspace
+              Open task
             </button>
             <button
               type="button"

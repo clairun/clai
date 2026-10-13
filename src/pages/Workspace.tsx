@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { useOutletContext, useParams } from 'react-router';
+import { useOutletContext, useParams, useSearchParams } from 'react-router';
 import type { FleetOutletContext } from '../layouts/FleetLayout';
 import { workspaceDeleteAgent } from '../api/client';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
@@ -1049,7 +1049,13 @@ const ArtifactsList = ({
   );
 };
 
-const WorkspaceAttentionBanner = ({ tasks }: { tasks: WorkspaceTaskResponse[] }) => {
+const WorkspaceAttentionBanner = ({
+  tasks,
+  onOpenTask,
+}: {
+  tasks: WorkspaceTaskResponse[];
+  onOpenTask: (taskId: string) => void;
+}) => {
   const attentionTasks = (tasks || []).filter(isTaskAttention);
 
   if (attentionTasks.length === 0) {
@@ -1070,7 +1076,13 @@ const WorkspaceAttentionBanner = ({ tasks }: { tasks: WorkspaceTaskResponse[] })
           {statusLabel}
         </span>
       </div>
-      <div className={styles.attentionBannerTask}>{primary.title}</div>
+      <button
+        type="button"
+        className={styles.attentionBannerTask}
+        onClick={() => onOpenTask(primary.id)}
+      >
+        {primary.title}
+      </button>
       {detail && <p className={styles.attentionBannerDetail}>{detail}</p>}
     </section>
   );
@@ -2242,12 +2254,31 @@ const Workspace = () => {
     },
     [workspaceId]
   );
+  const handleTaskNotFound = useCallback(() => setError('Task not found.'), [setError]);
   const openTaskById = useOpenTask({
     workspaceId,
     loadedTasks,
     showTasksPanel,
     updateViewingTask,
+    onNotFound: handleTaskNotFound,
   });
+  // A toast's "Open task" lands here as `?task=<id>`: open it once the
+  // details are in (so a recent task opens without a fetch), then drop the
+  // param so it does not reopen.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const taskParam = searchParams.get('task');
+  useEffect(() => {
+    if (!taskParam || !detailsReady) return;
+    openTaskById(taskParam);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('task');
+        return next;
+      },
+      { replace: true }
+    );
+  }, [taskParam, detailsReady, openTaskById, setSearchParams]);
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
   // `details.runs` holds only the newest run and the newest non-terminal
@@ -2419,7 +2450,7 @@ const Workspace = () => {
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <WorkspaceAttentionBanner tasks={tasks} />
+      <WorkspaceAttentionBanner tasks={tasks} onOpenTask={openTaskById} />
 
       <div className={styles.workspaceBody}>
         {/* Keyed by workspace so a switch applies the new workspace's panel

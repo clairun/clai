@@ -205,12 +205,25 @@
 }
 
 .attentionBannerTask {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  max-width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
   font-size: 12px;
   font-weight: 600;
   color: var(--color-text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.attentionBannerTask:hover {
+  color: var(--color-text-primary);
+  text-decoration: underline;
 }
 
 .attentionBannerDetail {
