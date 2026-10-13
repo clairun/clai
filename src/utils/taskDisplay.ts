@@ -49,7 +49,9 @@ const FAILED_LABEL: Record<string, string> = {
 export const taskDisplayStatus = (task: {
   status: string;
   failureReason?: string | null;
+  runId?: string | null;
 }): { key: string; label: string } => {
+  if (isTaskWaiting(task)) return { key: 'queued', label: 'Waiting for subtasks' };
   if (task.status === 'failed' && task.failureReason === 'blocked') {
     return { key: 'blocked', label: 'Blocked' };
   }
@@ -65,12 +67,17 @@ export const isTaskAttention = (
 ): boolean =>
   (task.status === 'failed' || task.status === 'input_required') && !task.attentionAcknowledgedAt;
 
-/** A task the agent is working on or about to; a question waits instead. */
-export const isTaskRunning = (task: { status: string }): boolean =>
-  task.status === 'running' || task.status === 'queued';
+/** Running with no run: its run ended and it waits for its subtasks. The wire omits `runId` then. */
+export const isTaskWaiting = (task: { status: string; runId?: string | null }): boolean =>
+  task.status === 'running' && task.runId == null;
 
+/** A task the agent is working on or about to; a question or subtasks wait instead. */
+export const isTaskRunning = (task: { status: string; runId?: string | null }): boolean =>
+  task.status === 'queued' || (task.status === 'running' && !isTaskWaiting(task));
+
+/** A task with an open cycle: running, queued, waiting for subtasks or for an answer. */
 export const isTaskActive = (task: { status: string }): boolean =>
-  isTaskRunning(task) || task.status === 'input_required';
+  task.status === 'running' || task.status === 'queued' || task.status === 'input_required';
 
 /** A task whose current cycle can still be stopped. */
 export const canStopTask = (task: { status: string }): boolean => isTaskActive(task);

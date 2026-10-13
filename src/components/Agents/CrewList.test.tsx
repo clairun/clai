@@ -47,7 +47,7 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   resultSummary: null,
   error: null,
   sessionId: null,
-  runId: null,
+  runId: 'run-1',
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,

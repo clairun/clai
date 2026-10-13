@@ -16,7 +16,7 @@ import StopChip from './Agents/StopChip';
 import TaskStopButton from './Agents/TaskStopButton';
 import { taskActivity } from './Agents/TaskList';
 import { taskIdentity } from './Agents/agentIdentity';
-import { taskDisplayStatus } from '../utils/taskDisplay';
+import { isTaskWaiting, taskDisplayStatus } from '../utils/taskDisplay';
 import { sendWorkspaceTaskMessage } from '../workspace/client';
 import { useTaskStore } from '../workspace/taskStore';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
@@ -29,6 +29,7 @@ const EMPTY_STREAMING: Record<string, string> = {};
 const MESSAGE_PAGE_LIMIT = 100;
 
 const composerPlaceholder = (task: WorkspaceTaskResponse, agent: string): string => {
+  if (isTaskWaiting(task)) return `Message ${agent}…`;
   switch (task.status) {
     case 'queued':
     case 'running':

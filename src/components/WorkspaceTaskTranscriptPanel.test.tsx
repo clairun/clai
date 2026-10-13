@@ -316,6 +316,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       const cases: [Partial<WorkspaceTaskResponse>, string][] = [
         [{ status: 'queued' }, 'Queue a message for Rust Architect…'],
         [{ status: 'running' }, 'Queue a message for Rust Architect…'],
+        [{ status: 'running', runId: null }, 'Message Rust Architect…'],
         [{ status: 'failed', failureReason: 'blocked' }, 'Reply to Rust Architect…'],
         [{ status: 'failed', failureReason: 'error' }, 'Continue this task…'],
         [{ status: 'completed' }, 'Continue this task…'],

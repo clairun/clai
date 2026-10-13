@@ -50,6 +50,7 @@ import {
   formatRelativeTime,
   isTaskActive,
   isTaskAttention,
+  isTaskRunning,
   taskDisplayStatus,
   toNumber,
   type NumericTimestamp,
@@ -1149,10 +1150,8 @@ const WorkspaceHeader = ({
   const scheduleEnabled = !!details?.scheduleEnabled;
   const schedulePaused = !!details?.schedulePaused;
   // Active = a task on this workspace is running or queued; a task waiting
-  // for an answer is not. Disables Run-now while a run is mid-flight.
-  const hasRunningTask = (details?.tasks || []).some(
-    (task) => task.status === 'running' || task.status === 'queued'
-  );
+  // for an answer or for its subtasks is not. Disables Run-now while a run is mid-flight.
+  const hasRunningTask = (details?.tasks || []).some(isTaskRunning);
   // Manager is invisible to the user — exclude it from the headline count so
   // the chip and the drawer (which already filters !isDefault) agree.
   // Count includes the main (default) agent — the manager is now a

@@ -260,7 +260,7 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   resultSummary: null,
   error: 'Alpha broke',
   sessionId: null,
-  runId: null,
+  runId: 'run-1',
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: 1n,
@@ -708,6 +708,22 @@ describe('Workspace switch with a call in flight', () => {
       betaRun.resolve();
       betaPause.resolve();
     });
+  });
+
+  it('keeps Run now enabled while a task only waits for its subtasks', async () => {
+    const task = { ...FAILED_TASK, status: 'running' as const, completedAt: null, error: null };
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { scheduleEnabled: true, tasks: [{ ...task, runId: null }] })
+    );
+    const { unmount } = renderWorkspace();
+    expect(await screen.findByRole('button', { name: 'Run now' })).toBeEnabled();
+    unmount();
+
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { scheduleEnabled: true, tasks: [task] })
+    );
+    renderWorkspace();
+    expect(await screen.findByRole('button', { name: 'Run now' })).toBeDisabled();
   });
 
   it('still shows a pending Run now and Pause on returning to their workspace', async () => {

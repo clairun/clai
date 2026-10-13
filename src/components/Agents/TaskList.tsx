@@ -13,6 +13,7 @@ import {
   formatRelativeTime,
   isTaskActive,
   isTaskAttention,
+  isTaskWaiting,
   taskDisplayStatus,
 } from '../../utils/taskDisplay';
 import { buildTaskTree, type TaskNode } from '../../utils/taskTree';
@@ -46,13 +47,15 @@ const errorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
-/** The ring a task row draws: what the task is doing, not the agent overall. A question waits, it does not run. */
+/** The ring a task row draws: what the task is doing, not the agent overall. A question or subtasks wait, they do not run. */
 export const taskActivity = (task: WorkspaceTaskResponse): AgentActivity =>
   task.status === 'input_required' || isTaskAttention(task)
     ? 'attention'
-    : isTaskActive(task)
-      ? 'running'
-      : 'none';
+    : isTaskWaiting(task)
+      ? 'idle'
+      : isTaskActive(task)
+        ? 'running'
+        : 'none';
 
 interface TaskRow {
   task: WorkspaceTaskResponse;

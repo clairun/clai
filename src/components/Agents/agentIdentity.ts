@@ -165,7 +165,7 @@ export const agentActivity = (
 export type TaskActivitySource = Pick<
   WorkspaceTaskResponse,
   'assignedToWorkspaceAgentId' | 'status' | 'attentionAcknowledgedAt'
->;
+> & { runId?: string | null };
 
 /**
  * Which activity to draw for `agentId` given the tasks the details carry.

@@ -45,7 +45,7 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   resultSummary: null,
   error: null,
   sessionId: null,
-  runId: null,
+  runId: 'run-1',
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,
@@ -109,6 +109,8 @@ beforeEach(() => {
 describe('task rules', () => {
   it('rings a row by the task state, not the agent', () => {
     expect(taskActivity(task({ status: 'queued' }))).toBe('running');
+    expect(taskActivity(task({ status: 'running' }))).toBe('running');
+    expect(taskActivity(task({ status: 'running', runId: null }))).toBe('idle');
     expect(taskActivity(task({ status: 'input_required' }))).toBe('attention');
     expect(taskActivity(task({ status: 'failed' }))).toBe('attention');
     expect(taskActivity(task({ status: 'failed', attentionAcknowledgedAt: 2n }))).toBe('none');
@@ -358,6 +360,18 @@ describe('task status display', () => {
       />
     );
     expect(screen.getByText('Failed · interrupted')).toBeInTheDocument();
+  });
+
+  it('running with no run reads Waiting for subtasks and can still be stopped', () => {
+    render(
+      <TaskList
+        {...props}
+        tasks={[task({ id: 't-w', title: 'Parent', status: 'running', runId: null })]}
+      />
+    );
+    expect(screen.getByText('Waiting for subtasks')).toBeInTheDocument();
+    expect(screen.queryByText('Running')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Stop Parent' })).toBeEnabled();
   });
 });
 

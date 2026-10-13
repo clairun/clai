@@ -170,6 +170,7 @@ describe('activityFromTasks', () => {
     assignedToWorkspaceAgentId: 'wa-1',
     status: 'completed',
     attentionAcknowledgedAt: null,
+    runId: 'run-1',
     ...over,
   });
 
@@ -202,5 +203,10 @@ describe('activityFromTasks', () => {
 
   it('a task waiting for an answer is attention, not running', () => {
     expect(activityFromTasks('wa-1', [task({ status: 'input_required' })])).toBe('attention');
+  });
+
+  it('a task waiting for its subtasks is idle, not running', () => {
+    expect(activityFromTasks('wa-1', [task({ status: 'running', runId: null })])).toBe('idle');
+    expect(activityFromTasks('wa-1', [task({ status: 'running', runId: undefined })])).toBe('idle');
   });
 });
