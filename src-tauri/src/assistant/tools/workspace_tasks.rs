@@ -5,11 +5,11 @@ use crate::assistant::types::{
     AssistantMessage, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
     SessionContext,
 };
-use crate::assistant::workspace_tasks_repo::{self, create_task_row, update_task_status};
-use crate::commands::workspace::{
+use crate::assistant::workspace_agents::{
     agent_display_names, concise_agent_description, load_workspace_agent_rows,
     workspace_agent_display_names, WorkspaceAgentRow,
 };
+use crate::assistant::workspace_tasks_repo::{self, create_task_row, update_task_status};
 use crate::config::first_enabled_connection;
 use crate::db::DbPool;
 use crate::AppState;

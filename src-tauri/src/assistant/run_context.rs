@@ -46,8 +46,11 @@ pub fn resolve_run_context(
         .lock()
         .map_err(|e| format!("Lock error: {e}"))?
         .get();
-    let workspace_agents =
-        crate::commands::workspace::workspace_agent_summaries_from(&app_config, &config, &roster);
+    let workspace_agents = crate::assistant::workspace_agents::workspace_agent_summaries_from(
+        &app_config,
+        &config,
+        &roster,
+    );
 
     let Some(agent_id) = agent_id else {
         let mut execution = ExecutionCapabilityConfig::default();
