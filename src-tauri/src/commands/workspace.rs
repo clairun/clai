@@ -3351,25 +3351,27 @@ pub async fn workspace_delete(
 async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), String> {
     let workspace_id = resolve_workspace_id(state, Some(workspace_id))?;
 
-    {
-        let workspace_pool = state.workspace_db(&workspace_id).await?;
-        if repository::workspace_has_active_run(&workspace_pool).await? {
-            return Err(format!(
-                "Workspace {} has an active run. Cancel or wait for it to finish before deleting the workspace.",
-                workspace_id
-            ));
-        }
+    let workspace_pool = state.workspace_db(&workspace_id).await?;
+    if repository::workspace_has_active_run(&workspace_pool).await? {
+        return Err(format!(
+            "Workspace {} has an active run. Cancel or wait for it to finish before deleting the workspace.",
+            workspace_id
+        ));
     }
 
     // Remove from the workspace index first; the returned locator carries
     // the on-disk root we still need below for both config-loading and
-    // recursive removal. Closes the cached sqlx pool too.
+    // recursive removal.
     let locator = state
         .workspace_index
         .write()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .remove_workspace(&workspace_id)
         .ok_or_else(|| format!("Workspace {} not found.", workspace_id))?;
+    // Dropping the index's pool handle does not close its connections, and
+    // Windows refuses to delete an open `data.sqlite`. `close` waits until
+    // every connection's worker thread has released the file.
+    workspace_pool.close().await;
 
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
@@ -5249,11 +5251,15 @@ mod tests {
         crate::agents::init::apply_workspace_schedule(&mut *state.scheduler.lock().await, &config);
         assert_eq!(state.scheduler.lock().await.instance_count(), 1);
         fs::write(workspace_config::config_path(&root), "not json").unwrap();
+        let pool = state.workspace_db(DETAILS_WORKSPACE_ID).await.unwrap();
 
         delete_workspace(state, DETAILS_WORKSPACE_ID.to_string())
             .await
             .expect("delete");
 
+        // An open connection would keep `data.sqlite` locked on Windows.
+        assert!(pool.is_closed());
+        assert!(!root.exists());
         let scheduler = state.scheduler.lock().await;
         assert_eq!(scheduler.instance_count(), 0);
         assert!(scheduler.get_definition(DETAILS_MANAGER_ID).is_none());
