@@ -3255,10 +3255,9 @@ fn remove_dir_all_forcing_permissions(root: &Path) -> std::io::Result<()> {
 ///
 /// `remove_dir_all` is not atomic and deletes children before the root, so it
 /// can take `.clai/config.json` with it and still fail. A locator whose
-/// config cannot be read poisons every lookup that walks the index, because
-/// `load_workspace_agent_as_config` fails on the first unreadable one
-/// (`agents/runner.rs:72-75`), which would stop scheduled runs across all
-/// workspaces. Such a leftover is left out, and stays out: the next startup
+/// config cannot be read poisons every walk of the index that rewrites each
+/// config — the MCP server and skill-source sweeps fail on the first one they
+/// cannot read. Such a leftover is left out, and stays out: the next startup
 /// scan cannot load it either, so it records a `load_failure` — a sink
 /// nothing reads today — and the directory sits on disk with no workspace in
 /// the rail. The `warn!` below is the only signal there is.
@@ -3792,9 +3791,7 @@ mod tests {
     }
 
     // Restoring a locator whose config the wipe already deleted would break
-    // far more than this delete: `load_workspace_agent_as_config` walks the
-    // whole index and fails on the first config it cannot read
-    // (`agents/runner.rs:72-75`), stopping scheduled runs everywhere.
+    // far more than this delete; see `restore_after_failed_delete`.
     #[test]
     fn restore_after_failed_delete_skips_a_workspace_whose_config_is_gone() {
         let parent = tempfile::tempdir().unwrap();
@@ -3817,9 +3814,7 @@ mod tests {
     // a read-only *parent* — the one obstacle the chmod pass cannot clear,
     // since it only relaxes what is inside the tree — has already taken
     // `.clai/config.json` with it. Restoring that locator would break far
-    // more than this delete: `load_workspace_agent_as_config` walks the whole
-    // index and fails on the first config it cannot read
-    // (`agents/runner.rs:72-75`), stopping scheduled runs everywhere.
+    // more than this delete; see `restore_after_failed_delete`.
     #[cfg(unix)]
     #[test]
     fn remove_workspace_root_does_not_restore_a_workspace_whose_config_is_gone() {

@@ -49,8 +49,12 @@ use crate::db::DbPool;
 use crate::AppState;
 
 /// Loads a workspace-local agent from `<workspace>/.clai/config.json`.
+///
+/// Reads only `workspace_id`'s config, so another workspace's unreadable
+/// config cannot stop this one's scheduled runs.
 fn load_workspace_agent_as_config(
     state: &AppState,
+    workspace_id: &str,
     id: &str,
 ) -> Result<Option<AgentConfig>, RunnerError> {
     let app_config = state
@@ -58,56 +62,46 @@ fn load_workspace_agent_as_config(
         .lock()
         .map_err(|e| RunnerError::AssistantPersistence(format!("Lock error: {}", e)))?
         .get();
-    let locators = state
-        .workspace_index
-        .read()
-        .map_err(|e| {
-            RunnerError::AssistantPersistence(format!("Workspace index lock error: {}", e))
-        })?
-        .locators_sorted();
-
-    for locator in locators {
-        let (config, roster) = state.resolve_workspace_roster(&locator.id).map_err(|e| {
-            RunnerError::AssistantPersistence(format!("Failed to load workspace config: {}", e))
-        })?;
-        if let Some(agent) = roster
-            .iter()
-            .map(|resolved| &resolved.agent)
-            .find(|agent| agent.id == id)
-        {
-            let created_at = chrono::DateTime::from_timestamp_millis(agent.created_at)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default();
-            let updated_at = chrono::DateTime::from_timestamp_millis(agent.updated_at)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default();
-            let is_manager = agent.id == config.main_agent_id();
-            return Ok(Some(AgentConfig {
-                id: agent.id.clone(),
-                workspace_id: config.id,
-                name: agent.name.clone(),
-                description: agent.description.clone(),
-                // Schedule is workspace-level. Only the default (manager)
-                // agent inherits the workspace schedule; sub-agents never
-                // run on their own schedule.
-                schedule_enabled: is_manager && config.schedule.enabled,
-                schedule_kind: if is_manager {
-                    config.schedule.kind.clone()
-                } else {
-                    crate::config::workspace_config::ScheduleKind::default()
-                },
-                enabled: agent.enabled,
-                provider_connection_ids: agent.provider_connection_ids.clone(),
-                selected_skill_ids: workspace_config::refs_to_skill_ids(
-                    &app_config,
-                    &agent.selected_skills,
-                ),
-                created_at,
-                updated_at,
-            }));
-        }
-    }
-    Ok(None)
+    let (config, roster) = state.resolve_workspace_roster(workspace_id).map_err(|e| {
+        RunnerError::AssistantPersistence(format!("Failed to load workspace config: {}", e))
+    })?;
+    let Some(agent) = roster
+        .iter()
+        .map(|resolved| &resolved.agent)
+        .find(|agent| agent.id == id)
+    else {
+        return Ok(None);
+    };
+    let created_at = chrono::DateTime::from_timestamp_millis(agent.created_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let updated_at = chrono::DateTime::from_timestamp_millis(agent.updated_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let is_manager = agent.id == config.main_agent_id();
+    Ok(Some(AgentConfig {
+        id: agent.id.clone(),
+        workspace_id: config.id,
+        name: agent.name.clone(),
+        description: agent.description.clone(),
+        // Schedule is workspace-level. Only the default (manager)
+        // agent inherits the workspace schedule; sub-agents never
+        // run on their own schedule.
+        schedule_enabled: is_manager && config.schedule.enabled,
+        schedule_kind: if is_manager {
+            config.schedule.kind.clone()
+        } else {
+            crate::config::workspace_config::ScheduleKind::default()
+        },
+        enabled: agent.enabled,
+        provider_connection_ids: agent.provider_connection_ids.clone(),
+        selected_skill_ids: workspace_config::refs_to_skill_ids(
+            &app_config,
+            &agent.selected_skills,
+        ),
+        created_at,
+        updated_at,
+    }))
 }
 
 // =============================================================================
@@ -251,18 +245,18 @@ async fn run_claimed_instance(
     tracing::info!(instance_id = %instance_id, "Running agent");
 
     // Get the instance details
-    let agent_id = {
+    let (workspace_id, agent_id) = {
         let sched = scheduler.lock().await;
         let instance = sched
             .get_instance(instance_id)
             .ok_or_else(|| RunnerError::InstanceNotFound(instance_id.to_string()))?;
 
-        instance.agent_id.clone()
+        (instance.workspace_id.clone(), instance.agent_id.clone())
     };
 
     tracing::debug!(agent_id = %agent_id, "Got agent instance");
 
-    let agent_config = load_workspace_agent_as_config(state.inner(), &agent_id)?
+    let agent_config = load_workspace_agent_as_config(state.inner(), &workspace_id, &agent_id)?
         .ok_or_else(|| RunnerError::AgentNotFound(agent_id.clone()))?;
     let workspace_pool = state
         .workspace_db(&agent_config.workspace_id)
@@ -675,5 +669,52 @@ mod tests {
         assert!(!sched.is_running());
         let instance = sched.get_instance(&instance_id).unwrap();
         assert!(instance.next_run_at.is_some());
+    }
+
+    // The scheduled agent is looked up in its own workspace only: another
+    // workspace's unreadable config must not stop it from starting.
+    #[test]
+    fn scheduled_agent_resolves_despite_another_unreadable_workspace() {
+        use crate::config::workspace_config::WorkspaceConfig;
+        use crate::workspace_index::WorkspaceIndex;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let parent = temp.path().join("workspaces");
+        let mut index = WorkspaceIndex::default();
+        let mut sched = crate::agents::scheduler::Scheduler::new();
+        for (id, main, updated_at) in [
+            ("ws-broken", "main-broken", 2_000),
+            ("ws-ok", "main-ok", 1_000),
+        ] {
+            let root = parent.join(id);
+            let mut config =
+                WorkspaceConfig::new(id.to_string(), id.to_string(), updated_at, main.to_string());
+            config.schedule.enabled = true;
+            workspace_config::save(&root, &config).expect("seed workspace");
+            index.insert_config(root, &config);
+            crate::agents::init::apply_workspace_schedule(&mut sched, &config);
+        }
+        std::fs::write(
+            workspace_config::config_path(&parent.join("ws-broken")),
+            "{ not json",
+        )
+        .expect("corrupt config");
+        let config_manager = crate::ConfigManager::new_for_tests(
+            crate::config::AppConfig::default(),
+            temp.path().join("config.json"),
+        );
+        let state = AppState::new_for_tests(config_manager, index).expect("app state");
+
+        let instance = sched
+            .get_instance(&crate::agents::types::AgentInstance::instance_id_for(
+                "main-ok",
+            ))
+            .expect("healthy workspace is scheduled");
+        let agent =
+            load_workspace_agent_as_config(&state, &instance.workspace_id, &instance.agent_id)
+                .expect("healthy workspace config loads")
+                .expect("scheduled agent resolves");
+        assert_eq!(agent.workspace_id, "ws-ok");
+        assert!(agent.schedule_enabled);
     }
 }
