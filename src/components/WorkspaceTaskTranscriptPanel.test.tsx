@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
@@ -36,7 +37,9 @@ vi.mock('./Chat/StreamingMarkdown', () => ({
 vi.mock('./Chat/VegaChart', () => ({ default: () => <div data-testid="vega-chart" /> }));
 
 import WorkspaceTaskTranscriptPanel from './WorkspaceTaskTranscriptPanel';
+import AskUserPanel from './AskUserPanel/AskUserPanel';
 import { useAssistantStore } from '../assistant';
+import type { PendingAskUser } from '../assistant/sessionStore';
 import type { AssistantMessage, WorkspaceTaskResponse } from '../generated/bindings';
 
 const SESSION_ID = 'sess-task-1';
@@ -81,7 +84,7 @@ const message: AssistantMessage = {
 
 // Only the fields the panel reads; `session` and the rest of SessionState are
 // never touched by it, so the fixture stays narrow on purpose.
-const seedSession = (isStreaming: boolean) => {
+const seedSession = (isStreaming: boolean, pendingAskUser: PendingAskUser | null = null) => {
   useAssistantStore.setState({
     sessions: {
       [SESSION_ID]: {
@@ -89,13 +92,22 @@ const seedSession = (isStreaming: boolean) => {
         toolCalls: [],
         isStreaming,
         runStartedAt: isStreaming ? Date.now() - 8000 : null,
+        pendingAskUser,
       },
     },
   } as never);
 };
 
+const question: PendingAskUser = {
+  pendingId: 'pending-1',
+  question: 'Also review the generated bindings?',
+  options: null,
+  extraContext: null,
+};
+
 describe('WorkspaceTaskTranscriptPanel', () => {
   beforeEach(() => {
+    mockInvoke.mockReset();
     useAssistantStore.setState({ sessions: {}, streamingText: {} } as never);
   });
 
@@ -142,5 +154,35 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       />
     );
     expect(face().dataset.activity).toBe('none');
+  });
+
+  it('pending ask_user for task session renders in task panel', () => {
+    seedSession(true, question);
+    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />);
+    const dialog = screen.getByRole('dialog', { name: 'Agent question' });
+    expect(dialog.textContent).toContain('Also review the generated bindings?');
+  });
+
+  it('submitting answer invokes assistant_submit_user_input with task session id', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    seedSession(true, question);
+    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />);
+    await userEvent.type(screen.getByRole('textbox'), 'No, skip them{Enter}');
+    // The pending id is minted for the task session's ask, so answering it
+    // here resolves that session's run.
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: {
+        pendingId: 'pending-1',
+        answer: 'No, skip them',
+        selectedOptionIndex: null,
+        selectedOptionIndexes: null,
+      },
+    });
+  });
+
+  it('manager chat does not show task session question', () => {
+    seedSession(true, question);
+    render(<AskUserPanel sessionId="sess-manager" />);
+    expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
   });
 });

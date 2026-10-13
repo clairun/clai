@@ -7,6 +7,7 @@ import type {
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
+import AskUserPanel from './AskUserPanel/AskUserPanel';
 import AgentAvatar from './Agents/AgentAvatar';
 import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
 import { isTaskActive, isTaskAttention, taskStatusLabel } from '../utils/taskDisplay';
@@ -243,6 +244,11 @@ export default function WorkspaceTaskTranscriptPanel({
               // their place.
               taskRoster={roster}
             />
+          </div>
+        )}
+        {sessionId && (
+          <div className={styles.ask}>
+            <AskUserPanel sessionId={sessionId} />
           </div>
         )}
       </div>
