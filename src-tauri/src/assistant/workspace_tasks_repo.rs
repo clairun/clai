@@ -1,6 +1,8 @@
 //! The `workspace_tasks` table: one row shape, one column list, and the one
 //! response every reader (the UI and the agents' task tools) gets.
 
+use crate::assistant::signals::SignalRef;
+use crate::assistant::types::{AssistantMessage, AssistantRun, MessageOrigin};
 use crate::db::{enum_text, parse_enum_text, DbPool};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection};
@@ -75,12 +77,28 @@ pub struct WorkspaceTaskResponse {
     /// Set when a stop was requested for the current cycle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_requested_at: Option<i64>,
+    /// Who answered the current cycle's last `ask_user` question.
+    pub answered_by: Option<MessageOrigin>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attention_acknowledged_at: Option<i64>,
+}
+
+/// What a message sent to a task did.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct WorkspaceTaskSendResponse {
+    pub task: WorkspaceTaskResponse,
+    pub message: AssistantMessage,
+    /// `consumed`: it answered the task's open question; `claimed`: it
+    /// started a new cycle; `pending`: it waits for the current run.
+    pub signal: SignalRef,
+    /// The run that took it, when one was started or is active.
+    pub run: Option<AssistantRun>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +121,7 @@ pub(crate) struct WorkspaceTaskRow {
     pub(crate) depth: i64,
     pub(crate) cycle_no: i64,
     pub(crate) stop_requested_at: Option<i64>,
+    pub(crate) input_answered_by: Option<MessageOrigin>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) completed_at: Option<i64>,
@@ -112,7 +131,7 @@ pub(crate) struct WorkspaceTaskRow {
 const TASK_COLUMNS: &str = "id, created_by_workspace_agent_id, assigned_to_workspace_agent_id, \
      assigned_agent_definition_id, title, instructions, status, failure_reason, result_summary, \
      error, session_id, run_id, parent_session_id, parent_run_id, parent_task_id, depth, \
-     cycle_no, stop_requested_at, created_at, updated_at, completed_at, attention_acknowledged_at";
+     cycle_no, stop_requested_at, input_answered_by_json, created_at, updated_at, completed_at, attention_acknowledged_at";
 
 impl WorkspaceTaskRow {
     fn from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<Self, String> {
@@ -138,6 +157,13 @@ impl WorkspaceTaskRow {
             depth: row.get("depth"),
             cycle_no: row.get("cycle_no"),
             stop_requested_at: row.get("stop_requested_at"),
+            input_answered_by: row
+                .get::<Option<String>, _>("input_answered_by_json")
+                .map(|json| {
+                    serde_json::from_str(&json)
+                        .map_err(|e| format!("Invalid task answered-by origin: {}", e))
+                })
+                .transpose()?,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             completed_at: row.get("completed_at"),
@@ -185,6 +211,7 @@ impl WorkspaceTaskRow {
             depth: self.depth,
             cycle_no: self.cycle_no,
             stop_requested_at: self.stop_requested_at,
+            answered_by: self.input_answered_by,
             created_at: self.created_at,
             updated_at: self.updated_at,
             completed_at: self.completed_at,
@@ -220,6 +247,18 @@ pub(crate) async fn load_task_for_session(
     .await
     .map_err(|e| format!("Failed to load workspace task for session: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
+}
+
+/// [`load_task_for_session`] on a pooled connection.
+pub(crate) async fn task_of_session(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<Option<WorkspaceTaskRow>, String> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("Failed to acquire connection: {}", e))?;
+    load_task_for_session(&mut conn, session_id).await
 }
 
 /// The most recently touched tasks, newest first.
@@ -353,6 +392,58 @@ pub(crate) async fn mark_running(
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to mark workspace task running: {}", e))?;
+    row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
+}
+
+/// `running → input_required` as the cycle of `run_id` asks a question; a
+/// task already waiting on an earlier question stays waiting. `None` when
+/// the cycle is not running (stopping, ended or superseded).
+pub(crate) async fn mark_input_required(
+    pool: &DbPool,
+    task_id: &str,
+    run_id: &str,
+) -> Result<Option<WorkspaceTaskRow>, String> {
+    let row = sqlx::query(&format!(
+        r#"
+        UPDATE workspace_tasks SET status = 'input_required', updated_at = ?
+        WHERE id = ? AND run_id = ? AND status IN ('running', 'input_required')
+        RETURNING {TASK_COLUMNS}
+        "#
+    ))
+    .bind(now_ms())
+    .bind(task_id)
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to mark workspace task input_required: {}", e))?;
+    row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
+}
+
+/// `input_required → running` once `answered_by` answered the question of
+/// the cycle of `run_id`. `None` when the task is no longer waiting.
+pub(crate) async fn record_answer(
+    pool: &DbPool,
+    task_id: &str,
+    run_id: &str,
+    answered_by: &MessageOrigin,
+) -> Result<Option<WorkspaceTaskRow>, String> {
+    let answered_by = serde_json::to_string(answered_by)
+        .map_err(|e| format!("Failed to serialize answer origin: {}", e))?;
+    let row = sqlx::query(&format!(
+        r#"
+        UPDATE workspace_tasks
+        SET status = 'running', input_answered_by_json = ?, updated_at = ?
+        WHERE id = ? AND run_id = ? AND status = 'input_required'
+        RETURNING {TASK_COLUMNS}
+        "#
+    ))
+    .bind(answered_by)
+    .bind(now_ms())
+    .bind(task_id)
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to record task answer: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
 }
 

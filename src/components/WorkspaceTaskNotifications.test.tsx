@@ -31,6 +31,7 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   depth: 0n,
   cycleNo: 1n,
   stopRequestedAt: null,
+  answeredBy: null,
   ...over,
 });
 

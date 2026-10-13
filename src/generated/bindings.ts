@@ -458,6 +458,16 @@ export type ShellAccessMode = "off" | "restricted" | "full";
 
 export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, };
 
+/**
+ * The signal a send created, as the sender sees it.
+ */
+export type SignalRef = { id: string, status: SignalStatus, };
+
+/**
+ * Where a signal is in its delivery.
+ */
+export type SignalStatus = "pending" | "claimed" | "consumed" | "dropped";
+
 export type SkillCatalogResponse = { sources: Array<SkillSourceResponse>, skills: Array<SkillDefinition>, diagnostics: Array<SkillSourceDiagnostic>, };
 
 export type SkillDefinition = { id: string, name: string, description: string, sourceId: string, sourceName: string, sourcePath: string, content: string, };
@@ -698,4 +708,22 @@ export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdBy
 /**
  * Set when a stop was requested for the current cycle.
  */
-stopRequestedAt: bigint | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };
+stopRequestedAt: bigint | null, 
+/**
+ * Who answered the current cycle's last `ask_user` question.
+ */
+answeredBy: MessageOrigin | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };
+
+/**
+ * What a message sent to a task did.
+ */
+export type WorkspaceTaskSendResponse = { task: WorkspaceTaskResponse, message: AssistantMessage, 
+/**
+ * `consumed`: it answered the task's open question; `claimed`: it
+ * started a new cycle; `pending`: it waits for the current run.
+ */
+signal: SignalRef, 
+/**
+ * The run that took it, when one was started or is active.
+ */
+run: AssistantRun | null, };

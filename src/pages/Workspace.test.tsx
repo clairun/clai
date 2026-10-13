@@ -272,6 +272,7 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   depth: 0n,
   cycleNo: 0n,
   stopRequestedAt: null,
+  answeredBy: null,
 };
 
 const renderWorkspace = () =>

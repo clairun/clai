@@ -511,6 +511,7 @@ pub fn run() {
             commands::workspace::workspace_acknowledge_task,
             commands::workspace::workspace_task_by_id,
             commands::workspace::workspace_stop_task,
+            commands::workspace::workspace_send_task_message,
             commands::workspace::workspace_create,
             commands::workspace::workspace_fork,
             commands::workspace::workspace_list,

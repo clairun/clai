@@ -368,6 +368,14 @@ pub struct WorkspaceTaskActionRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskMessageRequest {
+    pub workspace_id: String,
+    pub task_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceForkRequest {
     pub workspace_id: String,
     #[serde(default)]
@@ -2631,6 +2639,30 @@ pub async fn workspace_stop_task(
         .into_task();
     let agent_names = workspace_agent_display_names(state.inner(), &workspace_id);
     Ok(task.into_response(&workspace_id, &agent_names))
+}
+
+/// Send the user's message to a task: answers its open question, queues for
+/// its current run, or resumes it as a new cycle.
+#[tauri::command]
+pub async fn workspace_send_task_message(
+    request: WorkspaceTaskMessageRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::assistant::workspace_tasks_repo::WorkspaceTaskSendResponse, String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
+    let pool = state.workspace_db(&workspace_id).await?;
+    let deps = crate::assistant::engine::AssistantDeps {
+        workspace_id,
+        pool,
+        app,
+    };
+    crate::assistant::tools::workspace_tasks::send_task_message(
+        &deps,
+        &request.task_id,
+        &request.message,
+        crate::assistant::types::MessageOrigin::User,
+    )
+    .await
 }
 
 // =============================================================================

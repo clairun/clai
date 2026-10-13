@@ -50,6 +50,7 @@ pub async fn execute_tool(
         "workspace_listAgents"
         | "workspace_assignTask"
         | "workspace_getTaskResult"
+        | "workspace_sendTaskMessage"
         | "workspace_stopTask" => {
             workspace_tasks::execute(deps, context, name_for_dispatch, params).await
         }

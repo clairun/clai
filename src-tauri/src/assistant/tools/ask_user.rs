@@ -41,7 +41,9 @@ use uuid::Uuid;
 use crate::assistant::engine::AssistantDeps;
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository;
-use crate::assistant::tools::ToolExecutionContext;
+use crate::assistant::tools::{workspace_tasks, ToolExecutionContext};
+use crate::assistant::types::MessageOrigin;
+use crate::assistant::workspace_tasks_repo;
 
 // `deny_unknown_fields` keeps serde behavior aligned with the advertised
 // schema's `additionalProperties: false` (schemars derives the latter from
@@ -89,13 +91,15 @@ pub struct AskUserAnswer {
     /// Multi-select questions: every picked option's index, in option
     /// order. `None` for single-select / free-text answers.
     pub selected_option_indexes: Option<Vec<usize>>,
+    /// Who answered: the human, or the parent agent of a task.
+    pub origin: MessageOrigin,
 }
 
 // Keyed by pending id; the value carries the owning session id so callers
 // (mid-run input delivery) can check whether a session is currently blocked
 // on a human answer without threading new state through the tool router.
 #[derive(Debug)]
-enum AskUserOutcome {
+pub(crate) enum AskUserOutcome {
     Answer(AskUserAnswer),
     Superseded,
 }
@@ -129,6 +133,34 @@ pub fn submit_answer(pending_id: &str, answer: AskUserAnswer) -> Result<(), Stri
         .ok_or_else(|| format!("No pending ask_user with id `{}`", pending_id))?;
     tx.send(AskUserOutcome::Answer(answer))
         .map_err(|_| "ask_user receiver was dropped (run already ended)".to_string())
+}
+
+/// Answers the question `session_id` is waiting on, whoever asked it. The
+/// first answer to remove the pending entry wins; a later one gets `Err`.
+pub fn submit_answer_for_session(session_id: &str, answer: AskUserAnswer) -> Result<(), String> {
+    let mut map = pending_map()
+        .lock()
+        .map_err(|e| format!("ask_user pending map poisoned: {}", e))?;
+    let pending_id = map
+        .iter()
+        .find(|(_, (owner, _))| owner == session_id)
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| format!("No pending ask_user in session `{}`", session_id))?;
+    let (_, tx) = map.remove(&pending_id).expect("pending id was just found");
+    tx.send(AskUserOutcome::Answer(answer))
+        .map_err(|_| "ask_user receiver was dropped (run already ended)".to_string())
+}
+
+/// Registers a question for `session_id` as `execute` does, for tests that
+/// answer it.
+#[cfg(test)]
+pub(crate) fn register_test_ask(session_id: &str) -> oneshot::Receiver<AskUserOutcome> {
+    let (tx, rx) = oneshot::channel();
+    pending_map()
+        .lock()
+        .unwrap()
+        .insert(Uuid::new_v4().to_string(), (session_id.to_string(), tx));
+    rx
 }
 
 /// Removes every pending ask for `session_id`, returning the removed
@@ -239,6 +271,9 @@ pub async fn execute(
     let session = repository::get_session(&deps.pool, &context.session_id)
         .await?
         .ok_or_else(|| format!("Session not found: {}", context.session_id))?;
+    // Read before the question is registered: an error after that point
+    // would drop the guard and cancel the run.
+    let task = workspace_tasks_repo::task_of_session(&deps.pool, &session.id).await?;
 
     // Supersede any orphaned ask for this session (the model re-asking
     // after a CLI transport drop lost the original call). The frontend
@@ -285,6 +320,10 @@ pub async fn execute(
         },
     );
 
+    if let Some(task) = &task {
+        workspace_tasks::ask_parent(deps, task, &context.run_id, &question, &params).await;
+    }
+
     let answer = match rx.await {
         Ok(AskUserOutcome::Answer(answer)) => answer,
         Ok(AskUserOutcome::Superseded) => {
@@ -303,6 +342,9 @@ pub async fn execute(
         }
     };
     guard.disarm();
+    if let Some(task) = &task {
+        workspace_tasks::record_ask_answered(deps, &task.id, &context.run_id, &answer.origin).await;
+    }
 
     let _ = deps.emit(
         &session,
@@ -449,6 +491,7 @@ mod tests {
                 text: "late".to_string(),
                 selected_option_index: None,
                 selected_option_indexes: None,
+                origin: MessageOrigin::User,
             },
         );
         assert!(result.is_err(), "superseded ask must not accept answers");

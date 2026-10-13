@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::assistant::repository::{map_message_row, now_ms};
 use crate::assistant::types::{AssistantMessage, ContentPart, MessageOrigin, MessageRole};
-use crate::db::{enum_text, DbPool};
+use crate::db::{enum_text, parse_enum_text, DbPool};
 
 /// What a signal carries. Every kind so far is content: it has a message
 /// row and reaches the model.
@@ -26,6 +26,32 @@ pub enum SignalKind {
     TaskResult,
     /// A task this session assigned failed a cycle.
     TaskFailed,
+    /// A task this session assigned asked a question with `ask_user`.
+    TaskInputRequired,
+}
+
+/// Where a signal is in its delivery.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum SignalStatus {
+    /// Waiting for a run.
+    Pending,
+    /// The input of a run that has not ended.
+    Claimed,
+    /// Delivered: taken by a live run, or the answer to its `ask_user`.
+    Consumed,
+    /// Its message was deleted before delivery.
+    Dropped,
+}
+
+/// The signal a send created, as the sender sees it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct SignalRef {
+    pub id: String,
+    pub status: SignalStatus,
 }
 
 /// A content signal and its message.
@@ -170,6 +196,23 @@ pub(crate) async fn insert_event(
         .await
         .map_err(|e| format!("Failed to update assistant session timestamp: {}", e))?;
     Ok(Some(message))
+}
+
+/// The signal carrying `message_id`.
+pub(crate) async fn signal_for_message(
+    pool: &DbPool,
+    message_id: &str,
+) -> Result<SignalRef, String> {
+    let (id, status): (String, String) =
+        sqlx::query_as("SELECT id, status FROM session_signals WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("Failed to read session signal: {}", e))?;
+    Ok(SignalRef {
+        id,
+        status: parse_enum_text(status, "signal status")?,
+    })
 }
 
 /// Pending content signals of a session, oldest first. Claimed signals are
