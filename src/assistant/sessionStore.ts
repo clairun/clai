@@ -101,9 +101,8 @@ export interface AssistantStoreState {
   activeSessionByTab: Record<string, string>;
 
   setActiveSessionForTab: (tabId: string, sessionId: string) => void;
-  getActiveSessionForTab: (tabId: string) => string | null;
 
-  initSession: (session: AssistantSession & { tabId?: string | null }) => void;
+  initSession: (session: AssistantSession) => void;
   addMessage: (sessionId: string, message: AssistantMessage) => void;
   removeMessage: (sessionId: string, messageId: string) => void;
   /** Text of a user message whose run failed and was retracted by the
@@ -169,7 +168,7 @@ const ACTIVE_STATUSES = ['queued', 'running', 'waiting_for_tool'] as const;
 
 const useAssistantStore = create<AssistantStoreState>()(
   devtools(
-    immer((set, get) => ({
+    immer((set) => ({
       sessions: {},
       streamingText: {},
       deliveredQueuedMessageIds: {},
@@ -181,17 +180,10 @@ const useAssistantStore = create<AssistantStoreState>()(
           state.activeSessionByTab[tabId] = sessionId;
         }),
 
-      getActiveSessionForTab: (tabId) => {
-        return get().activeSessionByTab[tabId] || null;
-      },
-
       initSession: (session) =>
         set((state) => {
           if (!state.sessions[session.id]) {
             state.sessions[session.id] = createInitialSessionState(session);
-          }
-          if (session.tabId) {
-            state.activeSessionByTab[session.tabId] = session.id;
           }
         }),
 

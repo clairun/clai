@@ -22,9 +22,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 // Imported AFTER vi.mock so the hook picks up the mocked listen().
 const { useAssistantEvents } = await import('./useAssistantEvents');
 
-const SESSION = {
-  id: 'sess-1',
-} as unknown as AssistantSession & { tabId?: string | null };
+const SESSION = { id: 'sess-1' } as unknown as AssistantSession;
 const fire = (event: unknown, runId: string | null = null) => {
   capturedHandler?.({
     payload: {

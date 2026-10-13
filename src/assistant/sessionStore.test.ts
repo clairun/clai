@@ -4,10 +4,7 @@ import type { AssistantMessage, AssistantRun, AssistantSession } from '../genera
 
 // Minimal typed fixtures — the store only reads ids/status/content, so we
 // cast partial shapes rather than spell out every required field.
-const SESSION = {
-  id: 'sess-1',
-  tabId: null,
-} as unknown as AssistantSession & { tabId?: string | null };
+const SESSION = { id: 'sess-1' } as unknown as AssistantSession;
 
 const msg = (id: string): AssistantMessage =>
   ({ id, content: [] }) as unknown as AssistantMessage;
