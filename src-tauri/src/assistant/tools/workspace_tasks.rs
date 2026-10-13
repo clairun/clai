@@ -2,8 +2,8 @@ use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::repository::{self, CreateMessageParams, CreateRunParams};
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
-    AssistantMessage, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
-    SessionContext,
+    AssistantMessage, AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus,
+    RunTrigger, SessionContext,
 };
 use crate::assistant::workspace_agents::{
     agent_display_names, concise_agent_description, load_workspace_agent_rows,
@@ -317,21 +317,13 @@ fn spawn_task_run(
 
         match result {
             Ok(()) => {
-                let run = repository::get_run(&deps.pool, &run_id)
-                    .await
-                    .ok()
-                    .flatten();
-                let status = match run.as_ref().map(|run| &run.status) {
-                    Some(RunStatus::Completed | RunStatus::CompletedWithWarnings) => "completed",
-                    Some(RunStatus::Cancelled) => "failed",
-                    Some(RunStatus::Failed) => "failed",
-                    _ => "completed",
-                };
                 let summary = latest_assistant_text(&deps.pool, &session_id)
                     .await
                     .unwrap_or(None);
-                let status = classify_worker_status(summary.as_deref(), status);
-                let error = run.and_then(|run| run.error);
+                let (status, error) = finished_run_outcome(
+                    repository::get_run(&deps.pool, &run_id).await,
+                    summary.as_deref(),
+                );
                 let _ = update_task_status(
                     &deps.pool,
                     &task_id,
@@ -366,6 +358,35 @@ fn spawn_task_run(
             }
         }
     });
+}
+
+/// Task status and error for a worker run whose turn has returned. Nothing
+/// advances the task after this, so a run that is missing or still active
+/// fails the task instead of leaving it open; only a run that reached a
+/// terminal status can be reclassified by its `summary`.
+fn finished_run_outcome(
+    run: Result<Option<AssistantRun>, String>,
+    summary: Option<&str>,
+) -> (&'static str, Option<String>) {
+    match run {
+        Ok(Some(run)) => match run.status {
+            RunStatus::Completed | RunStatus::CompletedWithWarnings => {
+                (classify_worker_status(summary, "completed"), run.error)
+            }
+            RunStatus::Failed | RunStatus::Cancelled => {
+                (classify_worker_status(summary, "failed"), run.error)
+            }
+            status @ (RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool) => (
+                "failed",
+                Some(format!("Worker run ended while still {status:?}")),
+            ),
+        },
+        Ok(None) => ("failed", Some("Worker run record not found".to_string())),
+        Err(error) => (
+            "failed",
+            Some(format!("Could not load worker run: {error}")),
+        ),
+    }
 }
 
 /// The worker runs with its own configuration, resolved when each run starts —
@@ -874,5 +895,68 @@ mod tests {
             classify_worker_status(Some("   \n  "), "completed"),
             "completed"
         );
+    }
+
+    fn run_with(status: RunStatus, error: Option<&str>) -> AssistantRun {
+        AssistantRun {
+            id: "run".to_string(),
+            session_id: "session".to_string(),
+            status,
+            trigger: RunTrigger::WorkspaceTask,
+            connection_id: "c".to_string(),
+            protocol_id: "p".to_string(),
+            model_id: "m".to_string(),
+            started_at: 1,
+            completed_at: None,
+            error: error.map(str::to_string),
+        }
+    }
+
+    const BLOCKED: Option<&str> = Some("BLOCKED: need a key");
+
+    #[test]
+    fn finished_run_outcome_maps_terminal_statuses() {
+        for status in [RunStatus::Completed, RunStatus::CompletedWithWarnings] {
+            assert_eq!(
+                finished_run_outcome(Ok(Some(run_with(status, None))), None),
+                ("completed", None)
+            );
+        }
+        for status in [RunStatus::Failed, RunStatus::Cancelled] {
+            assert_eq!(
+                finished_run_outcome(Ok(Some(run_with(status, Some("boom")))), None),
+                ("failed", Some("boom".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn finished_run_outcome_fails_a_run_that_is_still_active_or_missing() {
+        for status in [
+            RunStatus::Queued,
+            RunStatus::Running,
+            RunStatus::WaitingForTool,
+        ] {
+            let (task_status, error) =
+                finished_run_outcome(Ok(Some(run_with(status, None))), BLOCKED);
+            assert_eq!(task_status, "failed");
+            assert!(error.unwrap().contains("still"));
+        }
+        let (task_status, error) = finished_run_outcome(Ok(None), BLOCKED);
+        assert_eq!(task_status, "failed");
+        assert!(error.unwrap().contains("not found"));
+        let (task_status, error) = finished_run_outcome(Err("db gone".to_string()), BLOCKED);
+        assert_eq!(task_status, "failed");
+        assert!(error.unwrap().contains("db gone"));
+    }
+
+    #[test]
+    fn finished_run_outcome_blocks_a_terminal_run_that_reports_blocked() {
+        for status in [RunStatus::Completed, RunStatus::Failed] {
+            assert_eq!(
+                finished_run_outcome(Ok(Some(run_with(status, None))), BLOCKED).0,
+                "blocked"
+            );
+        }
     }
 }
