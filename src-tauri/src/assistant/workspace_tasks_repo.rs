@@ -477,7 +477,8 @@ pub(crate) async fn mark_input_required(
 ) -> Result<Option<WorkspaceTaskRow>, String> {
     let row = sqlx::query(&format!(
         r#"
-        UPDATE workspace_tasks SET status = 'input_required', updated_at = ?
+        UPDATE workspace_tasks
+        SET status = 'input_required', attention_acknowledged_at = NULL, updated_at = ?
         WHERE id = ? AND run_id = ? AND status IN ('running', 'input_required')
         RETURNING {TASK_COLUMNS}
         "#
@@ -545,7 +546,7 @@ pub(crate) async fn finish_cycle(
         SET status = CASE WHEN stop_requested_at IS NULL THEN ? ELSE 'stopped' END,
             failure_reason = CASE WHEN stop_requested_at IS NULL THEN ? END,
             error = CASE WHEN stop_requested_at IS NULL THEN ? END,
-            result_summary = ?, updated_at = ?, completed_at = ?
+            result_summary = ?, attention_acknowledged_at = NULL, updated_at = ?, completed_at = ?
         WHERE id = ? AND run_id IS ?
           AND status IN ('queued', 'running', 'input_required', 'stopping')
         RETURNING {TASK_COLUMNS}
@@ -608,7 +609,7 @@ pub(crate) async fn stop_interrupted(
         UPDATE workspace_tasks
         SET status = 'failed', failure_reason = 'restart',
             error = COALESCE(error, 'task never started: the app restarted before it was dispatched'),
-            updated_at = ?, completed_at = ?
+            attention_acknowledged_at = NULL, updated_at = ?, completed_at = ?
         WHERE status = 'queued' AND session_id IS NULL
         "#,
     )
@@ -833,5 +834,40 @@ mod tests {
         assert_eq!(task["depth"], 0);
         assert_eq!(task["assignedToWorkspaceAgentId"], "wa-1");
         assert!(task.get("failure_reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn new_attention_clears_the_acknowledgement() {
+        let (_tmp, pool) = workspace_pool().await;
+        insert_task(&pool, "task-1", "running", Some("sess-1"), None).await;
+        let acknowledge = || async {
+            sqlx::query(
+                "UPDATE workspace_tasks SET run_id = 'run-1', attention_acknowledged_at = 7 WHERE id = 'task-1'",
+            )
+            .execute(&pool)
+            .await
+            .expect("ack");
+        };
+
+        acknowledge().await;
+        let asked = mark_input_required(&pool, "task-1", "run-1")
+            .await
+            .expect("mark")
+            .expect("task is running");
+        assert_eq!(asked.attention_acknowledged_at, None);
+
+        acknowledge().await;
+        let outcome = CycleOutcome {
+            status: TaskStatus::Failed,
+            failure_reason: None,
+            error: Some("boom".to_string()),
+            result_summary: None,
+        };
+        let mut conn = pool.acquire().await.expect("connection");
+        let failed = finish_cycle(&mut conn, "task-1", Some("run-1"), &outcome)
+            .await
+            .expect("finish")
+            .expect("cycle is open");
+        assert_eq!(failed.attention_acknowledged_at, None);
     }
 }
