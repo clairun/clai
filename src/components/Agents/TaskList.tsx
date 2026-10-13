@@ -17,6 +17,7 @@ import {
 } from '../../utils/taskDisplay';
 import { buildTaskTree, type TaskNode } from '../../utils/taskTree';
 import AgentAvatar from './AgentAvatar';
+import TaskStopButton from './TaskStopButton';
 import { identityFor, taskIdentity, type AgentActivity, type AgentIdentity } from './agentIdentity';
 import styles from './TaskList.module.css';
 
@@ -207,7 +208,12 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
       {visible.length > 0 ? (
         <ul className={styles.list}>
           {rows.map(({ task, depth, childCount }) => {
-            const detail = task.error || task.resultSummary || task.instructions;
+            const stopped = task.status === 'stopped';
+            // A restart stops a task with an error; that is the whole story.
+            const detail =
+              stopped && task.error
+                ? null
+                : task.error || task.resultSummary || task.instructions;
             const needsAttention = isTaskAttention(task);
             const status = taskDisplayStatus(task);
             const creator = roster.find((entry) => entry.id === task.createdByWorkspaceAgentId);
@@ -263,6 +269,11 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                     <span className={`${styles.status} ${styles[`status_${status.key}`] || ''}`}>
                       {status.label}
                     </span>
+                    <TaskStopButton
+                      task={task}
+                      label={`Stop ${task.title}`}
+                      className={styles.rowStop}
+                    />
                   </div>
                   <div className={styles.meta}>
                     {creatorName && (
@@ -287,6 +298,13 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                     </button>
                   )}
                   {detail && <p className={styles.summary}>{detail}</p>}
+                  {stopped && (
+                    <p className={styles.summary}>
+                      {task.error
+                        ? 'Interrupted by restart · send a message to resume'
+                        : 'Send a message to resume'}
+                    </p>
+                  )}
                   {needsAttention && (
                     <button
                       type="button"

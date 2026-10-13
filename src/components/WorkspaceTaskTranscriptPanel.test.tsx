@@ -226,4 +226,34 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     expect(screen.queryByText('Main agent')).toBeNull();
     expect(screen.queryByText('You')).toBeNull();
   });
+
+  it('stop chip shows Stop requested then stopped resume hint', () => {
+    seedSession(false);
+    const { rerender } = render(
+      <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />
+    );
+    expect(screen.getByRole('button', { name: 'Stop task Port the reducer' })).toBeEnabled();
+    expect(screen.queryByText(/Stop requested/)).toBeNull();
+
+    rerender(
+      <WorkspaceTaskTranscriptPanel
+        workspaceId="ws-1"
+        task={task({ status: 'stopping' })}
+        onClose={() => {}}
+      />
+    );
+    expect(screen.getByText('Stop requested · waiting for a safe point')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop task Port the reducer' })).toBeDisabled();
+
+    rerender(
+      <WorkspaceTaskTranscriptPanel
+        workspaceId="ws-1"
+        task={task({ status: 'stopped' })}
+        onClose={() => {}}
+      />
+    );
+    expect(screen.queryByText(/Stop requested/)).toBeNull();
+    expect(screen.getByText('Stopped · send a message to resume')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop task Port the reducer' })).toBeNull();
+  });
 });

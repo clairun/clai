@@ -68,3 +68,6 @@ export const isTaskAttention = (
 
 export const isTaskActive = (task: { status: string }): boolean =>
   task.status === 'running' || task.status === 'queued' || task.status === 'input_required';
+
+/** A task whose current cycle can still be stopped. */
+export const canStopTask = (task: { status: string }): boolean => isTaskActive(task);

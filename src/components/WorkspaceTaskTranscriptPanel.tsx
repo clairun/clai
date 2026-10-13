@@ -11,6 +11,8 @@ import AskUserPanel from './AskUserPanel/AskUserPanel';
 import { resolveSessionOwner } from './AssistantChat/messageSender';
 import AgentAvatar from './Agents/AgentAvatar';
 import TaskBreadcrumb from './Agents/TaskBreadcrumb';
+import StopChip from './Agents/StopChip';
+import TaskStopButton from './Agents/TaskStopButton';
 import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
 import { isTaskActive, isTaskAttention, taskDisplayStatus } from '../utils/taskDisplay';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
@@ -209,6 +211,7 @@ export default function WorkspaceTaskTranscriptPanel({
           <span className={styles.title} title={task.title}>{task.title}</span>
           <span className={`${styles.statusPill} ${statusClass}`}>{statusLabel}</span>
         </div>
+        <TaskStopButton task={task} label={`Stop task ${task.title}`} />
         <button
           type="button"
           className={styles.closeButton}
@@ -283,6 +286,9 @@ export default function WorkspaceTaskTranscriptPanel({
             />
           </div>
         )}
+        <div className={styles.chips}>
+          <StopChip status={task.status} />
+        </div>
         {sessionId && (
           <div className={styles.ask}>
             <AskUserPanel sessionId={sessionId} />

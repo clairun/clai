@@ -216,6 +216,12 @@
   overflow: hidden;
 }
 
+.rowStop {
+  /* Above the row's full-bleed button, so it keeps its own clicks. */
+  position: relative;
+  z-index: 1;
+}
+
 .action {
   /* Above the row's full-bleed button, so it keeps its own clicks. */
   position: relative;
