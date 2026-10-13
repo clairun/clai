@@ -246,9 +246,7 @@ pub async fn execute(
     // replaces the stale one; resolving the old ids also unblocks
     // `session_has_pending_ask` for mid-run input delivery.
     for stale_id in take_for_session(&session.id) {
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             &session,
             Some(context.run_id.as_str()),
             AssistantUiEvent::AskUserResolved {
@@ -275,9 +273,7 @@ pub async fn execute(
         armed: true,
     };
 
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         &session,
         Some(context.run_id.as_str()),
         AssistantUiEvent::AskUserRequested {
@@ -308,9 +304,7 @@ pub async fn execute(
     };
     guard.disarm();
 
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         &session,
         Some(context.run_id.as_str()),
         AssistantUiEvent::AskUserResolved {

@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::assistant::codex_app_server;
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
-use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::{
     CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
@@ -269,9 +269,7 @@ pub async fn run_session_turn(
     let run_id = resolve_run_id(deps, &session, &connection, &input).await?;
 
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         &session,
         Some(&run_id),
         AssistantUiEvent::RunStarted { run },
@@ -348,9 +346,7 @@ pub async fn run_session_turn(
             Ok(Some(outcome)) => {
                 compaction_attempt.record_success();
                 reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
-                let _ = emit_event(
-                    &deps.app,
-                    &deps.workspace_id,
+                let _ = deps.emit(
                     &session,
                     Some(&run_id),
                     AssistantUiEvent::SessionCompacted {
@@ -542,9 +538,7 @@ pub async fn run_session_turn(
                     Ok(Some(outcome)) => {
                         compaction_attempt.record_success();
                         reset_cli_session_for_rotation(&deps.pool, &mut session).await?;
-                        let _ = emit_event(
-                            &deps.app,
-                            &deps.workspace_id,
+                        let _ = deps.emit(
                             &session,
                             Some(&run_id),
                             AssistantUiEvent::SessionCompacted {
@@ -812,9 +806,7 @@ async fn ensure_assistant_message_slot(
             },
         )
         .await?;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::MessageCreated {
@@ -1134,9 +1126,7 @@ async fn try_deliver_queued_to_claude(
             "Mid-run delivery: messages reached the live process but marking delivered failed; the followup run may re-deliver them"
         );
     } else {
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::QueuedMessagesDelivered {
@@ -2410,9 +2400,7 @@ async fn split_codex_assistant_message(
         // Nothing emitted yet: drop the empty placeholder rather than leave an
         // empty bubble before the user's steered message.
         let _ = conversation.delete_message(&deps.pool, &current.id).await;
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::MessageDeleted {
@@ -2462,9 +2450,7 @@ async fn resolve_codex_steer_response(
         .await
     {
         Ok(()) => {
-            let _ = emit_event(
-                &deps.app,
-                &deps.workspace_id,
+            let _ = deps.emit(
                 session,
                 Some(run_id),
                 AssistantUiEvent::QueuedMessagesDelivered {
@@ -3050,9 +3036,7 @@ async fn prepare_prompt(
                 },
             )
             .await?;
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::MessageCreated {
@@ -3481,9 +3465,7 @@ fn emit_assistant_update(
     message: Option<AssistantMessage>,
 ) {
     if let Some(message) = message {
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::AssistantMessageUpdated { message },
@@ -3503,7 +3485,7 @@ fn emit_assistant_delta(
     text: &str,
 ) {
     for event in delta_events(throttle, std::time::Instant::now(), message_id, text) {
-        let _ = emit_event(&deps.app, &deps.workspace_id, session, Some(run_id), event);
+        let _ = deps.emit(session, Some(run_id), event);
     }
 }
 
@@ -3684,9 +3666,7 @@ async fn handle_opencode_event(
                     text: text.to_string(),
                     signature: None,
                 });
-                let _ = emit_event(
-                    &deps.app,
-                    &deps.workspace_id,
+                let _ = deps.emit(
                     session,
                     Some(run_id),
                     AssistantUiEvent::AssistantThinkingDelta {
@@ -4015,9 +3995,7 @@ async fn handle_codex_item(
                     text: text.to_string(),
                     signature: None,
                 });
-                let _ = emit_event(
-                    &deps.app,
-                    &deps.workspace_id,
+                let _ = deps.emit(
                     session,
                     Some(run_id),
                     AssistantUiEvent::AssistantThinkingDelta {
@@ -4049,9 +4027,7 @@ async fn handle_codex_item(
                     text: summary.clone(),
                     signature: None,
                 });
-                let _ = emit_event(
-                    &deps.app,
-                    &deps.workspace_id,
+                let _ = deps.emit(
                     session,
                     Some(run_id),
                     AssistantUiEvent::AssistantThinkingDelta {
@@ -4565,9 +4541,7 @@ async fn handle_stream_event(
                                 t.push_str(text);
                             }
                         }
-                        let _ = emit_event(
-                            &deps.app,
-                            &deps.workspace_id,
+                        let _ = deps.emit(
                             session,
                             Some(run_id),
                             AssistantUiEvent::AssistantThinkingDelta {
@@ -4962,9 +4936,7 @@ async fn finalize_assistant_message_from_parts(
     let updated = conversation
         .update_message_content(&deps.pool, &assistant_message.id, &content)
         .await?;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::AssistantMessageCompleted { message: updated },

@@ -1,5 +1,5 @@
 use crate::assistant::engine::AssistantDeps;
-use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository;
 use crate::assistant::run_context::RunContext;
 use crate::assistant::types::{ContentPart, MessageRole, ProviderInputMessage, RunTrigger};
@@ -87,9 +87,7 @@ pub(crate) async fn discard_unanswered_run_input(
         trigger_message_id,
         assistant_placeholder_id,
         |message_id| {
-            let _ = emit_event(
-                &deps.app,
-                &deps.workspace_id,
+            let _ = deps.emit(
                 session,
                 Some(run_id),
                 AssistantUiEvent::MessageDeleted { message_id },

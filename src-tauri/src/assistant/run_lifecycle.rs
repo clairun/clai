@@ -19,7 +19,7 @@
 
 use crate::assistant::conversation::RunConversation;
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
-use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
@@ -82,7 +82,7 @@ pub(crate) async fn fail_run(
     error_msg: &str,
 ) -> Result<(), AssistantEngineError> {
     fail_run_with_sink(&deps.pool, run_id, error_msg, |event| {
-        let _ = emit_event(&deps.app, &deps.workspace_id, session, Some(run_id), event);
+        let _ = deps.emit(session, Some(run_id), event);
     })
     .await
 }
@@ -113,18 +113,14 @@ pub(crate) async fn cancel_run(
     for tool_call in
         repository::fail_running_tool_calls_for_run(&deps.pool, run_id, "Run cancelled").await?
     {
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::ToolCallFailed { tool_call },
         );
     }
     let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, None).await?;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::RunCancelled { run },
@@ -151,9 +147,7 @@ pub(crate) async fn complete_run(
 ) -> Result<(), AssistantEngineError> {
     let run =
         repository::complete_run(&deps.pool, run_id, final_status(had_warnings), None).await?;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::RunCompleted { run },
@@ -189,9 +183,7 @@ pub(crate) async fn record_tool_call_started(
     )
     .await?;
 
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::ToolCallStarted {
@@ -310,13 +302,7 @@ pub(crate) async fn record_tool_call_result(
 
     let started_at = updated.started_at;
     let completed_at = updated.completed_at;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
-        session,
-        Some(run_id),
-        completion_event(status, updated),
-    );
+    let _ = deps.emit(session, Some(run_id), completion_event(status, updated));
 
     let payload = match outcome {
         ToolCallOutcome::Completed { payload } | ToolCallOutcome::Failed { payload, .. } => payload,
@@ -338,9 +324,7 @@ pub(crate) async fn record_tool_call_result(
         )
         .await?;
 
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::MessageCreated { message },

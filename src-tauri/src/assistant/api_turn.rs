@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tauri::Manager;
 
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
-use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::providers;
 use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::repository;
@@ -273,9 +273,7 @@ async fn accept_api_stream(
     if !queued_message_ids_in_request.is_empty() {
         // The queued messages just became part of this run's request —
         // tell the FE so their "Queued" chips clear.
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::QueuedMessagesDelivered {
@@ -300,9 +298,7 @@ async fn accept_api_stream(
         )
         .await?;
 
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::MessageCreated {
@@ -334,13 +330,7 @@ async fn start_api_turn(
 
     // Transition run to Running
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
-    let _ = emit_event(
-        &deps.app,
-        &deps.workspace_id,
-        session,
-        Some(&run_id),
-        AssistantUiEvent::RunStarted { run },
-    );
+    let _ = deps.emit(session, Some(&run_id), AssistantUiEvent::RunStarted { run });
 
     if input.cancel_token.is_cancelled() {
         cancel_run(deps, session, &run_id).await?;
@@ -409,9 +399,7 @@ async fn start_api_turn(
                 },
             )
             .await?;
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(&run_id),
             AssistantUiEvent::MessageCreated {
@@ -468,9 +456,7 @@ async fn prepare_api_request(
         {
             Ok(Some(outcome)) => {
                 state.compaction_attempt.record_success();
-                let _ = emit_event(
-                    &deps.app,
-                    &deps.workspace_id,
+                let _ = deps.emit(
                     session,
                     Some(run_id),
                     AssistantUiEvent::SessionCompacted {
@@ -560,9 +546,7 @@ async fn try_context_limit_recovery(
     {
         Ok(Some(outcome)) => {
             state.compaction_attempt.record_success();
-            let _ = emit_event(
-                &deps.app,
-                &deps.workspace_id,
+            let _ = deps.emit(
                 session,
                 Some(run_id),
                 AssistantUiEvent::SessionCompacted {
@@ -608,9 +592,7 @@ async fn finalize_api_message(
         let updated_message = conversation
             .update_message_content(&deps.pool, message_id, &final_content)
             .await?;
-        let _ = emit_event(
-            &deps.app,
-            &deps.workspace_id,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::AssistantMessageCompleted {
@@ -709,7 +691,7 @@ async fn consume_api_stream(
     message_id: &str,
 ) -> (StreamExit, Vec<ContentPart>, Vec<ToolInvocationDraft>) {
     consume_api_stream_with_sink(stream, cancel, message_id, |event| {
-        let _ = emit_event(&deps.app, &deps.workspace_id, session, Some(run_id), event);
+        let _ = deps.emit(session, Some(run_id), event);
     })
     .await
 }

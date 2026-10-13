@@ -23,6 +23,18 @@ pub struct AssistantDeps {
     pub app: AppHandle,
 }
 
+impl AssistantDeps {
+    /// [`emit_event`] for this workspace.
+    pub fn emit(
+        &self,
+        session: &AssistantSession,
+        run_id: Option<&str>,
+        event: AssistantUiEvent,
+    ) -> Result<(), String> {
+        emit_event(&self.app, &self.workspace_id, session, run_id, event)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RunTurnInput {
     pub session_id: SessionId,
@@ -112,7 +124,7 @@ async fn fail_before_start(
     error: AssistantEngineError,
 ) -> Result<(), AssistantEngineError> {
     close_unstarted_run(&deps.pool, &session.id, input, error, |run_id, event| {
-        let _ = emit_event(&deps.app, &deps.workspace_id, session, Some(run_id), event);
+        let _ = deps.emit(session, Some(run_id), event);
     })
     .await
 }
