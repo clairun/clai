@@ -17,6 +17,7 @@ import type {
   WorkspaceDetailsOptions,
   WorkspaceSessionBinding,
   WorkspaceTaskResponse,
+  WorkspaceTaskSendResponse,
 } from '../generated/bindings';
 
 export async function getWorkspaceDetails(
@@ -228,6 +229,20 @@ export async function stopWorkspaceTask(
 ): Promise<WorkspaceTaskResponse> {
   return invoke('workspace_stop_task', {
     request: { workspaceId, taskId },
+  });
+}
+
+/**
+ * Send the user's text to a task. It answers the task's open question, starts
+ * a new cycle, or waits for the current run; `signal.status` says which.
+ */
+export async function sendWorkspaceTaskMessage(
+  workspaceId: string,
+  taskId: string,
+  message: string
+): Promise<WorkspaceTaskSendResponse> {
+  return invoke('workspace_send_task_message', {
+    request: { workspaceId, taskId, message },
   });
 }
 

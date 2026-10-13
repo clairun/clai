@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../assistant';
 import type {
   AssistantMessage,
@@ -7,21 +7,42 @@ import type {
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
+import ChatComposer from './AssistantChat/ChatComposer';
 import AskUserPanel from './AskUserPanel/AskUserPanel';
-import { resolveSessionOwner } from './AssistantChat/messageSender';
+import { resolveAgent, resolveSessionOwner } from './AssistantChat/messageSender';
 import AgentAvatar from './Agents/AgentAvatar';
 import TaskBreadcrumb from './Agents/TaskBreadcrumb';
 import StopChip from './Agents/StopChip';
 import TaskStopButton from './Agents/TaskStopButton';
 import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
 import { isTaskActive, isTaskAttention, taskDisplayStatus } from '../utils/taskDisplay';
+import { sendWorkspaceTaskMessage } from '../workspace/client';
+import { useTaskStore } from '../workspace/taskStore';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
 
 const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+const EMPTY_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
 const MESSAGE_PAGE_LIMIT = 100;
+
+const composerPlaceholder = (task: WorkspaceTaskResponse, agent: string): string => {
+  switch (task.status) {
+    case 'queued':
+    case 'running':
+      return `Queue a message for ${agent}…`;
+    case 'input_required':
+      return `Answer ${agent} (or use the question above)…`;
+    case 'stopping':
+      return 'Stopping…';
+    default:
+      return task.failureReason === 'blocked' ? `Reply to ${agent}…` : 'Continue this task…';
+  }
+};
+
+const errorText = (err: unknown): string =>
+  typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to send message.';
 
 interface WorkspaceTaskTranscriptPanelProps {
   workspaceId: string;
@@ -64,6 +85,27 @@ export default function WorkspaceTaskTranscriptPanel({
         assignedAgentDisplayName,
       }),
     [roster, assignedToWorkspaceAgentId, assignedAgentDefinitionId, assignedAgentDisplayName]
+  );
+  const upsertTask = useTaskStore((state) => state.upsertTask);
+  const taskId = task?.id ?? '';
+  const handleSend = useCallback(
+    async (text: string): Promise<{ error?: string }> => {
+      try {
+        const res = await sendWorkspaceTaskMessage(workspaceId, taskId, text);
+        const store = useAssistantStore.getState();
+        store.addMessage(res.message.sessionId, res.message);
+        // `consumed` answered the open question or was taken mid-run; anything
+        // else waits for a run, and `queued_messages_delivered` clears the chip.
+        if (res.signal.status !== 'consumed') {
+          store.markMessageQueued(res.message.sessionId, res.message.id);
+        }
+        upsertTask(res.task);
+        return {};
+      } catch (err) {
+        return { error: errorText(err) };
+      }
+    },
+    [workspaceId, taskId, upsertTask]
   );
   const [bootstrapError, setBootstrapError] = useState('');
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -136,6 +178,7 @@ export default function WorkspaceTaskTranscriptPanel({
   if (!task) return null;
 
   const { key: statusKey, label: statusLabel } = taskDisplayStatus(task);
+  const agentName = owner ? resolveAgent(owner, roster).name : task.assignedAgentDisplayName;
   const statusClass = styles[`status_${statusKey}`] || '';
   // The header face carries the task's state, so the transcript below doesn't
   // have to: its running footer is deliberately off (see `runningIdentity`).
@@ -147,6 +190,7 @@ export default function WorkspaceTaskTranscriptPanel({
 
   const messages = sessionState?.messages || EMPTY_MESSAGES;
   const toolCalls = sessionState?.toolCalls || EMPTY_TOOL_CALLS;
+  const queuedMessageIds = sessionState?.queuedMessageIds || EMPTY_IDS;
   const isStreaming = !!sessionState?.isStreaming;
   const hasOlderMessages = !!sessionState?.hasOlderMessages;
   const isLoadingOlderMessages = !!sessionState?.isLoadingOlderMessages;
@@ -283,6 +327,7 @@ export default function WorkspaceTaskTranscriptPanel({
               taskRoster={roster}
               onOpenTask={onOpenTask}
               owner={owner}
+              queuedMessageIds={queuedMessageIds}
             />
           </div>
         )}
@@ -295,6 +340,14 @@ export default function WorkspaceTaskTranscriptPanel({
           </div>
         )}
       </div>
+      <ChatComposer
+        // Remount per task so a draft never carries over to another task.
+        key={task.id}
+        placeholder={composerPlaceholder(task, agentName)}
+        ariaLabel={`Message ${agentName} about ${task.title}`}
+        disabled={task.status === 'stopping'}
+        onSend={handleSend}
+      />
     </aside>
   );
 }
