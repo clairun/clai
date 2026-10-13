@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AgentAvatarRef,
+  ExecutionCapabilityConfig,
   McpCatalogEntry,
   McpOAuthStartResponse,
   McpServerResponse,
@@ -8,6 +9,9 @@ import type {
   SkillDefinition,
   SkillSourceResponse,
   StartMcpOAuthLoginRequest,
+  WorkspaceAgentCreateRequest,
+  WorkspaceAgentDetail,
+  WorkspaceAgentUpdateRequest,
 } from '../generated/bindings';
 
 /**
@@ -180,44 +184,6 @@ export const saveWorkspaceTeamPolicy = async (
 // Workspace-Scoped Agent CRUD
 // ============================================================================
 
-// Mirrors Rust `WorkspaceAgentDetail` and `ExecutionCapabilityConfig`, which
-// have no ts-rs binding yet. Enum-valued fields are widened to `string`.
-export interface GrantOrigin {
-  kind: string;
-  grantedAtUnixMs?: number;
-  reason?: string;
-}
-export interface PathGrant {
-  path: string;
-  access: string;
-  origin?: GrantOrigin | null;
-}
-export interface ExecutionConfig {
-  sandbox: { network: string; sessionBus: string };
-  filesystem: { extraPaths: PathGrant[] };
-  shell: {
-    mode: string;
-    allowedCommandPrefixes: string[];
-    blockedCommandPrefixes: string[];
-  };
-  web: { enabled: boolean };
-}
-export interface WorkspaceAgentDetail {
-  id: string;
-  workspaceId: string;
-  name: string;
-  description: string;
-  selectedSkillIds: string[];
-  selectedMcpServerIds: string[];
-  providerConnectionIds: string[];
-  execution: ExecutionConfig;
-  enabled: boolean;
-  isDefault: boolean;
-  createdAt: number;
-  updatedAt: number;
-}
-
-
 export const workspaceGetAgent = async (
   workspaceId: string,
   agentId: string
@@ -230,7 +196,7 @@ export const workspaceGetAgent = async (
 };
 
 export const workspaceCreateAgent = async (
-  request: unknown
+  request: WorkspaceAgentCreateRequest
 ): Promise<WorkspaceAgentDetail> => {
   try {
     return await invoke('workspace_create_agent', { request });
@@ -240,7 +206,7 @@ export const workspaceCreateAgent = async (
 };
 
 export const workspaceUpdateAgent = async (
-  request: unknown
+  request: WorkspaceAgentUpdateRequest
 ): Promise<WorkspaceAgentDetail> => {
   try {
     return await invoke('workspace_update_agent', { request });
@@ -274,7 +240,7 @@ export const workspaceSetAgentEnabled = async (
   }
 };
 
-export const workspaceAgentDefaultExecution = async (): Promise<unknown> => {
+export const workspaceAgentDefaultExecution = async (): Promise<ExecutionCapabilityConfig> => {
   try {
     return await invoke('workspace_agent_default_execution');
   } catch (error) {

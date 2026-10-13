@@ -249,8 +249,9 @@ pub enum FilesystemPathAccess {
 /// the user *why* a path is in the grant list: was it added by hand, derived
 /// from the credentials preset, or accepted via an in-run approval modal?
 /// `None` (the historical shape) is treated as `Manual` by the UI.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum GrantOrigin {
     /// Added by the user via the agent settings form.
     Manual,
@@ -265,8 +266,9 @@ pub enum GrantOrigin {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct FilesystemPathGrant {
     pub path: String,
     pub access: FilesystemPathAccess,
@@ -277,8 +279,9 @@ pub struct FilesystemPathGrant {
     pub origin: Option<GrantOrigin>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum ShellAccessMode {
     #[default]
     Off,
@@ -286,8 +289,9 @@ pub enum ShellAccessMode {
     Full,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct FilesystemCapabilityConfig {
     /// Additional path grants. Used for two things now that the sandbox
     /// auto-binds the user's `$HOME` read-only:
@@ -303,8 +307,9 @@ pub struct FilesystemCapabilityConfig {
     pub extra_paths: Vec<FilesystemPathGrant>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ShellCapabilityConfig {
     #[serde(default)]
     pub mode: ShellAccessMode,
@@ -371,15 +376,17 @@ fn push_unique_prefix(prefixes: &mut Vec<String>, prefix: String) {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct WebCapabilityConfig {
     #[serde(default)]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum SandboxNetworkConfig {
     #[default]
     Enabled,
@@ -401,16 +408,18 @@ pub enum SandboxNetworkConfig {
 /// Use for high-isolation agents — running untrusted code, agents that
 /// don't need any host integration, or workspaces where you specifically
 /// want keyring contents kept out of reach.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum SandboxSessionBusConfig {
     Deny,
     #[default]
     Allow,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ExecutionSandboxConfig {
     #[serde(default)]
     pub network: SandboxNetworkConfig,
@@ -418,8 +427,9 @@ pub struct ExecutionSandboxConfig {
     pub session_bus: SandboxSessionBusConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ExecutionCapabilityConfig {
     #[serde(default)]
     pub sandbox: ExecutionSandboxConfig,

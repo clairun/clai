@@ -16,12 +16,17 @@ import {
   workspaceDeleteAgent,
   workspaceGetAgent,
   workspaceUpdateAgent,
-  type ExecutionConfig,
-  type GrantOrigin,
-  type PathGrant,
 } from '../../api/client';
 import SkillPicker from './SkillPicker';
-import type { ProviderConnection, WorkspaceDetails } from '../../generated/bindings';
+import type {
+  ExecutionCapabilityConfig,
+  FilesystemPathAccess,
+  FilesystemPathGrant,
+  GrantOrigin,
+  ProviderConnection,
+  ShellAccessMode,
+  WorkspaceDetails,
+} from '../../generated/bindings';
 import type { SectionHandle } from './sectionHandle';
 // Shares the modal's stylesheet on purpose: the form is rendered inside the
 // modal's content pane and must match its fields, toggles and chips exactly.
@@ -45,7 +50,7 @@ export interface AgentBehaviorPayload {
   selectedSkillIds: string[];
   selectedMcpServerIds: string[];
   providerConnectionIds: string[];
-  execution: ExecutionConfig;
+  execution: ExecutionCapabilityConfig;
   enabled: boolean;
 }
 
@@ -60,21 +65,21 @@ export interface AgentDetail {
   selectedSkillIds?: string[];
   selectedMcpServerIds?: string[];
   providerConnectionIds?: string[];
-  execution?: Partial<ExecutionConfig>;
+  execution?: Partial<ExecutionCapabilityConfig>;
 }
 
 export interface AgentFormDeps {
   mcpServers: NamedRef[];
   skills: SkillRef[];
   providerConnections: ProviderConnection[];
-  defaultExecution: Partial<ExecutionConfig> | null | undefined;
+  defaultExecution: Partial<ExecutionCapabilityConfig> | null | undefined;
 }
 
 // ──────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-const defaultExecution = (): ExecutionConfig => ({
+const defaultExecution = (): ExecutionCapabilityConfig => ({
   sandbox: { network: 'enabled', sessionBus: 'allow' },
   filesystem: { extraPaths: [] },
   shell: {
@@ -96,7 +101,7 @@ const addUniqueItem = (items: string[], value: string): string[] => {
   return [...items, trimmed];
 };
 
-const normalizePathGrants = (items: PathGrant[] = []): PathGrant[] =>
+const normalizePathGrants = (items: FilesystemPathGrant[] = []): FilesystemPathGrant[] =>
   items
     .map((item) => ({
       path: item.path?.trim() || '',
@@ -110,7 +115,7 @@ const grantOriginLabel = (origin: GrantOrigin | null | undefined): string => {
   if (origin.kind === 'credentialsPreset') return 'Preset';
   if (origin.kind === 'approval') {
     const when = origin.grantedAtUnixMs
-      ? new Date(origin.grantedAtUnixMs).toLocaleDateString(undefined, {
+      ? new Date(Number(origin.grantedAtUnixMs)).toLocaleDateString(undefined, {
           year: 'numeric',
           month: 'short',
           day: 'numeric',
@@ -121,7 +126,7 @@ const grantOriginLabel = (origin: GrantOrigin | null | undefined): string => {
   return 'Manual';
 };
 
-const normalizeExecution = (execution: Partial<ExecutionConfig> = {}): ExecutionConfig => {
+const normalizeExecution = (execution: Partial<ExecutionCapabilityConfig> = {}): ExecutionCapabilityConfig => {
   const d = defaultExecution();
   return {
     sandbox: {
@@ -153,7 +158,7 @@ interface AgentPayloadInput {
   selectedMcpServerIds?: string[];
   providerConnectionIds?: string[];
   sessionBusAllowed?: boolean;
-  extraPathGrants?: PathGrant[];
+  extraPathGrants?: FilesystemPathGrant[];
   shellMode?: string;
   allowedCommands?: string[];
   blockedCommands?: string[];
@@ -249,11 +254,11 @@ export const AgentBehaviorForm = ({
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [providerConnectionIds, setProviderConnectionIds] = useState<string[]>([]);
   const [providerConnectionDraft, setProviderConnectionDraft] = useState('');
-  const [extraPathGrants, setExtraPathGrants] = useState<PathGrant[]>([]);
+  const [extraPathGrants, setExtraPathGrants] = useState<FilesystemPathGrant[]>([]);
   const [extraPathDraft, setExtraPathDraft] = useState('');
-  const [extraPathAccess, setExtraPathAccess] = useState('read_only');
+  const [extraPathAccess, setExtraPathAccess] = useState<FilesystemPathAccess>('read_only');
   const [sessionBusAllowed, setSessionBusAllowed] = useState(true);
-  const [shellMode, setShellMode] = useState('off');
+  const [shellMode, setShellMode] = useState<ShellAccessMode>('off');
   const [allowedCommands, setAllowedCommands] = useState<string[]>([]);
   const [blockedCommands, setBlockedCommands] = useState(defaultExecution().shell.blockedCommandPrefixes);
   const [allowedCommandDraft, setAllowedCommandDraft] = useState('');
@@ -466,7 +471,7 @@ export const AgentBehaviorForm = ({
         return v;
       }
       const trimmedName = name.trim();
-      const execution = {
+      const execution: ExecutionCapabilityConfig = {
         sandbox: {
           network: 'enabled',
           sessionBus: sessionBusAllowed ? 'allow' : 'deny',
@@ -502,7 +507,7 @@ export const AgentBehaviorForm = ({
         } else {
           await workspaceUpdateAgent({
             workspaceId,
-            agentId: agent?.id || createdAgentId,
+            agentId: agent?.id || createdAgentId || '',
             name: isManager ? (agent?.name || 'Manager') : trimmedName,
             description: description.trim(),
             selectedSkillIds,
@@ -729,7 +734,7 @@ export const AgentBehaviorForm = ({
               <div key={grant.path} className={styles.grantItem}>
                 <span className={styles.grantPath}>{grant.path}</span>
                 <span className={styles.grantAccess}>{grant.access === 'read_write' ? 'RW' : 'RO'}</span>
-                <span className={styles.grantOrigin} title={grant.origin?.reason || undefined}>
+                <span className={styles.grantOrigin} title={grant.origin?.kind === 'approval' ? grant.origin.reason : undefined}>
                   {grantOriginLabel(grant.origin)}
                 </span>
                 <button
@@ -758,7 +763,7 @@ export const AgentBehaviorForm = ({
           <select
             className={styles.select}
             value={extraPathAccess}
-            onChange={(e) => setExtraPathAccess(e.target.value)}
+            onChange={(e) => setExtraPathAccess(e.target.value as FilesystemPathAccess)}
             disabled={busy}
           >
             <option value="read_only">Read only</option>
@@ -781,7 +786,7 @@ export const AgentBehaviorForm = ({
           id="shell-mode"
           className={styles.select}
           value={shellMode}
-          onChange={(e) => setShellMode(e.target.value)}
+          onChange={(e) => setShellMode(e.target.value as ShellAccessMode)}
           disabled={busy}
         >
           <option value="off">Off</option>
@@ -975,7 +980,7 @@ export const AgentBehaviorForm = ({
 // user sees the granted paths up front. Falls back to the local empty
 // execution if the fetch failed — better to show an empty list than to
 // block the whole create flow.
-const blankAgentDraft = (defaultExecutionFromBackend?: Partial<ExecutionConfig>): AgentDetail => ({
+const blankAgentDraft = (defaultExecutionFromBackend?: Partial<ExecutionCapabilityConfig>): AgentDetail => ({
   id: '',
   isDefault: false,
   name: '',

@@ -13,7 +13,7 @@ vi.mock('../../api/client', () => api);
 
 import { AgentBehaviorForm, type AgentDetail, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
-import type { ProviderConnection } from '../../generated/bindings';
+import type { FilesystemPathGrant, ProviderConnection } from '../../generated/bindings';
 
 const connection = (id: string, name: string): ProviderConnection =>
   ({ id, name, enabled: true } as unknown as ProviderConnection);
@@ -25,7 +25,7 @@ const DEPS: AgentFormDeps = {
   defaultExecution: null,
 };
 
-const HOME_GRANT = { path: '/home/u', access: 'read_only', origin: { kind: 'credentialsPreset' } };
+const HOME_GRANT: FilesystemPathGrant = { path: '/home/u', access: 'read_only', origin: { kind: 'credentialsPreset' } };
 
 const REVIEWER: AgentDetail = {
   id: 'agent-1',

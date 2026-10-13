@@ -113,7 +113,42 @@ export type CreateProviderConnectionRequest = { name: string, protocolId: string
  */
 providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
+export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
+
+export type ExecutionSandboxConfig = { network: SandboxNetworkConfig, sessionBus: SandboxSessionBusConfig, };
+
+export type FilesystemCapabilityConfig = { 
+/**
+ * Additional path grants. Used for two things now that the sandbox
+ * auto-binds the user's `$HOME` read-only:
+ * 1. Read-write upgrades to specific subpaths inside `$HOME`
+ *    (e.g., a tool cache directory the agent needs to write).
+ * 2. Any access (read or write) to paths outside `$HOME` (e.g.,
+ *    `/mnt/data`, `/opt/external`).
+ *
+ * Entries land here either from explicit user edits in agent
+ * settings or from `fs_request_grant` approvals (the latter
+ * carries provenance via `GrantOrigin::Approval`).
+ */
+extraPaths: Array<FilesystemPathGrant>, };
+
 export type FilesystemPathAccess = "read_only" | "read_write";
+
+export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess, 
+/**
+ * Set by paths that landed in `extra_paths` via the approval flow.
+ * Pre-existing grants on disk have no provenance and deserialize as
+ * `None`; the UI shows those as `Manual`.
+ */
+origin?: GrantOrigin | null, };
+
+/**
+ * Provenance for a `FilesystemPathGrant`. Lets the agent-settings UI tell
+ * the user *why* a path is in the grant list: was it added by hand, derived
+ * from the credentials preset, or accepted via an in-run approval modal?
+ * `None` (the historical shape) is treated as `Manual` by the UI.
+ */
+export type GrantOrigin = { "kind": "manual" } | { "kind": "credentialsPreset" } | { "kind": "approval", reason: string, grantedAtUnixMs: bigint, };
 
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
@@ -332,6 +367,27 @@ export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" 
 
 export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task";
 
+export type SandboxNetworkConfig = "enabled" | "disabled";
+
+/**
+ * Whether the agent's sandbox can reach the user's session D-Bus.
+ *
+ * `Allow` (the default) exposes the user's D-Bus session bus socket
+ * (`$XDG_RUNTIME_DIR/bus`) inside the sandbox and lets
+ * `DBUS_SESSION_BUS_ADDRESS` + `XDG_RUNTIME_DIR` through the env filter.
+ * This enables every CLI that talks to libsecret / `gnome-keyring-daemon`
+ * over D-Bus — most importantly `gh`, but also `git-credential-libsecret`,
+ * `secret-tool`, password managers, and so on. It matches Codex's
+ * "agent acts as me on my desktop" reach while CLAI's path-grant flow
+ * keeps file access narrow.
+ *
+ * `Deny` strips the bus socket bind and the corresponding env vars.
+ * Use for high-isolation agents — running untrusted code, agents that
+ * don't need any host integration, or workspaces where you specifically
+ * want keyring contents kept out of reach.
+ */
+export type SandboxSessionBusConfig = "deny" | "allow";
+
 /**
  * Discriminated union describing *how* the manager's next run is
  * computed. Stored inline on [`WorkspaceSchedule`] and consumed by
@@ -379,6 +435,10 @@ automationId?: string | null, cliSessionId?: string | null,
 cliSessionProvider?: string | null, };
 
 export type SetSkillSourceEnabledRequest = { id: string, enabled: boolean, };
+
+export type ShellAccessMode = "off" | "restricted" | "full";
+
+export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, };
 
 export type SkillCatalogResponse = { sources: Array<SkillSourceResponse>, skills: Array<SkillDefinition>, diagnostics: Array<SkillSourceDiagnostic>, };
 
@@ -456,6 +516,16 @@ export type UpdateProviderConnectionRequest = { id: string, name: string, protoc
  */
 providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 
+export type WebCapabilityConfig = { enabled: boolean, };
+
+export type WorkspaceAgentCreateRequest = { workspaceId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, 
+/**
+ * Optional explicit id; if absent, a fresh UUID is generated.
+ */
+id?: string, };
+
+export type WorkspaceAgentDetail = { id: string, workspaceId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, isDefault: boolean, createdAt: bigint, updatedAt: bigint, };
+
 export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
 /**
  * MCP server IDs selected for this agent. Surfaced so the Fleet
@@ -477,6 +547,8 @@ execution: unknown,
 avatar?: AgentAvatarRef | null, createdAt: bigint, updatedAt: bigint, };
 
 export type WorkspaceAgentSummary = { id: string, displayName: string, isDefault: boolean, description?: string | null, };
+
+export type WorkspaceAgentUpdateRequest = { workspaceId: string, agentId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, };
 
 export type WorkspaceDetails = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, 
 /**
