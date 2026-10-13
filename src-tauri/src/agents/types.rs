@@ -29,6 +29,10 @@ pub struct AgentDefinition {
     /// Unique identifier for this agent type.
     pub id: String,
 
+    /// The workspace whose schedule fires this agent.
+    #[serde(default)]
+    pub workspace_id: String,
+
     /// Human-readable name.
     pub name: String,
 
@@ -49,10 +53,17 @@ impl AgentDefinition {
     pub fn new(id: &str, name: &str) -> Self {
         Self {
             id: id.to_string(),
+            workspace_id: String::new(),
             name: name.to_string(),
             description: String::new(),
             required_tools: vec![],
         }
+    }
+
+    /// Sets the owning workspace.
+    pub fn with_workspace_id(mut self, workspace_id: &str) -> Self {
+        self.workspace_id = workspace_id.to_string();
+        self
     }
 
     /// Sets the description.
@@ -78,6 +89,11 @@ impl AgentDefinition {
 pub struct AgentInstance {
     /// Reference to the agent definition ID.
     pub agent_id: String,
+
+    /// The definition's workspace, so deleting a workspace can remove its
+    /// instances without reading its config.
+    #[serde(default)]
+    pub workspace_id: String,
 
     /// The scheduler key, which is the agent id. The scheduler is a
     /// `HashMap<String, AgentInstance>` and every lookup outside this module
@@ -127,6 +143,7 @@ impl AgentInstance {
     pub fn new(definition: &AgentDefinition) -> Self {
         Self {
             agent_id: definition.id.clone(),
+            workspace_id: definition.workspace_id.clone(),
             instance_id: Self::instance_id_for(&definition.id),
             is_running: false,
             enabled: true,

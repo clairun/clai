@@ -90,7 +90,9 @@ pub fn apply_workspace_schedule(
     if execution.web.enabled {
         tools.push("web");
     }
-    let definition = AgentDefinition::new(&agent.id, &agent.name).with_tools(tools);
+    let definition = AgentDefinition::new(&agent.id, &agent.name)
+        .with_workspace_id(&config.id)
+        .with_tools(tools);
     sched.register_definition(definition);
 
     if agent.enabled {

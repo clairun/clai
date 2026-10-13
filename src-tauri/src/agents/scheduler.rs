@@ -86,13 +86,6 @@ impl Scheduler {
         self.definitions.get(agent_id)
     }
 
-    /// Removes an agent definition. Pair with [`remove_instances_for_agent`]
-    /// when the underlying agent is being deleted — clearing the definition
-    /// keeps the in-memory map from accumulating stale entries.
-    pub fn remove_definition(&mut self, agent_id: &str) -> Option<AgentDefinition> {
-        self.definitions.remove(agent_id)
-    }
-
     /// Creates and registers an instance of an agent.
     ///
     /// Returns `None` if the agent definition doesn't exist. An agent has at
@@ -139,6 +132,23 @@ impl Scheduler {
             self.remove_instance(&id);
         }
         count
+    }
+
+    /// Removes every definition and instance registered for `workspace_id`.
+    /// Returns the number of instances removed.
+    pub fn remove_workspace(&mut self, workspace_id: &str) -> usize {
+        self.definitions
+            .retain(|_, definition| definition.workspace_id != workspace_id);
+        let to_remove: Vec<String> = self
+            .instances
+            .values()
+            .filter(|instance| instance.workspace_id == workspace_id)
+            .map(|instance| instance.instance_id.clone())
+            .collect();
+        for id in &to_remove {
+            self.remove_instance(id);
+        }
+        to_remove.len()
     }
 
     // =========================================================================

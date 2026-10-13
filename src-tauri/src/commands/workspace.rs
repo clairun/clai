@@ -3346,7 +3346,11 @@ pub async fn workspace_delete(
     workspace_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    delete_workspace(state.inner(), workspace_id).await
+}
+
+async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), String> {
+    let workspace_id = resolve_workspace_id(state, Some(workspace_id))?;
 
     {
         let workspace_pool = state.workspace_db(&workspace_id).await?;
@@ -3368,21 +3372,6 @@ pub async fn workspace_delete(
         .remove_workspace(&workspace_id)
         .ok_or_else(|| format!("Workspace {} not found.", workspace_id))?;
 
-    // Best-effort: read the config (still on disk at this point) to learn
-    // which agent IDs the scheduler may have registered for this
-    // workspace. A missing/corrupt config isn't fatal — we still want
-    // disk cleanup to proceed, we just can't precisely purge scheduler
-    // state for an unknowable agent set.
-    let agent_ids: Vec<String> = workspace_config::load(&locator.root_path)
-        .map(|cfg| {
-            cfg.main_agent
-                .iter()
-                .map(|agent| agent.id.clone())
-                .chain(cfg.assignments.iter().map(|a| a.id.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
     // directory.
@@ -3400,17 +3389,10 @@ pub async fn workspace_delete(
         // five minutes until restart.
     }
 
-    // Drop scheduler entries for every agent the workspace owned. Any
-    // task already mid-flight will continue running with its own copy
-    // of context, but no further ticks will be scheduled — and the
-    // definition map won't leak the stale entry until restart.
-    if !agent_ids.is_empty() {
-        let mut sched = state.scheduler.lock().await;
-        for id in &agent_ids {
-            sched.remove_instances_for_agent(id);
-            sched.remove_definition(id);
-        }
-    }
+    // Drop the workspace's scheduler entries. Keyed by workspace id, so this
+    // works even when the config is unreadable. A run already in flight
+    // finishes, but no further ticks are scheduled.
+    let instances_cleared = state.scheduler.lock().await.remove_workspace(&workspace_id);
 
     // Drain in-memory queues for this workspace. The purge helpers cancel
     // runs before dropping pending senders, so workspace deletion cannot be
@@ -3437,7 +3419,7 @@ pub async fn workspace_delete(
 
     tracing::info!(
         workspace_id = %workspace_id,
-        agents_cleared = agent_ids.len(),
+        instances_cleared,
         approvals_purged = purged_approvals.len(),
         path_grants_purged = purged_path_grants.len(),
         runs_cancelled = purged_run_ids.len(),
@@ -5260,6 +5242,26 @@ mod tests {
             .await
             .expect("details")
         }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_workspace_with_an_unreadable_config_clears_its_schedule() {
+        let workspace = DetailsWorkspace::new().await;
+        let state = &workspace.state;
+        let root = state.workspace_root(DETAILS_WORKSPACE_ID).unwrap();
+        let mut config = workspace_config::load(&root).unwrap();
+        config.schedule.enabled = true;
+        crate::agents::init::apply_workspace_schedule(&mut *state.scheduler.lock().await, &config);
+        assert_eq!(state.scheduler.lock().await.instance_count(), 1);
+        fs::write(workspace_config::config_path(&root), "not json").unwrap();
+
+        delete_workspace(state, DETAILS_WORKSPACE_ID.to_string())
+            .await
+            .expect("delete");
+
+        let scheduler = state.scheduler.lock().await;
+        assert_eq!(scheduler.instance_count(), 0);
+        assert!(scheduler.get_definition(DETAILS_MANAGER_ID).is_none());
     }
 
     #[tokio::test]
