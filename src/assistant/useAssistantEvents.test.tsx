@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { renderHook } from '@testing-library/react';
+import React from 'react';
+import { act, render, renderHook, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import useAssistantStore from './sessionStore';
+import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
+import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import type { AssistantSession } from '../generated/bindings';
 
 type EventHandler = (event: { payload: unknown }) => void;
@@ -23,12 +27,12 @@ vi.mock('@tauri-apps/api/event', () => ({
 const { useAssistantEvents } = await import('./useAssistantEvents');
 
 const SESSION = { id: 'sess-1' } as unknown as AssistantSession;
-const fire = (event: unknown, runId: string | null = null) => {
+const fire = (event: unknown, runId: string | null = null, workspaceId = 'ws-1') => {
   capturedHandler?.({
     payload: {
       sessionId: SESSION.id,
       runId,
-      workspaceId: 'ws-1',
+      workspaceId,
       timestamp: Date.now(),
       event,
     },
@@ -37,6 +41,7 @@ const fire = (event: unknown, runId: string | null = null) => {
 
 beforeEach(() => {
   useAssistantStore.setState({ sessions: {}, activeSessionByTab: {} });
+  useFleetActivityStore.setState({ activeRunsByWorkspace: {}, runNowSkipped: [] });
   capturedHandler = null;
   unlisten = vi.fn();
 });
@@ -169,5 +174,44 @@ describe('useAssistantEvents — run lifecycle', () => {
     expect(
       useAssistantStore.getState().streamingText[SESSION.id]!['msg-1'],
     ).toBe('Hello world');
+  });
+});
+
+describe('useAssistantEvents — run_skipped', () => {
+  const RUN_SKIPPED = {
+    type: 'run_skipped',
+    payload: { reason: 'session_busy', activeRunId: 'run-busy' },
+  };
+
+  it('run_skipped shows busy toast and clears optimistic run', async () => {
+    useFleetActivityStore.getState().markRunStarted('ws-1', optimisticRunNowId('ws-1'));
+    // Rendered before the hook so the hook's listener is the captured one.
+    render(
+      <MemoryRouter>
+        <WorkspaceTaskNotifications />
+      </MemoryRouter>,
+    );
+    mount();
+    await Promise.resolve();
+
+    act(() => fire(RUN_SKIPPED));
+
+    expect(screen.getByRole('status')).toHaveTextContent('Run now skipped: session busy');
+    expect(useFleetActivityStore.getState().activeRunsByWorkspace).toEqual({});
+  });
+
+  it('run_skipped for another workspace keys toast by workspaceId', async () => {
+    const fleet = useFleetActivityStore.getState();
+    fleet.markRunStarted('ws-1', optimisticRunNowId('ws-1'));
+    fleet.markRunStarted('ws-2', optimisticRunNowId('ws-2'));
+    mount();
+    await Promise.resolve();
+
+    fire(RUN_SKIPPED, null, 'ws-2');
+    fire(RUN_SKIPPED, null, 'ws-2');
+
+    const state = useFleetActivityStore.getState();
+    expect(state.runNowSkipped).toEqual(['ws-2']);
+    expect(state.activeRunsByWorkspace).toEqual({ 'ws-1': [optimisticRunNowId('ws-1')] });
   });
 });

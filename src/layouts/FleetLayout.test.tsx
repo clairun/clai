@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 
 vi.mock('../workspace/client', () => ({
@@ -302,5 +303,21 @@ describe('FleetLayout workspace settings', () => {
     for (const call of getWorkspaceDetails.mock.calls) {
       expect(call).toEqual(['a', METADATA_ONLY]);
     }
+  });
+});
+
+describe('FleetLayout run now', () => {
+  it('run now other error keeps failure message', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha', { scheduleEnabled: true })]);
+    getSchedulerPaused.mockResolvedValue(false);
+    vi.mocked(workspaceClient.runWorkspaceNow).mockRejectedValue({ code: 'unknown' });
+
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'Run now' }));
+
+    expect(await screen.findByText('Failed to start run.')).toBeInTheDocument();
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual([]);
+    expect(useFleetActivityStore.getState().activeRunsByWorkspace).toEqual({});
   });
 });

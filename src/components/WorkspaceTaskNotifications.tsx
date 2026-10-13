@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useNavigate } from 'react-router';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import styles from './WorkspaceTaskNotifications.module.css';
 
 const WORKSPACE_TASK_ATTENTION_EVENT = 'workspace://task-attention';
@@ -38,6 +39,8 @@ const WorkspaceTaskNotifications = () => {
   const navigate = useNavigate();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const timersRef = useRef(new Map<string, number>());
+  const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped);
+  const dismissRunNowSkipped = useFleetActivityStore((state) => state.dismissRunNowSkipped);
 
   const dismiss = useCallback((id: string) => {
     const timer = timersRef.current.get(id);
@@ -90,12 +93,41 @@ const WorkspaceTaskNotifications = () => {
     };
   }, [dismiss]);
 
-  if (notifications.length === 0) {
+  if (notifications.length === 0 && runNowSkipped.length === 0) {
     return null;
   }
 
   return (
     <div className={styles.stack} aria-live="polite" aria-label="Workspace notifications">
+      {runNowSkipped.map((workspaceId) => (
+        <div
+          key={`run-now-skipped:${workspaceId}`}
+          role="status"
+          className={`${styles.toast} ${styles.toastNeutral}`}
+        >
+          <p className={styles.body}>Run now skipped: session busy</p>
+          <div className={styles.actions}>
+            <button
+              type="button"
+              className={styles.openButton}
+              onClick={() => {
+                navigate(`/workspace/${workspaceId}`);
+                dismissRunNowSkipped(workspaceId);
+              }}
+            >
+              Open workspace
+            </button>
+            <button
+              type="button"
+              className={styles.dismissButton}
+              onClick={() => dismissRunNowSkipped(workspaceId)}
+              aria-label="Dismiss notification"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ))}
       {notifications.map((item) => (
         <div key={item.id} className={styles.toast}>
           <div className={styles.toastHeader}>

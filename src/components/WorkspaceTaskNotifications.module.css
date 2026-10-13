@@ -22,6 +22,10 @@
   box-shadow: var(--shadow-lg);
 }
 
+.toastNeutral {
+  border-color: var(--color-border-medium);
+}
+
 .toastHeader {
   display: flex;
   align-items: center;

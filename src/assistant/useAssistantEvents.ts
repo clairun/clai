@@ -110,7 +110,8 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
       break;
 
     case 'run_skipped':
-      // Not surfaced yet.
+      // Only a manual "Run now" on a busy session emits this.
+      useFleetActivityStore.getState().markRunNowSkipped(envelope.workspaceId);
       break;
 
     default: {
