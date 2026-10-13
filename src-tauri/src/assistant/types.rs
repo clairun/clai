@@ -80,6 +80,8 @@ pub enum RunTrigger {
     Scheduled,
     ManualAutomation,
     WorkspaceTask,
+    /// Started by the dispatcher for pending session signals.
+    SignalWake,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, TS)]

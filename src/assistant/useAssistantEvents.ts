@@ -109,6 +109,10 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
       store.clearAskUserPending(sessionId, event.payload.pending_id);
       break;
 
+    case 'run_skipped':
+      // Not surfaced yet.
+      break;
+
     default: {
       // Exhaustiveness: the bindings union must cover every emitted
       // variant. If a new Rust variant lands without an arm here, this

@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn re_register_same_id_replaces_token_handle() {
-        // Defensive: the engine's spawn_run_task and the scheduler
+        // Defensive: the dispatcher and the scheduler
         // runner both register under run.id. If somehow the same
         // run.id were reused (it shouldn't be — UUIDs), the latest
         // registration wins. Pin the behavior so a future refactor

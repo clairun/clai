@@ -11,7 +11,7 @@ use crate::db::DbPool;
 /// Load a conversation with queued rows marked pending before any compaction cut.
 pub async fn load_with_pending(pool: &DbPool, session_id: &str) -> Result<RunConversation, String> {
     let mut conversation = RunConversation::load(pool, session_id).await?;
-    let pending = repository::list_pending_queued_messages(pool, session_id).await?;
+    let pending = crate::assistant::signals::list_open_content(pool, session_id).await?;
     conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
     Ok(conversation)
 }

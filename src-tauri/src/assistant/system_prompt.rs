@@ -246,7 +246,7 @@ pub(crate) fn build_system_prompt(
                 "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked by missing capability, context, permission, or runtime failure, start with `BLOCKED:` and state the specific manager or user action needed. If you specifically need user feedback or approval, start with `NEEDS_USER_INPUT:` and state the decision needed.\n",
             );
         }
-        RunTrigger::UserMessage => {
+        RunTrigger::UserMessage | RunTrigger::SignalWake => {
             prompt.push_str(
                 "This is a user-driven run. Prioritize the user's latest message and use prior context only as support.\n",
             );
@@ -597,7 +597,7 @@ fn push_agent_memory(prompt: &mut String, trigger: &RunTrigger) {
                  10. Prune stale entries: if a knowledge entry or checkpoint is no longer relevant, remove it.\n",
             );
         }
-        RunTrigger::WorkspaceTask | RunTrigger::UserMessage => {
+        RunTrigger::WorkspaceTask | RunTrigger::UserMessage | RunTrigger::SignalWake => {
             prompt.push_str(
                 "### Memory in user-driven runs\n\
                  - Do NOT read memory unless the user's request specifically needs historical context.\n\

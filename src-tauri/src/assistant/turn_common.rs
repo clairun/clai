@@ -33,7 +33,7 @@ pub(crate) fn build_trigger_message(
              Run the automation {} now and report the current findings.",
             now, automation_name
         )),
-        RunTrigger::WorkspaceTask | RunTrigger::UserMessage => None,
+        RunTrigger::WorkspaceTask | RunTrigger::UserMessage | RunTrigger::SignalWake => None,
     }?;
 
     Some(ProviderInputMessage {
@@ -110,7 +110,7 @@ pub(crate) async fn discard_unanswered_run_input_with_sink(
     mut on_deleted: impl FnMut(String),
 ) {
     let mut message_ids: Vec<String> = Vec::new();
-    match repository::list_delivered_queued_messages_for_run(pool, session_id, run_id).await {
+    match crate::assistant::signals::list_content_for_run(pool, session_id, run_id).await {
         Ok(queued) => {
             for q in queued {
                 // Preserve image-bearing messages (see fn doc): they are not
@@ -231,7 +231,7 @@ mod tests {
         let delivered_text = user_message(&pool, &session.id, vec![text("delivered")], true).await;
         let delivered_image = user_message(&pool, &session.id, vec![image()], true).await;
         let pending = user_message(&pool, &session.id, vec![text("pending")], true).await;
-        repository::mark_queued_messages_delivered(
+        crate::assistant::signals::consume(
             &pool,
             &session.id,
             &run.id,
@@ -269,7 +269,7 @@ mod tests {
         for id in [&trigger_image.id, &delivered_image.id, &pending.id] {
             assert!(repository::get_message(&pool, id).await.unwrap().is_some());
         }
-        let pending_ids = repository::list_pending_queued_message_ids(&pool, &session.id)
+        let pending_ids = crate::assistant::signals::list_open_message_ids(&pool, &session.id)
             .await
             .unwrap();
         assert_eq!(pending_ids, vec![pending.id]);

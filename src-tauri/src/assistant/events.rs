@@ -107,6 +107,19 @@ pub enum AssistantUiEvent {
     AskUserResolved {
         pending_id: String,
     },
+    /// A manual "Run now" found the session busy and was skipped.
+    #[serde(rename_all = "camelCase")]
+    RunSkipped {
+        reason: RunSkipReason,
+        active_run_id: Option<RunId>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum RunSkipReason {
+    SessionBusy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -17,6 +17,7 @@ use crate::assistant::run_lifecycle::{
     cancel_run, complete_run, fail_run, record_tool_call_result, record_tool_call_started,
     resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
+use crate::assistant::signals;
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::turn_common::{
@@ -256,7 +257,7 @@ async fn accept_api_stream(
     queued_message_ids_in_request: &[String],
     state: &mut ApiTurnState,
 ) -> Result<AssistantMessage, AssistantEngineError> {
-    if let Err(e) = repository::mark_queued_messages_delivered(
+    if let Err(e) = signals::consume(
         &deps.pool,
         &session.id,
         run_id,
@@ -437,7 +438,7 @@ async fn prepare_api_request(
     // consecutive same-role messages. The DB stays the source of truth;
     // this only shapes what the provider sees so a mid-stream hangup or
     // stacked user typing can't poison subsequent runs.
-    let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+    let pending = signals::list_open_content(&deps.pool, &session.id).await?;
     state
         .conversation
         .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
@@ -478,7 +479,7 @@ async fn prepare_api_request(
             }
         }
         // Summarization may have waited while the user edited or deleted queued input.
-        let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+        let pending = signals::list_open_content(&deps.pool, &session.id).await?;
         state
             .conversation
             .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());

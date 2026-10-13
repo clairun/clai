@@ -1,7 +1,7 @@
 use chrono::Utc;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use sqlx::{QueryBuilder, Row, Sqlite};
+use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 use uuid::Uuid;
 
 use crate::assistant::types::{
@@ -49,13 +49,7 @@ pub struct CreateCompactionParams {
     pub input_message_count: i64,
 }
 
-#[derive(Debug, Clone)]
-pub struct QueuedUserMessage {
-    pub message: AssistantMessage,
-    pub connection_id: String,
-}
-
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
@@ -67,8 +61,9 @@ fn parse_json<T: DeserializeOwned>(value: &str, context: &str) -> Result<T, Stri
     serde_json::from_str(value).map_err(|e| format!("Failed to parse {}: {}", context, e))
 }
 
-/// Non-terminal run statuses, for `status IN` clauses.
-const ACTIVE_RUN_STATUSES: &str = "('queued', 'running', 'waiting_for_tool')";
+/// Non-terminal run statuses, for `status IN` clauses. The predicate of
+/// `idx_assistant_runs_one_active_per_session` is a SQL copy of this list.
+pub(crate) const ACTIVE_RUN_STATUSES: &str = "('queued', 'running', 'waiting_for_tool')";
 
 fn parse_optional_json<T: DeserializeOwned>(
     value: Option<String>,
@@ -89,7 +84,7 @@ fn map_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantSession, St
     })
 }
 
-fn map_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantMessage, String> {
+pub(crate) fn map_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantMessage, String> {
     Ok(AssistantMessage {
         id: row.get("id"),
         session_id: row.get("session_id"),
@@ -103,13 +98,6 @@ fn map_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantMessage, St
             row.get("provider_metadata_json"),
             "provider metadata",
         )?,
-    })
-}
-
-fn map_queued_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<QueuedUserMessage, String> {
-    Ok(QueuedUserMessage {
-        message: map_message_row(row)?,
-        connection_id: row.get("connection_id"),
     })
 }
 
@@ -447,8 +435,8 @@ pub async fn get_message(
     row.as_ref().map(map_message_row).transpose()
 }
 
-/// Permanently remove a message row and its `assistant_message_queue` row.
-/// The queue row is deleted explicitly rather than left to the schema's
+/// Permanently remove a message row and its `session_signals` rows.
+/// The signal rows are deleted explicitly rather than left to the schema's
 /// ON DELETE CASCADE, so the two deletes share one transaction and the
 /// intent is visible at the call site. (FK enforcement itself is
 /// guaranteed: `init_workspace_db` sets `foreign_keys` on every pooled
@@ -461,11 +449,11 @@ pub async fn delete_message(pool: &DbPool, message_id: &str) -> Result<(), Strin
         .await
         .map_err(|e| format!("Failed to start message delete transaction: {}", e))?;
 
-    sqlx::query("DELETE FROM assistant_message_queue WHERE message_id = ?")
+    sqlx::query("DELETE FROM session_signals WHERE message_id = ?")
         .bind(message_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| format!("Failed to delete queued assistant message: {}", e))?;
+        .map_err(|e| format!("Failed to delete message signal: {}", e))?;
 
     sqlx::query("DELETE FROM assistant_messages WHERE id = ?")
         .bind(message_id)
@@ -477,113 +465,6 @@ pub async fn delete_message(pool: &DbPool, message_id: &str) -> Result<(), Strin
         .await
         .map_err(|e| format!("Failed to commit message delete transaction: {}", e))?;
     Ok(())
-}
-
-/// Delete a message that is still *pending* in the queue — i.e. the user
-/// wrote it while a run was active and no run has picked it up yet.
-/// Returns `false` (without touching anything) when the message has
-/// already been delivered or was never queued: the queue-row delete is
-/// conditioned on `status = 'pending'`, so the check-and-remove is one
-/// atomic statement and can't race a concurrent delivery.
-pub async fn delete_pending_queued_message(
-    pool: &DbPool,
-    session_id: &str,
-    message_id: &str,
-) -> Result<bool, String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start queued message delete transaction: {}", e))?;
-
-    let removed = sqlx::query(
-        r#"
-        DELETE FROM assistant_message_queue
-        WHERE message_id = ? AND session_id = ? AND status = 'pending'
-        "#,
-    )
-    .bind(message_id)
-    .bind(session_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to delete queued assistant message: {}", e))?;
-
-    if removed.rows_affected() == 0 {
-        return Ok(false);
-    }
-
-    sqlx::query("DELETE FROM assistant_messages WHERE id = ?")
-        .bind(message_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to delete assistant message: {}", e))?;
-
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit queued message delete transaction: {}", e))?;
-    Ok(true)
-}
-
-/// Update the text of a message that is still *pending* in the queue — the
-/// user wrote it while a run was active and no run has picked it up yet.
-/// Returns the updated message, or `None` (touching nothing) when the
-/// message has already been delivered or was never queued. The pending
-/// check and the content update share one transaction, so an edit can't
-/// race a concurrent delivery: a message already handed to a run is frozen.
-pub async fn update_pending_queued_message(
-    pool: &DbPool,
-    session_id: &str,
-    message_id: &str,
-    text: String,
-) -> Result<Option<AssistantMessage>, String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start queued message edit transaction: {}", e))?;
-
-    // Guard: only pending queue rows are editable. Pull `created_at` in the
-    // same query so we can return a faithful message without a second read.
-    let row = sqlx::query(
-        r#"
-        SELECT q.status AS status, m.created_at AS created_at
-        FROM assistant_message_queue q
-        JOIN assistant_messages m ON m.id = q.message_id
-        WHERE q.message_id = ? AND q.session_id = ?
-        "#,
-    )
-    .bind(message_id)
-    .bind(session_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to read queued assistant message: {}", e))?;
-
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    if row.get::<String, _>("status") != "pending" {
-        return Ok(None);
-    }
-
-    let message = AssistantMessage {
-        id: message_id.to_string(),
-        session_id: session_id.to_string(),
-        role: MessageRole::User,
-        content: vec![ContentPart::Text { text }],
-        created_at: row.get("created_at"),
-        provider_metadata: None,
-    };
-
-    sqlx::query("UPDATE assistant_messages SET content_json = ? WHERE id = ? AND session_id = ?")
-        .bind(to_json_string(&message.content)?)
-        .bind(message_id)
-        .bind(session_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to update queued assistant message: {}", e))?;
-
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit queued message edit transaction: {}", e))?;
-    Ok(Some(message))
 }
 
 pub async fn create_message(
@@ -687,20 +568,8 @@ pub async fn create_user_message_with_content(
     .map_err(|e| format!("Failed to create assistant message: {}", e))?;
 
     if let Some(connection_id) = queue_connection_id {
-        sqlx::query(
-            r#"
-            INSERT INTO assistant_message_queue
-                (message_id, session_id, connection_id, status, queued_at, delivered_run_id, delivered_at)
-            VALUES (?, ?, ?, 'pending', ?, NULL, NULL)
-            "#,
-        )
-        .bind(&message.id)
-        .bind(&message.session_id)
-        .bind(connection_id)
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to queue assistant message: {}", e))?;
+        crate::assistant::signals::insert_user_message_signal(&mut tx, &message, connection_id)
+            .await?;
     }
 
     sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
@@ -717,7 +586,13 @@ pub async fn create_user_message_with_content(
     Ok(message)
 }
 
-pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<AssistantRun, String> {
+/// Insert a run on `conn` and touch its session. `Ok(None)` when the session
+/// already has an active run: `idx_assistant_runs_one_active_per_session`
+/// rejects the insert, which makes this the arbiter for "one active run".
+pub(crate) async fn insert_run_if_idle(
+    conn: &mut SqliteConnection,
+    params: CreateRunParams,
+) -> Result<Option<AssistantRun>, String> {
     let run = AssistantRun {
         id: Uuid::new_v4().to_string(),
         session_id: params.session_id,
@@ -731,7 +606,7 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
         error: params.error,
     };
 
-    sqlx::query(
+    let inserted = sqlx::query(
         r#"
         INSERT INTO assistant_runs
             (id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at)
@@ -748,13 +623,46 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
     .bind(&run.error)
     .bind(run.started_at)
     .bind(run.completed_at)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to create assistant run: {}", e))?;
+    .execute(&mut *conn)
+    .await;
+    match inserted {
+        Err(e)
+            if e.as_database_error()
+                .is_some_and(|e| e.is_unique_violation()) =>
+        {
+            return Ok(None)
+        }
+        Err(e) => return Err(format!("Failed to create assistant run: {}", e)),
+        Ok(_) => {}
+    }
 
-    touch_session(pool, &run.session_id).await?;
+    sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
+        .bind(run.started_at)
+        .bind(&run.session_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| format!("Failed to update assistant session timestamp: {}", e))?;
 
-    Ok(run)
+    Ok(Some(run))
+}
+
+/// See [`insert_run_if_idle`].
+pub async fn create_run_if_idle(
+    pool: &DbPool,
+    params: CreateRunParams,
+) -> Result<Option<AssistantRun>, String> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("Failed to acquire database connection: {}", e))?;
+    insert_run_if_idle(&mut conn, params).await
+}
+
+pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<AssistantRun, String> {
+    let session_id = params.session_id.clone();
+    create_run_if_idle(pool, params)
+        .await?
+        .ok_or_else(|| format!("Assistant session {session_id} already has an active run"))
 }
 
 /// At most two rows, newest first: the newest run and, if different, the
@@ -785,24 +693,22 @@ pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<Assista
     Ok(runs)
 }
 
-/// Whether the session currently has a non-terminal run (queued, running,
-/// or waiting for a tool). Used by message queueing and follow-up scheduling
-/// to preserve one active run per session.
-pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<bool, String> {
-    let (count,): (i64,) = sqlx::query_as(&format!(
+/// The session's non-terminal run (queued, running, or waiting for a tool),
+/// if any. Advisory: `insert_run_if_idle` is the authoritative check.
+pub async fn active_run_id(pool: &DbPool, session_id: &str) -> Result<Option<String>, String> {
+    sqlx::query_scalar(&format!(
         r#"
-        SELECT COUNT(*)
+        SELECT id
         FROM assistant_runs
         WHERE session_id = ?
           AND status IN {ACTIVE_RUN_STATUSES}
+        LIMIT 1
         "#
     ))
     .bind(session_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("Failed to check for active runs: {}", e))?;
-
-    Ok(count > 0)
+    .map_err(|e| format!("Failed to check for active runs: {}", e))
 }
 
 /// Whether the workspace database contains any non-terminal run. Workspace
@@ -843,118 +749,6 @@ pub async fn get_active_run(
         .map_err(|e| format!("Failed to load active run: {}", e))?;
 
     row.as_ref().map(map_run_row).transpose()
-}
-
-pub async fn list_pending_queued_messages(
-    pool: &DbPool,
-    session_id: &str,
-) -> Result<Vec<QueuedUserMessage>, String> {
-    let rows = sqlx::query(
-        r#"
-        SELECT m.id, m.session_id, m.role, m.content_json, m.provider_metadata_json, m.created_at,
-               q.connection_id
-        FROM assistant_message_queue q
-        JOIN assistant_messages m ON m.id = q.message_id
-        WHERE q.session_id = ? AND q.status = 'pending'
-        ORDER BY q.queued_at ASC
-        "#,
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to list pending queued messages: {}", e))?;
-
-    rows.iter().map(map_queued_message_row).collect()
-}
-
-pub async fn list_delivered_queued_messages_for_run(
-    pool: &DbPool,
-    session_id: &str,
-    run_id: &str,
-) -> Result<Vec<QueuedUserMessage>, String> {
-    let rows = sqlx::query(
-        r#"
-        SELECT m.id, m.session_id, m.role, m.content_json, m.provider_metadata_json, m.created_at,
-               q.connection_id
-        FROM assistant_message_queue q
-        JOIN assistant_messages m ON m.id = q.message_id
-        WHERE q.session_id = ?
-          AND q.status = 'delivered'
-          AND q.delivered_run_id = ?
-        ORDER BY q.queued_at ASC
-        "#,
-    )
-    .bind(session_id)
-    .bind(run_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to list delivered queued messages: {}", e))?;
-
-    rows.iter().map(map_queued_message_row).collect()
-}
-
-pub async fn list_pending_queued_message_ids(
-    pool: &DbPool,
-    session_id: &str,
-) -> Result<Vec<String>, String> {
-    let rows = sqlx::query(
-        r#"
-        SELECT message_id
-        FROM assistant_message_queue
-        WHERE session_id = ? AND status = 'pending'
-        ORDER BY queued_at ASC
-        "#,
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to list pending queued message ids: {}", e))?;
-
-    Ok(rows.iter().map(|row| row.get("message_id")).collect())
-}
-
-pub async fn mark_queued_messages_delivered(
-    pool: &DbPool,
-    session_id: &str,
-    run_id: &str,
-    message_ids: &[String],
-) -> Result<(), String> {
-    if message_ids.is_empty() {
-        return Ok(());
-    }
-
-    let delivered_at = now_ms();
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start queue delivery transaction: {}", e))?;
-
-    for message_id in message_ids {
-        sqlx::query(
-            r#"
-            UPDATE assistant_message_queue
-            SET status = 'delivered',
-                delivered_run_id = ?,
-                delivered_at = ?
-            WHERE session_id = ?
-              AND message_id = ?
-              AND status = 'pending'
-            "#,
-        )
-        .bind(run_id)
-        .bind(delivered_at)
-        .bind(session_id)
-        .bind(message_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to mark queued message delivered: {}", e))?;
-    }
-
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit queue delivery transaction: {}", e))?;
-
-    Ok(())
 }
 
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {
@@ -1464,29 +1258,19 @@ mod tests {
     }
 
     async fn queue_rows_for(pool: &DbPool, message_id: &str) -> i64 {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM assistant_message_queue WHERE message_id = ?",
-        )
-        .bind(message_id)
-        .fetch_one(pool)
-        .await
-        .unwrap()
-    }
-
-    async fn message_text(pool: &DbPool, message_id: &str) -> Option<String> {
-        let message = get_message(pool, message_id).await.unwrap()?;
-        message.content.into_iter().find_map(|part| match part {
-            ContentPart::Text { text } => Some(text),
-            _ => None,
-        })
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM session_signals WHERE message_id = ?")
+            .bind(message_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn delete_message_removes_row_and_queue_entry() {
+    async fn delete_message_removes_row_and_signal() {
         let (_tmp, pool) = workspace_pool().await;
         insert_session(&pool, "s1").await;
 
-        // Queued variant: the queue side-table row must go with the message.
+        // Queued variant: the signal row must go with the message.
         let queued =
             create_user_message(&pool, "s1".to_string(), "hello".to_string(), Some("conn-1"))
                 .await
@@ -1507,139 +1291,6 @@ mod tests {
 
         // Deleting an unknown id is a no-op, not an error.
         delete_message(&pool, "missing").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn delete_pending_queued_message_only_removes_pending() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_session(&pool, "s1").await;
-
-        // Pending → deleted, returns true.
-        let pending = create_user_message(
-            &pool,
-            "s1".to_string(),
-            "queued".to_string(),
-            Some("conn-1"),
-        )
-        .await
-        .unwrap();
-        assert!(delete_pending_queued_message(&pool, "s1", &pending.id)
-            .await
-            .unwrap());
-        assert!(get_message(&pool, &pending.id).await.unwrap().is_none());
-        assert_eq!(queue_rows_for(&pool, &pending.id).await, 0);
-
-        // Already delivered → untouched, returns false.
-        let delivered =
-            create_user_message(&pool, "s1".to_string(), "taken".to_string(), Some("conn-1"))
-                .await
-                .unwrap();
-        sqlx::query("UPDATE assistant_message_queue SET status = 'delivered' WHERE message_id = ?")
-            .bind(&delivered.id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(!delete_pending_queued_message(&pool, "s1", &delivered.id)
-            .await
-            .unwrap());
-        assert!(get_message(&pool, &delivered.id).await.unwrap().is_some());
-
-        // Wrong session → untouched, returns false.
-        let other =
-            create_user_message(&pool, "s1".to_string(), "mine".to_string(), Some("conn-1"))
-                .await
-                .unwrap();
-        assert!(
-            !delete_pending_queued_message(&pool, "other-session", &other.id)
-                .await
-                .unwrap()
-        );
-        assert!(get_message(&pool, &other.id).await.unwrap().is_some());
-
-        // Never queued → untouched, returns false.
-        let direct = create_user_message(&pool, "s1".to_string(), "direct".to_string(), None)
-            .await
-            .unwrap();
-        assert!(!delete_pending_queued_message(&pool, "s1", &direct.id)
-            .await
-            .unwrap());
-        assert!(get_message(&pool, &direct.id).await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn update_pending_queued_message_only_edits_pending() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_session(&pool, "s1").await;
-
-        // Pending → edited; returns the updated message with original
-        // created_at, and the queue row stays pending (edit ≠ delivery).
-        let pending =
-            create_user_message(&pool, "s1".to_string(), "old".to_string(), Some("conn-1"))
-                .await
-                .unwrap();
-        let updated =
-            update_pending_queued_message(&pool, "s1", &pending.id, "new text".to_string())
-                .await
-                .unwrap()
-                .expect("pending message should be editable");
-        assert_eq!(updated.created_at, pending.created_at);
-        assert_eq!(
-            message_text(&pool, &pending.id).await.as_deref(),
-            Some("new text")
-        );
-        assert_eq!(queue_rows_for(&pool, &pending.id).await, 1);
-
-        // Already delivered → None, text untouched.
-        let delivered =
-            create_user_message(&pool, "s1".to_string(), "taken".to_string(), Some("conn-1"))
-                .await
-                .unwrap();
-        sqlx::query("UPDATE assistant_message_queue SET status = 'delivered' WHERE message_id = ?")
-            .bind(&delivered.id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(
-            update_pending_queued_message(&pool, "s1", &delivered.id, "nope".to_string())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            message_text(&pool, &delivered.id).await.as_deref(),
-            Some("taken")
-        );
-
-        // Wrong session → None, untouched.
-        let other =
-            create_user_message(&pool, "s1".to_string(), "mine".to_string(), Some("conn-1"))
-                .await
-                .unwrap();
-        assert!(
-            update_pending_queued_message(&pool, "other-session", &other.id, "x".to_string())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            message_text(&pool, &other.id).await.as_deref(),
-            Some("mine")
-        );
-
-        // Never queued → None, untouched.
-        let direct = create_user_message(&pool, "s1".to_string(), "direct".to_string(), None)
-            .await
-            .unwrap();
-        assert!(
-            update_pending_queued_message(&pool, "s1", &direct.id, "x".to_string())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(
-            message_text(&pool, &direct.id).await.as_deref(),
-            Some("direct")
-        );
     }
 
     #[test]
@@ -1663,6 +1314,7 @@ mod tests {
             RunTrigger::Scheduled,
             RunTrigger::ManualAutomation,
             RunTrigger::WorkspaceTask,
+            RunTrigger::SignalWake,
         ]);
         check(&[
             ToolCallStatus::Pending,
@@ -1795,11 +1447,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_run_started_at_ties_break_by_highest_id() {
+    async fn latest_run_started_at_ties_break_by_highest_id() {
         let (_tmp, pool) = workspace_pool().await;
         insert_session(&pool, "s").await;
         // Higher id inserted first so insertion order alone cannot pass.
-        for (id, status) in [("run-b", "queued"), ("run-a", "running")] {
+        for (id, status) in [("run-b", "completed"), ("run-a", "running")] {
             sqlx::query(
                 r#"
                 INSERT INTO assistant_runs
@@ -1815,13 +1467,13 @@ mod tests {
         }
 
         let active = get_active_run(&pool, "s").await.unwrap().unwrap();
-        assert_eq!(active.id, "run-b");
+        assert_eq!(active.id, "run-a");
         let current: Vec<String> = current_runs(&pool, "s")
             .await
             .unwrap()
             .into_iter()
             .map(|run| run.id)
             .collect();
-        assert_eq!(current, vec!["run-b".to_string()]);
+        assert_eq!(current, vec!["run-b".to_string(), "run-a".to_string()]);
     }
 }

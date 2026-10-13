@@ -1416,9 +1416,10 @@ mod tests {
         use crate::assistant::repository;
         use crate::assistant::repository::{
             complete_compaction, create_compaction, create_message, create_run, create_session,
-            create_user_message_with_content, delete_pending_queued_message,
-            list_pending_queued_messages, mark_queued_messages_delivered,
-            update_pending_queued_message,
+            create_user_message_with_content,
+        };
+        use crate::assistant::signals::{
+            consume, delete_pending_user_message, edit_pending_user_message, list_open_content,
         };
         use crate::assistant::types::SessionContext;
         use crate::db::test_support::workspace_pool;
@@ -1657,23 +1658,19 @@ mod tests {
             let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
 
             let queued = add_queued(&pool, &session.id, "queued").await;
-            let pending = |rows: Vec<crate::assistant::repository::QueuedUserMessage>| {
+            let pending = |rows: Vec<crate::assistant::signals::SignalContent>| {
                 rows.into_iter().map(|q| q.message).collect::<Vec<_>>()
             };
             conversation.refresh_pending(pending(
-                list_pending_queued_messages(&pool, &session.id)
-                    .await
-                    .unwrap(),
+                list_open_content(&pool, &session.id).await.unwrap(),
             ));
             assert_eq!(conversation.pending_ids(), vec![queued.id.clone()]);
 
-            update_pending_queued_message(&pool, &session.id, &queued.id, "edited".to_string())
+            edit_pending_user_message(&pool, &session.id, &queued.id, "edited".to_string())
                 .await
                 .unwrap();
             conversation.refresh_pending(pending(
-                list_pending_queued_messages(&pool, &session.id)
-                    .await
-                    .unwrap(),
+                list_open_content(&pool, &session.id).await.unwrap(),
             ));
             assert!(matches!(
                 &conversation.messages()[1].content[0],
@@ -1696,25 +1693,21 @@ mod tests {
             .await
             .unwrap();
             let delivered = conversation.pending_ids();
-            mark_queued_messages_delivered(&pool, &session.id, &run.id, &delivered)
+            consume(&pool, &session.id, &run.id, &delivered)
                 .await
                 .unwrap();
             conversation.mark_delivered(&delivered);
 
             let deleted = add_queued(&pool, &session.id, "never sent").await;
             conversation.refresh_pending(pending(
-                list_pending_queued_messages(&pool, &session.id)
-                    .await
-                    .unwrap(),
+                list_open_content(&pool, &session.id).await.unwrap(),
             ));
             assert_eq!(conversation.messages().len(), 3);
-            delete_pending_queued_message(&pool, &session.id, &deleted.id)
+            delete_pending_user_message(&pool, &session.id, &deleted.id)
                 .await
                 .unwrap();
             conversation.refresh_pending(pending(
-                list_pending_queued_messages(&pool, &session.id)
-                    .await
-                    .unwrap(),
+                list_open_content(&pool, &session.id).await.unwrap(),
             ));
 
             assert_eq!(
@@ -1850,7 +1843,7 @@ mod tests {
             conversation.upsert(result_x.clone());
             conversation.upsert(result_y.clone());
             conversation.refresh_pending(
-                list_pending_queued_messages(&pool, &session.id)
+                list_open_content(&pool, &session.id)
                     .await
                     .unwrap()
                     .into_iter()

@@ -1347,7 +1347,7 @@ async fn workspace_details(
     // Cheap single-table query, so it rides along even on lightweight polls —
     // the "Queued" chips stay accurate without the file walk.
     let queued_message_ids = if let Some(session) = &session {
-        repository::list_pending_queued_message_ids(&workspace_pool, &session.id).await?
+        crate::assistant::signals::list_open_message_ids(&workspace_pool, &session.id).await?
     } else {
         Vec::new()
     };

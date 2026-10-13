@@ -79,7 +79,7 @@ export type AssistantUiEvent = { "type": "session_created", "payload": { session
 /**
  * When true the user may pick any number of options.
  */
-multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } };
+multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } } | { "type": "run_skipped", "payload": { reason: RunSkipReason, activeRunId: string | null, } };
 
 export type AttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
@@ -363,9 +363,11 @@ providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: strin
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
+export type RunSkipReason = "session_busy";
+
 export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" | "completed_with_warnings" | "failed" | "cancelled";
 
-export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task";
+export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task" | "signal_wake";
 
 export type SandboxNetworkConfig = "enabled" | "disabled";
 

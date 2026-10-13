@@ -1,18 +1,19 @@
 use crate::assistant::cli_session::reset_cli_session_for_rotation;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::assistant::compaction;
+use crate::assistant::dispatcher::{self, Kick};
 use crate::assistant::display;
-use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
+use crate::assistant::engine::AssistantDeps;
 use crate::assistant::events::{emit_event, AssistantUiEvent};
 use crate::assistant::repository;
-use crate::assistant::repository::CreateRunParams;
 use crate::assistant::runtime;
+use crate::assistant::signals;
 use crate::assistant::tools::ask_user::{self, AskUserAnswer};
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantMessageCursor, AssistantMessagePage,
-    AssistantRun, AssistantSession, CompactionTrigger, ContentPart, RunStatus, RunTrigger,
+    AssistantRun, AssistantSession, CompactionTrigger, ContentPart, RunStatus,
 };
 use crate::db::DbPool;
 use crate::AppState;
@@ -109,7 +110,10 @@ pub async fn assistant_delete_session(
     // Hard clear: the schema cascades messages/runs/tool calls/compactions.
     // Refuse while a run is in flight — the engine would keep writing rows
     // for (and emitting events about) a session that no longer exists.
-    if repository::session_has_active_run(&target_pool, &session_id).await? {
+    if repository::active_run_id(&target_pool, &session_id)
+        .await?
+        .is_some()
+    {
         return Err(
             "Wait for the current assistant run to finish before clearing the conversation."
                 .to_string(),
@@ -364,10 +368,6 @@ pub async fn assistant_connection_supports_images(
 }
 
 #[tauri::command]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 105 lines against a 100-line budget; split it, do not raise the budget"
-)]
 pub async fn assistant_send_message(
     workspace_id: String,
     session_id: String,
@@ -383,120 +383,42 @@ pub async fn assistant_send_message(
     validate_send_images(&images)?;
     let (target_pool, session) =
         session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
-    let connection = provider_connection(state.inner(), &connection_id)?;
-    let active_run = repository::get_active_run(&target_pool, &session.id).await?;
-    let has_pending_queue = !repository::list_pending_queued_messages(&target_pool, &session.id)
-        .await?
-        .is_empty();
-
-    let queue_message = active_run.is_some() || has_pending_queue;
+    provider_connection(state.inner(), &connection_id)?;
     let mut content = vec![ContentPart::Text { text: message }];
     content.extend(images);
     let assistant_message = repository::create_user_message_with_content(
         &target_pool,
         session.id.clone(),
         content,
-        queue_message.then_some(connection_id.as_str()),
+        Some(connection_id.as_str()),
     )
     .await?;
-
-    if let Some(run) = active_run {
-        emit_event(
-            &app,
-            &workspace_id,
-            &session,
-            Some(&run.id),
-            AssistantUiEvent::MessageCreated {
-                message: assistant_message.clone(),
-            },
-        )?;
-
-        return Ok(AssistantSendMessageResult {
-            session,
-            message: assistant_message,
-            run: Some(run),
-            queued: true,
-        });
-    }
-
-    if has_pending_queue {
-        emit_event(
-            &app,
-            &workspace_id,
-            &session,
-            None,
-            AssistantUiEvent::MessageCreated {
-                message: assistant_message.clone(),
-            },
-        )?;
-
-        let run = start_queued_followup_if_idle(
-            AssistantDeps {
-                workspace_id: workspace_id.clone(),
-                pool: target_pool.clone(),
-                app: app.clone(),
-            },
-            session.id.clone(),
-        )
-        .await?;
-
-        return Ok(AssistantSendMessageResult {
-            session,
-            message: assistant_message,
-            run,
-            queued: false,
-        });
-    }
-
-    let run = repository::create_run(
-        &target_pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Queued,
-            trigger: RunTrigger::UserMessage,
-            connection_id: connection_id.clone(),
-            protocol_id: connection.protocol_id.clone(),
-            model_id: connection.model_id.clone(),
-            error: None,
-        },
-    )
-    .await?;
-
     emit_event(
         &app,
         &workspace_id,
         &session,
-        Some(&run.id),
+        None,
         AssistantUiEvent::MessageCreated {
             message: assistant_message.clone(),
         },
     )?;
-    emit_event(
-        &app,
-        &workspace_id,
-        &session,
-        Some(&run.id),
-        AssistantUiEvent::RunQueued { run: run.clone() },
-    )?;
 
-    spawn_run_task(
-        AssistantDeps {
-            workspace_id,
-            pool: target_pool.clone(),
-            app: app.clone(),
-        },
-        session.id.clone(),
-        run.id.clone(),
-        RunTrigger::UserMessage,
-        connection_id,
-        Some(assistant_message.id.clone()),
-    );
+    let deps = AssistantDeps {
+        workspace_id,
+        pool: target_pool.clone(),
+        app,
+    };
+    let (run, queued) = match dispatcher::kick(&deps, &session.id).await? {
+        Kick::Started { run, .. } => (Some(run), false),
+        Kick::Busy { run_id } => (repository::get_run(&target_pool, &run_id).await?, true),
+        Kick::Idle | Kick::Deferred => (None, true),
+    };
 
     Ok(AssistantSendMessageResult {
         session,
         message: assistant_message,
-        run: Some(run),
-        queued: false,
+        run,
+        queued,
     })
 }
 
@@ -511,7 +433,10 @@ pub async fn assistant_compact_session(
     let (target_pool, mut session) =
         session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let connection = provider_connection(state.inner(), &connection_id)?;
-    if repository::session_has_active_run(&target_pool, &session.id).await? {
+    if repository::active_run_id(&target_pool, &session.id)
+        .await?
+        .is_some()
+    {
         return Err("Wait for the current assistant run to finish before compacting.".to_string());
     }
 
@@ -575,7 +500,7 @@ pub async fn assistant_delete_queued_message(
     let (target_pool, session) =
         session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let deleted =
-        repository::delete_pending_queued_message(&target_pool, &session.id, &message_id).await?;
+        signals::delete_pending_user_message(&target_pool, &session.id, &message_id).await?;
     if !deleted {
         return Err(
             "This message was already picked up by the agent and can no longer be removed."
@@ -613,8 +538,7 @@ pub async fn assistant_edit_queued_message(
     let (target_pool, session) =
         session_in_workspace(state.inner(), &workspace_id, &session_id).await?;
     let updated =
-        repository::update_pending_queued_message(&target_pool, &session.id, &message_id, text)
-            .await?;
+        signals::edit_pending_user_message(&target_pool, &session.id, &message_id, text).await?;
     let Some(message) = updated else {
         return Err(
             "This message was already picked up by the agent and can no longer be edited."
@@ -705,136 +629,11 @@ pub async fn assistant_cancel_run(
     Ok(cancelled)
 }
 
-pub(crate) fn spawn_run_task(
-    deps: AssistantDeps,
-    session_id: String,
-    run_id: String,
-    trigger: RunTrigger,
-    connection_id: String,
-    // Id of the user message that triggered this run (direct send path
-    // only) — lets the engine discard it if the run fails before the
-    // provider produces anything. Queued-followup runs pass None; their
-    // messages are linked via assistant_message_queue.delivered_run_id.
-    trigger_message_id: Option<String>,
-) {
-    let run_registration = runtime::register_run(&run_id);
-    let cancel_token = run_registration.token();
-    tauri::async_runtime::spawn(async move {
-        let _run_registration = run_registration;
-        let input = RunTurnInput {
-            session_id: session_id.clone(),
-            run_id: Some(run_id.clone()),
-            trigger,
-            connection_id,
-            cancel_token,
-            trigger_message_id,
-        };
-        if let Err(e) = engine::run_session_turn(&deps, input).await {
-            tracing::error!("Assistant engine error for run {}: {}", run_id, e);
-        }
-        if let Err(e) = start_queued_followup_if_idle(deps, session_id.clone()).await {
-            tracing::error!(
-                session_id = %session_id,
-                error = %e,
-                "Failed to start queued assistant follow-up"
-            );
-        }
-    });
-}
-
-pub(crate) async fn start_queued_followup_if_idle(
-    deps: AssistantDeps,
-    session_id: String,
-) -> Result<Option<AssistantRun>, String> {
-    let AssistantDeps {
-        workspace_id,
-        pool,
-        app,
-    } = deps;
-    if repository::session_has_active_run(&pool, &session_id).await? {
-        return Ok(None);
-    }
-
-    let pending = repository::list_pending_queued_messages(&pool, &session_id).await?;
-    if pending.is_empty() {
-        return Ok(None);
-    }
-
-    let session = repository::get_session(&pool, &session_id)
-        .await?
-        .ok_or_else(|| format!("Assistant session not found: {}", session_id))?;
-
-    let app_state = app.state::<AppState>();
-
-    let connection_id = pending[0].connection_id.clone();
-    let connection = provider_connection(app_state.inner(), &connection_id)?;
-    let run = repository::create_run(
-        &pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Queued,
-            trigger: RunTrigger::UserMessage,
-            connection_id: connection_id.clone(),
-            protocol_id: connection.protocol_id.clone(),
-            model_id: connection.model_id.clone(),
-            error: None,
-        },
-    )
-    .await?;
-
-    let message_ids: Vec<String> = pending
-        .iter()
-        .map(|queued| queued.message.id.clone())
-        .collect();
-    if let Err(error) =
-        repository::mark_queued_messages_delivered(&pool, &session.id, &run.id, &message_ids).await
-    {
-        let _ =
-            repository::update_run_status(&pool, &run.id, RunStatus::Failed, Some(&error)).await;
-        return Err(error);
-    }
-
-    // The pending messages now belong to this follow-up run — clear their
-    // "Queued" chips in the FE.
-    let _ = emit_event(
-        &app,
-        &workspace_id,
-        &session,
-        Some(&run.id),
-        AssistantUiEvent::QueuedMessagesDelivered {
-            message_ids: message_ids.clone(),
-        },
-    );
-
-    emit_event(
-        &app,
-        &workspace_id,
-        &session,
-        Some(&run.id),
-        AssistantUiEvent::RunQueued { run: run.clone() },
-    )?;
-
-    spawn_run_task(
-        AssistantDeps {
-            workspace_id,
-            pool,
-            app,
-        },
-        session.id,
-        run.id.clone(),
-        RunTrigger::UserMessage,
-        connection_id,
-        // Followup runs find their input via the queue table
-        // (delivered_run_id), not a direct trigger message.
-        None,
-    );
-
-    Ok(Some(run))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::repository::CreateRunParams;
+    use crate::assistant::types::RunTrigger;
     use serde_json::json;
 
     #[tokio::test]

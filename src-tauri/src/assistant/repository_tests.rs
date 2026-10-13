@@ -303,12 +303,12 @@ async fn test_user_message_queue_lifecycle() {
     .await
     .unwrap();
 
-    let pending = list_pending_queued_messages(&pool, &session.id)
+    let pending = crate::assistant::signals::list_open_content(&pool, &session.id)
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].message.id, queued.id);
-    assert_eq!(pending[0].connection_id, "conn-1");
+    assert_eq!(pending[0].connection_id.as_deref(), Some("conn-1"));
     assert_ne!(pending[0].message.id, unqueued.id);
 
     let run = create_run(
@@ -326,7 +326,7 @@ async fn test_user_message_queue_lifecycle() {
     .await
     .unwrap();
 
-    mark_queued_messages_delivered(
+    crate::assistant::signals::consume(
         &pool,
         &session.id,
         &run.id,
@@ -335,12 +335,14 @@ async fn test_user_message_queue_lifecycle() {
     .await
     .unwrap();
 
-    assert!(list_pending_queued_messages(&pool, &session.id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        crate::assistant::signals::list_open_content(&pool, &session.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
-    let delivered = list_delivered_queued_messages_for_run(&pool, &session.id, &run.id)
+    let delivered = crate::assistant::signals::list_content_for_run(&pool, &session.id, &run.id)
         .await
         .unwrap();
     assert_eq!(delivered.len(), 1);

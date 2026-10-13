@@ -30,6 +30,7 @@ use crate::assistant::run_lifecycle::{
     cancel_run, complete_run, fail_run, record_tool_call_result, record_tool_call_started,
     resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
+use crate::assistant::signals;
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::turn_common::{
@@ -629,8 +630,7 @@ async fn run_input_messages(
     if is_automation_trigger {
         return Ok(Vec::new());
     }
-    let queued =
-        repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id).await?;
+    let queued = signals::list_content_for_run(&deps.pool, &session.id, run_id).await?;
     if !queued.is_empty() {
         return Ok(queued.into_iter().map(|queued| queued.message).collect());
     }
@@ -1067,7 +1067,7 @@ async fn try_deliver_queued_to_claude(
         return MidRunDelivery::NONE;
     }
 
-    let pending = match repository::list_pending_queued_messages(&deps.pool, &session.id).await {
+    let pending = match signals::list_open_content(&deps.pool, &session.id).await {
         Ok(pending) => pending,
         Err(error) => {
             tracing::warn!(run_id, %error, "Mid-run delivery: queue read failed");
@@ -1079,7 +1079,12 @@ async fn try_deliver_queued_to_claude(
     // run on that provider, not to this process.
     let matching: Vec<_> = pending
         .into_iter()
-        .filter(|queued| queued.connection_id == connection_id)
+        .filter(|queued| {
+            queued
+                .connection_id
+                .as_deref()
+                .is_none_or(|id| id == connection_id)
+        })
         .collect();
     if matching.is_empty() {
         return MidRunDelivery::NONE;
@@ -1117,10 +1122,7 @@ async fn try_deliver_queued_to_claude(
         let _ = stdin.flush().await;
     }
 
-    if let Err(error) =
-        repository::mark_queued_messages_delivered(&deps.pool, &session.id, run_id, &message_ids)
-            .await
-    {
+    if let Err(error) = signals::consume(&deps.pool, &session.id, run_id, &message_ids).await {
         tracing::warn!(
             run_id, %error,
             "Mid-run delivery: messages reached the live process but marking delivered failed; the followup run may re-deliver them"
@@ -2319,14 +2321,19 @@ async fn build_codex_steer(
     if crate::assistant::tools::ask_user::session_has_pending_ask(&session.id) {
         return None;
     }
-    let pending = repository::list_pending_queued_messages(&deps.pool, &session.id)
+    let pending = signals::list_open_content(&deps.pool, &session.id)
         .await
         .ok()?;
     let mut input = Vec::new();
     let mut messages = Vec::new();
     let mut total_chars = 0usize;
     for queued in pending {
-        if queued.connection_id != connection_id || inflight.contains(&queued.message.id) {
+        if queued
+            .connection_id
+            .as_deref()
+            .is_some_and(|id| id != connection_id)
+            || inflight.contains(&queued.message.id)
+        {
             continue;
         }
         if queued
@@ -2446,9 +2453,7 @@ async fn resolve_codex_steer_response(
         );
         return false;
     }
-    match repository::mark_queued_messages_delivered(&deps.pool, &session.id, run_id, &message_ids)
-        .await
-    {
+    match signals::consume(&deps.pool, &session.id, run_id, &message_ids).await {
         Ok(()) => {
             let _ = deps.emit(
                 session,
@@ -3075,7 +3080,7 @@ async fn fresh_cli_session_context_prompt_from_current_queue(
     conversation: &mut RunConversation,
     prompt: String,
 ) -> Result<String, String> {
-    let pending = repository::list_pending_queued_messages(pool, session_id).await?;
+    let pending = signals::list_open_content(pool, session_id).await?;
     conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
     Ok(with_fresh_cli_session_context_prompt(conversation, prompt))
 }
@@ -5344,7 +5349,7 @@ mod tests {
         summary.session_id = session.id.clone();
         conversation.apply_compaction(1, summary);
 
-        repository::update_pending_queued_message(
+        signals::edit_pending_user_message(
             &pool,
             &session.id,
             &edited.id,
@@ -5352,7 +5357,7 @@ mod tests {
         )
         .await
         .unwrap();
-        repository::delete_pending_queued_message(&pool, &session.id, &deleted.id)
+        signals::delete_pending_user_message(&pool, &session.id, &deleted.id)
             .await
             .unwrap();
 

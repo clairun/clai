@@ -22,16 +22,39 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 /// SQLite connection pool, the only persistent storage handle outside
 /// the OS keyring and `.clai/config.json` files.
 pub type DbPool = Pool<Sqlite>;
 
+/// Per database file: serializes opens and records whether this process
+/// already ran recovery on it.
+type OpenGate = Arc<tokio::sync::Mutex<bool>>;
+
+static OPEN_GATES: OnceLock<Mutex<HashMap<PathBuf, OpenGate>>> = OnceLock::new();
+
+fn open_gate(db_path: &Path) -> OpenGate {
+    OPEN_GATES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(db_path.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 /// Open (creating if missing) a workspace's `data.sqlite`, apply any
 /// pending migrations, then run recovery sweeps so the UI never shows
 /// orphaned `running` rows from a previous crashed app process.
+///
+/// Opens of the same file are serialized, and recovery runs only on the
+/// first open in this process: the eager startup fan-out and a lazy open can
+/// both open a workspace, and a second sweep would fail runs and tasks this
+/// process already has in flight.
 pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> {
     let db_path = crate::config::workspace_config::data_path(workspace_root);
     let parent = db_path
@@ -39,6 +62,8 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
         .ok_or_else(|| "Could not determine workspace DB directory".to_string())?;
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("Failed to create workspace DB directory: {}", e))?;
+    let gate = open_gate(&db_path);
+    let mut recovered = gate.lock().await;
 
     // Connection options applied to *every* pooled connection (sqlx runs
     // them on connect), unlike a one-off `pool.execute(PRAGMA …)` which only
@@ -77,8 +102,11 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
         .await
         .map_err(|e| format!("Workspace DB migration failed: {}", e))?;
 
-    sweep_orphaned_task_state(&pool).await?;
-    crate::assistant::repository::recover_stale_runs(&pool).await?;
+    if !*recovered {
+        sweep_orphaned_task_state(&pool).await?;
+        crate::assistant::repository::recover_stale_runs(&pool).await?;
+        *recovered = true;
+    }
 
     Ok(pool)
 }
@@ -99,15 +127,8 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
 /// window strands it. There is no dispatcher that picks `queued` rows back up
 /// after a restart, so failing them is the only honest outcome.
 ///
-/// Runs on every workspace-DB open, and a workspace is USUALLY opened once per
-/// process (pools are cached in the workspace index), but that is not
-/// guaranteed: `AppState::workspace_db` inits outside the index lock, so during
-/// the startup window the eager fan-out and a lazy open can both open the same
-/// workspace and both sweep. A task created in between would be failed while
-/// live. The exposure is the same one `recover_stale_runs` (called on the next
-/// line, and strictly wider — it fails `assistant_runs` too) already carries, so
-/// do not build on an at-most-once assumption here; fix the double open if it
-/// ever matters.
+/// Runs once per process per workspace DB, behind the open gate in
+/// [`init_workspace_db`].
 ///
 /// `assistant_runs` and `assistant_tool_calls` are NOT touched here —
 /// `crate::assistant::repository::recover_stale_runs` already handles those
@@ -460,9 +481,10 @@ mod tests {
             (run.status, run.trigger),
             (RunStatus::Running, RunTrigger::Scheduled)
         );
-        assert!(repository::session_has_active_run(&pool, "s")
+        assert!(repository::active_run_id(&pool, "s")
             .await
-            .unwrap());
+            .unwrap()
+            .is_some());
         let tool_call = repository::get_tool_call_for_session(&pool, "s", "t1")
             .await
             .unwrap()
@@ -690,15 +712,33 @@ mod tests {
         assert_eq!(before, after);
     }
 
+    /// A workspace DB as a previous process left it: migrated, never
+    /// recovered by this one.
+    async fn previous_process_db(root: &Path) -> DbPool {
+        let db_path = crate::config::workspace_config::data_path(root);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        run_all_migrations(&pool).await;
+        pool
+    }
+
     /// `init_workspace_db` must run the sweep itself: the eager startup fan-out
     /// and the lazy-open path both go through it and nothing else sweeps.
     #[tokio::test]
     async fn workspace_init_sweeps_orphaned_task_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let pool = init_workspace_db(tmp.path()).await.unwrap();
+        let pool = previous_process_db(tmp.path()).await;
         insert_task(&pool, "t1", "queued", None, None).await;
         insert_task(&pool, "t2", "running", None, None).await;
-        drop(pool);
+        pool.close().await;
 
         let pool = init_workspace_db(tmp.path()).await.unwrap();
         let statuses: Vec<String> =
@@ -707,5 +747,158 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(statuses, vec!["failed".to_string(), "failed".to_string()]);
+    }
+
+    /// Without the gate, concurrent opens of a fresh file race each other's
+    /// migrations.
+    #[tokio::test]
+    async fn init_gate_serializes_concurrent_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut opens = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let root = tmp.path().to_path_buf();
+            opens.spawn(async move { init_workspace_db(&root).await });
+        }
+        while let Some(opened) = opens.join_next().await {
+            opened.unwrap().expect("every concurrent open must succeed");
+        }
+    }
+
+    /// The eager startup open and a lazy open of the same workspace: the
+    /// second must not fail the run and task the first one's process owns.
+    #[tokio::test]
+    async fn startup_open_does_not_sweep_live_run() {
+        use crate::assistant::repository::{self, CreateRunParams};
+        use crate::assistant::types::{RunStatus, RunTrigger, SessionContext};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = init_workspace_db(tmp.path()).await.unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        let run = repository::create_run(
+            &pool,
+            CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Running,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "c".into(),
+                protocol_id: "openai".into(),
+                model_id: "m".into(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        insert_task(&pool, "t1", "running", Some(&session.id), None).await;
+
+        let second = init_workspace_db(tmp.path()).await.unwrap();
+
+        let stored = repository::get_run(&second, &run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, RunStatus::Running);
+        let status: String = sqlx::query_scalar("SELECT status FROM workspace_tasks")
+            .fetch_one(&second)
+            .await
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+
+    #[tokio::test]
+    async fn migrated_queue_rows_become_user_message_signals() {
+        let pool = pool_migrated_before(20261016000000).await;
+        for statement in [
+            "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+             VALUES ('s', '{}', 1, 1)",
+            "INSERT INTO assistant_messages (id, session_id, role, content_json, created_at)
+             VALUES ('m1', 's', 'user', '[]', 1), ('m2', 's', 'user', '[]', 2)",
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id, started_at)
+             VALUES ('r', 's', 'completed', 'user_message', 'c', 'openai', 'm', 1)",
+            "INSERT INTO assistant_message_queue
+                 (message_id, session_id, connection_id, status, queued_at, delivered_run_id, delivered_at)
+             VALUES ('m1', 's', 'c1', 'pending', 5, NULL, NULL),
+                    ('m2', 's', 'c2', 'delivered', 6, 'r', 9)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let signals: Vec<String> = sqlx::query_scalar(
+            "SELECT id || ' ' || target_session_id || ' ' || kind || ' ' || lane || ' '
+                    || message_id || ' ' || connection_id || ' ' || status || ' '
+                    || COALESCE(consumed_run_id, '-') || ' ' || created_at || ' '
+                    || COALESCE(consumed_at, '-')
+             FROM session_signals ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            signals,
+            [
+                "q:m1 s user_message 1 m1 c1 pending - 5 -",
+                "q:m2 s user_message 1 m2 c2 consumed r 6 9",
+            ]
+        );
+        let queue_left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'assistant_message_queue'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(queue_left, 0);
+    }
+
+    /// The migration closes all but the newest active run of a session so
+    /// the one-active-run index can be created.
+    #[tokio::test]
+    async fn session_signals_migration_keeps_only_the_newest_active_run() {
+        let pool = pool_migrated_before(20261016000000).await;
+        for statement in [
+            "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+             VALUES ('s', '{}', 1, 1)",
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id, started_at)
+             VALUES ('old', 's', 'running', 'user_message', 'c', 'openai', 'm', 1),
+                    ('new', 's', 'queued', 'user_message', 'c', 'openai', 'm', 2)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let runs: Vec<(String, String, Option<i64>)> =
+            sqlx::query_as("SELECT id, status, completed_at FROM assistant_runs ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            runs,
+            vec![
+                ("new".to_string(), "queued".to_string(), None),
+                ("old".to_string(), "failed".to_string(), Some(1)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn active_run_index_matches_active_run_statuses() {
+        let (_tmp, pool) = workspace_pool().await;
+        let sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_assistant_runs_one_active_per_session'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let predicate = sql
+            .split_once("WHERE status IN ")
+            .map(|(_, statuses)| statuses.trim())
+            .expect("the index is partial on run status");
+        assert_eq!(predicate, crate::assistant::repository::ACTIVE_RUN_STATUSES);
     }
 }
