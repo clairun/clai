@@ -199,4 +199,8 @@ describe('activityFromTasks', () => {
       activityFromTasks('wa-1', [task({ status: 'failed', attentionAcknowledgedAt: 5n })])
     ).toBe('idle');
   });
+
+  it('a task waiting for an answer is attention, not running', () => {
+    expect(activityFromTasks('wa-1', [task({ status: 'input_required' })])).toBe('attention');
+  });
 });

@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listAgentDefinitions, type AgentDefinitionDetail } from '../../api/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
-import { isTaskActive } from '../../utils/taskDisplay';
+import { isTaskRunning } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import AgentCardPicker from './AgentCardPicker';
 import { agentActivity, identityFor, type AgentActivity } from './agentIdentity';
@@ -62,7 +62,7 @@ export const crewStatus = (
   if (activity === 'disabled') return { activity, line: 'Disabled in this workspace' };
   if (activity === 'running') {
     const running = tasks.filter(
-      (task) => task.assignedToWorkspaceAgentId === agent.id && isTaskActive(task)
+      (task) => task.assignedToWorkspaceAgentId === agent.id && isTaskRunning(task)
     ).length;
     return { activity, line: running === 1 ? '1 task running' : `${running} tasks running` };
   }

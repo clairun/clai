@@ -36,7 +36,7 @@ const composerPlaceholder = (task: WorkspaceTaskResponse, agent: string): string
     case 'input_required':
       return `Answer ${agent} (or use the question above)…`;
     case 'stopping':
-      return 'Stopping…';
+      return 'Queue a message for after the stop…';
     default:
       return task.failureReason === 'blocked' ? `Reply to ${agent}…` : 'Continue this task…';
   }
@@ -249,7 +249,11 @@ export default function WorkspaceTaskTranscriptPanel({
           <span className={styles.title} title={task.title}>{task.title}</span>
           <span className={`${styles.statusPill} ${statusClass}`}>{statusLabel}</span>
         </div>
-        <TaskStopButton task={task} label={`Stop task ${task.title}`} />
+        <TaskStopButton
+          key={`${task.id}:${task.cycleNo}`}
+          task={task}
+          label={`Stop task ${task.title}`}
+        />
         <button
           type="button"
           className={styles.closeButton}
@@ -324,7 +328,6 @@ export default function WorkspaceTaskTranscriptPanel({
         key={task.id}
         placeholder={composerPlaceholder(task, agentName)}
         ariaLabel={`Message ${agentName} about ${task.title}`}
-        disabled={task.status === 'stopping'}
         onSend={handleSend}
       />
     </aside>

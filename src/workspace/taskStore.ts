@@ -10,8 +10,8 @@ type TaskMap = Record<string, WorkspaceTaskResponse>;
 
 interface TaskStoreState {
   tasks: Record<string, TaskMap>;
-  /** The workspace's first details load is in. Restarts emit no events, so it is the baseline. */
-  seeded: Record<string, boolean>;
+  /** When (ms) the workspace's first details load came in. Restarts emit no events, so it is the baseline. */
+  seeded: Record<string, number>;
   seedTasks: (workspaceId: string, tasks: readonly WorkspaceTaskResponse[]) => void;
   upsertTask: (task: WorkspaceTaskResponse) => void;
 }
@@ -42,7 +42,9 @@ export const useTaskStore = create<TaskStoreState>()((set) => ({
           merged === state.tasks[workspaceId]
             ? state.tasks
             : { ...state.tasks, [workspaceId]: merged },
-        seeded: state.seeded[workspaceId] ? state.seeded : { ...state.seeded, [workspaceId]: true },
+        seeded: state.seeded[workspaceId]
+          ? state.seeded
+          : { ...state.seeded, [workspaceId]: Date.now() },
       };
     }),
   upsertTask: (task) =>

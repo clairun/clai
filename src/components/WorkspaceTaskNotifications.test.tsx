@@ -107,6 +107,36 @@ describe('WorkspaceTaskNotifications', () => {
     expect(screen.queryByText('old failure')).toBeNull();
   });
 
+  it('a task created failed after the workspace loaded toasts on its first poll', async () => {
+    await renderNotifications();
+
+    act(() => useTaskStore.getState().seedTasks('ws-1', [task({ id: 'task-0' })]));
+    // An assignment with no usable connection is stored failed and emits nothing.
+    const createdAt = BigInt(Date.now() + 1000);
+    act(() =>
+      useTaskStore
+        .getState()
+        .seedTasks('ws-1', [
+          task({ id: 'task-0' }),
+          task({ status: 'failed', error: 'no connection', createdAt, updatedAt: createdAt }),
+        ])
+    );
+    expect(screen.getByText('no connection')).toBeInTheDocument();
+  });
+
+  it('an acknowledged failure that fails again next cycle toasts again', async () => {
+    await renderNotifications();
+
+    emitTaskUpdated(task());
+    emitTaskUpdated(task({ status: 'failed', error: 'first', updatedAt: 2n }));
+    act(() => screen.getByRole('button', { name: 'Dismiss notification' }).click());
+    emitTaskUpdated(task({ status: 'failed', error: 'first', attentionAcknowledgedAt: 3n, updatedAt: 3n }));
+    emitTaskUpdated(task({ status: 'queued', cycleNo: 2n, attentionAcknowledgedAt: 3n, updatedAt: 4n }));
+    // The backend clears the acknowledgement when the task needs attention again.
+    emitTaskUpdated(task({ status: 'failed', error: 'second', cycleNo: 2n, updatedAt: 5n }));
+    expect(screen.getByText('second')).toBeInTheDocument();
+  });
+
   it('names the task in the Open task button', async () => {
     await renderNotifications();
 

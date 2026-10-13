@@ -65,8 +65,12 @@ export const isTaskAttention = (
 ): boolean =>
   (task.status === 'failed' || task.status === 'input_required') && !task.attentionAcknowledgedAt;
 
+/** A task the agent is working on or about to; a question waits instead. */
+export const isTaskRunning = (task: { status: string }): boolean =>
+  task.status === 'running' || task.status === 'queued';
+
 export const isTaskActive = (task: { status: string }): boolean =>
-  task.status === 'running' || task.status === 'queued' || task.status === 'input_required';
+  isTaskRunning(task) || task.status === 'input_required';
 
 /** A task whose current cycle can still be stopped. */
 export const canStopTask = (task: { status: string }): boolean => isTaskActive(task);

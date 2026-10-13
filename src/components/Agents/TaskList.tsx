@@ -274,6 +274,7 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                       {status.label}
                     </span>
                     <TaskStopButton
+                      key={`${task.id}:${task.cycleNo}`}
                       task={task}
                       label={`Stop ${task.title}`}
                       className={styles.rowStop}

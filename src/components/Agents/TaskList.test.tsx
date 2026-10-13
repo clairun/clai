@@ -488,4 +488,14 @@ describe('task stop', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('task not found');
     expect(stop).toBeEnabled();
   });
+
+  it('a stop error does not outlive its cycle', async () => {
+    const running = task({ id: 't-x', title: 'Gone', status: 'running' });
+    api.stopWorkspaceTask.mockRejectedValue('transport closed');
+    const { rerender } = render(<TaskList {...props} tasks={[running]} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Stop Gone' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('transport closed');
+    rerender(<TaskList {...props} tasks={[{ ...running, cycleNo: 2n, updatedAt: 2n }]} />);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
 });

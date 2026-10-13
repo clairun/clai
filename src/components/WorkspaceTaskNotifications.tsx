@@ -20,8 +20,8 @@ interface NotificationItem {
 
 /**
  * Tasks whose status or cycle changed between two snapshots. Once a workspace
- * is loaded, a task with no earlier copy is not a transition: it is an old
- * task fetched because someone opened it.
+ * is loaded, a task with no earlier copy is a transition only if it was
+ * created after that load; an older one was fetched because someone opened it.
  */
 const transitionedTasks = (
   state: ReturnType<typeof useTaskStore.getState>,
@@ -33,9 +33,10 @@ const transitionedTasks = (
     if (tasks === before || state.seeded[workspaceId] !== prev.seeded[workspaceId]) continue;
     for (const task of Object.values(tasks)) {
       const old = before?.[task.id];
+      const seededAt = prev.seeded[workspaceId];
       const transitioned = old
         ? old.status !== task.status || old.cycleNo !== task.cycleNo
-        : !prev.seeded[workspaceId];
+        : seededAt === undefined || task.createdAt > BigInt(seededAt);
       if (transitioned) changed.push(task);
     }
   }

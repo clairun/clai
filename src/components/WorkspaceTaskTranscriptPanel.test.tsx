@@ -321,13 +321,12 @@ describe('WorkspaceTaskTranscriptPanel', () => {
         [{ status: 'failed', failureReason: 'error' }, 'Continue this task…'],
         [{ status: 'completed' }, 'Continue this task…'],
         [{ status: 'stopped' }, 'Continue this task…'],
-        [{ status: 'stopping' }, 'Stopping…'],
+        [{ status: 'stopping' }, 'Queue a message for after the stop…'],
       ];
       for (const [over, placeholder] of cases) {
         const { unmount } = renderPanel(over);
         expect(composer()).toHaveAttribute('placeholder', placeholder);
-        if (over.status === 'stopping') expect(composer()).toBeDisabled();
-        else expect(composer()).toBeEnabled();
+        expect(composer()).toBeEnabled();
         unmount();
       }
     });

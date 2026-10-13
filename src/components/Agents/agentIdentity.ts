@@ -11,7 +11,7 @@
  * "the main of this workspace" wherever it shows up.
  */
 import type { AgentAvatarRef, WorkspaceTaskResponse } from '../../generated/bindings';
-import { isTaskActive, isTaskAttention } from '../../utils/taskDisplay';
+import { isTaskAttention, isTaskRunning } from '../../utils/taskDisplay';
 import {
   GENERATOR_VERSION,
   HUES,
@@ -179,7 +179,7 @@ export const activityFromTasks = (
   let activity: 'idle' | 'running' | 'attention' = 'idle';
   for (const task of tasks) {
     if (task.assignedToWorkspaceAgentId !== agentId) continue;
-    if (isTaskActive(task)) return 'running';
+    if (isTaskRunning(task)) return 'running';
     if (isTaskAttention(task)) activity = 'attention';
   }
   return activity;

@@ -14,7 +14,6 @@ import { useOpenTask, type TaskView } from './useOpenTask';
 import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore';
 import * as assistantClient from '../assistant/client';
 import useAssistantStore from '../assistant/sessionStore';
-import { useCancelRun } from '../assistant/useCancelRun';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
@@ -2019,6 +2018,29 @@ const Workspace = () => {
     }
   }, [loadDetails, runNowBusy, setError, setRunNowBusy, workspaceId]);
 
+  // Track the run id we asked to cancel so the Stop button stays in a
+  // "stopping…" state until the details confirm the run flipped to a
+  // terminal state. `assistant_cancel_run` only *signals* the cancel
+  // token — the engine flips RunStatus on its next checkpoint — so
+  // clearing busy on resolve would re-arm the button while the run is
+  // still streaming.
+  const [cancellingRunId, setCancellingRunId] = useByWorkspace<string | null>(workspaceId, null);
+  const handleStop = useCallback(
+    async (runId: string | null) => {
+      if (!runId || cancellingRunId) return;
+      setCancellingRunId(runId);
+      try {
+        await assistantClient.cancelRun(workspaceId, runId);
+        setError('');
+        await loadDetails(false);
+      } catch (err) {
+        setError(errorMessage(err, 'Failed to stop run.'));
+        setCancellingRunId(null);
+      }
+    },
+    [cancellingRunId, loadDetails, setCancellingRunId, setError, workspaceId]
+  );
+
   const [pauseBusy, setPauseBusy] = useByWorkspace(workspaceId, false);
   const handleTogglePause = useCallback(
     async (nextPaused: boolean) => {
@@ -2323,25 +2345,6 @@ const Workspace = () => {
   const activeRun =
     (details?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
-  const activeRunId = activeRun?.id ?? null;
-  const cancelActiveRun = useCallback(async () => {
-    if (!activeRunId) return;
-    try {
-      await assistantClient.cancelRun(workspaceId, activeRunId);
-      setError('');
-      await loadDetails(false);
-    } catch (err) {
-      setError(errorMessage(err, 'Failed to stop run.'));
-      throw err;
-    }
-  }, [activeRunId, loadDetails, setError, workspaceId]);
-  // Keyed by workspace and run: a pending Stop shows again on returning to
-  // its workspace, and a failed one releases only its own run.
-  const { stop: handleStop, stopping: stopBusy } = useCancelRun({
-    cancel: cancelActiveRun,
-    isActive: hasActiveRun,
-    key: `${workspaceId}:${activeRunId}`,
-  });
   // Ctrl+C cancels the in-flight run (terminal-style interrupt). The guard
   // logic lives in shouldCancelRunOnKey so it stays unit-tested: a real text
   // selection still copies, Ctrl+C inside the integrated terminal reaches the
@@ -2363,11 +2366,11 @@ const Workspace = () => {
       });
       if (!cancel) return;
       e.preventDefault();
-      void handleStop();
+      void handleStop(activeRun?.id || null);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hasActiveRun, handleStop]);
+  }, [hasActiveRun, activeRun?.id, handleStop]);
   // Surface the most recent run's failure in the chat. Derived from the
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
@@ -2386,6 +2389,18 @@ const Workspace = () => {
       markWorkspaceOpened(workspaceId).catch(() => {});
     };
   }, [workspaceId, isStreaming]);
+  // Clear the "stopping…" lock once the cancelled run leaves the active
+  // set. The cancel propagation is async (engine checkpoints), so we
+  // can't clear on the cancel call returning, nor before the details load
+  // on returning to the workspace.
+  useEffect(() => {
+    if (!cancellingRunId || !details) return;
+    const stillActive = (details.runs || []).some(
+      (run) => run.id === cancellingRunId && ACTIVE_RUN_STATUSES.includes(run.status)
+    );
+    if (!stillActive) setCancellingRunId(null);
+  }, [details, cancellingRunId, setCancellingRunId]);
+  const stopBusy = cancellingRunId !== null;
 
   // Drawer header actions for the artifacts panel: hand the workspace
   // folder to the user's editor/terminal (Settings → Applications), and

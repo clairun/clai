@@ -58,7 +58,7 @@ describe('taskStore', () => {
     upsertTask(task({ status: 'completed', updatedAt: 5n }));
     seedTasks('ws-1', [task({ status: 'running', updatedAt: 3n })]);
     expect(stored()?.status).toBe('completed');
-    expect(useTaskStore.getState().seeded['ws-1']).toBe(true);
+    expect(useTaskStore.getState().seeded['ws-1']).toBeTypeOf('number');
     seedTasks('ws-1', [task({ status: 'failed', updatedAt: 7n })]);
     expect(stored()?.status).toBe('failed');
   });
