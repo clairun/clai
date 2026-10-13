@@ -263,10 +263,9 @@ pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
     mut session: AssistantSession,
-    run_context: RunContext,
+    run_context: Arc<RunContext>,
     connection: ProviderConnection,
 ) -> Result<(), AssistantEngineError> {
-    let run_context = Arc::new(run_context);
     let run_id = resolve_run_id(deps, &session, &connection, &input).await?;
 
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;

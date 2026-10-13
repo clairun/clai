@@ -113,7 +113,10 @@ async fn execute_bash_exec(
     context: &ToolExecutionContext,
     params: BashExecParams,
 ) -> Result<serde_json::Value, String> {
-    if matches!(context.execution.shell.mode, ShellAccessMode::Off) {
+    if matches!(
+        context.run_context.execution.shell.mode,
+        ShellAccessMode::Off
+    ) {
         return Err("Shell access is disabled for this agent".to_string());
     }
 
@@ -124,7 +127,7 @@ async fn execute_bash_exec(
     let run_allowed = context.session_allowed_command_prefixes_snapshot();
     let run_blocked = context.session_blocked_command_prefixes_snapshot();
     match evaluate_command_policy(
-        &context.execution,
+        &context.run_context.execution,
         &params.command,
         &run_allowed,
         &run_blocked,
@@ -234,7 +237,7 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
 
 fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
     let workspace = ensure_workspace_root(context)?;
-    let mut grants = context.execution.filesystem.extra_paths.clone();
+    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
     grants.extend(context.session_grants_snapshot());
     EffectiveFilesystemPolicy::from_config(
         &workspace,
@@ -244,7 +247,7 @@ fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesyst
 }
 
 fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
-    let workspace_root = context.workspace_root.clone();
+    let workspace_root = context.run_context.workspace_root.clone();
 
     // Create workspace root and pre-seed .clai/memory/ (including journal/)
     // so agents can use it immediately without spending a tool call.
@@ -266,12 +269,12 @@ fn sandbox_profile(
     workspace_root: PathBuf,
     filesystem: EffectiveFilesystemPolicy,
 ) -> SandboxProfile {
-    let network = match context.execution.sandbox.network {
+    let network = match context.run_context.execution.sandbox.network {
         SandboxNetworkConfig::Enabled => SandboxNetworkMode::Host,
         SandboxNetworkConfig::Disabled => SandboxNetworkMode::Disabled,
     };
 
-    let session_bus = match context.execution.sandbox.session_bus {
+    let session_bus = match context.run_context.execution.sandbox.session_bus {
         SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
         SandboxSessionBusConfig::Allow => SandboxSessionBusMode::Allow,
     };
@@ -626,7 +629,7 @@ async fn await_user_permission(
 
     let app_state = deps.app.state::<crate::AppState>();
     let workspace_id = Some(deps.workspace_id.clone());
-    let agent_id = context.automation_id.clone();
+    let agent_id = context.run_context.automation_id.clone();
 
     // The constructor resolves where an "always" decision would be saved — in
     // this workspace for its Main, or on a shared definition in force wherever
@@ -773,7 +776,7 @@ async fn execute_fs_request_grant(
     let request = crate::commands::path_grants::PathGrantRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         workspace_id: Some(deps.workspace_id.clone()),
-        agent_id: context.automation_id.clone(),
+        agent_id: context.run_context.automation_id.clone(),
         agent_name: None,
         requested_path: canonical_str.clone(),
         requested_access: params.access,
@@ -1539,6 +1542,7 @@ fn append_limited_web_fetch_body_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::run_context::RunContext;
     use tempfile::tempdir;
 
     fn context_with_grants(
@@ -1552,11 +1556,12 @@ mod tests {
             run_id: "run".to_string(),
             tool_call_id: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
-            mcp_server_ids: Vec::new(),
-            workspace_root: workspace_root.to_path_buf(),
-            automation_id: Some("agent".to_string()),
-            workspace_agents: Vec::new(),
-            execution,
+            run_context: std::sync::Arc::new(RunContext {
+                automation_id: Some("agent".to_string()),
+                execution,
+                workspace_root: workspace_root.to_path_buf(),
+                ..RunContext::default()
+            }),
             had_warnings: Default::default(),
             session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             session_allowed_command_prefixes: std::sync::Arc::new(

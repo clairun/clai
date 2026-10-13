@@ -146,7 +146,7 @@ async fn assign_task(
         ));
     }
 
-    let creator = creator_workspace_agent_id(&rows, context.automation_id.as_deref());
+    let creator = creator_workspace_agent_id(&rows, context.run_context.automation_id.as_deref());
 
     let task_id = uuid::Uuid::new_v4().to_string();
     create_task_row(

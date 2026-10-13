@@ -3,6 +3,7 @@ use crate::assistant::{
     providers::types::is_context_limit_error,
 };
 use futures::StreamExt;
+use std::sync::Arc;
 use tauri::Manager;
 
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
@@ -40,7 +41,7 @@ pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
     session: AssistantSession,
-    run_context: &RunContext,
+    run_context: &Arc<RunContext>,
     connection: ProviderConnection,
 ) -> Result<(), AssistantEngineError> {
     let Some((run_id, system_message, tool_defs, mut state, adapter)) =
@@ -316,7 +317,7 @@ async fn start_api_turn(
     deps: &AssistantDeps,
     input: &RunTurnInput,
     session: &AssistantSession,
-    run_context: &RunContext,
+    run_context: &Arc<RunContext>,
     connection: &ProviderConnection,
 ) -> Result<
     Option<(
@@ -375,11 +376,7 @@ async fn start_api_turn(
         run_id: run_id.clone(),
         tool_call_id: None,
         cancel_token: input.cancel_token.clone(),
-        mcp_server_ids: run_context.mcp_server_ids.clone(),
-        workspace_root: run_context.workspace_root.clone(),
-        automation_id: run_context.automation_id.clone(),
-        workspace_agents: run_context.workspace_agents.clone(),
-        execution: run_context.execution.clone(),
+        run_context: Arc::clone(run_context),
         had_warnings: Default::default(),
         session_grants,
         session_allowed_command_prefixes,
@@ -521,7 +518,11 @@ async fn prepare_api_request(
     // CLI providers ingest images via their own mechanism (file paths in the
     // CLI invocation), not this HTTP request, so they don't need inlining.
     let images = if supports_images && !providers::is_cli_provider(&connection.protocol_id) {
-        resolve_request_images(&state.tool_context.workspace_root, &provider_messages).await
+        resolve_request_images(
+            &state.tool_context.run_context.workspace_root,
+            &provider_messages,
+        )
+        .await
     } else {
         std::collections::HashMap::new()
     };

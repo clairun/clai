@@ -392,8 +392,6 @@ async fn execute_bound_tool(
         app: app.clone(),
     };
 
-    let run_context = &binding.run_context;
-
     let tool_context = ToolExecutionContext {
         session_id: binding.session_id.clone(),
         run_id: binding.run_id.clone(),
@@ -403,11 +401,7 @@ async fn execute_bound_tool(
         // tool still executes correctly.
         tool_call_id: None,
         cancel_token: binding.cancel_token.clone(),
-        mcp_server_ids: run_context.mcp_server_ids.clone(),
-        workspace_root: run_context.workspace_root.clone(),
-        automation_id: run_context.automation_id.clone(),
-        workspace_agents: run_context.workspace_agents.clone(),
-        execution: run_context.execution.clone(),
+        run_context: Arc::clone(&binding.run_context),
         had_warnings: binding.had_warnings.clone(),
         session_grants: binding.session_grants.clone(),
         session_allowed_command_prefixes: binding.session_allowed_command_prefixes.clone(),

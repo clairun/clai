@@ -58,7 +58,7 @@ pub async fn execute(
     context: &ToolExecutionContext,
     params: HistoryQueryParams,
 ) -> Result<serde_json::Value, String> {
-    let db_path = crate::config::workspace_config::data_path(&context.workspace_root);
+    let db_path = crate::config::workspace_config::data_path(&context.run_context.workspace_root);
     if !db_path.exists() {
         return Err(format!(
             "Conversation database not found at {} (nothing has been recorded for this workspace yet)",

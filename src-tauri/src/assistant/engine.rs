@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -87,7 +88,7 @@ pub async fn run_session_turn(
         None => Err("application state is not available".to_string()),
     };
     let run_context = match run_context {
-        Ok(run_context) => run_context,
+        Ok(run_context) => Arc::new(run_context),
         Err(error) => {
             let error = AssistantEngineError::RunConfig(error);
             return fail_before_start(deps, &session, &input, error).await;

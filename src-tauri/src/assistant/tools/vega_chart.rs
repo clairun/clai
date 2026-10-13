@@ -63,7 +63,7 @@ pub fn execute(
     context: &ToolExecutionContext,
     params: CreateVegaChartParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_root = &context.workspace_root;
+    let workspace_root = &context.run_context.workspace_root;
     let title = params.title.trim();
     if title.is_empty() {
         return Err("`title` must not be empty".to_string());
@@ -583,6 +583,7 @@ fn read_spec_file(absolute: &Path, relative: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::run_context::RunContext;
     use std::sync::{Arc, Mutex};
 
     fn bar_spec() -> serde_json::Value {
@@ -602,11 +603,10 @@ mod tests {
             run_id: "r".to_string(),
             tool_call_id: None,
             cancel_token: Default::default(),
-            mcp_server_ids: vec![],
-            workspace_root,
-            automation_id: None,
-            workspace_agents: vec![],
-            execution: Default::default(),
+            run_context: Arc::new(RunContext {
+                workspace_root,
+                ..RunContext::default()
+            }),
             had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(vec![])),
             session_allowed_command_prefixes: Arc::new(Mutex::new(vec![])),
