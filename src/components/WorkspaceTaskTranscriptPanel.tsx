@@ -249,7 +249,6 @@ export default function WorkspaceTaskTranscriptPanel({
               // this agent running, and the store only knows `isStreaming` /
               // `runStartedAt` for runs it saw start live — a transcript
               // opened mid-run showed nothing at all, which read as a bug.
-              userLabel="Main agent"
               hasOlderMessages={hasOlderMessages}
               isLoadingOlderMessages={isLoadingOlderMessages}
               onLoadOlderMessages={handleLoadOlderMessages}

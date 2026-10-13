@@ -29,9 +29,18 @@ import {
   type TaskCallCard,
 } from './toolDisplay';
 import TaskCard from '../Agents/TaskCard';
+import TaskResultCard from '../Agents/TaskResultCard';
 import AgentAvatar from '../Agents/AgentAvatar';
-import type { AgentIdentity } from '../Agents/agentIdentity';
-import { resolveAgent, type SenderAgent, type SessionOwner } from './messageSender';
+import { identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
+import { useAppTheme } from '../../hooks/useAppTheme';
+import {
+  resolveAgent,
+  resolveMessageSender,
+  senderGroupKey,
+  type MessageSender,
+  type SenderAgent,
+  type SessionOwner,
+} from './messageSender';
 import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './taskCardContext';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
@@ -574,7 +583,6 @@ interface ChatMessageListProps {
   streamingText?: Record<string, string>;
   isStreaming?: boolean;
   toolCalls?: ToolInvocation[];
-  userLabel?: string;
   // Error message of the most recent run if it failed, shown inline at the
   // end of the conversation (directly under the failed turn). Null when the
   // last run didn't fail. `runErrorIsLimit` selects a calmer style for
@@ -620,11 +628,6 @@ const ChatMessageList = ({
   streamingText = EMPTY_STREAMING,
   isStreaming = false,
   toolCalls = EMPTY_TOOL_CALLS,
-  // Label shown for `user`-role messages. Defaults to "You" for the human in
-  // the main chat. Pass "Main agent" when rendering a sub-agent's task
-  // transcript — those `user` messages are the parent's task instructions,
-  // not anything the human typed.
-  userLabel = 'You',
   runError = null,
   runErrorIsLimit = false,
   runStartedAt = null,
@@ -704,25 +707,30 @@ const ChatMessageList = ({
     return null;
   }, [visibleMessages]);
 
-  // An item is an "assistant continuation" when it's an assistant turn
-  // (text+tools MessageBlock or a tool-only MergedToolGroup) AND the
-  // item before it is also assistant/tool. Continuations render slim:
-  // no header, no card chrome, just the content flowing into the
-  // previous block. The first assistant after a user message keeps
-  // the full header and card framing so the turn boundary stays
-  // legible.
+  const senders = useMemo(
+    () =>
+      new Map(
+        visibleMessages.map((m) => [m.id, resolveMessageSender(m, ownerAgent, taskRoster)])
+      ),
+    [visibleMessages, ownerAgent, taskRoster]
+  );
+
+  // An item is a continuation when the item before it has the same sender
+  // group (see senderGroupKey): it renders slim, without a header, flowing
+  // into the previous block. Tool groups are the owner's.
   const continuationFlags = useMemo(() => {
-    const isAssistantItem = (it: RenderItem | undefined) => {
-      if (!it) return false;
-      if (it.type === 'load-earlier') return false;
-      if (it.type === 'tool-group') return true;
-      return it.message?.role === 'assistant';
+    const groupKey = (it: RenderItem | undefined) => {
+      if (!it || it.type === 'load-earlier') return null;
+      if (it.type === 'tool-group') return 'owner';
+      const sender = senders.get(it.message.id);
+      return sender ? senderGroupKey(sender) : null;
     };
 
-    return grouped.map(
-      (_, idx) => isAssistantItem(grouped[idx]) && isAssistantItem(grouped[idx - 1])
-    );
-  }, [grouped]);
+    return grouped.map((it, idx) => {
+      const key = groupKey(it);
+      return key !== null && key === groupKey(grouped[idx - 1]);
+    });
+  }, [grouped, senders]);
 
   const itemKey = useCallback(
     (item: RenderItem) =>
@@ -771,7 +779,7 @@ const ChatMessageList = ({
           message={item.message}
           streamingText={streamingText[item.message.id]}
           toolCallsById={toolCallsById}
-          userLabel={userLabel}
+          sender={senders.get(item.message.id)}
           workspaceId={workspaceId}
           isContinuation={continuationFlags[idx]}
           isQueued={queuedIdSet.has(item.message.id)}
@@ -785,7 +793,7 @@ const ChatMessageList = ({
       ownerAgent,
       streamingText,
       toolCallsById,
-      userLabel,
+      senders,
       workspaceId,
       queuedIdSet,
       onDeleteQueuedMessage,
@@ -859,7 +867,7 @@ interface MessageBlockProps {
   message: AssistantMessage;
   streamingText?: string;
   toolCallsById: Map<string, ToolInvocation>;
-  userLabel?: string;
+  sender?: MessageSender;
   workspaceId: string;
   isContinuation?: boolean;
   isQueued?: boolean;
@@ -869,15 +877,23 @@ interface MessageBlockProps {
 }
 
 const MessageBlock = memo(({ message, ...props }: MessageBlockProps) => {
-  if (message.role === 'user') return <UserMessageBlock message={message} {...props} />;
   if (message.role === 'assistant') return <AssistantMessageBlock message={message} {...props} />;
   // Skip tool result messages — shown inline with tool calls
-  return null;
+  if (message.role !== 'user') return null;
+  const sender = props.sender ?? { kind: 'user' };
+  if (sender.kind === 'user') return <UserMessageBlock message={message} {...props} />;
+  if (sender.kind === 'task') return <TaskResultBlock message={message} sender={sender} />;
+  return (
+    <InboxMessageBlock
+      message={message}
+      agent={sender.kind === 'agent' ? sender.agent : null}
+      isContinuation={props.isContinuation}
+    />
+  );
 });
 
 const UserMessageBlock = ({
   message,
-  userLabel = 'You',
   workspaceId,
   isQueued = false,
   onDeleteQueued,
@@ -916,7 +932,7 @@ const UserMessageBlock = ({
   return (
     <div className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''}`}>
       <div className={styles.messageHeader}>
-        <span className={styles.messageRoleText}>{userLabel}</span>
+        <span className={styles.messageRoleText}>You</span>
         {createdAt && (
           <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>
         )}
@@ -1047,6 +1063,46 @@ const AssistantMessageBlock = ({
   );
 };
 
+const TaskResultBlock = ({
+  message,
+  sender,
+}: {
+  message: AssistantMessage;
+  sender: Extract<MessageSender, { kind: 'task' }>;
+}) => {
+  const { onOpenTask } = useTaskCardSurface();
+  return <TaskResultCard sender={sender} body={getTextContent(message)} onOpen={onOpenTask} />;
+};
+
+/**
+ * A message another agent sent into this session, or one from an origin this
+ * build does not know ("System"). Never the user's style, never editable.
+ */
+const InboxMessageBlock = ({
+  message,
+  agent,
+  isContinuation = false,
+}: {
+  message: AssistantMessage;
+  agent: SenderAgent | null;
+  isContinuation?: boolean;
+}) => {
+  const theme = useAppTheme();
+  const style = agent
+    ? ({ '--sender-hue': identityRingColor(agent.identity, theme) } as React.CSSProperties)
+    : undefined;
+  return (
+    <div className={styles.inboxMessage} style={style}>
+      {!isContinuation && (
+        <SenderHeader agent={agent} fallbackName="System" createdAt={message.createdAt} />
+      )}
+      <div className={styles.messageContent}>
+        <MarkdownMessage content={getTextContent(message)} />
+      </div>
+    </div>
+  );
+};
+
 /** The owner's face and name over an assistant turn; "Clai" when no agent owns the session. */
 const OwnerHeader = ({
   owner,
@@ -1054,18 +1110,28 @@ const OwnerHeader = ({
 }: {
   owner: SenderAgent | null;
   createdAt: number | bigint | null | undefined;
+}) => <SenderHeader agent={owner} fallbackName="Clai" createdAt={createdAt} />;
+
+const SenderHeader = ({
+  agent,
+  fallbackName,
+  createdAt,
+}: {
+  agent: SenderAgent | null;
+  fallbackName: string;
+  createdAt: number | bigint | null | undefined;
 }) => (
   <div className={styles.messageHeader}>
-    {owner && (
+    {agent && (
       <AgentAvatar
-        identity={owner.identity}
+        identity={agent.identity}
         size={20}
-        activity={owner.presence === 'disabled' ? 'disabled' : 'none'}
+        activity={agent.presence === 'disabled' ? 'disabled' : 'none'}
       />
     )}
-    <span className={styles.messageRoleText}>{owner ? owner.name : 'Clai'}</span>
-    {owner && owner.presence !== 'active' && (
-      <span className={styles.senderSuffix}>({owner.presence})</span>
+    <span className={styles.messageRoleText}>{agent ? agent.name : fallbackName}</span>
+    {agent && agent.presence !== 'active' && (
+      <span className={styles.senderSuffix}>({agent.presence})</span>
     )}
     {createdAt && <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>}
   </div>

@@ -126,7 +126,7 @@ describe('ChatMessageList', () => {
       msg({ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hello there' }] }),
       msg({ id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'general kenobi' }] }),
     ];
-    render(<ChatMessageList workspaceId="ws-1" messages={messages} userLabel="You" />);
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} />);
     expect(screen.getByText('hello there')).toBeInTheDocument();
     expect(screen.getByText('general kenobi')).toBeInTheDocument();
     expect(screen.getByText('You')).toBeInTheDocument();
@@ -841,7 +841,7 @@ describe('ChatMessageList', () => {
         ],
       }),
     ];
-    render(<ChatMessageList messages={messages} workspaceId="ws-1" userLabel="You" />);
+    render(<ChatMessageList messages={messages} workspaceId="ws-1" />);
     // Image-only message is not hidden, and the thumbnail loads from the store.
     const img = await screen.findByAltText('shot.png');
     expect(img).toHaveAttribute('src', 'data:image/png;base64,QUJD');
@@ -851,7 +851,7 @@ describe('ChatMessageList', () => {
     const messages: AssistantMessage[] = [
       msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'See ![Q3](charts/q3.vl.json)' }] }),
     ];
-    render(<ChatMessageList messages={messages} workspaceId="ws-1" userLabel="You" />);
+    render(<ChatMessageList messages={messages} workspaceId="ws-1" />);
     const markdown = screen.getByTestId('markdown');
     expect(markdown.dataset.workspace).toBe('ws-1');
     expect(markdown.dataset.base).toBe('');
@@ -873,7 +873,7 @@ describe('ChatMessageList', () => {
         ],
       }),
     ];
-    render(<ChatMessageList messages={messages} workspaceId="ws-1" userLabel="You" />);
+    render(<ChatMessageList messages={messages} workspaceId="ws-1" />);
     const thumb = await screen.findByAltText('shot.png');
     expect(screen.queryByRole('dialog')).toBeNull();
 
@@ -1009,6 +1009,156 @@ describe('ChatMessageList', () => {
       fireEvent.change(editor, { target: { value: 'and the README' } });
       fireEvent.click(within(editor.parentElement as HTMLElement).getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(onEdit).toHaveBeenCalledWith('u1', 'and the README'));
+    });
+  });
+
+  describe('participants', () => {
+    const agentRow = (over: Partial<WorkspaceAgentResponse>): WorkspaceAgentResponse => ({
+      id: 'wa-x',
+      workspaceId: 'ws-1',
+      agentDefinitionId: 'def-x',
+      displayName: 'X',
+      enabled: true,
+      isDefault: false,
+      agentName: null,
+      agentDescription: null,
+      providerConnectionIds: [],
+      skillIds: [],
+      selectedMcpServerIds: [],
+      execution: {},
+      avatar: null,
+      createdAt: 1n,
+      updatedAt: 1n,
+      ...over,
+    });
+    const roster = [
+      agentRow({ id: 'wa-main', displayName: 'Manager', isDefault: true }),
+      agentRow({ id: 'wa-rev', agentDefinitionId: 'def-rev', displayName: 'Reviewer' }),
+    ];
+    const owner: AgentRefSnapshot = {
+      workspaceAgentId: 'wa-main',
+      displayName: 'Manager',
+      isDefault: true,
+    };
+    const reviewer: AgentRefSnapshot = {
+      workspaceAgentId: 'wa-rev',
+      agentDefinitionId: 'def-rev',
+      displayName: 'Reviewer',
+      isDefault: false,
+    };
+    const fromAgent = (id: string, text: string, agent = reviewer) =>
+      msg({ id, role: 'user', content: [{ type: 'text', text }], origin: { kind: 'agent', agent } });
+    const fromTask = (id: string, text: string) =>
+      msg({
+        id,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        origin: {
+          kind: 'task',
+          taskId: 'task-1',
+          agent: reviewer,
+          title: 'Review PR #231',
+          cycleNo: 1n,
+          status: 'completed',
+        },
+      });
+    const list = (messages: AssistantMessage[], extra: Record<string, unknown> = {}) =>
+      render(
+        <ChatMessageList
+          workspaceId="ws-1"
+          messages={messages}
+          taskRoster={roster}
+          owner={owner}
+          {...extra}
+        />
+      );
+
+    it('legacy message without origin renders as You', () => {
+      const legacy = msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'old' }] });
+      delete (legacy as Partial<AssistantMessage>).origin;
+      const { container } = list([legacy]);
+      expect(screen.getByText('You')).toBeInTheDocument();
+      expect(container.querySelector('[class*="userMessage"]')).not.toBeNull();
+    });
+
+    it('task origin renders result card, never user style', () => {
+      const { container } = list([fromTask('t1', 'Found 2 issues')]);
+      const card = screen.getByRole('article', { name: 'Result from Reviewer: Review PR #231' });
+      expect(within(card).getByText('Found 2 issues')).toBeInTheDocument();
+      expect(within(card).getByText('Completed')).toBeInTheDocument();
+      expect(screen.queryByText('You')).toBeNull();
+      expect(container.querySelector('[class*="userMessage"]')).toBeNull();
+    });
+
+    it('agent origin renders sender avatar and name', () => {
+      const { container } = list([fromAgent('a1', 'skip generated files')]);
+      expect(screen.getByText('Reviewer')).toBeInTheDocument();
+      expect(screen.getByText('skip generated files')).toBeInTheDocument();
+      expect(container.querySelector('[data-activity]')).not.toBeNull();
+      expect(container.querySelector('[class*="userMessage"]')).toBeNull();
+    });
+
+    it('unknown origin kind renders System block', () => {
+      const odd = msg({
+        id: 'x1',
+        role: 'user',
+        content: [{ type: 'text', text: 'from the future' }],
+        origin: { kind: 'webhook' } as unknown as AssistantMessage['origin'],
+      });
+      const { container } = list([odd]);
+      expect(screen.getByText('System')).toBeInTheDocument();
+      expect(screen.queryByText('You')).toBeNull();
+      expect(container.querySelector('[class*="userMessage"]')).toBeNull();
+    });
+
+    it('same sender shows avatar once', () => {
+      list([fromAgent('a1', 'first'), fromAgent('a2', 'second')]);
+      expect(screen.getAllByText('Reviewer')).toHaveLength(1);
+      expect(screen.getByText('second')).toBeInTheDocument();
+    });
+
+    it('task card breaks grouping', () => {
+      list([
+        msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'waiting' }] }),
+        fromTask('t1', 'done'),
+        msg({ id: 'm2', role: 'assistant', content: [{ type: 'text', text: 'thanks' }] }),
+      ]);
+      // Both owner turns keep their own header around the card.
+      expect(screen.getAllByText('Main')).toHaveLength(2);
+    });
+
+    it('removed agent uses snapshot name and face', () => {
+      list([fromAgent('a1', 'bye', { ...reviewer, workspaceAgentId: 'wa-gone', displayName: 'Ghost' })]);
+      expect(screen.getByText('Ghost')).toBeInTheDocument();
+      expect(screen.getByText('(removed)')).toBeInTheDocument();
+    });
+
+    it('renamed agent shows current name on old message', () => {
+      list([fromAgent('a1', 'old note', { ...reviewer, displayName: 'Old Name' })]);
+      expect(screen.getByText('Reviewer')).toBeInTheDocument();
+      expect(screen.queryByText('Old Name')).toBeNull();
+    });
+
+    it('result card clamps and expands with aria-expanded', () => {
+      const long = `${'a'.repeat(320)} TAIL`;
+      list([fromTask('t1', long)]);
+      expect(screen.queryByText(/TAIL/)).toBeNull();
+      const toggle = screen.getByRole('button', { name: 'Show full result' });
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(toggle);
+      expect(screen.getByText(/TAIL/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
+    });
+
+    it('inbox row has no edit/delete or delivery chip', () => {
+      list([fromAgent('a1', 'hello'), fromTask('t1', 'done')], {
+        queuedMessageIds: ['a1', 't1'],
+        onDeleteQueuedMessage: vi.fn(),
+        onEditQueuedMessage: vi.fn(),
+      });
+      expect(screen.queryByText('Queued')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Remove queued message' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Edit queued message' })).toBeNull();
     });
   });
 });

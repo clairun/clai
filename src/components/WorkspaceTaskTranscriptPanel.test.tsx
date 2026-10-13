@@ -196,4 +196,33 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     expect(screen.getByText('(removed)')).toBeInTheDocument();
     expect(screen.queryByText('Clai')).toBeNull();
   });
+
+  it('task session shows message from non-manager agent', () => {
+    const instruction: AssistantMessage = {
+      ...message,
+      id: 'm0',
+      role: 'user',
+      content: [{ type: 'text', text: 'Port it, please' }],
+      origin: {
+        kind: 'agent',
+        agent: { workspaceAgentId: 'agent-3', displayName: 'Planner', isDefault: false },
+      },
+    };
+    useAssistantStore.setState({
+      sessions: {
+        [SESSION_ID]: {
+          messages: [instruction, message],
+          toolCalls: [],
+          isStreaming: false,
+          runStartedAt: null,
+          pendingAskUser: null,
+        },
+      },
+    } as never);
+    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />);
+    expect(screen.getByText('Planner')).toBeInTheDocument();
+    expect(screen.getByText('Port it, please')).toBeInTheDocument();
+    expect(screen.queryByText('Main agent')).toBeNull();
+    expect(screen.queryByText('You')).toBeNull();
+  });
 });

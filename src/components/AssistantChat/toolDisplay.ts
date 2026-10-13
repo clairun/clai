@@ -249,7 +249,7 @@ const stringField = (obj: Record<string, unknown>, key: string): string =>
  * size of what is actually shown.
  */
 const CARD_TEXT_LIMIT = 300;
-const clampCardText = (value: string): string =>
+export const clampCardText = (value: string): string =>
   value.length > CARD_TEXT_LIMIT ? `${value.slice(0, CARD_TEXT_LIMIT).trimEnd()}…` : value;
 
 /**
