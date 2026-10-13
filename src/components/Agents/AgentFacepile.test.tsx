@@ -27,6 +27,7 @@ const running = (agentId: string): WorkspaceTaskResponse =>
     id: `t-${agentId}`,
     assignedToWorkspaceAgentId: agentId,
     status: 'running',
+    runId: 'run-1',
   }) as WorkspaceTaskResponse;
 
 describe('facepileOrder', () => {
