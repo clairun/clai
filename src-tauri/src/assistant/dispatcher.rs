@@ -9,13 +9,14 @@ use tauri::Manager;
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository::{self, CreateRunParams};
-use crate::assistant::runtime;
+use crate::assistant::run_lifecycle;
+use crate::assistant::runtime::{self, LiveRunKey};
 use crate::assistant::signals;
 use crate::assistant::tools::workspace_tasks;
 use crate::assistant::types::{
     AssistantRun, MessageId, ProviderConnection, RunId, RunStatus, RunTrigger,
 };
-use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskRow};
+use crate::assistant::workspace_tasks_repo::{self, TaskStatus, WorkspaceTaskRow};
 use crate::db::DbPool;
 use crate::AppState;
 
@@ -23,7 +24,8 @@ use crate::AppState;
 pub enum Kick {
     /// Nothing pending.
     Idle,
-    /// A run is active; pending signals wait for its end.
+    /// A run is active; it takes pending signals mid-run or they wait for
+    /// its end.
     Busy { run_id: RunId },
     Started {
         run: AssistantRun,
@@ -50,6 +52,9 @@ pub async fn kick(deps: &AssistantDeps, session_id: &str) -> Result<Kick, String
     })
     .await?;
 
+    if let Kick::Busy { .. } = &outcome {
+        runtime::notify_midrun(&LiveRunKey::new(&deps.workspace_id, session_id));
+    }
     if let Kick::Started {
         run,
         message_ids,
@@ -109,9 +114,30 @@ pub(crate) async fn claim(
         return Ok(Kick::Deferred);
     };
 
+    let task = {
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| format!("Failed to acquire connection: {}", e))?;
+        workspace_tasks_repo::load_task_for_session(&mut conn, session_id).await?
+    };
+    if let Some(task) = &task {
+        // A stopping task waits for its finalizer; a stopped one resumes
+        // only for input sent after it stopped.
+        let resumes = match task.status {
+            TaskStatus::Stopping => false,
+            TaskStatus::Stopped => open
+                .iter()
+                .any(|content| content.message.created_at > task.updated_at),
+            _ => true,
+        };
+        if !resumes {
+            return Ok(Kick::Idle);
+        }
+    }
     // A task session's runs keep the worker trigger: it selects the worker
     // prompt.
-    let trigger = if workspace_tasks_repo::is_task_session(pool, session_id).await? {
+    let trigger = if task.is_some() {
         RunTrigger::WorkspaceTask
     } else {
         RunTrigger::SignalWake
@@ -159,7 +185,10 @@ pub(crate) async fn claim(
 }
 
 fn spawn_run(deps: AssistantDeps, run: &AssistantRun, task_id: Option<String>) {
-    let run_registration = runtime::register_run(&run.id);
+    let run_registration = runtime::register_run(
+        LiveRunKey::new(&deps.workspace_id, &run.session_id),
+        &run.id,
+    );
     let input = RunTurnInput {
         session_id: run.session_id.clone(),
         run_id: Some(run.id.clone()),
@@ -173,17 +202,48 @@ fn spawn_run(deps: AssistantDeps, run: &AssistantRun, task_id: Option<String>) {
         let _run_registration = run_registration;
         let session_id = input.session_id.clone();
         let run_id = input.run_id.clone().unwrap_or_default();
-        if let Some(task_id) = &task_id {
-            workspace_tasks::start_task_cycle(&deps, task_id, &run_id).await;
-        }
-        if let Err(e) = engine::run_session_turn(&deps, input).await {
-            tracing::error!("Assistant engine error for run {}: {}", run_id, e);
+        if stopped_before_start(&deps, task_id.as_deref(), &run_id).await {
+            cancel_unstarted(&deps, &session_id, &run_id).await;
+        } else {
+            if let Some(task_id) = &task_id {
+                workspace_tasks::start_task_cycle(&deps, task_id, &run_id).await;
+            }
+            if let Err(e) = engine::run_session_turn(&deps, input).await {
+                tracing::error!("Assistant engine error for run {}: {}", run_id, e);
+            }
         }
         if let Some(task_id) = &task_id {
             workspace_tasks::finalize_task_cycle(&deps, task_id, &run_id).await;
         }
         kick_logged(&deps, &session_id).await;
     });
+}
+
+/// Whether the task cycle of `run_id` was asked to stop before its run
+/// registered, so no cancel token could reach it.
+async fn stopped_before_start(deps: &AssistantDeps, task_id: Option<&str>, run_id: &str) -> bool {
+    let Some(task_id) = task_id else {
+        return false;
+    };
+    workspace_tasks_repo::stop_requested(&deps.pool, task_id, run_id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(task_id, run_id, error, "Failed to read task stop request");
+            false
+        })
+}
+
+async fn cancel_unstarted(deps: &AssistantDeps, session_id: &str, run_id: &str) {
+    let cancelled = match repository::get_session(&deps.pool, session_id).await {
+        Ok(Some(session)) => run_lifecycle::cancel_run(deps, &session, run_id)
+            .await
+            .map_err(|error| error.to_string()),
+        Ok(None) => Err(format!("Assistant session not found: {}", session_id)),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = cancelled {
+        tracing::error!(run_id, error, "Failed to cancel a stopped task's run");
+    }
 }
 
 /// [`kick`] that logs instead of returning its error. Every run end calls it

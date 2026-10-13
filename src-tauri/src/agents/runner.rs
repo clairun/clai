@@ -601,10 +601,10 @@ async fn run_scheduled_agent(
         "Starting scheduled assistant run"
     );
 
-    // Register the cancel token under the DB run.id (the same key the
-    // chat and workspace-task paths use) so `assistant_cancel_run(workspace_id, run.id)`
-    // can find it.
-    let run_registration = runtime::register_run(&run.id);
+    // Registered like every other run, so `assistant_cancel_run(workspace_id,
+    // run.id)` and mid-run delivery reach it.
+    let run_registration =
+        runtime::register_run(runtime::LiveRunKey::new(workspace_id, &session.id), &run.id);
     let cancel_token = run_registration.token();
     let input = RunTurnInput {
         session_id: session.id.clone(),

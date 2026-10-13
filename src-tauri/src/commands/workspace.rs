@@ -2610,6 +2610,29 @@ pub async fn workspace_task_by_id(
         .map(|task| task.into_response(&workspace_id, &agent_names)))
 }
 
+/// Stop a task's current cycle. Returns the task as it now is: `stopping`
+/// until its run winds down, `stopped` at once when no run was active, and
+/// unchanged — not an error — when it already ended.
+#[tauri::command]
+pub async fn workspace_stop_task(
+    request: WorkspaceTaskActionRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceTaskResponse, String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
+    let pool = state.workspace_db(&workspace_id).await?;
+    let deps = crate::assistant::engine::AssistantDeps {
+        workspace_id: workspace_id.clone(),
+        pool,
+        app,
+    };
+    let task = crate::assistant::tools::workspace_tasks::stop_task(&deps, &request.task_id)
+        .await?
+        .into_task();
+    let agent_names = workspace_agent_display_names(state.inner(), &workspace_id);
+    Ok(task.into_response(&workspace_id, &agent_names))
+}
+
 // =============================================================================
 // Workspace CRUD — create, list, delete general workspaces
 // =============================================================================

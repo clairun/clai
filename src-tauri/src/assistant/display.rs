@@ -96,7 +96,7 @@ fn compact_result(tool_name: &str, result: &Value) -> Option<Value> {
             }
             Some(json!({"ok": true, "path": path}))
         }
-        "workspace_assignTask" | "workspace_getTaskResult" => {
+        "workspace_assignTask" | "workspace_getTaskResult" | "workspace_stopTask" => {
             if object.get("ok") != Some(&Value::Bool(true)) {
                 return None;
             }

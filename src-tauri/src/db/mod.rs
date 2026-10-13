@@ -103,70 +103,12 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
         .map_err(|e| format!("Workspace DB migration failed: {}", e))?;
 
     if !*recovered {
-        sweep_orphaned_task_state(&pool).await?;
+        crate::assistant::tools::workspace_tasks::recover_interrupted_tasks(&pool).await?;
         crate::assistant::repository::recover_stale_runs(&pool).await?;
         *recovered = true;
     }
 
     Ok(pool)
-}
-
-/// Startup recovery: mark `workspace_tasks` rows stuck in a non-terminal
-/// state (`queued` or `running`) as `failed`. They are orphans from a
-/// previous app process that died, was killed by a rebuild, or otherwise
-/// didn't finalize. Without this, the rows pile up as forever-"RUNNING" or
-/// forever-"QUEUED" in the UI, and a manager agent polling
-/// `workspace_getTaskResult` never sees a terminal status, so it waits on a
-/// task nothing can ever resolve: the run and the agent session that owned
-/// the task are gone with the previous process.
-///
-/// `queued` is a real orphan state, not just a transient one. A task row is
-/// inserted as `queued` before its provider connection, session, message and
-/// run rows exist (`assistant::tools::workspace_tasks::assign_task`), and it
-/// only flips to `running` inside the spawned task; quitting anywhere in that
-/// window strands it. There is no dispatcher that picks `queued` rows back up
-/// after a restart, so failing them is the only honest outcome.
-///
-/// Runs once per process per workspace DB, behind the open gate in
-/// [`init_workspace_db`].
-///
-/// `assistant_runs` and `assistant_tool_calls` are NOT touched here —
-/// `crate::assistant::repository::recover_stale_runs` already handles those
-/// at workspace-DB open.
-pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-
-    // SQLite evaluates every SET expression against the row's ORIGINAL
-    // values, so the CASE still sees the pre-sweep status.
-    let tasks = sqlx::query(
-        r#"
-        UPDATE workspace_tasks
-        SET status = 'failed',
-            failure_reason = 'restart',
-            error = COALESCE(
-                error,
-                CASE status
-                    WHEN 'queued' THEN 'task never started: the app restarted before it was dispatched'
-                    ELSE 'task interrupted by app restart'
-                END
-            ),
-            updated_at = ?,
-            completed_at = ?
-        WHERE status IN ('queued', 'running')
-        "#,
-    )
-    .bind(now)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to sweep orphaned workspace_tasks: {}", e))?;
-    if tasks.rows_affected() > 0 {
-        tracing::info!(
-            "Marked {} workspace_tasks as failed (orphaned 'queued'/'running' state from previous app session)",
-            tasks.rows_affected()
-        );
-    }
-    Ok(())
 }
 
 /// A unit enum stored in a TEXT column: the bare string serde gives it
@@ -656,181 +598,6 @@ mod tests {
         assert_eq!(compaction_foreign_keys().await, original_foreign_keys);
     }
 
-    #[tokio::test]
-    async fn sweep_marks_running_rows_as_failed() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "running", None, None).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let row: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, error, completed_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.1.as_deref(), Some("task interrupted by app restart"));
-        assert!(row.2.is_some(), "completed_at must be stamped");
-    }
-
-    #[tokio::test]
-    async fn sweep_preserves_existing_error_via_coalesce() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "running", None, Some("custom failure reason")).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let error: Option<String> =
-            sqlx::query_scalar("SELECT error FROM workspace_tasks WHERE id = 't1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(error.as_deref(), Some("custom failure reason"));
-    }
-
-    /// A task row is inserted as `queued` before its session and run exist and
-    /// only flips to `running` inside the spawned task, so quitting in that
-    /// window leaves a `queued` orphan nothing will ever dispatch.
-    #[tokio::test]
-    async fn sweep_marks_queued_rows_as_failed_with_a_never_started_reason() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "queued", None, None).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let row: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, error, completed_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(
-            row.1.as_deref(),
-            Some("task never started: the app restarted before it was dispatched")
-        );
-        assert!(row.2.is_some(), "completed_at must be stamped");
-    }
-
-    /// The reason is per-row: the CASE in the UPDATE must read each row's
-    /// pre-sweep status, not the `'failed'` it is being set to.
-    #[tokio::test]
-    async fn sweep_reasons_are_per_row() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "a-queued", "queued", None, None).await;
-        insert_task(&pool, "b-running", "running", None, None).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let rows: Vec<(String, String, Option<String>)> =
-            sqlx::query_as("SELECT id, status, error FROM workspace_tasks ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].1, "failed");
-        assert_eq!(
-            rows[0].2.as_deref(),
-            Some("task never started: the app restarted before it was dispatched")
-        );
-        assert_eq!(rows[1].1, "failed");
-        assert_eq!(
-            rows[1].2.as_deref(),
-            Some("task interrupted by app restart")
-        );
-    }
-
-    #[tokio::test]
-    async fn sweep_leaves_completed_failed_and_blocked_rows_untouched() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "done", "completed", None, None).await;
-        insert_task(&pool, "fail", "failed", None, Some("original error")).await;
-        insert_task(&pool, "stuck", "failed", None, Some("needs a decision")).await;
-        sqlx::query("UPDATE workspace_tasks SET failure_reason = 'blocked' WHERE id = 'stuck'")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let rows: Vec<(String, String, Option<String>, Option<i64>)> = sqlx::query_as(
-            "SELECT id, status, error, completed_at FROM workspace_tasks ORDER BY id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].1, "completed");
-        assert_eq!(rows[1].1, "failed");
-        assert_eq!(rows[1].2.as_deref(), Some("original error"));
-        assert_eq!(rows[2].1, "failed");
-        assert_eq!(rows[2].2.as_deref(), Some("needs a decision"));
-        let reason: Option<String> =
-            sqlx::query_scalar("SELECT failure_reason FROM workspace_tasks WHERE id = 'stuck'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(reason.as_deref(), Some("blocked"));
-        assert!(
-            rows[2].3.is_none(),
-            "a blocked task awaiting the user must not be completed by the sweep"
-        );
-    }
-
-    /// A reason the task already recorded wins over the sweep's generic one,
-    /// on the `queued` arm as well as the `running` one: COALESCE is evaluated
-    /// before the CASE arm it guards.
-    #[tokio::test]
-    async fn sweep_preserves_an_existing_error_on_queued_rows_too() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(
-            &pool,
-            "t1",
-            "queued",
-            None,
-            Some("no active provider connection"),
-        )
-        .await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let row: (String, Option<String>) =
-            sqlx::query_as("SELECT status, error FROM workspace_tasks WHERE id = 't1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.1.as_deref(), Some("no active provider connection"));
-    }
-
-    /// The sweep is idempotent: a row it already failed no longer matches the
-    /// WHERE clause, so a second pass must not re-stamp
-    /// `updated_at`/`completed_at` or overwrite the reason it wrote.
-    #[tokio::test]
-    async fn a_second_sweep_changes_nothing() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "queued", None, None).await;
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let before: (String, Option<String>, Option<i64>, i64) = sqlx::query_as(
-            "SELECT status, error, completed_at, updated_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let after: (String, Option<String>, Option<i64>, i64) = sqlx::query_as(
-            "SELECT status, error, completed_at, updated_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(before, after);
-    }
-
     /// A workspace DB as a previous process left it: migrated, never
     /// recovered by this one.
     async fn previous_process_db(root: &Path) -> DbPool {
@@ -865,7 +632,8 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(statuses, vec!["failed".to_string(), "failed".to_string()]);
+        // Queued with no session: never dispatchable. Running: interrupted.
+        assert_eq!(statuses, vec!["failed".to_string(), "stopped".to_string()]);
     }
 
     /// Without the gate, concurrent opens of a fresh file race each other's

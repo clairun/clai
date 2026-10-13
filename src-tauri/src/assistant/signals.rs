@@ -285,6 +285,29 @@ async fn stamp_run(
     Ok(())
 }
 
+/// Restart recovery: input claimed by a run that never started goes back to
+/// `pending`, so the next kick dispatches it again. Run before
+/// `recover_stale_runs` closes those runs.
+pub(crate) async fn release_claims_of_unstarted_runs(
+    conn: &mut SqliteConnection,
+) -> Result<(), String> {
+    const UNSTARTED: &str = "SELECT id FROM assistant_runs WHERE status = 'queued'";
+    sqlx::query(&format!(
+        "UPDATE session_signals SET status = 'pending', claimed_run_id = NULL, claimed_at = NULL
+         WHERE status = 'claimed' AND claimed_run_id IN ({UNSTARTED})"
+    ))
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| format!("Failed to release session signal claims: {}", e))?;
+    sqlx::query(&format!(
+        "UPDATE assistant_messages SET run_id = NULL WHERE run_id IN ({UNSTARTED})"
+    ))
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| format!("Failed to release message attribution: {}", e))?;
+    Ok(())
+}
+
 /// Marks the pending signals of `message_ids` consumed by a live run that
 /// delivered them mid-run.
 pub async fn consume(

@@ -20,6 +20,12 @@ pub enum TaskStatus {
     Failed,
 }
 
+impl TaskStatus {
+    pub(crate) fn is_terminal(self) -> bool {
+        matches!(self, Self::Stopped | Self::Completed | Self::Failed)
+    }
+}
+
 /// Why a `failed` task failed; set exactly when the status is `failed`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +72,9 @@ pub struct WorkspaceTaskResponse {
     pub parent_task_id: Option<String>,
     pub depth: i64,
     pub cycle_no: i64,
+    /// Set when a stop was requested for the current cycle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop_requested_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -93,6 +102,7 @@ pub(crate) struct WorkspaceTaskRow {
     pub(crate) parent_task_id: Option<String>,
     pub(crate) depth: i64,
     pub(crate) cycle_no: i64,
+    pub(crate) stop_requested_at: Option<i64>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) completed_at: Option<i64>,
@@ -102,7 +112,7 @@ pub(crate) struct WorkspaceTaskRow {
 const TASK_COLUMNS: &str = "id, created_by_workspace_agent_id, assigned_to_workspace_agent_id, \
      assigned_agent_definition_id, title, instructions, status, failure_reason, result_summary, \
      error, session_id, run_id, parent_session_id, parent_run_id, parent_task_id, depth, \
-     cycle_no, created_at, updated_at, completed_at, attention_acknowledged_at";
+     cycle_no, stop_requested_at, created_at, updated_at, completed_at, attention_acknowledged_at";
 
 impl WorkspaceTaskRow {
     fn from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<Self, String> {
@@ -127,6 +137,7 @@ impl WorkspaceTaskRow {
             parent_task_id: row.get("parent_task_id"),
             depth: row.get("depth"),
             cycle_no: row.get("cycle_no"),
+            stop_requested_at: row.get("stop_requested_at"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             completed_at: row.get("completed_at"),
@@ -173,6 +184,7 @@ impl WorkspaceTaskRow {
             parent_task_id: self.parent_task_id,
             depth: self.depth,
             cycle_no: self.cycle_no,
+            stop_requested_at: self.stop_requested_at,
             created_at: self.created_at,
             updated_at: self.updated_at,
             completed_at: self.completed_at,
@@ -208,16 +220,6 @@ pub(crate) async fn load_task_for_session(
     .await
     .map_err(|e| format!("Failed to load workspace task for session: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
-}
-
-pub(crate) async fn is_task_session(pool: &DbPool, session_id: &str) -> Result<bool, String> {
-    let found: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM workspace_tasks WHERE session_id = ? LIMIT 1")
-            .bind(session_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("Failed to look up workspace task: {}", e))?;
-    Ok(found.is_some())
 }
 
 /// The most recently touched tasks, newest first.
@@ -363,21 +365,25 @@ pub(crate) struct CycleOutcome {
     pub(crate) result_summary: Option<String>,
 }
 
-/// Ends the cycle of `run_id` with `outcome`. `None`, writing nothing, when
-/// that cycle has already ended or a newer one has started.
+/// Ends the cycle of `run_id` (`None`: a cycle that never got a run) with
+/// `outcome`, or as `stopped` when a stop was requested, however the run
+/// ended. `None`, writing nothing, when that cycle has already ended or a
+/// newer one has started.
 pub(crate) async fn finish_cycle(
     conn: &mut SqliteConnection,
     task_id: &str,
-    run_id: &str,
+    run_id: Option<&str>,
     outcome: &CycleOutcome,
 ) -> Result<Option<WorkspaceTaskRow>, String> {
     let now = now_ms();
     let row = sqlx::query(&format!(
         r#"
         UPDATE workspace_tasks
-        SET status = ?, failure_reason = ?, error = ?, result_summary = ?,
-            updated_at = ?, completed_at = ?
-        WHERE id = ? AND run_id = ?
+        SET status = CASE WHEN stop_requested_at IS NULL THEN ? ELSE 'stopped' END,
+            failure_reason = CASE WHEN stop_requested_at IS NULL THEN ? END,
+            error = CASE WHEN stop_requested_at IS NULL THEN ? END,
+            result_summary = ?, updated_at = ?, completed_at = ?
+        WHERE id = ? AND run_id IS ?
           AND status IN ('queued', 'running', 'input_required', 'stopping')
         RETURNING {TASK_COLUMNS}
         "#
@@ -394,6 +400,97 @@ pub(crate) async fn finish_cycle(
     .await
     .map_err(|e| format!("Failed to finish workspace task cycle: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
+}
+
+/// `queued | running | input_required → stopping`, recording the request.
+/// Returns the task as it now is and whether this call changed it; a task
+/// already stopping or terminal is returned unchanged. `None` when the task
+/// does not exist.
+pub(crate) async fn request_stop(
+    pool: &DbPool,
+    task_id: &str,
+) -> Result<Option<(WorkspaceTaskRow, bool)>, String> {
+    let now = now_ms();
+    let row = sqlx::query(&format!(
+        r#"
+        UPDATE workspace_tasks
+        SET status = 'stopping', stop_requested_at = ?, updated_at = ?
+        WHERE id = ? AND status IN ('queued', 'running', 'input_required')
+        RETURNING {TASK_COLUMNS}
+        "#
+    ))
+    .bind(now)
+    .bind(now)
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to request task stop: {}", e))?;
+    match row {
+        Some(row) => Ok(Some((WorkspaceTaskRow::from_sql(&row)?, true))),
+        None => Ok(load_task(pool, task_id).await?.map(|task| (task, false))),
+    }
+}
+
+/// Whether a stop was requested for the cycle of `run_id`.
+pub(crate) async fn stop_requested(
+    pool: &DbPool,
+    task_id: &str,
+    run_id: &str,
+) -> Result<bool, String> {
+    let found: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM workspace_tasks
+         WHERE id = ? AND run_id = ? AND stop_requested_at IS NOT NULL",
+    )
+    .bind(task_id)
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to read task stop request: {}", e))?;
+    Ok(found.is_some())
+}
+
+/// Restart recovery for tasks the previous process left mid-cycle: a task
+/// that got a session but whose run never started stays `queued` for the
+/// next kick; one with no session can never be dispatched and fails; every
+/// other unfinished cycle ends `stopped`. Returns the stopped tasks. Run
+/// before `recover_stale_runs`, which closes the runs this reads.
+pub(crate) async fn stop_interrupted(
+    conn: &mut SqliteConnection,
+) -> Result<Vec<WorkspaceTaskRow>, String> {
+    let now = now_ms();
+    sqlx::query(
+        r#"
+        UPDATE workspace_tasks
+        SET status = 'failed', failure_reason = 'restart',
+            error = COALESCE(error, 'task never started: the app restarted before it was dispatched'),
+            updated_at = ?, completed_at = ?
+        WHERE status = 'queued' AND session_id IS NULL
+        "#,
+    )
+    .bind(now)
+    .bind(now)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| format!("Failed to fail undispatched workspace tasks: {}", e))?;
+
+    let rows = sqlx::query(&format!(
+        r#"
+        UPDATE workspace_tasks
+        SET status = 'stopped', error = 'task interrupted by app restart',
+            stop_requested_at = COALESCE(stop_requested_at, ?), updated_at = ?, completed_at = ?
+        WHERE status IN ('running', 'input_required', 'stopping')
+           OR (status = 'queued' AND run_id IS NOT NULL
+               AND run_id NOT IN (SELECT id FROM assistant_runs WHERE status = 'queued'))
+        RETURNING {TASK_COLUMNS}
+        "#
+    ))
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| format!("Failed to stop interrupted workspace tasks: {}", e))?;
+    rows.iter().map(WorkspaceTaskRow::from_sql).collect()
 }
 
 /// Fails a task that never got a run because its assignee has no usable

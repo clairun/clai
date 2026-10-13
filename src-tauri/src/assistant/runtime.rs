@@ -1,22 +1,50 @@
+//! The live runs of this process, one per session: the cancel token and the
+//! mid-run wake of each. The database's one-active-run-per-session index
+//! guarantees at most one registration per key at a time; the generation
+//! keeps a late drop of an older guard from removing a newer entry.
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LiveRunKey {
+    pub workspace_id: String,
+    pub session_id: String,
+}
+
+impl LiveRunKey {
+    pub fn new(workspace_id: &str, session_id: &str) -> Self {
+        Self {
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+        }
+    }
+}
+
 #[derive(Clone)]
-struct ActiveRunEntry {
+struct LiveRun {
+    run_id: String,
     token: CancellationToken,
+    /// Woken when new content signals are pending for the session.
+    midrun: Arc<Notify>,
     generation: u64,
 }
 
-type ActiveRuns = HashMap<String, ActiveRunEntry>;
+type LiveRuns = HashMap<LiveRunKey, LiveRun>;
 
-static ACTIVE_RUNS: OnceLock<Mutex<ActiveRuns>> = OnceLock::new();
+static LIVE_RUNS: OnceLock<Mutex<LiveRuns>> = OnceLock::new();
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+fn live_runs() -> &'static Mutex<LiveRuns> {
+    LIVE_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub struct RunRegistration {
-    run_id: String,
+    key: LiveRunKey,
     token: CancellationToken,
     generation: u64,
 }
@@ -29,122 +57,133 @@ impl RunRegistration {
 
 impl Drop for RunRegistration {
     fn drop(&mut self) {
-        let mut active = active_runs().lock().unwrap();
-        if active
-            .get(&self.run_id)
-            .is_some_and(|entry| entry.generation == self.generation)
+        let mut live = live_runs().lock().unwrap();
+        if live
+            .get(&self.key)
+            .is_some_and(|run| run.generation == self.generation)
         {
-            active.remove(&self.run_id);
+            live.remove(&self.key);
         }
     }
 }
 
-fn active_runs() -> &'static Mutex<ActiveRuns> {
-    ACTIVE_RUNS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub fn register_run(run_id: &str) -> RunRegistration {
+pub fn register_run(key: LiveRunKey, run_id: &str) -> RunRegistration {
     let token = CancellationToken::new();
     let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
-    active_runs().lock().unwrap().insert(
-        run_id.to_string(),
-        ActiveRunEntry {
+    live_runs().lock().unwrap().insert(
+        key.clone(),
+        LiveRun {
+            run_id: run_id.to_string(),
             token: token.clone(),
+            midrun: Arc::new(Notify::new()),
             generation,
         },
     );
     RunRegistration {
-        run_id: run_id.to_string(),
+        key,
         token,
         generation,
     }
 }
 
-pub fn cancel_run(run_id: &str) -> bool {
-    if let Some(token) = active_runs()
+/// Cancels the session's live run, if any.
+pub fn cancel_session(key: &LiveRunKey) -> bool {
+    let token = live_runs()
         .lock()
         .unwrap()
-        .get(run_id)
-        .map(|entry| entry.token.clone())
-    {
-        token.cancel();
-        return true;
-    }
+        .get(key)
+        .map(|run| run.token.clone());
+    token.map(|token| token.cancel()).is_some()
+}
 
-    false
+pub fn cancel_run(run_id: &str) -> bool {
+    let token = live_runs()
+        .lock()
+        .unwrap()
+        .values()
+        .find(|run| run.run_id == run_id)
+        .map(|run| run.token.clone());
+    token.map(|token| token.cancel()).is_some()
+}
+
+/// Tells the session's live run that content signals are pending. The wake
+/// is kept until the run waits for it, so none is lost.
+pub fn notify_midrun(key: &LiveRunKey) -> bool {
+    let midrun = live_runs()
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|run| run.midrun.clone());
+    midrun.map(|midrun| midrun.notify_one()).is_some()
+}
+
+/// The mid-run wake of `run_id`, while it is the session's live run.
+pub fn midrun(key: &LiveRunKey, run_id: &str) -> Option<Arc<Notify>> {
+    live_runs()
+        .lock()
+        .unwrap()
+        .get(key)
+        .filter(|run| run.run_id == run_id)
+        .map(|run| run.midrun.clone())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Use unique ids per test so parallel execution of `cargo test`
-    // doesn't share state through the static `ACTIVE_RUNS` map.
-    // The unique-id approach is simpler than gating on a global mutex
-    // and matches how the engine assigns run ids in production.
+    // Unique session ids per test: the map is process-global and tests run
+    // in parallel.
+    fn key(session_id: &str) -> LiveRunKey {
+        LiveRunKey::new("runtime-test-ws", session_id)
+    }
 
     #[test]
-    fn register_then_cancel_propagates_to_token() {
-        let id = "runtime-test-register-then-cancel";
-        let registration = register_run(id);
+    fn cancel_session_and_cancel_run_reach_the_token() {
+        let registration = register_run(key("runtime-cancel-session"), "run-a");
         let token = registration.token();
-        assert!(!token.is_cancelled(), "fresh token must start uncancelled");
+        assert!(cancel_session(&key("runtime-cancel-session")));
+        assert!(token.is_cancelled());
 
-        let was_found = cancel_run(id);
-        assert!(was_found, "cancel_run must report success for a known id");
-        assert!(
-            token.is_cancelled(),
-            "the original token handle must observe the cancel"
-        );
+        let registration = register_run(key("runtime-cancel-run"), "run-b");
+        let token = registration.token();
+        assert!(cancel_run("run-b"));
+        assert!(token.is_cancelled());
     }
 
     #[test]
-    fn cancel_unknown_run_returns_false() {
-        // Defends the assistant_cancel_run code path: when a run isn't
-        // active anymore (e.g. it terminated before the user clicked
-        // Stop), cancel_run must return false so the caller falls back
-        // to marking the DB row Cancelled directly.
-        let was_found = cancel_run("runtime-test-nonexistent-id");
-        assert!(!was_found, "cancel_run must return false for unknown id");
-    }
+    fn unknown_or_unregistered_runs_are_not_found() {
+        assert!(!cancel_run("runtime-test-nonexistent-id"));
+        assert!(!cancel_session(&key("runtime-nonexistent")));
 
-    #[test]
-    fn unregister_removes_from_active_set() {
-        let id = "runtime-test-unregister-removes";
-        let registration = register_run(id);
+        let registration = register_run(key("runtime-unregister"), "run-c");
         drop(registration);
-
-        let was_found = cancel_run(id);
-        assert!(!was_found, "unregistered ids must no longer be cancellable");
+        assert!(!cancel_session(&key("runtime-unregister")));
+        assert!(!cancel_run("run-c"));
     }
 
     #[test]
-    fn re_register_same_id_replaces_token_handle() {
-        // Defensive: the dispatcher and the scheduler
-        // runner both register under run.id. If somehow the same
-        // run.id were reused (it shouldn't be — UUIDs), the latest
-        // registration wins. Pin the behavior so a future refactor
-        // doesn't accidentally start de-duping or asserting.
-        let id = "runtime-test-double-register";
-        let first_registration = register_run(id);
-        let first = first_registration.token();
-        let second_registration = register_run(id);
-        let second = second_registration.token();
+    fn dropping_an_older_registration_keeps_the_newer_one() {
+        let first = register_run(key("runtime-reregister"), "run-1");
+        let second = register_run(key("runtime-reregister"), "run-2");
+        drop(first);
+        assert!(midrun(&key("runtime-reregister"), "run-2").is_some());
+        assert!(midrun(&key("runtime-reregister"), "run-1").is_none());
+        drop(second);
+        assert!(!cancel_session(&key("runtime-reregister")));
+    }
 
-        // Cancelling now should signal the second (current) token.
-        assert!(cancel_run(id));
-        assert!(second.is_cancelled());
-        // The first token is orphaned — no longer in the map, so
-        // cancel_run never reaches it.
-        assert!(!first.is_cancelled());
+    #[tokio::test]
+    async fn midrun_channel_delivers_without_poll() {
+        let key = key("runtime-midrun");
+        let _registration = register_run(key.clone(), "run-m");
+        let wake = midrun(&key, "run-m").expect("the live run has a mid-run wake");
 
-        drop(first_registration);
-        assert!(
-            cancel_run(id),
-            "dropping an older guard must not unregister the newer token"
-        );
+        // Notified before the run waits: the wake is stored, not lost.
+        assert!(notify_midrun(&key));
+        tokio::time::timeout(std::time::Duration::from_millis(100), wake.notified())
+            .await
+            .expect("a pending wake resolves at once, without a poll interval");
 
-        drop(second_registration);
-        assert!(!cancel_run(id));
+        assert!(!notify_midrun(&LiveRunKey::new("runtime-test-ws", "other")));
     }
 }

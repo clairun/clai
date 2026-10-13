@@ -5,6 +5,7 @@ use crate::assistant::run_context::RunContext;
 use crate::assistant::tools::ask_user::AskUserParams;
 use crate::assistant::tools::workspace_tasks::{
     AssignWorkspaceTaskParams, GetWorkspaceTaskResultParams, ListWorkspaceAgentsParams,
+    StopWorkspaceTaskParams,
 };
 use crate::assistant::types::ToolDefinition;
 use crate::config::ShellAccessMode;
@@ -20,6 +21,7 @@ pub fn available_tools(
         tools.push(workspace_list_agents_def());
         tools.push(workspace_assign_task_def());
         tools.push(workspace_get_task_result_def());
+        tools.push(workspace_stop_task_def());
         tools.push(ask_user_def());
     }
 
@@ -98,6 +100,7 @@ fn all_builtin_defs() -> Vec<ToolDefinition> {
         workspace_list_agents_def(),
         workspace_assign_task_def(),
         workspace_get_task_result_def(),
+        workspace_stop_task_def(),
         ask_user_def(),
         fs_request_grant_def(),
         bash_exec_def(),
@@ -126,6 +129,13 @@ fn workspace_get_task_result_def() -> ToolDefinition {
     tool::<GetWorkspaceTaskResultParams>(
         "workspace_getTaskResult",
         "Read a task's current state and latest result. Inspection only; you do not need to poll. `status` is one of queued, running, input_required, stopping, stopped, completed, failed; `failed` carries `failureReason` (blocked = the worker needed something it could not get, error = run error, restart, connection_unavailable) and `error` text. The response includes sessionId/runId when available; use them with history_query to inspect a running worker's transcript.",
+    )
+}
+
+fn workspace_stop_task_def() -> ToolDefinition {
+    tool::<StopWorkspaceTaskParams>(
+        "workspace_stopTask",
+        "Request cancellation of a task's current run. The task becomes `stopping`, then `stopped` once its run winds down; a stopped task's result still arrives as an automated event. Stopping a task that already ended fails with `already_terminal`.",
     )
 }
 

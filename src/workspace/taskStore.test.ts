@@ -23,6 +23,7 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   parentTaskId: null,
   depth: 0n,
   cycleNo: 1n,
+  stopRequestedAt: null,
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,

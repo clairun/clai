@@ -271,6 +271,7 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   parentTaskId: null,
   depth: 0n,
   cycleNo: 0n,
+  stopRequestedAt: null,
 };
 
 const renderWorkspace = () =>

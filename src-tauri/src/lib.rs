@@ -58,7 +58,7 @@ pub use workspace_index::WorkspaceIndex;
 /// module's name signals intent at the use site.
 #[doc(hidden)]
 pub mod runtime {
-    pub use crate::assistant::runtime::{cancel_run, register_run};
+    pub use crate::assistant::runtime::{cancel_run, register_run, LiveRunKey};
 }
 
 /// Shared application state accessible from all commands.
@@ -510,6 +510,7 @@ pub fn run() {
             commands::workspace::workspace_list_agents,
             commands::workspace::workspace_acknowledge_task,
             commands::workspace::workspace_task_by_id,
+            commands::workspace::workspace_stop_task,
             commands::workspace::workspace_create,
             commands::workspace::workspace_fork,
             commands::workspace::workspace_list,

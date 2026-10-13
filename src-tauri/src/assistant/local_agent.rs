@@ -922,7 +922,7 @@ impl MidRunDelivery {
 /// single turn, and `try_deliver_queued_to_claude` appends user lines
 /// without waiting for a reply, so input that piles up before the CLI
 /// starts replying to it is answered by ONE turn — whether it arrived as
-/// one message, a batch of five in one `write_all`, or two poll ticks 1.2s
+/// one message, a batch of five in one `write_all`, or two deliveries moments
 /// apart. Only the first delivery in each such run takes a slot.
 ///
 /// The run ends when a turn STARTS (`turn_started`), not when one ends.
@@ -938,7 +938,7 @@ impl MidRunDelivery {
 /// count stuck at 2, and since stdin is only dropped at `pending() == 0`
 /// the CLI never saw EOF — `running` for 86 minutes until the app was
 /// restarted. Crediting per write fixes the batch but still leaks whenever
-/// two poll ticks deliver before the interrupted turn winds down.
+/// two deliveries land before the interrupted turn winds down.
 struct InjectedTurnLedger {
     pending: usize,
     original_turn_completed: bool,
@@ -1021,7 +1021,7 @@ struct MidRunPayload {
 /// to deliver silence would waste the turn and leave the ledger owed a
 /// `result` that is never coming. `user_lines` is empty exactly when every
 /// matching queued message had no text and no images — those are still marked
-/// delivered by the caller so they stop retrying on every poll tick.
+/// delivered by the caller so they are not redelivered on every wake.
 fn build_midrun_payload(user_lines: String, turn_active: bool) -> MidRunPayload {
     let owes_turn = !user_lines.is_empty();
     let interrupted = turn_active && owes_turn;
@@ -1104,7 +1104,7 @@ async fn try_deliver_queued_to_claude(
             user_lines.push_str(&claude_stream_json_user_message(&text, &images));
         }
         // Empty messages are still marked delivered below — leaving them
-        // pending would retry forever on every poll tick.
+        // pending would redeliver them on every wake.
         message_ids.push(queued.message.id.clone());
     }
 
@@ -1349,39 +1349,22 @@ async fn run_claude_turn(
     let mut turn_active = false;
     let mut awaiting_interrupt_result = false;
     let mut injected_turns = InjectedTurnLedger::new();
-    let mut queue_poll = tokio::time::interval(std::time::Duration::from_millis(1200));
-    queue_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The dispatcher wakes this run when input is pending for the session.
+    // A wake that lands during a tool call waits in `midrun_pending` for the
+    // tool's result: cutting a build, test run, or git operation half-way can
+    // corrupt work-in-progress, and the signal table keeps the input safe
+    // meanwhile.
+    let midrun = crate::assistant::runtime::midrun(
+        &crate::assistant::runtime::LiveRunKey::new(&deps.workspace_id, &session.id),
+        run_id,
+    )
+    .unwrap_or_default();
+    let mut midrun_pending = false;
 
     loop {
-        let update_due = state.update_throttle.due();
-        let line = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                let _ = child.kill().await;
-                let finalized = finalize_assistant_message(
-                    deps,
-                    session,
-                    run_id,
-                    &assistant_message,
-                    &mut state,
-                    conversation,
-                )
-                .await;
-                emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
-                return Err(LocalAgentRunError::Cancelled);
-            }
-            _ = queue_poll.tick(), if live_stdin.is_some() => {
-                // Never interrupt while a tool call is executing — cutting a
-                // build, test run, or git operation half-way can corrupt
-                // work-in-progress. The message waits for the tool's result
-                // (the next clean cut point); the queue keeps it safe
-                // meanwhile, and the followup run remains the fallback if
-                // this run ends first.
-                if state.has_tool_call_in_flight() {
-                    continue;
-                }
-                let Some(stdin) = live_stdin.as_mut() else {
-                    continue;
-                };
+        if midrun_pending && !state.has_tool_call_in_flight() {
+            if let Some(stdin) = live_stdin.as_mut() {
+                midrun_pending = false;
                 let outcome = try_deliver_queued_to_claude(
                     deps,
                     workspace_root,
@@ -1405,6 +1388,26 @@ async fn run_claude_turn(
                     // holding for the blocks still open.
                     injected_turns.delivered_write();
                 }
+            }
+        }
+        let update_due = state.update_throttle.due();
+        let line = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                let _ = child.kill().await;
+                let finalized = finalize_assistant_message(
+                    deps,
+                    session,
+                    run_id,
+                    &assistant_message,
+                    &mut state,
+                    conversation,
+                )
+                .await;
+                emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
+                return Err(LocalAgentRunError::Cancelled);
+            }
+            _ = midrun.notified(), if live_stdin.is_some() => {
+                midrun_pending = true;
                 continue;
             }
             _ = sleep_until_due(update_due) => {
@@ -1483,7 +1486,7 @@ async fn run_claude_turn(
             injected_turns.turn_ended();
             if live_stdin.is_some() {
                 // End-of-run race: a message may have been queued since the
-                // last poll tick. Fold it in as one more turn now instead of
+                // last delivery. Fold it in as one more turn now instead of
                 // closing; if delivery declines, the followup run has it.
                 if injected_turns.pending() == 0 {
                     if let Some(stdin) = live_stdin.as_mut() {

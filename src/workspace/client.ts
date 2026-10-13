@@ -217,6 +217,20 @@ export async function getWorkspaceTask(
   });
 }
 
+/**
+ * Stop a task's current cycle. Resolves with the task as it now is:
+ * `stopping` until its run winds down, `stopped` when no run was active, and
+ * unchanged (not an error) when it had already ended.
+ */
+export async function stopWorkspaceTask(
+  workspaceId: string,
+  taskId: string
+): Promise<WorkspaceTaskResponse> {
+  return invoke('workspace_stop_task', {
+    request: { workspaceId, taskId },
+  });
+}
+
 export async function acknowledgeWorkspaceTask(workspaceId: string, taskId: string): Promise<void> {
   return invoke('workspace_acknowledge_task', {
     request: { workspaceId, taskId },

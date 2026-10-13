@@ -694,4 +694,8 @@ starred: boolean, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 
-export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: TaskStatus, failureReason: FailureReason | null, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, parentSessionId: string | null, parentRunId: string | null, parentTaskId: string | null, depth: bigint, cycleNo: bigint, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };
+export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: TaskStatus, failureReason: FailureReason | null, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, parentSessionId: string | null, parentRunId: string | null, parentTaskId: string | null, depth: bigint, cycleNo: bigint, 
+/**
+ * Set when a stop was requested for the current cycle.
+ */
+stopRequestedAt: bigint | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };

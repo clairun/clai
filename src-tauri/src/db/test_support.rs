@@ -18,7 +18,7 @@ use tempfile::TempDir;
 /// deletes the directory — and the SQLite file inside it — when dropped.
 ///
 /// The pool comes back **post-recovery**: `init_workspace_db` runs
-/// `sweep_orphaned_task_state` and `recover_stale_runs` at open time. That is
+/// `recover_interrupted_tasks` and `recover_stale_runs` at open time. That is
 /// harmless on the empty database a test starts from, but do not re-open the
 /// same path with fixture data in flight — the second open would fail every
 /// `queued`/`running` row the test just seeded.

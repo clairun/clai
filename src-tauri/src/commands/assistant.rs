@@ -11,10 +11,12 @@ use crate::assistant::repository;
 use crate::assistant::runtime;
 use crate::assistant::signals;
 use crate::assistant::tools::ask_user::{self, AskUserAnswer};
+use crate::assistant::tools::workspace_tasks;
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantMessageCursor, AssistantMessagePage,
     AssistantRun, AssistantSession, CompactionTrigger, ContentPart, RunStatus,
 };
+use crate::assistant::workspace_tasks_repo;
 use crate::db::DbPool;
 use crate::AppState;
 use std::collections::HashSet;
@@ -603,6 +605,27 @@ pub async fn assistant_cancel_run(
 
     if run.status.is_terminal() {
         return Ok(run);
+    }
+
+    // A task's run stops through the task, so the stop is durable and the
+    // cycle ends `stopped`.
+    let task = {
+        let mut conn = target_pool
+            .acquire()
+            .await
+            .map_err(|e| format!("Failed to acquire connection: {}", e))?;
+        workspace_tasks_repo::load_task_for_session(&mut conn, &run.session_id).await?
+    };
+    if let Some(task) = task {
+        let deps = AssistantDeps {
+            workspace_id,
+            pool: target_pool.clone(),
+            app,
+        };
+        workspace_tasks::stop_task(&deps, &task.id).await?;
+        return Ok(repository::get_run(&target_pool, &run_id)
+            .await?
+            .unwrap_or(run));
     }
 
     if runtime::cancel_run(&run_id) {

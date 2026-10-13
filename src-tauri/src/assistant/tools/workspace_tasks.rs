@@ -2,6 +2,7 @@ use crate::assistant::dispatcher;
 use crate::assistant::engine::AssistantDeps;
 use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository;
+use crate::assistant::runtime::{self, LiveRunKey};
 use crate::assistant::signals::{self, NewEvent, SignalKind};
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
@@ -45,6 +46,12 @@ pub struct GetWorkspaceTaskResultParams {
     pub task_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StopWorkspaceTaskParams {
+    pub task_id: String,
+}
+
 pub async fn execute(
     deps: &AssistantDeps,
     context: &ToolExecutionContext,
@@ -66,6 +73,28 @@ pub async fn execute(
             let params: GetWorkspaceTaskResultParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_getTaskResult params: {}", e))?;
             get_task_result(deps, params).await
+        }
+        "workspace_stopTask" => {
+            let params: StopWorkspaceTaskParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid workspace_stopTask params: {}", e))?;
+            let task = match stop_task(deps, &params.task_id).await? {
+                StopOutcome::AlreadyTerminal(task) => {
+                    return Err(format!(
+                        "already_terminal: task {} already ended as {}; nothing to stop.",
+                        task.id,
+                        enum_text(&task.status)?
+                    ))
+                }
+                outcome => outcome.into_task(),
+            };
+            let agent_names = workspace_agent_display_names(
+                deps.app.state::<AppState>().inner(),
+                &deps.workspace_id,
+            );
+            Ok(serde_json::json!({
+                "ok": true,
+                "task": task.into_response(&deps.workspace_id, &agent_names),
+            }))
         }
         _ => Err(format!("Unknown workspace task tool: {}", tool_name)),
     }
@@ -299,14 +328,15 @@ pub(crate) async fn finalize_task_cycle(deps: &AssistantDeps, task_id: &str, run
     let roster =
         load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)
             .unwrap_or_default();
-    let finished = match finish_task_cycle(&deps.pool, task_id, run_id, &roster).await {
-        Ok(Some(finished)) => finished,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::error!(task_id, run_id, error, "Failed to finalize task cycle");
-            return;
-        }
-    };
+    match finish_task_cycle(&deps.pool, task_id, Some(run_id), &roster).await {
+        Ok(Some(finished)) => announce_finished(deps, finished).await,
+        Ok(None) => {}
+        Err(error) => tracing::error!(task_id, run_id, error, "Failed to finalize task cycle"),
+    }
+}
+
+/// Emits a finished cycle and wakes the parent with its result.
+async fn announce_finished(deps: &AssistantDeps, finished: FinishedCycle) {
     emit_task_updated(deps, finished.task).await;
     let Some(message) = finished.result else {
         return;
@@ -323,6 +353,7 @@ pub(crate) async fn finalize_task_cycle(deps: &AssistantDeps, task_id: &str, run
     dispatcher::kick_logged(deps, &message.session_id).await;
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct FinishedCycle {
     pub(crate) task: WorkspaceTaskRow,
     /// The result message written to the parent session.
@@ -335,10 +366,13 @@ pub(crate) struct FinishedCycle {
 pub(crate) async fn finish_task_cycle(
     pool: &DbPool,
     task_id: &str,
-    run_id: &str,
+    run_id: Option<&str>,
     roster: &[WorkspaceAgentRow],
 ) -> Result<Option<FinishedCycle>, String> {
-    let run = repository::get_run(pool, run_id).await;
+    let run = match run_id {
+        Some(run_id) => repository::get_run(pool, run_id).await,
+        None => Ok(None),
+    };
     let summary = match &run {
         Ok(Some(run)) => final_assistant_text(&repository::list_messages_for_run(pool, run).await?),
         _ => None,
@@ -390,6 +424,7 @@ fn result_event<'a>(
             SignalKind::TaskResult,
             task.result_summary
                 .clone()
+                .or_else(|| task.error.clone())
                 .unwrap_or_else(|| "(no output)".to_string()),
             serde_json::json!({
                 "taskId": task.id,
@@ -500,6 +535,107 @@ fn cycle_outcome(
             }
         }
     }
+}
+
+/// Requests a stop of the task's current cycle: `stopping` until the run's
+/// teardown finalizes it, `stopped` at once when no run is active.
+pub(crate) async fn stop_task(deps: &AssistantDeps, task_id: &str) -> Result<StopOutcome, String> {
+    let roster =
+        load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)
+            .unwrap_or_default();
+    let outcome = request_stop(&deps.pool, &deps.workspace_id, task_id, &roster).await?;
+    match &outcome {
+        StopOutcome::Requested(task) => emit_task_updated(deps, task.clone()).await,
+        StopOutcome::Stopped(finished) => announce_finished(deps, finished.clone()).await,
+        StopOutcome::AlreadyStopping(_) | StopOutcome::AlreadyTerminal(_) => {}
+    }
+    Ok(outcome)
+}
+
+#[derive(Debug)]
+pub(crate) enum StopOutcome {
+    /// Now `stopping`: the live run was cancelled, or the run about to start
+    /// sees the request before it does (`dispatcher::spawn_run`).
+    Requested(WorkspaceTaskRow),
+    /// No run was active: the cycle ended `stopped` here.
+    Stopped(FinishedCycle),
+    AlreadyStopping(WorkspaceTaskRow),
+    AlreadyTerminal(WorkspaceTaskRow),
+}
+
+impl StopOutcome {
+    pub(crate) fn into_task(self) -> WorkspaceTaskRow {
+        match self {
+            Self::Requested(task) | Self::AlreadyStopping(task) | Self::AlreadyTerminal(task) => {
+                task
+            }
+            Self::Stopped(finished) => finished.task,
+        }
+    }
+}
+
+/// The database and registry half of [`stop_task`]. The request is written
+/// before the registry is read, and the dispatcher registers a run before it
+/// reads the request, so one of the two always sees the other.
+pub(crate) async fn request_stop(
+    pool: &DbPool,
+    workspace_id: &str,
+    task_id: &str,
+    roster: &[WorkspaceAgentRow],
+) -> Result<StopOutcome, String> {
+    let (task, changed) = workspace_tasks_repo::request_stop(pool, task_id)
+        .await?
+        .ok_or_else(|| format!("Workspace task not found: {}", task_id))?;
+    if !changed {
+        return Ok(if task.status.is_terminal() {
+            StopOutcome::AlreadyTerminal(task)
+        } else {
+            StopOutcome::AlreadyStopping(task)
+        });
+    }
+    if let Some(session_id) = &task.session_id {
+        if runtime::cancel_session(&LiveRunKey::new(workspace_id, session_id))
+            || repository::active_run_id(pool, session_id).await?.is_some()
+        {
+            return Ok(StopOutcome::Requested(task));
+        }
+    }
+    Ok(
+        match finish_task_cycle(pool, &task.id, task.run_id.as_deref(), roster).await? {
+            Some(finished) => StopOutcome::Stopped(finished),
+            // The run's own teardown finalized the cycle first.
+            None => StopOutcome::Requested(load_task(pool, &task.id).await?),
+        },
+    )
+}
+
+/// Restart recovery, once per process per workspace database, before
+/// `recover_stale_runs`: input of runs that never started is handed back,
+/// interrupted tasks end `stopped`, and each stopped task's parent gets the
+/// usual result event (one per cycle, by delivery key). Emits nothing: no
+/// window is listening yet.
+pub(crate) async fn recover_interrupted_tasks(pool: &DbPool) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start task recovery transaction: {}", e))?;
+    signals::release_claims_of_unstarted_runs(&mut tx).await?;
+    let stopped = workspace_tasks_repo::stop_interrupted(&mut tx).await?;
+    for task in &stopped {
+        if let Some(parent_session_id) = &task.parent_session_id {
+            signals::insert_event(&mut tx, result_event(task, parent_session_id, &[])?).await?;
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit task recovery transaction: {}", e))?;
+    if !stopped.is_empty() {
+        tracing::info!(
+            count = stopped.len(),
+            "Stopped workspace tasks interrupted by the previous app session"
+        );
+    }
+    Ok(())
 }
 
 /// The worker runs with its own configuration, resolved when each run starts —
@@ -1060,7 +1196,7 @@ mod tests {
     }
 
     async fn finish(pool: &DbPool, task_id: &str, run: &AssistantRun) -> Option<FinishedCycle> {
-        finish_task_cycle(pool, task_id, &run.id, &[])
+        finish_task_cycle(pool, task_id, Some(&run.id), &[])
             .await
             .unwrap()
     }
@@ -1334,5 +1470,258 @@ mod tests {
             &result.content[0],
             ContentPart::Text { text } if text == "Failure reason: error\n\nboom"
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // stop and restart recovery
+    // -----------------------------------------------------------------
+
+    async fn stop(pool: &DbPool, task_id: &str) -> StopOutcome {
+        request_stop(pool, "ws-stop-tests", task_id, &[])
+            .await
+            .unwrap()
+    }
+
+    async fn set_run_status(pool: &DbPool, run: &AssistantRun, status: RunStatus) {
+        repository::update_run_status(pool, &run.id, status, None)
+            .await
+            .unwrap();
+    }
+
+    async fn restart(pool: &DbPool) {
+        recover_interrupted_tasks(pool).await.unwrap();
+        repository::recover_stale_runs(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_before_registration_cancels_queued_run() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        // Claimed, not yet registered: no token can reach the run.
+        let (run, _) = open(&pool, &session).await;
+
+        let StopOutcome::Requested(task) = stop(&pool, "task-1").await else {
+            panic!("a claimed run is still to come: the stop waits for it");
+        };
+        assert_eq!(task.status, TaskStatus::Stopping);
+
+        // What the dispatcher does once it registers the run.
+        assert!(
+            workspace_tasks_repo::stop_requested(&pool, "task-1", &run.id)
+                .await
+                .unwrap()
+        );
+        set_run_status(&pool, &run, RunStatus::Cancelled).await;
+        let finished = finish(&pool, "task-1", &run).await.unwrap();
+
+        assert_eq!(finished.task.status, TaskStatus::Stopped);
+        assert_eq!(finished.task.failure_reason, None);
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_result", "pending")]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_during_tool_honoured_at_boundary() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        workspace_tasks_repo::mark_running(&pool, "task-1", &run.id)
+            .await
+            .unwrap();
+        let registration =
+            runtime::register_run(LiveRunKey::new("ws-stop-tests", &session), &run.id);
+        set_run_status(&pool, &run, RunStatus::WaitingForTool).await;
+
+        let StopOutcome::Requested(task) = stop(&pool, "task-1").await else {
+            panic!("a live run is cancelled, not finalized by the stop");
+        };
+
+        // The token is cancelled; the run and task wait for the run to reach
+        // its next cancellation point.
+        assert!(registration.token().is_cancelled());
+        assert_eq!(task.status, TaskStatus::Stopping);
+        let stored = repository::get_run(&pool, &run.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, RunStatus::WaitingForTool);
+
+        set_run_status(&pool, &run, RunStatus::Cancelled).await;
+        drop(registration);
+        let finished = finish(&pool, "task-1", &run).await.unwrap();
+        assert_eq!(finished.task.status, TaskStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn stop_vs_completion_yields_stopped() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        set_run_status(&pool, &run, RunStatus::Running).await;
+
+        assert!(matches!(
+            stop(&pool, "task-1").await,
+            StopOutcome::Requested(_)
+        ));
+        // The provider finished before the cancel landed.
+        end_run(&pool, &run, "BLOCKED: done anyway", RunStatus::Completed).await;
+        let finished = finish(&pool, "task-1", &run).await.unwrap();
+
+        assert_eq!(finished.task.status, TaskStatus::Stopped);
+        assert_eq!(finished.task.failure_reason, None);
+        assert_eq!(finished.task.error, None);
+        assert_eq!(
+            finished.task.result_summary.as_deref(),
+            Some("BLOCKED: done anyway")
+        );
+        assert!(matches!(
+            finished.result.unwrap().origin,
+            MessageOrigin::Task {
+                status: TaskStatus::Stopped,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_twice_idempotent() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+
+        let StopOutcome::Requested(first) = stop(&pool, "task-1").await else {
+            panic!("the first stop requests");
+        };
+        let StopOutcome::AlreadyStopping(second) = stop(&pool, "task-1").await else {
+            panic!("the second stop changes nothing");
+        };
+        assert!(first.stop_requested_at.is_some());
+        assert_eq!(second.stop_requested_at, first.stop_requested_at);
+
+        set_run_status(&pool, &run, RunStatus::Cancelled).await;
+        finish(&pool, "task-1", &run).await.unwrap();
+        let StopOutcome::AlreadyTerminal(ended) = stop(&pool, "task-1").await else {
+            panic!("a stopped task is terminal");
+        };
+        assert_eq!(ended.status, TaskStatus::Stopped);
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_result", "pending")]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_without_a_run_stops_at_once_and_old_input_does_not_resume() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+
+        let StopOutcome::Stopped(finished) = stop(&pool, "task-1").await else {
+            panic!("nothing to wait for: the stop ends the cycle");
+        };
+        assert_eq!(finished.task.status, TaskStatus::Stopped);
+        assert!(finished.result.is_some());
+
+        // The instruction predates the stop: no new cycle.
+        assert!(matches!(
+            claim(&pool, &session, |id| Some(connection(id)))
+                .await
+                .unwrap(),
+            Kick::Idle
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_survives_restart() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        set_run_status(&pool, &run, RunStatus::Running).await;
+        let StopOutcome::Requested(requested) = stop(&pool, "task-1").await else {
+            panic!("the run is active");
+        };
+
+        // The process dies before the run winds down.
+        restart(&pool).await;
+        restart(&pool).await;
+
+        let task = load_task(&pool, "task-1").await.unwrap();
+        assert_eq!(task.status, TaskStatus::Stopped);
+        assert_eq!(task.stop_requested_at, requested.stop_requested_at);
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_result", "pending")]
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_marks_running_task_stopped_not_failed() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        workspace_tasks_repo::mark_running(&pool, "task-1", &run.id)
+            .await
+            .unwrap();
+        set_run_status(&pool, &run, RunStatus::Running).await;
+
+        restart(&pool).await;
+
+        let task = load_task(&pool, "task-1").await.unwrap();
+        assert_eq!(task.status, TaskStatus::Stopped);
+        assert_eq!(task.failure_reason, None);
+        assert_eq!(
+            task.error.as_deref(),
+            Some("task interrupted by app restart")
+        );
+        assert!(task.stop_requested_at.is_some());
+        let events = signals::list_open_content(&pool, &parent).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].message.origin,
+            MessageOrigin::Task {
+                status: TaskStatus::Stopped,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn restart_leaves_never_started_task_queued() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        // Never claimed, and claimed by a run that never started.
+        let unclaimed = assign(&pool, &parent, "task-1").await;
+        let claimed = assign(&pool, &parent, "task-2").await;
+        let (run, _) = open(&pool, &claimed).await;
+
+        restart(&pool).await;
+
+        for id in ["task-1", "task-2"] {
+            assert_eq!(
+                load_task(&pool, id).await.unwrap().status,
+                TaskStatus::Queued
+            );
+        }
+        assert_eq!(
+            signals_of(&pool, &claimed).await,
+            [signal("agent_message", "pending")]
+        );
+        assert!(signals_of(&pool, &parent).await.is_empty());
+        let stale = repository::get_run(&pool, &run.id).await.unwrap().unwrap();
+        assert_eq!(stale.status, RunStatus::Failed);
+
+        // The next kick dispatches both again.
+        for session in [&unclaimed, &claimed] {
+            let (rerun, _) = open(&pool, session).await;
+            let input = signals::list_content_for_run(&pool, session, &rerun.id)
+                .await
+                .unwrap();
+            assert_eq!(input.len(), 1);
+        }
     }
 }
