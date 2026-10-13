@@ -3563,7 +3563,7 @@ async fn workspace_task_attention_summary(
     let counts: (i64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-            COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'running' AND run_id IS NOT NULL THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN status = 'failed' AND failure_reason = 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0),
             COALESCE(SUM(CASE WHEN status = 'failed' AND failure_reason IS NOT 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0)
         FROM workspace_tasks

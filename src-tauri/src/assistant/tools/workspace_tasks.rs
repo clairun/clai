@@ -792,40 +792,41 @@ pub(crate) async fn record_ask_answered(
     }
 }
 
-/// Requests a stop of the task's current cycle and of every unfinished
-/// subtask below it: `stopping` until a run's teardown finalizes it,
-/// `stopped` at once when no run is active. Returns the task's outcome.
+/// Requests a stop of the task's current cycle and, unless the task had
+/// already ended, of every unfinished subtask below it, parents first so no
+/// subtask result can resume a parent being stopped: `stopping` until a
+/// run's teardown finalizes it, `stopped` at once when no run is active.
+/// Returns the task's outcome; a subtask that fails to stop is only logged.
 pub(crate) async fn stop_task(deps: &AssistantDeps, task_id: &str) -> Result<StopOutcome, String> {
     let roster =
         load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)
             .unwrap_or_default();
-    let outcomes = request_stop_tree(&deps.pool, &deps.workspace_id, task_id, &roster).await?;
-    for outcome in &outcomes {
-        match outcome {
-            StopOutcome::Requested(task) => emit_task_updated(deps, task.clone()).await,
-            StopOutcome::Stopped(finished) => announce_finished(deps, finished.clone()).await,
-            StopOutcome::AlreadyStopping(_) | StopOutcome::AlreadyTerminal(_) => {}
+    let outcome = request_stop(&deps.pool, &deps.workspace_id, task_id, &roster).await?;
+    if matches!(outcome, StopOutcome::AlreadyTerminal(_)) {
+        return Ok(outcome);
+    }
+    announce_stop(deps, &outcome).await;
+    let descendants = workspace_tasks_repo::descendant_ids(&deps.pool, task_id)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(task_id, error, "Failed to list subtasks to stop");
+            Vec::new()
+        });
+    for id in descendants {
+        match request_stop(&deps.pool, &deps.workspace_id, &id, &roster).await {
+            Ok(sub) => announce_stop(deps, &sub).await,
+            Err(error) => tracing::error!(task_id = %id, error, "Failed to stop subtask"),
         }
     }
-    Ok(outcomes
-        .into_iter()
-        .next()
-        .expect("the tree starts with the task"))
+    Ok(outcome)
 }
 
-/// [`request_stop`] for `task_id`, then for each task below it, parents
-/// first, so no subtask result can resume a parent being stopped.
-pub(crate) async fn request_stop_tree(
-    pool: &DbPool,
-    workspace_id: &str,
-    task_id: &str,
-    roster: &[WorkspaceAgentRow],
-) -> Result<Vec<StopOutcome>, String> {
-    let mut outcomes = vec![request_stop(pool, workspace_id, task_id, roster).await?];
-    for id in workspace_tasks_repo::descendant_ids(pool, task_id).await? {
-        outcomes.push(request_stop(pool, workspace_id, &id, roster).await?);
+async fn announce_stop(deps: &AssistantDeps, outcome: &StopOutcome) {
+    match outcome {
+        StopOutcome::Requested(task) => emit_task_updated(deps, task.clone()).await,
+        StopOutcome::Stopped(finished) => announce_finished(deps, finished.clone()).await,
+        StopOutcome::AlreadyStopping(_) | StopOutcome::AlreadyTerminal(_) => {}
     }
-    Ok(outcomes)
 }
 
 #[derive(Debug)]
@@ -2124,7 +2125,13 @@ mod tests {
             .await
             .unwrap();
 
-        let outcomes = request_stop_tree(&pool, WS, "task-1", &[]).await.unwrap();
+        let mut outcomes = vec![stop(&pool, "task-1").await];
+        for id in workspace_tasks_repo::descendant_ids(&pool, "task-1")
+            .await
+            .unwrap()
+        {
+            outcomes.push(stop(&pool, &id).await);
+        }
         assert!(matches!(
             outcomes.as_slice(),
             [
