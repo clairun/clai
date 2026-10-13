@@ -189,7 +189,6 @@ const formatSchedulePill = (details: WorkspaceDetails | null): string | null => 
 
 const getLastRunInfo = (runs: AssistantRun[] | null | undefined): AssistantRun | null => {
   if (!runs || runs.length === 0) return null;
-  // runs are sorted newest first from backend
   const last = [...runs].sort(
     (a, b) => (toNumber(b.startedAt) || 0) - (toNumber(a.startedAt) || 0)
   )[0];
@@ -1104,8 +1103,8 @@ const WorkspaceHeader = ({
   // Title from the rail's workspace list, shown until `details` land.
   listTitle: string | undefined;
   isGenericWorkspace: boolean;
-  // Total messages in the conversation (including not-yet-loaded history
-  // and rotation ancestors), not just the loaded window.
+  // Total messages in the conversation (including not-yet-loaded history),
+  // not just the loaded window.
   messageCount: number;
   memories: WorkspaceFileEntry[];
   artifactCount: number;
@@ -1878,11 +1877,11 @@ const Workspace = () => {
           if (shouldHydrateSession) {
             const [messagePage, runs] = await Promise.all([
               assistantClient.loadSessionMessagesPage({
+                workspaceId,
                 sessionId: nextDetails.session.id,
                 limit: MESSAGE_PAGE_LIMIT,
-                includeAncestors: true,
               }),
-              assistantClient.listRuns(nextDetails.session.id),
+              assistantClient.listRuns(workspaceId, nextDetails.session.id),
             ]);
             if (currentWorkspaceIdRef.current !== workspaceId) return;
 
@@ -2006,7 +2005,7 @@ const Workspace = () => {
       if (!runId || cancellingRunId) return;
       setCancellingRunId(runId);
       try {
-        await assistantClient.cancelRun(runId);
+        await assistantClient.cancelRun(workspaceId, runId);
         setError('');
         await loadDetails(false);
       } catch (err) {
@@ -2014,7 +2013,7 @@ const Workspace = () => {
         setCancellingRunId(null);
       }
     },
-    [cancellingRunId, loadDetails, setCancellingRunId, setError]
+    [cancellingRunId, loadDetails, setCancellingRunId, setError, workspaceId]
   );
 
   const [pauseBusy, setPauseBusy] = useByWorkspace(workspaceId, false);
@@ -2070,6 +2069,13 @@ const Workspace = () => {
   }, [loadDetails]);
 
   const memories = useMemo(() => details?.memories || [], [details?.memories]);
+  // `viewingTask` is a snapshot from when the panel opened; follow the polled
+  // copy so status and session stay live. A task fetched by id may not be listed yet.
+  const liveViewingTask = useMemo(
+    () =>
+      viewingTask ? (details?.tasks?.find((t) => t.id === viewingTask.id) ?? viewingTask) : null,
+    [viewingTask, details?.tasks]
+  );
   const artifactCount = Number(details?.artifactCount ?? 0);
   const artifactCountCapped = details?.artifactCountCapped ?? false;
 
@@ -2119,11 +2125,11 @@ const Workspace = () => {
       // MessageDeleted from the backend removes it from the store; on a
       // lost race ("already picked up") the chip clears via
       // queued_messages_delivered instead, so both outcomes self-resolve.
-      assistantClient.deleteQueuedMessage(sessionId, messageId).catch((err) => {
+      assistantClient.deleteQueuedMessage(workspaceId, sessionId, messageId).catch((err) => {
         console.error('[Workspace] Failed to delete queued message:', err);
       });
     },
-    [sessionId]
+    [sessionId, workspaceId]
   );
   const handleEditQueuedMessage = useCallback(
     async (messageId: string, text: string) => {
@@ -2132,12 +2138,12 @@ const Workspace = () => {
       // store. On a lost race ("already picked up") the edit errors and the
       // original text is left untouched.
       try {
-        await assistantClient.editQueuedMessage(sessionId, messageId, text);
+        await assistantClient.editQueuedMessage(workspaceId, sessionId, messageId, text);
       } catch (err) {
         console.error('[Workspace] Failed to edit queued message:', err);
       }
     },
-    [sessionId]
+    [sessionId, workspaceId]
   );
   const handleLoadOlderMessages = useCallback(() => {
     if (!sessionId) return;
@@ -2154,10 +2160,10 @@ const Workspace = () => {
     store.setOlderMessagesLoading(sessionId, true);
     assistantClient
       .loadSessionMessagesPage({
+        workspaceId,
         sessionId,
         before: current.olderMessageCursor,
         limit: MESSAGE_PAGE_LIMIT,
-        includeAncestors: true,
       })
       .then((page) => {
         useAssistantStore
@@ -2175,7 +2181,7 @@ const Workspace = () => {
         console.error('[Workspace] Failed to load older messages:', err);
         useAssistantStore.getState().setOlderMessagesLoading(sessionId, false);
       });
-  }, [sessionId]);
+  }, [sessionId, workspaceId]);
 
   const forkPromptStartedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -2201,7 +2207,7 @@ const Workspace = () => {
         store.initSession(binding.session);
         store.setActiveSessionForTab(`workspace:${workspaceId}`, binding.session.id);
 
-        const result = await assistantClient.sendMessage(binding.session.id, prompt, connectionId);
+        const result = await assistantClient.sendMessage(workspaceId, binding.session.id, prompt, connectionId);
         if (cancelled) return;
 
         store.addMessage(binding.session.id, result.message);
@@ -2263,8 +2269,8 @@ const Workspace = () => {
   });
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
-  // `details.runs` is sorted newest-first by the backend; pick the first
-  // non-terminal entry so we cancel the most recent activation.
+  // `details.runs` holds only the newest run and the newest non-terminal
+  // run (if older), so the first non-terminal entry is the one to cancel.
   const activeRun =
     (details?.runs || []).find((run) => ACTIVE_RUN_STATUSES.includes(run.status)) || null;
   const hasActiveRun = !!activeRun;
@@ -2472,9 +2478,10 @@ const Workspace = () => {
           />
         )}
 
-        {activePanel === 'tasks' && viewingTask && (
+        {activePanel === 'tasks' && liveViewingTask && (
           <WorkspaceTaskTranscriptPanel
-            task={viewingTask}
+            workspaceId={workspaceId}
+            task={liveViewingTask}
             roster={chatRoster}
             onClose={closeTaskTranscript}
           />

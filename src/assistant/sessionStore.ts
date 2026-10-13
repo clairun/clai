@@ -33,6 +33,7 @@ export interface PendingAskUser {
 export interface SessionState {
   session: AssistantSession;
   messages: AssistantMessage[];
+  /** Newest + active run from the backend plus runs upserted by live events; not the full history. */
   runs: AssistantRun[];
   toolCalls: ToolInvocation[];
   /** True while a run is queued/running/waiting_for_tool. Drives the chat activity indicator. */
@@ -48,14 +49,14 @@ export interface SessionState {
    *  the session-scoped `deliveredQueuedMessageIds` tombstones so a delivery
    *  that raced hydration or the send round trip cannot be undone. */
   queuedMessageIds: string[];
-  /** Cursor for loading older messages. Can point at an ancestor session. */
+  /** Cursor for loading older messages. */
   olderMessageCursor: AssistantMessageCursor | null;
   hasOlderMessages: boolean;
   isLoadingOlderMessages: boolean;
-  /** Total messages in the whole conversation (session + rotation ancestors),
-   *  not just the loaded window. Seeded from the backend's page responses and
-   *  kept live by add/removeMessage; null until the first page load reports it
-   *  (fall back to messages.length). */
+  /** Total messages in the whole conversation, not just the loaded window.
+   *  Seeded from the backend's page responses and kept live by
+   *  add/removeMessage; null until the first page load reports it (fall back
+   *  to messages.length). */
   totalMessageCount: number | null;
 }
 
@@ -100,9 +101,8 @@ export interface AssistantStoreState {
   activeSessionByTab: Record<string, string>;
 
   setActiveSessionForTab: (tabId: string, sessionId: string) => void;
-  getActiveSessionForTab: (tabId: string) => string | null;
 
-  initSession: (session: AssistantSession & { tabId?: string | null }) => void;
+  initSession: (session: AssistantSession) => void;
   addMessage: (sessionId: string, message: AssistantMessage) => void;
   removeMessage: (sessionId: string, messageId: string) => void;
   /** Text of a user message whose run failed and was retracted by the
@@ -168,7 +168,7 @@ const ACTIVE_STATUSES = ['queued', 'running', 'waiting_for_tool'] as const;
 
 const useAssistantStore = create<AssistantStoreState>()(
   devtools(
-    immer((set, get) => ({
+    immer((set) => ({
       sessions: {},
       streamingText: {},
       deliveredQueuedMessageIds: {},
@@ -180,17 +180,10 @@ const useAssistantStore = create<AssistantStoreState>()(
           state.activeSessionByTab[tabId] = sessionId;
         }),
 
-      getActiveSessionForTab: (tabId) => {
-        return get().activeSessionByTab[tabId] || null;
-      },
-
       initSession: (session) =>
         set((state) => {
           if (!state.sessions[session.id]) {
             state.sessions[session.id] = createInitialSessionState(session);
-          }
-          if (session.tabId) {
-            state.activeSessionByTab[session.tabId] = session.id;
           }
         }),
 

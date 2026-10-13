@@ -13,7 +13,6 @@ use crate::assistant::sandbox::{
     run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
     SandboxSessionBusMode,
 };
-use crate::assistant::types::RunNoticeKind;
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin,
     SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
@@ -114,7 +113,10 @@ async fn execute_bash_exec(
     context: &ToolExecutionContext,
     params: BashExecParams,
 ) -> Result<serde_json::Value, String> {
-    if matches!(context.execution.shell.mode, ShellAccessMode::Off) {
+    if matches!(
+        context.run_context.execution.shell.mode,
+        ShellAccessMode::Off
+    ) {
         return Err("Shell access is disabled for this agent".to_string());
     }
 
@@ -125,7 +127,7 @@ async fn execute_bash_exec(
     let run_allowed = context.session_allowed_command_prefixes_snapshot();
     let run_blocked = context.session_blocked_command_prefixes_snapshot();
     match evaluate_command_policy(
-        &context.execution,
+        &context.run_context.execution,
         &params.command,
         &run_allowed,
         &run_blocked,
@@ -163,12 +165,12 @@ async fn execute_bash_exec(
         .min(MAX_BASH_OUTPUT_LIMIT);
 
     // Resolve the shell up front. On Windows this can fail when no POSIX
-    // shell is installed; surface that as an actionable notice + error rather
+    // shell is installed; surface that as an actionable warning + error rather
     // than a cryptic spawn failure for a missing `bash`.
     let argv = match super::posix_shell::shell_argv(params.command) {
         Ok(argv) => argv,
         Err(message) => {
-            context.add_notice(RunNoticeKind::SandboxUnavailable, message.clone());
+            context.note_warning();
             return Err(message);
         }
     };
@@ -183,13 +185,12 @@ async fn execute_bash_exec(
     .await
     .inspect_err(|error| {
         // Surface sandbox-availability failures (bwrap missing, kernel
-        // refused namespaces, etc.) as a first-class run notice so the
-        // run completes with a SandboxUnavailable warning rather than a
-        // generic tool failure. The sandbox runner uses the
+        // refused namespaces, etc.) as a run warning so the run completes
+        // with warnings rather than as a generic tool failure. The sandbox runner uses the
         // "Sandboxed shell is unavailable" sentinel prefix for exactly
         // this case; other errors stay as plain tool failures.
         if error.starts_with("Sandboxed shell is unavailable") {
-            context.add_notice(RunNoticeKind::SandboxUnavailable, error.clone());
+            context.note_warning();
         }
     })
     .map_err(|error| augment_timeout_error(error, timeout_ms, explicit_timeout))?;
@@ -236,7 +237,7 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
 
 fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
     let workspace = ensure_workspace_root(context)?;
-    let mut grants = context.execution.filesystem.extra_paths.clone();
+    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
     grants.extend(context.session_grants_snapshot());
     EffectiveFilesystemPolicy::from_config(
         &workspace,
@@ -246,10 +247,7 @@ fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesyst
 }
 
 fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
-    let workspace_root = context.workspace_root.clone().ok_or_else(|| {
-        "Agent workspace is unavailable because this session is not tied to an automation"
-            .to_string()
-    })?;
+    let workspace_root = context.run_context.workspace_root.clone();
 
     // Create workspace root and pre-seed .clai/memory/ (including journal/)
     // so agents can use it immediately without spending a tool call.
@@ -271,12 +269,12 @@ fn sandbox_profile(
     workspace_root: PathBuf,
     filesystem: EffectiveFilesystemPolicy,
 ) -> SandboxProfile {
-    let network = match context.execution.sandbox.network {
+    let network = match context.run_context.execution.sandbox.network {
         SandboxNetworkConfig::Enabled => SandboxNetworkMode::Host,
         SandboxNetworkConfig::Disabled => SandboxNetworkMode::Disabled,
     };
 
-    let session_bus = match context.execution.sandbox.session_bus {
+    let session_bus = match context.run_context.execution.sandbox.session_bus {
         SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
         SandboxSessionBusConfig::Allow => SandboxSessionBusMode::Allow,
     };
@@ -302,10 +300,10 @@ fn sandbox_profile(
 /// info to the approval modal.
 #[allow(dead_code)]
 enum CommandDenial {
-    /// The command prefix is in the explicit block list — expected, no notice needed.
+    /// The command prefix is in the explicit block list — expected, no warning needed.
     ExplicitlyBlocked(String),
     /// The command prefix is not in the (non-empty) allow list — the user may not
-    /// have anticipated this, so a run notice is warranted.
+    /// have anticipated this, so a run warning is warranted.
     NotInAllowList(String),
 }
 
@@ -630,8 +628,8 @@ async fn await_user_permission(
     use tauri::{Emitter, Manager};
 
     let app_state = deps.app.state::<crate::AppState>();
-    let workspace_id = context.workspace_id.clone();
-    let agent_id = context.automation_id.clone();
+    let workspace_id = Some(deps.workspace_id.clone());
+    let agent_id = context.run_context.automation_id.clone();
 
     // The constructor resolves where an "always" decision would be saved — in
     // this workspace for its Main, or on a shared definition in force wherever
@@ -745,7 +743,7 @@ async fn await_user_permission(
 
     if decisions.iter().any(|d| !d.is_allow()) {
         let msg = "User denied one or more command segments";
-        context.add_notice(RunNoticeKind::CommandDenied, msg.to_string());
+        context.note_warning();
         return Err(msg.to_string());
     }
 
@@ -777,8 +775,8 @@ async fn execute_fs_request_grant(
 
     let request = crate::commands::path_grants::PathGrantRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
-        workspace_id: context.workspace_id.clone(),
-        agent_id: context.automation_id.clone(),
+        workspace_id: Some(deps.workspace_id.clone()),
+        agent_id: context.run_context.automation_id.clone(),
         agent_name: None,
         requested_path: canonical_str.clone(),
         requested_access: params.access,
@@ -790,17 +788,12 @@ async fn execute_fs_request_grant(
     match decision {
         crate::commands::path_grants::PathGrantDecision::Deny => {
             let msg = format!("User denied path grant for `{}`", canonical_str);
-            context.add_notice(RunNoticeKind::PathGrantDenied, msg.clone());
+            context.note_warning();
             Err(msg)
         }
         crate::commands::path_grants::PathGrantDecision::AllowOnce { path, access } => {
             apply_session_grant(context, &path, access);
-            let msg = format!(
-                "User granted `{}` ({}) for this run",
-                path,
-                access_to_str(access)
-            );
-            context.add_notice(RunNoticeKind::PathGranted, msg);
+            context.note_warning();
             Ok(serde_json::json!({
                 "granted": true,
                 "path": agent_path_string(std::path::Path::new(&path)),
@@ -817,12 +810,7 @@ async fn execute_fs_request_grant(
             // The submit handler already persisted to the agent's DB row;
             // we only need to make the grant visible in the *current* run.
             apply_session_grant(context, &path, access);
-            let msg = format!(
-                "User granted `{}` ({}) and persisted to agent settings",
-                path,
-                access_to_str(access)
-            );
-            context.add_notice(RunNoticeKind::PathGranted, msg);
+            context.note_warning();
             Ok(serde_json::json!({
                 "granted": true,
                 "path": agent_path_string(std::path::Path::new(&path)),
@@ -954,7 +942,7 @@ async fn await_path_grant_decision(
     use tauri::{Emitter, Manager};
 
     let app_state = deps.app.state::<crate::AppState>();
-    let workspace_id = context.workspace_id.clone();
+    let workspace_id = Some(deps.workspace_id.clone());
     let request_id = request.request_id.clone();
 
     // Supersede a stale orphaned request for the same run + path + access
@@ -1554,6 +1542,7 @@ fn append_limited_web_fetch_body_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::run_context::RunContext;
     use tempfile::tempdir;
 
     fn context_with_grants(
@@ -1567,15 +1556,13 @@ mod tests {
             run_id: "run".to_string(),
             tool_call_id: None,
             cancel_token: tokio_util::sync::CancellationToken::new(),
-            workspace_id: Some("ws".to_string()),
-            mcp_server_ids: Vec::new(),
-            agent_workspace_id: None,
-            workspace_root: Some(workspace_root.to_path_buf()),
-            automation_id: Some("agent".to_string()),
-            workspace_agents: Vec::new(),
-            inter_agent_call_depth: None,
-            execution,
-            notices: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            run_context: std::sync::Arc::new(RunContext {
+                automation_id: Some("agent".to_string()),
+                execution,
+                workspace_root: workspace_root.to_path_buf(),
+                ..RunContext::default()
+            }),
+            had_warnings: Default::default(),
             session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             session_allowed_command_prefixes: std::sync::Arc::new(
                 std::sync::Mutex::new(Vec::new()),

@@ -18,6 +18,7 @@ pub mod local_agent;
 pub mod local_mcp;
 pub mod providers;
 pub mod repository;
+pub mod run_context;
 pub mod run_lifecycle;
 pub mod runtime;
 pub mod sandbox;
@@ -26,6 +27,8 @@ pub mod token_estimate;
 pub mod tools;
 mod turn_common;
 pub mod types;
+pub mod workspace_agents;
+pub mod workspace_tasks_repo;
 
 #[cfg(test)]
 mod repository_tests;

@@ -26,8 +26,6 @@
 //! `PRAGMA table_info`/`sqlite_master` introspection over every row and
 //! column, paginated with `LIMIT`/`OFFSET`.
 
-use std::path::PathBuf;
-
 use serde::Deserialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Column, ConnectOptions, Connection, Row, TypeInfo, ValueRef};
@@ -60,11 +58,7 @@ pub async fn execute(
     context: &ToolExecutionContext,
     params: HistoryQueryParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_root: PathBuf = context.workspace_root.clone().ok_or_else(|| {
-        "history_query is unavailable because this session is not tied to an automation workspace"
-            .to_string()
-    })?;
-    let db_path = crate::config::workspace_config::data_path(&workspace_root);
+    let db_path = crate::config::workspace_config::data_path(&context.run_context.workspace_root);
     if !db_path.exists() {
         return Err(format!(
             "Conversation database not found at {} (nothing has been recorded for this workspace yet)",

@@ -63,10 +63,7 @@ pub fn execute(
     context: &ToolExecutionContext,
     params: CreateVegaChartParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_root = context.workspace_root.clone().ok_or_else(|| {
-        "create_vega_chart is unavailable because this session is not tied to an automation workspace"
-            .to_string()
-    })?;
+    let workspace_root = &context.run_context.workspace_root;
     let title = params.title.trim();
     if title.is_empty() {
         return Err("`title` must not be empty".to_string());
@@ -83,11 +80,11 @@ pub fn execute(
                     .entry("$schema")
                     .or_insert_with(|| serde_json::Value::String(VEGA_LITE_SCHEMA_URL.to_string()));
             }
-            write_spec(&workspace_root, &relative, &spec)?;
+            write_spec(workspace_root, &relative, &spec)?;
             (relative, warnings, "written")
         }
         None => {
-            let absolute = resolve_spec_for_read(&workspace_root, &relative)?;
+            let absolute = resolve_spec_for_read(workspace_root, &relative)?;
             let text = read_spec_file(&absolute, &relative)?;
             let spec = parse_spec_text(&text)?;
             validate_spec(&spec)?;
@@ -586,6 +583,7 @@ fn read_spec_file(absolute: &Path, relative: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::run_context::RunContext;
     use std::sync::{Arc, Mutex};
 
     fn bar_spec() -> serde_json::Value {
@@ -599,21 +597,17 @@ mod tests {
         })
     }
 
-    fn context_for(workspace_root: Option<PathBuf>) -> ToolExecutionContext {
+    fn context_for(workspace_root: PathBuf) -> ToolExecutionContext {
         ToolExecutionContext {
             session_id: "s".to_string(),
             run_id: "r".to_string(),
             tool_call_id: None,
             cancel_token: Default::default(),
-            workspace_id: None,
-            mcp_server_ids: vec![],
-            agent_workspace_id: workspace_root.as_ref().map(|_| "ws".to_string()),
-            workspace_root,
-            automation_id: None,
-            workspace_agents: vec![],
-            inter_agent_call_depth: None,
-            execution: Default::default(),
-            notices: Arc::new(Mutex::new(vec![])),
+            run_context: Arc::new(RunContext {
+                workspace_root,
+                ..RunContext::default()
+            }),
+            had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(vec![])),
             session_allowed_command_prefixes: Arc::new(Mutex::new(vec![])),
             session_blocked_command_prefixes: Arc::new(Mutex::new(vec![])),
@@ -829,7 +823,7 @@ mod tests {
     #[tokio::test]
     async fn writes_a_valid_inline_spec_at_the_requested_path_and_returns_the_markdown() {
         let dir = tempfile::tempdir().unwrap();
-        let context = context_for(Some(dir.path().to_path_buf()));
+        let context = context_for(dir.path().to_path_buf());
         let result = execute(
             &context,
             CreateVegaChartParams {
@@ -868,7 +862,7 @@ mod tests {
         let original = bar_spec().to_string();
         std::fs::write(outside.path().join("existing.vl.json"), &original).unwrap();
         symlink(outside.path(), workspace.path().join("charts")).unwrap();
-        let context = context_for(Some(workspace.path().to_path_buf()));
+        let context = context_for(workspace.path().to_path_buf());
 
         let read_error = execute(
             &context,
@@ -925,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn accepts_a_stringified_spec_and_an_explicit_destination() {
         let dir = tempfile::tempdir().unwrap();
-        let context = context_for(Some(dir.path().to_path_buf()));
+        let context = context_for(dir.path().to_path_buf());
         let result = execute(
             &context,
             CreateVegaChartParams {
@@ -942,7 +936,7 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_spec_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let context = context_for(Some(dir.path().to_path_buf()));
+        let context = context_for(dir.path().to_path_buf());
         let mut spec = bar_spec();
         spec["mark"] = serde_json::json!("barr");
         let error = execute(
@@ -966,7 +960,7 @@ mod tests {
         // Compact, no $schema: must be left byte-for-byte alone.
         let original = bar_spec().to_string();
         std::fs::write(&file, &original).unwrap();
-        let context = context_for(Some(dir.path().to_path_buf()));
+        let context = context_for(dir.path().to_path_buf());
         let result = execute(
             &context,
             CreateVegaChartParams {
@@ -995,7 +989,7 @@ mod tests {
     #[tokio::test]
     async fn warns_about_large_inline_tables() {
         let dir = tempfile::tempdir().unwrap();
-        let context = context_for(Some(dir.path().to_path_buf()));
+        let context = context_for(dir.path().to_path_buf());
         let mut spec = bar_spec();
         spec["data"]["values"] = serde_json::Value::Array(
             (0..INLINE_ROWS_WARNING_THRESHOLD + 1)
@@ -1025,24 +1019,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requires_a_workspace_a_title_and_a_valid_path() {
-        let no_workspace = context_for(None);
-        let error = execute(
-            &no_workspace,
-            CreateVegaChartParams {
-                title: "t".to_string(),
-                spec: Some(bar_spec()),
-                path: "analysis/chart.vl.json".to_string(),
-            },
-        )
-        .unwrap_err();
-        assert!(
-            error.contains("not tied to an automation workspace"),
-            "{error}"
-        );
-
+    async fn requires_a_title_and_a_valid_path() {
         let dir = tempfile::tempdir().unwrap();
-        let context = context_for(Some(dir.path().to_path_buf()));
+        let context = context_for(dir.path().to_path_buf());
         let error = execute(
             &context,
             CreateVegaChartParams {

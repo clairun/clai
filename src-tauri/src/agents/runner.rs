@@ -41,19 +41,20 @@ use tauri::{AppHandle, Manager};
 use crate::agents::{SchedulerState, SharedScheduler};
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
 use crate::assistant::events::{emit_event, AssistantUiEvent};
-use crate::assistant::repository::{self, CreateRunParams, CreateSessionParams};
+use crate::assistant::repository::{self, CreateRunParams};
 use crate::assistant::runtime;
-use crate::assistant::types::{
-    AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
-    SessionContext, SessionKind,
-};
+use crate::assistant::types::{ProviderConnection, RunStatus, RunTrigger};
 use crate::config::{workspace_config, AgentConfig};
 use crate::db::DbPool;
 use crate::AppState;
 
 /// Loads a workspace-local agent from `<workspace>/.clai/config.json`.
+///
+/// Reads only `workspace_id`'s config, so another workspace's unreadable
+/// config cannot stop this one's scheduled runs.
 fn load_workspace_agent_as_config(
     state: &AppState,
+    workspace_id: &str,
     id: &str,
 ) -> Result<Option<AgentConfig>, RunnerError> {
     let app_config = state
@@ -61,60 +62,46 @@ fn load_workspace_agent_as_config(
         .lock()
         .map_err(|e| RunnerError::AssistantPersistence(format!("Lock error: {}", e)))?
         .get();
-    let locators = state
-        .workspace_index
-        .read()
-        .map_err(|e| {
-            RunnerError::AssistantPersistence(format!("Workspace index lock error: {}", e))
-        })?
-        .locators_sorted();
-
-    for locator in locators {
-        let (config, roster) = state.resolve_workspace_roster(&locator.id).map_err(|e| {
-            RunnerError::AssistantPersistence(format!("Failed to load workspace config: {}", e))
-        })?;
-        if let Some(agent) = roster
-            .iter()
-            .map(|resolved| &resolved.agent)
-            .find(|agent| agent.id == id)
-        {
-            let created_at = chrono::DateTime::from_timestamp_millis(agent.created_at)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default();
-            let updated_at = chrono::DateTime::from_timestamp_millis(agent.updated_at)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_default();
-            let is_manager = agent.id == config.main_agent_id();
-            return Ok(Some(AgentConfig {
-                id: agent.id.clone(),
-                workspace_id: config.id,
-                name: agent.name.clone(),
-                description: agent.description.clone(),
-                // Schedule is workspace-level. Only the default (manager)
-                // agent inherits the workspace schedule; sub-agents never
-                // run on their own schedule.
-                schedule_enabled: is_manager && config.schedule.enabled,
-                schedule_kind: if is_manager {
-                    config.schedule.kind.clone()
-                } else {
-                    crate::config::workspace_config::ScheduleKind::default()
-                },
-                enabled: agent.enabled,
-                selected_mcp_server_ids: workspace_config::enabled_mcp_ids(
-                    &agent.selected_mcp_servers,
-                ),
-                provider_connection_ids: agent.provider_connection_ids.clone(),
-                selected_skill_ids: workspace_config::refs_to_skill_ids(
-                    &app_config,
-                    &agent.selected_skills,
-                ),
-                execution: agent.execution.clone(),
-                created_at,
-                updated_at,
-            }));
-        }
-    }
-    Ok(None)
+    let (config, roster) = state.resolve_workspace_roster(workspace_id).map_err(|e| {
+        RunnerError::AssistantPersistence(format!("Failed to load workspace config: {}", e))
+    })?;
+    let Some(agent) = roster
+        .iter()
+        .map(|resolved| &resolved.agent)
+        .find(|agent| agent.id == id)
+    else {
+        return Ok(None);
+    };
+    let created_at = chrono::DateTime::from_timestamp_millis(agent.created_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let updated_at = chrono::DateTime::from_timestamp_millis(agent.updated_at)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_default();
+    let is_manager = agent.id == config.main_agent_id();
+    Ok(Some(AgentConfig {
+        id: agent.id.clone(),
+        workspace_id: config.id,
+        name: agent.name.clone(),
+        description: agent.description.clone(),
+        // Schedule is workspace-level. Only the default (manager)
+        // agent inherits the workspace schedule; sub-agents never
+        // run on their own schedule.
+        schedule_enabled: is_manager && config.schedule.enabled,
+        schedule_kind: if is_manager {
+            config.schedule.kind.clone()
+        } else {
+            crate::config::workspace_config::ScheduleKind::default()
+        },
+        enabled: agent.enabled,
+        provider_connection_ids: agent.provider_connection_ids.clone(),
+        selected_skill_ids: workspace_config::refs_to_skill_ids(
+            &app_config,
+            &agent.selected_skills,
+        ),
+        created_at,
+        updated_at,
+    }))
 }
 
 // =============================================================================
@@ -123,6 +110,10 @@ fn load_workspace_agent_as_config(
 
 /// How often to check for ready agents (in seconds).
 const CHECK_INTERVAL_SECS: u64 = 5;
+
+/// How long a scheduled fire that failed to start (no enabled provider,
+/// config or DB error, ...) waits before it is retried.
+const START_FAILURE_RETRY_MS: i64 = 5 * 60 * 1000;
 
 // =============================================================================
 // Runner
@@ -171,71 +162,101 @@ pub fn start_agent_runner(app_handle: AppHandle, scheduler: SharedScheduler) {
 /// 2. Gets the next ready agent (if any)
 /// 3. Executes the agent
 /// 4. Marks it complete
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 107 against a budget of 25"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 143 lines against a 100-line budget; split it, do not raise the budget"
-)]
 async fn run_next_agent(
     app_handle: &AppHandle,
     scheduler: &SharedScheduler,
 ) -> Result<(), RunnerError> {
-    // Get app state
-    let state = app_handle.state::<AppState>();
-
-    // Note: pre-refactor this guard waited on a global `DbPool` in
-    // managed state. After the move to per-workspace SQLite that pool
-    // no longer exists — the per-workspace pool is loaded on demand
-    // below via `state.workspace_db(...)`. Leaving the guard in caused
-    // every tick to exit early, so scheduled workspaces never ran.
-
-    // Check for a ready agent
-    let instance_id = {
-        let mut sched = scheduler.lock().await;
-
-        // Log scheduler state
-        let instance_count = sched.instance_count();
-        let state = sched.state();
-        let running_agent = sched.running_instance();
-        tracing::debug!(
-            instance_count,
-            scheduler_state = ?state,
-            running_agent = ?running_agent,
-            "Scheduler status"
-        );
-
-        // Check if scheduler is paused
-        if matches!(state, SchedulerState::Paused { .. }) {
-            tracing::debug!("Scheduler is paused");
-            return Ok(());
-        }
-
-        sched.next_ready()
-    };
-
-    let Some(instance_id) = instance_id else {
+    let Some(instance_id) = claim_next_instance(scheduler).await else {
         tracing::debug!("No agents ready");
         return Ok(());
     };
+    release_slot_on_error(
+        scheduler,
+        &instance_id,
+        run_claimed_instance(app_handle, scheduler, &instance_id),
+    )
+    .await
+}
+
+/// Claims the next ready instance, marking it running in the scheduler.
+async fn claim_next_instance(scheduler: &SharedScheduler) -> Option<String> {
+    let mut sched = scheduler.lock().await;
+
+    let instance_count = sched.instance_count();
+    let state = sched.state();
+    let running_agent = sched.running_instance();
+    tracing::debug!(
+        instance_count,
+        scheduler_state = ?state,
+        running_agent = ?running_agent,
+        "Scheduler status"
+    );
+
+    if matches!(state, SchedulerState::Paused { .. }) {
+        tracing::debug!("Scheduler is paused");
+        return None;
+    }
+
+    sched.next_ready()
+}
+
+/// Awaits `body` for a claimed instance and, if it fails while the instance
+/// still holds the scheduler's single running slot, releases the slot with a
+/// retry after [`START_FAILURE_RETRY_MS`]. Without this an early error left
+/// the instance marked running, blocking every later scheduled run. A missing
+/// agent is retried too rather than removed: a failed workspace delete
+/// restores the workspace and expects its scheduler entries intact, while a
+/// successful delete removes them itself. The error is returned unchanged for
+/// the runner loop to log.
+async fn release_slot_on_error(
+    scheduler: &SharedScheduler,
+    instance_id: &str,
+    body: impl std::future::Future<Output = Result<(), RunnerError>>,
+) -> Result<(), RunnerError> {
+    let result = body.await;
+    if result.is_err() {
+        let mut sched = scheduler.lock().await;
+        if sched.running_instance().map(String::as_str) == Some(instance_id) {
+            let retry_at = chrono::Utc::now().timestamp_millis() + START_FAILURE_RETRY_MS;
+            sched.complete_agent(instance_id, false, retry_at);
+        }
+    }
+    result
+}
+
+/// Runs an instance already claimed by [`claim_next_instance`]. Every `Ok`
+/// path releases the scheduler slot itself; errors are released by
+/// [`release_slot_on_error`].
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 85 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 113 lines against a 100-line budget; split it, do not raise the budget"
+)]
+async fn run_claimed_instance(
+    app_handle: &AppHandle,
+    scheduler: &SharedScheduler,
+    instance_id: &str,
+) -> Result<(), RunnerError> {
+    let state = app_handle.state::<AppState>();
 
     tracing::info!(instance_id = %instance_id, "Running agent");
 
     // Get the instance details
-    let agent_id = {
+    let (workspace_id, agent_id) = {
         let sched = scheduler.lock().await;
         let instance = sched
-            .get_instance(&instance_id)
-            .ok_or_else(|| RunnerError::InstanceNotFound(instance_id.clone()))?;
+            .get_instance(instance_id)
+            .ok_or_else(|| RunnerError::InstanceNotFound(instance_id.to_string()))?;
 
-        instance.agent_id.clone()
+        (instance.workspace_id.clone(), instance.agent_id.clone())
     };
 
     tracing::debug!(agent_id = %agent_id, "Got agent instance");
 
-    let agent_config = load_workspace_agent_as_config(state.inner(), &agent_id)?
+    let agent_config = load_workspace_agent_as_config(state.inner(), &workspace_id, &agent_id)?
         .ok_or_else(|| RunnerError::AgentNotFound(agent_id.clone()))?;
     let workspace_pool = state
         .workspace_db(&agent_config.workspace_id)
@@ -252,7 +273,7 @@ async fn run_next_agent(
         // Remove the instance from scheduler
         {
             let mut sched = scheduler.lock().await;
-            sched.remove_instance(&instance_id);
+            sched.remove_instance(instance_id);
         }
 
         return Ok(());
@@ -269,7 +290,10 @@ async fn run_next_agent(
     // in the workspace. Defer instead: release the instance back to
     // ready-now (without consuming the schedule) so a later tick fires once
     // the workspace is idle.
-    if let Some(existing) = find_manager_session(&workspace_pool, &agent_config).await? {
+    if let Some(existing) = repository::find_manager_session(&workspace_pool, &agent_config.id)
+        .await
+        .map_err(RunnerError::AssistantPersistence)?
+    {
         let busy = repository::session_has_active_run(&workspace_pool, &existing.id)
             .await
             .map_err(RunnerError::AssistantPersistence)?;
@@ -280,19 +304,24 @@ async fn run_next_agent(
                 "Workspace session is busy with an active run; deferring scheduled tick"
             );
             let mut sched = scheduler.lock().await;
-            sched.defer_running_instance(&instance_id);
+            sched.defer_running_instance(instance_id);
             return Ok(());
         }
     }
 
-    let connections = resolve_agent_connections(state.inner(), &agent_config)?;
+    let connection = resolve_agent_connection(state.inner(), &agent_config)?;
 
     let session =
         ensure_workspace_manager_session(app_handle, &workspace_pool, &agent_config).await?;
 
-    let result =
-        run_scheduled_agent_with_fallback(app_handle, &workspace_pool, &session, &connections)
-            .await;
+    let result = run_scheduled_agent(
+        app_handle,
+        &agent_config.workspace_id,
+        &workspace_pool,
+        &session,
+        &connection,
+    )
+    .await;
 
     // Mark agent complete
     let success = match &result {
@@ -333,13 +362,13 @@ async fn run_next_agent(
         // scheduler parks the instance indefinitely. The user has to
         // fix the schedule via the UI before it ticks again.
         sched.complete_agent(
-            &instance_id,
+            instance_id,
             success,
             next_run_at_unix_ms.unwrap_or(i64::MAX),
         );
 
         // Log next run time
-        if let Some(instance) = sched.get_instance(&instance_id) {
+        if let Some(instance) = sched.get_instance(instance_id) {
             let seconds_until_next = instance.seconds_until_next_run();
             tracing::info!(
                 instance_id = %instance_id,
@@ -437,130 +466,22 @@ impl std::error::Error for RunnerError {}
 /// scheduled run.
 ///
 /// This is the **same** session row that the workspace card-click path
-/// resolves via `commands::workspace::find_workspace_session`: the resolver
-/// returns the most-recent non-task session for this manager in this
-/// workspace, and the workspace itself only owns one such session, which
-/// this helper creates as Interactive. User chats and scheduler ticks both
-/// write here, so the user sees one continuous thread regardless of how
-/// the turn was triggered.
-///
-/// Reconcile rules: title and most context fields track the live agent
-/// config; **dynamic per-run fields are preserved** when an existing row
-/// is found:
-/// - `cli_session_id`: the Claude Code CLI session id, set on first turn
-///   and reused across ticks so the model has its own conversation state
-///   to resume. Wiping this on every reconcile would force a fresh CLI
-///   session every 5 min — i.e. the model loses its prior reasoning.
-/// - `inter_agent_call`: only meaningful inside a synchronous inter-agent
-///   call frame; outside one it's already `None`, and overwriting an
-///   in-flight value here would be a data race anyway (this function is
-///   called between turns, never during one).
+/// resolves via `commands::workspace::find_workspace_session`, so the user
+/// sees one continuous thread regardless of how a turn was triggered. The
+/// agent's configuration is resolved when the run starts, so an existing row
+/// is used as-is.
 async fn ensure_workspace_manager_session(
     app_handle: &AppHandle,
     pool: &DbPool,
     agent_config: &crate::config::AgentConfig,
 ) -> Result<crate::assistant::types::AssistantSession, RunnerError> {
-    let state = app_handle.state::<AppState>();
-
-    // Load the workspace's agent roster so the manager session knows
-    // who it can delegate to. Without this, `is_workspace_manager_context`
-    // returns false (empty Vec → no `is_default` entry matches), the
-    // four `workspace_*` tools never get added to the tool list, and
-    // the periodic manager run cannot poll, assign, or request user
-    // input. The on-demand chat path already populates this via
-    // `desired_workspace_context` — this matches that behavior for
-    // scheduled runs. On failure we fall back to an empty Vec rather
-    // than crashing the run; the manager will then act as a solo
-    // agent (current pre-fix behavior).
-    let workspace_agents = if agent_config.workspace_id.is_empty() {
-        Vec::new()
-    } else {
-        crate::commands::workspace::workspace_agent_summaries(&state, &agent_config.workspace_id)
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    workspace_id = %agent_config.workspace_id,
-                    "Failed to load workspace agent summaries for scheduled run: {} — manager tools will be unavailable for this run",
-                    e
-                );
-                Vec::new()
-            })
-    };
-    let desired_context = SessionContext {
-        workspace_id: Some(agent_config.workspace_id.clone()),
-        tool_scopes: agent_config
-            .required_tools()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        mcp_server_ids: agent_config.selected_mcp_server_ids.clone(),
-        execution: agent_config.execution.clone(),
-        cli_session_id: None,
-        cli_session_provider: None,
-        automation_id: Some(agent_config.id.clone()),
-        // Despite the misleading name, `agent_workspace_id` is the *workspace*
-        // id the tools use to derive the on-disk working directory. Setting it
-        // to the agent's own id meant periodic runs wrote to a per-agent dir
-        // that the workspace UI never enumerates — manifesting as the
-        // "0 memories" inconsistency. On-demand chats already pass workspace_id
-        // here via `desired_workspace_context`; this matches them.
-        agent_workspace_id: Some(agent_config.workspace_id.clone()),
-        automation_name: Some(agent_config.name.clone()),
-        inter_agent_call: None,
-        workspace_agents,
-    };
-
-    let existing = find_manager_session(pool, agent_config).await?;
-
-    if let Some(session) = existing {
-        // Preserve dynamic per-run fields that aren't part of the "config
-        // reconcile" — see the doc comment above.
-        let mut merged = desired_context.clone();
-        merged.cli_session_id = session.context.cli_session_id.clone();
-        merged.cli_session_provider = session.context.cli_session_provider.clone();
-        merged.inter_agent_call = session.context.inter_agent_call.clone();
-
-        let session = if session.title.as_deref() != Some(agent_config.name.as_str())
-            || session.context != merged
-        {
-            let mut updated = session;
-            updated.title = Some(agent_config.name.clone());
-            updated.context = merged;
-            updated.updated_at = chrono::Utc::now().timestamp_millis();
-            repository::update_session(pool, &updated)
-                .await
-                .map_err(RunnerError::AssistantPersistence)?
-        } else {
-            session
-        };
-
-        emit_event(
-            app_handle,
-            &session,
-            None,
-            AssistantUiEvent::SessionCreated {
-                session: Box::new(session.clone()),
-            },
-        )
-        .map_err(RunnerError::AssistantSession)?;
-
-        return Ok(session);
-    }
-
-    let session = repository::create_session(
-        pool,
-        CreateSessionParams {
-            // Interactive — the user can type into this same session from
-            // the workspace's chat UI. See the doc comment above.
-            kind: SessionKind::Interactive,
-            title: Some(agent_config.name.clone()),
-            context: desired_context,
-        },
-    )
-    .await
-    .map_err(RunnerError::AssistantSession)?;
+    let session = repository::find_or_create_manager_session(pool, &agent_config.id)
+        .await
+        .map_err(RunnerError::AssistantPersistence)?;
 
     emit_event(
         app_handle,
+        &agent_config.workspace_id,
         &session,
         None,
         AssistantUiEvent::SessionCreated {
@@ -572,215 +493,104 @@ async fn ensure_workspace_manager_session(
     Ok(session)
 }
 
-/// Look up the canonical (workspace, manager) session by `automation_id`.
-///
-/// Kind is intentionally not part of the filter: legacy rows may still be
-/// `BackgroundJob` and we want to keep using them rather than creating a
-/// parallel Interactive row. Going forward, new rows are created Interactive
-/// (see `ensure_workspace_manager_session`).
-async fn find_manager_session(
-    pool: &DbPool,
-    agent_config: &crate::config::AgentConfig,
-) -> Result<Option<crate::assistant::types::AssistantSession>, RunnerError> {
-    Ok(repository::list_sessions(pool)
-        .await
-        .map_err(RunnerError::AssistantPersistence)?
-        .into_iter()
-        .find(|session| session.context.automation_id.as_deref() == Some(agent_config.id.as_str())))
-}
-
-fn resolve_agent_connections(
+fn resolve_agent_connection(
     state: &AppState,
-    agent_config: &crate::config::AgentConfig,
-) -> Result<Vec<ProviderConnection>, RunnerError> {
+    agent_config: &AgentConfig,
+) -> Result<ProviderConnection, RunnerError> {
     let all_connections = state
         .config_manager
         .lock()
         .map_err(|e| RunnerError::AssistantPersistence(format!("Lock error: {}", e)))?
         .get_provider_connections();
 
-    let mut resolved = Vec::new();
-    for connection_id in &agent_config.provider_connection_ids {
-        match all_connections
-            .iter()
-            .find(|connection| connection.id == *connection_id)
-        {
-            Some(connection) if connection.enabled => resolved.push(connection.clone()),
-            Some(connection) => {
-                tracing::warn!(
-                    agent_id = %agent_config.id,
-                    connection_id = %connection.id,
-                    "Skipping disabled provider connection"
-                );
-            }
-            None => {
-                tracing::warn!(
-                    agent_id = %agent_config.id,
-                    connection_id = %connection_id,
-                    "Skipping missing provider connection"
-                );
-            }
-        }
+    let connection = crate::config::first_enabled_connection(
+        &agent_config.provider_connection_ids,
+        &all_connections,
+    )
+    .ok_or_else(|| RunnerError::NoProviderConfigured(agent_config.id.clone()))?;
+
+    if agent_config.provider_connection_ids.first() != Some(&connection.id) {
+        tracing::warn!(
+            agent_id = %agent_config.id,
+            connection_id = %connection.id,
+            "First configured provider connection is disabled or missing; using the first enabled one"
+        );
     }
 
-    if resolved.is_empty() {
-        return Err(RunnerError::NoProviderConfigured(agent_config.id.clone()));
-    }
-
-    Ok(resolved)
+    Ok(connection.clone())
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 38 against a budget of 25"
-)]
-async fn run_scheduled_agent_with_fallback(
+async fn run_scheduled_agent(
     app_handle: &AppHandle,
+    workspace_id: &str,
     pool: &DbPool,
     session: &crate::assistant::types::AssistantSession,
-    connections: &[ProviderConnection],
+    connection: &ProviderConnection,
 ) -> Result<(), RunnerError> {
     let deps = AssistantDeps {
+        workspace_id: workspace_id.to_string(),
         pool: pool.clone(),
         app: app_handle.clone(),
     };
-    let mut last_error: Option<String> = None;
 
-    for (index, connection) in connections.iter().enumerate() {
-        tracing::info!(
-            session_id = %session.id,
-            connection_id = %connection.id,
-            protocol_id = %connection.protocol_id,
-            model_id = %connection.model_id,
-            fallback_index = index,
-            "Starting scheduled assistant run"
-        );
+    tracing::info!(
+        session_id = %session.id,
+        connection_id = %connection.id,
+        protocol_id = %connection.protocol_id,
+        model_id = %connection.model_id,
+        "Starting scheduled assistant run"
+    );
 
-        let run = repository::create_run(
-            pool,
-            CreateRunParams {
-                session_id: session.id.clone(),
-                status: RunStatus::Queued,
-                trigger: RunTrigger::Scheduled,
-                connection_id: connection.id.clone(),
-                protocol_id: connection.protocol_id.clone(),
-                model_id: connection.model_id.clone(),
-                error: None,
-            },
-        )
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
-
-        // Register the cancel token under the DB run.id (the same key the
-        // chat and workspace-task paths use). Previously this was a
-        // synthetic `scheduled:{instance_id}:{uuid}` string, which meant
-        // `assistant_cancel_run(run.id)` couldn't find the token and
-        // scheduled runs were effectively un-cancellable from the UI.
-        let run_registration = runtime::register_run(&run.id);
-        let cancel_token = run_registration.token();
-        let input = RunTurnInput {
+    let run = repository::create_run(
+        pool,
+        CreateRunParams {
             session_id: session.id.clone(),
-            run_id: Some(run.id.clone()),
+            status: RunStatus::Queued,
             trigger: RunTrigger::Scheduled,
             connection_id: connection.id.clone(),
-            cancel_token,
-            inter_agent_call_depth: None,
-            trigger_message_id: None,
-        };
-        let result = engine::run_session_turn(&deps, input).await;
-        drop(run_registration);
-
-        match result {
-            Ok(()) => {
-                if let Err(error) = crate::commands::assistant::start_queued_followup_if_idle(
-                    pool.clone(),
-                    app_handle.clone(),
-                    session.id.clone(),
-                )
-                .await
-                {
-                    tracing::error!(
-                        session_id = %session.id,
-                        error = %error,
-                        "Failed to start queued assistant follow-up after scheduled run"
-                    );
-                }
-                return Ok(());
-            }
-            Err(error) => {
-                let error_text = error.to_string();
-                last_error = Some(error_text.clone());
-                let can_fallback = run_allows_fallback(pool, session.id.as_str(), &run).await?;
-
-                tracing::warn!(
-                    run_id = %run.id,
-                    connection_id = %connection.id,
-                    can_fallback,
-                    error = %error_text,
-                    "Scheduled assistant run failed"
-                );
-
-                if !can_fallback {
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Err(error) = crate::commands::assistant::start_queued_followup_if_idle(
-        pool.clone(),
-        app_handle.clone(),
-        session.id.clone(),
+            protocol_id: connection.protocol_id.clone(),
+            model_id: connection.model_id.clone(),
+            error: None,
+        },
     )
     .await
+    .map_err(RunnerError::AssistantPersistence)?;
+
+    // Register the cancel token under the DB run.id (the same key the
+    // chat and workspace-task paths use) so `assistant_cancel_run(workspace_id, run.id)`
+    // can find it.
+    let run_registration = runtime::register_run(&run.id);
+    let cancel_token = run_registration.token();
+    let input = RunTurnInput {
+        session_id: session.id.clone(),
+        run_id: Some(run.id.clone()),
+        trigger: RunTrigger::Scheduled,
+        connection_id: connection.id.clone(),
+        cancel_token,
+        trigger_message_id: None,
+    };
+    let result = engine::run_session_turn(&deps, input).await;
+    drop(run_registration);
+
+    if let Err(error) =
+        crate::commands::assistant::start_queued_followup_if_idle(deps.clone(), session.id.clone())
+            .await
     {
         tracing::error!(
             session_id = %session.id,
             error = %error,
-            "Failed to start queued assistant follow-up after failed scheduled run"
+            "Failed to start queued assistant follow-up after scheduled run"
         );
     }
 
-    Err(RunnerError::AssistantSession(
-        last_error.unwrap_or_else(|| "scheduled run failed".to_string()),
-    ))
-}
-
-async fn run_allows_fallback(
-    pool: &DbPool,
-    session_id: &str,
-    run: &AssistantRun,
-) -> Result<bool, RunnerError> {
-    let tool_calls = repository::list_tool_calls(pool, session_id, Some(&run.id))
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
-    if !tool_calls.is_empty() {
-        return Ok(false);
-    }
-
-    let messages = repository::list_messages(pool, session_id)
-        .await
-        .map_err(RunnerError::AssistantPersistence)?;
-    let completed_at = run.completed_at.unwrap_or(i64::MAX);
-    let has_assistant_output = messages.iter().any(|message| {
-        message.role == MessageRole::Assistant
-            && message.created_at >= run.started_at
-            && message.created_at <= completed_at
-            && message_contains_output(&message.content)
-    });
-
-    Ok(!has_assistant_output)
-}
-
-fn message_contains_output(content: &[ContentPart]) -> bool {
-    content.iter().any(|part| match part {
-        ContentPart::Text { text } => !text.trim().is_empty(),
-        ContentPart::ToolUse { .. } | ContentPart::ToolResult { .. } => true,
-        // Thinking alone doesn't count as user-visible output — it's
-        // the model's internal reasoning, not a deliverable.
-        ContentPart::Thinking { .. } => false,
-        // A user-attached image is visible, deliverable content.
-        ContentPart::Image { .. } => true,
+    result.map_err(|error| {
+        tracing::warn!(
+            run_id = %run.id,
+            connection_id = %connection.id,
+            error = %error,
+            "Scheduled assistant run failed"
+        );
+        RunnerError::AssistantSession(error.to_string())
     })
 }
 
@@ -799,5 +609,112 @@ mod tests {
 
         let err = RunnerError::AgentNotFound("test-agent".to_string());
         assert!(err.to_string().contains("test-agent"));
+    }
+
+    #[test]
+    fn no_provider_configured_error_names_agent() {
+        let err = RunnerError::NoProviderConfigured("agent-1".to_string());
+        let text = err.to_string();
+        assert!(text.contains("No provider configured"));
+        assert!(text.contains("agent-1"));
+    }
+
+    #[tokio::test]
+    async fn failed_start_releases_scheduler_slot() {
+        let scheduler = crate::agents::create_shared_scheduler();
+        let instance_id = {
+            let mut sched = scheduler.lock().await;
+            sched.register_definition(crate::agents::AgentDefinition::new("agent-1", "Agent"));
+            sched.create_instance("agent-1").unwrap()
+        };
+
+        let claimed = claim_next_instance(&scheduler).await;
+        assert_eq!(claimed.as_deref(), Some(instance_id.as_str()));
+
+        let result = release_slot_on_error(&scheduler, &instance_id, async {
+            Err(RunnerError::NoProviderConfigured("agent-1".to_string()))
+        })
+        .await;
+        assert!(matches!(result, Err(RunnerError::NoProviderConfigured(_))));
+
+        let mut sched = scheduler.lock().await;
+        assert!(!sched.is_running());
+        let instance = sched.get_instance(&instance_id).unwrap();
+        assert!(!instance.is_running);
+        // Retried later, not hot-looped on every tick.
+        assert!(instance.next_run_at.is_some());
+        assert_eq!(sched.next_ready(), None);
+
+        sched.set_instance_next_run_at(&instance_id, None);
+        assert_eq!(sched.next_ready(), Some(instance_id));
+    }
+
+    #[tokio::test]
+    async fn start_for_missing_agent_keeps_instance_for_retry() {
+        let scheduler = crate::agents::create_shared_scheduler();
+        let instance_id = {
+            let mut sched = scheduler.lock().await;
+            sched.register_definition(crate::agents::AgentDefinition::new("agent-1", "Agent"));
+            sched.create_instance("agent-1").unwrap()
+        };
+        claim_next_instance(&scheduler).await;
+
+        let result = release_slot_on_error(&scheduler, &instance_id, async {
+            Err(RunnerError::AgentNotFound("agent-1".to_string()))
+        })
+        .await;
+        assert!(matches!(result, Err(RunnerError::AgentNotFound(_))));
+
+        let sched = scheduler.lock().await;
+        assert!(!sched.is_running());
+        let instance = sched.get_instance(&instance_id).unwrap();
+        assert!(instance.next_run_at.is_some());
+    }
+
+    // The scheduled agent is looked up in its own workspace only: another
+    // workspace's unreadable config must not stop it from starting.
+    #[test]
+    fn scheduled_agent_resolves_despite_another_unreadable_workspace() {
+        use crate::config::workspace_config::WorkspaceConfig;
+        use crate::workspace_index::WorkspaceIndex;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let parent = temp.path().join("workspaces");
+        let mut index = WorkspaceIndex::default();
+        let mut sched = crate::agents::scheduler::Scheduler::new();
+        for (id, main, updated_at) in [
+            ("ws-broken", "main-broken", 2_000),
+            ("ws-ok", "main-ok", 1_000),
+        ] {
+            let root = parent.join(id);
+            let mut config =
+                WorkspaceConfig::new(id.to_string(), id.to_string(), updated_at, main.to_string());
+            config.schedule.enabled = true;
+            workspace_config::save(&root, &config).expect("seed workspace");
+            index.insert_config(root, &config);
+            crate::agents::init::apply_workspace_schedule(&mut sched, &config);
+        }
+        std::fs::write(
+            workspace_config::config_path(&parent.join("ws-broken")),
+            "{ not json",
+        )
+        .expect("corrupt config");
+        let config_manager = crate::ConfigManager::new_for_tests(
+            crate::config::AppConfig::default(),
+            temp.path().join("config.json"),
+        );
+        let state = AppState::new_for_tests(config_manager, index).expect("app state");
+
+        let instance = sched
+            .get_instance(&crate::agents::types::AgentInstance::instance_id_for(
+                "main-ok",
+            ))
+            .expect("healthy workspace is scheduled");
+        let agent =
+            load_workspace_agent_as_config(&state, &instance.workspace_id, &instance.agent_id)
+                .expect("healthy workspace config loads")
+                .expect("scheduled agent resolves");
+        assert_eq!(agent.workspace_id, "ws-ok");
+        assert!(agent.schedule_enabled);
     }
 }

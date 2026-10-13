@@ -19,6 +19,7 @@ const EMPTY_STREAMING: Record<string, string> = {};
 const MESSAGE_PAGE_LIMIT = 100;
 
 interface WorkspaceTaskTranscriptPanelProps {
+  workspaceId: string;
   task: WorkspaceTaskResponse | null;
   /** The crew, so the header shows the assignee's face; empty is fine. */
   roster?: readonly WorkspaceAgentResponse[];
@@ -26,6 +27,7 @@ interface WorkspaceTaskTranscriptPanelProps {
 }
 
 export default function WorkspaceTaskTranscriptPanel({
+  workspaceId,
   task,
   // A constant, not a fresh `[]` per render: the cards below memoize on it.
   roster = EMPTY_ROSTER,
@@ -34,6 +36,9 @@ export default function WorkspaceTaskTranscriptPanel({
   const sessionId = task?.sessionId || null;
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] : null
+  );
+  const streamingText = useAssistantStore(
+    (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
   );
   const [bootstrapError, setBootstrapError] = useState('');
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -62,13 +67,13 @@ export default function WorkspaceTaskTranscriptPanel({
     const load = async () => {
       try {
         const [session, messagePage, runs] = await Promise.all([
-          assistantClient.getSession(sessionId),
+          assistantClient.getSession(workspaceId, sessionId),
           assistantClient.loadSessionMessagesPage({
+            workspaceId,
             sessionId,
             limit: MESSAGE_PAGE_LIMIT,
-            includeAncestors: true,
           }),
-          assistantClient.listRuns(sessionId),
+          assistantClient.listRuns(workspaceId, sessionId),
         ]);
         if (cancelled) return;
         if (!session) {
@@ -101,7 +106,7 @@ export default function WorkspaceTaskTranscriptPanel({
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, workspaceId]);
 
   if (!task) return null;
 
@@ -117,9 +122,6 @@ export default function WorkspaceTaskTranscriptPanel({
 
   const messages = sessionState?.messages || EMPTY_MESSAGES;
   const toolCalls = sessionState?.toolCalls || EMPTY_TOOL_CALLS;
-  const streamingText = useAssistantStore(
-    (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
-  );
   const isStreaming = !!sessionState?.isStreaming;
   const hasOlderMessages = !!sessionState?.hasOlderMessages;
   const isLoadingOlderMessages = !!sessionState?.isLoadingOlderMessages;
@@ -133,10 +135,10 @@ export default function WorkspaceTaskTranscriptPanel({
     store.setOlderMessagesLoading(sessionId, true);
     assistantClient
       .loadSessionMessagesPage({
+        workspaceId,
         sessionId,
         before: current.olderMessageCursor,
         limit: MESSAGE_PAGE_LIMIT,
-        includeAncestors: true,
       })
       .then((page) => {
         useAssistantStore
@@ -223,7 +225,7 @@ export default function WorkspaceTaskTranscriptPanel({
             <ChatMessageList
               key={sessionId}
               messages={messages}
-              workspaceId={task.workspaceId}
+              workspaceId={workspaceId}
               toolCalls={toolCalls}
               streamingText={streamingText}
               isStreaming={isStreaming}

@@ -57,7 +57,7 @@ export type AssistantEventEnvelope = { sessionId: string, runId: string | null,
  * run-lifecycle events (RunStarted/RunCompleted) back to a
  * workspace card without having to track session→workspace itself.
  */
-workspaceId: string | null, timestamp: bigint, event: AssistantUiEvent, };
+workspaceId: string, timestamp: bigint, event: AssistantUiEvent, };
 
 export type AssistantMessage = { id: string, sessionId: string, role: MessageRole, content: Array<ContentPart>, createdAt: bigint, providerMetadata: JsonValue | null, };
 
@@ -65,16 +65,15 @@ export type AssistantMessageCursor = { sessionId: string, createdAt: bigint, mes
 
 export type AssistantMessagePage = { messages: Array<AssistantMessage>, toolCalls: Array<ToolInvocation>, nextCursor: AssistantMessageCursor | null, hasMore: boolean, 
 /**
- * Total number of messages in the conversation (the requested session
- * plus, when ancestors were included, its whole rotation chain) — not
- * just this page. Lets the UI show a true conversation count while only
- * a window of messages is loaded.
+ * Total number of messages in the session — not just this page. Lets the
+ * UI show a true conversation count while only a window of messages is
+ * loaded.
  */
 totalCount: number, };
 
-export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, error: string | null, notices?: Array<RunNotice>, };
+export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, error: string | null, };
 
-export type AssistantSession = { id: string, kind: SessionKind, title: string | null, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
+export type AssistantSession = { id: string, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
 
 export type AssistantUiEvent = { "type": "session_created", "payload": { session: AssistantSession, } } | { "type": "message_created", "payload": { message: AssistantMessage, } } | { "type": "message_deleted", "payload": { message_id: string, } } | { "type": "queued_messages_delivered", "payload": { message_ids: Array<string>, } } | { "type": "session_compacted", "payload": { compaction: AssistantCompaction, summary_message: AssistantMessage, } } | { "type": "run_queued", "payload": { run: AssistantRun, } } | { "type": "run_started", "payload": { run: AssistantRun, } } | { "type": "assistant_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_thinking_delta", "payload": { message_id: string, text: string, } } | { "type": "assistant_message_completed", "payload": { message: AssistantMessage, } } | { "type": "assistant_message_updated", "payload": { message: AssistantMessage, } } | { "type": "tool_call_started", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_completed", "payload": { tool_call: ToolInvocation, } } | { "type": "tool_call_failed", "payload": { tool_call: ToolInvocation, } } | { "type": "run_completed", "payload": { run: AssistantRun, } } | { "type": "run_failed", "payload": { run: AssistantRun, } } | { "type": "run_cancelled", "payload": { run: AssistantRun, } } | { "type": "ask_user_requested", "payload": { pending_id: string, question: string, options: Array<AskUserOption> | null, 
 /**
@@ -114,9 +113,42 @@ export type CreateProviderConnectionRequest = { name: string, protocolId: string
  */
 providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
 
+export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
+
+export type ExecutionSandboxConfig = { network: SandboxNetworkConfig, sessionBus: SandboxSessionBusConfig, };
+
+export type FilesystemCapabilityConfig = { 
+/**
+ * Additional path grants. Used for two things now that the sandbox
+ * auto-binds the user's `$HOME` read-only:
+ * 1. Read-write upgrades to specific subpaths inside `$HOME`
+ *    (e.g., a tool cache directory the agent needs to write).
+ * 2. Any access (read or write) to paths outside `$HOME` (e.g.,
+ *    `/mnt/data`, `/opt/external`).
+ *
+ * Entries land here either from explicit user edits in agent
+ * settings or from `fs_request_grant` approvals (the latter
+ * carries provenance via `GrantOrigin::Approval`).
+ */
+extraPaths: Array<FilesystemPathGrant>, };
+
 export type FilesystemPathAccess = "read_only" | "read_write";
 
-export type InterAgentCallContext = { callId: string, callerAgentId: string | null, callerSessionId: string, callerRunId: string, callerToolCallId: string | null, calleeAgentId: string, exposedToolName: string, };
+export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess, 
+/**
+ * Set by paths that landed in `extra_paths` via the approval flow.
+ * Pre-existing grants on disk have no provenance and deserialize as
+ * `None`; the UI shows those as `Manual`.
+ */
+origin?: GrantOrigin | null, };
+
+/**
+ * Provenance for a `FilesystemPathGrant`. Lets the agent-settings UI tell
+ * the user *why* a path is in the grant list: was it added by hand, derived
+ * from the credentials preset, or accepted via an in-run approval modal?
+ * `None` (the historical shape) is treated as `Manual` by the UI.
+ */
+export type GrantOrigin = { "kind": "manual" } | { "kind": "credentialsPreset" } | { "kind": "approval", reason: string, grantedAtUnixMs: bigint, };
 
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
@@ -331,13 +363,30 @@ providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: strin
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
-export type RunNotice = { kind: RunNoticeKind, message: string, timestamp: bigint, };
-
-export type RunNoticeKind = "command_denied" | "path_denied" | "sandbox_unavailable" | "path_granted" | "path_grant_denied";
-
 export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" | "completed_with_warnings" | "failed" | "cancelled";
 
-export type RunTrigger = "user_message" | "retry" | "scheduled" | "manual_automation" | "inter_agent_call" | "workspace_task";
+export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task";
+
+export type SandboxNetworkConfig = "enabled" | "disabled";
+
+/**
+ * Whether the agent's sandbox can reach the user's session D-Bus.
+ *
+ * `Allow` (the default) exposes the user's D-Bus session bus socket
+ * (`$XDG_RUNTIME_DIR/bus`) inside the sandbox and lets
+ * `DBUS_SESSION_BUS_ADDRESS` + `XDG_RUNTIME_DIR` through the env filter.
+ * This enables every CLI that talks to libsecret / `gnome-keyring-daemon`
+ * over D-Bus — most importantly `gh`, but also `git-credential-libsecret`,
+ * `secret-tool`, password managers, and so on. It matches Codex's
+ * "agent acts as me on my desktop" reach while CLAI's path-grant flow
+ * keeps file access narrow.
+ *
+ * `Deny` strips the bus socket bind and the corresponding env vars.
+ * Use for high-isolation agents — running untrusted code, agents that
+ * don't need any host integration, or workspaces where you specifically
+ * want keyring contents kept out of reach.
+ */
+export type SandboxSessionBusConfig = "deny" | "allow";
 
 /**
  * Discriminated union describing *how* the manager's next run is
@@ -371,18 +420,25 @@ export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways",
 
 export type SegmentKind = "simple" | "opaque";
 
-export type SessionContext = { workspaceId: string | null, toolScopes: Array<string>, mcpServerIds: Array<string>, execution: unknown, cliSessionId: string | null, 
+export type SessionContext = { 
+/**
+ * The agent that owns this session; its configuration is resolved when
+ * each run starts (`assistant::run_context`).
+ */
+automationId?: string | null, cliSessionId?: string | null, 
 /**
  * The CLI provider that owns `cli_session_id`. A session id is
  * provider-specific (Claude generates its own UUID; Codex returns a
  * server-side thread id), so switching providers must NOT reuse it.
  * `None` for sessions created before this was tracked.
  */
-cliSessionProvider: string | null, automationId: string | null, agentWorkspaceId: string | null, automationName: string | null, interAgentCall: InterAgentCallContext | null, workspaceAgents?: Array<WorkspaceAgentSummary>, };
-
-export type SessionKind = "interactive" | "background_job";
+cliSessionProvider?: string | null, };
 
 export type SetSkillSourceEnabledRequest = { id: string, enabled: boolean, };
+
+export type ShellAccessMode = "off" | "restricted" | "full";
+
+export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, };
 
 export type SkillCatalogResponse = { sources: Array<SkillSourceResponse>, skills: Array<SkillDefinition>, diagnostics: Array<SkillSourceDiagnostic>, };
 
@@ -460,7 +516,17 @@ export type UpdateProviderConnectionRequest = { id: string, name: string, protoc
  */
 providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
 
-export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, role: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
+export type WebCapabilityConfig = { enabled: boolean, };
+
+export type WorkspaceAgentCreateRequest = { workspaceId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, 
+/**
+ * Optional explicit id; if absent, a fresh UUID is generated.
+ */
+id?: string, };
+
+export type WorkspaceAgentDetail = { id: string, workspaceId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, isDefault: boolean, createdAt: bigint, updatedAt: bigint, };
+
+export type WorkspaceAgentResponse = { id: string, workspaceId: string, agentDefinitionId: string, displayName: string, enabled: boolean, isDefault: boolean, agentName: string | null, agentDescription: string | null, providerConnectionIds: Array<string>, skillIds: Array<string>, 
 /**
  * MCP server IDs selected for this agent. Surfaced so the Fleet
  * chat input (which routes messages to the workspace's default
@@ -480,7 +546,9 @@ execution: unknown,
  */
 avatar?: AgentAvatarRef | null, createdAt: bigint, updatedAt: bigint, };
 
-export type WorkspaceAgentSummary = { id: string, agentDefinitionId: string, displayName: string, role: string, isDefault: boolean, description?: string | null, };
+export type WorkspaceAgentSummary = { id: string, displayName: string, isDefault: boolean, description?: string | null, };
+
+export type WorkspaceAgentUpdateRequest = { workspaceId: string, agentId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, };
 
 export type WorkspaceDetails = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, 
 /**
@@ -489,7 +557,11 @@ export type WorkspaceDetails = { workspaceId: string, kind: string, title: strin
  * config (the canonical store). Disjoint from
  * `selected_mcp_server_ids`, which is the effective enabled set.
  */
-disabledMcpServerIds: Array<string>, session: AssistantSession | null, runs: Array<AssistantRun>, memories: Array<WorkspaceFileEntry>, 
+disabledMcpServerIds: Array<string>, session: AssistantSession | null, 
+/**
+ * The newest run and the active run, if different; never the full history.
+ */
+runs: Array<AssistantRun>, memories: Array<WorkspaceFileEntry>, 
 /**
  * True recursive artifact count for the workspace root, independent of
  * any list cap. The artifacts panel lazy-loads its tree one directory
@@ -602,4 +674,4 @@ starred: boolean, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 
-export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: string, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, userResponse: string | null, userResponseAt: bigint | null, };
+export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: string, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };

@@ -3,20 +3,21 @@ use crate::assistant::{
     providers::types::is_context_limit_error,
 };
 use futures::StreamExt;
-use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::Manager;
 
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
-use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::providers;
 use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::repository;
 use crate::assistant::repository::CreateMessageParams;
+use crate::assistant::run_context::RunContext;
 use crate::assistant::run_lifecycle::{
-    cancel_run, complete_run_with_notices, fail_run, record_tool_call_result,
-    record_tool_call_started, resolve_run_id, MissingToolCall, ToolCallOutcome,
+    cancel_run, complete_run, fail_run, record_tool_call_result, record_tool_call_started,
+    resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
-use crate::assistant::system_prompt::{build_system_prompt, live_agent_description};
+use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::turn_common::{
     build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
@@ -27,7 +28,6 @@ use crate::assistant::types::{
     ToolDefinition, ToolInvocationDraft,
 };
 use crate::assistant::{compaction, compaction_service};
-use crate::AppState;
 
 #[allow(
     clippy::cognitive_complexity,
@@ -41,11 +41,11 @@ pub async fn run_session_turn(
     deps: &AssistantDeps,
     input: RunTurnInput,
     session: AssistantSession,
+    run_context: &Arc<RunContext>,
     connection: ProviderConnection,
-    workspace_root: Option<PathBuf>,
 ) -> Result<(), AssistantEngineError> {
     let Some((run_id, system_message, tool_defs, mut state, adapter)) =
-        start_api_turn(deps, &input, &session, &connection, workspace_root).await?
+        start_api_turn(deps, &input, &session, run_context, &connection).await?
     else {
         return Ok(());
     };
@@ -163,8 +163,7 @@ pub async fn run_session_turn(
         state.iteration += 1;
     }
 
-    let notices = state.tool_context.take_notices();
-    complete_run_with_notices(deps, &session, &run_id, &notices).await?;
+    complete_run(deps, &session, &run_id, state.tool_context.had_warnings()).await?;
 
     Ok(())
 }
@@ -274,8 +273,7 @@ async fn accept_api_stream(
     if !queued_message_ids_in_request.is_empty() {
         // The queued messages just became part of this run's request —
         // tell the FE so their "Queued" chips clear.
-        let _ = emit_event(
-            &deps.app,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::QueuedMessagesDelivered {
@@ -300,8 +298,7 @@ async fn accept_api_stream(
         )
         .await?;
 
-    let _ = emit_event(
-        &deps.app,
+    let _ = deps.emit(
         session,
         Some(run_id),
         AssistantUiEvent::MessageCreated {
@@ -316,8 +313,8 @@ async fn start_api_turn(
     deps: &AssistantDeps,
     input: &RunTurnInput,
     session: &AssistantSession,
+    run_context: &Arc<RunContext>,
     connection: &ProviderConnection,
-    workspace_root: Option<PathBuf>,
 ) -> Result<
     Option<(
         String,
@@ -333,12 +330,7 @@ async fn start_api_turn(
 
     // Transition run to Running
     let run = repository::update_run_status(&deps.pool, &run_id, RunStatus::Running, None).await?;
-    let _ = emit_event(
-        &deps.app,
-        session,
-        Some(&run_id),
-        AssistantUiEvent::RunStarted { run },
-    );
+    let _ = deps.emit(session, Some(&run_id), AssistantUiEvent::RunStarted { run });
 
     if input.cancel_token.is_cancelled() {
         cancel_run(deps, session, &run_id).await?;
@@ -352,13 +344,12 @@ async fn start_api_turn(
         let state = deps.app.state::<crate::AppState>();
         let mut manager = state.mcp_client_manager.lock().await;
         manager
-            .list_tools_for_servers(&session.context.mcp_server_ids)
+            .list_tools_for_servers(&run_context.mcp_server_ids)
             .await
     };
-    let tool_defs = tools::available_tools(&session.context, &external_tools);
+    let tool_defs = tools::available_tools(run_context, &external_tools);
 
     // Build execution context for tool calls
-    let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     // Run-scoped filesystem grants accepted via fs_request_grant stay visible
     // to subsequent tool calls through this shared context.
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -367,32 +358,16 @@ async fn start_api_turn(
 
     // === Tool execution loop ===
     // Build system prompt (prepended to every API call, not persisted).
-    // The agent description (user-set seed + skill content) is computed
-    // fresh from the workspace config on every turn — see
-    // workspace_agent_runtime_description for the rationale.
-    let agent_description = live_agent_description(&deps.app, &session.context);
-    let system_message = build_system_prompt(
-        &session.context,
-        agent_description.as_deref(),
-        &tool_defs,
-        &input.trigger,
-        workspace_root.as_deref(),
-    );
+    let system_message =
+        build_system_prompt(run_context, &deps.workspace_id, &tool_defs, &input.trigger);
 
     let tool_context = ToolExecutionContext {
         session_id: session.id.clone(),
         run_id: run_id.clone(),
         tool_call_id: None,
         cancel_token: input.cancel_token.clone(),
-        workspace_id: session.context.workspace_id.clone(),
-        mcp_server_ids: session.context.mcp_server_ids.clone(),
-        agent_workspace_id: session.context.agent_workspace_id.clone(),
-        workspace_root: workspace_root.clone(),
-        automation_id: session.context.automation_id.clone(),
-        workspace_agents: session.context.workspace_agents.clone(),
-        inter_agent_call_depth: input.inter_agent_call_depth,
-        execution: session.context.execution.clone(),
-        notices,
+        run_context: Arc::clone(run_context),
+        had_warnings: Default::default(),
         session_grants,
         session_allowed_command_prefixes,
         session_blocked_command_prefixes,
@@ -411,7 +386,7 @@ async fn start_api_turn(
     // Persist the trigger message as a run boundary marker so the LLM can see
     // where one run ends and the next begins. Without this, the LLM sees old
     // tool results from prior runs and may skip re-running tools.
-    if let Some(trigger_content) = build_trigger_message(session, &input.trigger) {
+    if let Some(trigger_content) = build_trigger_message(run_context, &input.trigger) {
         let boundary_msg = state
             .conversation
             .create_message(
@@ -424,8 +399,7 @@ async fn start_api_turn(
                 },
             )
             .await?;
-        let _ = emit_event(
-            &deps.app,
+        let _ = deps.emit(
             session,
             Some(&run_id),
             AssistantUiEvent::MessageCreated {
@@ -482,8 +456,7 @@ async fn prepare_api_request(
         {
             Ok(Some(outcome)) => {
                 state.compaction_attempt.record_success();
-                let _ = emit_event(
-                    &deps.app,
+                let _ = deps.emit(
                     session,
                     Some(run_id),
                     AssistantUiEvent::SessionCompacted {
@@ -531,7 +504,11 @@ async fn prepare_api_request(
     // CLI providers ingest images via their own mechanism (file paths in the
     // CLI invocation), not this HTTP request, so they don't need inlining.
     let images = if supports_images && !providers::is_cli_provider(&connection.protocol_id) {
-        resolve_request_images(deps, session, &provider_messages).await
+        resolve_request_images(
+            &state.tool_context.run_context.workspace_root,
+            &provider_messages,
+        )
+        .await
     } else {
         std::collections::HashMap::new()
     };
@@ -569,8 +546,7 @@ async fn try_context_limit_recovery(
     {
         Ok(Some(outcome)) => {
             state.compaction_attempt.record_success();
-            let _ = emit_event(
-                &deps.app,
+            let _ = deps.emit(
                 session,
                 Some(run_id),
                 AssistantUiEvent::SessionCompacted {
@@ -616,8 +592,7 @@ async fn finalize_api_message(
         let updated_message = conversation
             .update_message_content(&deps.pool, message_id, &final_content)
             .await?;
-        let _ = emit_event(
-            &deps.app,
+        let _ = deps.emit(
             session,
             Some(run_id),
             AssistantUiEvent::AssistantMessageCompleted {
@@ -716,7 +691,7 @@ async fn consume_api_stream(
     message_id: &str,
 ) -> (StreamExit, Vec<ContentPart>, Vec<ToolInvocationDraft>) {
     consume_api_stream_with_sink(stream, cancel, message_id, |event| {
-        let _ = emit_event(&deps.app, session, Some(run_id), event);
+        let _ = deps.emit(session, Some(run_id), event);
     })
     .await
 }
@@ -805,37 +780,16 @@ mod tests {
     use crate::assistant::types::ContentPart;
     use crate::assistant::types::RunTrigger;
     use crate::assistant::types::SessionContext;
-    use crate::assistant::types::SessionKind;
 
     #[tokio::test]
     async fn partial_assistant_output_survives_database_reload() {
-        use crate::assistant::repository::CreateSessionParams;
         use crate::assistant::types::SessionContext;
         use crate::db::test_support::workspace_pool;
 
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context: SessionContext {
-                    workspace_id: None,
-                    tool_scopes: vec![],
-                    mcp_server_ids: vec![],
-                    execution: Default::default(),
-                    cli_session_id: None,
-                    cli_session_provider: None,
-                    automation_id: None,
-                    agent_workspace_id: None,
-                    automation_name: None,
-                    inter_agent_call: None,
-                    workspace_agents: vec![],
-                },
-            },
-        )
-        .await
-        .unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
         let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
         let placeholder = conversation
             .create_message(
@@ -871,32 +825,12 @@ mod tests {
 
     #[tokio::test]
     async fn streamed_text_and_tool_result_replay_in_order() {
-        use crate::assistant::repository::CreateSessionParams;
         use crate::db::test_support::workspace_pool;
 
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context: SessionContext {
-                    workspace_id: None,
-                    tool_scopes: vec![],
-                    mcp_server_ids: vec![],
-                    execution: Default::default(),
-                    cli_session_id: None,
-                    cli_session_provider: None,
-                    automation_id: None,
-                    agent_workspace_id: None,
-                    automation_name: None,
-                    inter_agent_call: None,
-                    workspace_agents: vec![],
-                },
-            },
-        )
-        .await
-        .unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
         let mut conversation = RunConversation::load(&pool, &session.id).await.unwrap();
         let assistant = conversation
             .create_message(
@@ -1451,17 +1385,10 @@ mod tests {
         }
     }
 
-    fn make_session(automation_name: Option<&str>) -> crate::assistant::types::AssistantSession {
-        crate::assistant::types::AssistantSession {
-            id: "session".to_string(),
-            kind: SessionKind::BackgroundJob,
-            title: None,
-            context: SessionContext {
-                automation_name: automation_name.map(str::to_string),
-                ..Default::default()
-            },
-            created_at: 0,
-            updated_at: 0,
+    fn run_context(automation_name: Option<&str>) -> RunContext {
+        RunContext {
+            automation_name: automation_name.map(str::to_string),
+            ..RunContext::default()
         }
     }
 
@@ -1872,7 +1799,7 @@ mod tests {
 
     #[test]
     fn build_trigger_message_scheduled_emits_user_marker_with_automation_name() {
-        let session = make_session(Some("Health Monitor"));
+        let session = run_context(Some("Health Monitor"));
         let message = build_trigger_message(&session, &RunTrigger::Scheduled)
             .expect("scheduled returns Some");
 
@@ -1889,7 +1816,7 @@ mod tests {
     fn build_trigger_message_scheduled_falls_back_when_automation_name_missing() {
         // No automation_name → fallback string "automation" appears in the
         // marker.
-        let session = make_session(None);
+        let session = run_context(None);
         let message = build_trigger_message(&session, &RunTrigger::Scheduled)
             .expect("scheduled returns Some");
 
@@ -1902,7 +1829,7 @@ mod tests {
 
     #[test]
     fn build_trigger_message_manual_automation_emits_manual_marker() {
-        let session = make_session(Some("Daily Report"));
+        let session = run_context(Some("Daily Report"));
         let message = build_trigger_message(&session, &RunTrigger::ManualAutomation)
             .expect("manual returns Some");
 
@@ -1917,13 +1844,8 @@ mod tests {
 
     #[test]
     fn build_trigger_message_returns_none_for_user_driven_triggers() {
-        let session = make_session(Some("ignored"));
-        for trigger in &[
-            RunTrigger::UserMessage,
-            RunTrigger::Retry,
-            RunTrigger::InterAgentCall,
-            RunTrigger::WorkspaceTask,
-        ] {
+        let session = run_context(Some("ignored"));
+        for trigger in &[RunTrigger::UserMessage, RunTrigger::WorkspaceTask] {
             assert!(
                 build_trigger_message(&session, trigger).is_none(),
                 "expected None for {:?}",
@@ -2041,21 +1963,12 @@ fn normalized_assistant_parts(parts: &[ContentPart]) -> Vec<ContentPart> {
 /// logged and skipped (the adapter then omits that image block but still sends
 /// the surrounding text). Only called for image-capable API connections.
 async fn resolve_request_images(
-    deps: &AssistantDeps,
-    session: &crate::assistant::types::AssistantSession,
+    root: &std::path::Path,
     messages: &[ProviderInputMessage],
 ) -> std::collections::HashMap<String, crate::assistant::types::ResolvedImage> {
     use base64::Engine as _;
     let mut out: std::collections::HashMap<String, crate::assistant::types::ResolvedImage> =
         std::collections::HashMap::new();
-    let Some(root) = session
-        .context
-        .workspace_id
-        .as_deref()
-        .and_then(|id| deps.app.state::<AppState>().workspace_root(id))
-    else {
-        return out;
-    };
     for message in messages {
         for part in &message.content {
             if let ContentPart::Image {
@@ -2073,7 +1986,7 @@ async fn resolve_request_images(
                 // Resolve through symlinks and refuse anything that escapes the
                 // store (a non-store ref, a missing file, or a symlinked entry
                 // pre-planted to point outside `.clai/images/`).
-                let Some(full) = crate::assistant::image_store::resolve_store_path(&root, path)
+                let Some(full) = crate::assistant::image_store::resolve_store_path(root, path)
                 else {
                     tracing::warn!(image_id = %id, %path, "Rejecting non-store/escaping image path; skipping");
                     continue;

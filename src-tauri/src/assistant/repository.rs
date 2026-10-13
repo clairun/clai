@@ -6,16 +6,10 @@ use uuid::Uuid;
 
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantRun, AssistantSession, CompactionStatus,
-    CompactionStrategy, CompactionTrigger, ContentPart, MessageRole, RunNotice, RunStatus,
-    RunTrigger, SessionContext, SessionKind, ToolCallStatus, ToolInvocation,
+    CompactionStrategy, CompactionTrigger, ContentPart, MessageRole, RunStatus, RunTrigger,
+    SessionContext, ToolCallStatus, ToolInvocation,
 };
-use crate::db::DbPool;
-
-pub struct CreateSessionParams {
-    pub kind: SessionKind,
-    pub title: Option<String>,
-    pub context: SessionContext,
-}
+use crate::db::{enum_text, parse_enum_text, DbPool};
 
 pub struct CreateMessageParams {
     pub session_id: String,
@@ -73,6 +67,9 @@ fn parse_json<T: DeserializeOwned>(value: &str, context: &str) -> Result<T, Stri
     serde_json::from_str(value).map_err(|e| format!("Failed to parse {}: {}", context, e))
 }
 
+/// Non-terminal run statuses, for `status IN` clauses.
+const ACTIVE_RUN_STATUSES: &str = "('queued', 'running', 'waiting_for_tool')";
+
 fn parse_optional_json<T: DeserializeOwned>(
     value: Option<String>,
     context: &str,
@@ -83,8 +80,6 @@ fn parse_optional_json<T: DeserializeOwned>(
 fn map_session_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantSession, String> {
     Ok(AssistantSession {
         id: row.get("id"),
-        kind: parse_json::<SessionKind>(&row.get::<String, _>("kind"), "session kind")?,
-        title: row.get("title"),
         context: parse_json::<SessionContext>(
             &row.get::<String, _>("context_json"),
             "session context",
@@ -98,7 +93,7 @@ fn map_message_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantMessage, St
     Ok(AssistantMessage {
         id: row.get("id"),
         session_id: row.get("session_id"),
-        role: parse_json::<MessageRole>(&row.get::<String, _>("role"), "message role")?,
+        role: parse_enum_text::<MessageRole>(row.get::<String, _>("role"), "message role")?,
         content: parse_json::<Vec<ContentPart>>(
             &row.get::<String, _>("content_json"),
             "message content",
@@ -122,16 +117,14 @@ fn map_run_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantRun, String> {
     Ok(AssistantRun {
         id: row.get("id"),
         session_id: row.get("session_id"),
-        status: parse_json::<RunStatus>(&row.get::<String, _>("status"), "run status")?,
-        trigger: parse_json::<RunTrigger>(&row.get::<String, _>("trigger"), "run trigger")?,
+        status: parse_enum_text::<RunStatus>(row.get::<String, _>("status"), "run status")?,
+        trigger: parse_enum_text::<RunTrigger>(row.get::<String, _>("trigger"), "run trigger")?,
         connection_id: row.get("connection_id"),
         protocol_id: row.get("protocol_id"),
         model_id: row.get("model_id"),
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
         error: row.get("error"),
-        notices: parse_optional_json::<Vec<RunNotice>>(row.get("notices_json"), "run notices")?
-            .unwrap_or_default(),
     })
 }
 
@@ -139,16 +132,16 @@ fn map_compaction_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantCompacti
     Ok(AssistantCompaction {
         id: row.get("id"),
         session_id: row.get("session_id"),
-        trigger: parse_json::<CompactionTrigger>(
-            &row.get::<String, _>("trigger"),
+        trigger: parse_enum_text::<CompactionTrigger>(
+            row.get::<String, _>("trigger"),
             "compaction trigger",
         )?,
-        strategy: parse_json::<CompactionStrategy>(
-            &row.get::<String, _>("strategy"),
+        strategy: parse_enum_text::<CompactionStrategy>(
+            row.get::<String, _>("strategy"),
             "compaction strategy",
         )?,
-        status: parse_json::<CompactionStatus>(
-            &row.get::<String, _>("status"),
+        status: parse_enum_text::<CompactionStatus>(
+            row.get::<String, _>("status"),
             "compaction status",
         )?,
         source_from_message_id: row.get("source_from_message_id"),
@@ -166,15 +159,13 @@ fn map_compaction_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantCompacti
 
 pub async fn create_session(
     pool: &DbPool,
-    params: CreateSessionParams,
+    context: SessionContext,
 ) -> Result<AssistantSession, String> {
     let now = now_ms();
 
     let session = AssistantSession {
         id: Uuid::new_v4().to_string(),
-        kind: params.kind,
-        title: params.title,
-        context: params.context,
+        context,
         created_at: now,
         updated_at: now,
     };
@@ -182,13 +173,11 @@ pub async fn create_session(
     sqlx::query(
         r#"
         INSERT INTO assistant_sessions
-            (id, kind, title, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, context_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
         "#,
     )
     .bind(&session.id)
-    .bind(to_json_string(&session.kind)?)
-    .bind(&session.title)
     .bind(to_json_string(&session.context)?)
     .bind(session.created_at)
     .bind(session.updated_at)
@@ -203,26 +192,23 @@ pub async fn create_session(
 /// single SQLite transaction.
 ///
 /// `assignTask` creates the task row first (with `session_id = NULL`), then the
-/// `BackgroundJob` session that runs the task, then later UPDATEs the task row
+/// session that runs the task, then later UPDATEs the task row
 /// to stamp the session id. Between the session INSERT and that UPDATE there is
-/// a window where the new session is visible to `list_non_task_sessions` but
-/// has no `workspace_tasks.session_id` link, so the resolver would treat it as
-/// the most-recent non-task session and briefly hijack the conversation view
-/// for self-assigned tasks (manager→manager). Bundling the two writes into one
-/// transaction closes that window: the session only becomes visible to a
-/// concurrent resolver after the task row already points at it, so the anti-join
-/// excludes it.
+/// a window where the new session is visible to `find_manager_session` but has
+/// no `workspace_tasks.session_id` link, so a self-assigned task's session
+/// (manager→manager) would briefly be taken as the manager conversation.
+/// Bundling the two writes into one transaction closes that window: the session
+/// only becomes visible to a concurrent reader after the task row already
+/// points at it, so the anti-join excludes it.
 pub async fn create_session_and_link_task(
     pool: &DbPool,
-    params: CreateSessionParams,
+    context: SessionContext,
     task_id: &str,
 ) -> Result<AssistantSession, String> {
     let now = now_ms();
     let session = AssistantSession {
         id: Uuid::new_v4().to_string(),
-        kind: params.kind,
-        title: params.title,
-        context: params.context,
+        context,
         created_at: now,
         updated_at: now,
     };
@@ -235,13 +221,11 @@ pub async fn create_session_and_link_task(
     sqlx::query(
         r#"
         INSERT INTO assistant_sessions
-            (id, kind, title, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+            (id, context_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
         "#,
     )
     .bind(&session.id)
-    .bind(to_json_string(&session.kind)?)
-    .bind(&session.title)
     .bind(to_json_string(&session.context)?)
     .bind(session.created_at)
     .bind(session.updated_at)
@@ -273,7 +257,7 @@ pub async fn get_session(
 ) -> Result<Option<AssistantSession>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, kind, title, context_json, created_at, updated_at
+        SELECT id, context_json, created_at, updated_at
         FROM assistant_sessions
         WHERE id = ?
         "#,
@@ -286,53 +270,54 @@ pub async fn get_session(
     row.as_ref().map(map_session_row).transpose()
 }
 
-pub async fn list_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, String> {
-    let rows = sqlx::query(
+/// Canonical conversation session for a workspace manager: the newest session
+/// whose `automationId` is `manager_id`, excluding sessions
+/// linked from `workspace_tasks.session_id` (a self-assigned task carries the
+/// manager's automation id). `NOT EXISTS` keeps task rows with a NULL
+/// `session_id` harmless. Ties on `updated_at` are broken by `id DESC`.
+pub async fn find_manager_session(
+    pool: &DbPool,
+    manager_id: &str,
+) -> Result<Option<AssistantSession>, String> {
+    let row = sqlx::query(
         r#"
-        SELECT id, kind, title, context_json, created_at, updated_at
-        FROM assistant_sessions
-        ORDER BY updated_at DESC
+        SELECT s.id, s.context_json, s.created_at, s.updated_at
+        FROM assistant_sessions AS s
+        WHERE json_extract(s.context_json, '$.automationId') = ?
+          AND NOT EXISTS (
+              SELECT 1 FROM workspace_tasks AS t WHERE t.session_id = s.id
+          )
+        ORDER BY s.updated_at DESC, s.id DESC
+        LIMIT 1
         "#,
     )
-    .fetch_all(pool)
+    .bind(manager_id)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("Failed to list assistant sessions: {}", e))?;
+    .map_err(|e| format!("Failed to find manager session: {}", e))?;
 
-    rows.iter().map(map_session_row).collect()
+    row.as_ref().map(map_session_row).transpose()
 }
 
-/// Sessions that are NOT task delegations.
-///
-/// `workspace_assignTask` runs each delegated task in its own `BackgroundJob`
-/// session whose id is recorded in `workspace_tasks.session_id`. Such sessions
-/// must never be mistaken for a workspace's canonical conversation — and when a
-/// manager assigns a task to *itself* the task session even carries the
-/// manager's own `automation_id`, so an `automation_id` filter alone would not
-/// exclude it. Excluding task-linked sessions here, in SQL, keeps resolution
-/// independent of task volume (the unbounded set of task rows is never loaded)
-/// and leaves exactly the candidate conversations: the interactive chat plus
-/// any non-task `BackgroundJob` session (e.g. a scheduled-run conversation that
-/// older builds forked into its own row).
-///
-/// The `session_id IS NOT NULL` guard in the subquery is required: a `NULL` in
-/// a `NOT IN (...)` set makes the whole predicate `NULL` (never true) in SQL,
-/// which would otherwise return zero rows whenever any task has no session yet.
-pub async fn list_non_task_sessions(pool: &DbPool) -> Result<Vec<AssistantSession>, String> {
-    let rows = sqlx::query(
-        r#"
-        SELECT id, kind, title, context_json, created_at, updated_at
-        FROM assistant_sessions
-        WHERE id NOT IN (
-            SELECT session_id FROM workspace_tasks WHERE session_id IS NOT NULL
-        )
-        ORDER BY updated_at DESC
-        "#,
+/// The manager's canonical session, created on first use. An existing row is
+/// returned untouched: the agent's configuration is resolved per run, so there
+/// is nothing to refresh, and a write here could clobber a CLI session id saved
+/// by a concurrent run.
+pub async fn find_or_create_manager_session(
+    pool: &DbPool,
+    manager_id: &str,
+) -> Result<AssistantSession, String> {
+    if let Some(session) = find_manager_session(pool, manager_id).await? {
+        return Ok(session);
+    }
+    create_session(
+        pool,
+        SessionContext {
+            automation_id: Some(manager_id.to_string()),
+            ..SessionContext::default()
+        },
     )
-    .fetch_all(pool)
     .await
-    .map_err(|e| format!("Failed to list non-task assistant sessions: {}", e))?;
-
-    rows.iter().map(map_session_row).collect()
 }
 
 pub async fn delete_session(pool: &DbPool, session_id: &str) -> Result<bool, String> {
@@ -352,11 +337,10 @@ pub async fn update_session(
     sqlx::query(
         r#"
         UPDATE assistant_sessions
-        SET title = ?, context_json = ?, updated_at = ?
+        SET context_json = ?, updated_at = ?
         WHERE id = ?
         "#,
     )
-    .bind(&session.title)
     .bind(to_json_string(&session.context)?)
     .bind(session.updated_at)
     .bind(&session.id)
@@ -432,82 +416,16 @@ pub async fn list_messages_before(
     rows.iter().map(map_message_row).collect()
 }
 
-pub async fn parent_session_id(
-    pool: &DbPool,
-    child_session_id: &str,
-) -> Result<Option<String>, String> {
-    sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT parent_session_id
-        FROM assistant_session_links
-        WHERE child_session_id = ?
-        "#,
+pub async fn count_session_messages(pool: &DbPool, session_id: &str) -> Result<u32, String> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM assistant_messages WHERE session_id = ?",
     )
-    .bind(child_session_id)
-    .fetch_optional(pool)
+    .bind(session_id)
+    .fetch_one(pool)
     .await
-    .map_err(|e| format!("Failed to load assistant session parent: {}", e))
-}
-
-/// Count every message in a session's conversation: the session itself plus —
-/// when `include_ancestors` is set — all ancestors reachable through rotation
-/// links (compaction/rotation chains). One recursive-CTE round trip; UNION
-/// (not UNION ALL) so a malformed link cycle terminates instead of recursing
-/// forever.
-pub async fn count_session_chain_messages(
-    pool: &DbPool,
-    session_id: &str,
-    include_ancestors: bool,
-) -> Result<u32, String> {
-    let count = if include_ancestors {
-        sqlx::query_scalar::<_, i64>(
-            r#"
-            WITH RECURSIVE chain(session_id) AS (
-                SELECT ?
-                UNION
-                SELECT l.parent_session_id
-                FROM assistant_session_links l
-                JOIN chain c ON l.child_session_id = c.session_id
-            )
-            SELECT COUNT(*)
-            FROM assistant_messages
-            WHERE session_id IN (SELECT session_id FROM chain)
-            "#,
-        )
-        .bind(session_id)
-        .fetch_one(pool)
-        .await
-    } else {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM assistant_messages WHERE session_id = ?")
-            .bind(session_id)
-            .fetch_one(pool)
-            .await
-    }
     .map_err(|e| format!("Failed to count assistant messages: {}", e))?;
 
     Ok(count.max(0) as u32)
-}
-
-pub async fn create_session_rotation_link(
-    pool: &DbPool,
-    child_session_id: &str,
-    parent_session_id: &str,
-) -> Result<(), String> {
-    sqlx::query(
-        r#"
-        INSERT INTO assistant_session_links
-            (child_session_id, parent_session_id, kind, created_at)
-        VALUES (?, ?, 'rotation', ?)
-        "#,
-    )
-    .bind(child_session_id)
-    .bind(parent_session_id)
-    .bind(now_ms())
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to create assistant session rotation link: {}", e))?;
-
-    Ok(())
 }
 
 pub async fn get_message(
@@ -690,7 +608,7 @@ pub async fn create_message(
     )
     .bind(&message.id)
     .bind(&message.session_id)
-    .bind(to_json_string(&message.role)?)
+    .bind(enum_text(&message.role)?)
     .bind(to_json_string(&message.content)?)
     .bind(
         message
@@ -760,7 +678,7 @@ pub async fn create_user_message_with_content(
     )
     .bind(&message.id)
     .bind(&message.session_id)
-    .bind(to_json_string(&message.role)?)
+    .bind(enum_text(&message.role)?)
     .bind(to_json_string(&message.content)?)
     .bind(Option::<String>::None)
     .bind(message.created_at)
@@ -811,25 +729,23 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
         started_at: now_ms(),
         completed_at: None,
         error: params.error,
-        notices: Vec::new(),
     };
 
     sqlx::query(
         r#"
         INSERT INTO assistant_runs
-            (id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&run.id)
     .bind(&run.session_id)
-    .bind(to_json_string(&run.status)?)
-    .bind(to_json_string(&run.trigger)?)
+    .bind(enum_text(&run.status)?)
+    .bind(enum_text(&run.trigger)?)
     .bind(&run.connection_id)
     .bind(&run.protocol_id)
     .bind(&run.model_id)
     .bind(&run.error)
-    .bind(Option::<String>::None) // notices_json — empty on creation
     .bind(run.started_at)
     .bind(run.completed_at)
     .execute(pool)
@@ -841,35 +757,46 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
     Ok(run)
 }
 
-pub async fn list_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
-    let rows = sqlx::query(
+/// At most two rows, newest first: the newest run and, if different, the
+/// newest non-terminal run. Older history is never returned.
+pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
+    let latest = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
         "#,
     )
     .bind(session_id)
-    .fetch_all(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("Failed to list assistant runs: {}", e))?;
+    .map_err(|e| format!("Failed to load latest assistant run: {}", e))?;
+    let Some(latest) = latest.as_ref().map(map_run_row).transpose()? else {
+        return Ok(Vec::new());
+    };
 
-    rows.iter().map(map_run_row).collect()
+    let active = get_active_run(pool, session_id).await?;
+    let mut runs = vec![latest];
+    if let Some(active) = active.filter(|active| active.id != runs[0].id) {
+        runs.push(active);
+    }
+    Ok(runs)
 }
 
 /// Whether the session currently has a non-terminal run (queued, running,
 /// or waiting for a tool). Used by message queueing and follow-up scheduling
 /// to preserve one active run per session.
 pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<bool, String> {
-    let (count,): (i64,) = sqlx::query_as(
+    let (count,): (i64,) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)
         FROM assistant_runs
         WHERE session_id = ?
-          AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
-        "#,
-    )
+          AND status IN {ACTIVE_RUN_STATUSES}
+        "#
+    ))
     .bind(session_id)
     .fetch_one(pool)
     .await
@@ -881,13 +808,13 @@ pub async fn session_has_active_run(pool: &DbPool, session_id: &str) -> Result<b
 /// Whether the workspace database contains any non-terminal run. Workspace
 /// deletion uses this as a coarse guard before removing the root directory.
 pub async fn workspace_has_active_run(pool: &DbPool) -> Result<bool, String> {
-    let (count,): (i64,) = sqlx::query_as(
+    let (count,): (i64,) = sqlx::query_as(&format!(
         r#"
         SELECT COUNT(*)
         FROM assistant_runs
-        WHERE status IN ('"queued"', '"running"', '"waiting_for_tool"')
-        "#,
-    )
+        WHERE status IN {ACTIVE_RUN_STATUSES}
+        "#
+    ))
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to check workspace for active runs: {}", e))?;
@@ -899,20 +826,21 @@ pub async fn get_active_run(
     pool: &DbPool,
     session_id: &str,
 ) -> Result<Option<AssistantRun>, String> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
-          AND status IN ('"queued"', '"running"', '"waiting_for_tool"')
-        ORDER BY started_at DESC
+          AND status IN {ACTIVE_RUN_STATUSES}
+        ORDER BY started_at DESC, id DESC
         LIMIT 1
-        "#,
-    )
-    .bind(session_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load active run: {}", e))?;
+        "#
+    );
+    let row = sqlx::query(&sql)
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to load active run: {}", e))?;
 
     row.as_ref().map(map_run_row).transpose()
 }
@@ -1032,7 +960,7 @@ pub async fn mark_queued_messages_delivered(
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1051,11 +979,7 @@ pub async fn update_run_status(
     status: RunStatus,
     error: Option<&str>,
 ) -> Result<AssistantRun, String> {
-    let is_terminal = matches!(
-        status,
-        RunStatus::Completed | RunStatus::Failed | RunStatus::Cancelled
-    );
-    let completed_at = if is_terminal { Some(now_ms()) } else { None };
+    let completed_at = status.is_terminal().then(now_ms);
 
     sqlx::query(
         r#"
@@ -1064,7 +988,7 @@ pub async fn update_run_status(
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&status)?)
+    .bind(enum_text(&status)?)
     .bind(error)
     .bind(completed_at)
     .bind(run_id)
@@ -1074,7 +998,7 @@ pub async fn update_run_status(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1094,25 +1018,18 @@ pub async fn complete_run(
     run_id: &str,
     status: RunStatus,
     error: Option<&str>,
-    notices: &[RunNotice],
 ) -> Result<AssistantRun, String> {
     let completed_at = now_ms();
-    let notices_json = if notices.is_empty() {
-        None
-    } else {
-        Some(to_json_string(&notices)?)
-    };
 
     sqlx::query(
         r#"
         UPDATE assistant_runs
-        SET status = ?, error = ?, notices_json = COALESCE(?, notices_json), completed_at = ?
+        SET status = ?, error = ?, completed_at = ?
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&status)?)
+    .bind(enum_text(&status)?)
     .bind(error)
-    .bind(notices_json)
     .bind(completed_at)
     .bind(run_id)
     .execute(pool)
@@ -1121,7 +1038,7 @@ pub async fn complete_run(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, notices_json, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1203,9 +1120,9 @@ pub async fn create_compaction(
     )
     .bind(&compaction.id)
     .bind(&compaction.session_id)
-    .bind(to_json_string(&compaction.trigger)?)
-    .bind(to_json_string(&compaction.strategy)?)
-    .bind(to_json_string(&compaction.status)?)
+    .bind(enum_text(&compaction.trigger)?)
+    .bind(enum_text(&compaction.strategy)?)
+    .bind(enum_text(&compaction.status)?)
     .bind(&compaction.source_from_message_id)
     .bind(&compaction.source_to_message_id)
     .bind(&compaction.summary_message_id)
@@ -1237,7 +1154,7 @@ pub async fn complete_compaction(
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&CompactionStatus::Completed)?)
+    .bind(enum_text(&CompactionStatus::Completed)?)
     .bind(summary_message_id)
     .bind(completed_at)
     .bind(compaction_id)
@@ -1284,7 +1201,7 @@ pub async fn latest_completed_compaction(
                model_id, input_message_count, created_at, completed_at, error
         FROM assistant_compactions
         WHERE session_id = ?
-          AND status = '"completed"'
+          AND status = 'completed'
           AND summary_message_id IS NOT NULL
           AND source_to_message_id IS NOT NULL
         ORDER BY completed_at DESC, created_at DESC
@@ -1306,7 +1223,10 @@ fn map_tool_call_row(row: &sqlx::sqlite::SqliteRow) -> Result<ToolInvocation, St
         session_id: row.get("session_id"),
         tool_name: row.get("tool_name"),
         params: parse_json(&row.get::<String, _>("params_json"), "tool call params")?,
-        status: parse_json::<ToolCallStatus>(&row.get::<String, _>("status"), "tool call status")?,
+        status: parse_enum_text::<ToolCallStatus>(
+            row.get::<String, _>("status"),
+            "tool call status",
+        )?,
         result: parse_optional_json(row.get("result_json"), "tool call result")?,
         result_summary: None,
         has_full_result: false,
@@ -1349,7 +1269,7 @@ pub async fn create_tool_call(
     .bind(&tc.session_id)
     .bind(&tc.tool_name)
     .bind(to_json_string(&tc.params)?)
-    .bind(to_json_string(&tc.status)?)
+    .bind(enum_text(&tc.status)?)
     .bind::<Option<String>>(None)
     .bind::<Option<String>>(None)
     .bind(tc.started_at)
@@ -1378,7 +1298,7 @@ pub async fn update_tool_call(
         WHERE id = ?
         "#,
     )
-    .bind(to_json_string(&status)?)
+    .bind(enum_text(&status)?)
     .bind(result.map(to_json_string).transpose()?)
     .bind(error)
     .bind(completed_at)
@@ -1416,43 +1336,6 @@ pub async fn get_tool_call_for_session(
     .await
     .map_err(|e| format!("Failed to load assistant tool call: {}", e))?;
     row.as_ref().map(map_tool_call_row).transpose()
-}
-
-pub async fn list_tool_calls(
-    pool: &DbPool,
-    session_id: &str,
-    run_id: Option<&str>,
-) -> Result<Vec<ToolInvocation>, String> {
-    let rows = if let Some(run_id) = run_id {
-        sqlx::query(
-            r#"
-            SELECT id, run_id, session_id, tool_name, params_json, status, result_json, error, started_at, completed_at
-            FROM assistant_tool_calls
-            WHERE session_id = ? AND run_id = ?
-            ORDER BY started_at ASC
-            "#,
-        )
-        .bind(session_id)
-        .bind(run_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to list assistant tool calls: {}", e))?
-    } else {
-        sqlx::query(
-            r#"
-            SELECT id, run_id, session_id, tool_name, params_json, status, result_json, error, started_at, completed_at
-            FROM assistant_tool_calls
-            WHERE session_id = ?
-            ORDER BY started_at ASC
-            "#,
-        )
-        .bind(session_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Failed to list assistant tool calls: {}", e))?
-    };
-
-    rows.iter().map(map_tool_call_row).collect()
 }
 
 pub async fn list_tool_calls_by_ids(
@@ -1494,7 +1377,7 @@ pub async fn fail_running_tool_calls_for_run(
         r#"
         SELECT id
         FROM assistant_tool_calls
-        WHERE run_id = ? AND status IN ('"pending"', '"running"')
+        WHERE run_id = ? AND status IN ('pending', 'running')
         ORDER BY started_at ASC
         "#,
     )
@@ -1527,13 +1410,13 @@ async fn touch_session(pool: &DbPool, session_id: &str) -> Result<(), String> {
 pub async fn recover_stale_runs(pool: &DbPool) -> Result<u64, String> {
     let now = now_ms();
 
-    let run_result = sqlx::query(
+    let run_result = sqlx::query(&format!(
         r#"
         UPDATE assistant_runs
-        SET status = '"failed"', error = 'App restarted while running', completed_at = ?
-        WHERE status IN ('"queued"', '"running"', '"waiting_for_tool"')
-        "#,
-    )
+        SET status = 'failed', error = 'App restarted while running', completed_at = ?
+        WHERE status IN {ACTIVE_RUN_STATUSES}
+        "#
+    ))
     .bind(now)
     .execute(pool)
     .await
@@ -1542,8 +1425,8 @@ pub async fn recover_stale_runs(pool: &DbPool) -> Result<u64, String> {
     let tc_result = sqlx::query(
         r#"
         UPDATE assistant_tool_calls
-        SET status = '"failed"', error = 'App restarted while running'
-        WHERE status IN ('"pending"', '"running"')
+        SET status = 'failed', error = 'App restarted while running'
+        WHERE status IN ('pending', 'running')
         "#,
     )
     .execute(pool)
@@ -1570,8 +1453,8 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO assistant_sessions
-                (id, kind, title, context_json, created_at, updated_at)
-            VALUES (?, '"chat"', 'Test', '{}', 1, 1)
+                (id, context_json, created_at, updated_at)
+            VALUES (?, '{}', 1, 1)
             "#,
         )
         .bind(id)
@@ -1757,5 +1640,188 @@ mod tests {
             message_text(&pool, &direct.id).await.as_deref(),
             Some("direct")
         );
+    }
+
+    #[test]
+    fn enum_text_round_trips_every_stored_enum_without_quotes() {
+        fn check<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(values: &[T]) {
+            for value in values {
+                let text = enum_text(value).unwrap();
+                assert!(!text.contains('"'), "{text}");
+                assert_eq!(&parse_enum_text::<T>(text, "enum").unwrap(), value);
+            }
+        }
+        check(&[
+            MessageRole::System,
+            MessageRole::User,
+            MessageRole::Assistant,
+            MessageRole::Tool,
+        ]);
+        check(&ALL_RUN_STATUSES);
+        check(&[
+            RunTrigger::UserMessage,
+            RunTrigger::Scheduled,
+            RunTrigger::ManualAutomation,
+            RunTrigger::WorkspaceTask,
+        ]);
+        check(&[
+            ToolCallStatus::Pending,
+            ToolCallStatus::Running,
+            ToolCallStatus::Completed,
+            ToolCallStatus::Failed,
+        ]);
+        check(&[
+            CompactionTrigger::Manual,
+            CompactionTrigger::Automatic,
+            CompactionTrigger::ErrorRecovery,
+        ]);
+        check(&[
+            CompactionStrategy::LocalSummary,
+            CompactionStrategy::SessionRotationSummary,
+        ]);
+        check(&[
+            CompactionStatus::Running,
+            CompactionStatus::Completed,
+            CompactionStatus::Failed,
+        ]);
+    }
+
+    const ALL_RUN_STATUSES: [RunStatus; 7] = [
+        RunStatus::Queued,
+        RunStatus::Running,
+        RunStatus::WaitingForTool,
+        RunStatus::Completed,
+        RunStatus::CompletedWithWarnings,
+        RunStatus::Failed,
+        RunStatus::Cancelled,
+    ];
+
+    #[test]
+    fn active_run_statuses_are_the_non_terminal_ones() {
+        let active: Vec<String> = ALL_RUN_STATUSES
+            .iter()
+            .filter(|status| status.is_active())
+            .map(|status| format!("'{}'", enum_text(status).unwrap()))
+            .collect();
+        assert_eq!(ACTIVE_RUN_STATUSES, format!("({})", active.join(", ")));
+    }
+
+    #[tokio::test]
+    async fn enum_columns_are_written_as_plain_text() {
+        let (_tmp, pool) = workspace_pool().await;
+        insert_session(&pool, "s").await;
+        let message = create_message(
+            &pool,
+            CreateMessageParams {
+                session_id: "s".to_string(),
+                role: MessageRole::User,
+                content: Vec::new(),
+                provider_metadata: None,
+            },
+        )
+        .await
+        .unwrap();
+        let run = create_run(
+            &pool,
+            CreateRunParams {
+                session_id: "s".to_string(),
+                status: RunStatus::Queued,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "c".to_string(),
+                protocol_id: "openai".to_string(),
+                model_id: "m".to_string(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        update_run_status(&pool, &run.id, RunStatus::WaitingForTool, None)
+            .await
+            .unwrap();
+        create_tool_call(
+            &pool,
+            CreateToolCallParams {
+                id: "tc".to_string(),
+                run_id: run.id.clone(),
+                session_id: "s".to_string(),
+                tool_name: "t".to_string(),
+                params: serde_json::json!({}),
+                status: ToolCallStatus::Pending,
+            },
+        )
+        .await
+        .unwrap();
+        let compaction = create_compaction(
+            &pool,
+            CreateCompactionParams {
+                session_id: "s".to_string(),
+                trigger: CompactionTrigger::Manual,
+                strategy: CompactionStrategy::LocalSummary,
+                source_from_message_id: None,
+                source_to_message_id: None,
+                created_run_id: None,
+                protocol_id: "openai".to_string(),
+                model_id: "m".to_string(),
+                input_message_count: 0,
+            },
+        )
+        .await
+        .unwrap();
+        complete_compaction(&pool, &compaction.id, &message.id)
+            .await
+            .unwrap();
+
+        let stored: (String, String, String, String) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT role FROM assistant_messages),
+                (SELECT status || ' ' || "trigger" FROM assistant_runs),
+                (SELECT status FROM assistant_tool_calls),
+                (SELECT "trigger" || ' ' || strategy || ' ' || status FROM assistant_compactions)
+            "#,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            (
+                "user".to_string(),
+                "waiting_for_tool user_message".to_string(),
+                "pending".to_string(),
+                "manual local_summary completed".to_string(),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn active_run_started_at_ties_break_by_highest_id() {
+        let (_tmp, pool) = workspace_pool().await;
+        insert_session(&pool, "s").await;
+        // Higher id inserted first so insertion order alone cannot pass.
+        for (id, status) in [("run-b", "queued"), ("run-a", "running")] {
+            sqlx::query(
+                r#"
+                INSERT INTO assistant_runs
+                    (id, session_id, status, "trigger", connection_id, protocol_id, model_id, started_at)
+                VALUES (?, 's', ?, 'user_message', 'c', 'openai', 'm', 100)
+                "#,
+            )
+            .bind(id)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let active = get_active_run(&pool, "s").await.unwrap().unwrap();
+        assert_eq!(active.id, "run-b");
+        let current: Vec<String> = current_runs(&pool, "s")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(current, vec!["run-b".to_string()]);
     }
 }

@@ -45,6 +45,11 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
   const [isAgent, setIsAgent] = useState(false);
   const [agentMcpServerIds, setAgentMcpServerIds] = useState<string[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState('');
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Controls stay disabled from a save until the reload after it lands, so
+  // the next change is always computed from persisted state.
+  const [saving, setSaving] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   // Load workspace details to determine type and MCP config
   useEffect(() => {
@@ -60,33 +65,24 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
         if (agent) {
           setAgentMcpServerIds(details?.selectedMcpServerIds || []);
         } else {
-          // The workspace config is the canonical MCP store: the details'
-          // selectedMcpServerIds carries the *effective* (enabled) set and
-          // disabledMcpServerIds the toggled-off remainder; badges show the
-          // union. Mirror the backend's precedence exactly: when a manager
-          // row exists (defaultWorkspaceAgentId is set) the config-derived
-          // lists are authoritative even when empty — a Settings remove-all
-          // must not resurrect the session's stale list. Only manager-less
-          // workspaces, where the config cannot record a selection, fall
-          // back to the session context's enabled list.
-          const configEnabled = details?.selectedMcpServerIds || [];
+          // The Main's config is the only MCP store: selectedMcpServerIds is
+          // the enabled set, disabledMcpServerIds the toggled-off remainder;
+          // badges show the union.
+          const enabled = details?.selectedMcpServerIds || [];
           const disabled = details?.disabledMcpServerIds || [];
-          const enabled =
-            details?.defaultWorkspaceAgentId || configEnabled.length || disabled.length
-              ? configEnabled
-              : details?.session?.context?.mcpServerIds || [];
           setLocalMcpServerIds([...enabled, ...disabled.filter((id) => !enabled.includes(id))]);
           setLocalDisabledIds(disabled);
         }
         // Reflect the workspace's actual provider. The backend lists it
         // preferred-first, so [0] is the connection interactive sends and
-        // scheduled runs use. Set it directly (not `prev || …`) so switching
-        // workspaces doesn't retain the previous workspace's selection.
+        // scheduled runs use.
         if (!agent) {
           setSelectedProviderId(details?.providerConnectionIds?.[0] || '');
         }
       } catch {
         // Details not available yet — fine
+      } finally {
+        if (!cancelled) setSaving(false);
       }
     };
 
@@ -96,7 +92,7 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
       cancelled = true;
       window.removeEventListener(WORKSPACE_SETTINGS_CHANGED_EVENT, loadDetails);
     };
-  }, [workspaceId]);
+  }, [workspaceId, reloadKey]);
 
   // Load available MCP servers and provider connections
   useEffect(() => {
@@ -147,66 +143,66 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
     [displayMcpServerIds, availableMcpServers]
   );
 
+  // Persists a change, then reloads so the bar shows what the backend kept.
+  const save = useCallback(async (persist: () => Promise<unknown>) => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await persist();
+    } catch (err) {
+      console.error('[WorkspaceContextBar] Failed to save:', err);
+      // e.g. a workspace without a main agent has nowhere to store the selection.
+      setSaveError(err instanceof Error ? err.message : String(err));
+    }
+    setReloadKey((key) => key + 1);
+  }, []);
+
   const persistMcpChange = useCallback(
-    async (attachedIds: string[], disabledIds: string[]) => {
-      const prevAttached = localMcpServerIds;
-      const prevDisabled = localDisabledIds;
-      setLocalMcpServerIds(attachedIds);
-      setLocalDisabledIds(disabledIds);
-      try {
-        // The backend receives the effective (enabled) list plus the
-        // disabled remainder, so the toggle persists across restarts and
-        // disabled servers are excluded from runs.
-        await updateWorkspaceSessionMcp(
-          workspaceId,
-          attachedIds.filter((id) => !disabledIds.includes(id)),
-          disabledIds
-        );
-      } catch (err) {
-        console.error('[WorkspaceContextBar] Failed to persist MCP change:', err);
-        // Roll back the optimistic update so the badges reflect what the
-        // backend actually has — but only if no newer update has replaced
-        // this request's state in the meantime (identity check against the
-        // exact arrays this request set).
-        setLocalMcpServerIds((current) => (current === attachedIds ? prevAttached : current));
-        setLocalDisabledIds((current) => (current === disabledIds ? prevDisabled : current));
-      }
-    },
-    [workspaceId, localMcpServerIds, localDisabledIds]
+    // The backend receives the effective (enabled) list plus the disabled
+    // remainder, so the toggle persists across restarts and disabled
+    // servers are excluded from runs.
+    (attachedIds: string[], disabledIds: string[]) => save(() =>
+      updateWorkspaceSessionMcp(
+        workspaceId,
+        attachedIds.filter((id) => !disabledIds.includes(id)),
+        disabledIds
+      )
+    ),
+    [workspaceId, save]
   );
 
   const handleAddMcp = useCallback(
     (serverId: string) => {
-      if (isAgent) return;
+      if (isAgent || saving) return;
       const nextIds = localMcpServerIds.includes(serverId)
         ? localMcpServerIds
         : [...localMcpServerIds, serverId];
       persistMcpChange(nextIds, localDisabledIds);
     },
-    [isAgent, localMcpServerIds, localDisabledIds, persistMcpChange]
+    [isAgent, saving, localMcpServerIds, localDisabledIds, persistMcpChange]
   );
 
   const handleRemoveMcp = useCallback(
     (serverId: string) => {
-      if (isAgent) return;
+      if (isAgent || saving) return;
       persistMcpChange(
         localMcpServerIds.filter((id) => id !== serverId),
         localDisabledIds.filter((id) => id !== serverId)
       );
     },
-    [isAgent, localMcpServerIds, localDisabledIds, persistMcpChange]
+    [isAgent, saving, localMcpServerIds, localDisabledIds, persistMcpChange]
   );
 
   const handleToggleMcp = useCallback(
     (serverId: string) => {
-      if (isAgent) return;
+      if (isAgent || saving) return;
       const isDisabled = localDisabledIds.includes(serverId);
       const nextDisabled = isDisabled
         ? localDisabledIds.filter((id) => id !== serverId)
         : [...localDisabledIds, serverId];
       persistMcpChange(localMcpServerIds, nextDisabled);
     },
-    [isAgent, localMcpServerIds, localDisabledIds, persistMcpChange]
+    [isAgent, saving, localMcpServerIds, localDisabledIds, persistMcpChange]
   );
 
   const enabledProviders = useMemo(
@@ -215,16 +211,12 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
   );
 
   const handleProviderChange = useCallback(
-    async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
       const id = e.target.value;
       setSelectedProviderId(id);
-      try {
-        await setWorkspaceProvider(workspaceId, id);
-      } catch (err) {
-        console.error('[WorkspaceContextBar] Failed to set provider:', err);
-      }
+      save(() => setWorkspaceProvider(workspaceId, id));
     },
-    [workspaceId]
+    [workspaceId, save]
   );
 
   const hasConfiguredServers = configuredMcpServers.length > 0;
@@ -291,6 +283,7 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
             <select
               className={styles.providerSelect}
               value={selectedProviderId}
+              disabled={saving}
               onChange={handleProviderChange}
             >
               {enabledProviders.map((conn) => (
@@ -337,6 +330,12 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
             onClick={() => setShowMcpSelector(true)}
             clickable={true}
           />
+        )}
+
+        {saveError && (
+          <span className={styles.saveError} role="alert">
+            {saveError}
+          </span>
         )}
       </div>
 

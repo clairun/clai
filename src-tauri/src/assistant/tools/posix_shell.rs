@@ -27,7 +27,7 @@ use crate::providers::command_exists;
 const SHELL_OVERRIDE_ENV: &str = "CLAI_POSIX_SHELL";
 
 /// Guidance shown when no POSIX shell can be found on Windows. Surfaced both as
-/// the tool error and a run notice so the run record explains the failure.
+/// the tool error and a run warning so the run record explains the failure.
 pub const MISSING_SHELL_NOTICE: &str = "No POSIX shell found, so shell commands cannot run. \
 Install Git for Windows (https://git-scm.com/download/win) — it includes Git Bash — then restart CLAI. \
 Advanced: set the CLAI_POSIX_SHELL environment variable to a bash.exe path.";

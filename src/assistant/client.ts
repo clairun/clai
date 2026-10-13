@@ -23,59 +23,41 @@ import type {
   ProviderCatalogEntry,
   ProviderDescriptor,
   TestResult,
-  ToolInvocation,
   UpdateProviderConnectionRequest,
 } from '../generated/bindings';
 
-export async function createSession(params: {
-  tabId?: string;
-  kind?: 'interactive' | 'background_job';
-  title?: string;
-  context?: Record<string, unknown>;
-  parentSessionId?: string | null;
-}): Promise<AssistantSession> {
-  return invoke('assistant_create_session', { request: params });
+export async function getSession(workspaceId: string, sessionId: string): Promise<AssistantSession | null> {
+  return invoke('assistant_get_session', { workspaceId, sessionId });
 }
 
-export async function getSession(sessionId: string): Promise<AssistantSession | null> {
-  return invoke('assistant_get_session', { sessionId });
-}
-
-export async function listSessions(tabId: string | null = null): Promise<AssistantSession[]> {
-  return invoke('assistant_list_sessions', { tabId });
-}
-
-export async function deleteSession(sessionId: string): Promise<void> {
-  return invoke('assistant_delete_session', { sessionId });
-}
-
-export async function loadSessionMessages(sessionId: string): Promise<AssistantMessage[]> {
-  return invoke('assistant_load_session_messages', { sessionId });
+export async function deleteSession(workspaceId: string, sessionId: string): Promise<void> {
+  return invoke('assistant_delete_session', { workspaceId, sessionId });
 }
 
 export async function loadSessionMessagesPage(params: {
+  workspaceId: string;
   sessionId: string;
   before?: AssistantMessageCursor | null;
   limit?: number;
-  includeAncestors?: boolean;
 }): Promise<AssistantMessagePage> {
   return invoke('assistant_load_session_messages_page', {
     request: {
+      workspaceId: params.workspaceId,
       sessionId: params.sessionId,
       before: params.before ?? null,
       limit: params.limit ?? null,
-      includeAncestors: params.includeAncestors ?? true,
     },
   });
 }
 
 export async function sendMessage(
+  workspaceId: string,
   sessionId: string,
   message: string,
   connectionId: string,
   images: ContentPart[] = [],
 ): Promise<{ session: AssistantSession; message: AssistantMessage; run?: AssistantRun | null; queued: boolean }> {
-  return invoke('assistant_send_message', { sessionId, message, connectionId, images });
+  return invoke('assistant_send_message', { workspaceId, sessionId, message, connectionId, images });
 }
 
 /**
@@ -88,10 +70,11 @@ export async function connectionSupportsImages(connectionId: string): Promise<bo
 }
 
 export async function compactSession(
+  workspaceId: string,
   sessionId: string,
   connectionId: string,
 ): Promise<{ compaction?: AssistantCompaction | null; summaryMessage?: AssistantMessage | null }> {
-  return invoke('assistant_compact_session', { sessionId, connectionId });
+  return invoke('assistant_compact_session', { workspaceId, sessionId, connectionId });
 }
 
 /**
@@ -99,8 +82,8 @@ export async function compactSession(
  * up by a run). Errors if a run grabbed it in the meantime. The backend
  * emits MessageDeleted, which removes it from the store.
  */
-export async function deleteQueuedMessage(sessionId: string, messageId: string): Promise<void> {
-  return invoke('assistant_delete_queued_message', { sessionId, messageId });
+export async function deleteQueuedMessage(workspaceId: string, sessionId: string, messageId: string): Promise<void> {
+  return invoke('assistant_delete_queued_message', { workspaceId, sessionId, messageId });
 }
 
 /**
@@ -109,52 +92,39 @@ export async function deleteQueuedMessage(sessionId: string, messageId: string):
  * backend emits AssistantMessageUpdated, which swaps the text in the store.
  */
 export async function editQueuedMessage(
+  workspaceId: string,
   sessionId: string,
   messageId: string,
   text: string,
 ): Promise<void> {
-  return invoke('assistant_edit_queued_message', { sessionId, messageId, text });
+  return invoke('assistant_edit_queued_message', { workspaceId, sessionId, messageId, text });
 }
 
-export async function listRuns(sessionId: string): Promise<AssistantRun[]> {
-  return invoke('assistant_list_runs', { sessionId });
-}
-
-export async function listToolCalls(
-  sessionId: string,
-  runId: string | null = null,
-): Promise<ToolInvocation[]> {
-  return invoke('assistant_list_tool_calls', {
-    request: {
-      sessionId,
-      runId,
-    },
-  });
+/** Only the newest run plus the active run (if older), newest first — not the run history. */
+export async function listRuns(workspaceId: string, sessionId: string): Promise<AssistantRun[]> {
+  return invoke('assistant_list_runs', { workspaceId, sessionId });
 }
 
 /**
  * Full result of one tool call. Live events and message pages carry only a
- * compact view of it, so the expanded row fetches the rest on demand. Pass the
- * call's own `sessionId`: an ancestor session's call lives in that session.
+ * compact view of it, so the expanded row fetches the rest on demand. The
+ * lookup is keyed on the tool call's own `sessionId`, not the session being
+ * viewed.
  */
-export async function getToolCallResult(sessionId: string, toolCallId: string): Promise<unknown> {
-  return invoke('assistant_get_tool_call_result', { sessionId, toolCallId });
+export async function getToolCallResult(workspaceId: string, sessionId: string, toolCallId: string): Promise<unknown> {
+  return invoke('assistant_get_tool_call_result', { workspaceId, sessionId, toolCallId });
 }
 
 /**
  * Full input of one tool call; events and message pages carry a projection of
- * it. Pass the call's own `sessionId`, as for `getToolCallResult`.
+ * it. Keyed on the tool call's own `sessionId`, as for `getToolCallResult`.
  */
-export async function getToolCallInput(sessionId: string, toolCallId: string): Promise<unknown> {
-  return invoke('assistant_get_tool_call_input', { sessionId, toolCallId });
+export async function getToolCallInput(workspaceId: string, sessionId: string, toolCallId: string): Promise<unknown> {
+  return invoke('assistant_get_tool_call_input', { workspaceId, sessionId, toolCallId });
 }
 
-export async function retryRun(runId: string, connectionId: string): Promise<AssistantRun> {
-  return invoke('assistant_retry_run', { runId, connectionId });
-}
-
-export async function cancelRun(runId: string): Promise<AssistantRun> {
-  return invoke('assistant_cancel_run', { runId });
+export async function cancelRun(workspaceId: string, runId: string): Promise<AssistantRun> {
+  return invoke('assistant_cancel_run', { workspaceId, runId });
 }
 
 // ── Provider-connection commands ────────────────────────────────────
@@ -174,10 +144,6 @@ export async function getProviderSecretHint(id: string): Promise<string | null> 
   return invoke('provider_connection_secret_hint', { id });
 }
 
-export async function getProviderConnection(id: string): Promise<ProviderConnection | null> {
-  return invoke('provider_connection_get', { id });
-}
-
 export async function createProviderConnection(
   request: CreateProviderConnectionRequest,
 ): Promise<ProviderConnection> {
@@ -192,10 +158,6 @@ export async function updateProviderConnection(
 
 export async function deleteProviderConnection(id: string): Promise<void> {
   return invoke('provider_connection_delete', { id });
-}
-
-export async function listProviderModels(id: string): Promise<ModelInfo[]> {
-  return invoke('provider_connection_list_models', { id });
 }
 
 export async function listProviderDescriptorModels(providerId: string): Promise<ModelInfo[]> {

@@ -14,7 +14,6 @@ import VirtualizedList from '../common/VirtualizedList';
 import type {
   AssistantMessage,
   ContentPart,
-  RunNotice,
   ToolInvocation,
   WorkspaceAgentResponse,
 } from '../../generated/bindings';
@@ -568,9 +567,9 @@ RunningIndicator.displayName = 'RunningIndicator';
  */
 interface ChatMessageListProps {
   messages: AssistantMessage[];
-  // Workspace whose image store backs any `image` content parts; enables
-  // lazy thumbnail loading in the transcript. Omit in read-only/no-store views.
-  workspaceId?: string;
+  // Workspace that owns the session: backs image thumbnails, workspace-relative
+  // markdown links, and lazy tool-call detail loads.
+  workspaceId: string;
   streamingText?: Record<string, string>;
   isStreaming?: boolean;
   toolCalls?: ToolInvocation[];
@@ -647,8 +646,8 @@ const ChatMessageList = ({
 
   // Lets markdown in messages resolve workspace-relative references (a
   // `.vl.json` chart link, a spec's `data.url`) against the workspace root.
-  const fileLocation = useMemo<WorkspaceFileLocation | null>(
-    () => (workspaceId ? { workspaceId, basePath: '' } : null),
+  const fileLocation = useMemo<WorkspaceFileLocation>(
+    () => ({ workspaceId, basePath: '' }),
     [workspaceId]
   );
 
@@ -752,6 +751,7 @@ const ChatMessageList = ({
       ) : item.type === 'tool-group' ? (
         <MergedToolGroup
           item={item}
+          workspaceId={workspaceId}
           toolCallsById={toolCallsById}
           isContinuation={continuationFlags[idx]}
         />
@@ -847,7 +847,7 @@ interface MessageBlockProps {
   streamingText?: string;
   toolCallsById: Map<string, ToolInvocation>;
   userLabel?: string;
-  workspaceId?: string;
+  workspaceId: string;
   isContinuation?: boolean;
   isQueued?: boolean;
   onDeleteQueued?: (messageId: string) => void;
@@ -870,6 +870,24 @@ const MessageBlock = memo(
     // Local draft state for editing a queued message in-place. `null` = not
     // editing; a string = the working draft seeded from the message text.
     const [editDraft, setEditDraft] = useState<string | null>(null);
+    // Walk message.content in order, grouping consecutive same-type
+    // parts into segments. This preserves the interleaving (text → tool
+    // → text → tool …) the assistant actually produced, rather than
+    // collapsing all text to the top and all tools to the bottom.
+    // streamingText is appended as a trailing segment because by
+    // definition it represents the *current* in-flight text block,
+    // which sits after everything already persisted. Memoized so
+    // ToolCallGroup's prop reference is stable across re-renders when
+    // nothing actually changed — its memo only helps if its toolUses
+    // array reference doesn't churn. Only assistant turns render it.
+    const segments = useMemo(() => {
+      if (role !== 'assistant') return [];
+      const base = groupAssistantContent(message.content, toolCallsById);
+      if (streamingText) {
+        base.push({ kind: 'text', text: streamingText, streaming: true });
+      }
+      return base;
+    }, [role, message.content, toolCallsById, streamingText]);
 
     if (role === 'user') {
       const textContent = getTextContent(message);
@@ -972,7 +990,7 @@ const MessageBlock = memo(
           ) : (
             <div className={styles.messageContent}>
               {textContent && <MarkdownMessage content={textContent} />}
-              {imageParts.length > 0 && workspaceId && (
+              {imageParts.length > 0 && (
                 <div className={styles.imageAttachments}>
                   {imageParts.map((part) => (
                     <ImageAttachment key={part.id} workspaceId={workspaceId} part={part} />
@@ -986,24 +1004,6 @@ const MessageBlock = memo(
     }
 
     if (role === 'assistant') {
-      // Walk message.content in order, grouping consecutive same-type
-      // parts into segments. This preserves the interleaving (text → tool
-      // → text → tool …) the assistant actually produced, rather than
-      // collapsing all text to the top and all tools to the bottom.
-      // streamingText is appended as a trailing segment because by
-      // definition it represents the *current* in-flight text block,
-      // which sits after everything already persisted. Memoized so
-      // ToolCallGroup's prop reference is stable across re-renders when
-      // nothing actually changed — its memo only helps if its toolUses
-      // array reference doesn't churn.
-      const segments = useMemo(() => {
-        const base = groupAssistantContent(message.content, toolCallsById);
-        if (streamingText) {
-          base.push({ kind: 'text', text: streamingText, streaming: true });
-        }
-        return base;
-      }, [message.content, toolCallsById, streamingText]);
-
       return (
         <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
           {!isContinuation && (
@@ -1025,7 +1025,7 @@ const MessageBlock = memo(
                 );
               }
               if (seg.kind === 'tools') {
-                return <ToolCallGroup key={idx} toolUses={seg.toolUses} />;
+                return <ToolCallGroup key={idx} workspaceId={workspaceId} toolUses={seg.toolUses} />;
               }
               return null;
             })}
@@ -1045,12 +1045,13 @@ const MessageBlock = memo(
  */
 interface MergedToolGroupProps {
   item: Extract<RenderItem, { type: 'tool-group' }>;
+  workspaceId: string;
   toolCallsById: Map<string, ToolInvocation>;
   isContinuation?: boolean;
 }
 
 const MergedToolGroup = memo(
-  ({ item, toolCallsById, isContinuation = false }: MergedToolGroupProps) => {
+  ({ item, workspaceId, toolCallsById, isContinuation = false }: MergedToolGroupProps) => {
     const enrichedToolUses = useMemo<EnrichedToolUse[]>(
       () =>
         item.toolUses.map((tu) => {
@@ -1080,7 +1081,7 @@ const MergedToolGroup = memo(
           </div>
         )}
         <div className={styles.messageContent}>
-          <ToolCallGroup toolUses={enrichedToolUses} />
+          <ToolCallGroup workspaceId={workspaceId} toolUses={enrichedToolUses} />
         </div>
       </div>
     );
@@ -1273,7 +1274,7 @@ const ChatTaskCard = memo(({ card }: { card: TaskCallCard }) => {
  * A full task card breaks the count: it stays on screen wherever it was
  * produced and the calls that follow it collapse *below* it.
  */
-const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
+const ToolCallGroup = memo(({ workspaceId, toolUses }: { workspaceId: string; toolUses: EnrichedToolUse[] }) => {
   const segments = useMemo(() => splitAtRichRows(toolUses), [toolUses]);
 
   if (toolUses.length === 0) return null;
@@ -1284,7 +1285,7 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
         seg.kind === 'task' ? (
           <ChatTaskCard key={seg.key} card={seg.card} />
         ) : (
-          <CollapsibleToolRows key={seg.key} items={seg.items} />
+          <CollapsibleToolRows key={seg.key} workspaceId={workspaceId} items={seg.items} />
         )
       )}
     </div>
@@ -1296,7 +1297,7 @@ const ToolCallGroup = memo(({ toolUses }: { toolUses: EnrichedToolUse[] }) => {
  * the oldest collapse behind a "show N earlier" toggle; the most-recent rows
  * stay on screen.
  */
-const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
+const CollapsibleToolRows = memo(({ workspaceId, items }: { workspaceId: string; items: ToolItem[] }) => {
   const [showEarlier, setShowEarlier] = useState(false);
 
   const overflow = items.length - MAX_VISIBLE_TOOLS;
@@ -1326,6 +1327,7 @@ const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
         ) : (
           <ToolRow
             key={tu.toolCallId}
+            workspaceId={workspaceId}
             toolName={tu.toolName}
             params={tu.params ?? tu.arguments}
             status={tu.status}
@@ -1344,6 +1346,7 @@ const CollapsibleToolRows = memo(({ items }: { items: ToolItem[] }) => {
  * Click to expand the full, well-formatted Output/Input view.
  */
 interface ToolRowProps {
+  workspaceId: string;
   toolName: string;
   params?: unknown;
   status: string;
@@ -1351,7 +1354,7 @@ interface ToolRowProps {
   call?: ToolInvocation;
 }
 
-const ToolRow = memo(({ toolName, params, status, error, call }: ToolRowProps) => {
+const ToolRow = memo(({ workspaceId, toolName, params, status, error, call }: ToolRowProps) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'output' | 'input'>('output');
 
@@ -1378,10 +1381,12 @@ const ToolRow = memo(({ toolName, params, status, error, call }: ToolRowProps) =
   const hasOutput = hasFullResult || !!error || isRunning;
   const outputReadsInput = OUTPUT_READS_INPUT.has(cleanToolName(toolName || ''));
   const fullResult = useToolCallResult(
+    workspaceId,
     call,
     isExpanded && activeTab === 'output' && hasFullResult && !isRunning
   );
   const fullInput = useToolCallInput(
+    workspaceId,
     call,
     isExpanded &&
       hasFullInput &&
@@ -1478,39 +1483,4 @@ const ToolRow = memo(({ toolName, params, status, error, call }: ToolRowProps) =
   );
 });
 
-/**
- * NoticesBanner — expandable banner showing policy warnings for a run
- */
-const NoticesBanner = memo(({ notices }: { notices: RunNotice[] | undefined }) => {
-  const [expanded, setExpanded] = useState(false);
-
-  if (!notices || notices.length === 0) return null;
-
-  return (
-    <div
-      className={styles.noticesBanner}
-      onClick={() => setExpanded((prev) => !prev)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => e.key === 'Enter' && setExpanded((prev) => !prev)}
-    >
-      <span>⚠</span>
-      <span>
-        {notices.length} policy warning{notices.length > 1 ? 's' : ''}
-        {!expanded && ' — click to expand'}
-      </span>
-      {expanded && (
-        <div className={styles.noticesList}>
-          {notices.map((notice, i) => (
-            <div key={i} className={styles.noticeItem}>
-              {notice.message}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-});
-
-export { NoticesBanner };
 export default ChatMessageList;

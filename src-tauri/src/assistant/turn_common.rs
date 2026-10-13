@@ -1,15 +1,15 @@
 use crate::assistant::engine::AssistantDeps;
-use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository;
+use crate::assistant::run_context::RunContext;
 use crate::assistant::types::{ContentPart, MessageRole, ProviderInputMessage, RunTrigger};
 use crate::db::DbPool;
 
 pub(crate) fn build_trigger_message(
-    session: &crate::assistant::types::AssistantSession,
+    run_context: &RunContext,
     trigger: &RunTrigger,
 ) -> Option<ProviderInputMessage> {
-    let automation_name = session
-        .context
+    let automation_name = run_context
         .automation_name
         .as_deref()
         .unwrap_or("automation");
@@ -33,10 +33,7 @@ pub(crate) fn build_trigger_message(
              Run the automation {} now and report the current findings.",
             now, automation_name
         )),
-        RunTrigger::InterAgentCall
-        | RunTrigger::WorkspaceTask
-        | RunTrigger::UserMessage
-        | RunTrigger::Retry => None,
+        RunTrigger::WorkspaceTask | RunTrigger::UserMessage => None,
     }?;
 
     Some(ProviderInputMessage {
@@ -90,8 +87,7 @@ pub(crate) async fn discard_unanswered_run_input(
         trigger_message_id,
         assistant_placeholder_id,
         |message_id| {
-            let _ = emit_event(
-                &deps.app,
+            let _ = deps.emit(
                 session,
                 Some(run_id),
                 AssistantUiEvent::MessageDeleted { message_id },
@@ -105,7 +101,7 @@ pub(crate) async fn discard_unanswered_run_input(
     clippy::cognitive_complexity,
     reason = "lint debt: cognitive complexity 33 against a budget of 25"
 )]
-async fn discard_unanswered_run_input_with_sink(
+pub(crate) async fn discard_unanswered_run_input_with_sink(
     pool: &DbPool,
     session_id: &str,
     run_id: &str,
@@ -172,8 +168,8 @@ async fn discard_unanswered_run_input_with_sink(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::repository::{CreateRunParams, CreateSessionParams};
-    use crate::assistant::types::{RunStatus, SessionContext, SessionKind};
+    use crate::assistant::repository::CreateRunParams;
+    use crate::assistant::types::{RunStatus, SessionContext};
     use crate::db::test_support::workspace_pool;
 
     fn image() -> ContentPart {
@@ -206,16 +202,9 @@ mod tests {
     #[tokio::test]
     async fn unanswered_input_discards_text_but_keeps_images_and_pending_queue() {
         let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(
-            &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context: SessionContext::default(),
-            },
-        )
-        .await
-        .unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
         let run = repository::create_run(
             &pool,
             CreateRunParams {

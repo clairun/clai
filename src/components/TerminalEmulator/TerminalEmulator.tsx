@@ -631,7 +631,7 @@ const TerminalEmulator = ({
           {/* Workspace context bar — MCP badges inside the terminal on workspace routes */}
           {isWorkspaceRoute && currentWorkspaceId && (
             <div className={styles.workspaceContextWrapper}>
-              <WorkspaceContextBar workspaceId={currentWorkspaceId} />
+              <WorkspaceContextBar key={currentWorkspaceId} workspaceId={currentWorkspaceId} />
             </div>
           )}
 

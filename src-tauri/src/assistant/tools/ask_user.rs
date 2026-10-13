@@ -165,6 +165,7 @@ pub fn take_for_session(session_id: &str) -> Vec<String> {
 struct PendingGuard {
     id: String,
     app: tauri::AppHandle,
+    workspace_id: String,
     session: crate::assistant::types::AssistantSession,
     run_id: String,
     cancel_token: tokio_util::sync::CancellationToken,
@@ -182,6 +183,7 @@ impl PendingGuard {
         }
         let _ = emit_event(
             &self.app,
+            &self.workspace_id,
             &self.session,
             Some(self.run_id.as_str()),
             AssistantUiEvent::AskUserResolved {
@@ -203,12 +205,14 @@ impl Drop for PendingGuard {
             map.remove(&self.id);
         }
         let app = self.app.clone();
+        let workspace_id = self.workspace_id.clone();
         let session = self.session.clone();
         let run_id = self.run_id.clone();
         let pending_id = self.id.clone();
         tauri::async_runtime::spawn(async move {
             let _ = emit_event(
                 &app,
+                &workspace_id,
                 &session,
                 Some(run_id.as_str()),
                 AssistantUiEvent::AskUserResolved { pending_id },
@@ -242,8 +246,7 @@ pub async fn execute(
     // replaces the stale one; resolving the old ids also unblocks
     // `session_has_pending_ask` for mid-run input delivery.
     for stale_id in take_for_session(&session.id) {
-        let _ = emit_event(
-            &deps.app,
+        let _ = deps.emit(
             &session,
             Some(context.run_id.as_str()),
             AssistantUiEvent::AskUserResolved {
@@ -263,14 +266,14 @@ pub async fn execute(
     let mut guard = PendingGuard {
         id: pending_id.clone(),
         app: deps.app.clone(),
+        workspace_id: deps.workspace_id.clone(),
         session: session.clone(),
         run_id: context.run_id.clone(),
         cancel_token: context.cancel_token.clone(),
         armed: true,
     };
 
-    let _ = emit_event(
-        &deps.app,
+    let _ = deps.emit(
         &session,
         Some(context.run_id.as_str()),
         AssistantUiEvent::AskUserRequested {
@@ -301,8 +304,7 @@ pub async fn execute(
     };
     guard.disarm();
 
-    let _ = emit_event(
-        &deps.app,
+    let _ = deps.emit(
         &session,
         Some(context.run_id.as_str()),
         AssistantUiEvent::AskUserResolved {

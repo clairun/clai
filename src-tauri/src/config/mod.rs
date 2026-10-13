@@ -9,10 +9,11 @@ pub mod types;
 pub mod workspace_config;
 
 pub use types::{
-    AgentConfig, AiProvider, AppConfig, ClaiConfig, ExecutionCapabilityConfig,
-    FilesystemCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, McpEnvVar,
-    McpServerAuth, McpServerConfig, McpServerTransport, SandboxNetworkConfig,
-    SandboxSessionBusConfig, ShellAccessMode, SkillSourceConfig, SkillSourceKind,
+    first_enabled_connection, AgentConfig, AiProvider, AppConfig, ClaiConfig,
+    ExecutionCapabilityConfig, FilesystemCapabilityConfig, FilesystemPathAccess,
+    FilesystemPathGrant, GrantOrigin, McpEnvVar, McpServerAuth, McpServerConfig,
+    McpServerTransport, SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
+    SkillSourceConfig, SkillSourceKind,
 };
 pub use workspace_config::{WorkspaceAgent, WorkspaceConfig};
 
@@ -203,30 +204,6 @@ impl ConfigManager {
         let mut config = self.config.lock().unwrap();
         f(&mut config);
         self.save_to_file(&config)
-    }
-
-    /// Gets the current AI provider.
-    pub fn get_ai_provider(&self) -> Option<AiProvider> {
-        self.config.lock().unwrap().ai_provider.clone()
-    }
-
-    /// Sets the AI provider and saves config.
-    pub fn set_ai_provider(&self, provider: AiProvider) -> Result<(), ConfigError> {
-        self.update(|config| {
-            config.ai_provider = Some(provider);
-        })
-    }
-
-    /// Clears the AI provider and saves config.
-    pub fn clear_ai_provider(&self) -> Result<(), ConfigError> {
-        self.update(|config| {
-            config.ai_provider = None;
-        })
-    }
-
-    /// Checks if an AI provider is configured.
-    pub fn has_ai_provider(&self) -> bool {
-        self.config.lock().unwrap().ai_provider.is_some()
     }
 
     /// Gets all configured MCP servers.
@@ -441,8 +418,8 @@ pub fn discover_skills_with_diagnostics(
 
 /// Build the "system prompt seed" for an agent: the user-set description
 /// plus content of every selected skill, rendered as a single string.
-/// Called fresh on each turn at prompt-build time — see
-/// [`crate::commands::workspace::workspace_agent_runtime_description`].
+/// Called when each run starts — see
+/// [`crate::assistant::run_context::resolve_run_context`].
 pub fn compose_agent_instructions(
     config: &ClaiConfig,
     description: &str,
@@ -652,16 +629,13 @@ mod tests {
         let (manager, _temp_dir) = create_test_manager();
 
         manager
-            .set_ai_provider(AiProvider::Claude { model: None })
+            .update(|config| config.scheduler_paused = true)
             .unwrap();
 
         assert!(manager.config_path.exists());
 
         let loaded = ConfigManager::load_from_file(&manager.config_path).unwrap();
-        assert!(matches!(
-            loaded.ai_provider,
-            Some(AiProvider::Claude { .. })
-        ));
+        assert!(loaded.scheduler_paused);
     }
 
     // Note: tests that exercised the agent-side sweep on MCP/skill-source

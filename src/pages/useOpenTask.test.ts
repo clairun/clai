@@ -23,8 +23,6 @@ const task = (id: string): WorkspaceTaskResponse => ({
   updatedAt: 1n,
   completedAt: null,
   attentionAcknowledgedAt: null,
-  userResponse: null,
-  userResponseAt: null,
 });
 
 const setup = (

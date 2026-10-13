@@ -15,7 +15,6 @@ const agent = (over: Partial<WorkspaceAgentResponse>): WorkspaceAgentResponse =>
   workspaceId: 'ws-1',
   agentDefinitionId: 'def',
   displayName: 'Agent',
-  role: 'member',
   enabled: true,
   isDefault: false,
   agentName: null,
@@ -50,8 +49,6 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   updatedAt: 1n,
   completedAt: null,
   attentionAcknowledgedAt: null,
-  userResponse: null,
-  userResponseAt: null,
   ...over,
 });
 

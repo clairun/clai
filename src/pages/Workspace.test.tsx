@@ -45,6 +45,7 @@ vi.mock('../api/client', async (importOriginal) => ({
 }));
 
 vi.mock('../assistant/client', () => ({
+  getSession: vi.fn(async () => null),
   loadSessionMessagesPage: vi.fn(),
   listRuns: vi.fn(),
   cancelRun: vi.fn(async () => {}),
@@ -82,20 +83,10 @@ const MEMORY: WorkspaceFileEntry = {
 
 const sessionFor = (workspaceId: string, updatedAt: bigint): AssistantSession => ({
   id: `sess-${workspaceId}`,
-  kind: 'interactive',
-  title: null,
   context: {
-    workspaceId,
-    toolScopes: [],
-    mcpServerIds: [],
-    execution: {},
     cliSessionId: null,
     cliSessionProvider: null,
     automationId: null,
-    agentWorkspaceId: null,
-    automationName: null,
-    interAgentCall: null,
-    workspaceAgents: [],
   },
   createdAt: 0n,
   updatedAt,
@@ -259,8 +250,6 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   updatedAt: 1n,
   completedAt: 1n,
   attentionAcknowledgedAt: null,
-  userResponse: null,
-  userResponseAt: null,
 };
 
 const renderWorkspace = () =>
@@ -764,7 +753,6 @@ describe('Workspace switch with a call in flight', () => {
       id: 'wa-1',
       agentDefinitionId: 'agent-1',
       displayName: 'Helper',
-      role: 'member',
       enabled: true,
       isDefault: false,
       agentName: null,
@@ -816,7 +804,6 @@ describe('Workspace switch with a call in flight', () => {
                 workspaceId: 'a',
                 agentDefinitionId: 'agent-1',
                 displayName: 'Helper',
-                role: 'member',
                 enabled: true,
                 isDefault: false,
                 agentName: null,
@@ -852,7 +839,7 @@ describe('Workspace switch with a call in flight', () => {
         : detailsFor(options, { runs: [ACTIVE_RUN] })
     );
     const alphaStop = deferred<never>();
-    cancelRun.mockImplementation((runId) =>
+    cancelRun.mockImplementation((_workspaceId, runId) =>
       runId === 'run-a' ? alphaStop.promise : new Promise<never>(() => {})
     );
     renderSwitchableWorkspace();
@@ -1052,5 +1039,38 @@ describe('Workspace file preview', () => {
 
     expect(await screen.findByRole('region', { name: 'Memory: notes.md' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
+  });
+});
+
+describe('Workspace task transcript', () => {
+  it('follows the polled task status after the panel opened', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const running: WorkspaceTaskResponse = {
+      ...FAILED_TASK,
+      status: 'running',
+      error: null,
+      completedAt: null,
+      sessionId: 'sess-task-a',
+    };
+    let task = running;
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [task] })
+    );
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /1 tasks/ }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open the log of "${running.title}"` })
+    );
+    const panel = await screen.findByRole('region', { name: `Transcript for ${running.title}` });
+    expect(panel).toHaveTextContent('Running');
+
+    task = { ...running, status: 'completed', completedAt: 2n, updatedAt: 2n };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    await waitFor(() => expect(panel).toHaveTextContent('Completed'));
+    expect(panel).not.toHaveTextContent('Running');
   });
 });

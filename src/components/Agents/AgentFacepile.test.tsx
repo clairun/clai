@@ -8,7 +8,6 @@ const agent = (id: string, over: Partial<WorkspaceAgentResponse> = {}): Workspac
   workspaceId: 'ws-1',
   agentDefinitionId: `def-${id}`,
   displayName: id,
-  role: 'member',
   enabled: true,
   isDefault: false,
   agentName: null,
@@ -75,7 +74,6 @@ describe('AgentFacepile', () => {
       assignedToWorkspaceAgentId: 'b',
       status: 'blocked',
       attentionAcknowledgedAt: null,
-      userResponseAt: null,
     } as WorkspaceTaskResponse;
     const { container } = render(
       <AgentFacepile agents={[agent('a'), agent('b')]} tasks={[blocked]} />

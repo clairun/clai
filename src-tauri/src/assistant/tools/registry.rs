@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use crate::assistant::run_context::RunContext;
 use crate::assistant::tools::ask_user::AskUserParams;
 use crate::assistant::tools::workspace_tasks::{
     AssignWorkspaceTaskParams, GetWorkspaceTaskResultParams, ListWorkspaceAgentsParams,
 };
-use crate::assistant::types::{SessionContext, ToolDefinition};
+use crate::assistant::types::ToolDefinition;
 use crate::config::ShellAccessMode;
 
-/// Returns all tool definitions available for the given session context.
+/// Returns all tool definitions available to a run.
 pub fn available_tools(
-    context: &SessionContext,
+    context: &RunContext,
     external_tools: &[ToolDefinition],
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![];
@@ -22,27 +23,18 @@ pub fn available_tools(
         tools.push(ask_user_def());
     }
 
-    if context.agent_workspace_id.is_some() {
-        tools.push(history_query_def());
-        tools.push(create_vega_chart_def());
-    }
+    tools.push(history_query_def());
+    tools.push(create_vega_chart_def());
 
     // `bash_exec` is the only consumer of a path grant, so with the shell off
     // there is nothing for `fs_request_grant` to unlock: offering it would only
     // invite the agent to ask the user for access it still cannot use.
-    if context.agent_workspace_id.is_some()
-        && !matches!(context.execution.shell.mode, ShellAccessMode::Off)
-    {
+    if !matches!(context.execution.shell.mode, ShellAccessMode::Off) {
         tools.push(fs_request_grant_def());
         tools.push(bash_exec_def());
     }
 
-    // Web tools: always available in regular sessions, opt-in for agent sessions
-    let web_enabled = match context.agent_workspace_id.as_ref() {
-        Some(_) => context.execution.web.enabled,
-        None => true,
-    };
-    if web_enabled {
+    if context.execution.web.enabled {
         tools.push(web_search_def());
         tools.push(web_fetch_def());
     }
@@ -245,15 +237,15 @@ fn web_fetch_def() -> ToolDefinition {
     }
 }
 
-fn is_workspace_manager_context(context: &SessionContext) -> bool {
-    let Some(current_agent_definition_id) = context.automation_id.as_deref() else {
+fn is_workspace_manager_context(context: &RunContext) -> bool {
+    let Some(automation_id) = context.automation_id.as_deref() else {
         return false;
     };
 
     context
         .workspace_agents
         .iter()
-        .any(|agent| agent.is_default && agent.agent_definition_id == current_agent_definition_id)
+        .any(|agent| agent.is_default && agent.id == automation_id)
 }
 
 /// Build a ToolDefinition from a schemars-annotated param type.
@@ -310,12 +302,9 @@ mod tests {
 
     #[test]
     fn workspace_tools_use_bash_instead_of_operational_fs_tools() {
-        let mut context = SessionContext {
-            agent_workspace_id: Some("workspace".to_string()),
-            ..Default::default()
-        };
+        let mut context = RunContext::default();
 
-        let names = |context: &SessionContext| {
+        let names = |context: &RunContext| {
             available_tools(context, &[])
                 .into_iter()
                 .map(|tool| tool.name)
@@ -338,6 +327,24 @@ mod tests {
         let shell_on = names(&context);
         assert!(shell_on.contains(&"bash_exec".to_string()));
         assert!(shell_on.contains(&"fs_request_grant".to_string()));
+    }
+
+    #[test]
+    fn web_tools_are_off_unless_granted() {
+        let mut context = RunContext::default();
+        let has_web = |context: &RunContext| {
+            let names: Vec<String> = available_tools(context, &[])
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect();
+            let search = names.contains(&"web_search".to_string());
+            assert_eq!(search, names.contains(&"web_fetch".to_string()));
+            search
+        };
+
+        assert!(!has_web(&context));
+        context.execution.web.enabled = true;
+        assert!(has_web(&context));
     }
 
     #[test]

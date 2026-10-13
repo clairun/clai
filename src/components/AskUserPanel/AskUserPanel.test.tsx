@@ -13,20 +13,10 @@ import type { AssistantSession } from '../../generated/bindings';
 
 const SESSION: AssistantSession = {
   id: 'sess-1',
-  kind: 'interactive',
-  title: 'Test',
   context: {
-    workspaceId: 'ws-1',
-    toolScopes: [],
-    mcpServerIds: [],
-    execution: {},
     cliSessionId: null,
     cliSessionProvider: null,
     automationId: null,
-    agentWorkspaceId: null,
-    automationName: null,
-    interAgentCall: null,
-    workspaceAgents: [],
   },
   createdAt: 0n,
   updatedAt: 0n,

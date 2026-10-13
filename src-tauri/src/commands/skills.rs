@@ -159,20 +159,6 @@ impl From<SkillSourceConfig> for SkillSourceResponse {
 }
 
 #[tauri::command]
-pub fn skill_sources_list(state: State<'_, AppState>) -> Result<Vec<SkillSourceResponse>, String> {
-    let config_manager = state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?;
-
-    Ok(config_manager
-        .get_skill_sources()
-        .into_iter()
-        .map(SkillSourceResponse::from)
-        .collect())
-}
-
-#[tauri::command]
 pub fn skills_list(state: State<'_, AppState>) -> Result<Vec<SkillDefinition>, String> {
     let config = {
         let config_manager = state

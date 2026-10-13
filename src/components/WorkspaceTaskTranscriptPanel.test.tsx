@@ -60,8 +60,6 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   updatedAt: 0n,
   completedAt: null,
   attentionAcknowledgedAt: null,
-  userResponse: null,
-  userResponseAt: null,
   ...over,
 });
 
@@ -103,7 +101,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     for (const isStreaming of [true, false]) {
       seedSession(isStreaming);
       const { unmount } = render(
-        <WorkspaceTaskTranscriptPanel task={task()} onClose={() => {}} />
+        <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />
       );
       expect(screen.getByText('porting the reducer')).not.toBeNull();
       expect(screen.queryByRole('img', { name: 'Working' })).toBeNull();
@@ -115,13 +113,14 @@ describe('WorkspaceTaskTranscriptPanel', () => {
   it('puts the task state on the header face instead', () => {
     seedSession(true);
     const { rerender } = render(
-      <WorkspaceTaskTranscriptPanel task={task()} onClose={() => {}} />
+      <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />
     );
     const face = () => screen.getByRole('img', { name: 'Rust Architect' });
     expect(face().dataset.activity).toBe('running');
 
     rerender(
       <WorkspaceTaskTranscriptPanel
+        workspaceId="ws-1"
         task={task({ status: 'failed', completedAt: 1n })}
         onClose={() => {}}
       />
@@ -130,6 +129,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
 
     rerender(
       <WorkspaceTaskTranscriptPanel
+        workspaceId="ws-1"
         task={task({ status: 'completed', completedAt: 1n })}
         onClose={() => {}}
       />

@@ -39,7 +39,7 @@ vi.mock('./pages/FleetIndex', () => ({
 }));
 
 vi.mock('./pages/Workspace', () => ({
-  default: () => {
+  default: function WorkspaceStub() {
     const { workspaceId } = useParams();
     return <div data-testid="workspace">{workspaceId}</div>;
   },

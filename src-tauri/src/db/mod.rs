@@ -18,6 +18,8 @@
 //! workspace and calls `init_workspace_db`, and the lazy-open path goes
 //! through the same function. Both apply pending migrations.
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
 use std::path::Path;
@@ -109,8 +111,7 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
 ///
 /// `assistant_runs` and `assistant_tool_calls` are NOT touched here —
 /// `crate::assistant::repository::recover_stale_runs` already handles those
-/// at workspace-DB open, and its SQL uses the JSON-quoted enum format
-/// the column actually stores (e.g. `'"running"'`, not `'running'`).
+/// at workspace-DB open.
 pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
 
@@ -144,6 +145,24 @@ pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+/// A unit enum stored in a TEXT column: the bare string serde gives it
+/// (`RunStatus::Running` → `running`). Pair with [`parse_enum_text`].
+pub(crate) fn enum_text<T: Serialize>(value: &T) -> Result<String, String> {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(text)) => Ok(text),
+        Ok(other) => Err(format!("Expected a unit enum, got {other}")),
+        Err(e) => Err(format!("Failed to serialize enum: {e}")),
+    }
+}
+
+pub(crate) fn parse_enum_text<T: DeserializeOwned>(
+    text: String,
+    context: &str,
+) -> Result<T, String> {
+    serde_json::from_value(serde_json::Value::String(text))
+        .map_err(|e| format!("Failed to parse {context}: {e}"))
 }
 
 #[cfg(test)]
@@ -206,23 +225,304 @@ mod tests {
         );
     }
 
-    /// The `usage_json` column was dropped in `20260829000000_drop_run_usage`
-    /// along with all token accounting. A migration that silently fails to
-    /// drop it would otherwise ship green — nothing reads the column, so only
-    /// this assertion notices.
+    /// Dropped columns must stay dropped: nothing reads them, so a migration
+    /// that silently fails to drop one would otherwise ship green.
     #[tokio::test]
-    async fn assistant_runs_has_no_usage_json_column() {
+    async fn dropped_columns_stay_dropped() {
         let (_tmp, pool) = workspace_pool().await;
-        let columns: Vec<String> =
-            sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info('assistant_runs')")
+        for (table, column) in [
+            ("assistant_runs", "usage_json"),
+            ("assistant_runs", "notices_json"),
+            ("assistant_sessions", "kind"),
+            ("assistant_sessions", "title"),
+            ("workspace_tasks", "user_response"),
+            ("workspace_tasks", "user_response_at"),
+            ("workspace_tasks", "result_json"),
+        ] {
+            let present: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?")
+                    .bind(table)
+                    .bind(column)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(present, 0, "{table}.{column} should be dropped");
+        }
+    }
+
+    /// A pool with every migration older than `version` applied. Tests seed it
+    /// with raw SQL: repository code targets the current schema, not this one.
+    async fn pool_migrated_before(version: i64) -> DbPool {
+        // One connection: every connection to `:memory:` is its own database.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await
+            .unwrap();
+        let mut before = sqlx::migrate!("./migrations/workspace");
+        before.migrations = before
+            .migrations
+            .iter()
+            .filter(|migration| migration.version < version)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into();
+        before.run(&pool).await.unwrap();
+        pool
+    }
+
+    async fn run_all_migrations(pool: &DbPool) {
+        sqlx::migrate!("./migrations/workspace")
+            .run(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Legacy `retry`/`inter_agent_call` rows, quoted or not, must still
+    /// deserialize once `20261013000000_drop_dead_run_triggers` has run.
+    #[tokio::test]
+    async fn dead_run_triggers_are_mapped_to_live_ones() {
+        use crate::assistant::repository;
+        use crate::assistant::types::RunTrigger;
+
+        let pool = pool_migrated_before(20261013000000).await;
+        sqlx::query(
+            "INSERT INTO assistant_sessions (id, kind, title, context_json, created_at, updated_at)
+             VALUES ('s', '\"interactive\"', NULL, '{}', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, legacy) in [
+            ("r1", "\"retry\""),
+            ("r2", "retry"),
+            ("r3", "\"inter_agent_call\""),
+            ("r4", "inter_agent_call"),
+        ] {
+            sqlx::query(
+                "INSERT INTO assistant_runs
+                     (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id, started_at)
+                 VALUES (?, 's', '\"completed\"', ?, 'c', 'openai', 'm', 1)",
+            )
+            .bind(id)
+            .bind(legacy)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let mut triggers = Vec::new();
+        for id in ["r1", "r2", "r3", "r4"] {
+            let run = repository::get_run(&pool, id).await.unwrap().unwrap();
+            triggers.push(run.trigger);
+        }
+        assert_eq!(
+            triggers,
+            [
+                RunTrigger::UserMessage,
+                RunTrigger::UserMessage,
+                RunTrigger::WorkspaceTask,
+                RunTrigger::WorkspaceTask,
+            ]
+        );
+    }
+
+    /// `20261014000000_drop_dead_columns` keeps answered tasks out of the
+    /// attention count and leaves the rows it rewrites loadable.
+    #[tokio::test]
+    async fn dead_columns_drop_keeps_answered_tasks_acknowledged() {
+        use crate::assistant::repository;
+
+        let pool = pool_migrated_before(20261014000000).await;
+        sqlx::query(
+            "INSERT INTO assistant_sessions (id, kind, title, context_json, created_at, updated_at)
+             VALUES ('s', '\"background_job\"', 'Task: t', '{}', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id,
+                  notices_json, started_at)
+             VALUES ('r', 's', '\"completed_with_warnings\"', '\"workspace_task\"', 'c', 'openai',
+                     'm', '[{\"kind\":\"command_denied\",\"message\":\"x\",\"timestamp\":1}]', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, status, acknowledged_at) in [
+            ("answered", "blocked", None),
+            ("acknowledged", "failed", Some(7_i64)),
+        ] {
+            sqlx::query(
+                "INSERT INTO workspace_tasks
+                     (id, assigned_to_workspace_agent_id, assigned_agent_definition_id, title,
+                      instructions, status, result_summary, result_json, created_at, updated_at,
+                      attention_acknowledged_at, user_response, user_response_at)
+                 VALUES (?, 'wa', 'def', 't', 'i', ?, 'done', '{\"summary\":\"done\"}', 1, 1,
+                         ?, 'yes', 5)",
+            )
+            .bind(id)
+            .bind(status)
+            .bind(acknowledged_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let acknowledged: Vec<(String, Option<i64>)> =
+            sqlx::query_as("SELECT id, attention_acknowledged_at FROM workspace_tasks ORDER BY id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert!(
-            !columns.iter().any(|c| c == "usage_json"),
-            "token accounting was removed; columns: {:?}",
-            columns
+        assert_eq!(
+            acknowledged,
+            [
+                ("acknowledged".to_string(), Some(7)),
+                ("answered".to_string(), Some(5)),
+            ]
         );
+        assert!(repository::get_session(&pool, "s").await.unwrap().is_some());
+        assert!(repository::get_run(&pool, "r").await.unwrap().is_some());
+    }
+
+    /// `20261015000000_plain_enum_columns` unquotes JSON-string enums, leaves
+    /// already-plain values alone, and keeps every row loadable.
+    #[tokio::test]
+    async fn quoted_enum_columns_become_plain_text() {
+        use crate::assistant::repository;
+        use crate::assistant::types::{
+            CompactionStatus, MessageRole, RunStatus, RunTrigger, ToolCallStatus,
+        };
+
+        let pool = pool_migrated_before(20261015000000).await;
+        for statement in [
+            "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+             VALUES ('s', '{}', 1, 1)",
+            "INSERT INTO assistant_messages (id, session_id, role, content_json, created_at)
+             VALUES ('m1', 's', '\"user\"', '[]', 1), ('m2', 's', 'assistant', '[]', 2)",
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id, started_at)
+             VALUES ('r1', 's', '\"running\"', '\"scheduled\"', 'c', 'openai', 'm', 1),
+                    ('r2', 's', 'completed', 'user_message', 'c', 'openai', 'm', 2)",
+            "INSERT INTO assistant_tool_calls
+                 (id, run_id, session_id, tool_name, params_json, status, started_at)
+             VALUES ('t1', 'r1', 's', 'x', '{}', '\"pending\"', 1),
+                    ('t2', 'r2', 's', 'x', '{}', 'completed', 2)",
+            "INSERT INTO assistant_compactions
+                 (id, session_id, \"trigger\", strategy, status, source_to_message_id,
+                  summary_message_id, protocol_id, model_id, created_at, completed_at)
+             VALUES ('c1', 's', '\"automatic\"', '\"local_summary\"', '\"completed\"', 'm1', 'm2',
+                     'openai', 'm', 1, 1)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let stored: Vec<String> = sqlx::query_scalar(
+            "SELECT role FROM assistant_messages
+             UNION ALL SELECT status || ' ' || \"trigger\" FROM assistant_runs
+             UNION ALL SELECT status FROM assistant_tool_calls
+             UNION ALL SELECT \"trigger\" || ' ' || strategy || ' ' || status
+                       FROM assistant_compactions",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            [
+                "user",
+                "assistant",
+                "running scheduled",
+                "completed user_message",
+                "pending",
+                "completed",
+                "automatic local_summary completed",
+            ]
+        );
+
+        let roles: Vec<MessageRole> = repository::list_messages(&pool, "s")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|message| message.role)
+            .collect();
+        assert_eq!(roles, [MessageRole::User, MessageRole::Assistant]);
+        let run = repository::get_run(&pool, "r1").await.unwrap().unwrap();
+        assert_eq!(
+            (run.status, run.trigger),
+            (RunStatus::Running, RunTrigger::Scheduled)
+        );
+        assert!(repository::session_has_active_run(&pool, "s")
+            .await
+            .unwrap());
+        let tool_call = repository::get_tool_call_for_session(&pool, "s", "t1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tool_call.status, ToolCallStatus::Pending);
+        let compaction = repository::latest_completed_compaction(&pool, "s")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(compaction.status, CompactionStatus::Completed);
+
+        let quoted = sqlx::query(
+            "INSERT INTO assistant_compactions
+                 (id, session_id, \"trigger\", strategy, status, protocol_id, model_id, created_at)
+             VALUES ('c2', 's', 'manual', 'local_summary', '\"completed\"', 'openai', 'm', 2)",
+        )
+        .execute(&pool)
+        .await;
+        assert!(
+            quoted.is_err(),
+            "the rebuilt CHECK must reject quoted values"
+        );
+    }
+
+    /// The same migration rebuilds `assistant_compactions`; the rebuilt table
+    /// keeps its indexes and foreign keys.
+    #[tokio::test]
+    async fn plain_enum_rebuild_keeps_compaction_indexes_and_foreign_keys() {
+        let pool = pool_migrated_before(20261015000000).await;
+        let compaction_foreign_keys = || async {
+            sqlx::query_as::<_, (String, String, String, String, String)>(
+                "SELECT \"table\", \"from\", \"to\", on_update, on_delete
+                 FROM pragma_foreign_key_list('assistant_compactions')
+                 ORDER BY \"from\"",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+        };
+        let original_foreign_keys = compaction_foreign_keys().await;
+        assert_eq!(original_foreign_keys.len(), 5);
+
+        run_all_migrations(&pool).await;
+
+        let indexes: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'assistant_compactions' AND sql IS NOT NULL
+             ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            indexes,
+            [
+                "idx_assistant_compactions_session_created",
+                "idx_assistant_compactions_session_status",
+            ]
+        );
+        assert_eq!(compaction_foreign_keys().await, original_foreign_keys);
     }
 
     #[tokio::test]

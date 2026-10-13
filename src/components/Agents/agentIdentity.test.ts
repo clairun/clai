@@ -169,7 +169,6 @@ describe('activityFromTasks', () => {
     assignedToWorkspaceAgentId: 'wa-1',
     status: 'completed',
     attentionAcknowledgedAt: null,
-    userResponseAt: null,
     ...over,
   });
 
@@ -198,8 +197,5 @@ describe('activityFromTasks', () => {
     expect(
       activityFromTasks('wa-1', [task({ status: 'blocked', attentionAcknowledgedAt: 5n })])
     ).toBe('idle');
-    expect(activityFromTasks('wa-1', [task({ status: 'blocked', userResponseAt: 5n })])).toBe(
-      'idle'
-    );
   });
 });

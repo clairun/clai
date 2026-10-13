@@ -5,20 +5,21 @@
 
 use crate::agents::types::AgentInstance;
 use crate::assistant::repository;
-use crate::assistant::types::{
-    AssistantRun, AssistantSession, ContentPart, SessionContext, SessionKind, WorkspaceAgentSummary,
+use crate::assistant::types::{AssistantRun, AssistantSession, ContentPart, SessionContext};
+use crate::assistant::workspace_agents::{
+    load_workspace_agent_rows, workspace_agent_display_names, WorkspaceAgentRow,
 };
-use crate::config::global_agents::{AgentSource, ResolvedAgent};
+use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
+use crate::config::global_agents::AgentSource;
 use crate::config::workspace_config::{AgentAvatarRef, WorkspaceAssignment};
 use crate::config::{
-    workspace_config, AgentConfig, AppConfig, ExecutionCapabilityConfig,
-    FilesystemCapabilityConfig, FilesystemPathGrant, GrantOrigin, WorkspaceAgent, WorkspaceConfig,
+    workspace_config, AppConfig, ExecutionCapabilityConfig, FilesystemCapabilityConfig,
+    FilesystemPathGrant, GrantOrigin, WorkspaceAgent, WorkspaceConfig,
 };
 use crate::db::DbPool;
 use crate::workspace_index::{WorkspaceIndex, WorkspaceLocator};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -207,6 +208,7 @@ pub struct WorkspaceDetails {
     pub disabled_mcp_server_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<AssistantSession>,
+    /// The newest run and the active run, if different; never the full history.
     #[serde(default)]
     pub runs: Vec<AssistantRun>,
     #[serde(default)]
@@ -281,7 +283,6 @@ pub struct WorkspaceAgentResponse {
     pub workspace_id: String,
     pub agent_definition_id: String,
     pub display_name: String,
-    pub role: String,
     pub enabled: bool,
     pub is_default: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -310,42 +311,6 @@ pub struct WorkspaceAgentResponse {
     pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
     pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct WorkspaceTaskResponse {
-    pub id: String,
-    pub workspace_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by_workspace_agent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub created_by_display_name: Option<String>,
-    pub assigned_to_workspace_agent_id: String,
-    pub assigned_agent_definition_id: String,
-    pub assigned_agent_display_name: String,
-    pub title: String,
-    pub instructions: String,
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result_summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    pub created_at: i64,
-    pub updated_at: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attention_acknowledged_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_response: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_response_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -421,9 +386,6 @@ pub(crate) struct WorkspaceDescriptor {
     provider_connection_ids: Vec<String>,
     selected_mcp_server_ids: Vec<String>,
     disabled_mcp_server_ids: Vec<String>,
-    execution: ExecutionCapabilityConfig,
-    tool_scopes: Vec<String>,
-    automation_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -431,27 +393,6 @@ struct WorkspaceProviderSelection {
     ids: Vec<String>,
     names: Vec<String>,
     preferred_connection_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceAgentRow {
-    id: String,
-    workspace_id: String,
-    /// Legacy: foreign key into `ClaiConfig.agents`. Will be dropped in Phase 1.7.
-    agent_definition_id: String,
-    /// Legacy: replaced by `workspaces.default_workspace_agent_id` in Phase 1.6.
-    role: String,
-    enabled: bool,
-    // Inline agent fields (Phase 1.2 writes them, Phase 1.4 reads them).
-    name: String,
-    description: String,
-    selected_skill_ids: Vec<String>,
-    selected_mcp_server_ids: Vec<String>,
-    provider_connection_ids: Vec<String>,
-    execution: ExecutionCapabilityConfig,
-    avatar: Option<AgentAvatarRef>,
-    created_at: i64,
-    updated_at: i64,
 }
 
 // ===============================================================================
@@ -1125,12 +1066,6 @@ pub(crate) fn resolve_workspace_descriptor(
         .iter()
         .find(|resolved| matches!(resolved.source, AgentSource::Main))
         .map(|resolved| &resolved.agent);
-    let mut execution = manager
-        .map(|agent| agent.execution.clone())
-        .unwrap_or_default();
-    if manager.is_none() {
-        execution.web.enabled = true;
-    }
     // Both partitions come from the manager row's refs: `disabled: true`
     // marks a server attached to the conversation but toggled off in the
     // context bar; everything else is the effective enabled set.
@@ -1149,18 +1084,9 @@ pub(crate) fn resolve_workspace_descriptor(
         root_path: Some(root_path),
         provider_connection_ids: manager
             .map(|agent| agent.provider_connection_ids.clone())
-            .or_else(|| {
-                config
-                    .preferred_provider_connection_id
-                    .clone()
-                    .map(|id| vec![id])
-            })
             .unwrap_or_default(),
         selected_mcp_server_ids,
         disabled_mcp_server_ids,
-        execution,
-        tool_scopes: vec!["web".to_string()],
-        automation_name: manager.map(|agent| agent.name.clone()),
     })
 }
 
@@ -1228,33 +1154,6 @@ fn resolve_workspace_provider_selection(
     })
 }
 
-/// Live-compute the system-prompt seed for a workspace agent, reading the
-/// current workspace config + the user's enabled skills. Returns `None` when
-/// the workspace or agent has been deleted (the session is half-broken; the
-/// engine treats it as "no agent instructions" rather than panicking).
-///
-/// This is the canonical lookup used at prompt-build time. Skills are no
-/// longer snapshotted onto `SessionContext.automation_description`; we read
-/// fresh on every turn so toggling a skill in the workspace settings
-/// modal is immediately visible to the model on the next message.
-pub fn workspace_agent_runtime_description(
-    state: &AppState,
-    workspace_id: &str,
-    agent_id: &str,
-) -> Option<String> {
-    let agent = &state
-        .resolve_workspace_agent(workspace_id, agent_id)
-        .ok()??
-        .agent;
-    let app_cfg = state.config_manager.lock().ok()?.get();
-    let selected_skill_ids = workspace_config::refs_to_skill_ids(&app_cfg, &agent.selected_skills);
-    Some(crate::config::compose_agent_instructions(
-        &app_cfg,
-        &agent.description,
-        &selected_skill_ids,
-    ))
-}
-
 fn workspace_default_agent_id(
     state: &AppState,
     workspace_id: &str,
@@ -1263,60 +1162,11 @@ fn workspace_default_agent_id(
     Ok(config.main_agent.as_ref().map(|agent| agent.id.clone()))
 }
 
-fn load_workspace_agent_rows(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Vec<WorkspaceAgentRow>, String> {
-    let app_config = app_config(state)?;
-    let (config, roster) = state.resolve_workspace_roster(workspace_id)?;
-    let mut rows: Vec<_> = roster
-        .iter()
-        .map(|resolved| workspace_agent_row_from_config(&app_config, &config, resolved))
-        .collect();
-    rows.sort_by_key(|row| (if row.role == "manager" { 0 } else { 1 }, row.created_at));
-    Ok(rows)
-}
-
-fn workspace_agent_row_from_config(
-    app_config: &AppConfig,
-    workspace: &WorkspaceConfig,
-    resolved: &ResolvedAgent,
-) -> WorkspaceAgentRow {
-    let agent = &resolved.agent;
-    WorkspaceAgentRow {
-        id: agent.id.clone(),
-        workspace_id: workspace.id.clone(),
-        agent_definition_id: resolved
-            .definition_id()
-            .unwrap_or(agent.id.as_str())
-            .to_string(),
-        role: if matches!(resolved.source, AgentSource::Main) {
-            "manager".to_string()
-        } else {
-            "member".to_string()
-        },
-        enabled: agent.enabled,
-        name: agent.name.clone(),
-        description: agent.description.clone(),
-        selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
-        selected_mcp_server_ids: workspace_config::enabled_mcp_ids(&agent.selected_mcp_servers),
-        provider_connection_ids: agent.provider_connection_ids.clone(),
-        execution: agent.execution.clone(),
-        avatar: agent.avatar.clone(),
-        created_at: agent.created_at,
-        updated_at: agent.updated_at,
-    }
-}
-
 fn workspace_agent_response_from_row(
     row: WorkspaceAgentRow,
     default_workspace_agent_id: Option<&str>,
 ) -> WorkspaceAgentResponse {
-    let display_name = if row.name.trim().is_empty() {
-        row.agent_definition_id.clone()
-    } else {
-        row.name.clone()
-    };
+    let display_name = row.display_name().to_string();
 
     let agent_name = if row.name.trim().is_empty() {
         None
@@ -1334,7 +1184,6 @@ fn workspace_agent_response_from_row(
         workspace_id: row.workspace_id,
         agent_definition_id: row.agent_definition_id,
         display_name,
-        role: row.role,
         enabled: row.enabled,
         is_default: default_workspace_agent_id == Some(row.id.as_str()),
         agent_name,
@@ -1347,24 +1196,6 @@ fn workspace_agent_response_from_row(
         created_at: row.created_at,
         updated_at: row.updated_at,
     }
-}
-
-fn concise_agent_description(description: Option<String>) -> Option<String> {
-    let text = description?;
-    let first_line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?
-        .to_string();
-
-    const MAX_SUMMARY_CHARS: usize = 240;
-    if first_line.chars().count() <= MAX_SUMMARY_CHARS {
-        return Some(first_line);
-    }
-
-    let mut summary: String = first_line.chars().take(MAX_SUMMARY_CHARS).collect();
-    summary.push_str("...");
-    Some(summary)
 }
 
 fn list_workspace_agent_responses(
@@ -1384,225 +1215,24 @@ fn list_workspace_agent_responses(
     Ok((responses, default_workspace_agent_id))
 }
 
-/// Columns every `workspace_tasks` → [`WorkspaceTaskResponse`] query selects.
-/// Written once so the list query and the single-task lookup cannot drift into
-/// selecting different sets while sharing one row mapper.
-const WORKSPACE_TASK_COLUMNS: &str = "
-            task.id,
-            task.created_by_workspace_agent_id,
-            task.assigned_to_workspace_agent_id,
-            task.assigned_agent_definition_id,
-            task.title,
-            task.instructions,
-            task.status,
-            task.result_summary,
-            task.error,
-            task.session_id,
-            task.run_id,
-            task.created_at,
-            task.updated_at,
-            task.completed_at,
-            task.attention_acknowledged_at,
-            task.user_response,
-            task.user_response_at";
-
-fn workspace_task_response_from_row(
-    row: &sqlx::sqlite::SqliteRow,
-    workspace_id: &str,
-    agent_names: &HashMap<String, String>,
-) -> WorkspaceTaskResponse {
-    let assigned_agent_definition_id: String = row.get("assigned_agent_definition_id");
-    let assigned_agent_id: String = row.get("assigned_to_workspace_agent_id");
-    // An agent removed from the roster leaves its tasks behind: fall back to the
-    // definition id so the row still renders with something identifying.
-    let assigned_agent_display_name = agent_names
-        .get(&assigned_agent_id)
-        .cloned()
-        .unwrap_or_else(|| assigned_agent_definition_id.clone());
-    let created_by_workspace_agent_id: Option<String> = row.get("created_by_workspace_agent_id");
-    let created_by_display_name = created_by_workspace_agent_id
-        .as_ref()
-        .and_then(|id| agent_names.get(id).cloned());
-
-    WorkspaceTaskResponse {
-        id: row.get("id"),
-        workspace_id: workspace_id.to_string(),
-        created_by_workspace_agent_id,
-        created_by_display_name,
-        assigned_to_workspace_agent_id: assigned_agent_id,
-        assigned_agent_definition_id,
-        assigned_agent_display_name,
-        title: row.get("title"),
-        instructions: row.get("instructions"),
-        status: row.get("status"),
-        result_summary: row.get("result_summary"),
-        error: row.get("error"),
-        session_id: row.get("session_id"),
-        run_id: row.get("run_id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        completed_at: row.get("completed_at"),
-        attention_acknowledged_at: row.get("attention_acknowledged_at"),
-        user_response: row.get("user_response"),
-        user_response_at: row.get("user_response_at"),
-    }
-}
-
-/// Workspace-agent id → the agent's name, for resolving the assignee and
-/// creator names a task response carries. The name is passed through raw: a
-/// blank one stays blank here, where the agent response mapper substitutes the
-/// definition id. Roster failures degrade to raw ids rather than failing the
-/// task read.
-fn workspace_agent_display_names(state: &AppState, workspace_id: &str) -> HashMap<String, String> {
-    load_workspace_agent_rows(state, workspace_id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|agent| (agent.id, agent.name))
-        .collect()
-}
-
-async fn load_workspace_task_response(
-    pool: &DbPool,
-    workspace_id: &str,
-    task_id: &str,
-    agent_names: &HashMap<String, String>,
-) -> Result<Option<WorkspaceTaskResponse>, String> {
-    let row = sqlx::query(&format!(
-        r#"
-        SELECT {}
-        FROM workspace_tasks task
-        WHERE task.id = ?
-        "#,
-        WORKSPACE_TASK_COLUMNS
-    ))
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load workspace task: {}", e))?;
-
-    Ok(row.map(|row| workspace_task_response_from_row(&row, workspace_id, agent_names)))
-}
-
 async fn list_workspace_task_responses(
     pool: &DbPool,
     state: &AppState,
     workspace_id: &str,
 ) -> Result<Vec<WorkspaceTaskResponse>, String> {
     let agent_names = workspace_agent_display_names(state, workspace_id);
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT {}
-        FROM workspace_tasks task
-        ORDER BY task.updated_at DESC, task.created_at DESC
-        LIMIT 50
-        "#,
-        WORKSPACE_TASK_COLUMNS
-    ))
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to load workspace tasks: {}", e))?;
-
-    Ok(rows
+    Ok(workspace_tasks_repo::list_recent_tasks(pool, 50)
+        .await?
         .into_iter()
-        .map(|row| workspace_task_response_from_row(&row, workspace_id, &agent_names))
+        .map(|task| task.into_response(workspace_id, &agent_names))
         .collect())
-}
-
-pub(crate) fn workspace_agent_summaries(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Vec<WorkspaceAgentSummary>, String> {
-    let (agents, _) = list_workspace_agent_responses(state, workspace_id)?;
-
-    Ok(agents
-        .into_iter()
-        .map(|agent| WorkspaceAgentSummary {
-            // Phase 1.5: the LLM-visible "agent id" for inter-agent calls is the
-            // workspace-local row id. The legacy global `agent_definition_id`
-            // column is no longer surfaced (and will be dropped in Phase 1.7).
-            agent_definition_id: agent.id.clone(),
-            id: agent.id,
-            display_name: agent.display_name,
-            role: agent.role,
-            is_default: agent.is_default,
-            description: concise_agent_description(agent.agent_description),
-        })
-        .collect())
-}
-
-/// Build a transient `AgentConfig` from a workspace_agents row's inline fields.
-///
-/// Phase 1.4: the row carries the full configuration locally; no global
-/// catalog lookup is needed.
-/// Build a transient `AgentConfig` from a workspace_agents row's inline fields.
-/// Schedule fields are populated only for the workspace's default (manager)
-/// agent, sourced from the workspace-level `schedule` config; sub-agents
-/// never schedule themselves.
-fn agent_config_from_row(
-    row: &WorkspaceAgentRow,
-    schedule: Option<&workspace_config::WorkspaceSchedule>,
-) -> AgentConfig {
-    let created_at = chrono::DateTime::from_timestamp_millis(row.created_at)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default();
-    let updated_at = chrono::DateTime::from_timestamp_millis(row.updated_at)
-        .map(|dt| dt.to_rfc3339())
-        .unwrap_or_default();
-    AgentConfig {
-        id: row.id.clone(),
-        workspace_id: row.workspace_id.clone(),
-        name: row.name.clone(),
-        description: row.description.clone(),
-        schedule_enabled: schedule.map(|s| s.enabled).unwrap_or(false),
-        schedule_kind: schedule.map(|s| s.kind.clone()).unwrap_or_default(),
-        enabled: row.enabled,
-        selected_mcp_server_ids: row.selected_mcp_server_ids.clone(),
-        provider_connection_ids: row.provider_connection_ids.clone(),
-        selected_skill_ids: row.selected_skill_ids.clone(),
-        execution: row.execution.clone(),
-        created_at,
-        updated_at,
-    }
-}
-
-fn resolve_workspace_manager_agent(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Option<AgentConfig>, String> {
-    let root = state
-        .workspace_root(workspace_id)
-        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
-    let workspace = workspace_config::load(&root).map_err(|e| e.to_string())?;
-    let default_id = workspace.main_agent.as_ref().map(|agent| agent.id.clone());
-    let rows = load_workspace_agent_rows(state, workspace_id)?;
-
-    let manager_row = if let Some(default_id) = default_id.as_deref() {
-        rows.iter().find(|row| row.id == default_id)
-    } else {
-        // Legacy fallback: if no default pointer, prefer role='manager'.
-        rows.iter().find(|row| row.role == "manager")
-    };
-
-    Ok(manager_row.map(|row| agent_config_from_row(row, Some(&workspace.schedule))))
 }
 
 // assign_workspace_agent_row: removed. Workspace agents are created directly
 // by commands::workspace_agents::workspace_create_agent or seeded by
 // workspace_create's empty-Manager INSERT.
 
-/// Find the canonical session for a workspace's manager agent.
-///
-/// There is exactly one such session per (workspace, manager) — both
-/// user-typed chats and scheduled ticks read/write the same row. Selection
-/// is now kind-agnostic: the resolver excludes task-linked sessions via an
-/// SQL anti-join on `workspace_tasks.session_id` (see
-/// `list_non_task_sessions` in `assistant::repository`), so neither the
-/// interactive chat nor a non-task `BackgroundJob` session is missed and a
-/// task's own `BackgroundJob` row never hijacks the conversation view.
-///
-/// The actual selection lives in [`select_workspace_session`] so it can be
-/// unit-tested without a database; see the regression tests there for why
-/// excluding task sessions — not filtering by `kind` — is load-bearing.
+/// Find the canonical session for this workspace's manager in its selected DB.
 async fn find_workspace_session(
     pool: &DbPool,
     state: &AppState,
@@ -1613,138 +1243,7 @@ async fn find_workspace_session(
     else {
         return Ok(None);
     };
-
-    // Candidate conversations = all of this manager's sessions EXCEPT task
-    // delegations. Task sessions (workspace_tasks.session_id) are excluded in
-    // SQL, so resolution stays independent of task volume and a self-assigned
-    // task can't hijack the view. The canonical conversation is then the
-    // most-recently-updated remaining session: the interactive chat in the
-    // common case, or a non-task BackgroundJob session for workspaces whose
-    // scheduled-run conversation was forked into its own row.
-    Ok(select_workspace_session(
-        repository::list_non_task_sessions(pool).await?,
-        &manager_id,
-        &descriptor.workspace_id,
-        descriptor.agent_id.as_deref(),
-    ))
-}
-
-/// Pure selection logic behind [`find_workspace_session`], split out so it
-/// is unit-testable without a database or `AppState`.
-///
-/// Picks the single canonical conversation for `(workspace, manager)` as the
-/// most-recently-updated session that:
-/// - belongs to this workspace's manager (`automation_id == manager`), and
-/// - belongs to this workspace (by workspace / agent id).
-///
-/// Callers pass only NON-task sessions (see
-/// [`repository::list_non_task_sessions`]). Sub-agent task delegations run in
-/// separate `BackgroundJob` sessions recorded in `workspace_tasks`, and a
-/// self-assigned task even carries the manager's own `automation_id`, so they
-/// are excluded *upstream* rather than by kind here. Selecting by recency (not
-/// by kind) is deliberate: a workspace whose scheduled-run conversation lives
-/// in its own non-task `BackgroundJob` session still resolves to that live
-/// conversation instead of an abandoned interactive stub.
-fn select_workspace_session(
-    sessions: Vec<AssistantSession>,
-    manager_id: &str,
-    workspace_id: &str,
-    agent_id: Option<&str>,
-) -> Option<AssistantSession> {
-    let belongs_to_workspace = |session: &AssistantSession| -> bool {
-        session.context.workspace_id.as_deref() == Some(workspace_id)
-            || agent_id
-                .map(|aid| {
-                    session.context.agent_workspace_id.as_deref() == Some(aid)
-                        || session.context.automation_id.as_deref() == Some(aid)
-                })
-                .unwrap_or(false)
-    };
-
-    sessions
-        .into_iter()
-        .filter(|session| session.context.automation_id.as_deref() == Some(manager_id))
-        .filter(belongs_to_workspace)
-        .max_by_key(|session| session.updated_at)
-}
-
-fn desired_workspace_context(
-    descriptor: &WorkspaceDescriptor,
-    existing_session: Option<&AssistantSession>,
-    workspace_agents: Vec<WorkspaceAgentSummary>,
-    workspace_manager: Option<&AgentConfig>,
-) -> SessionContext {
-    // The workspace config is the canonical store for a general workspace's
-    // MCP selection: the manager row's `selected_mcp_servers` holds every
-    // attached server, and each ref's `disabled` flag records the context-bar
-    // toggle (the descriptor surfaces the two partitions).
-    // Sessions only ever receive the derived enabled list. When a manager row
-    // exists, its refs are authoritative even when empty — "no refs" means
-    // "no MCP servers", so a Settings remove-all clears live sessions too.
-    // Session lists from before the config mirror are intentionally dropped;
-    // re-attach the servers once to migrate.
-    let mcp_server_ids = if descriptor.agent_id.is_some() {
-        // Agent workspaces: MCP comes from agent config (descriptor)
-        descriptor.selected_mcp_server_ids.clone()
-    } else if workspace_manager.is_none() {
-        // No manager row: the config cannot record any MCP selection (both
-        // partitions live on the manager's `selected_mcp_servers`), so the
-        // session's list stays canonical. The disabled filter is defensive —
-        // without a manager row the descriptor's disabled list is empty.
-        existing_session
-            .map(|session| {
-                session
-                    .context
-                    .mcp_server_ids
-                    .iter()
-                    .filter(|id| !descriptor.disabled_mcp_server_ids.contains(*id))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        descriptor.selected_mcp_server_ids.clone()
-    };
-
-    let execution = if descriptor.agent_id.is_some() {
-        descriptor.execution.clone()
-    } else if let Some(manager) = workspace_manager {
-        manager.execution.clone()
-    } else {
-        descriptor.execution.clone()
-    };
-
-    let automation_id = descriptor
-        .agent_id
-        .clone()
-        .or_else(|| workspace_manager.map(|agent| agent.id.clone()));
-    let agent_workspace_id = descriptor.agent_id.clone().or_else(|| {
-        if descriptor.root_path.is_some() {
-            Some(descriptor.workspace_id.clone())
-        } else {
-            None
-        }
-    });
-    let automation_name = descriptor
-        .automation_name
-        .clone()
-        .or_else(|| workspace_manager.map(|agent| agent.name.clone()));
-
-    SessionContext {
-        workspace_id: Some(descriptor.workspace_id.clone()),
-        tool_scopes: descriptor.tool_scopes.clone(),
-        mcp_server_ids,
-        execution,
-        cli_session_id: existing_session.and_then(|session| session.context.cli_session_id.clone()),
-        cli_session_provider: existing_session
-            .and_then(|session| session.context.cli_session_provider.clone()),
-        automation_id,
-        agent_workspace_id,
-        automation_name,
-        inter_agent_call: existing_session
-            .and_then(|session| session.context.inter_agent_call.clone()),
-        workspace_agents,
-    }
+    repository::find_manager_session(pool, &manager_id).await
 }
 
 fn resolve_workspace_file_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
@@ -1840,9 +1339,9 @@ async fn workspace_details(
     let provider_selection = resolve_workspace_provider_selection(state, &descriptor)?;
 
     let session = find_workspace_session(&workspace_pool, state, &descriptor).await?;
-    // One small row each, and the workspace header reads them on every poll.
+    // Bounded to the newest and active run: the header polls this.
     let runs = match &session {
-        Some(session) => repository::list_runs(&workspace_pool, &session.id).await?,
+        Some(session) => repository::current_runs(&workspace_pool, &session.id).await?,
         None => Vec::new(),
     };
     // Cheap single-table query, so it rides along even on lightweight polls —
@@ -2114,49 +1613,15 @@ pub async fn workspace_get_or_create_session(
     let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
     let provider_selection = resolve_workspace_provider_selection(state.inner(), &descriptor)?;
     let provider_connection_id = provider_selection.preferred_connection_id;
-    let existing = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let workspace_agents = workspace_agent_summaries(state.inner(), &descriptor.workspace_id)?;
-    let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)?;
-    let session = if let Some(existing) = existing {
-        let desired_context = desired_workspace_context(
-            &descriptor,
-            Some(&existing),
-            workspace_agents.clone(),
-            workspace_manager.as_ref(),
-        );
-        if existing.title.as_deref() != Some(descriptor.title.as_str())
-            || existing.context != desired_context
-        {
-            let mut updated = existing;
-            updated.title = Some(descriptor.title.clone());
-            updated.context = desired_context;
-            updated.updated_at = chrono::Utc::now().timestamp_millis();
-            repository::update_session(&workspace_pool, &updated).await?
-        } else {
-            existing
+    // One manager session per (workspace, manager); user chats and scheduled
+    // ticks share it. Task delegations get their own task sessions
+    // (`tools::workspace_tasks`). Without a Main there is nothing to look up
+    // by, so each call starts a fresh unowned session.
+    let session = match workspace_default_agent_id(state.inner(), &descriptor.workspace_id)? {
+        Some(manager_id) => {
+            repository::find_or_create_manager_session(&workspace_pool, &manager_id).await?
         }
-    } else {
-        // One Interactive session per (workspace, manager). Both
-        // user-typed chats and scheduled ticks land here — there is no
-        // separate BackgroundJob row for the manager. Sub-agent task
-        // delegations still get their own BackgroundJob rows via
-        // `tools::workspace_tasks` (they're owned by the assignee, not
-        // the manager).
-        repository::create_session(
-            &workspace_pool,
-            repository::CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: Some(descriptor.title.clone()),
-                context: desired_workspace_context(
-                    &descriptor,
-                    None,
-                    workspace_agents,
-                    workspace_manager.as_ref(),
-                ),
-            },
-        )
-        .await?
+        None => repository::create_session(&workspace_pool, SessionContext::default()).await?,
     };
 
     Ok(WorkspaceSessionBinding {
@@ -3005,126 +2470,77 @@ fn sanitize_mcp_selection(request: &WorkspaceUpdateMcpRequest) -> (Vec<String>, 
 // MCP & provider selection — session MCP toggles, default provider
 // ===============================================================================
 
-/// Update the MCP server IDs for a workspace session.
+/// Update the workspace conversation's MCP selection.
 ///
-/// For the general workspace, this is the only way to configure MCP servers
-/// (agent workspaces get their MCP servers from the agent config).
+/// The selection lives on the Main's `selected_mcp_servers`: every attached
+/// server, with toggled-off ones carrying `disabled: true`. Runs read it when
+/// they start, so no session is touched here.
 #[tauri::command]
 pub async fn workspace_update_session_mcp(
     request: WorkspaceUpdateMcpRequest,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let descriptor =
-        resolve_workspace_descriptor(state.inner(), Some(request.workspace_id.clone()))?;
-    let workspace_pool = state.workspace_db(&descriptor.workspace_id).await?;
-    let existing = find_workspace_session(&workspace_pool, state.inner(), &descriptor).await?;
-    let workspace_agents = workspace_agent_summaries(state.inner(), &descriptor.workspace_id)?;
-    let workspace_manager =
-        resolve_workspace_manager_agent(state.inner(), &descriptor.workspace_id)?;
+    update_main_mcp_selection(state.inner(), &request)
+}
 
-    let session = if let Some(session) = existing {
-        session
-    } else {
-        // No session yet — create one so MCP preferences are persisted
-        // before the user sends their first message.
-        repository::create_session(
-            &workspace_pool,
-            repository::CreateSessionParams {
-                // Always Interactive: this row IS the canonical workspace
-                // conversation that find_workspace_session resolves. The
-                // resolver selects the most-recent non-task session for the
-                // manager; the workspace itself only ever owns one such
-                // session, so we keep it Interactive to match the historical
-                // shape (and so any non-task BackgroundJob rows from older
-                // scheduled-run code paths resolve ahead of this one only
-                // because they were updated more recently, not by virtue of
-                // their kind).
-                kind: SessionKind::Interactive,
-                title: Some(descriptor.title.clone()),
-                context: desired_workspace_context(
-                    &descriptor,
-                    None,
-                    workspace_agents.clone(),
-                    workspace_manager.as_ref(),
-                ),
-            },
-        )
-        .await?
-    };
+/// Returned by commands that write the Main's settings when there is no Main.
+const NO_MAIN_AGENT: &str = "Set up a main agent for this workspace first.";
 
-    let (enabled_mcp_ids, disabled_mcp_ids) = sanitize_mcp_selection(&request);
-    let mut updated = session;
-    updated.context.mcp_server_ids = enabled_mcp_ids.clone();
-    updated.context.workspace_agents = workspace_agents;
-    if descriptor.agent_id.is_none() {
-        if let Some(manager) = workspace_manager.as_ref() {
-            updated.context.execution = manager.execution.clone();
-            updated.context.automation_id = Some(manager.id.clone());
-            updated.context.agent_workspace_id = descriptor
-                .root_path
-                .as_ref()
-                .map(|_| descriptor.workspace_id.clone());
-            updated.context.automation_name = Some(manager.name.clone());
-        }
-
-        // Persist the MCP selection into the workspace config — the canonical
-        // store. The manager row's `selected_mcp_servers` records every
-        // attached server; toggled-off ones carry `disabled: true` so the
-        // context-bar toggle survives app restarts while sessions and
-        // scheduled runs consume only the enabled refs. Without a manager
-        // row nothing persists — consistent with the enabled set, which also
-        // only lives on the manager row.
-        let manager_id = workspace_manager.as_ref().map(|manager| manager.id.clone());
-        state.update_workspace_config(&descriptor.workspace_id, |config| {
-            let now = chrono::Utc::now().timestamp_millis();
-            if let Some(manager_id) = manager_id.as_deref() {
-                if let Some(agent) = config
-                    .main_agent
-                    .as_mut()
-                    .filter(|agent| agent.id == manager_id)
-                {
-                    agent.selected_mcp_servers = enabled_mcp_ids
-                        .iter()
-                        .map(|id| workspace_config::McpRef {
-                            id: id.clone(),
-                            disabled: false,
-                        })
-                        .chain(disabled_mcp_ids.iter().map(|id| workspace_config::McpRef {
-                            id: id.clone(),
-                            disabled: true,
-                        }))
-                        .collect();
-                    agent.updated_at = now;
-                    config.updated_at = now;
-                }
-            }
-            Ok(())
-        })?;
-    }
-    updated.updated_at = chrono::Utc::now().timestamp_millis();
-    repository::update_session(&workspace_pool, &updated).await?;
-
+fn update_main_mcp_selection(
+    state: &AppState,
+    request: &WorkspaceUpdateMcpRequest,
+) -> Result<(), String> {
+    let (enabled_mcp_ids, disabled_mcp_ids) = sanitize_mcp_selection(request);
+    state.update_workspace_config(&request.workspace_id, |config| {
+        let main = config
+            .main_agent
+            .as_mut()
+            .ok_or_else(|| NO_MAIN_AGENT.to_string())?;
+        main.selected_mcp_servers = enabled_mcp_ids
+            .iter()
+            .map(|id| workspace_config::McpRef {
+                id: id.clone(),
+                disabled: false,
+            })
+            .chain(disabled_mcp_ids.iter().map(|id| workspace_config::McpRef {
+                id: id.clone(),
+                disabled: true,
+            }))
+            .collect();
+        let now = chrono::Utc::now().timestamp_millis();
+        main.updated_at = now;
+        config.updated_at = now;
+        Ok(())
+    })?;
     Ok(())
 }
 
-/// Set the preferred provider connection for a workspace.
+/// Set the manager agent's provider connection.
 #[tauri::command]
 pub async fn workspace_set_provider(
     workspace_id: String,
     provider_connection_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-    state.update_workspace_config(&workspace_id, |config| {
-        config.preferred_provider_connection_id = Some(provider_connection_id.clone());
-        if let Some(manager) = config.main_agent.as_mut() {
-            manager.provider_connection_ids = vec![provider_connection_id];
-            manager.updated_at = now;
-        }
+    set_main_provider(state.inner(), &workspace_id, provider_connection_id)
+}
+
+fn set_main_provider(
+    state: &AppState,
+    workspace_id: &str,
+    provider_connection_id: String,
+) -> Result<(), String> {
+    state.update_workspace_config(workspace_id, |config| {
+        let main = config
+            .main_agent
+            .as_mut()
+            .ok_or_else(|| NO_MAIN_AGENT.to_string())?;
+        main.provider_connection_ids = vec![provider_connection_id];
+        let now = chrono::Utc::now().timestamp_millis();
+        main.updated_at = now;
         config.updated_at = now;
         Ok(())
     })?;
-
     Ok(())
 }
 
@@ -3189,7 +2605,9 @@ pub async fn workspace_task_by_id(
     let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
     let pool = state.workspace_db(&workspace_id).await?;
     let agent_names = workspace_agent_display_names(state.inner(), &workspace_id);
-    load_workspace_task_response(&pool, &workspace_id, &request.task_id, &agent_names).await
+    Ok(workspace_tasks_repo::load_task(&pool, &request.task_id)
+        .await?
+        .map(|task| task.into_response(&workspace_id, &agent_names)))
 }
 
 // =============================================================================
@@ -3425,8 +2843,7 @@ pub async fn workspace_fork(
         main_agent,
         assignments,
         filesystem_grants: forkable_grants(&source_config.filesystem_grants, &source_root),
-        // Carries version + preferred_provider_connection_id (+ any future
-        // top-level config fields) over unchanged.
+        // Carries version (+ any future top-level config fields) over unchanged.
         ..source_config.clone()
     };
 
@@ -3500,7 +2917,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         // is already on the in-memory locator. Reaching for the config here
         // cost five full read+parse cycles per workspace on every 5s poll.
         let message_count =
-            count_session_messages(&workspace_pool, &id, &locator.default_agent_id).await;
+            count_session_messages(&workspace_pool, &locator.default_agent_id).await;
         let task_attention = workspace_task_attention_summary(&workspace_pool, &id).await?;
         let schedule = locator.schedule;
         let next_run_in_seconds = schedule
@@ -3838,10 +3255,9 @@ fn remove_dir_all_forcing_permissions(root: &Path) -> std::io::Result<()> {
 ///
 /// `remove_dir_all` is not atomic and deletes children before the root, so it
 /// can take `.clai/config.json` with it and still fail. A locator whose
-/// config cannot be read poisons every lookup that walks the index, because
-/// `load_workspace_agent_as_config` fails on the first unreadable one
-/// (`agents/runner.rs:72-75`), which would stop scheduled runs across all
-/// workspaces. Such a leftover is left out, and stays out: the next startup
+/// config cannot be read poisons every walk of the index that rewrites each
+/// config — the MCP server and skill-source sweeps fail on the first one they
+/// cannot read. Such a leftover is left out, and stays out: the next startup
 /// scan cannot load it either, so it records a `load_failure` — a sink
 /// nothing reads today — and the directory sits on disk with no workspace in
 /// the rail. The `warn!` below is the only signal there is.
@@ -3929,42 +3345,33 @@ pub async fn workspace_delete(
     workspace_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    delete_workspace(state.inner(), workspace_id).await
+}
 
-    {
-        let workspace_pool = state.workspace_db(&workspace_id).await?;
-        if repository::workspace_has_active_run(&workspace_pool).await? {
-            return Err(format!(
-                "Workspace {} has an active run. Cancel or wait for it to finish before deleting the workspace.",
-                workspace_id
-            ));
-        }
+async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), String> {
+    let workspace_id = resolve_workspace_id(state, Some(workspace_id))?;
+
+    let workspace_pool = state.workspace_db(&workspace_id).await?;
+    if repository::workspace_has_active_run(&workspace_pool).await? {
+        return Err(format!(
+            "Workspace {} has an active run. Cancel or wait for it to finish before deleting the workspace.",
+            workspace_id
+        ));
     }
 
     // Remove from the workspace index first; the returned locator carries
     // the on-disk root we still need below for both config-loading and
-    // recursive removal. Closes the cached sqlx pool too.
+    // recursive removal.
     let locator = state
         .workspace_index
         .write()
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .remove_workspace(&workspace_id)
         .ok_or_else(|| format!("Workspace {} not found.", workspace_id))?;
-
-    // Best-effort: read the config (still on disk at this point) to learn
-    // which agent IDs the scheduler may have registered for this
-    // workspace. A missing/corrupt config isn't fatal — we still want
-    // disk cleanup to proceed, we just can't precisely purge scheduler
-    // state for an unknowable agent set.
-    let agent_ids: Vec<String> = workspace_config::load(&locator.root_path)
-        .map(|cfg| {
-            cfg.main_agent
-                .iter()
-                .map(|agent| agent.id.clone())
-                .chain(cfg.assignments.iter().map(|a| a.id.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Dropping the index's pool handle does not close its connections, and
+    // Windows refuses to delete an open `data.sqlite`. `close` waits until
+    // every connection's worker thread has released the file.
+    workspace_pool.close().await;
 
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
@@ -3978,23 +3385,15 @@ pub async fn workspace_delete(
         }
         // Not restored: the workspace is out of the index for good and the
         // user cannot reach it any more, so its runtime state has to go even
-        // though the directory survived. Leaving scheduler instances behind
-        // wedges the runner — the next tick claims one, the agent lookup
-        // fails, and nothing releases the claim, so no scheduled run fires
-        // again in any workspace until restart.
+        // though the directory survived. Scheduler instances left behind
+        // would fail their agent lookup on every fire and be retried every
+        // five minutes until restart.
     }
 
-    // Drop scheduler entries for every agent the workspace owned. Any
-    // task already mid-flight will continue running with its own copy
-    // of context, but no further ticks will be scheduled — and the
-    // definition map won't leak the stale entry until restart.
-    if !agent_ids.is_empty() {
-        let mut sched = state.scheduler.lock().await;
-        for id in &agent_ids {
-            sched.remove_instances_for_agent(id);
-            sched.remove_definition(id);
-        }
-    }
+    // Drop the workspace's scheduler entries. Keyed by workspace id, so this
+    // works even when the config is unreadable. A run already in flight
+    // finishes, but no further ticks are scheduled.
+    let instances_cleared = state.scheduler.lock().await.remove_workspace(&workspace_id);
 
     // Drain in-memory queues for this workspace. The purge helpers cancel
     // runs before dropping pending senders, so workspace deletion cannot be
@@ -4021,7 +3420,7 @@ pub async fn workspace_delete(
 
     tracing::info!(
         workspace_id = %workspace_id,
-        agents_cleared = agent_ids.len(),
+        instances_cleared,
         approvals_purged = purged_approvals.len(),
         path_grants_purged = purged_path_grants.len(),
         runs_cancelled = purged_run_ids.len(),
@@ -4110,8 +3509,8 @@ async fn workspace_task_attention_summary(
         r#"
         SELECT
             COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'blocked' AND attention_acknowledged_at IS NULL AND user_response_at IS NULL THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'failed' AND attention_acknowledged_at IS NULL AND user_response_at IS NULL THEN 1 ELSE 0 END), 0)
+            COALESCE(SUM(CASE WHEN status = 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN status = 'failed' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0)
         FROM workspace_tasks
         "#,
     )
@@ -4127,7 +3526,6 @@ async fn workspace_task_attention_summary(
             FROM workspace_tasks
             WHERE status IN ('blocked', 'failed')
                 AND attention_acknowledged_at IS NULL
-                AND user_response_at IS NULL
             ORDER BY
                 CASE status
                     WHEN 'blocked' THEN 0
@@ -4160,40 +3558,12 @@ async fn workspace_task_attention_summary(
     Ok(summary)
 }
 
-/// Count messages on the canonical workspace session — the *exact* same row
-/// the card-click path loads via [`find_workspace_session`]. Both now route
-/// through [`select_workspace_session`], so the card number and the
-/// conversation length reference the same session by construction and can
-/// never drift. (Previously this duplicated the selection inline and omitted
-/// the `kind == Interactive` filter, so a self-task `BackgroundJob` session
-/// could inflate the card count while the chat view showed the real
-/// Interactive conversation.)
-///
-/// Takes `manager_id` from the caller rather than re-deriving it. The only
-/// caller, `workspace_list`, already holds it on the in-memory
-/// `WorkspaceLocator`; resolving it here read and parsed `config.json` twice
-/// per workspace on every 5s rail poll (once via `resolve_workspace_descriptor`
-/// and once via `workspace_default_agent_id`) to recover a value the caller had
-/// in a local variable.
-///
-/// `select_workspace_session`'s `agent_id` argument is passed as `None`
-/// because it only ever received `WorkspaceDescriptor::agent_id`, which
-/// `resolve_workspace_descriptor` hardcodes to `None`. That argument exists for
-/// agent-workspace assets, which `workspace_list` does not enumerate — it emits
-/// `kind: "general"` entries only. If it ever does, this call needs the real
-/// agent id back or the count will miss sessions matched by
-/// `agent_workspace_id` / `automation_id`.
-async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &str) -> i64 {
-    let sessions = repository::list_non_task_sessions(pool)
-        .await
-        .unwrap_or_default();
-    let Some(session) = select_workspace_session(sessions, manager_id, workspace_id, None) else {
+/// Count messages on the same canonical session used by the workspace view.
+async fn count_session_messages(pool: &DbPool, manager_id: &str) -> i64 {
+    let Ok(Some(session)) = repository::find_manager_session(pool, manager_id).await else {
         return 0;
     };
-
-    // COUNT(*) instead of loading every row just to take .len(). Counts the
-    // head session only (unchanged behavior); ancestors are excluded.
-    repository::count_session_chain_messages(pool, &session.id, false)
+    repository::count_session_messages(pool, &session.id)
         .await
         .map(|n| n as i64)
         .unwrap_or(0)
@@ -4207,31 +3577,12 @@ async fn count_session_messages(pool: &DbPool, workspace_id: &str, manager_id: &
 mod tests {
     use super::*;
     use crate::assistant::types::{RunStatus, RunTrigger};
+    use crate::assistant::workspace_agents::workspace_agent_rows_from;
+    use crate::config::global_agents::ResolvedAgent;
     use crate::config::workspace_config::ScheduleSurface;
 
     const WS: &str = "ws-1";
     const MGR: &str = "mgr-1";
-
-    fn session(
-        id: &str,
-        kind: SessionKind,
-        automation_id: &str,
-        workspace_id: &str,
-        updated_at: i64,
-    ) -> AssistantSession {
-        AssistantSession {
-            id: id.to_string(),
-            kind,
-            title: None,
-            context: SessionContext {
-                workspace_id: Some(workspace_id.to_string()),
-                automation_id: Some(automation_id.to_string()),
-                ..Default::default()
-            },
-            created_at: 0,
-            updated_at,
-        }
-    }
 
     #[cfg(unix)]
     #[test]
@@ -4442,9 +3793,7 @@ mod tests {
     }
 
     // Restoring a locator whose config the wipe already deleted would break
-    // far more than this delete: `load_workspace_agent_as_config` walks the
-    // whole index and fails on the first config it cannot read
-    // (`agents/runner.rs:72-75`), stopping scheduled runs everywhere.
+    // far more than this delete; see `restore_after_failed_delete`.
     #[test]
     fn restore_after_failed_delete_skips_a_workspace_whose_config_is_gone() {
         let parent = tempfile::tempdir().unwrap();
@@ -4467,9 +3816,7 @@ mod tests {
     // a read-only *parent* — the one obstacle the chmod pass cannot clear,
     // since it only relaxes what is inside the tree — has already taken
     // `.clai/config.json` with it. Restoring that locator would break far
-    // more than this delete: `load_workspace_agent_as_config` walks the whole
-    // index and fails on the first config it cannot read
-    // (`agents/runner.rs:72-75`), stopping scheduled runs everywhere.
+    // more than this delete; see `restore_after_failed_delete`.
     #[cfg(unix)]
     #[test]
     fn remove_workspace_root_does_not_restore_a_workspace_whose_config_is_gone() {
@@ -4521,38 +3868,6 @@ mod tests {
 
         assert!(remove_workspace_root(&index, &loc).is_ok());
         assert!(index.read().unwrap().locator("ws-1").is_none());
-    }
-
-    // A workspace whose scheduled-run conversation was forked into its own
-    // (non-task) BackgroundJob session must resolve to that live session, not
-    // an older abandoned interactive stub. Selection is kind-agnostic: task
-    // sessions are excluded upstream (list_non_task_sessions), so by the time
-    // selection runs a newer background session here is a real conversation.
-    #[test]
-    fn picks_most_recent_non_task_session_regardless_of_kind() {
-        let interactive_stub = session("stub", SessionKind::Interactive, MGR, WS, 100);
-        let scheduled = session("scheduled", SessionKind::BackgroundJob, MGR, WS, 999);
-        let chosen = select_workspace_session(vec![interactive_stub, scheduled], MGR, WS, None);
-        assert_eq!(chosen.map(|s| s.id), Some("scheduled".to_string()));
-    }
-
-    #[test]
-    fn ignores_sessions_owned_by_other_automations() {
-        let other = session("other", SessionKind::Interactive, "someone-else", WS, 100);
-        assert!(select_workspace_session(vec![other], MGR, WS, None).is_none());
-    }
-
-    #[test]
-    fn picks_most_recent_interactive_when_several_match() {
-        let older = session("old", SessionKind::Interactive, MGR, WS, 10);
-        let newer = session("new", SessionKind::Interactive, MGR, WS, 20);
-        let chosen = select_workspace_session(vec![older, newer], MGR, WS, None);
-        assert_eq!(chosen.map(|s| s.id), Some("new".to_string()));
-    }
-
-    #[test]
-    fn returns_none_when_nothing_matches() {
-        assert!(select_workspace_session(vec![], MGR, WS, None).is_none());
     }
 
     // Pin the skip list for `copy_workspace_durable_files`. Image
@@ -4958,22 +4273,6 @@ mod tests {
         assert!(resolve_copy_source(root.path(), "outdir/secret").is_err());
     }
 
-    fn descriptor(agent_id: Option<&str>) -> WorkspaceDescriptor {
-        WorkspaceDescriptor {
-            workspace_id: WS.to_string(),
-            kind: "general".to_string(),
-            title: "Test".to_string(),
-            agent_id: agent_id.map(str::to_string),
-            root_path: None,
-            provider_connection_ids: vec![],
-            selected_mcp_server_ids: vec![],
-            disabled_mcp_server_ids: vec![],
-            execution: ExecutionCapabilityConfig::default(),
-            tool_scopes: vec![],
-            automation_name: None,
-        }
-    }
-
     #[test]
     fn sanitize_mcp_selection_keeps_lists_disjoint() {
         let request = WorkspaceUpdateMcpRequest {
@@ -4998,71 +4297,6 @@ mod tests {
         let (enabled, disabled) = sanitize_mcp_selection(&request);
         assert_eq!(enabled, vec!["a".to_string(), "b".to_string()]);
         assert!(disabled.is_empty());
-    }
-
-    #[test]
-    fn desired_workspace_context_general_workspaces_take_mcp_from_config() {
-        // The workspace config (via the descriptor) is the canonical store:
-        // its enabled list wins over whatever the session row carries.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
-        existing.context.mcp_server_ids = vec!["stale".into()];
-
-        let mut desc = descriptor(None);
-        desc.selected_mcp_server_ids = vec!["a".into()];
-        let manager = manager_config();
-        let context = desired_workspace_context(&desc, Some(&existing), vec![], Some(&manager));
-        assert_eq!(context.mcp_server_ids, vec!["a".to_string()]);
-    }
-
-    fn manager_config() -> crate::config::AgentConfig {
-        crate::config::AgentConfig::new(
-            "Manager".to_string(),
-            String::new(),
-            crate::config::workspace_config::ScheduleKind::default(),
-        )
-    }
-
-    #[test]
-    fn desired_workspace_context_all_disabled_config_beats_stale_session() {
-        // With a manager row present, selected=[] + disabled=[b] means
-        // "every attached server toggled off" — the fallback must not
-        // resurrect the session's list.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
-        existing.context.mcp_server_ids = vec!["stale".into()];
-
-        let mut desc = descriptor(None);
-        desc.disabled_mcp_server_ids = vec!["b".into()];
-        let manager = manager_config();
-        let context = desired_workspace_context(&desc, Some(&existing), vec![], Some(&manager));
-        assert!(context.mcp_server_ids.is_empty());
-    }
-
-    #[test]
-    fn desired_workspace_context_manager_less_keeps_session_minus_disabled() {
-        // Without a manager row the config cannot record an enabled
-        // selection, so the session's list stays canonical — but the
-        // config-level disabled toggle still applies to it.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
-        existing.context.mcp_server_ids = vec!["a".into(), "b".into()];
-
-        let mut desc = descriptor(None);
-        desc.disabled_mcp_server_ids = vec!["b".into()];
-        let context = desired_workspace_context(&desc, Some(&existing), vec![], None);
-        assert_eq!(context.mcp_server_ids, vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn desired_workspace_context_empty_manager_config_clears_session_mcp() {
-        // With a manager row present, an empty ref list is authoritative:
-        // a Settings remove-all (or a pre-mirror legacy session) yields no
-        // MCP servers instead of resurrecting the session's stale list.
-        let mut existing = session("s-1", SessionKind::Interactive, MGR, WS, 1);
-        existing.context.mcp_server_ids = vec!["legacy".into()];
-
-        let manager = manager_config();
-        let context =
-            desired_workspace_context(&descriptor(None), Some(&existing), vec![], Some(&manager));
-        assert!(context.mcp_server_ids.is_empty());
     }
 
     #[test]
@@ -5859,16 +5093,9 @@ mod tests {
     /// A session carrying one run — the only conversation row the details
     /// payload still reports.
     async fn seed_session_with_run(pool: &DbPool, context: SessionContext) -> String {
-        let session = repository::create_session(
-            pool,
-            repository::CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: None,
-                context,
-            },
-        )
-        .await
-        .expect("failed to create session");
+        let session = repository::create_session(pool, context)
+            .await
+            .expect("failed to create session");
         repository::create_run(
             pool,
             repository::CreateRunParams {
@@ -5955,7 +5182,7 @@ mod tests {
         }
 
         /// Same workspace, but the one session's `automation_id` is not the
-        /// manager's, so [`select_workspace_session`]'s first filter drops it
+        /// manager's, so the manager lookup excludes it
         /// and [`find_workspace_session`] resolves nothing. The owner is
         /// deliberately not on the roster: resolution never reads it.
         async fn without_a_manager_conversation() -> Self {
@@ -5994,7 +5221,6 @@ mod tests {
             seed_session_with_run(
                 &pool,
                 SessionContext {
-                    workspace_id: Some(DETAILS_WORKSPACE_ID.to_string()),
                     automation_id: Some(automation_id.to_string()),
                     ..Default::default()
                 },
@@ -6013,6 +5239,90 @@ mod tests {
             .await
             .expect("details")
         }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_workspace_with_an_unreadable_config_clears_its_schedule() {
+        let workspace = DetailsWorkspace::new().await;
+        let state = &workspace.state;
+        let root = state.workspace_root(DETAILS_WORKSPACE_ID).unwrap();
+        let mut config = workspace_config::load(&root).unwrap();
+        config.schedule.enabled = true;
+        crate::agents::init::apply_workspace_schedule(&mut *state.scheduler.lock().await, &config);
+        assert_eq!(state.scheduler.lock().await.instance_count(), 1);
+        fs::write(workspace_config::config_path(&root), "not json").unwrap();
+        let pool = state.workspace_db(DETAILS_WORKSPACE_ID).await.unwrap();
+
+        delete_workspace(state, DETAILS_WORKSPACE_ID.to_string())
+            .await
+            .expect("delete");
+
+        // An open connection would keep `data.sqlite` locked on Windows.
+        assert!(pool.is_closed());
+        assert!(!root.exists());
+        let scheduler = state.scheduler.lock().await;
+        assert_eq!(scheduler.instance_count(), 0);
+        assert!(scheduler.get_definition(DETAILS_MANAGER_ID).is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_toggle_writes_the_main_refs_and_fails_without_a_main() {
+        let workspace = DetailsWorkspace::new().await;
+        let request = WorkspaceUpdateMcpRequest {
+            workspace_id: DETAILS_WORKSPACE_ID.to_string(),
+            mcp_server_ids: vec!["a".into(), "b".into()],
+            disabled_mcp_server_ids: vec!["b".into()],
+        };
+        update_main_mcp_selection(&workspace.state, &request).expect("toggle");
+        let (config, _) = workspace
+            .state
+            .resolve_workspace_roster(DETAILS_WORKSPACE_ID)
+            .expect("config");
+        let refs = &config.main_agent.expect("main").selected_mcp_servers;
+        assert_eq!(
+            workspace_config::enabled_mcp_ids(refs),
+            vec!["a".to_string()]
+        );
+        assert_eq!(
+            workspace_config::disabled_mcp_ids(refs),
+            vec!["b".to_string()]
+        );
+
+        workspace
+            .state
+            .update_workspace_config(DETAILS_WORKSPACE_ID, |config| {
+                config.main_agent = None;
+                Ok(())
+            })
+            .expect("drop main");
+        let error = update_main_mcp_selection(&workspace.state, &request).unwrap_err();
+        assert!(error.contains("main agent"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn provider_pick_writes_the_main_and_fails_without_a_main() {
+        let workspace = DetailsWorkspace::new().await;
+        set_main_provider(&workspace.state, DETAILS_WORKSPACE_ID, "conn-b".into())
+            .expect("set provider");
+        let (config, _) = workspace
+            .state
+            .resolve_workspace_roster(DETAILS_WORKSPACE_ID)
+            .expect("config");
+        assert_eq!(
+            config.main_agent.expect("main").provider_connection_ids,
+            vec!["conn-b".to_string()]
+        );
+
+        workspace
+            .state
+            .update_workspace_config(DETAILS_WORKSPACE_ID, |config| {
+                config.main_agent = None;
+                Ok(())
+            })
+            .expect("drop main");
+        let error =
+            set_main_provider(&workspace.state, DETAILS_WORKSPACE_ID, "conn-c".into()).unwrap_err();
+        assert_eq!(error, NO_MAIN_AGENT);
     }
 
     /// The command's own wiring: the file walk is opt-in, and the opting in
@@ -6220,7 +5530,8 @@ mod tests {
         };
         let workspace = WorkspaceConfig::new(WS.to_string(), "W".to_string(), 1, MGR.to_string());
 
-        let row = workspace_agent_row_from_config(&AppConfig::default(), &workspace, &resolved);
+        let row =
+            workspace_agent_rows_from(&AppConfig::default(), &workspace, &[resolved]).remove(0);
         let response = workspace_agent_response_from_row(row, Some(MGR));
 
         assert_eq!(
@@ -6247,148 +5558,11 @@ mod tests {
         };
         let workspace = WorkspaceConfig::new(WS.to_string(), "W".to_string(), 1, MGR.to_string());
 
-        let row = workspace_agent_row_from_config(&AppConfig::default(), &workspace, &resolved);
+        let row =
+            workspace_agent_rows_from(&AppConfig::default(), &workspace, &[resolved]).remove(0);
         let response = workspace_agent_response_from_row(row, Some(MGR));
 
         assert_eq!(response.display_name, "def-1");
         assert_eq!(response.agent_name, None);
-    }
-
-    // -----------------------------------------------------------------------
-    // Single-task lookup (`workspace_task_by_id`)
-    //
-    // The `#[tauri::command]` wrapper needs a `State<AppState>`, which this
-    // module has no fixture for; these drive the query + mapper it delegates
-    // to, against the real migrated schema.
-    // -----------------------------------------------------------------------
-
-    fn agent_names(entries: &[(&str, &str)]) -> HashMap<String, String> {
-        entries
-            .iter()
-            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn load_workspace_task_response_returns_existing_task_with_session_id() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        crate::db::test_support::insert_task(&pool, "task-1", "completed", Some("sess-1"), None)
-            .await;
-
-        let task =
-            load_workspace_task_response(&pool, WS, "task-1", &agent_names(&[("agent-1", "Rust")]))
-                .await
-                .expect("query failed")
-                .expect("task-1 should exist");
-
-        assert_eq!(task.id, "task-1");
-        assert_eq!(task.workspace_id, WS);
-        assert_eq!(task.session_id, Some("sess-1".to_string()));
-        assert_eq!(task.status, "completed");
-        assert_eq!(task.title, "Title");
-        assert_eq!(task.instructions, "Do it");
-        assert_eq!(task.assigned_to_workspace_agent_id, "agent-1");
-        assert_eq!(task.assigned_agent_display_name, "Rust");
-        assert_eq!(task.created_by_workspace_agent_id, None);
-        assert_eq!(task.error, None);
-    }
-
-    #[tokio::test]
-    async fn load_workspace_task_response_returns_none_for_unknown_id() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        crate::db::test_support::insert_task(&pool, "task-1", "completed", None, None).await;
-
-        let missing = load_workspace_task_response(&pool, WS, "task-404", &agent_names(&[]))
-            .await
-            .expect("a missing task is not an error");
-
-        assert!(missing.is_none());
-    }
-
-    /// The shared `insert_task` fixture writes one id into both agent columns,
-    /// which cannot tell the assignee apart from the definition it fell back
-    /// to. These tests need distinct ids, so they write their own row.
-    async fn insert_task_with_agents(
-        pool: &DbPool,
-        id: &str,
-        created_by: Option<&str>,
-        assigned_to: &str,
-        definition_id: &str,
-    ) {
-        sqlx::query(
-            r#"
-            INSERT INTO workspace_tasks
-                (id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
-                 assigned_agent_definition_id, title, instructions, status, error,
-                 session_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'Title', 'Do it', 'failed', 'boom', NULL, 1, 1)
-            "#,
-        )
-        .bind(id)
-        .bind(created_by)
-        .bind(assigned_to)
-        .bind(definition_id)
-        .execute(pool)
-        .await
-        .expect("failed to insert workspace_tasks row");
-    }
-
-    #[tokio::test]
-    async fn load_workspace_task_response_falls_back_to_definition_id_for_unknown_agent() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        insert_task_with_agents(&pool, "task-1", None, "wa-gone", "rust-expert").await;
-
-        let task = load_workspace_task_response(&pool, WS, "task-1", &agent_names(&[]))
-            .await
-            .expect("query failed")
-            .expect("task-1 should exist");
-
-        assert_eq!(task.assigned_to_workspace_agent_id, "wa-gone");
-        assert_eq!(task.assigned_agent_display_name, "rust-expert");
-        assert_eq!(task.error, Some("boom".to_string()));
-    }
-
-    #[tokio::test]
-    async fn load_workspace_task_response_names_the_creator_only_while_it_is_on_the_roster() {
-        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
-        insert_task_with_agents(
-            &pool,
-            "task-known",
-            Some("wa-manager"),
-            "wa-1",
-            "rust-expert",
-        )
-        .await;
-        insert_task_with_agents(
-            &pool,
-            "task-gone",
-            Some("wa-removed"),
-            "wa-1",
-            "rust-expert",
-        )
-        .await;
-        let names = agent_names(&[("wa-manager", "Manager"), ("wa-1", "Rust")]);
-
-        let known = load_workspace_task_response(&pool, WS, "task-known", &names)
-            .await
-            .expect("query failed")
-            .expect("task-known should exist");
-        assert_eq!(
-            known.created_by_workspace_agent_id,
-            Some("wa-manager".to_string())
-        );
-        assert_eq!(known.created_by_display_name, Some("Manager".to_string()));
-
-        // A creator off the roster keeps its raw id but gets no name: unlike
-        // the assignee, there is no definition id to fall back to.
-        let gone = load_workspace_task_response(&pool, WS, "task-gone", &names)
-            .await
-            .expect("query failed")
-            .expect("task-gone should exist");
-        assert_eq!(
-            gone.created_by_workspace_agent_id,
-            Some("wa-removed".to_string())
-        );
-        assert_eq!(gone.created_by_display_name, None);
     }
 }

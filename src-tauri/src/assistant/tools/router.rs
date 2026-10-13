@@ -131,7 +131,7 @@ async fn execute_external_mcp_tool(
     let state = deps.app.state::<AppState>();
     let mut manager = state.mcp_client_manager.lock().await;
     manager
-        .execute_tool(&context.mcp_server_ids, tool_name, params)
+        .execute_tool(&context.run_context.mcp_server_ids, tool_name, params)
         .await
         .map_err(|e| format!("{} failed: {}", tool_name, e))
 }

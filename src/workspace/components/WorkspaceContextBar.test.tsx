@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   updateWorkspaceSessionMcp: vi.fn(),
   setWorkspaceProvider: vi.fn(),
   getMcpServers: vi.fn(),
-  getProviderConnections: vi.fn(),
+  listProviderConnections: vi.fn(),
 }));
 
 vi.mock('../client', () => ({
@@ -19,11 +19,14 @@ vi.mock('../client', () => ({
 
 vi.mock('../../api/client', () => ({
   getMcpServers: mocks.getMcpServers,
-  getProviderConnections: mocks.getProviderConnections,
+}));
+
+vi.mock('../../assistant', () => ({
+  assistantClient: { listProviderConnections: mocks.listProviderConnections },
 }));
 
 import WorkspaceContextBar from './WorkspaceContextBar';
-import type { SessionContext, WorkspaceDetails } from '../../generated/bindings';
+import type { WorkspaceDetails } from '../../generated/bindings';
 
 const server = (id: string, name: string) => ({
   id,
@@ -34,36 +37,38 @@ const server = (id: string, name: string) => ({
 
 // Typed against the generated bindings so a backend field rename (e.g.
 // disabledMcpServerIds) fails this test at compile time instead of silently
-// making the mock stale. The config-derived enabled set and the disabled
-// remainder both travel on the workspace details; the session context only matters
-// as a legacy fallback when the config records nothing.
-const details = (
-  context: Partial<SessionContext>,
-  extra: Partial<WorkspaceDetails> = {}
-) => ({
+// making the mock stale. The enabled set and the disabled remainder both
+// travel on the workspace details.
+const details = (extra: Partial<WorkspaceDetails> = {}) => ({
   kind: 'general',
   providerConnectionIds: [],
   selectedMcpServerIds: [],
   disabledMcpServerIds: [],
-  // A manager row exists by default (as it does for every real general
-  // workspace), making the config-derived lists authoritative. Tests for
-  // the manager-less legacy fallback override this to null.
   defaultWorkspaceAgentId: 'agent-mgr',
-  session: { context },
   ...extra,
 });
+
+function deferred() {
+  let resolve: (value: unknown) => void = () => {};
+  let reject: (err: Error) => void = () => {};
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 describe('WorkspaceContextBar MCP disable toggle', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getMcpServers.mockResolvedValue([server('srv-a', 'Alpha'), server('srv-b', 'Beta')]);
-    mocks.getProviderConnections.mockResolvedValue([]);
+    mocks.listProviderConnections.mockResolvedValue([]);
     mocks.updateWorkspaceSessionMcp.mockResolvedValue(undefined);
   });
 
   it('persists a disable toggle: enabled list shrinks, disabled list carries the id', async () => {
     mocks.getWorkspaceDetails.mockResolvedValue(
-      details({}, { selectedMcpServerIds: ['srv-a', 'srv-b'] })
+      details({ selectedMcpServerIds: ['srv-a', 'srv-b'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -75,12 +80,15 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     // a recursive walk of the workspace root per open and per settings save.
     expect(mocks.getWorkspaceDetails).toHaveBeenCalledWith('ws-1', { includeFiles: false });
 
+    mocks.getWorkspaceDetails.mockResolvedValue(
+      details({ selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
+    );
     await userEvent.click(badge);
 
     await waitFor(() =>
       expect(mocks.updateWorkspaceSessionMcp).toHaveBeenCalledWith('ws-1', ['srv-b'], ['srv-a'])
     );
-    // The badge stays visible but flips to the enable affordance.
+    // After the reload the badge stays visible but shows the enable affordance.
     expect(await screen.findByTitle('Alpha: click to enable')).toBeTruthy();
   });
 
@@ -88,7 +96,7 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     // Backend stores enabled and disabled separately; the bar must show the
     // union with the disabled badge toggled off after a restart.
     mocks.getWorkspaceDetails.mockResolvedValue(
-      details({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
+      details({ selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -98,7 +106,7 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
 
   it('re-enabling persists the id back into the enabled list', async () => {
     mocks.getWorkspaceDetails.mockResolvedValue(
-      details({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
+      details({ selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -116,7 +124,7 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
 
   it('removing a server also clears it from the disabled list', async () => {
     mocks.getWorkspaceDetails.mockResolvedValue(
-      details({}, { selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
+      details({ selectedMcpServerIds: ['srv-b'], disabledMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
@@ -133,35 +141,8 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     );
   });
 
-  it('prefers the config-derived list over a stale session context', async () => {
-    // Workspace Settings rewrites the manager's selection without touching
-    // the session row; the bar must surface the config truth, not the stale
-    // session list, or its next persist would overwrite the Settings change.
-    mocks.getWorkspaceDetails.mockResolvedValue(
-      details({ mcpServerIds: ['srv-a'] }, { selectedMcpServerIds: ['srv-b'] })
-    );
-
-    render(<WorkspaceContextBar workspaceId="ws-1" />);
-    expect(await screen.findByTitle('Beta: click to disable')).toBeTruthy();
-    expect(screen.queryByTitle('Alpha: click to disable')).toBeNull();
-  });
-
-  it('falls back to the session list only for manager-less workspaces', async () => {
-    // Without a manager row the config cannot record a selection, so the
-    // session's enabled list stays canonical.
-    mocks.getWorkspaceDetails.mockResolvedValue(
-      details({ mcpServerIds: ['srv-a'] }, { defaultWorkspaceAgentId: null })
-    );
-
-    render(<WorkspaceContextBar workspaceId="ws-1" />);
-    expect(await screen.findByTitle('Alpha: click to disable')).toBeTruthy();
-  });
-
-  it('treats an empty config selection as authoritative when a manager exists', async () => {
-    // Mirrors the backend rule: a manager row with zero MCP refs means zero
-    // servers — a Settings remove-all (or a pre-mirror legacy session) must
-    // not resurrect the session's stale list.
-    mocks.getWorkspaceDetails.mockResolvedValue(details({ mcpServerIds: ['srv-a'] }));
+  it('shows no servers when the config selection is empty', async () => {
+    mocks.getWorkspaceDetails.mockResolvedValue(details());
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
     expect(await screen.findByText('Add MCP')).toBeTruthy();
@@ -173,33 +154,68 @@ describe('WorkspaceContextBar MCP disable toggle', () => {
     // workspace-settings-changed so stale local state is replaced before the
     // next persist could overwrite the config.
     mocks.getWorkspaceDetails.mockResolvedValue(
-      details({}, { selectedMcpServerIds: ['srv-a'] })
+      details({ selectedMcpServerIds: ['srv-a'] })
     );
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
     expect(await screen.findByTitle('Alpha: click to disable')).toBeTruthy();
 
-    mocks.getWorkspaceDetails.mockResolvedValue(details({}, { selectedMcpServerIds: [] }));
+    mocks.getWorkspaceDetails.mockResolvedValue(details({ selectedMcpServerIds: [] }));
     window.dispatchEvent(new CustomEvent('workspace-settings-changed'));
 
     await waitFor(() => expect(screen.queryByTitle('Alpha: click to disable')).toBeNull());
   });
+});
 
-  it('rolls back the optimistic toggle when the backend rejects the update', async () => {
-    mocks.getWorkspaceDetails.mockResolvedValue(
-      details({}, { selectedMcpServerIds: ['srv-a', 'srv-b'] })
+describe('WorkspaceContextBar provider picker', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getMcpServers.mockResolvedValue([]);
+    mocks.listProviderConnections.mockResolvedValue([
+      { id: 'conn-a', name: 'Alpha', enabled: true },
+      { id: 'conn-b', name: 'Beta', enabled: true },
+      { id: 'conn-c', name: 'Gamma', enabled: true },
+    ]);
+  });
+
+  it('disables the picker while saving, then reloads the persisted value', async () => {
+    mocks.getWorkspaceDetails.mockResolvedValue(details({ providerConnectionIds: ['conn-a'] }));
+    const pending = deferred();
+    mocks.setWorkspaceProvider.mockReturnValue(pending.promise);
+
+    render(<WorkspaceContextBar workspaceId="ws-1" />);
+    const select = await screen.findByRole<HTMLSelectElement>('combobox');
+    await waitFor(() => expect(select.value).toBe('conn-a'));
+    await userEvent.selectOptions(select, 'conn-b');
+
+    expect(mocks.setWorkspaceProvider).toHaveBeenCalledWith('ws-1', 'conn-b');
+    expect(select.disabled).toBe(true);
+
+    mocks.getWorkspaceDetails.mockResolvedValue(details({ providerConnectionIds: ['conn-b'] }));
+    pending.resolve(undefined);
+
+    await waitFor(() => expect(select.disabled).toBe(false));
+    expect(mocks.getWorkspaceDetails).toHaveBeenCalledTimes(2);
+    expect(select.value).toBe('conn-b');
+  });
+
+  it('shows the error and the persisted value when the save fails', async () => {
+    mocks.getWorkspaceDetails.mockResolvedValue(details({ providerConnectionIds: ['conn-a'] }));
+    mocks.setWorkspaceProvider.mockRejectedValue(
+      new Error('Set up a main agent for this workspace first.')
     );
-    mocks.updateWorkspaceSessionMcp.mockRejectedValue(new Error('db locked'));
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     render(<WorkspaceContextBar workspaceId="ws-1" />);
-    const badge = await screen.findByTitle('Alpha: click to disable');
-    await userEvent.click(badge);
+    const select = await screen.findByRole<HTMLSelectElement>('combobox');
+    await waitFor(() => expect(select.value).toBe('conn-a'));
+    await userEvent.selectOptions(select, 'conn-b');
 
-    // The optimistic flip must revert to the persisted state once the
-    // backend rejects, so the badge shows Alpha as enabled again.
-    expect(await screen.findByTitle('Alpha: click to disable')).toBeTruthy();
-    expect(screen.queryByTitle('Alpha: click to enable')).toBeNull();
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      'Set up a main agent for this workspace first.'
+    );
+    await waitFor(() => expect(select.disabled).toBe(false));
+    expect(select.value).toBe('conn-a');
     consoleError.mockRestore();
   });
 });

@@ -8,23 +8,10 @@
 
 use super::repository::*;
 use super::types::*;
-use crate::config::ExecutionCapabilityConfig;
 use crate::db::test_support::{insert_task, workspace_pool};
 
 fn sample_context() -> SessionContext {
-    SessionContext {
-        workspace_id: Some("ws-1".to_string()),
-        tool_scopes: vec![],
-        mcp_server_ids: vec![],
-        execution: ExecutionCapabilityConfig::default(),
-        cli_session_id: None,
-        cli_session_provider: None,
-        automation_id: None,
-        agent_workspace_id: None,
-        automation_name: None,
-        inter_agent_call: None,
-        workspace_agents: vec![],
-    }
+    SessionContext::default()
 }
 
 // ---------------------------------------------------------------------------
@@ -35,27 +22,16 @@ fn sample_context() -> SessionContext {
 async fn test_create_and_get_session() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Test Session".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
-    assert_eq!(session.kind, SessionKind::Interactive);
-    assert_eq!(session.title, Some("Test Session".to_string()));
-    assert_eq!(session.context.workspace_id, Some("ws-1".to_string()));
+    assert_eq!(session.context, sample_context());
     assert!(session.created_at > 0);
 
     let fetched = get_session(&pool, &session.id).await.unwrap();
     assert!(fetched.is_some());
     let fetched = fetched.unwrap();
     assert_eq!(fetched.id, session.id);
-    assert_eq!(fetched.title, session.title);
+    assert_eq!(fetched.context, session.context);
 }
 
 #[tokio::test]
@@ -66,114 +42,91 @@ async fn test_get_session_missing_returns_none() {
 }
 
 #[tokio::test]
-async fn test_list_sessions_ordered_by_updated_at_desc() {
+async fn test_find_manager_session_ignores_newer_self_task() {
     let (_tmp, pool) = workspace_pool().await;
-
-    let s1 = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("First".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    let s2 = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some("Second".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let all = list_sessions(&pool).await.unwrap();
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].id, s2.id); // newest first
-    assert_eq!(all[1].id, s1.id);
+    let context = |manager: &str| SessionContext {
+        automation_id: Some(manager.to_string()),
+        ..sample_context()
+    };
+    let conversation = create_session(&pool, context("manager")).await.unwrap();
+    let self_task = create_session(&pool, context("manager")).await.unwrap();
+    insert_task(&pool, "self-task", "running", Some(&self_task.id), None).await;
+    insert_task(&pool, "pending-task", "queued", None, None).await;
+    let other = create_session(&pool, context("other")).await.unwrap();
+    for (id, updated_at) in [
+        (&conversation.id, 10_i64),
+        (&self_task.id, 30),
+        (&other.id, 40),
+    ] {
+        sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
+            .bind(updated_at)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        conversation.id
+    );
+    let scheduled = create_session(&pool, context("manager")).await.unwrap();
+    sqlx::query("UPDATE assistant_sessions SET updated_at = ? WHERE id = ?")
+        .bind(20_i64)
+        .bind(&scheduled.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        scheduled.id
+    );
+    assert!(find_manager_session(&pool, "missing")
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
-async fn test_list_non_task_sessions_excludes_task_sessions() {
+async fn test_find_manager_session_breaks_updated_at_tie_by_id_desc() {
     let (_tmp, pool) = workspace_pool().await;
-    // The interactive chat (canonical conversation).
-    let convo = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Conversation".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    // A task-delegation session: BackgroundJob + a workspace_tasks row.
-    let task = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some("Task A".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-    insert_task(&pool, "task-1", "running", Some(&task.id), None).await;
-
-    // A task with no session yet (NULL session_id) must not nuke the result
-    // set via NOT IN / NULL semantics.
-    insert_task(&pool, "task-pending", "queued", None, None).await;
-
-    // A non-task BackgroundJob session (e.g. a scheduled-run conversation).
-    let scheduled = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some("Scheduled".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let result = list_non_task_sessions(&pool).await.unwrap();
-    let ids: Vec<&str> = result.iter().map(|s| s.id.as_str()).collect();
-    assert!(
-        ids.contains(&convo.id.as_str()),
-        "interactive conversation kept"
+    let params = || SessionContext {
+        automation_id: Some("manager".to_string()),
+        ..sample_context()
+    };
+    // SQLite's order for equal sort keys is unspecified; `id DESC` is the
+    // explicit tie-break.
+    for id in ["session-a", "session-b"] {
+        let session = create_session(&pool, params()).await.unwrap();
+        sqlx::query("UPDATE assistant_sessions SET id = ?, updated_at = 10 WHERE id = ?")
+            .bind(id)
+            .bind(&session.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "session-b"
     );
-    assert!(
-        ids.contains(&scheduled.id.as_str()),
-        "non-task background session kept"
-    );
-    assert!(
-        !ids.contains(&task.id.as_str()),
-        "task-linked session excluded"
-    );
-    assert_eq!(result.len(), 2);
 }
 
 #[tokio::test]
 async fn test_delete_session() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("ToDelete".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let deleted = delete_session(&pool, &session.id).await.unwrap();
     assert!(deleted);
@@ -186,141 +139,47 @@ async fn test_delete_session() {
 }
 
 #[tokio::test]
-async fn test_create_session_rotation_link_loads_parent() {
+async fn test_count_session_messages() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let parent = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Parent".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-    let child = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Child".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
-    assert_eq!(parent_session_id(&pool, &child.id).await.unwrap(), None);
+    assert_eq!(count_session_messages(&pool, &session.id).await.unwrap(), 0);
 
-    create_session_rotation_link(&pool, &child.id, &parent.id)
-        .await
-        .unwrap();
-
-    assert_eq!(
-        parent_session_id(&pool, &child.id).await.unwrap(),
-        Some(parent.id)
-    );
-}
-
-#[tokio::test]
-async fn test_count_session_chain_messages() {
-    let (_tmp, pool) = workspace_pool().await;
-
-    // grandparent ← parent ← child rotation chain, with messages at each level.
-    let mut chain_ids = Vec::new();
-    for title in ["Grandparent", "Parent", "Child"] {
-        let session = create_session(
+    for n in 0..3 {
+        create_message(
             &pool,
-            CreateSessionParams {
-                kind: SessionKind::Interactive,
-                title: Some(title.to_string()),
-                context: sample_context(),
+            CreateMessageParams {
+                session_id: session.id.clone(),
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: format!("msg {}", n),
+                }],
+                provider_metadata: None,
             },
         )
         .await
         .unwrap();
-        chain_ids.push(session.id);
-    }
-    create_session_rotation_link(&pool, &chain_ids[1], &chain_ids[0])
-        .await
-        .unwrap();
-    create_session_rotation_link(&pool, &chain_ids[2], &chain_ids[1])
-        .await
-        .unwrap();
-
-    // 3 messages in grandparent, 2 in parent, 1 in child.
-    for (idx, session_id) in chain_ids.iter().enumerate() {
-        for n in 0..(3 - idx) {
-            create_message(
-                &pool,
-                CreateMessageParams {
-                    session_id: session_id.clone(),
-                    role: MessageRole::User,
-                    content: vec![ContentPart::Text {
-                        text: format!("msg {}", n),
-                    }],
-                    provider_metadata: None,
-                },
-            )
-            .await
-            .unwrap();
-        }
     }
 
-    // Child alone vs. child + ancestors.
-    assert_eq!(
-        count_session_chain_messages(&pool, &chain_ids[2], false)
-            .await
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        count_session_chain_messages(&pool, &chain_ids[2], true)
-            .await
-            .unwrap(),
-        6
-    );
-    // Mid-chain: parent + grandparent, not the child below it.
-    assert_eq!(
-        count_session_chain_messages(&pool, &chain_ids[1], true)
-            .await
-            .unwrap(),
-        5
-    );
+    assert_eq!(count_session_messages(&pool, &session.id).await.unwrap(), 3);
     // Unknown session: zero, not an error.
-    assert_eq!(
-        count_session_chain_messages(&pool, "missing", true)
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(count_session_messages(&pool, "missing").await.unwrap(), 0);
 }
 
 #[tokio::test]
-async fn test_update_session_title_and_context() {
+async fn test_update_session_context() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Old".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let mut updated = session.clone();
-    updated.title = Some("New".to_string());
-    updated.context.workspace_id = Some("ws-2".to_string());
+    updated.context.cli_session_id = Some("cli-1".to_string());
 
-    let result = update_session(&pool, &updated).await.unwrap();
-    assert_eq!(result.title, Some("New".to_string()));
+    update_session(&pool, &updated).await.unwrap();
 
     let fetched = get_session(&pool, &session.id).await.unwrap().unwrap();
-    assert_eq!(fetched.title, Some("New".to_string()));
-    assert_eq!(fetched.context.workspace_id, Some("ws-2".to_string()));
+    assert_eq!(fetched.context.cli_session_id.as_deref(), Some("cli-1"));
 }
 
 // ---------------------------------------------------------------------------
@@ -331,16 +190,7 @@ async fn test_update_session_title_and_context() {
 async fn test_create_and_list_messages() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let _msg1 = create_message(
         &pool,
@@ -384,16 +234,7 @@ async fn test_create_and_list_messages() {
 async fn test_update_message_content() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let msg = create_message(
         &pool,
@@ -448,16 +289,7 @@ async fn test_update_message_content() {
 async fn test_user_message_queue_lifecycle() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let unqueued = create_user_message(&pool, session.id.clone(), "first".into(), None)
         .await
@@ -519,16 +351,7 @@ async fn test_user_message_queue_lifecycle() {
 async fn test_get_active_run_ignores_terminal_runs() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     create_run(
         &pool,
@@ -575,26 +398,8 @@ async fn test_get_active_run_ignores_terminal_runs() {
 async fn test_workspace_has_active_run_tracks_any_session() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let first = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("first".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-    let second = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("second".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let first = create_session(&pool, sample_context()).await.unwrap();
+    let second = create_session(&pool, sample_context()).await.unwrap();
 
     assert!(!workspace_has_active_run(&pool).await.unwrap());
 
@@ -638,16 +443,7 @@ async fn test_workspace_has_active_run_tracks_any_session() {
 async fn test_create_and_get_run() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let run = create_run(
         &pool,
@@ -668,7 +464,6 @@ async fn test_create_and_get_run() {
     assert_eq!(run.trigger, RunTrigger::UserMessage);
     assert_eq!(run.connection_id, "conn-1");
     assert!(run.completed_at.is_none());
-    assert!(run.notices.is_empty());
 
     // Assert on the *stored* row, not the struct `create_run` returned: the
     // INSERT binds `protocol_id` and `model_id` as adjacent strings, so only a
@@ -683,26 +478,17 @@ async fn test_create_and_get_run() {
     assert_eq!(fetched.connection_id, "conn-1");
 }
 
-#[tokio::test]
-async fn test_list_runs_ordered_by_started_at_desc() {
-    let (_tmp, pool) = workspace_pool().await;
-
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-
-    let run1 = create_run(
-        &pool,
+async fn insert_run_at(
+    pool: &crate::db::DbPool,
+    session_id: &str,
+    status: RunStatus,
+    started_at: i64,
+) -> String {
+    let run = create_run(
+        pool,
         CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Completed,
+            session_id: session_id.to_string(),
+            status,
             trigger: RunTrigger::UserMessage,
             connection_id: "c1".to_string(),
             protocol_id: "openai".to_string(),
@@ -712,44 +498,66 @@ async fn test_list_runs_ordered_by_started_at_desc() {
     )
     .await
     .unwrap();
+    sqlx::query("UPDATE assistant_runs SET started_at = ? WHERE id = ?")
+        .bind(started_at)
+        .bind(&run.id)
+        .execute(pool)
+        .await
+        .unwrap();
+    run.id
+}
 
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+async fn current_run_ids(pool: &crate::db::DbPool, session_id: &str) -> Vec<String> {
+    current_runs(pool, session_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|run| run.id)
+        .collect()
+}
 
-    let run2 = create_run(
-        &pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Failed,
-            trigger: RunTrigger::Retry,
-            connection_id: "c1".to_string(),
-            protocol_id: "openai".to_string(),
-            model_id: "gpt-4".to_string(),
-            error: Some("Timeout".to_string()),
-        },
-    )
-    .await
-    .unwrap();
+#[tokio::test]
+async fn test_current_runs_returns_latest_and_older_active_run() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
-    let runs = list_runs(&pool, &session.id).await.unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].id, run2.id); // newest first
-    assert_eq!(runs[1].id, run1.id);
+    insert_run_at(&pool, &session.id, RunStatus::Completed, 1).await;
+    let running = insert_run_at(&pool, &session.id, RunStatus::Running, 2).await;
+    let latest = insert_run_at(&pool, &session.id, RunStatus::Completed, 3).await;
+
+    assert_eq!(current_run_ids(&pool, &session.id).await, [latest, running]);
+}
+
+#[tokio::test]
+async fn test_current_runs_returns_only_latest_when_idle() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
+    assert!(current_run_ids(&pool, &session.id).await.is_empty());
+
+    for started_at in 1..=2 {
+        insert_run_at(&pool, &session.id, RunStatus::Completed, started_at).await;
+    }
+    let latest = insert_run_at(&pool, &session.id, RunStatus::Failed, 3).await;
+
+    assert_eq!(current_run_ids(&pool, &session.id).await, [latest]);
+}
+
+#[tokio::test]
+async fn test_current_runs_lists_active_latest_run_once() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
+
+    insert_run_at(&pool, &session.id, RunStatus::Completed, 1).await;
+    let active = insert_run_at(&pool, &session.id, RunStatus::Queued, 2).await;
+
+    assert_eq!(current_run_ids(&pool, &session.id).await, [active]);
 }
 
 #[tokio::test]
 async fn test_update_run_status_to_terminal_sets_completed_at() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let run = create_run(
         &pool,
@@ -780,16 +588,7 @@ async fn test_update_run_status_to_terminal_sets_completed_at() {
 async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let run = create_run(
         &pool,
@@ -814,19 +613,10 @@ async fn test_update_run_status_non_terminal_does_not_set_completed_at() {
 }
 
 #[tokio::test]
-async fn test_complete_run_with_notices() {
+async fn test_complete_run_with_warnings() {
     let (_tmp, pool) = workspace_pool().await;
 
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     let run = create_run(
         &pool,
@@ -843,25 +633,39 @@ async fn test_complete_run_with_notices() {
     .await
     .unwrap();
 
-    let notices = vec![RunNotice {
-        kind: RunNoticeKind::CommandDenied,
-        message: "sudo denied".to_string(),
-        timestamp: 1234567890,
-    }];
+    let completed = complete_run(&pool, &run.id, RunStatus::CompletedWithWarnings, None)
+        .await
+        .unwrap();
 
-    let completed = complete_run(
+    assert_eq!(completed.status, RunStatus::CompletedWithWarnings);
+    assert!(completed.completed_at.is_some());
+}
+
+#[tokio::test]
+async fn update_run_status_to_completed_with_warnings_sets_completed_at() {
+    let (_tmp, pool) = workspace_pool().await;
+    let session = create_session(&pool, sample_context()).await.unwrap();
+    let run = create_run(
         &pool,
-        &run.id,
-        RunStatus::CompletedWithWarnings,
-        None,
-        &notices,
+        CreateRunParams {
+            session_id: session.id.clone(),
+            status: RunStatus::Running,
+            trigger: RunTrigger::UserMessage,
+            connection_id: "c1".to_string(),
+            protocol_id: "openai".to_string(),
+            model_id: "gpt-4".to_string(),
+            error: None,
+        },
     )
     .await
     .unwrap();
 
-    assert_eq!(completed.status, RunStatus::CompletedWithWarnings);
-    assert_eq!(completed.notices.len(), 1);
-    assert!(completed.completed_at.is_some());
+    let updated = update_run_status(&pool, &run.id, RunStatus::CompletedWithWarnings, None)
+        .await
+        .unwrap();
+
+    assert_eq!(updated.status, RunStatus::CompletedWithWarnings);
+    assert!(updated.completed_at.is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -873,16 +677,7 @@ async fn test_full_session_lifecycle() {
     let (_tmp, pool) = workspace_pool().await;
 
     // 1. Create session
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: Some("Demo".to_string()),
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
 
     // 2. Add messages
     create_message(
@@ -916,12 +711,12 @@ async fn test_full_session_lifecycle() {
     .unwrap();
 
     // 4. Complete the run
-    complete_run(&pool, &run.id, RunStatus::Completed, None, &[])
+    complete_run(&pool, &run.id, RunStatus::Completed, None)
         .await
         .unwrap();
 
     // 5. Verify everything is linked
-    let runs = list_runs(&pool, &session.id).await.unwrap();
+    let runs = current_runs(&pool, &session.id).await.unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, RunStatus::Completed);
 
@@ -946,22 +741,19 @@ async fn test_create_session_and_link_task_links_atomically() {
     insert_task(&pool, "task-1", "queued", None, None).await;
 
     // The atomic helper should INSERT the session AND stamp session_id in one
-    // transaction, so list_non_task_sessions (run before/after) reflects the
-    // final state on both sides.
+    // transaction, so find_manager_session never sees it unlinked.
     let session = create_session_and_link_task(
         &pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some("Self-task".to_string()),
-            context: sample_context(),
+        SessionContext {
+            automation_id: Some("manager".to_string()),
+            ..sample_context()
         },
         "task-1",
     )
     .await
     .unwrap();
 
-    // The task row must now point at the session — the anti-join will exclude
-    // it, so a concurrent resolver cannot hijack the conversation view.
+    // The task row must now point at the session, so the anti-join excludes it.
     let linked: Option<String> =
         sqlx::query_scalar("SELECT session_id FROM workspace_tasks WHERE id = ?")
             .bind("task-1")
@@ -974,16 +766,12 @@ async fn test_create_session_and_link_task_links_atomically() {
     let fetched = get_session(&pool, &session.id).await.unwrap();
     assert!(fetched.is_some(), "session row exists after commit");
 
-    // And it must be invisible to list_non_task_sessions — the resolver
-    // property the whole fix hinges on.
-    let non_task_ids: Vec<String> = list_non_task_sessions(&pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
+    // And it must never be taken as the manager conversation.
     assert!(
-        !non_task_ids.contains(&session.id),
+        find_manager_session(&pool, "manager")
+            .await
+            .unwrap()
+            .is_none(),
         "task-linked session excluded by anti-join"
     );
 }
@@ -998,21 +786,12 @@ async fn test_create_session_and_link_task_links_atomically() {
 #[tokio::test]
 async fn test_list_messages_orders_same_timestamp_by_insertion() {
     let (_tmp, pool) = workspace_pool().await;
-    let session = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let session = create_session(&pool, sample_context()).await.unwrap();
     let inserted = ["z-first", "m-second", "a-third"];
     for id in inserted {
         sqlx::query(
             "INSERT INTO assistant_messages (id, session_id, role, content_json, provider_metadata_json, created_at) \
-             VALUES (?, ?, '\"user\"', '[]', NULL, 1000)",
+             VALUES (?, ?, 'user', '[]', NULL, 1000)",
         )
         .bind(id)
         .bind(&session.id)
@@ -1034,26 +813,8 @@ async fn test_list_messages_orders_same_timestamp_by_insertion() {
 #[tokio::test]
 async fn tool_result_lookup_is_session_scoped_and_keeps_full_payload() {
     let (_tmp, pool) = workspace_pool().await;
-    let first = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
-    let second = create_session(
-        &pool,
-        CreateSessionParams {
-            kind: SessionKind::Interactive,
-            title: None,
-            context: sample_context(),
-        },
-    )
-    .await
-    .unwrap();
+    let first = create_session(&pool, sample_context()).await.unwrap();
+    let second = create_session(&pool, sample_context()).await.unwrap();
     let run = create_run(
         &pool,
         CreateRunParams {
@@ -1113,18 +874,7 @@ async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
     let (_tmp, pool) = workspace_pool().await;
     let mut sessions = Vec::new();
     for _ in 0..2 {
-        sessions.push(
-            create_session(
-                &pool,
-                CreateSessionParams {
-                    kind: SessionKind::Interactive,
-                    title: None,
-                    context: sample_context(),
-                },
-            )
-            .await
-            .unwrap(),
-        );
+        sessions.push(create_session(&pool, sample_context()).await.unwrap());
     }
     let run = create_run(
         &pool,

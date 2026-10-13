@@ -1,49 +1,22 @@
 //! System prompt assembly.
 //!
 //! `build_system_prompt` renders the full system message handed to every
-//! provider — API and CLI alike — from the session context, the live agent
-//! description, the tool set, and the run trigger. It lived in `engine.rs`
+//! provider — API and CLI alike — from the run context, the tool set, and
+//! the run trigger. It lived in `engine.rs`
 //! until it grew to roughly a third of that file (R3.4); it has no dependency
 //! on the run loop, so it lives on its own.
 //!
-//! `live_agent_description` comes along because it exists only to feed the
-//! prompt and both call sites take the two as a pair. It is the sole reason
-//! this otherwise pure module needs `AppHandle`/`AppState`.
+//! The agent's configuration arrives as a [`RunContext`] resolved at run
+//! start, so this module stays pure.
 
-use tauri::AppHandle;
-use tauri::Manager;
-
+use crate::assistant::run_context::RunContext;
 use crate::assistant::types::{ContentPart, MessageRole, ProviderInputMessage, RunTrigger};
-use crate::AppState;
-
-/// Resolve the live agent description for the session's owning agent.
-///
-/// Returns the user-set description plus assembled skill content read fresh
-/// from disk on each call. `None` when the session has no workspace/agent
-/// binding, AppState is unavailable, or the workspace/agent has been
-/// deleted — all "no agent instructions" scenarios.
-pub(crate) fn live_agent_description(
-    app: &AppHandle,
-    context: &crate::assistant::types::SessionContext,
-) -> Option<String> {
-    let workspace_id = context.workspace_id.as_deref()?;
-    let agent_id = context.automation_id.as_deref()?;
-    let state = app.try_state::<AppState>()?;
-    crate::commands::workspace::workspace_agent_runtime_description(
-        state.inner(),
-        workspace_id,
-        agent_id,
-    )
-}
 
 /// Build the system prompt for the assistant.
 ///
-/// `agent_description` is the live-computed seed (user-set description plus
-/// resolved skill content) for the agent owning this session. It is NOT
-/// persisted on the session — callers re-derive it at turn start so toggling
-/// a skill or editing a description is immediately visible to the model.
-/// Pass `None` only for sessions that have no associated agent (e.g. tests,
-/// or sessions whose underlying agent has been deleted).
+/// `context.agent_description` is the agent's description with its skills
+/// folded in, resolved when the run starts so a description or skill edit is
+/// visible on the next run.
 #[allow(
     clippy::cognitive_complexity,
     reason = "lint debt: cognitive complexity 40 against a budget of 25"
@@ -53,11 +26,10 @@ pub(crate) fn live_agent_description(
     reason = "lint debt: 312 lines against a 100-line budget; split it, do not raise the budget"
 )]
 pub(crate) fn build_system_prompt(
-    context: &crate::assistant::types::SessionContext,
-    agent_description: Option<&str>,
+    context: &RunContext,
+    workspace_id: &str,
     tool_defs: &[crate::assistant::types::ToolDefinition],
     trigger: &RunTrigger,
-    workspace_root: Option<&std::path::Path>,
 ) -> ProviderInputMessage {
     let tool_names: Vec<&str> = tool_defs.iter().map(|t| t.name.as_str()).collect();
     // `bash_exec` is the only tool that reads or writes arbitrary files, and in
@@ -118,8 +90,8 @@ pub(crate) fn build_system_prompt(
                     .filter(|d| !d.trim().is_empty())
                     .unwrap_or("(no description)");
                 prompt.push_str(&format!(
-                    "- **{}** ({}) — `workspaceAgentId`: `{}` — {}\n",
-                    agent.display_name, agent.role, agent.id, summary
+                    "- **{}** (member) — `workspaceAgentId`: `{}` — {}\n",
+                    agent.display_name, agent.id, summary
                 ));
             }
             // Self-tasking is offered below as the way to parallelize work, so
@@ -269,17 +241,12 @@ pub(crate) fn build_system_prompt(
                  decide what needs to be refreshed, and communicate the result clearly.\n",
             );
         }
-        RunTrigger::InterAgentCall => {
-            prompt.push_str(
-                "This is a synchronous inter-agent call. The caller is waiting for your response.\n",
-            );
-        }
         RunTrigger::WorkspaceTask => {
             prompt.push_str(
                 "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked by missing capability, context, permission, or runtime failure, start with `BLOCKED:` and state the specific manager or user action needed. If you specifically need user feedback or approval, start with `NEEDS_USER_INPUT:` and state the decision needed.\n",
             );
         }
-        RunTrigger::UserMessage | RunTrigger::Retry => {
+        RunTrigger::UserMessage => {
             prompt.push_str(
                 "This is a user-driven run. Prioritize the user's latest message and use prior context only as support.\n",
             );
@@ -298,7 +265,7 @@ pub(crate) fn build_system_prompt(
             let role = if agent.is_default {
                 "manager"
             } else {
-                agent.role.as_str()
+                "member"
             };
             if let Some(description) = agent
                 .description
@@ -337,95 +304,87 @@ pub(crate) fn build_system_prompt(
              Prefer updating existing visuals over recreating duplicate panels when the topic is unchanged.\n",
         );
 
-        if let Some(description) = agent_description.filter(|s| !s.is_empty()) {
+        if let Some(description) = context
+            .agent_description
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
             prompt.push_str("\nAgent instructions:\n");
             prompt.push_str(description);
             prompt.push('\n');
         }
     }
 
-    if matches!(trigger, RunTrigger::InterAgentCall) {
+    prompt.push_str("\n## Local Execution Capabilities\n");
+    if shell_enabled && !can_write_files {
+        prompt.push_str(&format!(
+            "- Your workspace (id `{workspace_id}`) is your default shell working directory (run `pwd` for its path) and holds this workspace's artifacts, which you can read. Your command allowlist contains no command that writes a file, so any write you attempt through `bash_exec` stops and waits for the user to approve that command — which an unattended run has nobody to answer. Put your results in chat, save charts with `create_vega_chart` (it writes its own file and needs no shell), and say plainly when a request needs a file you cannot write.\n",
+        ));
+    } else if shell_enabled {
+        prompt.push_str(&format!(
+            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
+        ));
+    } else {
+        prompt.push_str(&format!(
+            "- Your workspace (id `{workspace_id}`) is where the charts you save appear to the user as **artifacts** in the CLAI app. You have no shell and no filesystem tools this session: you cannot read, write, list, or search files. Chat is your output channel — put findings in your reply instead of promising files you cannot write.\n",
+        ));
+    }
+    prompt.push_str(
+        "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
+    );
+    prompt.push_str(
+        "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never hand-write a Vega-Lite spec into a file or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The tool does not show the chart in chat: it returns a `markdown` snippet such as `![title](/reports/q3/revenue.vl.json)`, and embedding that snippet in your reply or in a markdown report is the only way the chart is displayed — put it exactly where the chart belongs, once. Leading `/` = workspace root, so the link works from a report in any folder. Saved charts also appear as artifacts.\n",
+    );
+    if can_write_files {
         prompt.push_str(
-            "\n## Inter-Agent Call\n\
-             You have been called by another agent. The latest user message includes the request parameters, the required JSON output schema, and a trace ID.\n\
-             Return exactly one JSON object that matches the output schema.\n\
-             Do not wrap the response in markdown fences.\n\
-             Do not ask follow-up questions because you will not receive answers.\n",
+            "- Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `bash_exec` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
+        );
+    } else {
+        prompt.push_str(
+            "- Keep the data inside the spec small: you cannot write a companion CSV/JSON this session, so aggregate to the rows that carry the finding instead of inlining a large table.\n",
+        );
+    }
+    prompt.push_str(
+        "- Make the chart worth looking at — aim for what an analyst would publish, not the default output. Give it a `title` whose `subtitle` states the finding and the units; sort categorical axes by value, not alphabetically. Numeric categories such as hour, age and rank must remain numeric: for CSV data, declare them in `data.format.parse`; otherwise provide an explicit domain order matching the source values, because nominal/ordinal CSV fields sort as strings by default (0, 1, 10, 11, …). Pick the mark that answers the question — a `rect` heatmap for a value across two keys, layered `rule` + `point` to compare two measures per category, `stack: \"center\"` area for composition over time, log or sqrt scales for values spanning orders of magnitude — and let `transform` (`fold`, `window`, `regression`, `joinaggregate`, `timeUnit`) shape the data instead of pre-chewing it. CLAI supplies the theme, quiet axes and tooltips, plus clickable categorical legends and a pan/zoom button on eligible unit or flat layered charts. Spend your effort on the encoding; add an explicit `tooltip` array only to choose which fields show. Specs with authored parameters keep control of their own interactions; set `usermeta.clai.interactions` to false to disable automatic interactions, or add native Vega-Lite parameters for linked brushing or composed views. One hard rule: declare a selection `param` inside a single unit view — one mark — and read it from the other views with `{\"filter\": {\"param\": …}}`, `scale.domain.param` or `condition.param`. Vega-Lite copies a param down into every unit view in its scope, so a param placed on a `layer` of two or more marks (directly, or above one through a concat/facet/repeat) validates and then fails to render with `Duplicate signal name`.\n",
+    );
+
+    if shell_enabled {
+        push_shell_capability_lines(&mut prompt, context);
+    } else {
+        prompt.push_str(
+            "- Shell mode: off — no `bash_exec` and no filesystem tools. Do not plan work that depends on reading or writing files; say plainly that you lack the access if a request needs it. `create_vega_chart` still saves charts for you, and `history_query` still reads this workspace's conversation record.\n",
         );
     }
 
-    if let Some(workspace_id) = context.agent_workspace_id.as_deref() {
-        prompt.push_str("\n## Local Execution Capabilities\n");
-        if shell_enabled && !can_write_files {
-            prompt.push_str(&format!(
-                "- Your workspace (id `{workspace_id}`) is your default shell working directory (run `pwd` for its path) and holds this workspace's artifacts, which you can read. Your command allowlist contains no command that writes a file, so any write you attempt through `bash_exec` stops and waits for the user to approve that command — which an unattended run has nobody to answer. Put your results in chat, save charts with `create_vega_chart` (it writes its own file and needs no shell), and say plainly when a request needs a file you cannot write.\n",
-            ));
-        } else if shell_enabled {
-            prompt.push_str(&format!(
-                "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
-            ));
-        } else {
-            prompt.push_str(&format!(
-                "- Your workspace (id `{workspace_id}`) is where the charts you save appear to the user as **artifacts** in the CLAI app. You have no shell and no filesystem tools this session: you cannot read, write, list, or search files. Chat is your output channel — put findings in your reply instead of promising files you cannot write.\n",
-            ));
-        }
-        prompt.push_str(
-            "- Choose a chart proactively when it makes a pattern, comparison, distribution, trend, correlation, composition, or relationship materially easier to understand than prose or a short table. Skip charts for a single fact, a one-step action, a short list, or data with no meaningful visual structure.\n",
-        );
-        prompt.push_str(
-            "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never hand-write a Vega-Lite spec into a file or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The tool does not show the chart in chat: it returns a `markdown` snippet such as `![title](/reports/q3/revenue.vl.json)`, and embedding that snippet in your reply or in a markdown report is the only way the chart is displayed — put it exactly where the chart belongs, once. Leading `/` = workspace root, so the link works from a report in any folder. Saved charts also appear as artifacts.\n",
-        );
-        if can_write_files {
-            prompt.push_str(
-                "- Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `bash_exec` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
-            );
-        } else {
-            prompt.push_str(
-                "- Keep the data inside the spec small: you cannot write a companion CSV/JSON this session, so aggregate to the rows that carry the finding instead of inlining a large table.\n",
-            );
-        }
-        prompt.push_str(
-            "- Make the chart worth looking at — aim for what an analyst would publish, not the default output. Give it a `title` whose `subtitle` states the finding and the units; sort categorical axes by value, not alphabetically. Numeric categories such as hour, age and rank must remain numeric: for CSV data, declare them in `data.format.parse`; otherwise provide an explicit domain order matching the source values, because nominal/ordinal CSV fields sort as strings by default (0, 1, 10, 11, …). Pick the mark that answers the question — a `rect` heatmap for a value across two keys, layered `rule` + `point` to compare two measures per category, `stack: \"center\"` area for composition over time, log or sqrt scales for values spanning orders of magnitude — and let `transform` (`fold`, `window`, `regression`, `joinaggregate`, `timeUnit`) shape the data instead of pre-chewing it. CLAI supplies the theme, quiet axes and tooltips, plus clickable categorical legends and a pan/zoom button on eligible unit or flat layered charts. Spend your effort on the encoding; add an explicit `tooltip` array only to choose which fields show. Specs with authored parameters keep control of their own interactions; set `usermeta.clai.interactions` to false to disable automatic interactions, or add native Vega-Lite parameters for linked brushing or composed views. One hard rule: declare a selection `param` inside a single unit view — one mark — and read it from the other views with `{\"filter\": {\"param\": …}}`, `scale.domain.param` or `condition.param`. Vega-Lite copies a param down into every unit view in its scope, so a param placed on a `layer` of two or more marks (directly, or above one through a concat/facet/repeat) validates and then fails to render with `Duplicate signal name`.\n",
-        );
+    if context.execution.web.enabled {
+        prompt.push_str("- Web access: enabled (`web_search` and `web_fetch` available)\n");
+    }
 
-        if shell_enabled {
-            push_shell_capability_lines(&mut prompt, context, workspace_root);
-        } else {
-            prompt.push_str(
-                "- Shell mode: off — no `bash_exec` and no filesystem tools. Do not plan work that depends on reading or writing files; say plainly that you lack the access if a request needs it. `create_vega_chart` still saves charts for you, and `history_query` still reads this workspace's conversation record.\n",
-            );
-        }
+    if shell_enabled {
+        push_filesystem_boundary(&mut prompt, can_write_files);
+    }
+    // The memory protocol is all reads and writes of `.clai/memory/` files.
+    if can_write_files {
+        push_agent_memory(&mut prompt, trigger);
+    }
 
-        if context.execution.web.enabled {
-            prompt.push_str("- Web access: enabled (`web_search` and `web_fetch` available)\n");
-        }
-
-        if shell_enabled {
-            push_filesystem_boundary(&mut prompt, can_write_files);
-        }
-        // The memory protocol is all reads and writes of `.clai/memory/` files.
-        if can_write_files {
-            push_agent_memory(&mut prompt, trigger);
-        }
-
+    prompt.push_str(
+        "\n## Conversation History Database (read-only)\n\
+         The complete conversation record of this workspace lives in a SQLite database at `.clai/data.sqlite` (relative to your workspace root): every message, run, and tool call with its full output, across all agents in this workspace — including detail long since compacted out of your context window. Use it when memory files don't have what you need and you must recover verbatim past work: the exact command that was run, the full text of an old error, what the user or a sibling agent said weeks ago.\n\
+         - PREFERRED: use the `history_query` tool. It runs a single read-only SQL query against THIS workspace's `.clai/data.sqlite` and returns rows as JSON. It needs no approval because it is structurally incapable of writing or escaping, so it is your always-available way to recover context: if you ever find yourself missing earlier context — for example right after a compaction — query the record to recover it instead of asking the user to repeat anything.\n\
+         - Discover the schema first rather than assuming it — it changes between app versions: `SELECT name FROM sqlite_master WHERE type='table'`, then `PRAGMA table_info(<table>)`. The key tables are `assistant_messages` (conversation, `content_json`), `assistant_tool_calls` (every tool invocation and its result), `assistant_runs`, and `workspace_tasks`.\n\
+         - Keep queries narrow. Single rows can hold megabytes of tool output, so always SELECT specific columns, filter (`WHERE ... LIKE`, `json_extract`, time ranges on `created_at`) and page with `LIMIT`/`OFFSET`; never dump whole tables or `SELECT *` unbounded.\n\
+         - `history_query` reads only THIS workspace's database.\n",
+    );
+    if shell_enabled {
         prompt.push_str(
-            "\n## Conversation History Database (read-only)\n\
-             The complete conversation record of this workspace lives in a SQLite database at `.clai/data.sqlite` (relative to your workspace root): every message, run, and tool call with its full output, across all agents in this workspace — including detail long since compacted out of your context window. Use it when memory files don't have what you need and you must recover verbatim past work: the exact command that was run, the full text of an old error, what the user or a sibling agent said weeks ago.\n\
-             - PREFERRED: use the `history_query` tool. It runs a single read-only SQL query against THIS workspace's `.clai/data.sqlite` and returns rows as JSON. It needs no approval because it is structurally incapable of writing or escaping, so it is your always-available way to recover context: if you ever find yourself missing earlier context — for example right after a compaction — query the record to recover it instead of asking the user to repeat anything.\n\
-             - Discover the schema first rather than assuming it — it changes between app versions: `SELECT name FROM sqlite_master WHERE type='table'`, then `PRAGMA table_info(<table>)`. The key tables are `assistant_messages` (conversation, `content_json`), `assistant_tool_calls` (every tool invocation and its result), `assistant_runs`, and `workspace_tasks`.\n\
-             - Keep queries narrow. Single rows can hold megabytes of tool output, so always SELECT specific columns, filter (`WHERE ... LIKE`, `json_extract`, time ranges on `created_at`) and page with `LIMIT`/`OFFSET`; never dump whole tables or `SELECT *` unbounded.\n\
-             - `history_query` reads only THIS workspace's database.\n",
-        );
-        if shell_enabled {
-            prompt.push_str(
-                "             - To read a DIFFERENT workspace's DB that you have been granted access to, fall back to the shell — STRICTLY READ-ONLY: open it only as `sqlite3 'file:<path>/.clai/data.sqlite?mode=ro'` (or python3's sqlite3 module with the same `mode=ro` URI). Never INSERT/UPDATE/DELETE, never VACUUM or ALTER, never open it without `mode=ro` — a write can corrupt the app's state.\n",
-            );
-        }
-        prompt.push_str(
-            "\
-             - Your own in-flight run is in there too. This is a tool for finding *past* work — check memory files first, and reach for the database when you need the verbatim record.\n",
+            "             - To read a DIFFERENT workspace's DB that you have been granted access to, fall back to the shell — STRICTLY READ-ONLY: open it only as `sqlite3 'file:<path>/.clai/data.sqlite?mode=ro'` (or python3's sqlite3 module with the same `mode=ro` URI). Never INSERT/UPDATE/DELETE, never VACUUM or ALTER, never open it without `mode=ro` — a write can corrupt the app's state.\n",
         );
     }
+    prompt.push_str(
+        "\
+         - Your own in-flight run is in there too. This is a tool for finding *past* work — check memory files first, and reach for the database when you need the verbatim record.\n",
+    );
 
     ProviderInputMessage {
         role: MessageRole::System,
@@ -435,25 +394,19 @@ pub(crate) fn build_system_prompt(
 
 /// Path grants, shell mode, sandbox posture and the command policy.
 /// Only meaningful when the agent actually has `bash_exec`.
-fn push_shell_capability_lines(
-    prompt: &mut String,
-    context: &crate::assistant::types::SessionContext,
-    workspace_root: Option<&std::path::Path>,
-) {
+fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
     use crate::assistant::sandbox::{
         filesystem::{agent_path_string, EffectiveFilesystemPolicy},
         SandboxPathAccess,
     };
     let home = crate::paths::real_home();
-    let policy = workspace_root.map(|root| {
-        EffectiveFilesystemPolicy::from_config(
-            root,
-            &context.execution.filesystem.extra_paths,
-            home.as_deref(),
-        )
-    });
+    let policy = EffectiveFilesystemPolicy::from_config(
+        &context.workspace_root,
+        &context.execution.filesystem.extra_paths,
+        home.as_deref(),
+    );
     match policy {
-        Some(Ok(policy)) => {
+        Ok(policy) => {
             prompt.push_str(&format!(
                 "- Shell workspace path: `{}`\n",
                 agent_path_string(&policy.workspace_root)
@@ -475,11 +428,10 @@ fn push_shell_capability_lines(
                 }
             }
         }
-        Some(Err(error)) => prompt.push_str(&format!(
+        Err(error) => prompt.push_str(&format!(
             "- Filesystem policy unavailable; shell execution will refuse this configuration: {}\n",
             error
         )),
-        None => prompt.push_str("- Filesystem policy unavailable: no workspace is attached.\n"),
     }
 
     let shell_mode = match context.execution.shell.mode {
@@ -645,10 +597,7 @@ fn push_agent_memory(prompt: &mut String, trigger: &RunTrigger) {
                  10. Prune stale entries: if a knowledge entry or checkpoint is no longer relevant, remove it.\n",
             );
         }
-        RunTrigger::InterAgentCall
-        | RunTrigger::WorkspaceTask
-        | RunTrigger::UserMessage
-        | RunTrigger::Retry => {
+        RunTrigger::WorkspaceTask | RunTrigger::UserMessage => {
             prompt.push_str(
                 "### Memory in user-driven runs\n\
                  - Do NOT read memory unless the user's request specifically needs historical context.\n\
@@ -677,7 +626,6 @@ fn push_agent_memory(prompt: &mut String, trigger: &RunTrigger) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::SessionContext;
     use crate::assistant::types::WorkspaceAgentSummary;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
 
@@ -696,30 +644,45 @@ mod tests {
         }
     }
 
+    fn with_description(context: &RunContext, description: Option<&str>) -> RunContext {
+        RunContext {
+            agent_description: description.map(str::to_string),
+            ..context.clone()
+        }
+    }
+
     fn build_system_prompt(
-        context: &SessionContext,
+        context: &RunContext,
         description: Option<&str>,
         tools: &[crate::assistant::types::ToolDefinition],
         trigger: &RunTrigger,
     ) -> ProviderInputMessage {
-        super::build_system_prompt(
-            context,
-            description,
-            tools,
-            trigger,
-            Some(std::path::Path::new("/clai-test-workspace")),
-        )
+        build_workspace_prompt("ws-test", context, description, tools, trigger)
+    }
+
+    fn build_workspace_prompt(
+        workspace_id: &str,
+        context: &RunContext,
+        description: Option<&str>,
+        tools: &[crate::assistant::types::ToolDefinition],
+        trigger: &RunTrigger,
+    ) -> ProviderInputMessage {
+        let context = RunContext {
+            workspace_root: std::path::PathBuf::from("/clai-test-workspace"),
+            ..with_description(context, description)
+        };
+        super::build_system_prompt(&context, workspace_id, tools, trigger)
     }
 
     #[test]
     fn build_system_prompt_includes_agent_memory_guidance_for_automations() {
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -762,13 +725,13 @@ mod tests {
 
     #[test]
     fn build_system_prompt_tells_user_runs_to_recover_lost_context_from_memory() {
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -783,27 +746,14 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_omits_agent_memory_guidance_without_workspace() {
-        let context = SessionContext::default();
-
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
-        let text = match &message.content[0] {
-            ContentPart::Text { text } => text,
-            other => panic!("expected text content, got {:?}", other),
-        };
-
-        assert!(!text.contains("## Agent Memory"));
-    }
-
-    #[test]
     fn build_system_prompt_makes_agent_self_aware_of_clai_workspace_model() {
-        let context = SessionContext {
-            agent_workspace_id: Some("ws-abc".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("ws-abc", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -824,12 +774,12 @@ mod tests {
 
     #[test]
     fn build_system_prompt_routes_charts_through_create_vega_chart() {
-        let context = SessionContext {
-            agent_workspace_id: Some("ws-abc".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("ws-abc", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -863,30 +813,17 @@ mod tests {
         // layer collides through a concat/facet/repeat parent too, while a
         // concat of plain unit views is fine (both measured).
         assert!(text.contains("through a concat/facet/repeat"));
-
-        // Without a workspace there is no tool and no guidance.
-        let plain = build_system_prompt(
-            &SessionContext::default(),
-            None,
-            &[],
-            &RunTrigger::UserMessage,
-        );
-        let plain_text = match &plain.content[0] {
-            ContentPart::Text { text } => text,
-            other => panic!("expected text content, got {:?}", other),
-        };
-        assert!(!plain_text.contains("create_vega_chart"));
     }
 
     #[test]
     fn build_system_prompt_documents_readonly_conversation_history_db() {
-        let context = SessionContext {
-            agent_workspace_id: Some("ws-abc".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("ws-abc", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -931,13 +868,13 @@ mod tests {
             access: crate::config::FilesystemPathAccess::ReadOnly,
             origin: None,
         }];
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution,
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -951,30 +888,17 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_omits_history_db_without_workspace() {
-        let context = SessionContext::default();
-
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
-        let text = match &message.content[0] {
-            ContentPart::Text { text } => text,
-            other => panic!("expected text content, got {:?}", other),
-        };
-
-        assert!(!text.contains("## Conversation History Database"));
-    }
-
-    #[test]
     fn build_system_prompt_withholds_filesystem_guidance_from_shell_off_agents() {
         // With generic file operations routed through `bash_exec`, a shell-off
         // agent has no filesystem: instructing it to obey a path boundary or to
         // keep `.clai/memory/` up to date asks for work it cannot perform.
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution: ExecutionCapabilityConfig::default(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1020,8 +944,7 @@ mod tests {
             .map(|command| (*command).to_string())
             .collect();
 
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             // An automation, so the "save durable outputs as files" line is
             // reachable — otherwise reverting its gate survives this test.
             automation_name: Some("Nightly review".to_string()),
@@ -1029,7 +952,8 @@ mod tests {
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1059,13 +983,13 @@ mod tests {
         execution.shell.allowed_command_prefixes =
             vec!["cargo check".to_string(), "tee".to_string()];
 
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution,
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1079,7 +1003,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_makes_chat_the_primary_output_channel() {
-        let context = SessionContext {
+        let context = RunContext {
             automation_name: Some("Health Monitor".to_string()),
             ..Default::default()
         };
@@ -1100,7 +1024,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_includes_current_datetime() {
-        let context = SessionContext::default();
+        let context = RunContext::default();
 
         let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
@@ -1113,7 +1037,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_warns_that_prior_tool_results_may_be_stale() {
-        let context = SessionContext::default();
+        let context = RunContext::default();
 
         let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
@@ -1131,7 +1055,7 @@ mod tests {
     #[test]
     fn build_system_prompt_always_includes_response_style_guidance() {
         // Unconditional: no tools, no memory, plain user message.
-        let context = SessionContext::default();
+        let context = RunContext::default();
         let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
         let ContentPart::Text { text } = &message.content[0] else {
             panic!("expected text")
@@ -1145,7 +1069,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_adds_interactive_reliability_guidance_when_blocking_tool_present() {
-        let context = SessionContext::default();
+        let context = RunContext::default();
         let tools = [crate::assistant::types::ToolDefinition {
             name: "ask_user".to_string(),
             description: "desc".to_string(),
@@ -1172,7 +1096,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_omits_interactive_reliability_guidance_without_blocking_tool() {
-        let context = SessionContext::default();
+        let context = RunContext::default();
         let tools = [crate::assistant::types::ToolDefinition {
             name: "non_interactive_tool".to_string(),
             description: "desc".to_string(),
@@ -1190,13 +1114,13 @@ mod tests {
 
     #[test]
     fn build_system_prompt_describes_autonomous_run_mode() {
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1214,13 +1138,13 @@ mod tests {
 
     #[test]
     fn build_system_prompt_describes_user_driven_run_mode() {
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
 
-        let message = build_system_prompt(&context, None, &[], &RunTrigger::UserMessage);
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::UserMessage);
         let text = match &message.content[0] {
             ContentPart::Text { text } => text,
             other => panic!("expected text content, got {:?}", other),
@@ -1234,21 +1158,17 @@ mod tests {
 
     #[test]
     fn build_system_prompt_includes_workspace_agent_roster() {
-        let context = SessionContext {
+        let context = RunContext {
             workspace_agents: vec![
                 WorkspaceAgentSummary {
                     id: "workspace-agent-manager".to_string(),
-                    agent_definition_id: "manager-definition".to_string(),
                     display_name: "Manager".to_string(),
-                    role: "manager".to_string(),
                     is_default: true,
                     description: Some("Coordinates workspace tasks.".to_string()),
                 },
                 WorkspaceAgentSummary {
                     id: "workspace-agent-reviewer".to_string(),
-                    agent_definition_id: "reviewer-definition".to_string(),
                     display_name: "Code Reviewer".to_string(),
-                    role: "member".to_string(),
                     is_default: false,
                     description: Some("Reviews source changes.".to_string()),
                 },
@@ -1275,7 +1195,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_roster_renders_the_id_for_a_descriptionless_agent() {
-        let context = SessionContext {
+        let context = RunContext {
             workspace_agents: vec![WorkspaceAgentSummary {
                 description: None,
                 ..manager_summary()
@@ -1297,12 +1217,7 @@ mod tests {
     fn manager_summary() -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             id: "workspace-agent-manager".to_string(),
-            // Deliberately different from `id`: the roster must render the
-            // workspace agent id (what `workspace_assignTask` matches on),
-            // and identical fixtures would hide a swap between the two.
-            agent_definition_id: "manager-definition".to_string(),
             display_name: "Manager".to_string(),
-            role: "manager".to_string(),
             is_default: true,
             description: Some("Coordinates workspace tasks.".to_string()),
         }
@@ -1311,9 +1226,7 @@ mod tests {
     fn member_summary() -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
             id: "workspace-agent-reviewer".to_string(),
-            agent_definition_id: "reviewer-definition".to_string(),
             display_name: "Code Reviewer".to_string(),
-            role: "member".to_string(),
             is_default: false,
             description: Some("Reviews source changes.".to_string()),
         }
@@ -1321,7 +1234,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_documents_parallel_task_mechanics_for_manager() {
-        let context = SessionContext {
+        let context = RunContext {
             automation_id: Some("workspace-agent-manager".to_string()),
             workspace_agents: vec![manager_summary(), member_summary()],
             ..Default::default()
@@ -1360,7 +1273,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_offers_self_tasking_to_solo_manager() {
-        let context = SessionContext {
+        let context = RunContext {
             automation_id: Some("workspace-agent-manager".to_string()),
             workspace_agents: vec![manager_summary()],
             ..Default::default()
@@ -1385,7 +1298,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_marks_workspace_task_runs_as_workers() {
-        let context = SessionContext {
+        let context = RunContext {
             automation_id: Some("workspace-agent-manager".to_string()),
             workspace_agents: vec![manager_summary()],
             ..Default::default()
@@ -1410,7 +1323,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_withholds_own_id_from_a_manager_worker_with_members() {
-        let context = SessionContext {
+        let context = RunContext {
             automation_id: Some("workspace-agent-manager".to_string()),
             workspace_agents: vec![manager_summary(), member_summary()],
             ..Default::default()
@@ -1433,7 +1346,7 @@ mod tests {
 
     #[test]
     fn build_system_prompt_hides_task_mechanics_from_members() {
-        let context = SessionContext {
+        let context = RunContext {
             automation_id: Some("workspace-agent-reviewer".to_string()),
             workspace_agents: vec![manager_summary(), member_summary()],
             ..Default::default()
@@ -1452,14 +1365,13 @@ mod tests {
 
     #[test]
     fn build_system_prompt_memory_guardrails_present_in_both_modes() {
-        let context = SessionContext {
-            agent_workspace_id: Some("agent-123".to_string()),
+        let context = RunContext {
             execution: shell_execution(),
             ..Default::default()
         };
 
         for trigger in &[RunTrigger::Scheduled, RunTrigger::UserMessage] {
-            let message = build_system_prompt(&context, None, &[], trigger);
+            let message = build_workspace_prompt("agent-123", &context, None, &[], trigger);
             let text = match &message.content[0] {
                 ContentPart::Text { text } => text,
                 other => panic!("expected text content, got {:?}", other),

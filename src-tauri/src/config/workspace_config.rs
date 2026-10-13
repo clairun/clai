@@ -219,8 +219,6 @@ pub struct WorkspaceConfig {
     /// recently-starred entries first if it ever wants to; `> 0` = starred.
     #[serde(default)]
     pub starred_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preferred_provider_connection_id: Option<String>,
     #[serde(default)]
     pub schedule: WorkspaceSchedule,
     /// The workspace's own Main agent — the one the schedule runs and the user
@@ -284,8 +282,6 @@ struct WorkspaceConfigFile {
     last_opened_at: i64,
     #[serde(default)]
     starred_at: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    preferred_provider_connection_id: Option<String>,
     #[serde(default)]
     schedule: WorkspaceSchedule,
     /// Legacy selector for the Main agent inside `agents`. Read for recovery,
@@ -362,7 +358,6 @@ impl From<WorkspaceConfigFile> for WorkspaceConfig {
             last_run_completed_at: file.last_run_completed_at,
             last_opened_at: file.last_opened_at,
             starred_at: file.starred_at,
-            preferred_provider_connection_id: file.preferred_provider_connection_id,
             schedule: file.schedule,
             main_agent,
             assignments: file.assignments,
@@ -389,7 +384,6 @@ impl From<WorkspaceConfig> for WorkspaceConfigFile {
             last_run_completed_at: config.last_run_completed_at,
             last_opened_at: config.last_opened_at,
             starred_at: config.starred_at,
-            preferred_provider_connection_id: config.preferred_provider_connection_id,
             schedule: config.schedule,
             default_agent_id: String::new(),
             agents: Vec::new(),
@@ -480,7 +474,6 @@ impl WorkspaceConfig {
             last_run_completed_at: 0,
             last_opened_at: 0,
             starred_at: 0,
-            preferred_provider_connection_id: None,
             schedule: WorkspaceSchedule::default(),
             main_agent: Some(WorkspaceAgent::new_manager(manager_id, now)),
             assignments: Vec::new(),
@@ -507,11 +500,9 @@ impl WorkspaceConfig {
             .find(|assignment| assignment.id == workspace_agent_id)
     }
 
-    /// Attach the first enabled provider connection as this workspace's
-    /// default, so a freshly created workspace is immediately usable without a
-    /// trip to Settings. Sets both the workspace-level preferred provider and
-    /// the manager agent's provider list (the source of truth scheduled runs
-    /// read). No-op when there are no enabled connections.
+    /// Attach the first enabled provider connection to the manager agent, so a
+    /// freshly created workspace is immediately usable without a trip to
+    /// Settings. No-op when there are no enabled connections.
     pub fn attach_default_provider(
         &mut self,
         connections: &[crate::assistant::types::ProviderConnection],
@@ -520,7 +511,6 @@ impl WorkspaceConfig {
         let Some(first) = connections.iter().find(|c| c.enabled) else {
             return;
         };
-        self.preferred_provider_connection_id = Some(first.id.clone());
         if let Some(main) = self.main_agent.as_mut() {
             main.provider_connection_ids = vec![first.id.clone()];
             main.updated_at = now;
@@ -960,14 +950,10 @@ mod attach_provider_tests {
     }
 
     #[test]
-    fn attaches_first_enabled_connection_to_manager_and_preferred() {
+    fn attaches_first_enabled_connection_to_manager() {
         let mut config = workspace();
         config.attach_default_provider(&[connection("a", true), connection("b", true)], 42);
 
-        assert_eq!(
-            config.preferred_provider_connection_id.as_deref(),
-            Some("a")
-        );
         let manager = config.main_agent.as_ref().expect("main agent");
         assert_eq!(manager.provider_connection_ids, vec!["a".to_string()]);
         assert_eq!(manager.updated_at, 42);
@@ -978,10 +964,6 @@ mod attach_provider_tests {
         let mut config = workspace();
         config.attach_default_provider(&[connection("a", false), connection("b", true)], 7);
 
-        assert_eq!(
-            config.preferred_provider_connection_id.as_deref(),
-            Some("b")
-        );
         let manager = config.main_agent.as_ref().expect("main agent");
         assert_eq!(manager.provider_connection_ids, vec!["b".to_string()]);
     }
@@ -991,7 +973,6 @@ mod attach_provider_tests {
         let mut config = workspace();
         config.attach_default_provider(&[connection("a", false)], 9);
 
-        assert!(config.preferred_provider_connection_id.is_none());
         let manager = config.main_agent.as_ref().expect("main agent");
         assert!(manager.provider_connection_ids.is_empty());
     }
@@ -1646,6 +1627,26 @@ mod main_agent_recovery_tests {
         assert_eq!(loaded.context, "house rules");
         assert_eq!(loaded.filesystem_grants[0].path, "/opt/tools");
         assert_eq!(loaded.main_agent_id(), "main");
+    }
+
+    #[test]
+    fn a_stored_preferred_provider_key_loads_and_is_dropped_on_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = WorkspaceConfig::new("ws".to_string(), "T".to_string(), 1, "main".to_string());
+        save(tmp.path(), &config).unwrap();
+        let path = config_path(tmp.path());
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        raw["preferredProviderConnectionId"] = serde_json::json!("conn-1");
+        fs::write(&path, raw.to_string()).unwrap();
+
+        let loaded = load(tmp.path()).unwrap();
+        assert_eq!(loaded.main_agent_id(), "main");
+        save(tmp.path(), &loaded).unwrap();
+
+        let rewritten: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(rewritten.get("preferredProviderConnectionId").is_none());
     }
 }
 

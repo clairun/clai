@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::config::ExecutionCapabilityConfig;
-
 pub type SessionId = String;
 pub type MessageId = String;
 pub type RunId = String;
@@ -41,14 +39,6 @@ impl std::fmt::Display for AuthMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "bindings.ts")]
-pub enum SessionKind {
-    Interactive,
-    BackgroundJob,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "bindings.ts")]
 pub enum MessageRole {
     System,
     User,
@@ -69,30 +59,17 @@ pub enum RunStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "bindings.ts")]
-pub enum RunNoticeKind {
-    CommandDenied,
-    PathDenied,
-    SandboxUnavailable,
-    /// A `fs_request_grant` was approved by the user. Carries the granted
-    /// path and access level in the message so the run record shows what
-    /// was extended.
-    PathGranted,
-    /// A `fs_request_grant` was denied (explicit deny, timeout, or channel
-    /// close). Same shape as the existing `PathDenied` but distinguishes
-    /// "path was outside grants" from "grant request was refused."
-    PathGrantDenied,
-}
+impl RunStatus {
+    pub fn is_active(&self) -> bool {
+        match self {
+            Self::Queued | Self::Running | Self::WaitingForTool => true,
+            Self::Completed | Self::CompletedWithWarnings | Self::Failed | Self::Cancelled => false,
+        }
+    }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct RunNotice {
-    pub kind: RunNoticeKind,
-    pub message: String,
-    pub timestamp: i64,
+    pub fn is_terminal(&self) -> bool {
+        !self.is_active()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -100,26 +77,9 @@ pub struct RunNotice {
 #[ts(export, export_to = "bindings.ts")]
 pub enum RunTrigger {
     UserMessage,
-    Retry,
     Scheduled,
     ManualAutomation,
-    InterAgentCall,
     WorkspaceTask,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct InterAgentCallContext {
-    pub call_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub caller_agent_id: Option<String>,
-    pub caller_session_id: String,
-    pub caller_run_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub caller_tool_call_id: Option<String>,
-    pub callee_agent_id: String,
-    pub exposed_tool_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq, TS)]
@@ -127,9 +87,7 @@ pub struct InterAgentCallContext {
 #[ts(export, export_to = "bindings.ts")]
 pub struct WorkspaceAgentSummary {
     pub id: String,
-    pub agent_definition_id: String,
     pub display_name: String,
-    pub role: String,
     pub is_default: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -139,37 +97,18 @@ pub struct WorkspaceAgentSummary {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct SessionContext {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    #[serde(default)]
-    pub tool_scopes: Vec<String>,
-    #[serde(default)]
-    pub mcp_server_ids: Vec<String>,
-    // ExecutionCapabilityConfig has a deep tree (sandbox/fs/shell/web
-    // configs each with sub-types). The FE doesn't deeply consume it in
-    // event payloads, so we erase it to `unknown` here to avoid pulling
-    // the entire config module into the generated bindings.
-    #[serde(default)]
-    #[ts(type = "unknown")]
-    pub execution: ExecutionCapabilityConfig,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The agent that owns this session; its configuration is resolved when
+    /// each run starts (`assistant::run_context`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<String>,
     /// The CLI provider that owns `cli_session_id`. A session id is
     /// provider-specific (Claude generates its own UUID; Codex returns a
     /// server-side thread id), so switching providers must NOT reuse it.
     /// `None` for sessions created before this was tracked.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub automation_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_workspace_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub automation_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub inter_agent_call: Option<InterAgentCallContext>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub workspace_agents: Vec<WorkspaceAgentSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -177,9 +116,6 @@ pub struct SessionContext {
 #[ts(export, export_to = "bindings.ts")]
 pub struct AssistantSession {
     pub id: SessionId,
-    pub kind: SessionKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
     pub context: SessionContext,
     pub created_at: i64,
     pub updated_at: i64,
@@ -282,10 +218,9 @@ pub struct AssistantMessagePage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<AssistantMessageCursor>,
     pub has_more: bool,
-    /// Total number of messages in the conversation (the requested session
-    /// plus, when ancestors were included, its whole rotation chain) — not
-    /// just this page. Lets the UI show a true conversation count while only
-    /// a window of messages is loaded.
+    /// Total number of messages in the session — not just this page. Lets the
+    /// UI show a true conversation count while only a window of messages is
+    /// loaded.
     #[serde(default)]
     pub total_count: u32,
 }
@@ -306,8 +241,6 @@ pub struct AssistantRun {
     pub completed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notices: Vec<RunNotice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -570,6 +503,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finished_run_statuses_are_terminal() {
+        for status in [
+            RunStatus::Completed,
+            RunStatus::CompletedWithWarnings,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ] {
+            assert!(status.is_terminal(), "{status:?}");
+        }
+        for status in [
+            RunStatus::Queued,
+            RunStatus::Running,
+            RunStatus::WaitingForTool,
+        ] {
+            assert!(!status.is_terminal(), "{status:?}");
+        }
+    }
+
+    #[test]
     fn image_content_part_round_trips_with_type_tag() {
         let part = ContentPart::Image {
             id: "img-1".to_string(),
@@ -602,5 +554,29 @@ mod tests {
             }
             other => panic!("expected Image, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_context_ignores_removed_keys() {
+        let with_removed: SessionContext = serde_json::from_str(
+            r#"{"workspaceId":"ws-1","agentWorkspaceId":"ws-1","mcpServerIds":["clai"],
+                "toolScopes":["web"],"execution":{"web":{"enabled":true}},
+                "automationId":"main","automationName":"Main",
+                "workspaceAgents":[{"id":"a","agentDefinitionId":"a","displayName":"A",
+                    "role":"member","isDefault":false}],
+                "cliSessionId":"cli-1","cliSessionProvider":"claude",
+                "interAgentCall":{"callerAgentId":"a","depth":1}}"#,
+        )
+        .unwrap();
+        let without: SessionContext = serde_json::from_str(
+            r#"{"automationId":"main","cliSessionId":"cli-1","cliSessionProvider":"claude"}"#,
+        )
+        .unwrap();
+        assert_eq!(with_removed, without);
+        let rewritten = serde_json::to_string(&with_removed).unwrap();
+        assert_eq!(
+            rewritten,
+            r#"{"automationId":"main","cliSessionId":"cli-1","cliSessionProvider":"claude"}"#
+        );
     }
 }

@@ -38,8 +38,8 @@ export interface TaskCardProps {
  *
  * A stop that is not a clean finish still earns the static attention ring.
  * `TaskList.taskActivity` can ask whether such a task was since reviewed; a
- * tool payload carries no acknowledgement fields, so here it stands as the
- * call saw it.
+ * tool payload's acknowledgement is as frozen as its status, so here it stands
+ * as the call saw it.
  */
 export const cardActivity = (status: string): AgentActivity =>
   status === 'failed' || status === 'blocked' ? 'attention' : 'none';

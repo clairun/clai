@@ -1,18 +1,20 @@
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
-use crate::assistant::repository::{
-    self, CreateMessageParams, CreateRunParams, CreateSessionParams,
-};
+use crate::assistant::repository::{self, CreateMessageParams, CreateRunParams};
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
-    AssistantMessage, ContentPart, MessageRole, ProviderConnection, RunStatus, RunTrigger,
-    SessionContext, SessionKind,
+    AssistantMessage, AssistantRun, ContentPart, MessageRole, ProviderConnection, RunStatus,
+    RunTrigger, SessionContext,
 };
-use crate::config::global_agents::{AgentSource, ResolvedAgent};
-use crate::config::{workspace_config, AgentConfig, AppConfig, WorkspaceConfig};
+use crate::assistant::workspace_agents::{
+    agent_display_names, concise_agent_description, load_workspace_agent_rows,
+    workspace_agent_display_names, WorkspaceAgentRow,
+};
+use crate::assistant::workspace_tasks_repo::{self, create_task_row, update_task_status};
+use crate::config::first_enabled_connection;
 use crate::db::DbPool;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use std::collections::HashMap;
 use tauri::{Emitter, Manager};
 
 pub const WORKSPACE_TASK_ATTENTION_EVENT_NAME: &str = "workspace://task-attention";
@@ -42,27 +44,6 @@ pub struct GetWorkspaceTaskResultParams {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkspaceTaskResponse {
-    id: String,
-    workspace_id: String,
-    created_by_workspace_agent_id: Option<String>,
-    assigned_to_workspace_agent_id: String,
-    assigned_agent_definition_id: String,
-    title: String,
-    instructions: String,
-    status: String,
-    result_summary: Option<String>,
-    result_json: Option<serde_json::Value>,
-    error: Option<String>,
-    session_id: Option<String>,
-    run_id: Option<String>,
-    created_at: i64,
-    updated_at: i64,
-    completed_at: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct WorkspaceTaskAttentionEvent {
     task_id: String,
     workspace_id: String,
@@ -71,44 +52,6 @@ struct WorkspaceTaskAttentionEvent {
     summary: Option<String>,
     error: Option<String>,
     updated_at: i64,
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceAgentRow {
-    id: String,
-    workspace_id: String,
-    agent_definition_id: String,
-    display_name: Option<String>,
-    role: String,
-    enabled: bool,
-    // Inline agent fields (Phase 1.4 — populated from workspace_agents columns;
-    // no more join with the global ClaiConfig.agents catalog).
-    name: String,
-    description: String,
-    selected_skill_ids: Vec<String>,
-    selected_mcp_server_ids: Vec<String>,
-    provider_connection_ids: Vec<String>,
-    execution: crate::config::ExecutionCapabilityConfig,
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceTaskRow {
-    id: String,
-    workspace_id: String,
-    created_by_workspace_agent_id: Option<String>,
-    assigned_to_workspace_agent_id: String,
-    assigned_agent_definition_id: String,
-    title: String,
-    instructions: String,
-    status: String,
-    result_summary: Option<String>,
-    result_json: Option<String>,
-    error: Option<String>,
-    session_id: Option<String>,
-    run_id: Option<String>,
-    created_at: i64,
-    updated_at: i64,
-    completed_at: Option<i64>,
 }
 
 pub async fn execute(
@@ -121,7 +64,7 @@ pub async fn execute(
         "workspace_listAgents" => {
             let params: ListWorkspaceAgentsParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_listAgents params: {}", e))?;
-            list_agents(deps, context, params)
+            list_agents(deps, params)
         }
         "workspace_assignTask" => {
             let params: AssignWorkspaceTaskParams = serde_json::from_value(params)
@@ -131,7 +74,7 @@ pub async fn execute(
         "workspace_getTaskResult" => {
             let params: GetWorkspaceTaskResultParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid workspace_getTaskResult params: {}", e))?;
-            get_task_result(deps, context, params).await
+            get_task_result(deps, params).await
         }
         _ => Err(format!("Unknown workspace task tool: {}", tool_name)),
     }
@@ -139,10 +82,9 @@ pub async fn execute(
 
 fn list_agents(
     deps: &AssistantDeps,
-    context: &ToolExecutionContext,
     params: ListWorkspaceAgentsParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_id = workspace_id_from_context(context)?;
+    let workspace_id = deps.workspace_id.clone();
     let app_state = deps.app.state::<AppState>();
     let rows = load_workspace_agent_rows(app_state.inner(), &workspace_id)?;
 
@@ -150,14 +92,11 @@ fn list_agents(
         .into_iter()
         .filter(|row| params.include_disabled || row.enabled)
         .map(|row| {
-            // Phase 1.4: every field below comes from the workspace_agents row
-            // itself; no join with the global ClaiConfig.agents catalog.
-            let display_name = agent_label(&row);
             serde_json::json!({
                 "id": row.id,
                 "workspaceId": row.workspace_id,
                 "agentDefinitionId": row.agent_definition_id,
-                "displayName": display_name,
+                "displayName": row.display_name(),
                 "role": row.role,
                 "enabled": row.enabled,
                 "description": concise_agent_description(Some(row.description.clone())),
@@ -182,7 +121,7 @@ async fn assign_task(
     context: &ToolExecutionContext,
     params: AssignWorkspaceTaskParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_id = workspace_id_from_context(context)?;
+    let workspace_id = deps.workspace_id.clone();
     let title = params.title.trim();
     let instructions = params.instructions.trim();
     if title.is_empty() {
@@ -207,42 +146,21 @@ async fn assign_task(
         ));
     }
 
-    // Phase 1.4: build the target AgentConfig from the workspace_agents row
-    // inline fields — no global catalog lookup.
-    let target_config = AgentConfig {
-        id: target.id.clone(),
-        workspace_id: target.workspace_id.clone(),
-        name: target.name.clone(),
-        description: target.description.clone(),
-        schedule_enabled: false,
-        schedule_kind: crate::config::workspace_config::ScheduleKind::default(),
-        enabled: target.enabled,
-        selected_mcp_server_ids: target.selected_mcp_server_ids.clone(),
-        provider_connection_ids: target.provider_connection_ids.clone(),
-        selected_skill_ids: target.selected_skill_ids.clone(),
-        execution: target.execution.clone(),
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-
-    let creator_workspace_agent_id = find_workspace_agent_for_definition(
-        app_state.inner(),
-        &workspace_id,
-        context.automation_id.as_deref(),
-    )?;
+    let creator = creator_workspace_agent_id(&rows, context.run_context.automation_id.as_deref());
 
     let task_id = uuid::Uuid::new_v4().to_string();
     create_task_row(
         &deps.pool,
         &task_id,
-        creator_workspace_agent_id.as_deref(),
-        &target,
+        creator,
+        &target.id,
+        &target.agent_definition_id,
         title,
         instructions,
     )
     .await?;
 
-    let connection = match resolve_first_connection(deps, &target_config) {
+    let connection = match resolve_first_connection(deps, &target) {
         Ok(connection) => connection,
         Err(message) => {
             update_task_status(
@@ -253,16 +171,11 @@ async fn assign_task(
                 None,
                 Some(&message),
                 None,
-                None,
                 true,
             )
             .await?;
             let _ = emit_task_attention_event(&deps.app, &deps.pool, &workspace_id, &task_id).await;
-            let task = load_task(&deps.pool, &workspace_id, &task_id).await?;
-            return Ok(serde_json::json!({
-                "ok": true,
-                "task": task_to_response(task)?,
-            }));
+            return task_result(deps, &task_id, &agent_display_names(&rows)).await;
         }
     };
 
@@ -271,11 +184,7 @@ async fn assign_task(
     // before the task row links to it (see create_session_and_link_task).
     let session = repository::create_session_and_link_task(
         &deps.pool,
-        CreateSessionParams {
-            kind: SessionKind::BackgroundJob,
-            title: Some(format!("Task: {}", title)),
-            context: task_session_context(deps, context, &workspace_id, &target_config),
-        },
+        task_session_context(&target.id),
         &task_id,
     )
     .await?;
@@ -325,7 +234,6 @@ async fn assign_task(
         Some(&run.id),
         None,
         None,
-        None,
         false,
     )
     .await?;
@@ -339,25 +247,37 @@ async fn assign_task(
         connection.id.clone(),
     );
 
-    let task = load_task(&deps.pool, &workspace_id, &task_id).await?;
-    Ok(serde_json::json!({
-        "ok": true,
-        "task": task_to_response(task)?,
-    }))
+    task_result(deps, &task_id, &agent_display_names(&rows)).await
 }
 
 async fn get_task_result(
     deps: &AssistantDeps,
-    context: &ToolExecutionContext,
     params: GetWorkspaceTaskResultParams,
 ) -> Result<serde_json::Value, String> {
-    let workspace_id = workspace_id_from_context(context)?;
-    let task = load_task(&deps.pool, &workspace_id, &params.task_id).await?;
+    let agent_names =
+        workspace_agent_display_names(deps.app.state::<AppState>().inner(), &deps.workspace_id);
+    task_result(deps, &params.task_id, &agent_names).await
+}
 
+async fn task_result(
+    deps: &AssistantDeps,
+    task_id: &str,
+    agent_names: &HashMap<String, String>,
+) -> Result<serde_json::Value, String> {
+    let task = load_task(&deps.pool, task_id).await?;
     Ok(serde_json::json!({
         "ok": true,
-        "task": task_to_response(task)?,
+        "task": task.into_response(&deps.workspace_id, agent_names),
     }))
+}
+
+async fn load_task(
+    pool: &DbPool,
+    task_id: &str,
+) -> Result<workspace_tasks_repo::WorkspaceTaskRow, String> {
+    workspace_tasks_repo::load_task(pool, task_id)
+        .await?
+        .ok_or_else(|| format!("Workspace task not found: {}", task_id))
 }
 
 fn spawn_task_run(
@@ -377,7 +297,6 @@ fn spawn_task_run(
             Some(&run_id),
             None,
             None,
-            None,
             false,
         )
         .await;
@@ -390,7 +309,6 @@ fn spawn_task_run(
             trigger: RunTrigger::WorkspaceTask,
             connection_id,
             cancel_token,
-            inter_agent_call_depth: None,
             trigger_message_id: None,
         };
 
@@ -399,24 +317,13 @@ fn spawn_task_run(
 
         match result {
             Ok(()) => {
-                let run = repository::get_run(&deps.pool, &run_id)
-                    .await
-                    .ok()
-                    .flatten();
-                let status = match run.as_ref().map(|run| &run.status) {
-                    Some(RunStatus::Completed | RunStatus::CompletedWithWarnings) => "completed",
-                    Some(RunStatus::Cancelled) => "failed",
-                    Some(RunStatus::Failed) => "failed",
-                    _ => "completed",
-                };
                 let summary = latest_assistant_text(&deps.pool, &session_id)
                     .await
                     .unwrap_or(None);
-                let status = classify_worker_status(summary.as_deref(), status);
-                let error = run.and_then(|run| run.error);
-                let result_json = summary
-                    .as_ref()
-                    .map(|summary| serde_json::json!({ "summary": summary }));
+                let (status, error) = finished_run_outcome(
+                    repository::get_run(&deps.pool, &run_id).await,
+                    summary.as_deref(),
+                );
                 let _ = update_task_status(
                     &deps.pool,
                     &task_id,
@@ -425,7 +332,6 @@ fn spawn_task_run(
                     Some(&run_id),
                     error.as_deref(),
                     summary.as_deref(),
-                    result_json.as_ref(),
                     true,
                 )
                 .await;
@@ -444,7 +350,6 @@ fn spawn_task_run(
                     Some(&run_id),
                     Some(&error.to_string()),
                     None,
-                    None,
                     true,
                 )
                 .await;
@@ -455,48 +360,47 @@ fn spawn_task_run(
     });
 }
 
-fn workspace_id_from_context(context: &ToolExecutionContext) -> Result<String, String> {
-    context
-        .workspace_id
-        .clone()
-        .or_else(|| context.agent_workspace_id.clone())
-        .ok_or_else(|| "Workspace task tools require a workspace context.".to_string())
+/// Task status and error for a worker run whose turn has returned. Nothing
+/// advances the task after this, so a run that is missing or still active
+/// fails the task instead of leaving it open; only a run that reached a
+/// terminal status can be reclassified by its `summary`.
+fn finished_run_outcome(
+    run: Result<Option<AssistantRun>, String>,
+    summary: Option<&str>,
+) -> (&'static str, Option<String>) {
+    match run {
+        Ok(Some(run)) => match run.status {
+            RunStatus::Completed | RunStatus::CompletedWithWarnings => {
+                (classify_worker_status(summary, "completed"), run.error)
+            }
+            RunStatus::Failed | RunStatus::Cancelled => {
+                (classify_worker_status(summary, "failed"), run.error)
+            }
+            status @ (RunStatus::Queued | RunStatus::Running | RunStatus::WaitingForTool) => (
+                "failed",
+                Some(format!("Worker run ended while still {status:?}")),
+            ),
+        },
+        Ok(None) => ("failed", Some("Worker run record not found".to_string())),
+        Err(error) => (
+            "failed",
+            Some(format!("Could not load worker run: {error}")),
+        ),
+    }
 }
 
-fn task_session_context(
-    _deps: &AssistantDeps,
-    context: &ToolExecutionContext,
-    workspace_id: &str,
-    target_config: &AgentConfig,
-) -> SessionContext {
-    // The worker's tools are its own. This used to prefer the caller's session
-    // MCP selection when it had one, which handed a delegated agent servers its
-    // own settings never granted — a task inherits its workspace and the
-    // instructions it was given, not the caller's capabilities.
-    let mcp_server_ids = target_config.selected_mcp_server_ids.clone();
-
+/// The worker runs with its own configuration, resolved when each run starts —
+/// never the caller's capabilities.
+pub(crate) fn task_session_context(assignee_id: &str) -> SessionContext {
     SessionContext {
-        workspace_id: Some(workspace_id.to_string()),
-        tool_scopes: target_config
-            .required_tools()
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
-        mcp_server_ids,
-        execution: target_config.execution.clone(),
-        cli_session_id: None,
-        cli_session_provider: None,
-        automation_id: Some(target_config.id.clone()),
-        agent_workspace_id: Some(workspace_id.to_string()),
-        automation_name: Some(target_config.name.clone()),
-        inter_agent_call: None,
-        workspace_agents: context.workspace_agents.clone(),
+        automation_id: Some(assignee_id.to_string()),
+        ..SessionContext::default()
     }
 }
 
 fn resolve_first_connection(
     deps: &AssistantDeps,
-    config: &AgentConfig,
+    agent: &WorkspaceAgentRow,
 ) -> Result<ProviderConnection, String> {
     let all = deps
         .app
@@ -505,54 +409,16 @@ fn resolve_first_connection(
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .get_provider_connections();
-    for id in &config.provider_connection_ids {
-        if let Some(connection) = all
-            .iter()
-            .find(|connection| &connection.id == id && connection.enabled)
-        {
-            return Ok(connection.clone());
-        }
-    }
-    Err(format!(
-        "Agent '{}' has no active provider connection.",
-        config.name
-    ))
+    assignee_connection(agent, &all)
 }
 
-fn concise_agent_description(description: Option<String>) -> Option<String> {
-    let text = description?;
-    let first_line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?
-        .to_string();
-
-    const MAX_SUMMARY_CHARS: usize = 240;
-    if first_line.chars().count() <= MAX_SUMMARY_CHARS {
-        return Some(first_line);
-    }
-
-    let mut summary: String = first_line.chars().take(MAX_SUMMARY_CHARS).collect();
-    summary.push_str("...");
-    Some(summary)
-}
-
-fn load_workspace_agent_rows(
-    state: &AppState,
-    workspace_id: &str,
-) -> Result<Vec<WorkspaceAgentRow>, String> {
-    let app_config = state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .get();
-    let (config, roster) = state.resolve_workspace_roster(workspace_id)?;
-    let mut rows: Vec<_> = roster
-        .iter()
-        .map(|resolved| workspace_agent_row_from_config(&app_config, &config, resolved))
-        .collect();
-    rows.sort_by_key(|row| (if row.role == "manager" { 0 } else { 1 }, row.id.clone()));
-    Ok(rows)
+fn assignee_connection(
+    agent: &WorkspaceAgentRow,
+    connections: &[ProviderConnection],
+) -> Result<ProviderConnection, String> {
+    first_enabled_connection(&agent.provider_connection_ids, connections)
+        .cloned()
+        .ok_or_else(|| format!("Agent '{}' has no active provider connection.", agent.name))
 }
 
 /// Message for an unknown `workspaceAgentId`.
@@ -572,9 +438,9 @@ fn unknown_workspace_agent_error(requested: &str, rows: &[WorkspaceAgentRow]) ->
         .iter()
         .map(|row| {
             if row.enabled {
-                format!("{} ({})", row.id, agent_label(row))
+                format!("{} ({})", row.id, row.display_name())
             } else {
-                format!("{} ({}, disabled)", row.id, agent_label(row))
+                format!("{} ({}, disabled)", row.id, row.display_name())
             }
         })
         .collect::<Vec<_>>()
@@ -594,7 +460,7 @@ fn disabled_workspace_agent_error(requested: &str, rows: &[WorkspaceAgentRow]) -
     let enabled = rows
         .iter()
         .filter(|row| row.enabled)
-        .map(|row| format!("{} ({})", row.id, agent_label(row)))
+        .map(|row| format!("{} ({})", row.id, row.display_name()))
         .collect::<Vec<_>>()
         .join(", ");
     if enabled.is_empty() {
@@ -608,207 +474,16 @@ fn disabled_workspace_agent_error(requested: &str, rows: &[WorkspaceAgentRow]) -
     )
 }
 
-/// The name a caller has seen for an agent: the display-name override when it
-/// is set, the agent's own name otherwise — the same fallback `list_agents`
-/// and the prompt roster use, so an error can be matched against what the
-/// caller was shown.
-fn agent_label(row: &WorkspaceAgentRow) -> String {
-    row.display_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(row.name.as_str())
-        .to_string()
-}
-
-fn find_workspace_agent_for_definition(
-    state: &AppState,
-    workspace_id: &str,
-    agent_definition_id: Option<&str>,
-) -> Result<Option<String>, String> {
-    let Some(agent_definition_id) = agent_definition_id else {
-        return Ok(None);
-    };
-
-    Ok(load_workspace_agent_rows(state, workspace_id)?
-        .into_iter()
-        .find(|row| row.id == agent_definition_id || row.agent_definition_id == agent_definition_id)
-        .map(|row| row.id))
-}
-
-fn workspace_agent_row_from_config(
-    app_config: &AppConfig,
-    workspace: &WorkspaceConfig,
-    resolved: &ResolvedAgent,
-) -> WorkspaceAgentRow {
-    let agent = &resolved.agent;
-    WorkspaceAgentRow {
-        id: agent.id.clone(),
-        workspace_id: workspace.id.clone(),
-        // The shared definition for a teammate, the local id for the Main.
-        // Callers address agents by the local id; this is provenance only.
-        agent_definition_id: resolved
-            .definition_id()
-            .unwrap_or(agent.id.as_str())
-            .to_string(),
-        display_name: None,
-        role: if matches!(resolved.source, AgentSource::Main) {
-            "manager".to_string()
-        } else {
-            "member".to_string()
-        },
-        enabled: agent.enabled,
-        name: agent.name.clone(),
-        description: agent.description.clone(),
-        selected_skill_ids: workspace_config::refs_to_skill_ids(app_config, &agent.selected_skills),
-        selected_mcp_server_ids: workspace_config::enabled_mcp_ids(&agent.selected_mcp_servers),
-        provider_connection_ids: agent.provider_connection_ids.clone(),
-        execution: agent.execution.clone(),
-    }
-}
-
-async fn create_task_row(
-    pool: &DbPool,
-    task_id: &str,
-    created_by_workspace_agent_id: Option<&str>,
-    target: &WorkspaceAgentRow,
-    title: &str,
-    instructions: &str,
-) -> Result<(), String> {
-    let now = now_ms();
-    sqlx::query(
-        r#"
-        INSERT INTO workspace_tasks (
-            id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
-            assigned_agent_definition_id, title, instructions, status, created_at, updated_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
-        "#,
-    )
-    .bind(task_id)
-    .bind(created_by_workspace_agent_id)
-    .bind(&target.id)
-    .bind(&target.agent_definition_id)
-    .bind(title)
-    .bind(instructions)
-    .bind(now)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to create workspace task: {}", e))?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn update_task_status(
-    pool: &DbPool,
-    task_id: &str,
-    status: &str,
-    session_id: Option<&str>,
-    run_id: Option<&str>,
-    error: Option<&str>,
-    result_summary: Option<&str>,
-    result_json: Option<&serde_json::Value>,
-    terminal: bool,
-) -> Result<(), String> {
-    let now = now_ms();
-    sqlx::query(
-        r#"
-        UPDATE workspace_tasks
-        SET status = ?,
-            session_id = COALESCE(?, session_id),
-            run_id = COALESCE(?, run_id),
-            error = ?,
-            result_summary = COALESCE(?, result_summary),
-            result_json = COALESCE(?, result_json),
-            updated_at = ?,
-            completed_at = COALESCE(?, completed_at)
-        WHERE id = ?
-        "#,
-    )
-    .bind(status)
-    .bind(session_id)
-    .bind(run_id)
-    .bind(error)
-    .bind(result_summary)
-    .bind(result_json.map(|value| value.to_string()))
-    .bind(now)
-    .bind(if terminal { Some(now) } else { None })
-    .bind(task_id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to update workspace task: {}", e))?;
-
-    Ok(())
-}
-
-async fn load_task(
-    pool: &DbPool,
-    workspace_id: &str,
-    task_id: &str,
-) -> Result<WorkspaceTaskRow, String> {
-    let row = sqlx::query(
-        r#"
-        SELECT id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
-               assigned_agent_definition_id, title, instructions, status, result_summary,
-               result_json, error, session_id, run_id, created_at, updated_at, completed_at
-        FROM workspace_tasks
-        WHERE id = ?
-        "#,
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load workspace task: {}", e))?
-    .ok_or_else(|| format!("Workspace task not found: {}", task_id))?;
-
-    Ok(map_task_row(&row, workspace_id))
-}
-
-fn map_task_row(row: &sqlx::sqlite::SqliteRow, workspace_id: &str) -> WorkspaceTaskRow {
-    WorkspaceTaskRow {
-        id: row.get("id"),
-        workspace_id: workspace_id.to_string(),
-        created_by_workspace_agent_id: row.get("created_by_workspace_agent_id"),
-        assigned_to_workspace_agent_id: row.get("assigned_to_workspace_agent_id"),
-        assigned_agent_definition_id: row.get("assigned_agent_definition_id"),
-        title: row.get("title"),
-        instructions: row.get("instructions"),
-        status: row.get("status"),
-        result_summary: row.get("result_summary"),
-        result_json: row.get("result_json"),
-        error: row.get("error"),
-        session_id: row.get("session_id"),
-        run_id: row.get("run_id"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-        completed_at: row.get("completed_at"),
-    }
-}
-
-fn task_to_response(task: WorkspaceTaskRow) -> Result<WorkspaceTaskResponse, String> {
-    Ok(WorkspaceTaskResponse {
-        id: task.id,
-        workspace_id: task.workspace_id,
-        created_by_workspace_agent_id: task.created_by_workspace_agent_id,
-        assigned_to_workspace_agent_id: task.assigned_to_workspace_agent_id,
-        assigned_agent_definition_id: task.assigned_agent_definition_id,
-        title: task.title,
-        instructions: task.instructions,
-        status: task.status,
-        result_summary: task.result_summary,
-        result_json: task
-            .result_json
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
-            .map_err(|e| format!("Failed to parse task result JSON: {}", e))?,
-        error: task.error,
-        session_id: task.session_id,
-        run_id: task.run_id,
-        created_at: task.created_at,
-        updated_at: task.updated_at,
-        completed_at: task.completed_at,
-    })
+/// The caller's own workspace agent id, if it is one: a run's
+/// `automation_id` is the workspace agent id of the agent running it.
+fn creator_workspace_agent_id<'rows>(
+    rows: &'rows [WorkspaceAgentRow],
+    automation_id: Option<&str>,
+) -> Option<&'rows str> {
+    let automation_id = automation_id?;
+    rows.iter()
+        .find(|row| row.id == automation_id)
+        .map(|row| row.id.as_str())
 }
 
 async fn emit_task_attention_event(
@@ -817,14 +492,14 @@ async fn emit_task_attention_event(
     workspace_id: &str,
     task_id: &str,
 ) -> Result<(), String> {
-    let task = load_task(pool, workspace_id, task_id).await?;
+    let task = load_task(pool, task_id).await?;
     if !is_attention_status(&task.status) {
         return Ok(());
     }
 
     let event = WorkspaceTaskAttentionEvent {
         task_id: task.id,
-        workspace_id: task.workspace_id,
+        workspace_id: workspace_id.to_string(),
         title: task.title,
         status: task.status,
         summary: task.result_summary,
@@ -884,13 +559,32 @@ fn final_assistant_text(messages: &[AssistantMessage]) -> Option<String> {
     None
 }
 
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn task_session_persists_only_assignee_id() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        crate::db::test_support::insert_task(&pool, "task-1", "queued", None, None).await;
+        let session = repository::create_session_and_link_task(
+            &pool,
+            task_session_context("assignee"),
+            "task-1",
+        )
+        .await
+        .expect("session");
+        let stored: String =
+            sqlx::query_scalar("SELECT context_json FROM assistant_sessions WHERE id = ?")
+                .bind(&session.id)
+                .fetch_one(&pool)
+                .await
+                .expect("context_json");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&stored).expect("json"),
+            serde_json::json!({ "automationId": "assignee" })
+        );
+    }
 
     // -----------------------------------------------------------------
     // unknown_workspace_agent_error
@@ -900,17 +594,21 @@ mod tests {
         WorkspaceAgentRow {
             id: id.to_string(),
             workspace_id: "workspace-1".to_string(),
-            agent_definition_id: id.to_string(),
-            display_name: None,
+            agent_definition_id: format!("def-{id}"),
             role: "member".to_string(),
             enabled: true,
             name: name.to_string(),
-            description: String::new(),
-            selected_skill_ids: Vec::new(),
-            selected_mcp_server_ids: Vec::new(),
-            provider_connection_ids: Vec::new(),
-            execution: Default::default(),
+            ..WorkspaceAgentRow::default()
         }
+    }
+
+    #[test]
+    fn assignee_without_enabled_connection_names_agent_in_error() {
+        let error = assignee_connection(&agent_row("agent-2", "Code Reviewer"), &[]).unwrap_err();
+        assert_eq!(
+            error,
+            "Agent 'Code Reviewer' has no active provider connection."
+        );
     }
 
     #[test]
@@ -954,15 +652,26 @@ mod tests {
 
     #[test]
     fn unknown_workspace_agent_error_uses_the_name_the_caller_was_shown() {
-        let mut renamed = agent_row("agent-2", "Code Reviewer");
-        renamed.display_name = Some("Reviewer #2".to_string());
+        let message = unknown_workspace_agent_error("x", &[agent_row("agent-2", " ")]);
 
-        let message = unknown_workspace_agent_error("Reviewer #2", &[renamed]);
+        // A blank name shows as the definition id in the roster and in
+        // `workspace_listAgents`, so the hint has to use it too — naming the
+        // agent something the caller has never seen breaks the mapping.
+        assert!(message.contains("agent-2 (def-agent-2)"));
+    }
 
-        // The roster and `workspace_listAgents` both prefer the display-name
-        // override, so the hint has to use it too — naming the agent something
-        // the caller has never seen breaks the mapping the hint exists for.
-        assert!(message.contains("agent-2 (Reviewer #2)"));
+    #[test]
+    fn creator_is_the_calling_workspace_agent_when_it_is_on_the_roster() {
+        let rows = vec![agent_row("agent-1", "Manager")];
+
+        assert_eq!(
+            creator_workspace_agent_id(&rows, Some("agent-1")),
+            Some("agent-1")
+        );
+        // A definition id is never a run's automation id, so it does not match.
+        assert_eq!(creator_workspace_agent_id(&rows, Some("def-agent-1")), None);
+        assert_eq!(creator_workspace_agent_id(&rows, Some("gone")), None);
+        assert_eq!(creator_workspace_agent_id(&rows, None), None);
     }
 
     #[test]
@@ -987,69 +696,6 @@ mod tests {
 
         assert!(message.contains("No other workspace agent is enabled"));
         assert!(!message.contains("assign to one of"));
-    }
-
-    // -----------------------------------------------------------------
-    // concise_agent_description
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn concise_agent_description_none_returns_none() {
-        assert_eq!(concise_agent_description(None), None);
-    }
-
-    #[test]
-    fn concise_agent_description_empty_returns_none() {
-        assert_eq!(concise_agent_description(Some("".to_string())), None);
-    }
-
-    #[test]
-    fn concise_agent_description_whitespace_only_returns_none() {
-        assert_eq!(
-            concise_agent_description(Some("   \n\t  ".to_string())),
-            None
-        );
-    }
-
-    #[test]
-    fn concise_agent_description_short_single_line() {
-        let input = Some("A short description.".to_string());
-        assert_eq!(
-            concise_agent_description(input),
-            Some("A short description.".to_string())
-        );
-    }
-
-    #[test]
-    fn concise_agent_description_takes_first_non_empty_line() {
-        let input = Some("\n\nSecond line is first non-empty.\nThird line.".to_string());
-        assert_eq!(
-            concise_agent_description(input),
-            Some("Second line is first non-empty.".to_string())
-        );
-    }
-
-    #[test]
-    fn concise_agent_description_trims_leading_whitespace() {
-        let input = Some("   \t  Trimmed description.".to_string());
-        assert_eq!(
-            concise_agent_description(input),
-            Some("Trimmed description.".to_string())
-        );
-    }
-
-    #[test]
-    fn concise_agent_description_truncates_long_line() {
-        let long = "x".repeat(300);
-        let result = concise_agent_description(Some(long));
-        let expected = "x".repeat(240) + "...";
-        assert_eq!(result, Some(expected));
-    }
-
-    #[test]
-    fn concise_agent_description_exactly_max_length_passes_through() {
-        let exact = "x".repeat(240);
-        assert_eq!(concise_agent_description(Some(exact.clone())), Some(exact));
     }
 
     // -----------------------------------------------------------------
@@ -1249,5 +895,68 @@ mod tests {
             classify_worker_status(Some("   \n  "), "completed"),
             "completed"
         );
+    }
+
+    fn run_with(status: RunStatus, error: Option<&str>) -> AssistantRun {
+        AssistantRun {
+            id: "run".to_string(),
+            session_id: "session".to_string(),
+            status,
+            trigger: RunTrigger::WorkspaceTask,
+            connection_id: "c".to_string(),
+            protocol_id: "p".to_string(),
+            model_id: "m".to_string(),
+            started_at: 1,
+            completed_at: None,
+            error: error.map(str::to_string),
+        }
+    }
+
+    const BLOCKED: Option<&str> = Some("BLOCKED: need a key");
+
+    #[test]
+    fn finished_run_outcome_maps_terminal_statuses() {
+        for status in [RunStatus::Completed, RunStatus::CompletedWithWarnings] {
+            assert_eq!(
+                finished_run_outcome(Ok(Some(run_with(status, None))), None),
+                ("completed", None)
+            );
+        }
+        for status in [RunStatus::Failed, RunStatus::Cancelled] {
+            assert_eq!(
+                finished_run_outcome(Ok(Some(run_with(status, Some("boom")))), None),
+                ("failed", Some("boom".to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn finished_run_outcome_fails_a_run_that_is_still_active_or_missing() {
+        for status in [
+            RunStatus::Queued,
+            RunStatus::Running,
+            RunStatus::WaitingForTool,
+        ] {
+            let (task_status, error) =
+                finished_run_outcome(Ok(Some(run_with(status, None))), BLOCKED);
+            assert_eq!(task_status, "failed");
+            assert!(error.unwrap().contains("still"));
+        }
+        let (task_status, error) = finished_run_outcome(Ok(None), BLOCKED);
+        assert_eq!(task_status, "failed");
+        assert!(error.unwrap().contains("not found"));
+        let (task_status, error) = finished_run_outcome(Err("db gone".to_string()), BLOCKED);
+        assert_eq!(task_status, "failed");
+        assert!(error.unwrap().contains("db gone"));
+    }
+
+    #[test]
+    fn finished_run_outcome_blocks_a_terminal_run_that_reports_blocked() {
+        for status in [RunStatus::Completed, RunStatus::Failed] {
+            assert_eq!(
+                finished_run_outcome(Ok(Some(run_with(status, None))), BLOCKED).0,
+                "blocked"
+            );
+        }
     }
 }

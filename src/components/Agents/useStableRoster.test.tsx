@@ -9,7 +9,6 @@ const agent = (over: Partial<WorkspaceAgentResponse> = {}): WorkspaceAgentRespon
   workspaceId: 'ws-1',
   agentDefinitionId: 'def-review',
   displayName: 'Rust Reviewer',
-  role: 'member',
   enabled: true,
   isDefault: false,
   agentName: null,

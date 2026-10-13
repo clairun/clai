@@ -146,43 +146,6 @@ impl AiProvider {
             AiProvider::Custom { command, .. } => command,
         }
     }
-
-    /// Returns the selected model (if any).
-    pub fn model(&self) -> Option<&str> {
-        match self {
-            AiProvider::OpenCode { model } => model.as_deref(),
-            AiProvider::Claude { model } => model.as_deref(),
-            AiProvider::Gemini { model } => model.as_deref(),
-            AiProvider::Codex { model } => model.as_deref(),
-            AiProvider::Custom { model, .. } => model.as_deref(),
-        }
-    }
-
-    /// Returns a new provider with the specified model.
-    pub fn with_model(self, model: Option<String>) -> Self {
-        match self {
-            AiProvider::OpenCode { .. } => AiProvider::OpenCode { model },
-            AiProvider::Claude { .. } => AiProvider::Claude { model },
-            AiProvider::Gemini { .. } => AiProvider::Gemini { model },
-            AiProvider::Codex { .. } => AiProvider::Codex { model },
-            AiProvider::Custom { command, args, .. } => AiProvider::Custom {
-                command,
-                args,
-                model,
-            },
-        }
-    }
-
-    /// Returns the provider type as a string.
-    pub fn provider_type(&self) -> &str {
-        match self {
-            AiProvider::OpenCode { .. } => "opencode",
-            AiProvider::Claude { .. } => "claude",
-            AiProvider::Gemini { .. } => "gemini",
-            AiProvider::Codex { .. } => "codex",
-            AiProvider::Custom { .. } => "custom",
-        }
-    }
 }
 
 // =============================================================================
@@ -286,8 +249,9 @@ pub enum FilesystemPathAccess {
 /// the user *why* a path is in the grant list: was it added by hand, derived
 /// from the credentials preset, or accepted via an in-run approval modal?
 /// `None` (the historical shape) is treated as `Manual` by the UI.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum GrantOrigin {
     /// Added by the user via the agent settings form.
     Manual,
@@ -302,8 +266,9 @@ pub enum GrantOrigin {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct FilesystemPathGrant {
     pub path: String,
     pub access: FilesystemPathAccess,
@@ -314,8 +279,9 @@ pub struct FilesystemPathGrant {
     pub origin: Option<GrantOrigin>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum ShellAccessMode {
     #[default]
     Off,
@@ -323,8 +289,9 @@ pub enum ShellAccessMode {
     Full,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct FilesystemCapabilityConfig {
     /// Additional path grants. Used for two things now that the sandbox
     /// auto-binds the user's `$HOME` read-only:
@@ -340,8 +307,9 @@ pub struct FilesystemCapabilityConfig {
     pub extra_paths: Vec<FilesystemPathGrant>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ShellCapabilityConfig {
     #[serde(default)]
     pub mode: ShellAccessMode,
@@ -408,15 +376,17 @@ fn push_unique_prefix(prefixes: &mut Vec<String>, prefix: String) {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct WebCapabilityConfig {
     #[serde(default)]
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum SandboxNetworkConfig {
     #[default]
     Enabled,
@@ -438,16 +408,18 @@ pub enum SandboxNetworkConfig {
 /// Use for high-isolation agents — running untrusted code, agents that
 /// don't need any host integration, or workspaces where you specifically
 /// want keyring contents kept out of reach.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
 pub enum SandboxSessionBusConfig {
     Deny,
     #[default]
     Allow,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ExecutionSandboxConfig {
     #[serde(default)]
     pub network: SandboxNetworkConfig,
@@ -455,8 +427,9 @@ pub struct ExecutionSandboxConfig {
     pub session_bus: SandboxSessionBusConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct ExecutionCapabilityConfig {
     #[serde(default)]
     pub sandbox: ExecutionSandboxConfig,
@@ -594,10 +567,6 @@ pub struct AgentConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// User-selected MCP servers available to this automation.
-    #[serde(default)]
-    pub selected_mcp_server_ids: Vec<String>,
-
     /// Ordered provider connections for this automation.
     #[serde(default)]
     pub provider_connection_ids: Vec<String>,
@@ -606,10 +575,6 @@ pub struct AgentConfig {
     #[serde(default)]
     pub selected_skill_ids: Vec<String>,
 
-    /// Local execution capability policy for this automation.
-    #[serde(default)]
-    pub execution: ExecutionCapabilityConfig,
-
     /// When the automation was created (ISO 8601).
     pub created_at: String,
 
@@ -617,11 +582,21 @@ pub struct AgentConfig {
     pub updated_at: String,
 }
 
-// AgentConfig is the in-memory row shape for `workspace_agents`. The helpers
-// below are used by tests and by commands::workspace_agents validation logic
-// (via separate copies); marked `allow(dead_code)` because rustc can't see
-// across that boundary.
-#[allow(dead_code)]
+/// First entry of `provider_connection_ids` that resolves to an enabled
+/// connection. Scheduled and task runs use exactly this one; there is no
+/// fallback to the rest of the list.
+pub fn first_enabled_connection<'c>(
+    provider_connection_ids: &[String],
+    connections: &'c [ProviderConnection],
+) -> Option<&'c ProviderConnection> {
+    provider_connection_ids.iter().find_map(|id| {
+        connections
+            .iter()
+            .find(|connection| &connection.id == id && connection.enabled)
+    })
+}
+
+#[cfg(test)]
 impl AgentConfig {
     /// Creates a new workspace-local agent with a generated UUID.
     pub fn new(
@@ -638,25 +613,11 @@ impl AgentConfig {
             schedule_enabled: true,
             schedule_kind,
             enabled: false,
-            selected_mcp_server_ids: vec![],
             provider_connection_ids: vec![],
             selected_skill_ids: vec![],
-            execution: ExecutionCapabilityConfig::default(),
             created_at: now.clone(),
             updated_at: now,
         }
-    }
-
-    /// Returns the static list of required built-in tool namespaces.
-    pub fn required_tools(&self) -> Vec<&'static str> {
-        let mut tools = vec!["dashboard", "tabs"];
-        if !matches!(self.execution.shell.mode, ShellAccessMode::Off) {
-            tools.push("bash");
-        }
-        if self.execution.web.enabled {
-            tools.push("web");
-        }
-        tools
     }
 
     /// Updates the global enabled state.
@@ -717,10 +678,6 @@ pub struct AppConfig {
     #[serde(default = "default_workspace_dirs")]
     pub workspace_dirs: Vec<PathBuf>,
 
-    /// Global AI provider for all automations.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ai_provider: Option<AiProvider>,
-
     /// User-configured MCP servers.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -753,7 +710,6 @@ impl Default for AppConfig {
             agent_definitions: Vec::new(),
             version: default_app_config_version(),
             workspace_dirs: default_workspace_dirs(),
-            ai_provider: None,
             mcp_servers: Vec::new(),
             skill_sources: Vec::new(),
             provider_connections: Vec::new(),
@@ -781,6 +737,53 @@ pub type ClaiConfig = AppConfig;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::AuthMode;
+
+    fn connection(id: &str, enabled: bool) -> ProviderConnection {
+        ProviderConnection {
+            id: id.to_string(),
+            name: format!("conn-{id}"),
+            protocol_id: "claude-code".to_string(),
+            provider_id: "claude-code".to_string(),
+            auth_mode: AuthMode::SubscriptionLogin,
+            base_url: None,
+            secret_ref: format!("provider-connection::{id}"),
+            model_id: String::new(),
+            account_label: None,
+            enabled,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn first_of<'c>(ids: &[&str], all: &'c [ProviderConnection]) -> Option<&'c ProviderConnection> {
+        let ids: Vec<String> = ids.iter().map(|id| (*id).to_string()).collect();
+        first_enabled_connection(&ids, all)
+    }
+
+    #[test]
+    fn scheduled_run_uses_first_enabled_connection_only() {
+        let all = vec![connection("a", true), connection("b", true)];
+        let chosen = first_of(&["a", "b"], &all);
+        assert_eq!(chosen.map(|c| c.id.as_str()), Some("a"));
+
+        let all = vec![connection("a", false), connection("b", true)];
+        let chosen = first_of(&["a", "b"], &all);
+        assert_eq!(chosen.map(|c| c.id.as_str()), Some("b"));
+
+        let all = vec![connection("b", true), connection("c", true)];
+        let chosen = first_of(&["dangling", "c", "b"], &all);
+        assert_eq!(chosen.map(|c| c.id.as_str()), Some("c"));
+    }
+
+    #[test]
+    fn scheduled_run_with_no_enabled_connection_fails_instance() {
+        let all = vec![connection("a", false), connection("b", false)];
+        assert!(first_of(&["a", "b"], &all).is_none());
+        assert!(first_of(&[], &all).is_none());
+        assert!(first_of(&["unknown"], &all).is_none());
+        assert!(first_of(&["a"], &[]).is_none());
+    }
 
     fn restricted_with(prefixes: &[&str]) -> ShellCapabilityConfig {
         ShellCapabilityConfig {
@@ -829,18 +832,26 @@ mod tests {
     #[test]
     fn test_clai_config_serialization() {
         let config = ClaiConfig {
-            ai_provider: Some(AiProvider::Claude { model: None }),
+            scheduler_paused: true,
             ..ClaiConfig::default()
         };
 
         let json = serde_json::to_string_pretty(&config).unwrap();
-        assert!(json.contains("claude"));
-
         let parsed: ClaiConfig = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            parsed.ai_provider,
-            Some(AiProvider::Claude { .. })
-        ));
+        assert!(parsed.scheduler_paused);
+    }
+
+    #[test]
+    fn config_with_the_removed_ai_provider_key_still_loads() {
+        let legacy = r#"{
+            "aiProvider": {"type": "claude"},
+            "schedulerPaused": true
+        }"#;
+        let parsed: ClaiConfig = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.scheduler_paused);
+        assert!(!serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("aiProvider"));
     }
 
     #[test]
@@ -916,39 +927,6 @@ mod tests {
                 interval_minutes: 15
             }
         ));
-    }
-
-    #[test]
-    fn test_agent_required_tools() {
-        let agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
-        let tools = agent.required_tools();
-
-        assert!(tools.contains(&"dashboard"));
-        assert!(tools.contains(&"tabs"));
-        assert_eq!(tools, vec!["dashboard", "tabs"]);
-    }
-
-    #[test]
-    fn test_agent_required_tools_include_local_execution_when_enabled() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
-        agent.execution.shell.mode = ShellAccessMode::Restricted;
-
-        let tools = agent.required_tools();
-
-        assert!(tools.contains(&"bash"));
-    }
-
-    #[test]
-    fn test_agent_required_tools_include_web_when_enabled() {
-        let mut agent = AgentConfig::new("Agent".to_string(), "Desc".to_string(), interval_kind(5));
-        agent.execution.web.enabled = true;
-
-        let tools = agent.required_tools();
-        assert!(tools.contains(&"web"));
-
-        agent.execution.web.enabled = false;
-        let tools = agent.required_tools();
-        assert!(!tools.contains(&"web"));
     }
 
     #[test]

@@ -119,14 +119,14 @@ pub struct AssistantEventEnvelope {
     /// The workspace this session belongs to. Lets the frontend map
     /// run-lifecycle events (RunStarted/RunCompleted) back to a
     /// workspace card without having to track session→workspace itself.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
+    pub workspace_id: String,
     pub timestamp: i64,
     pub event: AssistantUiEvent,
 }
 
 pub fn emit_event(
     app: &AppHandle,
+    workspace_id: &str,
     session: &AssistantSession,
     run_id: Option<&str>,
     event: AssistantUiEvent,
@@ -134,7 +134,7 @@ pub fn emit_event(
     let envelope = AssistantEventEnvelope {
         session_id: session.id.clone(),
         run_id: run_id.map(str::to_string),
-        workspace_id: session.context.workspace_id.clone(),
+        workspace_id: workspace_id.to_string(),
         timestamp: Utc::now().timestamp_millis(),
         event: display::event(event),
     };

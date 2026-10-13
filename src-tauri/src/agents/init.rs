@@ -5,17 +5,8 @@
 //! which runs after the DB pool is ready.
 
 use crate::agents::{AgentDefinition, SharedScheduler};
-use crate::config::{
-    workspace_config, AgentConfig, ConfigManager, ExecutionCapabilityConfig, ShellAccessMode,
-};
+use crate::config::{workspace_config, ConfigManager, ExecutionCapabilityConfig, ShellAccessMode};
 use crate::AppState;
-
-#[allow(dead_code)]
-fn agent_config_to_definition(config: &AgentConfig) -> AgentDefinition {
-    AgentDefinition::new(&config.id, &config.name)
-        .with_description(&config.description)
-        .with_tools(config.required_tools())
-}
 
 /// No-op kept so the synchronous lib.rs setup path stays untouched. The real
 /// scheduler population now happens in `populate_scheduler_from_workspace_agents`
@@ -99,7 +90,9 @@ pub fn apply_workspace_schedule(
     if execution.web.enabled {
         tools.push("web");
     }
-    let definition = AgentDefinition::new(&agent.id, &agent.name).with_tools(tools);
+    let definition = AgentDefinition::new(&agent.id, &agent.name)
+        .with_workspace_id(&config.id)
+        .with_tools(tools);
     sched.register_definition(definition);
 
     if agent.enabled {
@@ -149,24 +142,14 @@ mod tests {
     use crate::agents::create_shared_scheduler;
     use crate::agents::types::AgentInstance;
 
-    fn create_test_agent_config() -> AgentConfig {
-        AgentConfig::new(
+    fn create_test_agent_config() -> crate::config::AgentConfig {
+        crate::config::AgentConfig::new(
             "Test Agent".to_string(),
             "Test description".to_string(),
             crate::config::workspace_config::ScheduleKind::Interval {
                 interval_minutes: 5,
             },
         )
-    }
-
-    #[test]
-    fn test_agent_config_to_definition() {
-        let agent = create_test_agent_config();
-        let definition = agent_config_to_definition(&agent);
-
-        assert_eq!(definition.id, agent.id);
-        assert_eq!(definition.name, "Test Agent");
-        assert_eq!(definition.required_tools, vec!["dashboard", "tabs"]);
     }
 
     #[tokio::test]
@@ -176,7 +159,7 @@ mod tests {
         let agent = create_test_agent_config();
         {
             let mut s = scheduler.lock().await;
-            s.register_definition(agent_config_to_definition(&agent));
+            s.register_definition(AgentDefinition::new(&agent.id, &agent.name));
         }
 
         create_instance_for_agent(&scheduler, &agent.id).await;
@@ -206,7 +189,7 @@ mod tests {
         let agent = create_test_agent_config();
         {
             let mut s = scheduler.lock().await;
-            s.register_definition(agent_config_to_definition(&agent));
+            s.register_definition(AgentDefinition::new(&agent.id, &agent.name));
         }
 
         create_instance_for_agent(&scheduler, &agent.id).await;

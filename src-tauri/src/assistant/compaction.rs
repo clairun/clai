@@ -1420,8 +1420,7 @@ mod tests {
             list_pending_queued_messages, mark_queued_messages_delivered,
             update_pending_queued_message,
         };
-        use crate::assistant::types::{SessionContext, SessionKind};
-        use crate::config::ExecutionCapabilityConfig;
+        use crate::assistant::types::SessionContext;
         use crate::db::test_support::workspace_pool;
         use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::{Arc, Mutex};
@@ -1445,33 +1444,12 @@ mod tests {
         }
 
         fn sample_context() -> SessionContext {
-            SessionContext {
-                workspace_id: Some("ws-1".to_string()),
-                tool_scopes: vec![],
-                mcp_server_ids: vec![],
-                execution: ExecutionCapabilityConfig::default(),
-                cli_session_id: None,
-                cli_session_provider: None,
-                automation_id: None,
-                agent_workspace_id: None,
-                automation_name: None,
-                inter_agent_call: None,
-                workspace_agents: vec![],
-            }
+            SessionContext::default()
         }
 
         async fn db_session() -> (tempfile::TempDir, crate::db::DbPool, AssistantSession) {
             let (tmp, pool) = workspace_pool().await;
-            let session = create_session(
-                &pool,
-                crate::assistant::repository::CreateSessionParams {
-                    kind: SessionKind::Interactive,
-                    title: None,
-                    context: sample_context(),
-                },
-            )
-            .await
-            .unwrap();
+            let session = create_session(&pool, sample_context()).await.unwrap();
             (tmp, pool, session)
         }
 
@@ -2243,16 +2221,7 @@ mod tests {
         async fn load_falls_back_to_raw_history_for_a_degenerate_compaction_row() {
             let (_tmp, pool, session) = db_session().await;
             let m1 = add_text(&pool, &session.id, "one").await;
-            let other = create_session(
-                &pool,
-                crate::assistant::repository::CreateSessionParams {
-                    kind: SessionKind::Interactive,
-                    title: None,
-                    context: sample_context(),
-                },
-            )
-            .await
-            .unwrap();
+            let other = create_session(&pool, sample_context()).await.unwrap();
             let foreign = add_text(&pool, &other.id, "elsewhere").await;
             let compaction = create_compaction(
                 &pool,

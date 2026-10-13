@@ -140,6 +140,7 @@ const TerminalEmulatorWrapper = () => {
         store.setActiveSessionForTab(workspaceTabKey, binding.session.id);
 
         const result = await assistantClient.sendMessage(
+          currentWorkspaceId,
           binding.session.id,
           query,
           connectionId,
@@ -254,7 +255,7 @@ const TerminalEmulatorWrapper = () => {
         try {
           const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
           const store = useAssistantStore.getState();
-          await assistantClient.deleteSession(binding.session.id);
+          await assistantClient.deleteSession(currentWorkspaceId, binding.session.id);
           store.removeSession(binding.session.id);
           const fresh = await getOrCreateWorkspaceSession(currentWorkspaceId);
           store.initSession(fresh.session);
@@ -281,7 +282,7 @@ const TerminalEmulatorWrapper = () => {
         const store = useAssistantStore.getState();
         store.initSession(binding.session);
         store.setActiveSessionForTab(`workspace:${currentWorkspaceId}`, binding.session.id);
-        const result = await assistantClient.compactSession(binding.session.id, connectionId);
+        const result = await assistantClient.compactSession(currentWorkspaceId, binding.session.id, connectionId);
         if (result.summaryMessage) {
           store.addMessage(binding.session.id, result.summaryMessage);
         }

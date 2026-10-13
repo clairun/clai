@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use ts_rs::TS;
 
 use crate::config::{
     workspace_config, AppConfig, ExecutionCapabilityConfig, WorkspaceAgent, WorkspaceConfig,
@@ -19,8 +20,9 @@ fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct WorkspaceAgentCreateRequest {
     pub workspace_id: String,
     pub name: String,
@@ -38,11 +40,13 @@ pub struct WorkspaceAgentCreateRequest {
     pub enabled: bool,
     /// Optional explicit id; if absent, a fresh UUID is generated.
     #[serde(default)]
+    #[ts(optional)]
     pub id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct WorkspaceAgentUpdateRequest {
     pub workspace_id: String,
     pub agent_id: String,
@@ -63,8 +67,9 @@ pub struct WorkspaceAgentEnabledRequest {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct WorkspaceAgentDetail {
     pub id: String,
     pub workspace_id: String,

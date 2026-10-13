@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use clai_lib::{
-    workspace_agent_runtime_description, workspace_config, AppConfig, AppState, ConfigManager,
-    SkillSourceConfig, WorkspaceConfig, WorkspaceIndex,
+    resolve_run_context, workspace_config, AppConfig, AppState, ConfigManager, SkillSourceConfig,
+    WorkspaceConfig, WorkspaceIndex,
 };
 use tempfile::TempDir;
 
@@ -110,7 +110,7 @@ impl PromptBuildFixture {
 }
 
 #[test]
-fn workspace_agent_runtime_description_includes_selected_skill_content() {
+fn run_context_description_includes_selected_skill_content() {
     let fixture = PromptBuildFixture::new(
         "Base manager instructions.",
         vec![workspace_config::SkillRef::Bundled {
@@ -118,12 +118,14 @@ fn workspace_agent_runtime_description_includes_selected_skill_content() {
         }],
     );
 
-    let prompt = workspace_agent_runtime_description(
+    let prompt = resolve_run_context(
         &fixture.state,
         &fixture.workspace_id,
-        &fixture.agent_id,
+        Some(&fixture.agent_id),
     )
-    .expect("runtime description");
+    .expect("run context")
+    .agent_description
+    .expect("agent description");
 
     assert!(prompt.contains("Base manager instructions."));
     assert!(prompt.contains("## Selected Skills"));
@@ -132,15 +134,17 @@ fn workspace_agent_runtime_description_includes_selected_skill_content() {
 }
 
 #[test]
-fn workspace_agent_runtime_description_without_skills_is_raw_description() {
+fn run_context_description_without_skills_is_raw_description() {
     let fixture = PromptBuildFixture::new("Raw manager instructions.", Vec::new());
 
-    let prompt = workspace_agent_runtime_description(
+    let prompt = resolve_run_context(
         &fixture.state,
         &fixture.workspace_id,
-        &fixture.agent_id,
+        Some(&fixture.agent_id),
     )
-    .expect("runtime description");
+    .expect("run context")
+    .agent_description
+    .expect("agent description");
 
     assert_eq!(prompt, "Raw manager instructions.");
 }
