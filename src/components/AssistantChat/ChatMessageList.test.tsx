@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 // VirtualizedList windows its children by scroll geometry, which jsdom
 // doesn't have (zero heights). Replace it with a plain list that renders
@@ -91,7 +91,12 @@ vi.mock('../../assistant/client', () => ({ getToolCallResult, getToolCallInput }
 import ChatMessageList from './ChatMessageList';
 import { clearToolCallResultCache } from '../../assistant/toolCallResult';
 import { mainIdentity } from '../Agents/agentIdentity';
-import type { AssistantMessage, ToolInvocation } from '../../generated/bindings';
+import type {
+  AgentRefSnapshot,
+  AssistantMessage,
+  ToolInvocation,
+  WorkspaceAgentResponse,
+} from '../../generated/bindings';
 
 // Whose face the in-flight footer wears. A module constant, the way call
 // sites are required to pass it (the footer memoizes on the reference).
@@ -918,5 +923,92 @@ describe('ChatMessageList', () => {
     expect(screen.queryByRole('img', { name: 'Working' })).toBeNull();
     expect(screen.queryByText(/^0:0\d$/)).toBeNull();
     expect(screen.getByTestId('virtual-list').children).toHaveLength(1);
+  });
+
+  describe('session owner', () => {
+    const roster = (over: Partial<WorkspaceAgentResponse> = {}): WorkspaceAgentResponse[] => [
+      {
+        id: 'wa-main',
+        workspaceId: 'ws-1',
+        agentDefinitionId: 'def-main',
+        displayName: 'Manager',
+        enabled: true,
+        isDefault: true,
+        agentName: null,
+        agentDescription: null,
+        providerConnectionIds: [],
+        skillIds: [],
+        selectedMcpServerIds: [],
+        execution: {},
+        avatar: null,
+        createdAt: 1n,
+        updatedAt: 1n,
+        ...over,
+      },
+    ];
+    const owner: AgentRefSnapshot = {
+      workspaceAgentId: 'wa-main',
+      agentDefinitionId: 'def-main',
+      displayName: 'Manager',
+      isDefault: true,
+    };
+    const reply = [
+      msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'on it' }] }),
+    ];
+
+    it('assistant header shows owner avatar and name instead of Clai', () => {
+      const { container } = render(
+        <ChatMessageList workspaceId="ws-1" messages={reply} taskRoster={roster()} owner={owner} />
+      );
+      expect(screen.getByText('Main')).toBeInTheDocument();
+      expect(screen.queryByText('Clai')).toBeNull();
+      const face = container.querySelector('[data-activity]') as HTMLElement;
+      // Decorative: the name is printed right next to it.
+      expect(face.getAttribute('aria-hidden')).toBe('true');
+      expect(face.dataset.activity).toBe('none');
+    });
+
+    it('disabled owner renders dimmed face and suffix', () => {
+      const { container } = render(
+        <ChatMessageList
+          workspaceId="ws-1"
+          messages={reply}
+          taskRoster={roster({ isDefault: false, displayName: 'Reviewer', enabled: false })}
+          owner={{ ...owner, isDefault: false, displayName: 'Reviewer' }}
+        />
+      );
+      expect(screen.getByText('Reviewer')).toBeInTheDocument();
+      expect(screen.getByText('(disabled)')).toBeInTheDocument();
+      const face = container.querySelector('[data-activity]') as HTMLElement;
+      expect(face.dataset.activity).toBe('disabled');
+    });
+
+    it('MessageBlock split keeps queued chip edit/delete for user messages', async () => {
+      const onDelete = vi.fn();
+      const onEdit = vi.fn();
+      render(
+        <ChatMessageList
+          workspaceId="ws-1"
+          messages={[
+            msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'also the changelog' }] }),
+            ...reply,
+          ]}
+          taskRoster={roster()}
+          owner={owner}
+          queuedMessageIds={['u1', 'm1']}
+          onDeleteQueuedMessage={onDelete}
+          onEditQueuedMessage={onEdit}
+        />
+      );
+      // Only the user's message carries the chip and its controls.
+      expect(screen.getAllByText('Queued')).toHaveLength(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Remove queued message' }));
+      expect(onDelete).toHaveBeenCalledWith('u1');
+      fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+      const editor = screen.getByRole('textbox');
+      fireEvent.change(editor, { target: { value: 'and the README' } });
+      fireEvent.click(within(editor.parentElement as HTMLElement).getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(onEdit).toHaveBeenCalledWith('u1', 'and the README'));
+    });
   });
 });

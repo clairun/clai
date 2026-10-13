@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../assistant';
 import type {
   AssistantMessage,
@@ -8,6 +8,7 @@ import type {
 } from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
 import AskUserPanel from './AskUserPanel/AskUserPanel';
+import { resolveSessionOwner } from './AssistantChat/messageSender';
 import AgentAvatar from './Agents/AgentAvatar';
 import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
 import { isTaskActive, isTaskAttention, taskStatusLabel } from '../utils/taskDisplay';
@@ -40,6 +41,20 @@ export default function WorkspaceTaskTranscriptPanel({
   );
   const streamingText = useAssistantStore(
     (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
+  );
+  // Keyed on the assignee, not the task: the poll hands a new task object
+  // every 5s, and a new owner would repaint the whole transcript.
+  const assignedToWorkspaceAgentId = task?.assignedToWorkspaceAgentId ?? '';
+  const assignedAgentDefinitionId = task?.assignedAgentDefinitionId ?? '';
+  const assignedAgentDisplayName = task?.assignedAgentDisplayName ?? '';
+  const owner = useMemo(
+    () =>
+      resolveSessionOwner(roster, {
+        assignedToWorkspaceAgentId,
+        assignedAgentDefinitionId,
+        assignedAgentDisplayName,
+      }),
+    [roster, assignedToWorkspaceAgentId, assignedAgentDefinitionId, assignedAgentDisplayName]
   );
   const [bootstrapError, setBootstrapError] = useState('');
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -243,6 +258,7 @@ export default function WorkspaceTaskTranscriptPanel({
               // task's log, and swapping the task under the reader would lose
               // their place.
               taskRoster={roster}
+              owner={owner}
             />
           </div>
         )}

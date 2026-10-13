@@ -1156,3 +1156,8 @@
 .imageLightboxClose:hover {
   background: rgba(255, 255, 255, 0.24);
 }
+
+.senderSuffix {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}

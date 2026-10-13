@@ -45,8 +45,20 @@ describe('useStableRoster', () => {
       { initialProps: { agents: [agent()] } }
     );
     const first = result.current;
-    rerender({ agents: [agent({ updatedAt: 99n, enabled: false })] });
+    rerender({ agents: [agent({ updatedAt: 99n })] });
     expect(result.current).toBe(first);
+  });
+
+  it('roster key changes when agent enabled flips', () => {
+    // A disabled agent's face is dimmed, so the flip must reach the chat.
+    const { result, rerender } = renderHook(
+      ({ agents }: { agents: WorkspaceAgentResponse[] }) => useStableRoster(agents),
+      { initialProps: { agents: [agent()] } }
+    );
+    const first = result.current;
+    rerender({ agents: [agent({ enabled: false })] });
+    expect(result.current).not.toBe(first);
+    expect(result.current[0]?.enabled).toBe(false);
   });
 
   it('hands over a new crew when a face changes', () => {

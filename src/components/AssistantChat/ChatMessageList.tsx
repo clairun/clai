@@ -31,6 +31,7 @@ import {
 import TaskCard from '../Agents/TaskCard';
 import AgentAvatar from '../Agents/AgentAvatar';
 import type { AgentIdentity } from '../Agents/agentIdentity';
+import { resolveAgent, type SenderAgent, type SessionOwner } from './messageSender';
 import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './taskCardContext';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
@@ -608,6 +609,9 @@ interface ChatMessageListProps {
   // Open a delegated task's own log, by task id. Omit in read-only views —
   // cards then render inert.
   onOpenTask?: (taskId: string) => void;
+  // The agent `assistant` messages are signed with, resolved against
+  // `taskRoster`. Omit for sessions no workspace agent owns ("Clai").
+  owner?: SessionOwner;
 }
 
 const ChatMessageList = ({
@@ -633,7 +637,13 @@ const ChatMessageList = ({
   onLoadOlderMessages,
   taskRoster = EMPTY_ROSTER,
   onOpenTask,
+  owner = null,
 }: ChatMessageListProps) => {
+  const ownerAgent = useMemo(
+    () => (owner ? resolveAgent(owner, taskRoster) : null),
+    [owner, taskRoster]
+  );
+
   // Build a Map of toolCalls keyed by id once per render, so every
   // tool_use part lookup is O(1) instead of an Array.find walk. Memoized
   // on the toolCalls reference so the Map is stable while toolCalls
@@ -754,6 +764,7 @@ const ChatMessageList = ({
           workspaceId={workspaceId}
           toolCallsById={toolCallsById}
           isContinuation={continuationFlags[idx]}
+          owner={ownerAgent}
         />
       ) : (
         <MessageBlock
@@ -766,10 +777,12 @@ const ChatMessageList = ({
           isQueued={queuedIdSet.has(item.message.id)}
           onDeleteQueued={onDeleteQueuedMessage}
           onEditQueued={onEditQueuedMessage}
+          owner={ownerAgent}
         />
       ),
     [
       continuationFlags,
+      ownerAgent,
       streamingText,
       toolCallsById,
       userLabel,
@@ -852,191 +865,210 @@ interface MessageBlockProps {
   isQueued?: boolean;
   onDeleteQueued?: (messageId: string) => void;
   onEditQueued?: (messageId: string, text: string) => Promise<void> | void;
+  owner: SenderAgent | null;
 }
 
-const MessageBlock = memo(
-  ({
-    message,
-    streamingText,
-    toolCallsById,
-    userLabel = 'You',
-    workspaceId,
-    isContinuation = false,
-    isQueued = false,
-    onDeleteQueued,
-    onEditQueued,
-  }: MessageBlockProps) => {
-    const { role, createdAt } = message;
-    // Local draft state for editing a queued message in-place. `null` = not
-    // editing; a string = the working draft seeded from the message text.
-    const [editDraft, setEditDraft] = useState<string | null>(null);
-    // Walk message.content in order, grouping consecutive same-type
-    // parts into segments. This preserves the interleaving (text → tool
-    // → text → tool …) the assistant actually produced, rather than
-    // collapsing all text to the top and all tools to the bottom.
-    // streamingText is appended as a trailing segment because by
-    // definition it represents the *current* in-flight text block,
-    // which sits after everything already persisted. Memoized so
-    // ToolCallGroup's prop reference is stable across re-renders when
-    // nothing actually changed — its memo only helps if its toolUses
-    // array reference doesn't churn. Only assistant turns render it.
-    const segments = useMemo(() => {
-      if (role !== 'assistant') return [];
-      const base = groupAssistantContent(message.content, toolCallsById);
-      if (streamingText) {
-        base.push({ kind: 'text', text: streamingText, streaming: true });
-      }
-      return base;
-    }, [role, message.content, toolCallsById, streamingText]);
+const MessageBlock = memo(({ message, ...props }: MessageBlockProps) => {
+  if (message.role === 'user') return <UserMessageBlock message={message} {...props} />;
+  if (message.role === 'assistant') return <AssistantMessageBlock message={message} {...props} />;
+  // Skip tool result messages — shown inline with tool calls
+  return null;
+});
 
-    if (role === 'user') {
-      const textContent = getTextContent(message);
-      const imageParts = getImageContent(message);
-      if (!textContent && imageParts.length === 0) return null;
+const UserMessageBlock = ({
+  message,
+  userLabel = 'You',
+  workspaceId,
+  isQueued = false,
+  onDeleteQueued,
+  onEditQueued,
+}: MessageBlockProps) => {
+  const { createdAt } = message;
+  // Local draft state for editing a queued message in-place. `null` = not
+  // editing; a string = the working draft seeded from the message text.
+  const [editDraft, setEditDraft] = useState<string | null>(null);
+  const textContent = getTextContent(message);
+  const imageParts = getImageContent(message);
+  if (!textContent && imageParts.length === 0) return null;
 
-      // Hide run boundary markers (persisted trigger messages for the LLM, not for the user)
-      if (
-        textContent.startsWith('--- New scheduled run at') ||
-        textContent.startsWith('--- Manual run at')
-      ) {
-        return null;
-      }
-
-      const isEditing = editDraft !== null;
-      const trimmedDraft = (editDraft ?? '').trim();
-      const submitEdit = () => {
-        if (!trimmedDraft || trimmedDraft === textContent.trim()) {
-          setEditDraft(null);
-          return;
-        }
-        // The backend emits AssistantMessageUpdated, which swaps the text in
-        // the store; close the editor optimistically. On error the store is
-        // untouched and the original text remains.
-        void Promise.resolve(onEditQueued?.(message.id, trimmedDraft)).catch(() => {});
-        setEditDraft(null);
-      };
-
-      return (
-        <div className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''}`}>
-          <div className={styles.messageHeader}>
-            <span className={styles.messageRoleText}>{userLabel}</span>
-            {createdAt && (
-              <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>
-            )}
-            {isQueued && (
-              <span className={styles.queuedChip} title="Waiting for the agent to pick this up">
-                Queued
-              </span>
-            )}
-            {isQueued && onEditQueued && !isEditing && (
-              <button
-                type="button"
-                className={styles.queuedEdit}
-                onClick={() => setEditDraft(textContent)}
-                title="Edit before it's picked up"
-                aria-label="Edit queued message"
-              >
-                ✎
-              </button>
-            )}
-            {isQueued && onDeleteQueued && !isEditing && (
-              <button
-                type="button"
-                className={styles.queuedRemove}
-                onClick={() => onDeleteQueued(message.id)}
-                title="Remove before it's picked up"
-                aria-label="Remove queued message"
-              >
-                ×
-              </button>
-            )}
-          </div>
-          {isEditing ? (
-            <div className={styles.queuedEditor}>
-              <textarea
-                className={styles.queuedEditorInput}
-                value={editDraft ?? ''}
-                autoFocus
-                rows={Math.min(8, Math.max(2, (editDraft ?? '').split('\n').length))}
-                onChange={(e) => setEditDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    submitEdit();
-                  } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    setEditDraft(null);
-                  }
-                }}
-              />
-              <div className={styles.queuedEditorActions}>
-                <button
-                  type="button"
-                  className={styles.queuedEditorSave}
-                  onClick={submitEdit}
-                  disabled={!trimmedDraft}
-                >
-                  Save
-                </button>
-                <button
-                  type="button"
-                  className={styles.queuedEditorCancel}
-                  onClick={() => setEditDraft(null)}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className={styles.messageContent}>
-              {textContent && <MarkdownMessage content={textContent} />}
-              {imageParts.length > 0 && (
-                <div className={styles.imageAttachments}>
-                  {imageParts.map((part) => (
-                    <ImageAttachment key={part.id} workspaceId={workspaceId} part={part} />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    if (role === 'assistant') {
-      return (
-        <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
-          {!isContinuation && (
-            <div className={styles.messageHeader}>
-              <span className={styles.messageRoleText}>Clai</span>
-              {createdAt && (
-                <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>
-              )}
-            </div>
-          )}
-          <div className={styles.messageContent}>
-            {segments.map((seg, idx) => {
-              if (seg.kind === 'thinking') {
-                return <ThinkingBlock key={idx} content={seg.text} />;
-              }
-              if (seg.kind === 'text') {
-                return (
-                  <StreamingMarkdown key={idx} content={seg.text} isStreaming={!!seg.streaming} />
-                );
-              }
-              if (seg.kind === 'tools') {
-                return <ToolCallGroup key={idx} workspaceId={workspaceId} toolUses={seg.toolUses} />;
-              }
-              return null;
-            })}
-          </div>
-        </div>
-      );
-    }
-
-    // Skip tool result messages — shown inline with tool calls
+  // Hide run boundary markers (persisted trigger messages for the LLM, not for the user)
+  if (
+    textContent.startsWith('--- New scheduled run at') ||
+    textContent.startsWith('--- Manual run at')
+  ) {
     return null;
   }
+
+  const isEditing = editDraft !== null;
+  const trimmedDraft = (editDraft ?? '').trim();
+  const submitEdit = () => {
+    if (!trimmedDraft || trimmedDraft === textContent.trim()) {
+      setEditDraft(null);
+      return;
+    }
+    // The backend emits AssistantMessageUpdated, which swaps the text in
+    // the store; close the editor optimistically. On error the store is
+    // untouched and the original text remains.
+    void Promise.resolve(onEditQueued?.(message.id, trimmedDraft)).catch(() => {});
+    setEditDraft(null);
+  };
+
+  return (
+    <div className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''}`}>
+      <div className={styles.messageHeader}>
+        <span className={styles.messageRoleText}>{userLabel}</span>
+        {createdAt && (
+          <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>
+        )}
+        {isQueued && (
+          <span className={styles.queuedChip} title="Waiting for the agent to pick this up">
+            Queued
+          </span>
+        )}
+        {isQueued && onEditQueued && !isEditing && (
+          <button
+            type="button"
+            className={styles.queuedEdit}
+            onClick={() => setEditDraft(textContent)}
+            title="Edit before it's picked up"
+            aria-label="Edit queued message"
+          >
+            ✎
+          </button>
+        )}
+        {isQueued && onDeleteQueued && !isEditing && (
+          <button
+            type="button"
+            className={styles.queuedRemove}
+            onClick={() => onDeleteQueued(message.id)}
+            title="Remove before it's picked up"
+            aria-label="Remove queued message"
+          >
+            ×
+          </button>
+        )}
+      </div>
+      {isEditing ? (
+        <div className={styles.queuedEditor}>
+          <textarea
+            className={styles.queuedEditorInput}
+            value={editDraft ?? ''}
+            autoFocus
+            rows={Math.min(8, Math.max(2, (editDraft ?? '').split('\n').length))}
+            onChange={(e) => setEditDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitEdit();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                setEditDraft(null);
+              }
+            }}
+          />
+          <div className={styles.queuedEditorActions}>
+            <button
+              type="button"
+              className={styles.queuedEditorSave}
+              onClick={submitEdit}
+              disabled={!trimmedDraft}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              className={styles.queuedEditorCancel}
+              onClick={() => setEditDraft(null)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className={styles.messageContent}>
+          {textContent && <MarkdownMessage content={textContent} />}
+          {imageParts.length > 0 && (
+            <div className={styles.imageAttachments}>
+              {imageParts.map((part) => (
+                <ImageAttachment key={part.id} workspaceId={workspaceId} part={part} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AssistantMessageBlock = ({
+  message,
+  streamingText,
+  toolCallsById,
+  workspaceId,
+  isContinuation = false,
+  owner,
+}: MessageBlockProps) => {
+  // Walk message.content in order, grouping consecutive same-type
+  // parts into segments. This preserves the interleaving (text → tool
+  // → text → tool …) the assistant actually produced, rather than
+  // collapsing all text to the top and all tools to the bottom.
+  // streamingText is appended as a trailing segment because by
+  // definition it represents the *current* in-flight text block,
+  // which sits after everything already persisted. Memoized so
+  // ToolCallGroup's prop reference is stable across re-renders when
+  // nothing actually changed — its memo only helps if its toolUses
+  // array reference doesn't churn.
+  const segments = useMemo(() => {
+    const base = groupAssistantContent(message.content, toolCallsById);
+    if (streamingText) {
+      base.push({ kind: 'text', text: streamingText, streaming: true });
+    }
+    return base;
+  }, [message.content, toolCallsById, streamingText]);
+
+  return (
+    <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
+      {!isContinuation && <OwnerHeader owner={owner} createdAt={message.createdAt} />}
+      <div className={styles.messageContent}>
+        {segments.map((seg, idx) => {
+          if (seg.kind === 'thinking') {
+            return <ThinkingBlock key={idx} content={seg.text} />;
+          }
+          if (seg.kind === 'text') {
+            return <StreamingMarkdown key={idx} content={seg.text} isStreaming={!!seg.streaming} />;
+          }
+          if (seg.kind === 'tools') {
+            return <ToolCallGroup key={idx} workspaceId={workspaceId} toolUses={seg.toolUses} />;
+          }
+          return null;
+        })}
+      </div>
+    </div>
+  );
+};
+
+/** The owner's face and name over an assistant turn; "Clai" when no agent owns the session. */
+const OwnerHeader = ({
+  owner,
+  createdAt,
+}: {
+  owner: SenderAgent | null;
+  createdAt: number | bigint | null | undefined;
+}) => (
+  <div className={styles.messageHeader}>
+    {owner && (
+      <AgentAvatar
+        identity={owner.identity}
+        size={20}
+        activity={owner.presence === 'disabled' ? 'disabled' : 'none'}
+      />
+    )}
+    <span className={styles.messageRoleText}>{owner ? owner.name : 'Clai'}</span>
+    {owner && owner.presence !== 'active' && (
+      <span className={styles.senderSuffix}>({owner.presence})</span>
+    )}
+    {createdAt && <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>}
+  </div>
 );
 
 /**
@@ -1048,10 +1080,11 @@ interface MergedToolGroupProps {
   workspaceId: string;
   toolCallsById: Map<string, ToolInvocation>;
   isContinuation?: boolean;
+  owner: SenderAgent | null;
 }
 
 const MergedToolGroup = memo(
-  ({ item, workspaceId, toolCallsById, isContinuation = false }: MergedToolGroupProps) => {
+  ({ item, workspaceId, toolCallsById, isContinuation = false, owner }: MergedToolGroupProps) => {
     const enrichedToolUses = useMemo<EnrichedToolUse[]>(
       () =>
         item.toolUses.map((tu) => {
@@ -1072,14 +1105,7 @@ const MergedToolGroup = memo(
 
     return (
       <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>
-        {!isContinuation && (
-          <div className={styles.messageHeader}>
-            <span className={styles.messageRoleText}>Clai</span>
-            {item.createdAt && (
-              <span className={styles.messageTimestamp}>{formatTimestamp(item.createdAt)}</span>
-            )}
-          </div>
-        )}
+        {!isContinuation && <OwnerHeader owner={owner} createdAt={item.createdAt} />}
         <div className={styles.messageContent}>
           <ToolCallGroup workspaceId={workspaceId} toolUses={enrichedToolUses} />
         </div>

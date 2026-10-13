@@ -185,4 +185,15 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     render(<AskUserPanel sessionId="sess-manager" />);
     expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
   });
+
+  it('task transcript assistant header shows assignee', () => {
+    seedSession(false);
+    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />);
+    // The assistant row is signed by the agent the task was handed to — the
+    // header's name and the row's name — never "Clai". With an empty roster
+    // the agent reads as removed, from the task's own copy of its name.
+    expect(screen.getAllByText('Rust Architect').length).toBeGreaterThan(0);
+    expect(screen.getByText('(removed)')).toBeInTheDocument();
+    expect(screen.queryByText('Clai')).toBeNull();
+  });
 });

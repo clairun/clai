@@ -14,7 +14,7 @@ import type { WorkspaceAgentResponse } from '../../generated/bindings';
 import type { TaskCallCard } from '../AssistantChat/toolDisplay';
 import { taskStatusLabel } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
-import { taskIdentity, type AgentActivity } from './agentIdentity';
+import { agentDisplayName, taskIdentity, type AgentActivity } from './agentIdentity';
 import pills from './taskStatus.module.css';
 import styles from './TaskCard.module.css';
 
@@ -50,8 +50,7 @@ const assigneeName = (
   roster: readonly WorkspaceAgentResponse[]
 ): string => {
   const agent = roster.find((entry) => entry.id === card.assignedToWorkspaceAgentId);
-  if (!agent) return 'Agent';
-  return agent.isDefault ? 'Main' : agent.displayName || 'Agent';
+  return agent ? agentDisplayName(agent) : 'Agent';
 };
 
 const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {

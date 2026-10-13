@@ -43,6 +43,7 @@ export interface AgentLike {
   agentDefinitionId?: string | null;
   isDefault?: boolean | null;
   avatar?: AgentAvatarRef | null;
+  displayName?: string | null;
 }
 
 export const mainIdentity = (): AgentIdentity => ({
@@ -62,6 +63,10 @@ export const identityFor = (agent: AgentLike): AgentIdentity => {
     generatorVersion: GENERATOR_VERSION,
   };
 };
+
+/** The name an agent goes by: the Main is always "Main", unnamed agents "Agent". */
+export const agentDisplayName = (agent: AgentLike): string =>
+  agent.isDefault ? 'Main' : agent.displayName || 'Agent';
 
 /** What the create flow saves once a candidate is picked. */
 export const avatarRefFor = (seed: string): AgentAvatarRef => ({
