@@ -177,7 +177,7 @@ pub(crate) async fn claim(
 
     // A task session is linked when it is created, so this read cannot go
     // stale. Its runs keep the worker trigger: it selects the worker prompt.
-    let task_session = workspace_tasks_repo::task_of_session(pool, session_id)
+    let task_session = workspace_tasks_repo::load_task_for_session(pool, session_id)
         .await?
         .is_some();
     let trigger = if task_session {

@@ -477,16 +477,6 @@ pub async fn delete_message(pool: &DbPool, message_id: &str) -> Result<(), Strin
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to delete message signal: {}", e))?;
-    // Other signals keep their delivery key, so a retried producer cannot
-    // re-deliver; the foreign key nulls their message_id.
-    sqlx::query(
-        "UPDATE session_signals SET status = 'dropped'
-         WHERE message_id = ? AND status IN ('pending', 'claimed')",
-    )
-    .bind(message_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to drop message signal: {}", e))?;
 
     sqlx::query("DELETE FROM assistant_messages WHERE id = ?")
         .bind(message_id)

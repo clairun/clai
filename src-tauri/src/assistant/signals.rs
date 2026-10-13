@@ -4,7 +4,6 @@
 //!
 //! Lifecycle: `pending` → `claimed` by the run [`crate::assistant::dispatcher`]
 //! starts for it, or `pending` → `consumed` when a live run takes it mid-run.
-//! A signal whose message was deleted before delivery is `dropped`.
 
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection};
@@ -12,7 +11,7 @@ use uuid::Uuid;
 
 use crate::assistant::repository::{map_message_row, now_ms};
 use crate::assistant::types::{AssistantMessage, ContentPart, MessageOrigin, MessageRole};
-use crate::db::{enum_text, parse_enum_text, DbPool};
+use crate::db::{enum_text, DbPool};
 
 /// What a signal carries. Every kind so far is content: it has a message
 /// row and reaches the model.
@@ -28,30 +27,6 @@ pub enum SignalKind {
     TaskFailed,
     /// A task this session assigned asked a question with `ask_user`.
     TaskInputRequired,
-}
-
-/// Where a signal is in its delivery.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "bindings.ts")]
-pub enum SignalStatus {
-    /// Waiting for a run.
-    Pending,
-    /// The input of a run that has not ended.
-    Claimed,
-    /// Delivered: taken by a live run, or the answer to its `ask_user`.
-    Consumed,
-    /// Its message was deleted before delivery.
-    Dropped,
-}
-
-/// The signal a send created, as the sender sees it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct SignalRef {
-    pub id: String,
-    pub status: SignalStatus,
 }
 
 /// A content signal and its message.
@@ -84,7 +59,6 @@ pub(crate) async fn insert_user_message_signal(
         SignalKind::UserMessage,
         message,
         None,
-        None,
         Some(connection_id),
     )
     .await
@@ -94,23 +68,21 @@ async fn insert_signal(
     conn: &mut SqliteConnection,
     kind: SignalKind,
     message: &AssistantMessage,
-    payload: Option<&serde_json::Value>,
     delivery_key: Option<&str>,
     connection_id: Option<&str>,
 ) -> Result<(), String> {
     sqlx::query(
         r#"
         INSERT INTO session_signals
-            (id, target_session_id, kind, lane, message_id, payload_json, origin_json,
-             delivery_key, connection_id, status, created_at)
-        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, 'pending', ?)
+            (id, target_session_id, kind, message_id, origin_json, delivery_key,
+             connection_id, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
         "#,
     )
     .bind(Uuid::new_v4().to_string())
     .bind(&message.session_id)
     .bind(enum_text(&kind)?)
     .bind(&message.id)
-    .bind(payload.map(serde_json::Value::to_string))
     .bind(json_text(&message.origin)?)
     .bind(delivery_key)
     .bind(connection_id)
@@ -132,7 +104,6 @@ pub(crate) struct NewEvent<'a> {
     pub(crate) kind: SignalKind,
     pub(crate) text: String,
     pub(crate) origin: MessageOrigin,
-    pub(crate) payload: serde_json::Value,
     /// At most one event is ever written per key.
     pub(crate) delivery_key: Option<String>,
     pub(crate) connection_id: Option<&'a str>,
@@ -184,7 +155,6 @@ pub(crate) async fn insert_event(
         conn,
         event.kind,
         &message,
-        Some(&event.payload),
         event.delivery_key.as_deref(),
         event.connection_id,
     )
@@ -229,23 +199,6 @@ pub(crate) async fn ensure_sender_budget(
     Ok(())
 }
 
-/// The signal carrying `message_id`.
-pub(crate) async fn signal_for_message(
-    pool: &DbPool,
-    message_id: &str,
-) -> Result<SignalRef, String> {
-    let (id, status): (String, String) =
-        sqlx::query_as("SELECT id, status FROM session_signals WHERE message_id = ?")
-            .bind(message_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| format!("Failed to read session signal: {}", e))?;
-    Ok(SignalRef {
-        id,
-        status: parse_enum_text(status, "signal status")?,
-    })
-}
-
 /// Pending content signals of a session, oldest first. Claimed signals are
 /// not listed: they already are the claiming run's input.
 pub async fn list_open_content(
@@ -257,7 +210,7 @@ pub async fn list_open_content(
         SELECT {CONTENT_COLUMNS}
         FROM session_signals s
         JOIN assistant_messages m ON m.id = s.message_id
-        WHERE s.target_session_id = ? AND s.lane = 1 AND s.status = 'pending'
+        WHERE s.target_session_id = ? AND s.status = 'pending'
         ORDER BY s.created_at ASC, s.id ASC
         "#
     ))
@@ -275,7 +228,7 @@ pub async fn sessions_with_pending(pool: &DbPool) -> Result<Vec<String>, String>
         r#"
         SELECT target_session_id
         FROM session_signals
-        WHERE lane = 1 AND status = 'pending'
+        WHERE status = 'pending'
         GROUP BY target_session_id
         ORDER BY MIN(created_at) ASC
         "#,
@@ -291,7 +244,7 @@ pub async fn list_open_message_ids(pool: &DbPool, session_id: &str) -> Result<Ve
         r#"
         SELECT message_id
         FROM session_signals
-        WHERE target_session_id = ? AND lane = 1 AND status = 'pending'
+        WHERE target_session_id = ? AND status = 'pending'
           AND message_id IS NOT NULL
         ORDER BY created_at ASC, id ASC
         "#,
@@ -313,7 +266,7 @@ pub async fn list_content_for_run(
         SELECT {CONTENT_COLUMNS}
         FROM session_signals s
         JOIN assistant_messages m ON m.id = s.message_id
-        WHERE s.target_session_id = ? AND s.lane = 1
+        WHERE s.target_session_id = ?
           AND (s.claimed_run_id = ? OR s.consumed_run_id = ?)
         ORDER BY s.created_at ASC, s.id ASC
         "#
@@ -340,15 +293,14 @@ pub(crate) async fn claim_batch(
     let message_ids: Vec<String> = sqlx::query_scalar(
         r#"
         UPDATE session_signals
-        SET status = 'claimed', claimed_run_id = ?, claimed_at = ?
-        WHERE target_session_id = ? AND lane = 1 AND status = 'pending'
+        SET status = 'claimed', claimed_run_id = ?
+        WHERE target_session_id = ? AND status = 'pending'
           AND message_id IS NOT NULL
           AND (connection_id = ? OR connection_id IS NULL)
         RETURNING message_id
         "#,
     )
     .bind(run_id)
-    .bind(now_ms())
     .bind(session_id)
     .bind(connection_id)
     .fetch_all(&mut *conn)
@@ -383,7 +335,7 @@ pub(crate) async fn release_claims_of_unstarted_runs(
 ) -> Result<(), String> {
     const UNSTARTED: &str = "SELECT id FROM assistant_runs WHERE status = 'queued'";
     sqlx::query(&format!(
-        "UPDATE session_signals SET status = 'pending', claimed_run_id = NULL, claimed_at = NULL
+        "UPDATE session_signals SET status = 'pending', claimed_run_id = NULL
          WHERE status = 'claimed' AND claimed_run_id IN ({UNSTARTED})"
     ))
     .execute(&mut *conn)
@@ -431,12 +383,11 @@ pub(crate) async fn consume_one(
     sqlx::query(
         r#"
         UPDATE session_signals
-        SET status = 'consumed', consumed_run_id = ?, consumed_at = ?
+        SET status = 'consumed', consumed_run_id = ?
         WHERE target_session_id = ? AND message_id = ? AND status = 'pending'
         "#,
     )
     .bind(run_id)
-    .bind(now_ms())
     .bind(session_id)
     .bind(message_id)
     .execute(&mut *conn)
@@ -452,7 +403,7 @@ pub(crate) async fn unconsume(pool: &DbPool, message_id: &str) -> Result<(), Str
         .await
         .map_err(|e| format!("Failed to start signal release transaction: {}", e))?;
     sqlx::query(
-        "UPDATE session_signals SET status = 'pending', consumed_run_id = NULL, consumed_at = NULL
+        "UPDATE session_signals SET status = 'pending', consumed_run_id = NULL
          WHERE message_id = ? AND status = 'consumed'",
     )
     .bind(message_id)

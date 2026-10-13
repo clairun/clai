@@ -610,13 +610,7 @@ pub async fn assistant_cancel_run(
 
     // A task's run stops through the task, so the stop is durable and the
     // cycle ends `stopped`.
-    let task = {
-        let mut conn = target_pool
-            .acquire()
-            .await
-            .map_err(|e| format!("Failed to acquire connection: {}", e))?;
-        workspace_tasks_repo::load_task_for_session(&mut conn, &run.session_id).await?
-    };
+    let task = workspace_tasks_repo::load_task_for_session(&target_pool, &run.session_id).await?;
     if let Some(task) = task {
         let deps = AssistantDeps {
             workspace_id,

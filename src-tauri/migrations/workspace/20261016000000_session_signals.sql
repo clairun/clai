@@ -6,31 +6,27 @@ CREATE TABLE session_signals (
     id                TEXT PRIMARY KEY,
     target_session_id TEXT NOT NULL REFERENCES assistant_sessions(id) ON DELETE CASCADE,
     kind              TEXT NOT NULL,
-    lane              INTEGER NOT NULL,              -- 0 = control, 1 = content
     message_id        TEXT REFERENCES assistant_messages(id) ON DELETE SET NULL,
-    payload_json      TEXT,
     origin_json       TEXT NOT NULL DEFAULT '{"kind":"user"}',
     delivery_key      TEXT,
     connection_id     TEXT,                          -- user_message only; NULL = resolve at claim
-    status            TEXT NOT NULL CHECK (status IN ('pending','claimed','consumed','dropped')),
+    status            TEXT NOT NULL CHECK (status IN ('pending','claimed','consumed')),
     claimed_run_id    TEXT REFERENCES assistant_runs(id) ON DELETE SET NULL,
     consumed_run_id   TEXT REFERENCES assistant_runs(id) ON DELETE SET NULL,
-    created_at        INTEGER NOT NULL,
-    claimed_at        INTEGER,
-    consumed_at       INTEGER
+    created_at        INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX idx_session_signals_delivery_key
     ON session_signals(delivery_key) WHERE delivery_key IS NOT NULL;
 CREATE INDEX idx_session_signals_target_open
-    ON session_signals(target_session_id, lane, created_at) WHERE status IN ('pending','claimed');
+    ON session_signals(target_session_id, created_at) WHERE status IN ('pending','claimed');
 CREATE INDEX idx_session_signals_claimed_run ON session_signals(claimed_run_id) WHERE claimed_run_id IS NOT NULL;
 CREATE INDEX idx_session_signals_origin_window ON session_signals(created_at, kind);
 
-INSERT INTO session_signals (id, target_session_id, kind, lane, message_id, origin_json, connection_id,
-                             status, consumed_run_id, created_at, consumed_at)
-SELECT 'q:' || message_id, session_id, 'user_message', 1, message_id, '{"kind":"user"}', connection_id,
+INSERT INTO session_signals (id, target_session_id, kind, message_id, origin_json, connection_id,
+                             status, consumed_run_id, created_at)
+SELECT 'q:' || message_id, session_id, 'user_message', message_id, '{"kind":"user"}', connection_id,
        CASE status WHEN 'pending' THEN 'pending' ELSE 'consumed' END,
-       delivered_run_id, queued_at, delivered_at
+       delivered_run_id, queued_at
 FROM assistant_message_queue;
 DROP TABLE assistant_message_queue;
 

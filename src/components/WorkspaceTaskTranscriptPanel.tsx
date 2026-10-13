@@ -95,9 +95,9 @@ export default function WorkspaceTaskTranscriptPanel({
         const res = await sendWorkspaceTaskMessage(workspaceId, taskId, text);
         const store = useAssistantStore.getState();
         store.addMessage(res.message.sessionId, res.message);
-        // `consumed` answered the open question or was taken mid-run; anything
-        // else waits for a run, and `queued_messages_delivered` clears the chip.
-        if (res.signal.status !== 'consumed') {
+        // A queued message waits for a run; `queued_messages_delivered` clears
+        // the chip.
+        if (res.queued) {
           store.markMessageQueued(res.message.sessionId, res.message.id);
         }
         upsertTask(res.task);

@@ -273,7 +273,7 @@ pub async fn execute(
         .ok_or_else(|| format!("Session not found: {}", context.session_id))?;
     // Read before the question is registered: an error after that point
     // would drop the guard and cancel the run.
-    let task = workspace_tasks_repo::task_of_session(&deps.pool, &session.id).await?;
+    let task = workspace_tasks_repo::load_task_for_session(&deps.pool, &session.id).await?;
 
     // Supersede any orphaned ask for this session (the model re-asking
     // after a CLI transport drop lost the original call). The frontend

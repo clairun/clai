@@ -458,16 +458,6 @@ export type ShellAccessMode = "off" | "restricted" | "full";
 
 export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, };
 
-/**
- * The signal a send created, as the sender sees it.
- */
-export type SignalRef = { id: string, status: SignalStatus, };
-
-/**
- * Where a signal is in its delivery.
- */
-export type SignalStatus = "pending" | "claimed" | "consumed" | "dropped";
-
 export type SkillCatalogResponse = { sources: Array<SkillSourceResponse>, skills: Array<SkillDefinition>, diagnostics: Array<SkillSourceDiagnostic>, };
 
 export type SkillDefinition = { id: string, name: string, description: string, sourceId: string, sourceName: string, sourcePath: string, content: string, };
@@ -719,10 +709,10 @@ answeredBy: MessageOrigin | null, createdAt: bigint, updatedAt: bigint, complete
  */
 export type WorkspaceTaskSendResponse = { task: WorkspaceTaskResponse, message: AssistantMessage, 
 /**
- * `consumed`: it answered the task's open question; `claimed`: it
- * started a new cycle; `pending`: it waits for the current run.
+ * It waits for the task's current run; `false` when it answered the
+ * task's open question or started a new cycle.
  */
-signal: SignalRef, 
+queued: boolean, 
 /**
  * The run that took it, when one was started or is active.
  */

@@ -1,7 +1,8 @@
 //! The `workspace_tasks` table: one row shape, one column list, and the one
 //! response every reader (the UI and the agents' task tools) gets.
 
-use crate::assistant::signals::{self, SignalRef};
+use crate::assistant::repository::now_ms;
+use crate::assistant::signals;
 use crate::assistant::types::{AssistantMessage, AssistantRun, MessageOrigin};
 use crate::db::{enum_text, parse_enum_text, DbPool};
 use serde::{Deserialize, Serialize};
@@ -94,9 +95,9 @@ pub struct WorkspaceTaskResponse {
 pub struct WorkspaceTaskSendResponse {
     pub task: WorkspaceTaskResponse,
     pub message: AssistantMessage,
-    /// `consumed`: it answered the task's open question; `claimed`: it
-    /// started a new cycle; `pending`: it waits for the current run.
-    pub signal: SignalRef,
+    /// It waits for the task's current run; `false` when it answered the
+    /// task's open question or started a new cycle.
+    pub queued: bool,
     /// The run that took it, when one was started or is active.
     pub run: Option<AssistantRun>,
 }
@@ -236,29 +237,17 @@ pub(crate) async fn load_task(
 
 /// The task that owns `session_id`, if the session is a task session.
 pub(crate) async fn load_task_for_session(
-    conn: &mut SqliteConnection,
+    pool: &DbPool,
     session_id: &str,
 ) -> Result<Option<WorkspaceTaskRow>, String> {
     let row = sqlx::query(&format!(
         "SELECT {TASK_COLUMNS} FROM workspace_tasks WHERE session_id = ?"
     ))
     .bind(session_id)
-    .fetch_optional(conn)
+    .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to load workspace task for session: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
-}
-
-/// [`load_task_for_session`] on a pooled connection.
-pub(crate) async fn task_of_session(
-    pool: &DbPool,
-    session_id: &str,
-) -> Result<Option<WorkspaceTaskRow>, String> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .map_err(|e| format!("Failed to acquire connection: {}", e))?;
-    load_task_for_session(&mut conn, session_id).await
 }
 
 /// The most recently touched tasks, newest first.
@@ -299,10 +288,6 @@ pub(crate) struct NewTask<'a> {
 
 /// Tasks nest at most this deep: a root task has depth 0.
 pub(crate) const MAX_TASK_DEPTH: i64 = 4;
-/// Assignments one run may make.
-pub(crate) const MAX_ASSIGNMENTS_PER_RUN: i64 = 4;
-/// Unfinished tasks one workspace agent may have created.
-pub(crate) const MAX_ACTIVE_TASKS_PER_CREATOR: i64 = 12;
 
 /// Inserts a `queued` task, or with `error` one that failed for want of a
 /// provider connection, unless it would break a delegation limit.
@@ -356,34 +341,7 @@ async fn ensure_within_limits(
             "depth_exceeded: tasks nest at most {MAX_TASK_DEPTH} levels deep; do this work yourself."
         ));
     }
-    if let Some(run_id) = &task.lineage.parent_run_id {
-        let assigned: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM workspace_tasks WHERE parent_run_id = ?")
-                .bind(run_id)
-                .fetch_one(&mut *conn)
-                .await
-                .map_err(|e| format!("Failed to count assigned tasks: {}", e))?;
-        if assigned >= MAX_ASSIGNMENTS_PER_RUN {
-            return Err(format!(
-                "fan_out_exceeded: one turn may assign at most {MAX_ASSIGNMENTS_PER_RUN} tasks; end your turn and wait for results."
-            ));
-        }
-    }
     if let Some(creator) = task.created_by_workspace_agent_id {
-        let active: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM workspace_tasks
-             WHERE created_by_workspace_agent_id = ?
-               AND status IN ('queued', 'running', 'input_required', 'stopping')",
-        )
-        .bind(creator)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|e| format!("Failed to count active tasks: {}", e))?;
-        if active >= MAX_ACTIVE_TASKS_PER_CREATOR {
-            return Err(format!(
-                "fan_out_exceeded: you already have {MAX_ACTIVE_TASKS_PER_CREATOR} unfinished tasks; wait for some to finish."
-            ));
-        }
         signals::ensure_sender_budget(conn, creator).await?;
     }
     Ok(())
@@ -395,11 +353,7 @@ pub(crate) async fn lineage_for_caller(
     session_id: &str,
     run_id: &str,
 ) -> Result<TaskLineage, String> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .map_err(|e| format!("Failed to acquire connection: {}", e))?;
-    let parent = load_task_for_session(&mut conn, session_id).await?;
+    let parent = load_task_for_session(pool, session_id).await?;
     Ok(TaskLineage {
         parent_session_id: Some(session_id.to_string()),
         parent_run_id: Some(run_id.to_string()),
@@ -606,7 +560,7 @@ pub(crate) async fn finish_cycle(
 /// Returns the task as it now is and whether this call changed it; a task
 /// already stopping or terminal is returned unchanged. `None` when the task
 /// does not exist.
-pub(crate) async fn request_stop(
+pub(crate) async fn mark_stopping(
     pool: &DbPool,
     task_id: &str,
 ) -> Result<Option<(WorkspaceTaskRow, bool)>, String> {
@@ -684,10 +638,6 @@ pub(crate) async fn stop_interrupted(
     .await
     .map_err(|e| format!("Failed to stop interrupted workspace tasks: {}", e))?;
     rows.iter().map(WorkspaceTaskRow::from_sql).collect()
-}
-
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
 }
 
 #[cfg(test)]

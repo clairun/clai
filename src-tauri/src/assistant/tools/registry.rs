@@ -9,9 +9,7 @@ use crate::assistant::tools::workspace_tasks::{
     SendWorkspaceTaskMessageParams, StopWorkspaceTaskParams, MAX_TASK_MESSAGE_CHARS,
 };
 use crate::assistant::types::ToolDefinition;
-use crate::assistant::workspace_tasks_repo::{
-    MAX_ACTIVE_TASKS_PER_CREATOR, MAX_ASSIGNMENTS_PER_RUN, MAX_TASK_DEPTH,
-};
+use crate::assistant::workspace_tasks_repo::MAX_TASK_DEPTH;
 use crate::config::ShellAccessMode;
 
 /// Returns all tool definitions available to a run.
@@ -128,7 +126,7 @@ fn workspace_assign_task_def() -> ToolDefinition {
     tool::<AssignWorkspaceTaskParams>(
         "workspace_assignTask",
         &format!(
-            "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained. Delegation is limited: {MAX_ASSIGNMENTS_PER_RUN} assignments per turn, {MAX_ACTIVE_TASKS_PER_CREATOR} unfinished tasks at a time, {MAX_TASK_DEPTH} levels of nesting, {AGENT_SENDS_PER_HOUR} assignments and task messages per hour.",
+            "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained. Delegation is limited: {MAX_TASK_DEPTH} levels of nesting, {AGENT_SENDS_PER_HOUR} assignments and task messages per hour.",
         ),
     )
 }
@@ -144,7 +142,7 @@ fn workspace_send_task_message_def() -> ToolDefinition {
     tool::<SendWorkspaceTaskMessageParams>(
         "workspace_sendTaskMessage",
         &format!(
-            "Send a message to a task. It answers the task's question if the task is `input_required`, queues for its current run if it is running, and resumes it as a new cycle if it is completed, failed or stopped. Returns the task and `signal.status`: `consumed` = answered the question, `claimed` = started a new cycle, `pending` = waiting for the current run. Messages are at most {MAX_TASK_MESSAGE_CHARS} characters.",
+            "Send a message to a task. It answers the task's question if the task is `input_required`, queues for its current run if it is running, and resumes it as a new cycle if it is completed, failed or stopped. Returns the task and `queued`: true when the message waits for the task's current run. Messages are at most {MAX_TASK_MESSAGE_CHARS} characters.",
         ),
     )
 }

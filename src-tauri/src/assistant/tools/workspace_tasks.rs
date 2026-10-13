@@ -122,7 +122,7 @@ pub async fn execute(
             Ok(serde_json::json!({
                 "ok": true,
                 "task": sent.task,
-                "signal": sent.signal,
+                "queued": sent.queued,
                 "run": sent.run,
             }))
         }
@@ -262,7 +262,6 @@ pub(crate) async fn create_assignment(
                     kind: SignalKind::AgentMessage,
                     text: assignment_text(task.id, task.title, task.instructions),
                     origin,
-                    payload: serde_json::json!({ "taskId": task.id, "assignment": true }),
                     delivery_key: None,
                     connection_id: Some(connection_id),
                 },
@@ -304,20 +303,13 @@ async fn task_result(
     task_id: &str,
     agent_names: &HashMap<String, String>,
 ) -> Result<serde_json::Value, String> {
-    let task = load_task(&deps.pool, task_id).await?;
+    let task = workspace_tasks_repo::load_task(&deps.pool, task_id)
+        .await?
+        .ok_or_else(|| not_found(task_id))?;
     Ok(serde_json::json!({
         "ok": true,
         "task": task.into_response(&deps.workspace_id, agent_names),
     }))
-}
-
-async fn load_task(
-    pool: &DbPool,
-    task_id: &str,
-) -> Result<workspace_tasks_repo::WorkspaceTaskRow, String> {
-    workspace_tasks_repo::load_task(pool, task_id)
-        .await?
-        .ok_or_else(|| not_found(task_id))
 }
 
 /// Emits `task_updated` for `task` on its own session.
@@ -435,7 +427,7 @@ fn result_event<'a>(
     parent_session_id: &'a str,
     roster: &[WorkspaceAgentRow],
 ) -> Result<NewEvent<'a>, String> {
-    let (kind, text, payload) = match task.failure_reason {
+    let (kind, text) = match task.failure_reason {
         Some(reason) => (
             SignalKind::TaskFailed,
             format!(
@@ -443,12 +435,6 @@ fn result_event<'a>(
                 enum_text(&reason)?,
                 task.error.as_deref().unwrap_or("(no error text)")
             ),
-            serde_json::json!({
-                "taskId": task.id,
-                "cycleNo": task.cycle_no,
-                "failureReason": reason,
-                "error": task.error,
-            }),
         ),
         None => (
             SignalKind::TaskResult,
@@ -456,12 +442,6 @@ fn result_event<'a>(
                 .clone()
                 .or_else(|| task.error.clone())
                 .unwrap_or_else(|| "(no output)".to_string()),
-            serde_json::json!({
-                "taskId": task.id,
-                "cycleNo": task.cycle_no,
-                "status": task.status,
-                "title": task.title,
-            }),
         ),
     };
     Ok(NewEvent {
@@ -469,7 +449,6 @@ fn result_event<'a>(
         kind,
         text,
         origin: task_origin(task, roster),
-        payload,
         delivery_key: Some(format!("task-result:{}:{}", task.id, task.cycle_no)),
         connection_id: None,
     })
@@ -592,26 +571,28 @@ pub(crate) async fn send_task_message(
             },
         );
     }
-    let run_id = if delivery.answered {
-        delivery.task.run_id.clone()
+    let (run_id, queued) = if delivery.answered {
+        (delivery.task.run_id.clone(), false)
     } else {
         match dispatcher::kick(deps, &session_id).await? {
-            Kick::Started { run, .. } => Some(run.id),
-            Kick::Busy { run_id } => Some(run_id),
-            Kick::Idle | Kick::Deferred => None,
+            Kick::Started { run, .. } => (Some(run.id), false),
+            Kick::Busy { run_id } => (Some(run_id), true),
+            Kick::Idle | Kick::Deferred => (None, true),
         }
     };
     let run = match run_id {
         Some(run_id) => repository::get_run(&deps.pool, &run_id).await?,
         None => None,
     };
-    let task = load_task(&deps.pool, task_id).await?;
+    let task = workspace_tasks_repo::load_task(&deps.pool, task_id)
+        .await?
+        .ok_or_else(|| not_found(task_id))?;
     let agent_names =
         workspace_agent_display_names(deps.app.state::<AppState>().inner(), &deps.workspace_id);
     Ok(WorkspaceTaskSendResponse {
         task: task.into_response(&deps.workspace_id, &agent_names),
-        signal: signals::signal_for_message(&deps.pool, &delivery.message.id).await?,
         message: delivery.message,
+        queued,
         run,
     })
 }
@@ -649,15 +630,9 @@ pub(crate) async fn deliver_task_message(
         format!("invalid_input: task {task_id} never started, so it cannot take messages.")
     })?;
 
-    let (kind, payload) = match origin {
-        MessageOrigin::User => (
-            SignalKind::UserMessage,
-            serde_json::json!({ "taskId": task_id }),
-        ),
-        _ => (
-            SignalKind::AgentMessage,
-            serde_json::json!({ "taskId": task_id, "assignment": false }),
-        ),
+    let kind = match origin {
+        MessageOrigin::User => SignalKind::UserMessage,
+        _ => SignalKind::AgentMessage,
     };
     // IMMEDIATE for the same reason as in `create_assignment`.
     let mut tx = pool
@@ -674,7 +649,6 @@ pub(crate) async fn deliver_task_message(
             kind,
             text: text.to_string(),
             origin: origin.clone(),
-            payload,
             delivery_key: None,
             connection_id: None,
         },
@@ -768,12 +742,6 @@ pub(crate) async fn post_input_required(
                     kind: SignalKind::TaskInputRequired,
                     text: question_text(&task.id, question, params),
                     origin: task_origin(&task, roster),
-                    payload: serde_json::json!({
-                        "taskId": task.id,
-                        "cycleNo": task.cycle_no,
-                        "question": question,
-                        "options": params.options,
-                    }),
                     delivery_key: None,
                     connection_id: None,
                 },
@@ -865,7 +833,7 @@ pub(crate) async fn request_stop(
     task_id: &str,
     roster: &[WorkspaceAgentRow],
 ) -> Result<StopOutcome, String> {
-    let (task, changed) = workspace_tasks_repo::request_stop(pool, task_id)
+    let (task, changed) = workspace_tasks_repo::mark_stopping(pool, task_id)
         .await?
         .ok_or_else(|| not_found(task_id))?;
     if !changed {
@@ -886,7 +854,11 @@ pub(crate) async fn request_stop(
         match finish_task_cycle(pool, &task.id, task.run_id.as_deref(), roster).await? {
             Some(finished) => StopOutcome::Stopped(finished),
             // The run's own teardown finalized the cycle first.
-            None => StopOutcome::Requested(load_task(pool, &task.id).await?),
+            None => StopOutcome::Requested(
+                workspace_tasks_repo::load_task(pool, &task.id)
+                    .await?
+                    .ok_or_else(|| not_found(&task.id))?,
+            ),
         },
     )
 }
@@ -1493,6 +1465,13 @@ mod tests {
             .unwrap();
     }
 
+    async fn task_row(pool: &DbPool, task_id: &str) -> WorkspaceTaskRow {
+        workspace_tasks_repo::load_task(pool, task_id)
+            .await
+            .unwrap()
+            .expect("task exists")
+    }
+
     async fn finish(pool: &DbPool, task_id: &str, run: &AssistantRun) -> Option<FinishedCycle> {
         finish_task_cycle(pool, task_id, Some(&run.id), &[])
             .await
@@ -1520,7 +1499,7 @@ mod tests {
         let parent = parent_session(&pool).await;
         let task_session = assign(&pool, &parent, "task-1").await;
 
-        let queued = load_task(&pool, "task-1").await.unwrap();
+        let queued = task_row(&pool, "task-1").await;
         assert_eq!(queued.status, TaskStatus::Queued);
         assert_eq!(queued.cycle_no, 0);
         assert_eq!(queued.run_id, None);
@@ -1592,34 +1571,6 @@ mod tests {
         let block = crate::assistant::conversation::content_text(&provider[0].content);
         assert_eq!(block.matches("[Automated event: task").count(), 2);
         assert!(block.contains("first done") && block.contains("second done"));
-    }
-
-    #[tokio::test]
-    async fn result_message_deleted_does_not_duplicate() {
-        let (_tmp, pool) = workspace_pool().await;
-        let parent = parent_session(&pool).await;
-        let session = assign(&pool, &parent, "task-1").await;
-        let (run, _) = open(&pool, &session).await;
-        end_run(&pool, &run, "done", RunStatus::Completed).await;
-        let result = finish(&pool, "task-1", &run).await.unwrap().result.unwrap();
-
-        repository::delete_message(&pool, &result.id).await.unwrap();
-        // A retried finalizer for the same cycle.
-        sqlx::query("UPDATE workspace_tasks SET status = 'running' WHERE id = 'task-1'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let retried = finish(&pool, "task-1", &run).await.unwrap();
-
-        assert!(retried.result.is_none());
-        assert!(repository::list_messages(&pool, &parent)
-            .await
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            signals_of(&pool, &parent).await,
-            [signal("task_result", "dropped")]
-        );
     }
 
     #[tokio::test]
@@ -1953,7 +1904,7 @@ mod tests {
         restart(tmp.path()).await;
         let pool = restart(tmp.path()).await;
 
-        let task = load_task(&pool, "task-1").await.unwrap();
+        let task = task_row(&pool, "task-1").await;
         assert_eq!(task.status, TaskStatus::Stopped);
         assert_eq!(task.stop_requested_at, requested.stop_requested_at);
         assert_eq!(
@@ -1975,7 +1926,7 @@ mod tests {
 
         let pool = restart(tmp.path()).await;
 
-        let task = load_task(&pool, "task-1").await.unwrap();
+        let task = task_row(&pool, "task-1").await;
         assert_eq!(task.status, TaskStatus::Stopped);
         assert_eq!(task.failure_reason, None);
         assert_eq!(
@@ -2006,10 +1957,7 @@ mod tests {
         let pool = restart(tmp.path()).await;
 
         for id in ["task-1", "task-2"] {
-            assert_eq!(
-                load_task(&pool, id).await.unwrap().status,
-                TaskStatus::Queued
-            );
+            assert_eq!(task_row(&pool, id).await.status, TaskStatus::Queued);
         }
         assert_eq!(
             signals_of(&pool, &claimed).await,
@@ -2101,7 +2049,7 @@ mod tests {
         );
         drop(tx);
 
-        let task = load_task(&pool, "task-1").await.unwrap();
+        let task = task_row(&pool, "task-1").await;
         assert_eq!(task.status, TaskStatus::Stopped);
         assert_eq!(task.stop_requested_at, stopped.task.stop_requested_at);
     }
@@ -2184,7 +2132,7 @@ mod tests {
         // The worker ends its turn while its subtask runs: no result yet.
         end_run(&pool, &run, "waiting for the child", RunStatus::Completed).await;
         assert!(finish(&pool, "task-1", &run).await.is_none());
-        let parked = load_task(&pool, "task-1").await.unwrap();
+        let parked = task_row(&pool, "task-1").await;
         assert_eq!((parked.status, parked.run_id), (TaskStatus::Running, None));
         assert!(signals_of(&pool, &parent).await.is_empty());
 
@@ -2257,7 +2205,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(session, None);
-        let task = load_task(&pool, "task-1").await.unwrap();
+        let task = task_row(&pool, "task-1").await;
         assert_eq!(task.status, TaskStatus::Failed);
         assert_eq!(
             task.failure_reason,
@@ -2303,11 +2251,12 @@ mod tests {
             .unwrap()
     }
 
-    async fn signal_status(pool: &DbPool, delivery: &TaskMessageDelivery) -> SignalStatus {
-        signals::signal_for_message(pool, &delivery.message.id)
+    async fn signal_status(pool: &DbPool, delivery: &TaskMessageDelivery) -> String {
+        sqlx::query_scalar("SELECT status FROM session_signals WHERE message_id = ?")
+            .bind(&delivery.message.id)
+            .fetch_one(pool)
             .await
             .unwrap()
-            .status
     }
 
     /// What `ask_user` does in a task session: registers the question, then
@@ -2344,8 +2293,6 @@ mod tests {
         }
     }
 
-    use crate::assistant::signals::SignalStatus;
-
     #[tokio::test]
     async fn message_running_task_is_pending_signal() {
         let (_tmp, pool) = workspace_pool().await;
@@ -2355,7 +2302,7 @@ mod tests {
         let sent = send(&pool, "task-1", "also check the docs", parent_agent()).await;
 
         assert!(!sent.answered);
-        assert_eq!(signal_status(&pool, &sent).await, SignalStatus::Pending);
+        assert_eq!(signal_status(&pool, &sent).await, "pending");
         assert!(matches!(
             claim(&pool, WS, &session, |id| Some(connection(id))).await.unwrap(),
             Kick::Busy { run_id } if run_id == run.id
@@ -2393,7 +2340,7 @@ mod tests {
         assert_eq!((task.status, task.cycle_no), (TaskStatus::Queued, 2));
         assert_eq!(task.stop_requested_at, None);
         assert_eq!(message_ids, std::slice::from_ref(&sent.message.id));
-        assert_eq!(signal_status(&pool, &sent).await, SignalStatus::Claimed);
+        assert_eq!(signal_status(&pool, &sent).await, "claimed");
     }
 
     #[tokio::test]
@@ -2413,7 +2360,7 @@ mod tests {
                 .unwrap(),
             Kick::Idle
         ));
-        assert_eq!(signal_status(&pool, &old).await, SignalStatus::Pending);
+        assert_eq!(signal_status(&pool, &old).await, "pending");
 
         // A new message resumes it, and the old one rides along.
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -2478,7 +2425,7 @@ mod tests {
         let sent = send(&pool, "task-1", "staging", parent_agent()).await;
 
         assert!(sent.answered);
-        assert_eq!(signal_status(&pool, &sent).await, SignalStatus::Consumed);
+        assert_eq!(signal_status(&pool, &sent).await, "consumed");
         let answer = answer_of(rx);
         assert_eq!(answer.text, "staging");
         assert_eq!(answer.origin, parent_agent());
@@ -2538,8 +2485,8 @@ mod tests {
         assert!(first.answered);
         assert!(!second.answered);
         assert_eq!(answer_of(rx).text, "from the parent");
-        assert_eq!(signal_status(&pool, &first).await, SignalStatus::Consumed);
-        assert_eq!(signal_status(&pool, &second).await, SignalStatus::Pending);
+        assert_eq!(signal_status(&pool, &first).await, "consumed");
+        assert_eq!(signal_status(&pool, &second).await, "pending");
         assert!(matches!(
             claim(&pool, WS, &session, |id| Some(connection(id)))
                 .await
@@ -2605,8 +2552,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(stopped.starts_with("not_found:"), "{stopped}");
-        let read = load_task(&other_pool, "task-1").await.unwrap_err();
-        assert!(read.starts_with("not_found:"), "{read}");
+        assert!(workspace_tasks_repo::load_task(&other_pool, "task-1")
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(message_count(&other_pool).await, (0, 0));
     }
 
@@ -2653,43 +2602,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_run_fanout_cap() {
+    async fn forty_first_assignment_rejected_budget_exceeded() {
         let (_tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
-        for n in 1..=4 {
+        for n in 1..=signals::AGENT_SENDS_PER_HOUR {
             delegate(&pool, &parent, "run-1", &format!("task-{n}"))
                 .await
-                .unwrap();
+                .unwrap_or_else(|error| panic!("assignment {n}: {error}"));
         }
 
-        let error = delegate(&pool, &parent, "run-1", "task-5")
+        let error = delegate(&pool, &parent, "run-1", "task-41")
             .await
             .unwrap_err();
-        assert!(error.starts_with("fan_out_exceeded:"), "{error}");
-        assert_eq!(task_count(&pool).await, 4);
-        // The cap is per run: the caller's next turn may assign again.
-        delegate(&pool, &parent, "run-2", "task-5").await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn active_task_cap_per_creator() {
-        let (_tmp, pool) = workspace_pool().await;
-        let parent = parent_session(&pool).await;
-        for n in 1..=12 {
-            delegate(&pool, &parent, &format!("run-{n}"), &format!("task-{n}"))
-                .await
-                .unwrap();
-        }
-
-        let error = delegate(&pool, &parent, "run-13", "task-13")
-            .await
-            .unwrap_err();
-        assert!(error.starts_with("fan_out_exceeded:"), "{error}");
-        sqlx::query("UPDATE workspace_tasks SET status = 'completed' WHERE id = 'task-1'")
-            .execute(&pool)
-            .await
-            .unwrap();
-        delegate(&pool, &parent, "run-13", "task-13").await.unwrap();
+        assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert_eq!(task_count(&pool).await, signals::AGENT_SENDS_PER_HOUR);
     }
 
     #[tokio::test]

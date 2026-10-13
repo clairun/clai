@@ -43,7 +43,6 @@ import { useTaskStore } from '../workspace/taskStore';
 import type { PendingAskUser } from '../assistant/sessionStore';
 import type {
   AssistantMessage,
-  SignalStatus,
   WorkspaceTaskResponse,
   WorkspaceTaskSendResponse,
 } from '../generated/bindings';
@@ -296,12 +295,12 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       content: [{ type: 'text', text: 'Also check the CHANGELOG' }],
     };
     const sendResponse = (
-      status: SignalStatus,
+      queued: boolean,
       over: Partial<WorkspaceTaskResponse> = {}
     ): WorkspaceTaskSendResponse => ({
       task: task({ updatedAt: 5n, ...over }),
       message: sent,
-      signal: { id: 'sig-1', status },
+      queued,
       run: null,
     });
     const composer = () => screen.getByRole('textbox', { name: /^Message Rust Architect/ });
@@ -343,7 +342,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
 
     it('send to running task marks queued chip', async () => {
       seedSession(true);
-      mockInvoke.mockResolvedValue(sendResponse('pending'));
+      mockInvoke.mockResolvedValue(sendResponse(true));
       renderPanel();
       await send();
       expect(mockInvoke).toHaveBeenCalledWith('workspace_send_task_message', {
@@ -355,7 +354,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
 
     it('queued_messages_delivered clears task chip', async () => {
       seedSession(true);
-      mockInvoke.mockResolvedValue(sendResponse('pending'));
+      mockInvoke.mockResolvedValue(sendResponse(true));
       renderPanel();
       await send();
       expect(await screen.findByText('Queued')).toBeInTheDocument();
@@ -365,9 +364,9 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       expect(screen.queryByText('Queued')).toBeNull();
     });
 
-    it('consumed send shows no chip', async () => {
+    it('unqueued send shows no chip', async () => {
       seedSession(true);
-      mockInvoke.mockResolvedValue(sendResponse('consumed'));
+      mockInvoke.mockResolvedValue(sendResponse(false));
       renderPanel();
       await send();
       expect(await screen.findByText('Also check the CHANGELOG')).toBeInTheDocument();
@@ -377,7 +376,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     it('composer send to input_required answers ask', async () => {
       seedSession(true, question);
       // The returned task may still read input_required; task_updated follows.
-      mockInvoke.mockResolvedValue(sendResponse('consumed', { status: 'input_required' }));
+      mockInvoke.mockResolvedValue(sendResponse(false, { status: 'input_required' }));
       renderPanel({ status: 'input_required' });
       await send('No, skip them');
       expect(mockInvoke).toHaveBeenCalledWith('workspace_send_task_message', {
@@ -391,7 +390,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       // The parent answered first, so the human's send waits for the run.
       seedSession(true);
       mockInvoke.mockResolvedValue(
-        sendResponse('pending', {
+        sendResponse(true, {
           status: 'running',
           answeredBy: {
             kind: 'agent',
@@ -406,7 +405,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
 
     it('send to stopped task upserts queued task', async () => {
       seedSession(false);
-      mockInvoke.mockResolvedValue(sendResponse('claimed', { status: 'queued', cycleNo: 2n }));
+      mockInvoke.mockResolvedValue(sendResponse(false, { status: 'queued', cycleNo: 2n }));
       renderPanel({ status: 'stopped' });
       await send();
       expect(useTaskStore.getState().tasks['ws-1']?.['task-1']).toMatchObject({

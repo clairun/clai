@@ -43,5 +43,3 @@ SET failure_reason = CASE WHEN error LIKE '%app restart%' THEN 'restart' ELSE 'e
 WHERE status = 'failed' AND failure_reason IS NULL;
 CREATE INDEX idx_workspace_tasks_parent_task ON workspace_tasks(parent_task_id, created_at);
 CREATE INDEX idx_workspace_tasks_parent_session ON workspace_tasks(parent_session_id, created_at);
-CREATE INDEX idx_workspace_tasks_parent_run ON workspace_tasks(parent_run_id);
-CREATE INDEX idx_workspace_tasks_creator_active ON workspace_tasks(created_by_workspace_agent_id, status);

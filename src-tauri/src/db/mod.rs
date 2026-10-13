@@ -728,10 +728,9 @@ mod tests {
         run_all_migrations(&pool).await;
 
         let signals: Vec<String> = sqlx::query_scalar(
-            "SELECT id || ' ' || target_session_id || ' ' || kind || ' ' || lane || ' '
+            "SELECT id || ' ' || target_session_id || ' ' || kind || ' '
                     || message_id || ' ' || connection_id || ' ' || status || ' '
-                    || COALESCE(consumed_run_id, '-') || ' ' || created_at || ' '
-                    || COALESCE(consumed_at, '-')
+                    || COALESCE(consumed_run_id, '-') || ' ' || created_at
              FROM session_signals ORDER BY id",
         )
         .fetch_all(&pool)
@@ -740,8 +739,8 @@ mod tests {
         assert_eq!(
             signals,
             [
-                "q:m1 s user_message 1 m1 c1 pending - 5 -",
-                "q:m2 s user_message 1 m2 c2 consumed r 6 9",
+                "q:m1 s user_message m1 c1 pending - 5",
+                "q:m2 s user_message m2 c2 consumed r 6",
             ]
         );
         let queue_left: i64 = sqlx::query_scalar(
