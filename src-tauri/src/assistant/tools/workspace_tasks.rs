@@ -61,7 +61,7 @@ pub struct SendWorkspaceTaskMessageParams {
     pub message: String,
 }
 
-const MAX_TASK_MESSAGE_CHARS: usize = 20_000;
+pub(crate) const MAX_TASK_MESSAGE_CHARS: usize = 20_000;
 
 pub async fn execute(
     deps: &AssistantDeps,
@@ -240,8 +240,10 @@ pub(crate) async fn create_assignment(
     connection: Result<&str, &str>,
     origin: MessageOrigin,
 ) -> Result<Option<String>, String> {
+    // IMMEDIATE: the limit checks read before the insert writes, and a
+    // deferred read transaction cannot upgrade once another writer commits.
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| format!("Failed to start task assignment transaction: {}", e))?;
     create_task_row(&mut tx, task, connection.err()).await?;
@@ -382,7 +384,7 @@ pub(crate) struct FinishedCycle {
 
 /// The database half of [`finalize_task_cycle`]: the task's terminal update
 /// and its result event, in one transaction. `None` when the cycle was
-/// already finalized.
+/// already finalized or stays open for its subtasks.
 pub(crate) async fn finish_task_cycle(
     pool: &DbPool,
     task_id: &str,
@@ -403,6 +405,14 @@ pub(crate) async fn finish_task_cycle(
         .begin()
         .await
         .map_err(|e| format!("Failed to start task finalize transaction: {}", e))?;
+    if let Some(run_id) = run_id {
+        if workspace_tasks_repo::park_for_subtasks(&mut tx, task_id, run_id).await? {
+            tx.commit()
+                .await
+                .map_err(|e| format!("Failed to commit task park: {}", e))?;
+            return Ok(None);
+        }
+    }
     let Some(task) = workspace_tasks_repo::finish_cycle(&mut tx, task_id, run_id, &outcome).await?
     else {
         return Ok(None);
@@ -649,8 +659,9 @@ pub(crate) async fn deliver_task_message(
             serde_json::json!({ "taskId": task_id, "assignment": false }),
         ),
     };
+    // IMMEDIATE for the same reason as in `create_assignment`.
     let mut tx = pool
-        .begin()
+        .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| format!("Failed to start task message transaction: {}", e))?;
     if let MessageOrigin::Agent { agent, .. } = &origin {
@@ -670,27 +681,33 @@ pub(crate) async fn deliver_task_message(
     )
     .await?
     .expect("an event without a delivery key is always written");
+    // An answer is consumed before the waiting tool sees it, so the run's
+    // next request cannot also read it as pending input.
+    let answer_run = match (task.status, &task.run_id) {
+        (TaskStatus::InputRequired, Some(run_id)) => Some(run_id),
+        _ => None,
+    };
+    if let Some(run_id) = answer_run {
+        signals::consume_one(&mut tx, &session_id, run_id, &message.id).await?;
+    }
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit task message transaction: {}", e))?;
 
-    let answered = match (task.status, &task.run_id) {
-        (TaskStatus::InputRequired, Some(run_id)) => {
-            let answer = AskUserAnswer {
+    let answered = answer_run.is_some()
+        && ask_user::submit_answer_for_session(
+            &session_id,
+            AskUserAnswer {
                 text: text.to_string(),
                 selected_option_index: None,
                 selected_option_indexes: None,
                 origin,
-            };
-            let answered = ask_user::submit_answer_for_session(&session_id, answer).is_ok();
-            if answered {
-                signals::consume(pool, &session_id, run_id, std::slice::from_ref(&message.id))
-                    .await?;
-            }
-            answered
-        }
-        _ => false,
-    };
+            },
+        )
+        .is_ok();
+    if answer_run.is_some() && !answered {
+        signals::unconsume(pool, &message.id).await?;
+    }
     Ok(TaskMessageDelivery {
         task,
         message,
@@ -734,12 +751,44 @@ pub(crate) async fn post_input_required(
     params: &AskUserParams,
     roster: &[WorkspaceAgentRow],
 ) -> Result<Option<(WorkspaceTaskRow, Option<AssistantMessage>)>, String> {
-    let Some(task) = workspace_tasks_repo::mark_input_required(pool, task_id, run_id).await? else {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start task question transaction: {}", e))?;
+    let Some(task) = workspace_tasks_repo::mark_input_required(&mut tx, task_id, run_id).await?
+    else {
         return Ok(None);
     };
-    let Some(parent_session_id) = task.parent_session_id.clone() else {
-        return Ok(Some((task, None)));
+    let event = match task.parent_session_id.as_deref() {
+        Some(parent_session_id) => {
+            signals::insert_event(
+                &mut tx,
+                NewEvent {
+                    session_id: parent_session_id,
+                    kind: SignalKind::TaskInputRequired,
+                    text: question_text(&task.id, question, params),
+                    origin: task_origin(&task, roster),
+                    payload: serde_json::json!({
+                        "taskId": task.id,
+                        "cycleNo": task.cycle_no,
+                        "question": question,
+                        "options": params.options,
+                    }),
+                    delivery_key: None,
+                    connection_id: None,
+                },
+            )
+            .await?
+        }
+        None => None,
     };
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit task question transaction: {}", e))?;
+    Ok(Some((task, event)))
+}
+
+fn question_text(task_id: &str, question: &str, params: &AskUserParams) -> String {
     let mut text = format!("Question: {question}");
     if let Some(context) = params.context.as_deref().filter(|c| !c.trim().is_empty()) {
         text.push_str(&format!("\n\nContext: {}", context.trim()));
@@ -751,35 +800,9 @@ pub(crate) async fn post_input_required(
         }
     }
     text.push_str(&format!(
-        "\n\nAnswer with workspace_sendTaskMessage (taskId: {}).",
-        task.id
+        "\n\nAnswer with workspace_sendTaskMessage (taskId: {task_id})."
     ));
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start task question transaction: {}", e))?;
-    let event = signals::insert_event(
-        &mut tx,
-        NewEvent {
-            session_id: &parent_session_id,
-            kind: SignalKind::TaskInputRequired,
-            text,
-            origin: task_origin(&task, roster),
-            payload: serde_json::json!({
-                "taskId": task.id,
-                "cycleNo": task.cycle_no,
-                "question": question,
-                "options": params.options,
-            }),
-            delivery_key: None,
-            connection_id: None,
-        },
-    )
-    .await?;
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit task question transaction: {}", e))?;
-    Ok(Some((task, event)))
+    text
 }
 
 /// `input_required → running` once the task's question was answered.
@@ -2152,6 +2175,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegating_worker_reports_once_after_its_subtask() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let (session, run) = running(&pool, &parent, "task-1").await;
+        let child_session = delegate(&pool, &session, &run.id, "child").await.unwrap();
+
+        // The worker ends its turn while its subtask runs: no result yet.
+        end_run(&pool, &run, "waiting for the child", RunStatus::Completed).await;
+        assert!(finish(&pool, "task-1", &run).await.is_none());
+        let parked = load_task(&pool, "task-1").await.unwrap();
+        assert_eq!((parked.status, parked.run_id), (TaskStatus::Running, None));
+        assert!(signals_of(&pool, &parent).await.is_empty());
+
+        // The subtask's result wakes it in the same cycle.
+        let (child_run, _) = open(&pool, &child_session).await;
+        end_run(&pool, &child_run, "child done", RunStatus::Completed).await;
+        finish(&pool, "child", &child_run).await.unwrap();
+        let (run, task) = open(&pool, &session).await;
+        assert_eq!((task.status, task.cycle_no), (TaskStatus::Queued, 1));
+        workspace_tasks_repo::mark_running(&pool, "task-1", &run.id)
+            .await
+            .unwrap();
+        end_run(&pool, &run, "all done", RunStatus::Completed).await;
+
+        let finished = finish(&pool, "task-1", &run).await.expect("finalized");
+        assert_eq!(finished.task.status, TaskStatus::Completed);
+        assert!(matches!(
+            &finished.result.expect("one result").content[0],
+            ContentPart::Text { text } if text == "all done"
+        ));
+        assert_eq!(
+            signals_of(&pool, &parent).await,
+            [signal("task_result", "pending")]
+        );
+    }
+
+    #[tokio::test]
     async fn assignment_error_stores_nothing() {
         let (_tmp, pool) = workspace_pool().await;
         sqlx::query(
@@ -2548,6 +2608,21 @@ mod tests {
         let read = load_task(&other_pool, "task-1").await.unwrap_err();
         assert!(read.starts_with("not_found:"), "{read}");
         assert_eq!(message_count(&other_pool).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn parallel_assignments_from_one_run_all_succeed() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+
+        let (a, b) = tokio::join!(
+            delegate(&pool, &parent, "run-1", "task-a"),
+            delegate(&pool, &parent, "run-1", "task-b"),
+        );
+
+        a.unwrap();
+        b.unwrap();
+        assert_eq!(task_count(&pool).await, 2);
     }
 
     #[tokio::test]

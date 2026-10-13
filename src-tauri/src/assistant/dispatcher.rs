@@ -16,7 +16,7 @@ use crate::assistant::runtime::{self, LiveRunKey};
 use crate::assistant::signals;
 use crate::assistant::tools::workspace_tasks;
 use crate::assistant::types::{
-    AssistantRun, MessageId, MessageOrigin, ProviderConnection, RunId, RunStatus, RunTrigger,
+    AssistantRun, MessageId, ProviderConnection, RunId, RunStatus, RunTrigger,
 };
 use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskRow};
 use crate::db::DbPool;
@@ -180,19 +180,8 @@ pub(crate) async fn claim(
     let task_session = workspace_tasks_repo::task_of_session(pool, session_id)
         .await?
         .is_some();
-    let only_user_messages = open
-        .iter()
-        .filter(|content| {
-            content
-                .connection_id
-                .as_ref()
-                .is_none_or(|id| *id == connection.id)
-        })
-        .all(|content| content.message.origin == MessageOrigin::User);
     let trigger = if task_session {
         RunTrigger::WorkspaceTask
-    } else if only_user_messages {
-        RunTrigger::UserMessage
     } else {
         RunTrigger::SignalWake
     };
@@ -411,7 +400,7 @@ mod tests {
         else {
             panic!("an idle session with a pending message must start a run");
         };
-        assert_eq!(run.trigger, RunTrigger::UserMessage);
+        assert_eq!(run.trigger, RunTrigger::SignalWake);
         assert_eq!(run.status, RunStatus::Queued);
         assert_eq!(message_ids, vec![message_id.clone()]);
         let input = signals::list_content_for_run(&pool, &session.id, &run.id)
@@ -472,49 +461,6 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(100), wake.notified())
             .await
             .expect("the kick wakes the active run for its mid-run input");
-    }
-
-    #[tokio::test]
-    async fn automated_events_wake_a_chat_with_the_signal_prompt() {
-        let (_tmp, pool) = workspace_pool().await;
-        let session = repository::create_session(&pool, SessionContext::default())
-            .await
-            .unwrap();
-        send(&pool, &session.id, "hello").await;
-        let mut tx = pool.begin().await.unwrap();
-        signals::insert_event(
-            &mut tx,
-            signals::NewEvent {
-                session_id: &session.id,
-                kind: signals::SignalKind::TaskResult,
-                text: "done".into(),
-                origin: MessageOrigin::Agent {
-                    agent: Box::new(crate::assistant::types::AgentRefSnapshot {
-                        workspace_agent_id: "wa-1".into(),
-                        agent_definition_id: None,
-                        display_name: "Worker".into(),
-                        is_default: false,
-                        avatar: None,
-                    }),
-                    session_id: None,
-                    run_id: None,
-                },
-                payload: serde_json::json!({}),
-                delivery_key: None,
-                connection_id: None,
-            },
-        )
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-
-        let Kick::Started { run, .. } = claim(&pool, WS, &session.id, |id| Some(connection(id)))
-            .await
-            .unwrap()
-        else {
-            panic!("expected a run");
-        };
-        assert_eq!(run.trigger, RunTrigger::SignalWake);
     }
 
     #[tokio::test]

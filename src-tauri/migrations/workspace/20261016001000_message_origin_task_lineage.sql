@@ -32,6 +32,12 @@ ALTER TABLE workspace_tasks ADD COLUMN input_answered_by_json TEXT;
 -- Non-NULL iff status = 'failed'.
 ALTER TABLE workspace_tasks ADD COLUMN failure_reason TEXT;
 UPDATE workspace_tasks SET status = 'failed', failure_reason = 'blocked' WHERE status = 'blocked';
+-- A task in flight under the old code has no signal that could dispatch it.
+UPDATE workspace_tasks
+SET status = 'failed', failure_reason = 'restart',
+    error = COALESCE(error, 'task interrupted by app upgrade'),
+    completed_at = COALESCE(completed_at, updated_at)
+WHERE status IN ('queued', 'running');
 UPDATE workspace_tasks
 SET failure_reason = CASE WHEN error LIKE '%app restart%' THEN 'restart' ELSE 'error' END
 WHERE status = 'failed' AND failure_reason IS NULL;

@@ -366,8 +366,8 @@ mod tests {
         }
     }
 
-    /// The same migration folds `blocked` into `failed{blocked}` and gives
-    /// every other failed row a reason.
+    /// The same migration folds `blocked` into `failed{blocked}`, fails tasks
+    /// left in flight by the old code, and gives every failed row a reason.
     #[tokio::test]
     async fn migration_backfills_blocked_rows_and_labels_restart_failures() {
         let pool = pool_migrated_before(20261016001000).await;
@@ -381,6 +381,8 @@ mod tests {
             ),
             ("error", "failed", Some("provider exploded")),
             ("done", "completed", None),
+            ("in-flight-queued", "queued", None),
+            ("in-flight-running", "running", None),
         ] {
             insert_task(&pool, id, status, None, error).await;
         }
@@ -396,6 +398,8 @@ mod tests {
             ("blocked", "failed", Some("blocked")),
             ("done", "completed", None),
             ("error", "failed", Some("error")),
+            ("in-flight-queued", "failed", Some("restart")),
+            ("in-flight-running", "failed", Some("restart")),
             ("never-ran", "failed", Some("restart")),
             ("restart", "failed", Some("restart")),
         ];
@@ -629,6 +633,10 @@ mod tests {
         let pool = previous_process_db(tmp.path()).await;
         insert_task(&pool, "t1", "queued", None, None).await;
         insert_task(&pool, "t2", "running", None, None).await;
+        sqlx::query("UPDATE workspace_tasks SET run_id = 'run-2' WHERE id = 't2'")
+            .execute(&pool)
+            .await
+            .unwrap();
         pool.close().await;
 
         let pool = init_workspace_db(tmp.path(), &[]).await.unwrap();

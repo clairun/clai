@@ -409,32 +409,64 @@ pub async fn consume(
     if message_ids.is_empty() {
         return Ok(());
     }
-
-    let consumed_at = now_ms();
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| format!("Failed to start signal consume transaction: {}", e))?;
     for message_id in message_ids {
-        sqlx::query(
-            r#"
-            UPDATE session_signals
-            SET status = 'consumed', consumed_run_id = ?, consumed_at = ?
-            WHERE target_session_id = ? AND message_id = ? AND status = 'pending'
-            "#,
-        )
-        .bind(run_id)
-        .bind(consumed_at)
-        .bind(session_id)
-        .bind(message_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to consume session signal: {}", e))?;
-        stamp_run(&mut tx, message_id, run_id).await?;
+        consume_one(&mut tx, session_id, run_id, message_id).await?;
     }
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit signal consume transaction: {}", e))
+}
+
+/// [`consume`] for one message, inside the caller's transaction.
+pub(crate) async fn consume_one(
+    conn: &mut SqliteConnection,
+    session_id: &str,
+    run_id: &str,
+    message_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE session_signals
+        SET status = 'consumed', consumed_run_id = ?, consumed_at = ?
+        WHERE target_session_id = ? AND message_id = ? AND status = 'pending'
+        "#,
+    )
+    .bind(run_id)
+    .bind(now_ms())
+    .bind(session_id)
+    .bind(message_id)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| format!("Failed to consume session signal: {}", e))?;
+    stamp_run(conn, message_id, run_id).await
+}
+
+/// Undoes [`consume_one`] for a message no run took after all.
+pub(crate) async fn unconsume(pool: &DbPool, message_id: &str) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to start signal release transaction: {}", e))?;
+    sqlx::query(
+        "UPDATE session_signals SET status = 'pending', consumed_run_id = NULL, consumed_at = NULL
+         WHERE message_id = ? AND status = 'consumed'",
+    )
+    .bind(message_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to release session signal: {}", e))?;
+    sqlx::query("UPDATE assistant_messages SET run_id = NULL WHERE id = ?")
+        .bind(message_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to release message attribution: {}", e))?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit signal release transaction: {}", e))
 }
 
 /// Deletes a user message whose signal is still pending, with the signal.

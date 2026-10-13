@@ -298,11 +298,11 @@ pub(crate) struct NewTask<'a> {
 }
 
 /// Tasks nest at most this deep: a root task has depth 0.
-const MAX_TASK_DEPTH: i64 = 4;
+pub(crate) const MAX_TASK_DEPTH: i64 = 4;
 /// Assignments one run may make.
-const MAX_ASSIGNMENTS_PER_RUN: i64 = 4;
+pub(crate) const MAX_ASSIGNMENTS_PER_RUN: i64 = 4;
 /// Unfinished tasks one workspace agent may have created.
-const MAX_ACTIVE_TASKS_PER_CREATOR: i64 = 12;
+pub(crate) const MAX_ACTIVE_TASKS_PER_CREATOR: i64 = 12;
 
 /// Inserts a `queued` task, or with `error` one that failed for want of a
 /// provider connection, unless it would break a delegation limit.
@@ -411,7 +411,8 @@ pub(crate) async fn lineage_for_caller(
 /// Opens the next cycle of the task owning `session_id` for `run_id`, the
 /// run the dispatcher just claimed its input for. Only a finished task opens
 /// one: a new task, a completed or failed one, or a stopped one that `run_id`
-/// claimed a message for that was sent after the stop. `None` when the
+/// claimed a message for that was sent after the stop. A task parked by
+/// [`park_for_subtasks`] continues its cycle instead. `None` when the
 /// session is not a task session or the task is not finished. Call inside
 /// the claim transaction, after the claim.
 pub(crate) async fn open_cycle(
@@ -422,12 +423,14 @@ pub(crate) async fn open_cycle(
     let row = sqlx::query(&format!(
         r#"
         UPDATE workspace_tasks
-        SET status = 'queued', run_id = ?, cycle_no = cycle_no + 1, failure_reason = NULL,
-            result_summary = NULL, error = NULL, completed_at = NULL,
-            stop_requested_at = NULL, input_answered_by_json = NULL, updated_at = ?
+        SET status = 'queued', run_id = ?, cycle_no = cycle_no + (status <> 'running'),
+            failure_reason = NULL, result_summary = NULL, error = NULL, completed_at = NULL,
+            stop_requested_at = NULL,
+            input_answered_by_json = CASE WHEN status = 'running' THEN input_answered_by_json END,
+            updated_at = ?
         WHERE session_id = ?
           AND (status IN ('completed', 'failed')
-               OR (status = 'queued' AND run_id IS NULL)
+               OR (status IN ('queued', 'running') AND run_id IS NULL)
                OR (status = 'stopped' AND EXISTS (
                    SELECT 1 FROM session_signals s
                    WHERE s.claimed_run_id = ? AND s.kind IN ('user_message', 'agent_message')
@@ -443,6 +446,39 @@ pub(crate) async fn open_cycle(
     .await
     .map_err(|e| format!("Failed to open task cycle: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
+}
+
+/// Keeps the cycle of `run_id`, whose run just ended, open while the task
+/// still waits on its own subtasks: one is unfinished, or its event has not
+/// been delivered here yet. The task stays `running` with no run until that
+/// event wakes it and [`open_cycle`] continues the cycle, so its parent gets
+/// one result, after the subtasks. `false` when there is nothing to wait for
+/// or the cycle is not running.
+pub(crate) async fn park_for_subtasks(
+    conn: &mut SqliteConnection,
+    task_id: &str,
+    run_id: &str,
+) -> Result<bool, String> {
+    let parked = sqlx::query(
+        r#"
+        UPDATE workspace_tasks SET run_id = NULL, updated_at = ?
+        WHERE id = ? AND run_id = ? AND status = 'running'
+          AND (EXISTS (SELECT 1 FROM workspace_tasks AS child
+                       WHERE child.parent_session_id = workspace_tasks.session_id
+                         AND child.status IN ('queued', 'running', 'input_required', 'stopping'))
+               OR EXISTS (SELECT 1 FROM session_signals AS s
+                          WHERE s.target_session_id = workspace_tasks.session_id
+                            AND s.status = 'pending'
+                            AND s.kind IN ('task_result', 'task_failed', 'task_input_required')))
+        "#,
+    )
+    .bind(now_ms())
+    .bind(task_id)
+    .bind(run_id)
+    .execute(conn)
+    .await
+    .map_err(|e| format!("Failed to park workspace task cycle: {}", e))?;
+    Ok(parked.rows_affected() > 0)
 }
 
 /// `queued → running` for the cycle of `run_id`.
@@ -471,7 +507,7 @@ pub(crate) async fn mark_running(
 /// task already waiting on an earlier question stays waiting. `None` when
 /// the cycle is not running (stopping, ended or superseded).
 pub(crate) async fn mark_input_required(
-    pool: &DbPool,
+    conn: &mut SqliteConnection,
     task_id: &str,
     run_id: &str,
 ) -> Result<Option<WorkspaceTaskRow>, String> {
@@ -486,7 +522,7 @@ pub(crate) async fn mark_input_required(
     .bind(now_ms())
     .bind(task_id)
     .bind(run_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(|e| format!("Failed to mark workspace task input_required: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
@@ -597,8 +633,9 @@ pub(crate) async fn request_stop(
 
 /// Restart recovery for tasks the previous process left mid-cycle: a task
 /// whose run never started is `queued` again without a run, for the next
-/// kick; one with no session can never be dispatched and fails; every other
-/// unfinished cycle ends `stopped`. Returns the stopped tasks. Run before
+/// kick; one with no session can never be dispatched and fails; a task
+/// parked for its subtasks keeps waiting; every other unfinished cycle ends
+/// `stopped`. Returns the stopped tasks. Run before
 /// `recover_stale_runs`, which closes the runs this reads.
 pub(crate) async fn stop_interrupted(
     conn: &mut SqliteConnection,
@@ -635,8 +672,8 @@ pub(crate) async fn stop_interrupted(
         UPDATE workspace_tasks
         SET status = 'stopped', error = 'task interrupted by app restart',
             stop_requested_at = COALESCE(stop_requested_at, ?), updated_at = ?, completed_at = ?
-        WHERE status IN ('running', 'input_required', 'stopping')
-           OR (status = 'queued' AND run_id IS NOT NULL)
+        WHERE status IN ('input_required', 'stopping')
+           OR (status IN ('queued', 'running') AND run_id IS NOT NULL)
         RETURNING {TASK_COLUMNS}
         "#
     ))
@@ -850,7 +887,8 @@ mod tests {
         };
 
         acknowledge().await;
-        let asked = mark_input_required(&pool, "task-1", "run-1")
+        let mut conn = pool.acquire().await.expect("connection");
+        let asked = mark_input_required(&mut conn, "task-1", "run-1")
             .await
             .expect("mark")
             .expect("task is running");
@@ -863,7 +901,6 @@ mod tests {
             error: Some("boom".to_string()),
             result_summary: None,
         };
-        let mut conn = pool.acquire().await.expect("connection");
         let failed = finish_cycle(&mut conn, "task-1", Some("run-1"), &outcome)
             .await
             .expect("finish")
