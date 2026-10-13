@@ -222,14 +222,14 @@ impl WorkspaceTaskRow {
 }
 
 pub(crate) async fn load_task(
-    pool: &DbPool,
+    conn: impl sqlx::SqliteExecutor<'_>,
     task_id: &str,
 ) -> Result<Option<WorkspaceTaskRow>, String> {
     let row = sqlx::query(&format!(
         "SELECT {TASK_COLUMNS} FROM workspace_tasks WHERE id = ?"
     ))
     .bind(task_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .map_err(|e| format!("Failed to load workspace task: {}", e))?;
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
@@ -377,7 +377,8 @@ pub(crate) async fn open_cycle(
     let row = sqlx::query(&format!(
         r#"
         UPDATE workspace_tasks
-        SET status = 'queued', run_id = ?, cycle_no = cycle_no + (status <> 'running'),
+        SET status = 'queued', run_id = ?,
+            cycle_no = cycle_no + (status NOT IN ('queued', 'running') OR cycle_no = 0),
             failure_reason = NULL, result_summary = NULL, error = NULL, completed_at = NULL,
             stop_requested_at = NULL,
             input_answered_by_json = CASE WHEN status = 'running' THEN input_answered_by_json END,
@@ -406,14 +407,14 @@ pub(crate) async fn open_cycle(
 /// still waits on its own subtasks: one is unfinished, or its event has not
 /// been delivered here yet. The task stays `running` with no run until that
 /// event wakes it and [`open_cycle`] continues the cycle, so its parent gets
-/// one result, after the subtasks. `false` when there is nothing to wait for
-/// or the cycle is not running.
+/// one result, after the subtasks. Returns the parked task; `None` when there
+/// is nothing to wait for or the cycle is not running.
 pub(crate) async fn park_for_subtasks(
     conn: &mut SqliteConnection,
     task_id: &str,
     run_id: &str,
-) -> Result<bool, String> {
-    let parked = sqlx::query(
+) -> Result<Option<WorkspaceTaskRow>, String> {
+    let row = sqlx::query(&format!(
         r#"
         UPDATE workspace_tasks SET run_id = NULL, updated_at = ?
         WHERE id = ? AND run_id = ? AND status = 'running'
@@ -424,15 +425,16 @@ pub(crate) async fn park_for_subtasks(
                           WHERE s.target_session_id = workspace_tasks.session_id
                             AND s.status = 'pending'
                             AND s.kind IN ('task_result', 'task_failed', 'task_input_required')))
-        "#,
-    )
+        RETURNING {TASK_COLUMNS}
+        "#
+    ))
     .bind(now_ms())
     .bind(task_id)
     .bind(run_id)
-    .execute(conn)
+    .fetch_optional(conn)
     .await
     .map_err(|e| format!("Failed to park workspace task cycle: {}", e))?;
-    Ok(parked.rows_affected() > 0)
+    row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
 }
 
 /// `queued → running` for the cycle of `run_id`.
@@ -585,6 +587,25 @@ pub(crate) async fn mark_stopping(
     }
 }
 
+/// Every task below `task_id` in the delegation tree, parents first.
+pub(crate) async fn descendant_ids(pool: &DbPool, task_id: &str) -> Result<Vec<String>, String> {
+    sqlx::query_scalar(
+        r#"
+        WITH RECURSIVE tree(id, depth) AS (
+            SELECT id, depth FROM workspace_tasks WHERE parent_task_id = ?
+            UNION ALL
+            SELECT child.id, child.depth FROM workspace_tasks AS child
+            JOIN tree ON child.parent_task_id = tree.id
+        )
+        SELECT id FROM tree ORDER BY depth
+        "#,
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load subtasks: {}", e))
+}
+
 /// Restart recovery for tasks the previous process left mid-cycle: a task
 /// whose run never started is `queued` again without a run, for the next
 /// kick; one with no session can never be dispatched and fails; a task
@@ -612,7 +633,7 @@ pub(crate) async fn stop_interrupted(
 
     sqlx::query(
         r#"
-        UPDATE workspace_tasks SET run_id = NULL, cycle_no = cycle_no - 1
+        UPDATE workspace_tasks SET run_id = NULL
         WHERE status = 'queued'
           AND run_id IN (SELECT id FROM assistant_runs WHERE status = 'queued')
         "#,

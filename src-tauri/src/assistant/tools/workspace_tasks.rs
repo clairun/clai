@@ -375,8 +375,9 @@ pub(crate) struct FinishedCycle {
 }
 
 /// The database half of [`finalize_task_cycle`]: the task's terminal update
-/// and its result event, in one transaction. `None` when the cycle was
-/// already finalized or stays open for its subtasks.
+/// and its result event, in one transaction. A completed cycle whose task
+/// still waits on its subtasks stays open instead, returned with no result.
+/// `None` when the cycle was already finalized.
 pub(crate) async fn finish_task_cycle(
     pool: &DbPool,
     task_id: &str,
@@ -397,12 +398,14 @@ pub(crate) async fn finish_task_cycle(
         .begin()
         .await
         .map_err(|e| format!("Failed to start task finalize transaction: {}", e))?;
-    if let Some(run_id) = run_id {
-        if workspace_tasks_repo::park_for_subtasks(&mut tx, task_id, run_id).await? {
+    if let (Some(run_id), TaskStatus::Completed) = (run_id, outcome.status) {
+        if let Some(task) =
+            workspace_tasks_repo::park_for_subtasks(&mut tx, task_id, run_id).await?
+        {
             tx.commit()
                 .await
                 .map_err(|e| format!("Failed to commit task park: {}", e))?;
-            return Ok(None);
+            return Ok(Some(FinishedCycle { task, result: None }));
         }
     }
     let Some(task) = workspace_tasks_repo::finish_cycle(&mut tx, task_id, run_id, &outcome).await?
@@ -623,13 +626,6 @@ pub(crate) async fn deliver_task_message(
             "invalid_input: message is longer than {MAX_TASK_MESSAGE_CHARS} characters."
         ));
     }
-    let task = workspace_tasks_repo::load_task(pool, task_id)
-        .await?
-        .ok_or_else(|| not_found(task_id))?;
-    let session_id = task.session_id.clone().ok_or_else(|| {
-        format!("invalid_input: task {task_id} never started, so it cannot take messages.")
-    })?;
-
     let kind = match origin {
         MessageOrigin::User => SignalKind::UserMessage,
         _ => SignalKind::AgentMessage,
@@ -639,6 +635,12 @@ pub(crate) async fn deliver_task_message(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(|e| format!("Failed to start task message transaction: {}", e))?;
+    let task = workspace_tasks_repo::load_task(&mut *tx, task_id)
+        .await?
+        .ok_or_else(|| not_found(task_id))?;
+    let session_id = task.session_id.clone().ok_or_else(|| {
+        format!("invalid_input: task {task_id} never started, so it cannot take messages.")
+    })?;
     if let MessageOrigin::Agent { agent, .. } = &origin {
         signals::ensure_sender_budget(&mut tx, &agent.workspace_agent_id).await?;
     }
@@ -654,7 +656,7 @@ pub(crate) async fn deliver_task_message(
         },
     )
     .await?
-    .expect("an event without a delivery key is always written");
+    .ok_or_else(|| format!("invalid_input: task {task_id} has no session any more."))?;
     // An answer is consumed before the waiting tool sees it, so the run's
     // next request cannot also read it as pending input.
     let answer_run = match (task.status, &task.run_id) {
@@ -680,7 +682,10 @@ pub(crate) async fn deliver_task_message(
         )
         .is_ok();
     if answer_run.is_some() && !answered {
-        signals::unconsume(pool, &message.id).await?;
+        // The message is saved; failing here would invite a duplicate send.
+        if let Err(error) = signals::unconsume(pool, &message.id).await {
+            tracing::error!(task_id, error, "Failed to hand an unanswered message back");
+        }
     }
     Ok(TaskMessageDelivery {
         task,
@@ -787,19 +792,40 @@ pub(crate) async fn record_ask_answered(
     }
 }
 
-/// Requests a stop of the task's current cycle: `stopping` until the run's
-/// teardown finalizes it, `stopped` at once when no run is active.
+/// Requests a stop of the task's current cycle and of every unfinished
+/// subtask below it: `stopping` until a run's teardown finalizes it,
+/// `stopped` at once when no run is active. Returns the task's outcome.
 pub(crate) async fn stop_task(deps: &AssistantDeps, task_id: &str) -> Result<StopOutcome, String> {
     let roster =
         load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)
             .unwrap_or_default();
-    let outcome = request_stop(&deps.pool, &deps.workspace_id, task_id, &roster).await?;
-    match &outcome {
-        StopOutcome::Requested(task) => emit_task_updated(deps, task.clone()).await,
-        StopOutcome::Stopped(finished) => announce_finished(deps, finished.clone()).await,
-        StopOutcome::AlreadyStopping(_) | StopOutcome::AlreadyTerminal(_) => {}
+    let outcomes = request_stop_tree(&deps.pool, &deps.workspace_id, task_id, &roster).await?;
+    for outcome in &outcomes {
+        match outcome {
+            StopOutcome::Requested(task) => emit_task_updated(deps, task.clone()).await,
+            StopOutcome::Stopped(finished) => announce_finished(deps, finished.clone()).await,
+            StopOutcome::AlreadyStopping(_) | StopOutcome::AlreadyTerminal(_) => {}
+        }
     }
-    Ok(outcome)
+    Ok(outcomes
+        .into_iter()
+        .next()
+        .expect("the tree starts with the task"))
+}
+
+/// [`request_stop`] for `task_id`, then for each task below it, parents
+/// first, so no subtask result can resume a parent being stopped.
+pub(crate) async fn request_stop_tree(
+    pool: &DbPool,
+    workspace_id: &str,
+    task_id: &str,
+    roster: &[WorkspaceAgentRow],
+) -> Result<Vec<StopOutcome>, String> {
+    let mut outcomes = vec![request_stop(pool, workspace_id, task_id, roster).await?];
+    for id in workspace_tasks_repo::descendant_ids(pool, task_id).await? {
+        outcomes.push(request_stop(pool, workspace_id, &id, roster).await?);
+    }
+    Ok(outcomes)
 }
 
 #[derive(Debug)]
@@ -2088,20 +2114,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_task_not_resumed_by_child_result() {
+    async fn stop_cascades_to_subtasks_whose_results_do_not_resume_it() {
         let (_tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
         let (session, run) = running(&pool, &parent, "task-1").await;
-        let child_session = assign(&pool, &session, "child").await;
-        stop(&pool, "task-1").await;
+        let child_session = delegate(&pool, &session, &run.id, "child").await.unwrap();
+        let (child_run, _) = open(&pool, &child_session).await;
+        delegate(&pool, &child_session, &child_run.id, "grandchild")
+            .await
+            .unwrap();
+
+        let outcomes = request_stop_tree(&pool, WS, "task-1", &[]).await.unwrap();
+        assert!(matches!(
+            outcomes.as_slice(),
+            [
+                StopOutcome::Requested(_),
+                StopOutcome::Requested(_),
+                StopOutcome::Stopped(_)
+            ]
+        ));
+        assert_eq!(
+            task_row(&pool, "grandchild").await.status,
+            TaskStatus::Stopped
+        );
+
+        // The child's run sees the stop as it starts and reports back.
+        start_cycle(&pool, Some("child"), &child_run.id)
+            .await
+            .unwrap();
+        let child = finish(&pool, "child", &child_run).await.unwrap();
+        assert_eq!(child.task.status, TaskStatus::Stopped);
         set_run_status(&pool, &run, RunStatus::Cancelled).await;
         finish(&pool, "task-1", &run).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-
-        // Stop does not cascade: the child finishes and reports back.
-        let (child_run, _) = open(&pool, &child_session).await;
-        end_run(&pool, &child_run, "child done", RunStatus::Completed).await;
-        finish(&pool, "child", &child_run).await.unwrap();
         assert!(matches!(
             claim(&pool, WS, &session, |id| Some(connection(id)))
                 .await
@@ -2110,7 +2155,6 @@ mod tests {
         ));
 
         // Explicit input resumes it, and the result rides along.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         send(&pool, "task-1", "carry on", parent_agent()).await;
         let Kick::Started { message_ids, .. } =
             claim(&pool, WS, &session, |id| Some(connection(id)))
@@ -2131,9 +2175,12 @@ mod tests {
 
         // The worker ends its turn while its subtask runs: no result yet.
         end_run(&pool, &run, "waiting for the child", RunStatus::Completed).await;
-        assert!(finish(&pool, "task-1", &run).await.is_none());
-        let parked = task_row(&pool, "task-1").await;
-        assert_eq!((parked.status, parked.run_id), (TaskStatus::Running, None));
+        let parked = finish(&pool, "task-1", &run).await.expect("parked");
+        assert!(parked.result.is_none());
+        assert_eq!(
+            (parked.task.status, parked.task.run_id),
+            (TaskStatus::Running, None)
+        );
         assert!(signals_of(&pool, &parent).await.is_empty());
 
         // The subtask's result wakes it in the same cycle.
@@ -2157,6 +2204,70 @@ mod tests {
             signals_of(&pool, &parent).await,
             [signal("task_result", "pending")]
         );
+    }
+
+    #[tokio::test]
+    async fn blocked_worker_finishes_without_waiting_for_its_subtask() {
+        let (_tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let (session, run) = running(&pool, &parent, "task-1").await;
+        delegate(&pool, &session, &run.id, "child").await.unwrap();
+
+        end_run(&pool, &run, "BLOCKED: need X", RunStatus::Completed).await;
+        let finished = finish(&pool, "task-1", &run).await.expect("finalized");
+
+        assert_eq!(finished.task.failure_reason, Some(FailureReason::Blocked));
+        assert!(finished.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn deleted_parent_session_does_not_wedge_finalize_or_recovery() {
+        let (tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let (_, run) = running(&pool, &parent, "task-1").await;
+        running(&pool, &parent, "task-2").await;
+        repository::delete_session(&pool, &parent).await.unwrap();
+
+        end_run(&pool, &run, "done", RunStatus::Completed).await;
+        let finished = finish(&pool, "task-1", &run).await.expect("finalized");
+        assert_eq!(finished.task.status, TaskStatus::Completed);
+        assert!(finished.result.is_none());
+
+        // task-2 is interrupted; recovery stops it with nowhere to report.
+        let pool = restart(tmp.path()).await;
+        assert_eq!(task_row(&pool, "task-2").await.status, TaskStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn resumed_task_stopped_after_restart_reports_its_own_cycle() {
+        let (tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let (session, run) = running(&pool, &parent, "task-1").await;
+        end_run(&pool, &run, "cycle one", RunStatus::Completed).await;
+        finish(&pool, "task-1", &run).await.unwrap();
+        send(&pool, "task-1", "again", parent_agent()).await;
+        // Cycle two is claimed, then the app restarts before its run starts.
+        let (_, task) = open(&pool, &session).await;
+        assert_eq!(task.cycle_no, 2);
+        let pool = restart(tmp.path()).await;
+
+        let StopOutcome::Stopped(stopped) = stop(&pool, "task-1").await else {
+            panic!("no run: the stop ends the cycle");
+        };
+        assert_eq!(stopped.task.cycle_no, 2);
+        assert!(
+            stopped.result.is_some(),
+            "the parent gets cycle two's result"
+        );
+        let keys: Vec<String> = sqlx::query_scalar(
+            "SELECT delivery_key FROM session_signals WHERE target_session_id = ?
+             ORDER BY created_at, id",
+        )
+        .bind(&parent)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(keys, ["task-result:task-1:1", "task-result:task-1:2"]);
     }
 
     #[tokio::test]

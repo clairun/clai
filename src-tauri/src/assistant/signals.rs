@@ -109,13 +109,22 @@ pub(crate) struct NewEvent<'a> {
     pub(crate) connection_id: Option<&'a str>,
 }
 
-/// Writes the event's message and signal. `None`, writing nothing, when an
-/// event with the same delivery key already exists — even if its message
-/// was deleted since. Call inside a transaction.
+/// Writes the event's message and signal. `None`, writing nothing, when the
+/// target session was deleted, or when an event with the same delivery key
+/// already exists — even if its message was deleted since. Call inside a
+/// transaction.
 pub(crate) async fn insert_event(
     conn: &mut SqliteConnection,
     event: NewEvent<'_>,
 ) -> Result<Option<AssistantMessage>, String> {
+    let session: Option<i64> = sqlx::query_scalar("SELECT 1 FROM assistant_sessions WHERE id = ?")
+        .bind(event.session_id)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(|e| format!("Failed to read assistant session: {}", e))?;
+    if session.is_none() {
+        return Ok(None);
+    }
     if let Some(key) = &event.delivery_key {
         let exists: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM session_signals WHERE delivery_key = ?")
