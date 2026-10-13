@@ -242,7 +242,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     expect(screen.queryByText('You')).toBeNull();
   });
 
-  it('stop chip shows Stop requested then stopped resume hint', () => {
+  it('stop chip shows Stop requested, then leaves the resume hint to the composer', () => {
     seedSession(false);
     const { rerender } = render(
       <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />
@@ -268,8 +268,24 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       />
     );
     expect(screen.queryByText(/Stop requested/)).toBeNull();
-    expect(screen.getByText('Stopped · send a message to resume')).toBeInTheDocument();
+    expect(screen.queryByText(/resume/)).toBeNull();
+    expect(screen.getByPlaceholderText('Continue this task…')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Stop task Port the reducer' })).toBeNull();
+  });
+
+  it('a task waiting for an answer wears the attention face, not the running one', () => {
+    seedSession(false);
+    const { container } = render(
+      <WorkspaceTaskTranscriptPanel
+        workspaceId="ws-1"
+        task={task({ status: 'input_required' })}
+        onClose={() => {}}
+      />
+    );
+    expect(container.querySelector('[data-activity]')).toHaveAttribute(
+      'data-activity',
+      'attention'
+    );
   });
 
   describe('task composer', () => {

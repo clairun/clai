@@ -18,18 +18,25 @@ interface NotificationItem {
   text: string;
 }
 
-/** The tasks that changed between two snapshots, with whether this is their workspace's first load. */
-const changedTasks = (
+/**
+ * Tasks whose status or cycle changed between two snapshots. Once a workspace
+ * is loaded, a task with no earlier copy is not a transition: it is an old
+ * task fetched because someone opened it.
+ */
+const transitionedTasks = (
   state: ReturnType<typeof useTaskStore.getState>,
   prev: ReturnType<typeof useTaskStore.getState>
-): { task: WorkspaceTaskResponse; firstLoad: boolean }[] => {
+): WorkspaceTaskResponse[] => {
   const changed = [];
   for (const [workspaceId, tasks] of Object.entries(state.tasks)) {
     const before = prev.tasks[workspaceId];
-    if (tasks === before) continue;
-    const firstLoad = !!state.seeded[workspaceId] && !prev.seeded[workspaceId];
+    if (tasks === before || state.seeded[workspaceId] !== prev.seeded[workspaceId]) continue;
     for (const task of Object.values(tasks)) {
-      if (task !== before?.[task.id]) changed.push({ task, firstLoad });
+      const old = before?.[task.id];
+      const transitioned = old
+        ? old.status !== task.status || old.cycleNo !== task.cycleNo
+        : !prev.seeded[workspaceId];
+      if (transitioned) changed.push(task);
     }
   }
   return changed;
@@ -79,12 +86,12 @@ const WorkspaceTaskNotifications = () => {
     };
 
     const unsubscribe = useTaskStore.subscribe((state, prev) => {
-      for (const { task, firstLoad } of changedTasks(state, prev)) {
+      for (const task of transitionedTasks(state, prev)) {
         if (!isTaskAttention(task)) continue;
         const id = `${task.id}:${task.cycleNo}:${task.status}`;
         if (seen.has(id)) continue;
         seen.add(id);
-        if (!firstLoad) notify(task, id);
+        notify(task, id);
       }
     });
 
@@ -145,6 +152,7 @@ const WorkspaceTaskNotifications = () => {
             <button
               type="button"
               className={styles.openButton}
+              aria-label={`Open task ${item.title}`}
               onClick={() => {
                 navigate(`/workspace/${item.workspaceId}?task=${encodeURIComponent(item.taskId)}`);
                 dismiss(item.id);

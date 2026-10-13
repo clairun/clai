@@ -1166,7 +1166,9 @@ describe('Workspace open task from toast or banner', () => {
     await screen.findByText('Beta');
 
     emitTaskUpdated({ ...FAILED_TASK, updatedAt: 2n });
-    await userEvent.click(await screen.findByRole('button', { name: 'Open task' }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open task ${FAILED_TASK.title}` })
+    );
 
     expect(await screen.findByRole('region', { name: `Transcript for ${FAILED_TASK.title}` })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspace\/a$/));
@@ -1197,11 +1199,11 @@ describe('Workspace open task from toast or banner', () => {
     expect(await screen.findByRole('button', { name: FAILED_TASK.title })).toBeInTheDocument();
     // Re-announcing the same failure does not toast either.
     emitTaskUpdated({ ...FAILED_TASK, updatedAt: 2n });
-    expect(screen.queryByRole('button', { name: 'Open task' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Open task / })).toBeNull();
 
     // A new failure after the baseline does.
     emitTaskUpdated({ ...FAILED_TASK, cycleNo: 1n, updatedAt: 3n });
-    expect(await screen.findByRole('button', { name: 'Open task' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Open task / })).toBeInTheDocument();
   });
 });
 
@@ -1288,6 +1290,22 @@ describe('Workspace nested task logs', () => {
     parentTaskId: PARENT.id,
     depth: 1n,
   };
+  const childResult: AssistantMessage = {
+    id: 'result-1',
+    sessionId: 'sess-parent',
+    role: 'user',
+    content: [{ type: 'text', text: 'parse() fixed' }],
+    createdAt: 1n,
+    providerMetadata: null,
+    origin: {
+      kind: 'task',
+      taskId: CHILD.id,
+      agent: { workspaceAgentId: 'wa-1', displayName: 'Helper', isDefault: false },
+      title: CHILD.title,
+      cycleNo: 1n,
+      status: 'completed',
+    },
+  };
   const seedLog = (sessionId: string, messages: AssistantMessage[]) =>
     useAssistantStore.setState((state) => ({
       sessions: {
@@ -1300,24 +1318,7 @@ describe('Workspace nested task logs', () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
       detailsFor(options, { tasks: [PARENT, CHILD] })
     );
-    seedLog('sess-parent', [
-      {
-        id: 'result-1',
-        sessionId: 'sess-parent',
-        role: 'user',
-        content: [{ type: 'text', text: 'parse() fixed' }],
-        createdAt: 1n,
-        providerMetadata: null,
-        origin: {
-          kind: 'task',
-          taskId: CHILD.id,
-          agent: { workspaceAgentId: 'wa-1', displayName: 'Helper', isDefault: false },
-          title: CHILD.title,
-          cycleNo: 1n,
-          status: 'completed',
-        },
-      },
-    ]);
+    seedLog('sess-parent', [childResult]);
     seedLog('sess-child', [
       {
         id: 'child-1',
@@ -1338,7 +1339,7 @@ describe('Workspace nested task logs', () => {
     const parentLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
 
-    await userEvent.click(within(parentLog).getByRole('button', { name: 'Open task' }));
+    await userEvent.click(within(parentLog).getByRole('button', { name: `Open task ${CHILD.title}` }));
     const childLog = await screen.findByRole('region', { name: `Transcript for ${CHILD.title}` });
     expect(childLog).toHaveTextContent('child log');
     expect(
@@ -1349,6 +1350,44 @@ describe('Workspace nested task logs', () => {
     expect(
       await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` })
     ).toHaveTextContent('parse() fixed');
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+  });
+
+  it('a ?task= link opens with nothing to go Back to', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [PARENT, CHILD] })
+    );
+    seedLog('sess-parent', [childResult]);
+    const OpenParentLink = () => {
+      const navigate = useNavigate();
+      return (
+        <button type="button" onClick={() => navigate(`/workspace/a?task=${PARENT.id}`)}>
+          toast link
+        </button>
+      );
+    };
+    render(
+      <MemoryRouter initialEntries={['/workspace/a']}>
+        <OpenParentLink />
+        <Routes>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /2 tasks/ }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open the log of "${PARENT.title}"` })
+    );
+    const parentLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
+    await userEvent.click(within(parentLog).getByRole('button', { name: `Open task ${CHILD.title}` }));
+    await screen.findByRole('region', { name: `Transcript for ${CHILD.title}` });
+    expect(screen.getByRole('button', { name: 'Back' })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'toast link' }));
+    expect(
+      await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` })
+    ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 });

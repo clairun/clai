@@ -109,6 +109,7 @@ beforeEach(() => {
 describe('task rules', () => {
   it('rings a row by the task state, not the agent', () => {
     expect(taskActivity(task({ status: 'queued' }))).toBe('running');
+    expect(taskActivity(task({ status: 'input_required' }))).toBe('attention');
     expect(taskActivity(task({ status: 'failed' }))).toBe('attention');
     expect(taskActivity(task({ status: 'failed', attentionAcknowledgedAt: 2n }))).toBe('none');
     expect(taskActivity(task({ status: 'completed' }))).toBe('none');
@@ -258,6 +259,8 @@ describe('TaskList', () => {
     expect(onViewTask).toHaveBeenCalledTimes(1);
     expect(onViewTask).toHaveBeenCalledWith(asking);
     expect(screen.getAllByRole('button', { name: /^Answer / })).toHaveLength(1);
+    // Answering reviews a question; only the blocked row offers Mark reviewed.
+    expect(screen.getAllByRole('button', { name: 'Mark reviewed' })).toHaveLength(1);
   });
 
   it('leaves the row inert when nobody is listening for the log', () => {
@@ -347,13 +350,6 @@ describe('task status display', () => {
     expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeInTheDocument();
   });
 
-  it('legacy blocked status maps to Blocked', () => {
-    const legacy = task({ id: 't-old', status: 'blocked' as WorkspaceTaskResponse['status'] });
-    render(<TaskList {...props} tasks={[legacy]} />);
-    expect(screen.getByText('Blocked')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Mark reviewed' })).toBeInTheDocument();
-  });
-
   it('failed+restart reads Failed · interrupted', () => {
     render(
       <TaskList
@@ -438,7 +434,7 @@ describe('task stop', () => {
     expect(screen.getByRole('button', { name: 'Stop Review' })).toBeDisabled();
   });
 
-  it('stopped rows hint resume and name a restart', () => {
+  it('stopped rows name a restart and leave the resume hint to the composer', () => {
     render(
       <TaskList
         {...props}
@@ -448,11 +444,29 @@ describe('task stop', () => {
         ]}
       />
     );
-    expect(screen.getByText('Send a message to resume')).toBeInTheDocument();
-    expect(
-      screen.getByText('Interrupted by restart · send a message to resume')
-    ).toBeInTheDocument();
+    expect(screen.getByText('Interrupted by restart')).toBeInTheDocument();
+    expect(screen.queryByText(/send a message to resume/i)).toBeNull();
     expect(screen.queryByText('task interrupted by app restart')).toBeNull();
+  });
+
+  it('stop is enabled again once a stopped task resumes', async () => {
+    const running = task({ id: 't-s', title: 'Review', status: 'running' });
+    api.stopWorkspaceTask.mockResolvedValue({ ...running, status: 'stopping', updatedAt: 2n });
+    const { rerender } = render(<TaskList {...props} tasks={[running]} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Stop Review' }));
+    await waitFor(() =>
+      expect(useTaskStore.getState().tasks['ws-1']?.['t-s']?.status).toBe('stopping')
+    );
+    rerender(<TaskList {...props} tasks={[{ ...running, status: 'stopping', updatedAt: 2n }]} />);
+    expect(screen.getByRole('button', { name: 'Stop Review' })).toBeDisabled();
+    rerender(<TaskList {...props} tasks={[{ ...running, status: 'stopped', updatedAt: 3n }]} />);
+    rerender(
+      <TaskList
+        {...props}
+        tasks={[{ ...running, cycleNo: 2n, status: 'running', updatedAt: 4n }]}
+      />
+    );
+    expect(screen.getByRole('button', { name: 'Stop Review' })).toBeEnabled();
   });
 
   it('already_terminal shows no error', async () => {

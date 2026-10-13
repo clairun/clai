@@ -31,7 +31,7 @@ export const TASK_STATUS_LABEL: Record<string, string> = {
   stopped: 'Stopped',
   completed: 'Completed',
   failed: 'Failed',
-  // Rows written before `blocked` became a failure reason.
+  // Tool results recorded before `blocked` became a failure reason.
   blocked: 'Blocked',
 };
 
@@ -59,12 +59,11 @@ export const taskDisplayStatus = (task: {
   return { key: task.status, label: taskStatusLabel(task.status) };
 };
 
-/** A task waiting on someone: it failed, was blocked, or asked a question, and is not yet reviewed. */
+/** A task waiting on someone: it failed (or was blocked) or asked a question, and is not yet reviewed. */
 export const isTaskAttention = (
   task: Pick<WorkspaceTaskResponse, 'attentionAcknowledgedAt'> & { status: string }
 ): boolean =>
-  (task.status === 'failed' || task.status === 'input_required' || task.status === 'blocked') &&
-  !task.attentionAcknowledgedAt;
+  (task.status === 'failed' || task.status === 'input_required') && !task.attentionAcknowledgedAt;
 
 export const isTaskActive = (task: { status: string }): boolean =>
   task.status === 'running' || task.status === 'queued' || task.status === 'input_required';

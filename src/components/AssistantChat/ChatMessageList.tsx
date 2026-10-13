@@ -1073,14 +1073,16 @@ const TaskResultBlock = ({
   sender: Extract<MessageSender, { kind: 'task' }>;
 }) => {
   const { workspaceId = '', roster, onOpenTask } = useTaskCardSurface();
-  const liveTask = useTask(workspaceId, sender.status === 'input_required' ? sender.taskId : null);
+  const liveTask = useTask(workspaceId, sender.taskId);
   const question =
     sender.status === 'input_required' ? questionState(sender, liveTask, roster) : undefined;
+  const sameCycle = liveTask && Number(liveTask.cycleNo) === sender.cycleNo;
   return (
     <TaskResultCard
       sender={sender}
       body={getTextContent(message)}
       question={question}
+      failureReason={sameCycle ? liveTask.failureReason : null}
       onOpen={onOpenTask}
     />
   );
@@ -1105,7 +1107,9 @@ const InboxMessageBlock = ({
     : undefined;
   return (
     <div className={styles.inboxMessage} style={style}>
-      {!isContinuation && (
+      {isContinuation ? (
+        <span className="sr-only">{agent ? agent.name : 'System'}:</span>
+      ) : (
         <SenderHeader agent={agent} fallbackName="System" createdAt={message.createdAt} />
       )}
       <div className={styles.messageContent}>

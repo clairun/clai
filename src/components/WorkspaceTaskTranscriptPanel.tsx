@@ -14,8 +14,9 @@ import AgentAvatar from './Agents/AgentAvatar';
 import TaskBreadcrumb from './Agents/TaskBreadcrumb';
 import StopChip from './Agents/StopChip';
 import TaskStopButton from './Agents/TaskStopButton';
-import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
-import { isTaskActive, isTaskAttention, taskDisplayStatus } from '../utils/taskDisplay';
+import { taskActivity } from './Agents/TaskList';
+import { taskIdentity } from './Agents/agentIdentity';
+import { taskDisplayStatus } from '../utils/taskDisplay';
 import { sendWorkspaceTaskMessage } from '../workspace/client';
 import { useTaskStore } from '../workspace/taskStore';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
@@ -180,13 +181,6 @@ export default function WorkspaceTaskTranscriptPanel({
   const { key: statusKey, label: statusLabel } = taskDisplayStatus(task);
   const agentName = owner ? resolveAgent(owner, roster).name : task.assignedAgentDisplayName;
   const statusClass = styles[`status_${statusKey}`] || '';
-  // The header face carries the task's state, so the transcript below doesn't
-  // have to: its running footer is deliberately off (see `runningIdentity`).
-  const headerActivity: AgentActivity = isTaskActive(task)
-    ? 'running'
-    : isTaskAttention(task)
-      ? 'attention'
-      : 'none';
 
   const messages = sessionState?.messages || EMPTY_MESSAGES;
   const toolCalls = sessionState?.toolCalls || EMPTY_TOOL_CALLS;
@@ -249,7 +243,7 @@ export default function WorkspaceTaskTranscriptPanel({
           <AgentAvatar
             identity={taskIdentity(task, roster)}
             size={20}
-            activity={headerActivity}
+            activity={taskActivity(task)}
             label={task.assignedAgentDisplayName}
           />
           <span className={styles.title} title={task.title}>{task.title}</span>
@@ -271,21 +265,6 @@ export default function WorkspaceTaskTranscriptPanel({
         {task.parentTaskId && onOpenTask && (
           <div className={styles.bodyMeta}>
             <TaskBreadcrumb task={task} onOpenTask={onOpenTask} />
-          </div>
-        )}
-        {(task.assignedAgentDisplayName || sessionId) && (
-          <div className={styles.bodyMeta}>
-            {task.assignedAgentDisplayName && (
-              <span>{task.assignedAgentDisplayName}</span>
-            )}
-            {sessionId && (
-              <>
-                {task.assignedAgentDisplayName && <span className={styles.sep}>·</span>}
-                <span className={styles.sessionId} title={sessionId}>
-                  session {sessionId.slice(0, 8)}
-                </span>
-              </>
-            )}
           </div>
         )}
         {!sessionId && (

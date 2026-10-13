@@ -46,9 +46,13 @@ const errorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
-/** The ring a task row draws: what the task is doing, not the agent overall. */
+/** The ring a task row draws: what the task is doing, not the agent overall. A question waits, it does not run. */
 export const taskActivity = (task: WorkspaceTaskResponse): AgentActivity =>
-  isTaskActive(task) ? 'running' : isTaskAttention(task) ? 'attention' : 'none';
+  task.status === 'input_required' || isTaskAttention(task)
+    ? 'attention'
+    : isTaskActive(task)
+      ? 'running'
+      : 'none';
 
 interface TaskRow {
   task: WorkspaceTaskResponse;
@@ -298,12 +302,8 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                     </button>
                   )}
                   {detail && <p className={styles.summary}>{detail}</p>}
-                  {stopped && (
-                    <p className={styles.summary}>
-                      {task.error
-                        ? 'Interrupted by restart · send a message to resume'
-                        : 'Send a message to resume'}
-                    </p>
+                  {stopped && task.error && (
+                    <p className={styles.summary}>Interrupted by restart</p>
                   )}
                   {task.status === 'input_required' && open && (
                     <button
@@ -315,7 +315,8 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                       Answer
                     </button>
                   )}
-                  {needsAttention && (
+                  {/* A question is reviewed by answering it. */}
+                  {needsAttention && task.status !== 'input_required' && (
                     <button
                       type="button"
                       className={styles.action}

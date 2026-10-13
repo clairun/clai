@@ -144,16 +144,6 @@
   background: var(--color-bg-primary);
 }
 
-.sep {
-  color: var(--color-text-tertiary);
-}
-
-.sessionId {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-}
-
 .transcript {
   flex: 1;
   min-height: 0;

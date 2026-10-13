@@ -87,4 +87,31 @@ describe('WorkspaceTaskNotifications', () => {
     emitTaskUpdated(task({ id: 'task-2', title: 'Other', status: 'failed', failureReason: 'error' }));
     expect(screen.getByText('Failed')).toBeInTheDocument();
   });
+
+  it('a question then a failure in the same cycle toast twice', async () => {
+    await renderNotifications();
+
+    emitTaskUpdated(task());
+    emitTaskUpdated(task({ status: 'input_required', updatedAt: 2n }));
+    expect(screen.getByText('Needs an answer')).toBeInTheDocument();
+    emitTaskUpdated(task({ status: 'failed', error: 'boom', updatedAt: 3n }));
+    expect(screen.getByText('Failed')).toBeInTheDocument();
+  });
+
+  it('opening an old failed task of a loaded workspace does not toast', async () => {
+    await renderNotifications();
+
+    act(() => useTaskStore.getState().seedTasks('ws-1', [task({ id: 'task-0' })]));
+    // What opening a task outside the details window does: fetch, then upsert.
+    emitTaskUpdated(task({ status: 'failed', error: 'old failure', updatedAt: 2n }));
+    expect(screen.queryByText('old failure')).toBeNull();
+  });
+
+  it('names the task in the Open task button', async () => {
+    await renderNotifications();
+
+    emitTaskUpdated(task());
+    emitTaskUpdated(task({ status: 'failed', updatedAt: 2n }));
+    expect(screen.getByRole('button', { name: 'Open task Fix flaky test' })).toBeInTheDocument();
+  });
 });

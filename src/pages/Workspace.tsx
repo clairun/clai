@@ -1149,10 +1149,11 @@ const WorkspaceHeader = ({
   const schedulePillText = formatSchedulePill(details);
   const scheduleEnabled = !!details?.scheduleEnabled;
   const schedulePaused = !!details?.schedulePaused;
-  // Active = a scheduled task is running, or any non-terminal task is in
-  // flight on this workspace. Matches Fleet's "isProcessing" check so the
-  // Run-now button correctly disables while a run is mid-flight.
-  const hasRunningTask = (details?.tasks || []).some(isTaskActive);
+  // Active = a task on this workspace is running or queued; a task waiting
+  // for an answer is not. Disables Run-now while a run is mid-flight.
+  const hasRunningTask = (details?.tasks || []).some(
+    (task) => task.status === 'running' || task.status === 'queued'
+  );
   // Manager is invisible to the user — exclude it from the headline count so
   // the chip and the drawer (which already filters !isDefault) agree.
   // Count includes the main (default) agent — the manager is now a
@@ -2304,7 +2305,8 @@ const Workspace = () => {
   const taskParam = searchParams.get('task');
   useEffect(() => {
     if (!taskParam || !detailsReady) return;
-    openTaskById(taskParam);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes the one-shot `?task=` param from a toast, then removes it below.
+    openTask(taskParam);
     setSearchParams(
       (prev) => {
         const next = new URLSearchParams(prev);
@@ -2313,7 +2315,7 @@ const Workspace = () => {
       },
       { replace: true }
     );
-  }, [taskParam, detailsReady, openTaskById, setSearchParams]);
+  }, [taskParam, detailsReady, openTask, setSearchParams]);
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
   // `details.runs` holds only the newest run and the newest non-terminal

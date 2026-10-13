@@ -1089,6 +1089,7 @@ describe('ChatMessageList', () => {
       expect(within(card).getByText('Found 2 issues')).toBeInTheDocument();
       expect(within(card).getByText('Completed')).toBeInTheDocument();
       expect(screen.queryByText('You')).toBeNull();
+      expect(within(card).queryByRole('button', { name: /Open task/ })).toBeNull();
       expect(container.querySelector('[class*="userMessage"]')).toBeNull();
     });
 
@@ -1117,6 +1118,8 @@ describe('ChatMessageList', () => {
       list([fromAgent('a1', 'first'), fromAgent('a2', 'second')]);
       expect(screen.getAllByText('Reviewer')).toHaveLength(1);
       expect(screen.getByText('second')).toBeInTheDocument();
+      // A screen reader still hears who sent the follow-on block.
+      expect(screen.getByText('Reviewer:')).toHaveClass('sr-only');
     });
 
     it('task card breaks grouping', () => {
@@ -1224,14 +1227,38 @@ describe('ChatMessageList', () => {
         expect(within(open).getByRole('button', { name: 'Answer Review PR #231' })).toBeInTheDocument();
       });
 
-      it('Answer opens task panel focused on AskUserPanel', () => {
-        // The task panel's AskUserPanel focuses itself on a pending question
-        // (see WorkspaceTaskTranscriptPanel tests); the card only opens it.
+      it('Answer and Open task open the task, each named by its title', () => {
         useTaskStore.getState().upsertTask(liveTask());
         const onOpenTask = vi.fn();
         list([question], { onOpenTask });
         fireEvent.click(screen.getByRole('button', { name: 'Answer Review PR #231' }));
-        expect(onOpenTask).toHaveBeenCalledWith('task-1');
+        fireEvent.click(screen.getByRole('button', { name: 'Open task Review PR #231' }));
+        expect(onOpenTask.mock.calls).toEqual([['task-1'], ['task-1']]);
+      });
+
+      it('result card of a blocked cycle reads Blocked', () => {
+        const result = (cycleNo: bigint) =>
+          msg({
+            id: `r${cycleNo}`,
+            role: 'user',
+            content: [{ type: 'text', text: 'BLOCKED: need repo access' }],
+            origin: {
+              kind: 'task',
+              taskId: 'task-1',
+              agent: reviewer,
+              title: 'Review PR #231',
+              cycleNo,
+              status: 'failed',
+            },
+          });
+        useTaskStore
+          .getState()
+          .upsertTask(liveTask({ status: 'failed', failureReason: 'blocked', cycleNo: 2n }));
+        list([result(1n), result(2n)]);
+        const [older, latest] = screen.getAllByRole('article');
+        // Only the live task's cycle is known to be blocked.
+        expect(within(older!).getByText('Failed')).toBeInTheDocument();
+        expect(within(latest!).getByText('Blocked')).toBeInTheDocument();
       });
 
       it('parent answer labels card Answered by Main from task.answeredBy', () => {
@@ -1268,12 +1295,18 @@ describe('ChatMessageList', () => {
         expect(card('Answered by you')).toBeInTheDocument();
       });
 
-      it('stopped before answer shows not answered', () => {
+      it('ended before answer shows not answered with the live status', () => {
         useTaskStore.getState().upsertTask(liveTask({ status: 'stopped' }));
         list([question]);
         expect(
-          within(card('Not answered · task stopped')).getByText('Not answered · task stopped')
+          within(card('Not answered · Stopped')).getByText('Not answered · Stopped')
         ).toBeInTheDocument();
+        act(() => {
+          useTaskStore
+            .getState()
+            .upsertTask(liveTask({ status: 'failed', failureReason: 'error', updatedAt: 2n }));
+        });
+        expect(card('Not answered · Failed')).toBeInTheDocument();
       });
     });
   });

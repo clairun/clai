@@ -6,6 +6,7 @@ import type {
   WorkspaceAgentResponse,
   WorkspaceTaskResponse,
 } from '../../generated/bindings';
+import { taskDisplayStatus } from '../../utils/taskDisplay';
 import { agentDisplayName, identityFor, type AgentIdentity } from '../Agents/agentIdentity';
 
 export type AgentPresence = 'active' | 'disabled' | 'removed';
@@ -150,7 +151,7 @@ export const questionState = (
     return { open: false, label: `Answered by ${resolveAgent(answeredBy.agent, roster).name}` };
   }
   if (!answeredBy && ENDED_WITHOUT_ANSWER.has(liveTask.status)) {
-    return { open: false, label: 'Not answered · task stopped' };
+    return { open: false, label: `Not answered · ${taskDisplayStatus(liveTask).label}` };
   }
   return { open: false, label: 'Answered' };
 };

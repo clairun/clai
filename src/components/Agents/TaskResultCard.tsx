@@ -7,7 +7,7 @@
 import { useId, useState } from 'react';
 import type { MessageSender, QuestionState } from '../AssistantChat/messageSender';
 import { clampCardText } from '../AssistantChat/toolDisplay';
-import { taskStatusLabel } from '../../utils/taskDisplay';
+import { taskDisplayStatus } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import { cardActivity } from './TaskCard';
 import pills from './taskStatus.module.css';
@@ -18,12 +18,15 @@ export interface TaskResultCardProps {
   body: string;
   /** A question's live state; `null` when the task is unknown. Unused for results. */
   question?: QuestionState | null;
+  /** The failure reason of the card's cycle, when known; only the live task carries it. */
+  failureReason?: string | null;
   /** Omit to render the card without "Open task". */
   onOpen?: (taskId: string) => void;
 }
 
-const TaskResultCard = ({ sender, body, question, onOpen }: TaskResultCardProps) => {
+const TaskResultCard = ({ sender, body, question, failureReason, onOpen }: TaskResultCardProps) => {
   const { agent, taskId, title, status, cycleNo } = sender;
+  const pill = taskDisplayStatus({ status, failureReason });
   const isQuestion = status === 'input_required';
   const [expanded, setExpanded] = useState(false);
   const bodyId = useId();
@@ -50,9 +53,7 @@ const TaskResultCard = ({ sender, body, question, onOpen }: TaskResultCardProps)
             <span className={styles.lead}>{isQuestion ? ' · needs an answer' : ' · task result'}</span>
           </span>
           {cycleNo > 1 && <span className={styles.cycle}>cycle {cycleNo}</span>}
-          <span className={`${pills.pill} ${pills[`pill_${status}`] || ''}`}>
-            {taskStatusLabel(status)}
-          </span>
+          <span className={`${pills.pill} ${pills[`pill_${pill.key}`] || ''}`}>{pill.label}</span>
         </div>
         <div className={styles.title}>{title}</div>
         <div id={bodyId} className={styles.body}>
@@ -82,7 +83,12 @@ const TaskResultCard = ({ sender, body, question, onOpen }: TaskResultCardProps)
             </button>
           )}
           {onOpen && (
-            <button type="button" className={styles.action} onClick={() => onOpen(taskId)}>
+            <button
+              type="button"
+              className={styles.action}
+              aria-label={`Open task ${title}`}
+              onClick={() => onOpen(taskId)}
+            >
               Open task
             </button>
           )}

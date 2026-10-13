@@ -46,6 +46,13 @@ describe('taskStore', () => {
     expect(stored()?.status).toBe('input_required');
   });
 
+  it('upsert with the same updatedAt takes the later copy', () => {
+    const { upsertTask } = useTaskStore.getState();
+    upsertTask(task({ status: 'running', updatedAt: 5n }));
+    upsertTask(task({ status: 'input_required', updatedAt: 5n }));
+    expect(stored()?.status).toBe('input_required');
+  });
+
   it('seed does not overwrite newer event copy', () => {
     const { upsertTask, seedTasks } = useTaskStore.getState();
     upsertTask(task({ status: 'completed', updatedAt: 5n }));
