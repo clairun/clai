@@ -3425,8 +3425,13 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
         .ok_or_else(|| format!("Workspace {} not found.", workspace_id))?;
     // Dropping the index's pool handle does not close its connections, and
     // Windows refuses to delete an open `data.sqlite`. `close` waits until
-    // every connection's worker thread has released the file.
+    // every connection's worker thread has released the file — except that
+    // sqlx 0.8 returns early when a connection is still checked out while
+    // idle ones are closed, so also wait for the pool to drain.
     workspace_pool.close().await;
+    while workspace_pool.size() > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
@@ -5310,6 +5315,7 @@ mod tests {
 
         // An open connection would keep `data.sqlite` locked on Windows.
         assert!(pool.is_closed());
+        assert_eq!(pool.size(), 0);
         assert!(!root.exists());
         let scheduler = state.scheduler.lock().await;
         assert_eq!(scheduler.instance_count(), 0);
