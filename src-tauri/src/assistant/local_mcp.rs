@@ -288,13 +288,9 @@ impl ServerHandler for ClaiMcpService {
                     .list_tools_for_servers(&binding.run_context.mcp_server_ids)
                     .await
             };
-            let is_task_session = crate::assistant::workspace_tasks_repo::load_task_for_session(
-                &binding.pool,
-                &binding.session_id,
-            )
-            .await
-            .map_err(|error| McpError::internal_error(error, None))?
-            .is_some();
+            let is_task_session = is_task_session(&binding.pool, &binding.session_id)
+                .await
+                .map_err(|error| McpError::internal_error(error, None))?;
             let tool_defs =
                 tools::available_tools(&binding.run_context, &external_tools, is_task_session);
             Ok(ListToolsResult {
@@ -530,9 +526,50 @@ fn bearer_token(context: &RequestContext<RoleServer>) -> Option<String> {
         .map(str::to_string)
 }
 
+async fn is_task_session(pool: &DbPool, session_id: &str) -> Result<bool, String> {
+    Ok(
+        crate::assistant::workspace_tasks_repo::load_task_for_session(pool, session_id)
+            .await?
+            .is_some(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn self_assigned_manager_task_hides_ask_user_on_mcp_path() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let context = crate::assistant::types::SessionContext {
+            automation_id: Some("manager".to_string()),
+            ..Default::default()
+        };
+        let manager = crate::assistant::repository::create_session(&pool, context.clone())
+            .await
+            .unwrap();
+        let worker = crate::assistant::repository::create_session(&pool, context)
+            .await
+            .unwrap();
+        crate::db::test_support::insert_task(&pool, "self-task", "running", Some(&worker.id), None)
+            .await;
+        let context = crate::assistant::run_context::RunContext {
+            agent_enabled: true,
+            ..Default::default()
+        };
+        assert!(!is_task_session(&pool, &manager.id).await.unwrap());
+        assert!(is_task_session(&pool, &worker.id).await.unwrap());
+        assert!(tools::available_tools(&context, &[], false)
+            .iter()
+            .any(|tool| tool.name == "ask_user"));
+        assert!(!tools::available_tools(
+            &context,
+            &[],
+            is_task_session(&pool, &worker.id).await.unwrap()
+        )
+        .iter()
+        .any(|tool| tool.name == "ask_user"));
+    }
 
     fn test_binding() -> ToolBinding {
         ToolBinding {

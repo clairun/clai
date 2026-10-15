@@ -242,7 +242,7 @@ pub(crate) fn build_system_prompt(
         }
         RunTrigger::WorkspaceTask => {
             prompt.push_str(
-                "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked by missing capability, context, permission, or runtime failure, start with `BLOCKED:` and state the specific manager or user action needed. When you end your turn, your final reply is sent to whoever created the task. Don't message them yourself. If you end your turn to wait for a reply, say so in that final reply. If you need work done and answered, prefer creating a subtask over messaging a sibling: you are not reported back until your subtasks finish.\n",
+                "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked or you need an answer, put the question or blocking detail in your final reply, including a denied filesystem grant or GH007 push rejection. Start blocking replies with `BLOCKED:` and state the needed action. When you end your turn, your final reply is sent to whoever created the task. Don't message them yourself. If you end your turn to wait for a reply, say so in that final reply. If you need work done and answered, prefer creating a subtask over messaging a sibling: you are not reported back until your subtasks finish.\n",
             );
         }
         RunTrigger::UserMessage => {
@@ -262,7 +262,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "This workspace has assigned agents. The default manager agent receives user messages and is responsible for routing work inside this workspace.\n\
              Use this roster as workspace-local context. Do not assume agents outside this list are available for collaboration.\n\
-             When task delegation tools are available, assign bounded tasks only to assigned workspace agents, addressed by the `workspaceAgentId` shown in the roster (a display name is not accepted). Tasks run asynchronously and in parallel, each in its own session. The workspace session can use `ask_user` for a short answer only the user can give. A task worker should message `workspace` and end its turn when it needs an answer from the user. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
+             When task delegation tools are available, assign bounded tasks only to assigned workspace agents, addressed by the `workspaceAgentId` shown in the roster (a display name is not accepted). Tasks run asynchronously and in parallel, each in its own session. The workspace session can use `ask_user` for a short answer only the user can give. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
         );
         prompt.push_str("Assigned workspace agents:\n");
         for agent in &context.workspace_agents {
@@ -365,7 +365,7 @@ pub(crate) fn build_system_prompt(
     }
 
     if shell_enabled {
-        push_filesystem_boundary(&mut prompt, can_write_files);
+        push_filesystem_boundary(&mut prompt, can_write_files, trigger);
     }
     // The memory protocol is all reads and writes of `.clai/memory/` files.
     if can_write_files {
@@ -511,16 +511,19 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
 /// The authorization boundary and the git/SSH etiquette that goes with it.
 /// Both describe how to behave *while running commands*, so they are
 /// omitted for agents without a shell.
-fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool) {
+fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool, trigger: &RunTrigger) {
     prompt.push_str(
         "\n## Filesystem boundary\n\
          The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms with no sandbox implementation, `bash_exec` is labeled as a host shell: the command policy still applies, but nothing outside this paragraph stops you from reaching an ungranted path, so treat these rules as the boundary itself.\n\
          - Do not `cd`, redirect to, or pass paths outside the listed grants — not even via subshells, heredocs, scripts, or absolute paths.\n\
          - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
          - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
-         - If `fs_request_grant` is denied, do not retry the same path. Either request a narrower path, ask the user via `ask_user`, or stop and explain what was blocked.\n\
+         - If `fs_request_grant` is denied, do not retry the same path. Either request a narrower path or stop and explain what was blocked.\n\
          - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n",
     );
+    if !matches!(trigger, RunTrigger::WorkspaceTask) {
+        prompt.push_str("         - If a denied grant requires a human answer, use `ask_user`.\n");
+    }
     if can_write_files {
         prompt.push_str(
             "         - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n",
@@ -537,8 +540,13 @@ fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool) {
     // -F /dev/null workaround experimentally.
     prompt.push_str(
         "\n## Git and SSH conventions inside the sandbox\n\
-         - Never rewrite commit authorship. Do not run `git commit --amend --reset-author`, do not change `user.email` / `user.name` away from what the commit already has, and do not use the `--author=` flag to overwrite an existing author. If a push is rejected because of GitHub's email privacy (error `GH007`) or because the author's email is not allowed, STOP and escalate via `ask_user` with the exact failing email and the rejection reason. The user owns the choice of which email to publish.\n",
+         - Never rewrite commit authorship. Do not run `git commit --amend --reset-author`, do not change `user.email` / `user.name` away from what the commit already has, and do not use the `--author=` flag to overwrite an existing author. If a push is rejected because of GitHub's email privacy (error `GH007`) or because the author's email is not allowed, STOP with the exact failing email and the rejection reason. The user owns the choice of which email to publish.\n",
     );
+    if !matches!(trigger, RunTrigger::WorkspaceTask) {
+        prompt.push_str(
+            "         - If GH007 blocks a push, use `ask_user` with the rejection detail.\n",
+        );
+    }
     if cfg!(target_os = "linux") {
         prompt.push_str(
             "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n",
@@ -1299,6 +1307,23 @@ mod tests {
         // rather than pointing it at `workspace_listAgents`.
         assert!(text.contains("Your own `workspaceAgentId` is `workspace-agent-manager`"));
         assert!(text.contains("### How tasks run"));
+    }
+
+    #[test]
+    fn task_worker_prompt_routes_blocking_answers_through_final_reply() {
+        let context = RunContext {
+            execution: shell_execution(),
+            workspace_agents: vec![manager_summary()],
+            ..Default::default()
+        };
+        let worker = build_system_prompt(&context, None, &[], &RunTrigger::WorkspaceTask);
+        let ContentPart::Text { text } = &worker.content[0] else {
+            panic!("expected text");
+        };
+        assert!(!text.contains("If a denied grant requires a human answer, use `ask_user`"));
+        assert!(!text.contains("If GH007 blocks a push, use `ask_user`"));
+        assert!(text.contains("including a denied filesystem grant or GH007 push rejection"));
+        assert!(!text.contains("should message `workspace`"));
     }
 
     #[test]

@@ -253,6 +253,17 @@ pub async fn find_manager_session(
     pool: &DbPool,
     manager_id: &str,
 ) -> Result<Option<AssistantSession>, String> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("Failed to acquire manager session connection: {e}"))?;
+    find_manager_session_on_connection(&mut conn, manager_id).await
+}
+
+pub(crate) async fn find_manager_session_on_connection(
+    conn: &mut SqliteConnection,
+    manager_id: &str,
+) -> Result<Option<AssistantSession>, String> {
     let row = sqlx::query(
         r#"
         SELECT s.id, s.context_json, s.created_at, s.updated_at
@@ -266,7 +277,7 @@ pub async fn find_manager_session(
         "#,
     )
     .bind(manager_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .map_err(|e| format!("Failed to find manager session: {}", e))?;
 
