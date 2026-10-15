@@ -157,10 +157,7 @@ fn claude_stream_json_user_message(text: &str, images: &[(String, String)]) -> S
             "source": { "type": "base64", "media_type": media_type, "data": data },
         }));
     }
-    // A user turn must never be empty; fall back to the (possibly empty) text.
-    if content.is_empty() {
-        content.push(serde_json::json!({ "type": "text", "text": text }));
-    }
+    content.push(serde_json::json!({ "type": "text", "text": "\n\n" }));
     let mut line = serde_json::json!({
         "type": "user",
         "message": { "role": "user", "content": content },
@@ -5144,6 +5141,7 @@ mod tests {
         assert_eq!(value["message"]["role"], "user");
         assert_eq!(value["message"]["content"][0]["type"], "text");
         assert_eq!(value["message"]["content"][0]["text"], "hello there");
+        assert_eq!(value["message"]["content"][1]["text"], "\n\n");
     }
 
     #[test]
@@ -5154,13 +5152,14 @@ mod tests {
         );
         let value: Value = serde_json::from_str(line.trim()).unwrap();
         let content = value["message"]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2, "text + one image block");
+        assert_eq!(content.len(), 3, "text, image, separator");
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "look at this");
         assert_eq!(content[1]["type"], "image");
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "QUJD");
+        assert_eq!(content[2]["text"], "\n\n");
     }
 
     #[test]
@@ -5169,9 +5168,35 @@ mod tests {
             claude_stream_json_user_message("", &[("image/jpeg".to_string(), "Zm9v".to_string())]);
         let value: Value = serde_json::from_str(line.trim()).unwrap();
         let content = value["message"]["content"].as_array().unwrap();
-        // No empty text block when text is empty: just the image.
-        assert_eq!(content.len(), 1);
+        assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[1]["text"], "\n\n");
+    }
+
+    #[test]
+    fn claude_stream_json_separates_event_human_event() {
+        let messages = [
+            "[Automated event: task result]\nDone.",
+            "Please inspect it.",
+            "[Automated event: task update]\nRunning.",
+        ];
+        let batch: String = messages
+            .iter()
+            .map(|text| claude_stream_json_user_message(text, &[]))
+            .collect();
+        let projected: Vec<String> = batch
+            .lines()
+            .map(|line| {
+                let value: Value = serde_json::from_str(line).unwrap();
+                value["message"]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|part| part["text"].as_str().unwrap())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(projected, messages.map(|text| format!("{text}\n\n")));
     }
 
     #[test]
