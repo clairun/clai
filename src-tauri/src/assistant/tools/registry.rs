@@ -142,7 +142,7 @@ fn workspace_send_task_message_def() -> ToolDefinition {
     tool::<SendWorkspaceTaskMessageParams>(
         "workspace_sendTaskMessage",
         &format!(
-            "Send a message to a task. It answers the task's question if the task is `input_required`, queues for its current run if it is running, and resumes it as a new cycle if it is completed, failed or stopped. Returns the task and `queued`: true when the message waits for the task's current run. Messages are at most {MAX_TASK_MESSAGE_CHARS} characters.",
+            "Send a message to a task as an agent. It answers the task's question if the task is `input_required`, queues for its current run if it is running, and resumes it as a new cycle if it is completed, failed or stopped. Results and questions continue to reach the task's parent session as automated events. Returns the task and `queued`: true when the message waits for the task's current run. Messages are at most {MAX_TASK_MESSAGE_CHARS} characters.",
         ),
     )
 }
@@ -150,7 +150,7 @@ fn workspace_send_task_message_def() -> ToolDefinition {
 fn workspace_stop_task_def() -> ToolDefinition {
     tool::<StopWorkspaceTaskParams>(
         "workspace_stopTask",
-        "Request cancellation of a task's current run. The task becomes `stopping`, then `stopped` once its run winds down; a stopped task's result still arrives as an automated event. Stopping a task that already ended fails with `already_terminal`.",
+        "Request cancellation of a task's current run and its unfinished subtasks. The task becomes `stopping`, then `stopped` once its run winds down; a stopped task's result still arrives as an automated event. Stopping a task that already ended fails with `already_terminal`.",
     )
 }
 
