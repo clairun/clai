@@ -1222,6 +1222,32 @@ describe('ChatMessageList', () => {
         expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
       });
 
+      it('keeps separate task titles and opens the matching transcript', () => {
+        const onOpenTask = vi.fn();
+        const secondQuestion = msg({
+          id: 'q2',
+          role: 'user',
+          content: [{ type: 'text', text: 'Should I check the release notes?' }],
+          origin: {
+            kind: 'task',
+            taskId: 'task-2',
+            agent: reviewer,
+            title: 'Prepare release',
+            cycleNo: 1n,
+            status: 'input_required',
+          },
+        });
+        list([question, secondQuestion], { onOpenTask });
+
+        expect(screen.getByText('Review PR #231')).toBeInTheDocument();
+        expect(screen.getByText('Prepare release')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Open task Review PR #231' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Open task Prepare release' }));
+        expect(onOpenTask.mock.calls).toEqual([['task-1'], ['task-2']]);
+        expect(screen.queryByRole('article')).toBeNull();
+        expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
+      });
+
       it('result card of a blocked cycle reads Blocked', () => {
         const result = (cycleNo: bigint) =>
           msg({

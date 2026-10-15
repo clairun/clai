@@ -885,7 +885,7 @@ const MessageBlock = memo(({ message, ...props }: MessageBlockProps) => {
   if (sender.kind === 'user') return <UserMessageBlock message={message} {...props} />;
   if (sender.kind === 'task') {
     return sender.status === 'input_required'
-      ? <InboxMessageBlock message={message} agent={sender.agent} />
+      ? <InboxMessageBlock message={message} agent={sender.agent} task={sender} />
       : <TaskResultBlock message={message} sender={sender} />;
   }
   return (
@@ -1095,13 +1095,16 @@ const TaskResultBlock = ({
 const InboxMessageBlock = ({
   message,
   agent,
+  task,
   isContinuation = false,
 }: {
   message: AssistantMessage;
   agent: SenderAgent | null;
+  task?: Extract<MessageSender, { kind: 'task' }>;
   isContinuation?: boolean;
 }) => {
   const theme = useAppTheme();
+  const { onOpenTask } = useTaskCardSurface();
   const style = agent
     ? ({ '--sender-hue': identityRingColor(agent.identity, theme) } as React.CSSProperties)
     : undefined;
@@ -1111,6 +1114,16 @@ const InboxMessageBlock = ({
         <span className="sr-only">{agent ? agent.name : 'System'}:</span>
       ) : (
         <SenderHeader agent={agent} fallbackName="System" createdAt={message.createdAt} />
+      )}
+      {task && (
+        <div className={styles.inboxTaskContext}>
+          <span>{task.title}</span>
+          {onOpenTask && (
+            <button type="button" onClick={() => onOpenTask(task.taskId)} aria-label={`Open task ${task.title}`}>
+              Open task
+            </button>
+          )}
+        </div>
       )}
       <div className={styles.messageContent}>
         <MarkdownMessage content={getTextContent(message)} />
