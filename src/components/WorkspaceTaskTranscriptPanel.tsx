@@ -30,7 +30,7 @@ const MESSAGE_PAGE_LIMIT = 100;
 const composerPlaceholder = (task: WorkspaceTaskResponse, agent: string): string =>
   isTaskActive(task)
     ? `Message ${agent}…`
-    : 'This task has finished. Ask the agent that created it to resume it.';
+    : 'Messages are unavailable for this task.';
 
 const errorText = (err: unknown): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to send message.';

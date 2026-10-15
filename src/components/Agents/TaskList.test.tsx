@@ -256,7 +256,7 @@ describe('TaskList', () => {
   it('input_required row waits for its creator without answer controls', () => {
     const asking = { ...REVIEW_TASK, status: 'input_required' as const };
     render(<TaskList {...props} onViewTask={vi.fn()} tasks={[asking, WRITE_TASK]} />);
-    expect(screen.getByText('Waiting for Main')).toBeInTheDocument();
+    expect(screen.getByText('Waiting for Manager')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
     expect(screen.getAllByRole('button', { name: 'Mark reviewed' })).toHaveLength(1);
   });

@@ -225,7 +225,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
             const status = taskDisplayStatus(task);
             const creator = roster.find((entry) => entry.id === task.createdByWorkspaceAgentId);
             const creatorName = nameOf(task.createdByWorkspaceAgentId, task.createdByDisplayName);
-            if (task.status === 'input_required') status.label = `Waiting for ${creatorName || 'agent'}`;
             const assigneeName = nameOf(
               task.assignedToWorkspaceAgentId,
               task.assignedAgentDisplayName

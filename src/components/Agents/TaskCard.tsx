@@ -70,7 +70,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
    * for `kind: 'assign'`), so the slim line below always has one to draw.
    */
   const pill =
-    card.kind === 'assign' ? null : (
+    card.kind === 'assign' || card.status === 'input_required' ? null : (
       <span className={`${pills.pill} ${pills[`pill_${card.status}`] || ''}`}>
         {taskStatusLabel(card.status)}
       </span>

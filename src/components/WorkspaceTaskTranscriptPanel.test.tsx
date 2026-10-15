@@ -287,7 +287,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     );
     expect(screen.queryByText(/Stop requested/)).toBeNull();
     expect(screen.queryByText(/resume/)).toBeNull();
-    expect(screen.getByPlaceholderText('This task has finished. Ask the agent that created it to resume it.')).toBeDisabled();
+    expect(screen.getByPlaceholderText('Messages are unavailable for this task.')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Stop task Port the reducer' })).toBeNull();
   });
 
@@ -341,7 +341,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       for (const status of ['stopping', 'failed', 'completed', 'stopped'] as const) {
         const { unmount } = renderPanel({ status });
         expect(composer()).toBeDisabled();
-        expect(composer()).toHaveAttribute('placeholder', 'This task has finished. Ask the agent that created it to resume it.');
+        expect(composer()).toHaveAttribute('placeholder', 'Messages are unavailable for this task.');
         unmount();
       }
     });
