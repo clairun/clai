@@ -187,7 +187,7 @@
 }
 
 .status_input_required {
-  composes: pill_input_required from './taskStatus.module.css';
+  composes: pill_queued from './taskStatus.module.css';
 }
 
 .meta {

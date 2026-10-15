@@ -88,9 +88,3 @@
 .action:hover {
   text-decoration: underline;
 }
-
-.footer {
-  margin-top: 6px;
-  font-size: 11.5px;
-  color: var(--color-text-tertiary);
-}

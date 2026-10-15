@@ -8,7 +8,6 @@ import type {
 } from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
 import ChatComposer from './AssistantChat/ChatComposer';
-import AskUserPanel from './AskUserPanel/AskUserPanel';
 import { resolveAgent, resolveSessionOwner } from './AssistantChat/messageSender';
 import AgentAvatar from './Agents/AgentAvatar';
 import TaskBreadcrumb from './Agents/TaskBreadcrumb';
@@ -16,7 +15,7 @@ import StopChip from './Agents/StopChip';
 import TaskStopButton from './Agents/TaskStopButton';
 import { taskActivity } from './Agents/TaskList';
 import { taskIdentity } from './Agents/agentIdentity';
-import { isTaskWaiting, taskDisplayStatus } from '../utils/taskDisplay';
+import { isTaskActive, taskDisplayStatus } from '../utils/taskDisplay';
 import { sendWorkspaceTaskMessage } from '../workspace/client';
 import { useTaskStore } from '../workspace/taskStore';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
@@ -28,20 +27,10 @@ const EMPTY_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
 const MESSAGE_PAGE_LIMIT = 100;
 
-const composerPlaceholder = (task: WorkspaceTaskResponse, agent: string): string => {
-  if (isTaskWaiting(task)) return `Message ${agent}…`;
-  switch (task.status) {
-    case 'queued':
-    case 'running':
-      return `Queue a message for ${agent}…`;
-    case 'input_required':
-      return `Answer ${agent} (or use the question above)…`;
-    case 'stopping':
-      return 'Queue a message for after the stop…';
-    default:
-      return task.failureReason === 'blocked' ? `Reply to ${agent}…` : 'Continue this task…';
-  }
-};
+const composerPlaceholder = (task: WorkspaceTaskResponse, agent: string): string =>
+  isTaskActive(task)
+    ? `Message ${agent}…`
+    : 'This task has finished. Ask the agent that created it to resume it.';
 
 const errorText = (err: unknown): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to send message.';
@@ -318,16 +307,12 @@ export default function WorkspaceTaskTranscriptPanel({
         <div className={styles.chips}>
           <StopChip status={task.status} />
         </div>
-        {sessionId && (
-          <div className={styles.ask}>
-            <AskUserPanel sessionId={sessionId} />
-          </div>
-        )}
       </div>
       <ChatComposer
         // Remount per task so a draft never carries over to another task.
         key={task.id}
         placeholder={composerPlaceholder(task, agentName)}
+        disabled={!isTaskActive(task)}
         ariaLabel={`Message ${agentName} about ${task.title}`}
         onSend={handleSend}
       />

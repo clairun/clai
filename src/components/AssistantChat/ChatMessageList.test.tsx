@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 // VirtualizedList windows its children by scroll geometry, which jsdom
 // doesn't have (zero heights). Replace it with a plain list that renders
@@ -1209,31 +1209,17 @@ describe('ChatMessageList', () => {
         answeredBy: null,
         ...over,
       });
-      const card = (state: string) =>
-        screen.getByRole('article', {
-          name: `Question from Reviewer: Review PR #231, ${state}`,
-        });
-
       beforeEach(() => {
         useTaskStore.setState({ tasks: {}, seeded: {} });
       });
 
-      it('question card shows Answer while task input_required', () => {
+      it('renders a task question as a plain worker message', () => {
         useTaskStore.getState().upsertTask(liveTask());
         list([question], { onOpenTask: vi.fn() });
-        const open = card('open');
-        expect(within(open).getByText('Should I also review the generated bindings?')).toBeInTheDocument();
-        expect(within(open).getByText(/needs an answer/)).toBeInTheDocument();
-        expect(within(open).getByRole('button', { name: 'Answer Review PR #231' })).toBeInTheDocument();
-      });
-
-      it('Answer and Open task open the task, each named by its title', () => {
-        useTaskStore.getState().upsertTask(liveTask());
-        const onOpenTask = vi.fn();
-        list([question], { onOpenTask });
-        fireEvent.click(screen.getByRole('button', { name: 'Answer Review PR #231' }));
-        fireEvent.click(screen.getByRole('button', { name: 'Open task Review PR #231' }));
-        expect(onOpenTask.mock.calls).toEqual([['task-1'], ['task-1']]);
+        expect(screen.getByText('Should I also review the generated bindings?')).toBeInTheDocument();
+        expect(screen.getByText('Reviewer')).toBeInTheDocument();
+        expect(screen.queryByRole('article')).toBeNull();
+        expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
       });
 
       it('result card of a blocked cycle reads Blocked', () => {
@@ -1261,53 +1247,6 @@ describe('ChatMessageList', () => {
         expect(within(latest!).getByText('Blocked')).toBeInTheDocument();
       });
 
-      it('parent answer labels card Answered by Main from task.answeredBy', () => {
-        useTaskStore.getState().upsertTask(liveTask());
-        list([question]);
-        act(() => {
-          useTaskStore.getState().upsertTask(
-            liveTask({
-              status: 'running',
-              updatedAt: 2n,
-              answeredBy: { kind: 'agent', agent: owner },
-            })
-          );
-        });
-        // The default agent reads "Main" everywhere.
-        expect(within(card('Answered by Main')).getByText('Answered by Main')).toBeInTheDocument();
-        expect(screen.queryByRole('button', { name: 'Answer Review PR #231' })).toBeNull();
-      });
-
-      it('human answer first labels Answered by you', () => {
-        useTaskStore
-          .getState()
-          .upsertTask(liveTask({ status: 'running', answeredBy: { kind: 'user' } }));
-        list([question]);
-        expect(within(card('Answered by you')).getByText('Answered by you')).toBeInTheDocument();
-      });
-
-      it('answeredBy survives reload', () => {
-        // After a reload the only source is the details load; no events.
-        useTaskStore.getState().seedTasks('ws-1', [
-          liveTask({ status: 'completed', answeredBy: { kind: 'user' } }),
-        ]);
-        list([question]);
-        expect(card('Answered by you')).toBeInTheDocument();
-      });
-
-      it('ended before answer shows not answered with the live status', () => {
-        useTaskStore.getState().upsertTask(liveTask({ status: 'stopped' }));
-        list([question]);
-        expect(
-          within(card('Not answered · Stopped')).getByText('Not answered · Stopped')
-        ).toBeInTheDocument();
-        act(() => {
-          useTaskStore
-            .getState()
-            .upsertTask(liveTask({ status: 'failed', failureReason: 'error', updatedAt: 2n }));
-        });
-        expect(card('Not answered · Failed')).toBeInTheDocument();
-      });
     });
   });
 });

@@ -26,7 +26,7 @@ export const formatRelativeTime = (timestamp: NumericTimestamp): string => {
 export const TASK_STATUS_LABEL: Record<string, string> = {
   queued: 'Queued',
   running: 'Running',
-  input_required: 'Needs an answer',
+  input_required: 'Waiting for agent',
   stopping: 'Stopping…',
   stopped: 'Stopped',
   completed: 'Completed',
@@ -50,6 +50,7 @@ export const taskDisplayStatus = (task: {
   status: string;
   failureReason?: string | null;
   runId?: string | null;
+  createdByDisplayName?: string | null;
 }): { key: string; label: string } => {
   if (isTaskWaiting(task)) return { key: 'queued', label: 'Waiting for subtasks' };
   if (task.status === 'failed' && task.failureReason === 'blocked') {
@@ -58,14 +59,17 @@ export const taskDisplayStatus = (task: {
   if (task.status === 'failed') {
     return { key: 'failed', label: FAILED_LABEL[task.failureReason ?? ''] ?? 'Failed' };
   }
+  if (task.status === 'input_required') {
+    return { key: 'input_required', label: `Waiting for ${task.createdByDisplayName || 'agent'}` };
+  }
   return { key: task.status, label: taskStatusLabel(task.status) };
 };
 
-/** A task waiting on someone: it failed (or was blocked) or asked a question, and is not yet reviewed. */
+/** Unreviewed failures need attention. */
 export const isTaskAttention = (
   task: Pick<WorkspaceTaskResponse, 'attentionAcknowledgedAt'> & { status: string }
 ): boolean =>
-  (task.status === 'failed' || task.status === 'input_required') && !task.attentionAcknowledgedAt;
+  task.status === 'failed' && !task.attentionAcknowledgedAt;
 
 /** Running with no run: its run ended and it waits for its subtasks. The wire omits `runId` then. */
 export const isTaskWaiting = (task: { status: string; runId?: string | null }): boolean =>

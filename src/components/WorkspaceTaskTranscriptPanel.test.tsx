@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
@@ -43,6 +43,7 @@ import { useTaskStore } from '../workspace/taskStore';
 import type { PendingAskUser } from '../assistant/sessionStore';
 import type {
   AssistantMessage,
+  ToolInvocation,
   WorkspaceTaskResponse,
   WorkspaceTaskSendResponse,
 } from '../generated/bindings';
@@ -170,35 +171,53 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     expect(face().dataset.activity).toBe('none');
   });
 
-  it('pending ask_user for task session renders in task panel', () => {
+  it('does not mount interactive question controls for a task session', () => {
     seedSession(true, question);
-    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />);
-    const dialog = screen.getByRole('dialog', { name: 'Agent question' });
-    expect(dialog.textContent).toContain('Also review the generated bindings?');
-  });
-
-  it('submitting answer invokes assistant_submit_user_input with task session id', async () => {
-    mockInvoke.mockResolvedValue(undefined);
-    seedSession(true, question);
-    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />);
-    const dialog = screen.getByRole('dialog', { name: 'Agent question' });
-    await userEvent.type(within(dialog).getByRole('textbox'), 'No, skip them{Enter}');
-    // The pending id is minted for the task session's ask, so answering it
-    // here resolves that session's run.
-    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
-      request: {
-        pendingId: 'pending-1',
-        answer: 'No, skip them',
-        selectedOptionIndex: null,
-        selectedOptionIndexes: null,
-      },
-    });
+    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task({ status: 'input_required' })} onClose={() => {}} />);
+    expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
   });
 
   it('manager chat does not show task session question', () => {
     seedSession(true, question);
     render(<AskUserPanel sessionId="sess-manager" />);
     expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
+  });
+
+  it('keeps a recorded Ask question visible after reopening the panel', () => {
+    const askMessage: AssistantMessage = {
+      ...message,
+      content: [{
+        type: 'tool_use',
+        tool_call_id: 'ask-1',
+        tool_name: 'ask_user',
+        arguments: { question: 'Also review the generated bindings?' },
+      }],
+    };
+    const askCall: ToolInvocation = {
+      id: 'ask-1',
+      runId: 'run-1',
+      sessionId: SESSION_ID,
+      toolName: 'ask_user',
+      params: { question: 'Also review the generated bindings?' },
+      status: 'running',
+      result: null,
+      hasFullResult: false,
+      hasFullInput: true,
+      error: null,
+      startedAt: 1n,
+      completedAt: null,
+    };
+    seedSession(false, question);
+    useAssistantStore.setState({
+      sessions: { [SESSION_ID]: { ...useAssistantStore.getState().sessions[SESSION_ID], messages: [askMessage], toolCalls: [askCall] } },
+    } as never);
+    const panel = () => <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task({ status: 'input_required' })} onClose={() => {}} />;
+    const first = render(panel());
+    expect(screen.getByRole('button', { name: /Also review the generated bindings\?/ })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
+    first.unmount();
+    render(panel());
+    expect(screen.getByRole('button', { name: /Also review the generated bindings\?/ })).toBeInTheDocument();
   });
 
   it('task transcript assistant header shows assignee', () => {
@@ -268,11 +287,11 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     );
     expect(screen.queryByText(/Stop requested/)).toBeNull();
     expect(screen.queryByText(/resume/)).toBeNull();
-    expect(screen.getByPlaceholderText('Continue this task…')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('This task has finished. Ask the agent that created it to resume it.')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Stop task Port the reducer' })).toBeNull();
   });
 
-  it('a task waiting for an answer wears the attention face, not the running one', () => {
+  it('a task waiting for its creator wears a neutral face', () => {
     seedSession(false);
     const { container } = render(
       <WorkspaceTaskTranscriptPanel
@@ -283,7 +302,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     );
     expect(container.querySelector('[data-activity]')).toHaveAttribute(
       'data-activity',
-      'attention'
+      'idle'
     );
   });
 
@@ -311,34 +330,20 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     const send = async (text = 'Also check the CHANGELOG') =>
       userEvent.type(composer(), `${text}{Enter}`);
 
-    it('placeholder per task status', () => {
+    it('composer is enabled only for open tasks', () => {
       seedSession(false);
-      const cases: [Partial<WorkspaceTaskResponse>, string][] = [
-        [{ status: 'queued' }, 'Queue a message for Rust Architect…'],
-        [{ status: 'running' }, 'Queue a message for Rust Architect…'],
-        [{ status: 'running', runId: null }, 'Message Rust Architect…'],
-        [{ status: 'failed', failureReason: 'blocked' }, 'Reply to Rust Architect…'],
-        [{ status: 'failed', failureReason: 'error' }, 'Continue this task…'],
-        [{ status: 'completed' }, 'Continue this task…'],
-        [{ status: 'stopped' }, 'Continue this task…'],
-        [{ status: 'stopping' }, 'Queue a message for after the stop…'],
-      ];
-      for (const [over, placeholder] of cases) {
-        const { unmount } = renderPanel(over);
-        expect(composer()).toHaveAttribute('placeholder', placeholder);
+      for (const status of ['queued', 'running', 'input_required'] as const) {
+        const { unmount } = renderPanel({ status });
+        expect(composer()).toHaveAttribute('placeholder', 'Message Rust Architect…');
         expect(composer()).toBeEnabled();
         unmount();
       }
-    });
-
-    it('input_required placeholder offers to answer', () => {
-      seedSession(false);
-      renderPanel({ status: 'input_required' });
-      expect(composer()).toHaveAttribute(
-        'placeholder',
-        'Answer Rust Architect (or use the question above)…'
-      );
-      expect(composer()).toBeEnabled();
+      for (const status of ['stopping', 'failed', 'completed', 'stopped'] as const) {
+        const { unmount } = renderPanel({ status });
+        expect(composer()).toBeDisabled();
+        expect(composer()).toHaveAttribute('placeholder', 'This task has finished. Ask the agent that created it to resume it.');
+        unmount();
+      }
     });
 
     it('send to running task marks queued chip', async () => {
@@ -404,21 +409,10 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       expect(await screen.findByText('Queued')).toBeInTheDocument();
     });
 
-    it('send to stopped task upserts queued task', async () => {
-      seedSession(false);
-      mockInvoke.mockResolvedValue(sendResponse(false, { status: 'queued', cycleNo: 2n }));
-      renderPanel({ status: 'stopped' });
-      await send();
-      expect(useTaskStore.getState().tasks['ws-1']?.['task-1']).toMatchObject({
-        status: 'queued',
-        cycleNo: 2n,
-      });
-    });
-
     it('send error keeps text and shows alert', async () => {
       seedSession(false);
       mockInvoke.mockRejectedValue('Message is too long');
-      renderPanel({ status: 'completed' });
+      renderPanel({ status: 'running' });
       await send('Try again');
       expect(await screen.findByRole('alert')).toHaveTextContent('Message is too long');
       expect(composer()).toHaveValue('Try again');

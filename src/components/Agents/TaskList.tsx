@@ -47,11 +47,11 @@ const errorMessage = (error: unknown, fallback: string): string => {
   return fallback;
 };
 
-/** The ring a task row draws: what the task is doing, not the agent overall. A question or subtasks wait, they do not run. */
+/** The ring a task row draws from its current state. */
 export const taskActivity = (task: WorkspaceTaskResponse): AgentActivity =>
-  task.status === 'input_required' || isTaskAttention(task)
+  isTaskAttention(task)
     ? 'attention'
-    : isTaskWaiting(task)
+    : task.status === 'input_required' || isTaskWaiting(task)
       ? 'idle'
       : isTaskActive(task)
         ? 'running'
@@ -225,6 +225,7 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
             const status = taskDisplayStatus(task);
             const creator = roster.find((entry) => entry.id === task.createdByWorkspaceAgentId);
             const creatorName = nameOf(task.createdByWorkspaceAgentId, task.createdByDisplayName);
+            if (task.status === 'input_required') status.label = `Waiting for ${creatorName || 'agent'}`;
             const assigneeName = nameOf(
               task.assignedToWorkspaceAgentId,
               task.assignedAgentDisplayName
@@ -309,18 +310,7 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                   {stopped && task.error && (
                     <p className={styles.summary}>Interrupted by restart</p>
                   )}
-                  {task.status === 'input_required' && open && (
-                    <button
-                      type="button"
-                      className={styles.action}
-                      aria-label={`Answer ${task.title}`}
-                      onClick={open}
-                    >
-                      Answer
-                    </button>
-                  )}
-                  {/* A question is reviewed by answering it. */}
-                  {needsAttention && task.status !== 'input_required' && (
+                  {needsAttention && (
                     <button
                       type="button"
                       className={styles.action}

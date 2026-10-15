@@ -1068,16 +1068,13 @@ const WorkspaceAttentionBanner = ({
 
   const primary = attentionTasks[0]!;
   const status = taskDisplayStatus(primary);
-  const detail =
-    primary.status === 'input_required'
-      ? `${primary.assignedAgentDisplayName || 'The agent'} needs an answer`
-      : primary.error || primary.resultSummary || primary.instructions;
+  const detail = primary.error || primary.resultSummary || primary.instructions;
 
   return (
     <section className={styles.attentionBanner} aria-label="Workspace attention">
       <div className={styles.attentionBannerHeader}>
         <span className={styles.attentionBannerTitle}>
-          {attentionTasks.length} task{attentionTasks.length === 1 ? '' : 's'} need attention
+          {attentionTasks.length} task{attentionTasks.length === 1 ? '' : 's'} need{attentionTasks.length === 1 ? 's' : ''} attention
         </span>
         <span className={`${styles.taskStatus} ${styles[`taskStatus_${status.key}`] || ''}`}>
           {status.label}

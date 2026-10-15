@@ -111,7 +111,7 @@ describe('task rules', () => {
     expect(taskActivity(task({ status: 'queued' }))).toBe('running');
     expect(taskActivity(task({ status: 'running' }))).toBe('running');
     expect(taskActivity(task({ status: 'running', runId: null }))).toBe('idle');
-    expect(taskActivity(task({ status: 'input_required' }))).toBe('attention');
+    expect(taskActivity(task({ status: 'input_required' }))).toBe('idle');
     expect(taskActivity(task({ status: 'failed' }))).toBe('attention');
     expect(taskActivity(task({ status: 'failed', attentionAcknowledgedAt: 2n }))).toBe('none');
     expect(taskActivity(task({ status: 'completed' }))).toBe('none');
@@ -253,15 +253,11 @@ describe('TaskList', () => {
     expect(within(write).queryByRole('button', { name: /Open the log/ })).toBeNull();
   });
 
-  it('input_required row offers Answer, which opens its log', async () => {
+  it('input_required row waits for its creator without answer controls', () => {
     const asking = { ...REVIEW_TASK, status: 'input_required' as const };
-    const onViewTask = vi.fn();
-    render(<TaskList {...props} onViewTask={onViewTask} tasks={[asking, WRITE_TASK]} />);
-    await userEvent.setup().click(screen.getByRole('button', { name: 'Answer Review PR' }));
-    expect(onViewTask).toHaveBeenCalledTimes(1);
-    expect(onViewTask).toHaveBeenCalledWith(asking);
-    expect(screen.getAllByRole('button', { name: /^Answer / })).toHaveLength(1);
-    // Answering reviews a question; only the blocked row offers Mark reviewed.
+    render(<TaskList {...props} onViewTask={vi.fn()} tasks={[asking, WRITE_TASK]} />);
+    expect(screen.getByText('Waiting for Main')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
     expect(screen.getAllByRole('button', { name: 'Mark reviewed' })).toHaveLength(1);
   });
 

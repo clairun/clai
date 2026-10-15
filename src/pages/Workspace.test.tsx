@@ -560,6 +560,14 @@ describe('Workspace switch chrome', () => {
     expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
   });
 
+  it('shows singular failure attention and no question attention', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [FAILED_TASK, { ...FAILED_TASK, id: 'asking', status: 'input_required' }] })
+    );
+    renderSwitchableWorkspace();
+    expect(await screen.findByText('1 task needs attention')).toBeInTheDocument();
+  });
+
   it("keeps the previous workspace's counts and attention banner off the page", async () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
       detailsFor(options, { tasks: [FAILED_TASK] })

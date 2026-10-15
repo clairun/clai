@@ -35,7 +35,6 @@ import { identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import {
   resolveAgent,
-  questionState,
   resolveMessageSender,
   senderGroupKey,
   type MessageSender,
@@ -884,7 +883,11 @@ const MessageBlock = memo(({ message, ...props }: MessageBlockProps) => {
   if (message.role !== 'user') return null;
   const sender = props.sender ?? { kind: 'user' };
   if (sender.kind === 'user') return <UserMessageBlock message={message} {...props} />;
-  if (sender.kind === 'task') return <TaskResultBlock message={message} sender={sender} />;
+  if (sender.kind === 'task') {
+    return sender.status === 'input_required'
+      ? <InboxMessageBlock message={message} agent={sender.agent} />
+      : <TaskResultBlock message={message} sender={sender} />;
+  }
   return (
     <InboxMessageBlock
       message={message}
@@ -1072,16 +1075,13 @@ const TaskResultBlock = ({
   message: AssistantMessage;
   sender: Extract<MessageSender, { kind: 'task' }>;
 }) => {
-  const { workspaceId = '', roster, onOpenTask } = useTaskCardSurface();
+  const { workspaceId = '', onOpenTask } = useTaskCardSurface();
   const liveTask = useTask(workspaceId, sender.taskId);
-  const question =
-    sender.status === 'input_required' ? questionState(sender, liveTask, roster) : undefined;
   const sameCycle = liveTask && Number(liveTask.cycleNo) === sender.cycleNo;
   return (
     <TaskResultCard
       sender={sender}
       body={getTextContent(message)}
-      question={question}
       failureReason={sameCycle ? liveTask.failureReason : null}
       onOpen={onOpenTask}
     />

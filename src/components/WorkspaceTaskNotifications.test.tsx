@@ -53,24 +53,11 @@ describe('WorkspaceTaskNotifications', () => {
     useTaskStore.setState({ tasks: {}, seeded: {} });
   });
 
-  it('task_updated with input_required raises one toast per cycle', async () => {
+  it('input_required never raises a toast', async () => {
     await renderNotifications();
-
     emitTaskUpdated(task({ status: 'running' }));
-    expect(screen.queryByText('Fix flaky test')).toBeNull();
-
     emitTaskUpdated(task({ status: 'input_required', updatedAt: 2n }));
-    emitTaskUpdated(task({ status: 'input_required', updatedAt: 3n }));
-    expect(screen.getAllByText('Needs an answer')).toHaveLength(1);
-
-    // Dismissed, then the same question re-announced: still no second toast.
-    act(() => screen.getByRole('button', { name: 'Dismiss notification' }).click());
-    emitTaskUpdated(task({ status: 'input_required', updatedAt: 4n }));
-    expect(screen.queryByText('Needs an answer')).toBeNull();
-
-    // The next cycle's question is a new one.
-    emitTaskUpdated(task({ status: 'input_required', cycleNo: 2n, updatedAt: 5n }));
-    expect(screen.getAllByText('Needs an answer')).toHaveLength(1);
+    expect(screen.queryByText('Fix flaky test')).toBeNull();
   });
 
   it('failed with failureReason blocked toasts as blocked', async () => {
@@ -88,14 +75,13 @@ describe('WorkspaceTaskNotifications', () => {
     expect(screen.getByText('Failed')).toBeInTheDocument();
   });
 
-  it('a question then a failure in the same cycle toast twice', async () => {
+  it('failure after a question raises only the failure toast', async () => {
     await renderNotifications();
-
     emitTaskUpdated(task());
     emitTaskUpdated(task({ status: 'input_required', updatedAt: 2n }));
-    expect(screen.getByText('Needs an answer')).toBeInTheDocument();
     emitTaskUpdated(task({ status: 'failed', error: 'boom', updatedAt: 3n }));
     expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Dismiss notification' })).toHaveLength(1);
   });
 
   it('opening an old failed task of a loaded workspace does not toast', async () => {
