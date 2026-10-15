@@ -2641,8 +2641,8 @@ pub async fn workspace_stop_task(
     Ok(task.into_response(&workspace_id, &agent_names))
 }
 
-/// Send the user's message to a task: answers its open question, queues for
-/// its current run, or resumes it as a new cycle.
+/// Send the user's message to an open task: answer its question or queue
+/// input for its current run.
 #[tauri::command]
 pub async fn workspace_send_task_message(
     request: WorkspaceTaskMessageRequest,
