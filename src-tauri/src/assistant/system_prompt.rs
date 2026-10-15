@@ -262,8 +262,14 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "This workspace has assigned agents. The default manager agent receives user messages and is responsible for routing work inside this workspace.\n\
              Use this roster as workspace-local context. Do not assume agents outside this list are available for collaboration.\n\
-             When task delegation tools are available, assign bounded tasks only to assigned workspace agents, addressed by the `workspaceAgentId` shown in the roster (a display name is not accepted). Tasks run asynchronously and in parallel, each in its own session. The workspace session can use `ask_user` for a short answer only the user can give. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
+             When task delegation tools are available, assign bounded tasks only to assigned workspace agents, addressed by the `workspaceAgentId` shown in the roster (a display name is not accepted). Tasks run asynchronously and in parallel, each in its own session. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n",
         );
+        if own_agent.is_some() && !matches!(trigger, RunTrigger::WorkspaceTask) {
+            prompt.push_str(
+                "The workspace session can use `ask_user` for a short answer only the user can give.\n",
+            );
+        }
+        prompt.push('\n');
         prompt.push_str("Assigned workspace agents:\n");
         for agent in &context.workspace_agents {
             let role = if agent.is_default {
@@ -1322,6 +1328,7 @@ mod tests {
         };
         assert!(!text.contains("If a denied grant requires a human answer, use `ask_user`"));
         assert!(!text.contains("If GH007 blocks a push, use `ask_user`"));
+        assert!(!text.contains("ask_user"));
         assert!(text.contains("including a denied filesystem grant or GH007 push rejection"));
         assert!(!text.contains("should message `workspace`"));
     }
