@@ -82,8 +82,6 @@ pub struct WorkspaceTaskResponse {
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attention_acknowledged_at: Option<i64>,
 }
 
 /// What a message sent to a task did.
@@ -122,13 +120,12 @@ pub(crate) struct WorkspaceTaskRow {
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) completed_at: Option<i64>,
-    pub(crate) attention_acknowledged_at: Option<i64>,
 }
 
 const TASK_COLUMNS: &str = "id, created_by_workspace_agent_id, assigned_to_workspace_agent_id, \
      assigned_agent_definition_id, title, instructions, status, failure_reason, result_summary, \
      error, session_id, run_id, parent_session_id, parent_run_id, parent_task_id, depth, \
-     cycle_no, stop_requested_at, created_at, updated_at, completed_at, attention_acknowledged_at";
+     cycle_no, stop_requested_at, created_at, updated_at, completed_at";
 
 impl WorkspaceTaskRow {
     fn from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<Self, String> {
@@ -157,7 +154,6 @@ impl WorkspaceTaskRow {
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             completed_at: row.get("completed_at"),
-            attention_acknowledged_at: row.get("attention_acknowledged_at"),
         })
     }
 
@@ -204,7 +200,6 @@ impl WorkspaceTaskRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
             completed_at: self.completed_at,
-            attention_acknowledged_at: self.attention_acknowledged_at,
         }
     }
 }
@@ -472,7 +467,7 @@ pub(crate) async fn finish_cycle(
         SET status = CASE WHEN stop_requested_at IS NULL THEN ? ELSE 'stopped' END,
             failure_reason = CASE WHEN stop_requested_at IS NULL THEN ? END,
             error = CASE WHEN stop_requested_at IS NULL THEN ? END,
-            result_summary = ?, attention_acknowledged_at = NULL, updated_at = ?, completed_at = ?
+            result_summary = ?, updated_at = ?, completed_at = ?
         WHERE id = ? AND run_id IS ?
           AND status IN ('queued', 'running', 'stopping')
         RETURNING {TASK_COLUMNS}
@@ -555,7 +550,7 @@ pub(crate) async fn stop_interrupted(
         UPDATE workspace_tasks
         SET status = 'failed', failure_reason = 'restart',
             error = COALESCE(error, 'task never started: the app restarted before it was dispatched'),
-            attention_acknowledged_at = NULL, updated_at = ?, completed_at = ?
+            updated_at = ?, completed_at = ?
         WHERE status = 'queued' AND session_id IS NULL
         "#,
     )
@@ -666,7 +661,6 @@ mod tests {
         );
         assert_eq!(row.error.as_deref(), Some("boom"));
         assert!(row.completed_at.is_some());
-        assert_eq!(row.attention_acknowledged_at, None);
     }
 
     #[tokio::test]
@@ -681,15 +675,10 @@ mod tests {
     async fn list_and_single_load_read_the_same_row() {
         let (_tmp, pool) = workspace_pool().await;
         insert_task(&pool, "task-1", "completed", Some("sess-1"), None).await;
-        sqlx::query("UPDATE workspace_tasks SET attention_acknowledged_at = 7 WHERE id = 'task-1'")
-            .execute(&pool)
-            .await
-            .expect("ack");
 
         let listed = list_recent_tasks(&pool, 50).await.expect("list");
 
         assert_eq!(listed, vec![task(&pool, "task-1").await]);
-        assert_eq!(listed[0].attention_acknowledged_at, Some(7));
     }
 
     #[tokio::test]
@@ -783,33 +772,5 @@ mod tests {
         assert_eq!(task["depth"], 0);
         assert_eq!(task["assignedToWorkspaceAgentId"], "wa-1");
         assert!(task.get("failure_reason").is_none());
-    }
-
-    #[tokio::test]
-    async fn new_attention_clears_the_acknowledgement() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "task-1", "running", Some("sess-1"), None).await;
-        let acknowledge = || async {
-            sqlx::query(
-                "UPDATE workspace_tasks SET run_id = 'run-1', attention_acknowledged_at = 7 WHERE id = 'task-1'",
-            )
-            .execute(&pool)
-            .await
-            .expect("ack");
-        };
-
-        let mut conn = pool.acquire().await.expect("connection");
-        acknowledge().await;
-        let outcome = CycleOutcome {
-            status: TaskStatus::Failed,
-            failure_reason: None,
-            error: Some("boom".to_string()),
-            result_summary: None,
-        };
-        let failed = finish_cycle(&mut conn, "task-1", Some("run-1"), &outcome)
-            .await
-            .expect("finish")
-            .expect("cycle is open");
-        assert_eq!(failed.attention_acknowledged_at, None);
     }
 }

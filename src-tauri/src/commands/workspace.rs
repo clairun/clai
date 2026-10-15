@@ -2570,36 +2570,6 @@ pub async fn workspace_list_agents(
 // it is edited in place — a shared teammate cannot become one workspace's Main
 // without dragging its other workspaces along.
 
-#[tauri::command]
-pub async fn workspace_acknowledge_task(
-    request: WorkspaceTaskActionRequest,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
-    let pool = state.workspace_db(&workspace_id).await?;
-    let now = now_millis();
-    let result = sqlx::query(
-        r#"
-        UPDATE workspace_tasks
-        SET attention_acknowledged_at = ?,
-            updated_at = ?
-        WHERE id = ?
-        "#,
-    )
-    .bind(now)
-    .bind(now)
-    .bind(&request.task_id)
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Failed to acknowledge workspace task: {}", e))?;
-
-    if result.rows_affected() == 0 {
-        return Err(format!("Workspace task not found: {}", request.task_id));
-    }
-
-    Ok(())
-}
-
 /// Fetch a single task by id. The details payload's task list is capped, so a
 /// workspace with hundreds of tasks can still be asked for an older one by id.
 /// A task that no longer exists is `Ok(None)`, not an error: the caller is a
@@ -2681,19 +2651,6 @@ pub struct WorkspaceListEntry {
     pub enabled: bool,
     pub message_count: i64,
     pub running_task_count: i64,
-    pub blocked_task_count: i64,
-    pub failed_task_count: i64,
-    pub attention_task_count: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_updated_at: Option<i64>,
     // Periodic-workspace surface — copied from the workspace's default
     // manager agent so a card can render its cadence pill without a
     // separate details fetch. NOT a sort key: the rail orders purely by
@@ -2720,24 +2677,6 @@ pub struct WorkspaceListEntry {
     /// section. Derived from `WorkspaceConfig::starred_at > 0`.
     pub starred: bool,
     pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, Default)]
-struct WorkspaceTaskAttentionSummary {
-    running_task_count: i64,
-    blocked_task_count: i64,
-    failed_task_count: i64,
-    latest_attention_task_id: Option<String>,
-    latest_attention_task_title: Option<String>,
-    latest_attention_task_status: Option<String>,
-    latest_attention_task_summary: Option<String>,
-    latest_attention_task_updated_at: Option<i64>,
-}
-
-impl WorkspaceTaskAttentionSummary {
-    fn attention_task_count(&self) -> i64 {
-        self.blocked_task_count + self.failed_task_count
-    }
 }
 
 /// Create a new general workspace with a UUID and filesystem root.
@@ -2973,7 +2912,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         // cost five full read+parse cycles per workspace on every 5s poll.
         let message_count =
             count_session_messages(&workspace_pool, &locator.default_agent_id).await;
-        let task_attention = workspace_task_attention_summary(&workspace_pool, &id).await?;
+        let running_task_count = running_task_count(&workspace_pool).await?;
         let schedule = locator.schedule;
         let next_run_in_seconds = schedule
             .wants_countdown()
@@ -2987,15 +2926,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             agent_id: None,
             enabled: true,
             message_count,
-            running_task_count: task_attention.running_task_count,
-            blocked_task_count: task_attention.blocked_task_count,
-            failed_task_count: task_attention.failed_task_count,
-            attention_task_count: task_attention.attention_task_count(),
-            latest_attention_task_id: task_attention.latest_attention_task_id,
-            latest_attention_task_title: task_attention.latest_attention_task_title,
-            latest_attention_task_status: task_attention.latest_attention_task_status,
-            latest_attention_task_summary: task_attention.latest_attention_task_summary,
-            latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
+            running_task_count,
             schedule_enabled: schedule.enabled,
             schedule_paused: schedule.paused,
             schedule_kind: schedule.kind,
@@ -3561,57 +3492,13 @@ pub async fn workspace_set_starred(
     Ok(())
 }
 
-async fn workspace_task_attention_summary(
-    pool: &DbPool,
-    _workspace_id: &str,
-) -> Result<WorkspaceTaskAttentionSummary, String> {
-    let counts: (i64, i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            COALESCE(SUM(CASE WHEN status = 'running' AND run_id IS NOT NULL THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'failed' AND failure_reason = 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'failed' AND failure_reason IS NOT 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0)
-        FROM workspace_tasks
-        "#,
+async fn running_task_count(pool: &DbPool) -> Result<i64, String> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workspace_tasks WHERE status = 'running' AND run_id IS NOT NULL",
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| format!("Failed to count workspace task attention: {}", e))?;
-
-    #[allow(clippy::type_complexity)]
-    let latest: Option<(String, String, String, Option<String>, Option<String>, i64)> =
-        sqlx::query_as(
-            r#"
-            SELECT id, title,
-                   CASE failure_reason WHEN 'blocked' THEN 'blocked' ELSE status END,
-                   result_summary, error, updated_at
-            FROM workspace_tasks
-            WHERE status = 'failed'
-                AND attention_acknowledged_at IS NULL
-            ORDER BY failure_reason IS NOT 'blocked', updated_at DESC
-            LIMIT 1
-            "#,
-        )
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("Failed to load latest workspace attention task: {}", e))?;
-
-    let mut summary = WorkspaceTaskAttentionSummary {
-        running_task_count: counts.0,
-        blocked_task_count: counts.1,
-        failed_task_count: counts.2,
-        ..Default::default()
-    };
-
-    if let Some((id, title, status, result_summary, error, updated_at)) = latest {
-        summary.latest_attention_task_id = Some(id);
-        summary.latest_attention_task_title = Some(title);
-        summary.latest_attention_task_status = Some(status);
-        summary.latest_attention_task_summary = error.or(result_summary);
-        summary.latest_attention_task_updated_at = Some(updated_at);
-    }
-
-    Ok(summary)
+    .map_err(|e| format!("Failed to count running workspace tasks: {}", e))
 }
 
 /// Count messages on the same canonical session used by the workspace view.
@@ -5621,38 +5508,5 @@ mod tests {
 
         assert_eq!(response.display_name, "def-1");
         assert_eq!(response.agent_name, None);
-    }
-
-    #[tokio::test]
-    async fn attention_summary_counts_failed_blocked_as_blocked() {
-        use crate::db::test_support::{insert_task, workspace_pool};
-        let (_tmp, pool) = workspace_pool().await;
-        for (id, status, reason, updated_at) in [
-            ("blocked", "failed", Some("blocked"), 1),
-            ("errored", "failed", Some("error"), 2),
-            ("done", "completed", None, 3),
-        ] {
-            insert_task(&pool, id, status, None, Some("why")).await;
-            sqlx::query(
-                "UPDATE workspace_tasks SET failure_reason = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(reason)
-            .bind(updated_at)
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-
-        let summary = workspace_task_attention_summary(&pool, WS).await.unwrap();
-
-        assert_eq!(summary.blocked_task_count, 1);
-        assert_eq!(summary.failed_task_count, 1);
-        // Blocked ranks first even though the error is newer.
-        assert_eq!(summary.latest_attention_task_id.as_deref(), Some("blocked"));
-        assert_eq!(
-            summary.latest_attention_task_status.as_deref(),
-            Some("blocked")
-        );
     }
 }

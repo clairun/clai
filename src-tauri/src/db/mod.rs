@@ -410,10 +410,9 @@ mod tests {
         assert_eq!(rows, expected);
     }
 
-    /// `20261014000000_drop_dead_columns` keeps answered tasks out of the
-    /// attention count and leaves the rows it rewrites loadable.
+    /// `20261014000000_drop_dead_columns` leaves the rows it rewrites loadable.
     #[tokio::test]
-    async fn dead_columns_drop_keeps_answered_tasks_acknowledged() {
+    async fn dead_columns_drop_keeps_rows_loadable() {
         use crate::assistant::repository;
 
         let pool = pool_migrated_before(20261014000000).await;
@@ -434,42 +433,28 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        for (id, status, acknowledged_at) in [
-            ("answered", "blocked", None),
-            ("acknowledged", "failed", Some(7_i64)),
-        ] {
-            sqlx::query(
-                "INSERT INTO workspace_tasks
-                     (id, assigned_to_workspace_agent_id, assigned_agent_definition_id, title,
-                      instructions, status, result_summary, result_json, created_at, updated_at,
-                      attention_acknowledged_at, user_response, user_response_at)
-                 VALUES (?, 'wa', 'def', 't', 'i', ?, 'done', '{\"summary\":\"done\"}', 1, 1,
-                         ?, 'yes', 5)",
-            )
-            .bind(id)
-            .bind(status)
-            .bind(acknowledged_at)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO workspace_tasks
+                 (id, assigned_to_workspace_agent_id, assigned_agent_definition_id, title,
+                  instructions, status, result_summary, result_json, created_at, updated_at,
+                  user_response, user_response_at)
+             VALUES ('answered', 'wa', 'def', 't', 'i', 'blocked', 'done',
+                     '{\"summary\":\"done\"}', 1, 1, 'yes', 5)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         run_all_migrations(&pool).await;
 
-        let acknowledged: Vec<(String, Option<i64>)> =
-            sqlx::query_as("SELECT id, attention_acknowledged_at FROM workspace_tasks ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            acknowledged,
-            [
-                ("acknowledged".to_string(), Some(7)),
-                ("answered".to_string(), Some(5)),
-            ]
-        );
         assert!(repository::get_session(&pool, "s").await.unwrap().is_some());
         assert!(repository::get_run(&pool, "r").await.unwrap().is_some());
+        assert!(
+            crate::assistant::workspace_tasks_repo::load_task(&pool, "answered")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// `20261015000000_plain_enum_columns` unquotes JSON-string enums, leaves

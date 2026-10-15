@@ -673,7 +673,7 @@ export type WorkspaceFileContent = { path: string, viewer: string, content: stri
 
 export type WorkspaceFileEntry = { path: string, relativePath: string, name: string, viewer: string, size: bigint | null, updatedAt: bigint | null, preview: string | null, };
 
-export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, runningTaskCount: bigint, blockedTaskCount: bigint, failedTaskCount: bigint, attentionTaskCount: bigint, latestAttentionTaskId: string | null, latestAttentionTaskTitle: string | null, latestAttentionTaskStatus: string | null, latestAttentionTaskSummary: string | null, latestAttentionTaskUpdatedAt: bigint | null, scheduleEnabled: boolean, schedulePaused: boolean, 
+export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, runningTaskCount: bigint, scheduleEnabled: boolean, schedulePaused: boolean, 
 /**
  * Schedule mode (interval vs cron). Empty when the workspace is
  * not scheduled. The Fleet card reads this to render the cadence
@@ -698,7 +698,7 @@ export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdBy
 /**
  * Set when a stop was requested for the current cycle.
  */
-stopRequestedAt: bigint | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };
+stopRequestedAt: bigint | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, };
 
 /**
  * What a message sent to a task did.
