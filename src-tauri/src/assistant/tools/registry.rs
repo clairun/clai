@@ -129,7 +129,7 @@ fn workspace_assign_task_def() -> ToolDefinition {
     tool::<AssignWorkspaceTaskParams>(
         "workspace_assignTask",
         &format!(
-            "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained. Delegation is limited: {MAX_TASK_DEPTH} levels of nesting, {AGENT_SENDS_PER_HOUR} assignments and task messages per hour.",
+            "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained. A task can report more than once; a later cycle sends another result. Delegation is limited: {MAX_TASK_DEPTH} levels of nesting, {AGENT_SENDS_PER_HOUR} assignments and task messages per hour.",
         ),
     )
 }
@@ -137,7 +137,7 @@ fn workspace_assign_task_def() -> ToolDefinition {
 fn workspace_get_task_result_def() -> ToolDefinition {
     tool::<GetWorkspaceTaskResultParams>(
         "workspace_getTaskResult",
-        "Read a task's current state and latest result. Inspection only; you do not need to poll. `status` is one of queued, running, input_required, stopping, stopped, completed, failed; `failed` carries `failureReason` (blocked = the worker needed something it could not get, error = run error, restart, connection_unavailable) and `error` text. The response includes sessionId/runId when available; use them with history_query to inspect a running worker's transcript.",
+        "Read a task's current state and latest result. Inspection only; you do not need to poll. `status` is one of queued, running, stopping, stopped, completed, failed; `failed` carries `failureReason` (blocked = the worker needed something it could not get, error = run error, restart, connection_unavailable) and `error` text. The response includes sessionId/runId when available; use them with history_query to inspect a running worker's transcript.",
     )
 }
 
@@ -145,7 +145,7 @@ fn workspace_send_task_message_def() -> ToolDefinition {
     tool::<SendWorkspaceTaskMessageParams>(
         "workspace_sendTaskMessage",
         &format!(
-            "Send a message to a task as an agent. It answers the task's question if the task is `input_required`, queues for its current run if it is running, and resumes it as a new cycle if it is completed, failed or stopped. Results and questions continue to reach the task's parent session as automated events. Returns the task and `queued`: true when the message waits for the task's current run. Messages are at most {MAX_TASK_MESSAGE_CHARS} characters.",
+            "Send a message to any task in this workspace by taskId, or to its canonical manager with taskId `workspace`. Any task can message any task. The send does not wait for a reply. A running task receives the message in its current run or queues it; a finished task resumes in a new cycle. A task can report more than once; a later cycle sends another result. Returns the target and whether delivery queued. Messages are at most {MAX_TASK_MESSAGE_CHARS} characters.",
         ),
     )
 }

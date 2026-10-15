@@ -242,7 +242,7 @@ pub(crate) fn build_system_prompt(
         }
         RunTrigger::WorkspaceTask => {
             prompt.push_str(
-                "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked by missing capability, context, permission, or runtime failure, start with `BLOCKED:` and state the specific manager or user action needed. If you specifically need user feedback or approval, start with `NEEDS_USER_INPUT:` and state the decision needed.\n",
+                "This is a workspace-local task assigned by the manager agent. Complete the bounded task using the current workspace context, then report the result clearly. If blocked by missing capability, context, permission, or runtime failure, start with `BLOCKED:` and state the specific manager or user action needed. When you end your turn, your final reply is sent to whoever created the task. Don't message them yourself. If you end your turn to wait for a reply, say so in that final reply. If you need work done and answered, prefer creating a subtask over messaging a sibling: you are not reported back until your subtasks finish.\n",
             );
         }
         RunTrigger::UserMessage => {
@@ -262,7 +262,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "This workspace has assigned agents. The default manager agent receives user messages and is responsible for routing work inside this workspace.\n\
              Use this roster as workspace-local context. Do not assume agents outside this list are available for collaboration.\n\
-             When task delegation tools are available, assign bounded tasks only to assigned workspace agents, addressed by the `workspaceAgentId` shown in the roster (a display name is not accepted). Tasks run asynchronously and in parallel, each in its own session. Use `ask_user` when work is blocked on a short answer only the user can give — approval, a missing fact, a choice between ready-made options. If the decision needs deliberation, write the analysis in your reply and end your turn instead of forcing it into a modal. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
+             When task delegation tools are available, assign bounded tasks only to assigned workspace agents, addressed by the `workspaceAgentId` shown in the roster (a display name is not accepted). Tasks run asynchronously and in parallel, each in its own session. The workspace session can use `ask_user` for a short answer only the user can give. A task worker should message `workspace` and end its turn when it needs an answer from the user. If delegation tools are not available in this session, explain which assigned agent should handle the work and what is blocked.\n\n",
         );
         prompt.push_str("Assigned workspace agents:\n");
         for agent in &context.workspace_agents {

@@ -230,7 +230,7 @@ export type McpServerTransportResponse = { "type": "stdio", command: string, arg
  * Who wrote a message. Everything a person typed, and every row a run
  * writes, is `User`; agent and task origins mark automated events.
  */
-export type MessageOrigin = { "kind": "user" } | { "kind": "agent", agent: AgentRefSnapshot, sessionId?: string | null, runId?: string | null, } | { "kind": "task", taskId: string, agent: AgentRefSnapshot, title: string, cycleNo: bigint, status: TaskStatus, };
+export type MessageOrigin = { "kind": "user" } | { "kind": "agent", agent: AgentRefSnapshot, sessionId?: string | null, runId?: string | null, replyAddress?: string | null, } | { "kind": "task", taskId: string, agent: AgentRefSnapshot, title: string, cycleNo: bigint, status: TaskStatus, };
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
@@ -518,7 +518,7 @@ terminals: Array<SystemAppEntry>,
  */
 systemEditorName: string | null, };
 
-export type TaskStatus = "queued" | "running" | "input_required" | "stopping" | "stopped" | "completed" | "failed";
+export type TaskStatus = "queued" | "running" | "stopping" | "stopped" | "completed" | "failed";
 
 export type TestResult = { success: boolean, error: string | null, };
 
@@ -698,19 +698,14 @@ export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdBy
 /**
  * Set when a stop was requested for the current cycle.
  */
-stopRequestedAt: bigint | null, 
-/**
- * Who answered the current cycle's last `ask_user` question.
- */
-answeredBy: MessageOrigin | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };
+stopRequestedAt: bigint | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };
 
 /**
  * What a message sent to a task did.
  */
 export type WorkspaceTaskSendResponse = { task: WorkspaceTaskResponse, message: AssistantMessage, 
 /**
- * It waits for the task's current run; `false` when it answered the
- * task's open question or started a new cycle.
+ * It waits for the task's current run; `false` when a new cycle starts.
  */
 queued: boolean, 
 /**

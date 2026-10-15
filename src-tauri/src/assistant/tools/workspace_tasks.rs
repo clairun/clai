@@ -70,7 +70,15 @@ pub async fn execute(
 ) -> Result<serde_json::Value, String> {
     let roster =
         load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)?;
-    let caller = authorize_caller(&roster, context.run_context.automation_id.as_deref())?;
+    let caller = if tool_name == "workspace_sendTaskMessage" {
+        context
+            .run_context
+            .automation_id
+            .as_deref()
+            .unwrap_or("unknown")
+    } else {
+        authorize_caller(&roster, context.run_context.automation_id.as_deref())?
+    };
     match tool_name {
         "workspace_listAgents" => {
             let params: ListWorkspaceAgentsParams = serde_json::from_value(params)
@@ -116,7 +124,13 @@ pub async fn execute(
                 agent: agent_snapshot(&roster, caller, None),
                 session_id: Some(context.session_id.clone()),
                 run_id: Some(context.run_id.clone()),
+                reply_address: reply_address(&deps.pool, &roster, &context.session_id).await?,
             };
+            if params.task_id == "workspace" {
+                let (queued, run) =
+                    send_workspace_message(deps, &roster, &params.message, origin).await?;
+                return Ok(workspace_send_response(queued, run));
+            }
             let sent = send_task_message(deps, &params.task_id, &params.message, origin).await?;
             Ok(serde_json::json!({
                 "ok": true,
@@ -217,6 +231,7 @@ async fn assign_task(
             agent: agent_snapshot(rows, caller, None),
             session_id: Some(context.session_id.clone()),
             run_id: Some(context.run_id.clone()),
+            reply_address: reply_address(&deps.pool, rows, &context.session_id).await?,
         },
     )
     .await?;
@@ -283,7 +298,7 @@ fn assignment_text(task_id: &str, title: &str, instructions: &str) -> String {
          Task title: {}\n\n\
          Instructions:\n{}\n\n\
          Work only with the current workspace context and available tools. \
-         Return a concise result summary. If blocked by missing capability, context, permission, or runtime failure, start your response with `BLOCKED:` and describe the blocker. If you need a human decision, call the `ask_user` tool directly — do not surface the question via your text response.",
+         Return a concise result summary. If blocked by missing capability, context, permission, or runtime failure, start your response with `BLOCKED:` and describe the blocker. When you end your turn, your final reply is sent to whoever created the task. Don't message them yourself. If you end your turn to wait for a reply, say so in that final reply. If you need work done and answered, prefer creating a subtask over messaging a sibling: you are not reported back until your subtasks finish.",
         task_id, title, instructions
     )
 }
@@ -553,6 +568,116 @@ fn cycle_outcome(
     }
 }
 
+async fn reply_address(
+    pool: &DbPool,
+    roster: &[WorkspaceAgentRow],
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    if let Some(task) = workspace_tasks_repo::load_task_for_session(pool, session_id).await? {
+        return Ok(Some(task.id));
+    }
+    let Some(manager) = roster.iter().find(|row| row.role == "manager") else {
+        return Ok(None);
+    };
+    Ok(repository::find_manager_session(pool, &manager.id)
+        .await?
+        .filter(|session| session.id == session_id)
+        .map(|_| "workspace".to_string()))
+}
+
+async fn send_workspace_message(
+    deps: &AssistantDeps,
+    roster: &[WorkspaceAgentRow],
+    text: &str,
+    origin: MessageOrigin,
+) -> Result<(bool, Option<AssistantRun>), String> {
+    let message = deliver_workspace_message(&deps.pool, roster, text, origin).await?;
+    dispatch_message(deps, &message).await
+}
+
+async fn deliver_workspace_message(
+    pool: &DbPool,
+    roster: &[WorkspaceAgentRow],
+    text: &str,
+    origin: MessageOrigin,
+) -> Result<AssistantMessage, String> {
+    let text = validated_message(text)?;
+    let manager = roster
+        .iter()
+        .find(|row| row.role == "manager")
+        .ok_or_else(|| "not_found: workspace manager does not exist.".to_string())?;
+    let session = repository::find_manager_session(pool, &manager.id)
+        .await?
+        .ok_or_else(|| "not_found: workspace manager session does not exist.".to_string())?;
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|e| format!("Failed to start task message transaction: {}", e))?;
+    if let MessageOrigin::Agent { agent, .. } = &origin {
+        signals::ensure_sender_budget(&mut tx, &agent.workspace_agent_id).await?;
+    }
+    let message = signals::insert_event(
+        &mut tx,
+        NewEvent {
+            session_id: &session.id,
+            kind: SignalKind::AgentMessage,
+            text: text.to_string(),
+            origin,
+            delivery_key: None,
+            connection_id: None,
+        },
+    )
+    .await?
+    .ok_or_else(|| "not_found: workspace manager session does not exist.".to_string())?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit task message transaction: {}", e))?;
+    Ok(message)
+}
+
+fn workspace_send_response(queued: bool, run: Option<AssistantRun>) -> serde_json::Value {
+    serde_json::json!({ "ok": true, "task": null, "queued": queued, "run": run })
+}
+
+fn validated_message(text: &str) -> Result<&str, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("invalid_input: message is required.".to_string());
+    }
+    if text.chars().count() > MAX_TASK_MESSAGE_CHARS {
+        return Err(format!(
+            "invalid_input: message is longer than {MAX_TASK_MESSAGE_CHARS} characters."
+        ));
+    }
+    Ok(text)
+}
+
+async fn dispatch_message(
+    deps: &AssistantDeps,
+    message: &AssistantMessage,
+) -> Result<(bool, Option<AssistantRun>), String> {
+    let session_id = &message.session_id;
+    if let Ok(Some(session)) = repository::get_session(&deps.pool, session_id).await {
+        let _ = deps.emit(
+            &session,
+            None,
+            AssistantUiEvent::MessageCreated {
+                message: message.clone(),
+            },
+        );
+    }
+    let (run_id, queued) = match dispatcher::kick(deps, session_id).await? {
+        Kick::Started { run, .. } => (Some(run.id), false),
+        Kick::Busy { run_id } => (Some(run_id), true),
+        Kick::Idle | Kick::Deferred => (None, true),
+    };
+    let run = match run_id {
+        Some(run_id) => repository::get_run(&deps.pool, &run_id).await?,
+        None => None,
+    };
+    Ok((queued, run))
+}
+
 /// Sends `text` to a task from `origin`: queues for its current run or starts
 /// a new cycle.
 pub(crate) async fn send_task_message(
@@ -562,25 +687,7 @@ pub(crate) async fn send_task_message(
     origin: MessageOrigin,
 ) -> Result<WorkspaceTaskSendResponse, String> {
     let delivery = deliver_task_message(&deps.pool, task_id, text, origin).await?;
-    let session_id = delivery.message.session_id.clone();
-    if let Ok(Some(session)) = repository::get_session(&deps.pool, &session_id).await {
-        let _ = deps.emit(
-            &session,
-            None,
-            AssistantUiEvent::MessageCreated {
-                message: delivery.message.clone(),
-            },
-        );
-    }
-    let (run_id, queued) = match dispatcher::kick(deps, &session_id).await? {
-        Kick::Started { run, .. } => (Some(run.id), false),
-        Kick::Busy { run_id } => (Some(run_id), true),
-        Kick::Idle | Kick::Deferred => (None, true),
-    };
-    let run = match run_id {
-        Some(run_id) => repository::get_run(&deps.pool, &run_id).await?,
-        None => None,
-    };
+    let (queued, run) = dispatch_message(deps, &delivery.message).await?;
     let task = workspace_tasks_repo::load_task(&deps.pool, task_id)
         .await?
         .ok_or_else(|| not_found(task_id))?;
@@ -607,15 +714,7 @@ pub(crate) async fn deliver_task_message(
     text: &str,
     origin: MessageOrigin,
 ) -> Result<TaskMessageDelivery, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err("invalid_input: message is required.".to_string());
-    }
-    if text.chars().count() > MAX_TASK_MESSAGE_CHARS {
-        return Err(format!(
-            "invalid_input: message is longer than {MAX_TASK_MESSAGE_CHARS} characters."
-        ));
-    }
+    let text = validated_message(text)?;
     let kind = match origin {
         MessageOrigin::User => SignalKind::UserMessage,
         _ => SignalKind::AgentMessage,
@@ -931,6 +1030,125 @@ fn final_assistant_text(messages: &[AssistantMessage]) -> Option<String> {
 mod tests {
     use super::*;
     use crate::assistant::types::RunTrigger;
+
+    #[tokio::test]
+    async fn workspace_target_uses_canonical_manager_and_null_task_response() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let roster = vec![WorkspaceAgentRow {
+            role: "manager".to_string(),
+            ..agent_row("manager", "Manager")
+        }];
+        let context = SessionContext {
+            automation_id: Some("manager".to_string()),
+            ..SessionContext::default()
+        };
+        let manager = repository::create_session(&pool, context.clone())
+            .await
+            .unwrap();
+        let self_task = repository::create_session(&pool, context).await.unwrap();
+        crate::db::test_support::insert_task(
+            &pool,
+            "self-task",
+            "running",
+            Some(&self_task.id),
+            None,
+        )
+        .await;
+        let origin = MessageOrigin::Agent {
+            agent: agent_snapshot(&roster, "worker", None),
+            session_id: None,
+            run_id: None,
+            reply_address: Some("worker-task".to_string()),
+        };
+        let message = deliver_workspace_message(&pool, &roster, "hello manager", origin)
+            .await
+            .unwrap();
+        assert_eq!(message.session_id, manager.id);
+        let pending = signals::list_open_content(&pool, &manager.id)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message.id, message.id);
+        let response = workspace_send_response(true, None);
+        assert_eq!(response["task"], serde_json::Value::Null);
+        assert_eq!(response["queued"], true);
+        assert_eq!(response["run"], serde_json::Value::Null);
+        assert!(
+            crate::assistant::turn_common::render_origin_header(&message.origin)
+                .unwrap()
+                .contains("taskId: worker-task")
+        );
+    }
+
+    #[tokio::test]
+    async fn sender_reply_address_is_stored_for_messages_and_assignments() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let roster = vec![WorkspaceAgentRow {
+            role: "manager".to_string(),
+            ..agent_row("manager", "Manager")
+        }];
+        let manager = repository::create_session(
+            &pool,
+            SessionContext {
+                automation_id: Some("manager".to_string()),
+                ..SessionContext::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reply_address(&pool, &roster, &manager.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("workspace")
+        );
+        let receiver = create_assignment(
+            &pool,
+            &new_task("receiver", TaskLineage::default()),
+            Ok("conn"),
+            MessageOrigin::Agent {
+                agent: agent_snapshot(&roster, "manager", None),
+                session_id: Some(manager.id.clone()),
+                run_id: None,
+                reply_address: reply_address(&pool, &roster, &manager.id).await.unwrap(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let assignment = signals::list_open_content(&pool, &receiver).await.unwrap();
+        assert!(
+            crate::assistant::turn_common::render_origin_header(&assignment[0].message.origin)
+                .unwrap()
+                .contains("taskId: workspace")
+        );
+        assert_eq!(
+            reply_address(&pool, &roster, &receiver)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("receiver")
+        );
+        let sent = deliver_task_message(
+            &pool,
+            "receiver",
+            "follow up",
+            MessageOrigin::Agent {
+                agent: agent_snapshot(&roster, "worker", None),
+                session_id: Some(receiver.clone()),
+                run_id: None,
+                reply_address: reply_address(&pool, &roster, &receiver).await.unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::assistant::turn_common::render_origin_header(&sent.message.origin)
+                .unwrap()
+                .contains("taskId: receiver")
+        );
+    }
 
     #[tokio::test]
     async fn task_session_persists_only_assignee_id() {
@@ -2227,6 +2445,7 @@ mod tests {
             agent: agent_snapshot(&[], "wa-mgr", None),
             session_id: None,
             run_id: None,
+            reply_address: None,
         }
     }
 

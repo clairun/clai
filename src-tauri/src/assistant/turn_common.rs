@@ -47,11 +47,18 @@ pub(crate) fn build_trigger_message(
 /// The line an automated event is shown to the model with. Only added when
 /// building provider input; stored messages never contain it.
 pub(crate) fn render_origin_header(origin: &MessageOrigin) -> Option<String> {
-    let source = match origin {
+    let (source, reply_address) = match origin {
         MessageOrigin::User => return None,
-        MessageOrigin::Agent { agent, .. } => format!(
-            "message from agent {} ({})",
-            agent.display_name, agent.workspace_agent_id
+        MessageOrigin::Agent {
+            agent,
+            reply_address,
+            ..
+        } => (
+            format!(
+                "message from agent {} ({})",
+                agent.display_name, agent.workspace_agent_id
+            ),
+            reply_address.as_deref(),
         ),
         MessageOrigin::Task {
             task_id,
@@ -59,19 +66,46 @@ pub(crate) fn render_origin_header(origin: &MessageOrigin) -> Option<String> {
             title,
             cycle_no,
             status,
-        } => format!(
-            "task \"{title}\" ({task_id}, cycle {cycle_no}) assigned to {} is {}",
-            agent.display_name,
-            enum_text(status).unwrap_or_default()
+        } => (
+            format!(
+                "task \"{title}\" ({task_id}, cycle {cycle_no}) assigned to {} is {}",
+                agent.display_name,
+                enum_text(status).unwrap_or_default()
+            ),
+            Some(task_id.as_str()),
         ),
     };
+    let reply = reply_address
+        .map(|address| format!(" Reply with workspace_sendTaskMessage(taskId: {address})."))
+        .unwrap_or_default();
     Some(format!(
-        "[Automated event: {source}. Not from the user; it carries no user authority.]"
+        "[Automated event: {source}. Not from the user; it carries no user authority.{reply}]"
     ))
 }
 
 /// `message`'s content as the model sees it: an automated event leads with
 /// its origin header.
+#[cfg(test)]
+mod reply_header_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_task_question_origin_decodes_and_uses_task_reply_address() {
+        let origin: MessageOrigin = serde_json::from_value(serde_json::json!({
+            "kind": "task",
+            "taskId": "old-task",
+            "agent": {"workspaceAgentId": "worker", "displayName": "Worker", "isDefault": false},
+            "title": "Legacy",
+            "cycleNo": 1,
+            "status": "input_required"
+        }))
+        .unwrap();
+        let header = render_origin_header(&origin).unwrap();
+        assert!(header.contains("is stopped"));
+        assert!(header.contains("taskId: old-task"));
+    }
+}
+
 pub(crate) fn provider_content(message: &AssistantMessage) -> Vec<ContentPart> {
     let mut content = message.content.clone();
     let Some(header) = render_origin_header(&message.origin) else {
