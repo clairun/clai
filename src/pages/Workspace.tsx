@@ -1146,8 +1146,7 @@ const WorkspaceHeader = ({
   const schedulePillText = formatSchedulePill(details);
   const scheduleEnabled = !!details?.scheduleEnabled;
   const schedulePaused = !!details?.schedulePaused;
-  // Active = a task on this workspace is running or queued; a task waiting
-  // for an answer or for its subtasks is not. Disables Run-now while a run is mid-flight.
+  // Running or queued tasks disable Run-now; tasks waiting for subtasks do not.
   const hasRunningTask = (details?.tasks || []).some(isTaskRunning);
   // Manager is invisible to the user — exclude it from the headline count so
   // the chip and the drawer (which already filters !isDefault) agree.

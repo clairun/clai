@@ -66,17 +66,6 @@ describe('TaskCard', () => {
     }
   });
 
-  it('omits the creator-dependent question status on a frozen poll', () => {
-    for (const variant of ['full', 'slim'] as const) {
-      const { container } = render(
-        <TaskCard card={card({ kind: 'poll', variant, status: 'input_required' })} roster={roster} />
-      );
-      expect(container.textContent).not.toContain('Waiting for agent');
-      expect(container.querySelector('[class*="pill_input_required"]')).toBeNull();
-      cleanup();
-    }
-  });
-
   it('keeps the status on a poll, which went and looked at the task', () => {
     render(<TaskCard card={card({ kind: 'poll', status: 'completed' })} roster={roster} />);
     expect(screen.getByText('Completed')).toBeInTheDocument();

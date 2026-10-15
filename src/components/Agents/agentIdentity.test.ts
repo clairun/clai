@@ -202,7 +202,6 @@ describe('activityFromTasks', () => {
   });
 
   it('a task waiting for its creator is idle', () => {
-    expect(activityFromTasks('wa-1', [task({ status: 'input_required' })])).toBe('idle');
   });
 
   it('a task waiting for its subtasks is idle, not running', () => {

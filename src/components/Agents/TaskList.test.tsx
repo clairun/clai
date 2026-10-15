@@ -57,7 +57,6 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   depth: 0n,
   cycleNo: 0n,
   stopRequestedAt: null,
-  answeredBy: null,
   ...over,
 });
 
@@ -111,7 +110,6 @@ describe('task rules', () => {
     expect(taskActivity(task({ status: 'queued' }))).toBe('running');
     expect(taskActivity(task({ status: 'running' }))).toBe('running');
     expect(taskActivity(task({ status: 'running', runId: null }))).toBe('idle');
-    expect(taskActivity(task({ status: 'input_required' }))).toBe('idle');
     expect(taskActivity(task({ status: 'failed' }))).toBe('attention');
     expect(taskActivity(task({ status: 'failed', attentionAcknowledgedAt: 2n }))).toBe('none');
     expect(taskActivity(task({ status: 'completed' }))).toBe('none');
@@ -253,14 +251,6 @@ describe('TaskList', () => {
     expect(within(write).queryByRole('button', { name: /Open the log/ })).toBeNull();
   });
 
-  it('input_required row waits for its creator without answer controls', () => {
-    const asking = { ...REVIEW_TASK, status: 'input_required' as const };
-    render(<TaskList {...props} onViewTask={vi.fn()} tasks={[asking, WRITE_TASK]} />);
-    expect(screen.getByText('Waiting for Manager')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
-    expect(screen.getAllByRole('button', { name: 'Mark reviewed' })).toHaveLength(1);
-  });
-
   it('leaves the row inert when nobody is listening for the log', () => {
     render(<TaskList {...props} tasks={[REVIEW_TASK]} />);
     expect(screen.queryByRole('button', { name: /Open the log/ })).toBeNull();
@@ -396,11 +386,10 @@ describe('task stop', () => {
     useTaskStore.setState({ tasks: {}, seeded: {} });
   });
 
-  it('stop visible for queued/running/input_required', () => {
+  it('stop visible for queued/running', () => {
     const statuses = [
       'queued',
       'running',
-      'input_required',
       'completed',
       'failed',
       'stopped',
@@ -414,7 +403,7 @@ describe('task stop', () => {
     const stops = screen
       .getAllByRole('button', { name: /^Stop / })
       .map((b) => b.getAttribute('aria-label'));
-    expect(stops).toEqual(['Stop queued', 'Stop running', 'Stop input_required']);
+    expect(stops).toEqual(['Stop queued', 'Stop running']);
   });
 
   it('stop disables while stopping and survives reload via status', async () => {

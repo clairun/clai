@@ -1166,20 +1166,7 @@ describe('ChatMessageList', () => {
       expect(screen.queryByRole('button', { name: 'Edit queued message' })).toBeNull();
     });
 
-    describe('question cards', () => {
-      const question = msg({
-        id: 'q1',
-        role: 'user',
-        content: [{ type: 'text', text: 'Should I also review the generated bindings?' }],
-        origin: {
-          kind: 'task',
-          taskId: 'task-1',
-          agent: reviewer,
-          title: 'Review PR #231',
-          cycleNo: 1n,
-          status: 'input_required',
-        },
-      });
+    describe('task result cards', () => {
       const liveTask = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse => ({
         id: 'task-1',
         workspaceId: 'ws-1',
@@ -1190,7 +1177,7 @@ describe('ChatMessageList', () => {
         assignedAgentDisplayName: 'Reviewer',
         title: 'Review PR #231',
         instructions: 'review',
-        status: 'input_required',
+        status: 'running',
         resultSummary: null,
         error: null,
         sessionId: 'sess-rev',
@@ -1206,46 +1193,10 @@ describe('ChatMessageList', () => {
         depth: 0n,
         cycleNo: 1n,
         stopRequestedAt: null,
-        answeredBy: null,
         ...over,
       });
       beforeEach(() => {
         useTaskStore.setState({ tasks: {}, seeded: {} });
-      });
-
-      it('renders a task question as a plain worker message', () => {
-        useTaskStore.getState().upsertTask(liveTask());
-        list([question], { onOpenTask: vi.fn() });
-        expect(screen.getByText('Should I also review the generated bindings?')).toBeInTheDocument();
-        expect(screen.getByText('Reviewer')).toBeInTheDocument();
-        expect(screen.queryByRole('article')).toBeNull();
-        expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
-      });
-
-      it('keeps separate task titles and opens the matching transcript', () => {
-        const onOpenTask = vi.fn();
-        const secondQuestion = msg({
-          id: 'q2',
-          role: 'user',
-          content: [{ type: 'text', text: 'Should I check the release notes?' }],
-          origin: {
-            kind: 'task',
-            taskId: 'task-2',
-            agent: reviewer,
-            title: 'Prepare release',
-            cycleNo: 1n,
-            status: 'input_required',
-          },
-        });
-        list([question, secondQuestion], { onOpenTask });
-
-        expect(screen.getByText('Review PR #231')).toBeInTheDocument();
-        expect(screen.getByText('Prepare release')).toBeInTheDocument();
-        fireEvent.click(screen.getByRole('button', { name: 'Open task Review PR #231' }));
-        fireEvent.click(screen.getByRole('button', { name: 'Open task Prepare release' }));
-        expect(onOpenTask.mock.calls).toEqual([['task-1'], ['task-2']]);
-        expect(screen.queryByRole('article')).toBeNull();
-        expect(screen.queryByRole('button', { name: /^Answer / })).toBeNull();
       });
 
       it('result card of a blocked cycle reads Blocked', () => {

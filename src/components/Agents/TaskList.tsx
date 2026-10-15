@@ -51,7 +51,7 @@ const errorMessage = (error: unknown, fallback: string): string => {
 export const taskActivity = (task: WorkspaceTaskResponse): AgentActivity =>
   isTaskAttention(task)
     ? 'attention'
-    : task.status === 'input_required' || isTaskWaiting(task)
+    : isTaskWaiting(task)
       ? 'idle'
       : isTaskActive(task)
         ? 'running'

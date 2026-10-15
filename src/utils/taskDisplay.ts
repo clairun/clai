@@ -26,7 +26,6 @@ export const formatRelativeTime = (timestamp: NumericTimestamp): string => {
 export const TASK_STATUS_LABEL: Record<string, string> = {
   queued: 'Queued',
   running: 'Running',
-  input_required: 'Waiting for agent',
   stopping: 'Stopping…',
   stopped: 'Stopped',
   completed: 'Completed',
@@ -50,7 +49,6 @@ export const taskDisplayStatus = (task: {
   status: string;
   failureReason?: string | null;
   runId?: string | null;
-  createdByDisplayName?: string | null;
 }): { key: string; label: string } => {
   if (isTaskWaiting(task)) return { key: 'queued', label: 'Waiting for subtasks' };
   if (task.status === 'failed' && task.failureReason === 'blocked') {
@@ -58,9 +56,6 @@ export const taskDisplayStatus = (task: {
   }
   if (task.status === 'failed') {
     return { key: 'failed', label: FAILED_LABEL[task.failureReason ?? ''] ?? 'Failed' };
-  }
-  if (task.status === 'input_required') {
-    return { key: 'input_required', label: `Waiting for ${task.createdByDisplayName || 'agent'}` };
   }
   return { key: task.status, label: taskStatusLabel(task.status) };
 };
@@ -75,13 +70,13 @@ export const isTaskAttention = (
 export const isTaskWaiting = (task: { status: string; runId?: string | null }): boolean =>
   task.status === 'running' && task.runId == null;
 
-/** A task the agent is working on or about to; a question or subtasks wait instead. */
+/** A task the agent is working on or about to; subtasks wait instead. */
 export const isTaskRunning = (task: { status: string; runId?: string | null }): boolean =>
   task.status === 'queued' || (task.status === 'running' && !isTaskWaiting(task));
 
-/** A task with an open cycle: running, queued, waiting for subtasks or for an answer. */
+/** A task with an open cycle: running, queued, or waiting for subtasks. */
 export const isTaskActive = (task: { status: string }): boolean =>
-  task.status === 'running' || task.status === 'queued' || task.status === 'input_required';
+  task.status === 'running' || task.status === 'queued';
 
 /** A task whose current cycle can still be stopped. */
 export const canStopTask = (task: { status: string }): boolean => isTaskActive(task);

@@ -37,13 +37,10 @@ vi.mock('./Chat/StreamingMarkdown', () => ({
 vi.mock('./Chat/VegaChart', () => ({ default: () => <div data-testid="vega-chart" /> }));
 
 import WorkspaceTaskTranscriptPanel from './WorkspaceTaskTranscriptPanel';
-import AskUserPanel from './AskUserPanel/AskUserPanel';
 import { useAssistantStore } from '../assistant';
 import { useTaskStore } from '../workspace/taskStore';
-import type { PendingAskUser } from '../assistant/sessionStore';
 import type {
   AssistantMessage,
-  ToolInvocation,
   WorkspaceTaskResponse,
   WorkspaceTaskSendResponse,
 } from '../generated/bindings';
@@ -76,7 +73,6 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   depth: 0n,
   cycleNo: 0n,
   stopRequestedAt: null,
-  answeredBy: null,
   ...over,
 });
 
@@ -92,7 +88,7 @@ const message: AssistantMessage = {
 
 // Only the fields the panel reads; `session` and the rest of SessionState are
 // never touched by it, so the fixture stays narrow on purpose.
-const seedSession = (isStreaming: boolean, pendingAskUser: PendingAskUser | null = null) => {
+const seedSession = (isStreaming: boolean) => {
   useAssistantStore.setState({
     sessions: {
       [SESSION_ID]: {
@@ -100,19 +96,12 @@ const seedSession = (isStreaming: boolean, pendingAskUser: PendingAskUser | null
         toolCalls: [],
         isStreaming,
         runStartedAt: isStreaming ? Date.now() - 8000 : null,
-        pendingAskUser,
+        pendingAskUser: null,
         queuedMessageIds: [],
         totalMessageCount: null,
       },
     },
   } as never);
-};
-
-const question: PendingAskUser = {
-  pendingId: 'pending-1',
-  question: 'Also review the generated bindings?',
-  options: null,
-  extraContext: null,
 };
 
 describe('WorkspaceTaskTranscriptPanel', () => {
@@ -169,55 +158,6 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       />
     );
     expect(face().dataset.activity).toBe('none');
-  });
-
-  it('does not mount interactive question controls for a task session', () => {
-    seedSession(true, question);
-    render(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task({ status: 'input_required' })} onClose={() => {}} />);
-    expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
-  });
-
-  it('manager chat does not show task session question', () => {
-    seedSession(true, question);
-    render(<AskUserPanel sessionId="sess-manager" />);
-    expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
-  });
-
-  it('keeps a recorded Ask question visible after reopening the panel', () => {
-    const askMessage: AssistantMessage = {
-      ...message,
-      content: [{
-        type: 'tool_use',
-        tool_call_id: 'ask-1',
-        tool_name: 'ask_user',
-        arguments: { question: 'Also review the generated bindings?' },
-      }],
-    };
-    const askCall: ToolInvocation = {
-      id: 'ask-1',
-      runId: 'run-1',
-      sessionId: SESSION_ID,
-      toolName: 'ask_user',
-      params: { question: 'Also review the generated bindings?' },
-      status: 'running',
-      result: null,
-      hasFullResult: false,
-      hasFullInput: true,
-      error: null,
-      startedAt: 1n,
-      completedAt: null,
-    };
-    seedSession(false, question);
-    useAssistantStore.setState({
-      sessions: { [SESSION_ID]: { ...useAssistantStore.getState().sessions[SESSION_ID], messages: [askMessage], toolCalls: [askCall] } },
-    } as never);
-    const panel = () => <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task({ status: 'input_required' })} onClose={() => {}} />;
-    const first = render(panel());
-    expect(screen.getByRole('button', { name: /Also review the generated bindings\?/ })).toBeInTheDocument();
-    expect(screen.queryByRole('dialog', { name: 'Agent question' })).toBeNull();
-    first.unmount();
-    render(panel());
-    expect(screen.getByRole('button', { name: /Also review the generated bindings\?/ })).toBeInTheDocument();
   });
 
   it('task transcript assistant header shows assignee', () => {
@@ -287,23 +227,8 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     );
     expect(screen.queryByText(/Stop requested/)).toBeNull();
     expect(screen.queryByText(/resume/)).toBeNull();
-    expect(screen.getByPlaceholderText('Messages are unavailable for this task.')).toBeDisabled();
+    expect(screen.getByPlaceholderText('Message Rust Architect…')).toBeEnabled();
     expect(screen.queryByRole('button', { name: 'Stop task Port the reducer' })).toBeNull();
-  });
-
-  it('a task waiting for its creator wears a neutral face', () => {
-    seedSession(false);
-    const { container } = render(
-      <WorkspaceTaskTranscriptPanel
-        workspaceId="ws-1"
-        task={task({ status: 'input_required' })}
-        onClose={() => {}}
-      />
-    );
-    expect(container.querySelector('[data-activity]')).toHaveAttribute(
-      'data-activity',
-      'idle'
-    );
   });
 
   describe('task composer', () => {
@@ -330,20 +255,19 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     const send = async (text = 'Also check the CHANGELOG') =>
       userEvent.type(composer(), `${text}{Enter}`);
 
-    it('composer is enabled only for open tasks', () => {
+    it('composer is enabled for every task status with a session', () => {
       seedSession(false);
-      for (const status of ['queued', 'running', 'input_required'] as const) {
+      for (const status of ['queued', 'running', 'stopping', 'stopped', 'completed', 'failed'] as const) {
         const { unmount } = renderPanel({ status });
         expect(composer()).toHaveAttribute('placeholder', 'Message Rust Architect…');
         expect(composer()).toBeEnabled();
         unmount();
       }
-      for (const status of ['stopping', 'failed', 'completed', 'stopped'] as const) {
-        const { unmount } = renderPanel({ status });
-        expect(composer()).toBeDisabled();
-        expect(composer()).toHaveAttribute('placeholder', 'Messages are unavailable for this task.');
-        unmount();
-      }
+    });
+
+    it('composer is disabled without a session', () => {
+      renderPanel({ status: 'queued', sessionId: null });
+      expect(composer()).toBeDisabled();
     });
 
     it('send to running task marks queued chip', async () => {
@@ -379,34 +303,16 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       expect(screen.queryByText('Queued')).toBeNull();
     });
 
-    it('composer send to input_required answers ask', async () => {
-      seedSession(true, question);
-      // The returned task may still read input_required; task_updated follows.
-      mockInvoke.mockResolvedValue(sendResponse(false, { status: 'input_required' }));
-      renderPanel({ status: 'input_required' });
-      await send('No, skip them');
-      expect(mockInvoke).toHaveBeenCalledWith('workspace_send_task_message', {
-        request: { workspaceId: 'ws-1', taskId: 'task-1', message: 'No, skip them' },
-      });
-      expect(mockInvoke).not.toHaveBeenCalledWith('assistant_submit_user_input', expect.anything());
-      expect(screen.queryByText('Queued')).toBeNull();
-    });
-
-    it('send losing answer race shows queued chip', async () => {
-      // The parent answered first, so the human's send waits for the run.
-      seedSession(true);
-      mockInvoke.mockResolvedValue(
-        sendResponse(true, {
-          status: 'running',
-          answeredBy: {
-            kind: 'agent',
-            agent: { workspaceAgentId: 'agent-main', displayName: 'Main', isDefault: true },
-          },
-        })
-      );
-      renderPanel({ status: 'input_required' });
+    it('send from a completed task starts a new cycle', async () => {
+      seedSession(false);
+      mockInvoke.mockResolvedValue(sendResponse(false, { status: 'running', cycleNo: 1n }));
+      renderPanel({ status: 'completed' });
       await send();
-      expect(await screen.findByText('Queued')).toBeInTheDocument();
+      expect(mockInvoke).toHaveBeenCalledWith('workspace_send_task_message', {
+        request: { workspaceId: 'ws-1', taskId: 'task-1', message: 'Also check the CHANGELOG' },
+      });
+      expect(await screen.findByText('Also check the CHANGELOG')).toBeInTheDocument();
+      expect(screen.queryByText('Queued')).toBeNull();
     });
 
     it('send error keeps text and shows alert', async () => {

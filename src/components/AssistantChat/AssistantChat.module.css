@@ -1172,28 +1172,3 @@
   border-radius: var(--radius-md);
   contain: layout paint style;
 }
-
-.inboxTaskContext {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-}
-
-.inboxTaskContext button {
-  flex-shrink: 0;
-  border: 0;
-  background: none;
-  color: var(--color-primary);
-  cursor: pointer;
-  font: inherit;
-  text-decoration: underline;
-}
-
-.inboxTaskContext button:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 2px;
-}

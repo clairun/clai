@@ -24,7 +24,6 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   depth: 0n,
   cycleNo: 1n,
   stopRequestedAt: null,
-  answeredBy: null,
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,
@@ -42,15 +41,15 @@ describe('taskStore', () => {
     upsertTask(task({ status: 'completed', updatedAt: 5n }));
     upsertTask(task({ status: 'running', updatedAt: 4n }));
     expect(stored()?.status).toBe('completed');
-    upsertTask(task({ status: 'input_required', updatedAt: 6n }));
-    expect(stored()?.status).toBe('input_required');
+    upsertTask(task({ status: 'failed', updatedAt: 6n }));
+    expect(stored()?.status).toBe('failed');
   });
 
   it('upsert with the same updatedAt takes the later copy', () => {
     const { upsertTask } = useTaskStore.getState();
     upsertTask(task({ status: 'running', updatedAt: 5n }));
-    upsertTask(task({ status: 'input_required', updatedAt: 5n }));
-    expect(stored()?.status).toBe('input_required');
+    upsertTask(task({ status: 'failed', updatedAt: 5n }));
+    expect(stored()?.status).toBe('failed');
   });
 
   it('seed does not overwrite newer event copy', () => {

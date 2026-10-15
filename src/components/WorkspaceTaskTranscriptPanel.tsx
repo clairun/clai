@@ -15,7 +15,7 @@ import StopChip from './Agents/StopChip';
 import TaskStopButton from './Agents/TaskStopButton';
 import { taskActivity } from './Agents/TaskList';
 import { taskIdentity } from './Agents/agentIdentity';
-import { isTaskActive, taskDisplayStatus } from '../utils/taskDisplay';
+import { taskDisplayStatus } from '../utils/taskDisplay';
 import { sendWorkspaceTaskMessage } from '../workspace/client';
 import { useTaskStore } from '../workspace/taskStore';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
@@ -26,11 +26,6 @@ const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
 const MESSAGE_PAGE_LIMIT = 100;
-
-const composerPlaceholder = (task: WorkspaceTaskResponse, agent: string): string =>
-  isTaskActive(task)
-    ? `Message ${agent}…`
-    : 'Messages are unavailable for this task.';
 
 const errorText = (err: unknown): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to send message.';
@@ -311,8 +306,8 @@ export default function WorkspaceTaskTranscriptPanel({
       <ChatComposer
         // Remount per task so a draft never carries over to another task.
         key={task.id}
-        placeholder={composerPlaceholder(task, agentName)}
-        disabled={!isTaskActive(task)}
+        placeholder={`Message ${agentName}…`}
+        disabled={!sessionId}
         ariaLabel={`Message ${agentName} about ${task.title}`}
         onSend={handleSend}
       />

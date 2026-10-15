@@ -93,8 +93,7 @@
   border-color: color-mix(in srgb, var(--color-critical) 30%, transparent);
 }
 
-.status_queued,
-.status_input_required {
+.status_queued {
   background: var(--color-overlay-06);
   color: var(--color-text-tertiary);
 }

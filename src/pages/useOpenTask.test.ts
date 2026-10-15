@@ -30,7 +30,6 @@ const task = (id: string): WorkspaceTaskResponse => ({
   depth: 0n,
   cycleNo: 0n,
   stopRequestedAt: null,
-  answeredBy: null,
 });
 
 const setup = (

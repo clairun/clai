@@ -272,7 +272,6 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   depth: 0n,
   cycleNo: 0n,
   stopRequestedAt: null,
-  answeredBy: null,
 };
 
 const renderWorkspace = () =>
@@ -560,9 +559,9 @@ describe('Workspace switch chrome', () => {
     expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
   });
 
-  it('shows singular failure attention and no question attention', async () => {
+  it('shows singular failure attention with a non-attention task', async () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
-      detailsFor(options, { tasks: [FAILED_TASK, { ...FAILED_TASK, id: 'asking', status: 'input_required' }] })
+      detailsFor(options, { tasks: [FAILED_TASK, { ...FAILED_TASK, id: 'other', status: 'completed' }] })
     );
     renderSwitchableWorkspace();
     expect(await screen.findByText('1 task needs attention')).toBeInTheDocument();

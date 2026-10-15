@@ -31,7 +31,6 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   depth: 0n,
   cycleNo: 1n,
   stopRequestedAt: null,
-  answeredBy: null,
   ...over,
 });
 
@@ -53,13 +52,6 @@ describe('WorkspaceTaskNotifications', () => {
     useTaskStore.setState({ tasks: {}, seeded: {} });
   });
 
-  it('input_required never raises a toast', async () => {
-    await renderNotifications();
-    emitTaskUpdated(task({ status: 'running' }));
-    emitTaskUpdated(task({ status: 'input_required', updatedAt: 2n }));
-    expect(screen.queryByText('Fix flaky test')).toBeNull();
-  });
-
   it('failed with failureReason blocked toasts as blocked', async () => {
     await renderNotifications();
 
@@ -73,15 +65,6 @@ describe('WorkspaceTaskNotifications', () => {
 
     emitTaskUpdated(task({ id: 'task-2', title: 'Other', status: 'failed', failureReason: 'error' }));
     expect(screen.getByText('Failed')).toBeInTheDocument();
-  });
-
-  it('failure after a question raises only the failure toast', async () => {
-    await renderNotifications();
-    emitTaskUpdated(task());
-    emitTaskUpdated(task({ status: 'input_required', updatedAt: 2n }));
-    emitTaskUpdated(task({ status: 'failed', error: 'boom', updatedAt: 3n }));
-    expect(screen.getByText('Failed')).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Dismiss notification' })).toHaveLength(1);
   });
 
   it('opening an old failed task of a loaded workspace does not toast', async () => {

@@ -233,8 +233,7 @@ export async function stopWorkspaceTask(
 }
 
 /**
- * Send the user's text to a task. It answers the task's open question, starts
- * a new cycle, or waits for the current run (`queued`).
+ * Send the user's text to a task; queue for its current run or start a new cycle.
  */
 export async function sendWorkspaceTaskMessage(
   workspaceId: string,
