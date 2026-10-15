@@ -104,7 +104,6 @@ describe('WorkspaceRail sections', () => {
       .map((el) => el.textContent);
     // Starred (Beta) first, then Recent in recency order (Alpha, Gamma).
     expect(titles).toEqual(['Beta', 'Alpha', 'Gamma']);
-    expect(within(screen.getByRole('button', { name: /Gamma/ })).queryByTitle('Needs attention')).toBeNull();
   });
 
   it('pins attention workspaces in a labeled section that outranks Starred', () => {

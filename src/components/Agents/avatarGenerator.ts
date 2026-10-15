@@ -7,8 +7,7 @@
  * byte for byte, on every platform; no network, no dependency, no font.
  *
  * `mood` is a render-time input, not part of the identity: the same face
- * looks alert while its agent runs, wide-eyed when it needs the user, and
- * half-asleep when idle or disabled.
+ * looks alert while its agent runs and half-asleep when idle or disabled.
  *
  * Capacity: 12 hues × 4 bodies × 6 eyes × 5 mouths × 4 markers = 5 760
  * recognisably different faces, each with continuous variation (blob wobble,
@@ -24,7 +23,7 @@
  */
 
 export type AvatarTheme = 'light' | 'dark';
-export type AvatarMood = 'neutral' | 'running' | 'attention' | 'idle';
+export type AvatarMood = 'neutral' | 'running' | 'idle';
 
 export const GENERATOR_VERSION = 1;
 
@@ -244,25 +243,24 @@ const drawEyes = (
   // Idle: a lid in body colour covers the upper half of each eye.
   const lid = (x: number): string =>
     mood === 'idle' ? rect(x - r * 1.2, cy - r * 1.2, r * 2.4, r * 1.1, 0, body) : '';
-  const wide = mood === 'attention' ? 1.35 : 1;
   switch (kind) {
     case 'dots':
       return (
-        circle(lx, cy, r * wide, `fill="${ink}"`) +
-        circle(rx, cy, r * wide, `fill="${ink}"`) +
+        circle(lx, cy, r, `fill="${ink}"`) +
+        circle(rx, cy, r, `fill="${ink}"`) +
         lid(lx) +
         lid(rx)
       );
     case 'rings':
       return (
-        circle(lx, cy, r * 1.3 * wide, stroke(ink, r * 0.7)) +
-        circle(rx, cy, r * 1.3 * wide, stroke(ink, r * 0.7)) +
+        circle(lx, cy, r * 1.3, stroke(ink, r * 0.7)) +
+        circle(rx, cy, r * 1.3, stroke(ink, r * 0.7)) +
         lid(lx) +
         lid(rx)
       );
     case 'visor': {
       const w = spacing * 2 + r * 3;
-      const h = r * 1.8 * wide;
+      const h = r * 1.8;
       const x = cx - w / 2;
       const y = cy - h / 2;
       return (
@@ -278,13 +276,13 @@ const drawEyes = (
     }
     case 'odd':
       return (
-        circle(lx, cy, r * wide, `fill="${ink}"`) +
-        circle(rx, cy, r * 1.5 * wide, stroke(ink, r * 0.7)) +
+        circle(lx, cy, r, `fill="${ink}"`) +
+        circle(rx, cy, r * 1.5, stroke(ink, r * 0.7)) +
         lid(lx) +
         lid(rx)
       );
     case 'tall': {
-      const h = r * 3.6 * wide;
+      const h = r * 3.6;
       return (
         rect(lx - r * 0.6, cy - h / 2, r * 1.2, h, r * 0.6, ink) +
         rect(rx - r * 0.6, cy - h / 2, r * 1.2, h, r * 0.6, ink) +
@@ -296,7 +294,6 @@ const drawEyes = (
 };
 
 const drawMouth = (kind: MouthKind, cx: number, cy: number, w: number, { ink, mood }: FaceCtx): string => {
-  if (mood === 'attention') return circle(cx, cy, w * 0.35, `fill="${ink}"`);
   const k: MouthKind = mood === 'idle' && kind !== 'none' ? 'flat' : kind;
   switch (k) {
     case 'none':

@@ -26,8 +26,10 @@ vi.mock('../hooks/useFleetActivity', () => ({
   useFleetActivity: () => ({}),
 }));
 
+const permissionAttention = vi.hoisted(() => ({ counts: {} as Record<string, number> }));
+
 vi.mock('../hooks/usePermissionAttention', () => ({
-  usePermissionAttention: () => ({}),
+  usePermissionAttention: () => permissionAttention.counts,
 }));
 
 vi.mock('../components/AppUpdateBadge', () => ({
@@ -129,6 +131,19 @@ describe('FleetLayout attention', () => {
     renderFleet();
     await screen.findByText('Alpha');
     expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('0 need attention');
+  });
+
+  it('counts a workspace with a pending approval as needing attention', async () => {
+    permissionAttention.counts = { a: 1 };
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    try {
+      renderFleet();
+      await screen.findByText('Alpha');
+      expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('1 need attention');
+    } finally {
+      permissionAttention.counts = {};
+    }
   });
 });
 

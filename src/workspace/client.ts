@@ -245,12 +245,6 @@ export async function sendWorkspaceTaskMessage(
   });
 }
 
-export async function acknowledgeWorkspaceTask(workspaceId: string, taskId: string): Promise<void> {
-  return invoke('workspace_acknowledge_task', {
-    request: { workspaceId, taskId },
-  });
-}
-
 export async function createWorkspace(title?: string | null): Promise<string> {
   return invoke('workspace_create', { title: title || null });
 }
