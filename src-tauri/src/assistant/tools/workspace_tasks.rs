@@ -556,7 +556,7 @@ fn cycle_outcome(
 
 /// Sends `text` to a task from `origin`: answers its open `ask_user`
 /// question when it has one, otherwise queues for its current run or starts
-/// a new cycle for agent-origin messages.
+/// a new cycle.
 pub(crate) async fn send_task_message(
     deps: &AssistantDeps,
     task_id: &str,
@@ -638,17 +638,6 @@ pub(crate) async fn deliver_task_message(
     let task = workspace_tasks_repo::load_task(&mut *tx, task_id)
         .await?
         .ok_or_else(|| not_found(task_id))?;
-    if matches!(origin, MessageOrigin::User)
-        && !matches!(
-            task.status,
-            TaskStatus::Queued | TaskStatus::Running | TaskStatus::InputRequired
-        )
-    {
-        return Err(
-            "invalid_input: This task is not accepting messages."
-                .to_string(),
-        );
-    }
     let session_id = task.session_id.clone().ok_or_else(|| {
         format!("invalid_input: task {task_id} never started, so it cannot take messages.")
     })?;
@@ -2455,7 +2444,7 @@ mod tests {
         finish(&pool, "task-1", &run).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
-        let sent = send(&pool, "task-1", "carry on", parent_agent()).await;
+        let sent = send(&pool, "task-1", "carry on", MessageOrigin::User).await;
         let Kick::Started {
             message_ids, task, ..
         } = claim(&pool, WS, &session, |id| Some(connection(id)))
@@ -2470,38 +2459,6 @@ mod tests {
         assert_eq!(task.stop_requested_at, None);
         assert_eq!(message_ids, std::slice::from_ref(&sent.message.id));
         assert_eq!(signal_status(&pool, &sent).await, "claimed");
-    }
-
-    #[tokio::test]
-    async fn completed_task_rejects_user_message_but_agent_can_resume() {
-        let (_tmp, pool) = workspace_pool().await;
-        let parent = parent_session(&pool).await;
-        let (session, run) = running(&pool, &parent, "task-1").await;
-        set_run_status(&pool, &run, RunStatus::Completed).await;
-        finish(&pool, "task-1", &run).await.unwrap();
-        assert_eq!(
-            task_row(&pool, "task-1").await.status,
-            TaskStatus::Completed
-        );
-
-        let before = message_count(&pool).await;
-        let error = deliver_task_message(&pool, "task-1", "from user", MessageOrigin::User)
-            .await
-            .unwrap_err();
-        assert_eq!(error, "invalid_input: This task is not accepting messages.");
-        assert_eq!(message_count(&pool).await, before);
-
-        let sent = send(&pool, "task-1", "from agent", parent_agent()).await;
-        let Kick::Started {
-            message_ids, task, ..
-        } = claim(&pool, WS, &session, |id| Some(connection(id)))
-            .await
-            .unwrap()
-        else {
-            panic!("agent message resumes the completed task");
-        };
-        assert_eq!(message_ids, vec![sent.message.id]);
-        assert_eq!(task.unwrap().cycle_no, 2);
     }
 
     #[tokio::test]
