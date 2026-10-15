@@ -191,9 +191,6 @@ describe('activityFromTasks', () => {
     ).toBe('running');
   });
 
-  it('a task waiting for its creator is idle', () => {
-  });
-
   it('a task waiting for its subtasks is idle, not running', () => {
     expect(activityFromTasks('wa-1', [task({ status: 'running', runId: null })])).toBe('idle');
     expect(activityFromTasks('wa-1', [task({ status: 'running', runId: undefined })])).toBe('idle');

@@ -148,7 +148,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
         onClose={() => {}}
       />
     );
-    expect(face().dataset.activity).toBe('attention');
+    expect(face().dataset.activity).toBe('none');
 
     rerender(
       <WorkspaceTaskTranscriptPanel
@@ -257,8 +257,16 @@ describe('WorkspaceTaskTranscriptPanel', () => {
 
     it('composer is enabled for every task status with a session', () => {
       seedSession(false);
-      for (const status of ['queued', 'running', 'stopping', 'stopped', 'completed', 'failed'] as const) {
-        const { unmount } = renderPanel({ status });
+      const states: Partial<WorkspaceTaskResponse>[] = [
+        { status: 'queued' },
+        { status: 'running', runId: null },
+        { status: 'stopping' },
+        { status: 'stopped' },
+        { status: 'completed', runId: null },
+        { status: 'failed' },
+      ];
+      for (const state of states) {
+        const { unmount } = renderPanel(state);
         expect(composer()).toHaveAttribute('placeholder', 'Message Rust Architect…');
         expect(composer()).toBeEnabled();
         unmount();
