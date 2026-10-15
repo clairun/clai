@@ -101,10 +101,6 @@
   color: var(--color-healthy);
 }
 
-.live[data-activity='attention'] {
-  color: var(--color-warning, #f5a524);
-}
-
 .actions {
   display: flex;
   align-items: center;

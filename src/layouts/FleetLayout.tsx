@@ -213,10 +213,7 @@ const FleetLayout = () => {
       running: workspaces.filter(
         (w) => num(w.runningTaskCount) > 0 || (activeRunsByWorkspace[w.id] || 0) > 0,
       ).length,
-      attention: workspaces.filter(
-        (w) =>
-          num(w.attentionTaskCount) > 0 || (pendingPermissionCounts[w.id] || 0) > 0,
-      ).length,
+      attention: workspaces.filter((w) => (pendingPermissionCounts[w.id] || 0) > 0).length,
     }),
     [workspaces, activeRunsByWorkspace, pendingPermissionCounts],
   );

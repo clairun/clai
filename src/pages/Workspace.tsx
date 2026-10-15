@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { useOutletContext, useParams, useSearchParams } from 'react-router';
+import { useOutletContext, useParams } from 'react-router';
 import type { FleetOutletContext } from '../layouts/FleetLayout';
 import { workspaceDeleteAgent } from '../api/client';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
@@ -49,9 +49,7 @@ import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
 import {
   formatRelativeTime,
   isTaskActive,
-  isTaskAttention,
   isTaskRunning,
-  taskDisplayStatus,
   toNumber,
   type NumericTimestamp,
 } from '../utils/taskDisplay';
@@ -1050,45 +1048,6 @@ const ArtifactsList = ({
         <div className={styles.drawerEmpty}>Loading…</div>
       )}
     </div>
-  );
-};
-
-const WorkspaceAttentionBanner = ({
-  tasks,
-  onOpenTask,
-}: {
-  tasks: WorkspaceTaskResponse[];
-  onOpenTask: (taskId: string) => void;
-}) => {
-  const attentionTasks = (tasks || []).filter(isTaskAttention);
-
-  if (attentionTasks.length === 0) {
-    return null;
-  }
-
-  const primary = attentionTasks[0]!;
-  const status = taskDisplayStatus(primary);
-  const detail = primary.error || primary.resultSummary || primary.instructions;
-
-  return (
-    <section className={styles.attentionBanner} aria-label="Workspace attention">
-      <div className={styles.attentionBannerHeader}>
-        <span className={styles.attentionBannerTitle}>
-          {attentionTasks.length} task{attentionTasks.length === 1 ? '' : 's'} need{attentionTasks.length === 1 ? 's' : ''} attention
-        </span>
-        <span className={`${styles.taskStatus} ${styles[`taskStatus_${status.key}`] || ''}`}>
-          {status.label}
-        </span>
-      </div>
-      <button
-        type="button"
-        className={styles.attentionBannerTask}
-        onClick={() => onOpenTask(primary.id)}
-      >
-        {primary.title}
-      </button>
-      {detail && <p className={styles.attentionBannerDetail}>{detail}</p>}
-    </section>
   );
 };
 
@@ -2293,7 +2252,7 @@ const Workspace = () => {
     updateViewingTask,
     onNotFound: handleTaskNotFound,
   });
-  // From the chat or the banner: nothing to go Back to.
+  // From the chat: nothing to go Back to.
   const openTask = useCallback(
     (taskId: string) => {
       patchWorkspaceUi({ previousTasks: EMPTY_TASKS });
@@ -2315,24 +2274,6 @@ const Workspace = () => {
       patchWorkspaceUi({ viewingTask: previous, previousTasks: previousTasks.slice(0, -1) });
     }
   }, [patchWorkspaceUi, previousTasks]);
-  // A toast's "Open task" lands here as `?task=<id>`: open it once the
-  // details are in (so a recent task opens without a fetch), then drop the
-  // param so it does not reopen.
-  const [searchParams, setSearchParams] = useSearchParams();
-  const taskParam = searchParams.get('task');
-  useEffect(() => {
-    if (!taskParam || !detailsReady) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes the one-shot `?task=` param from a toast, then removes it below.
-    openTask(taskParam);
-    setSearchParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        next.delete('task');
-        return next;
-      },
-      { replace: true }
-    );
-  }, [taskParam, detailsReady, openTask, setSearchParams]);
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
   // `details.runs` holds only the newest run and the newest non-terminal
@@ -2497,7 +2438,6 @@ const Workspace = () => {
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <WorkspaceAttentionBanner tasks={tasks} onOpenTask={openTask} />
 
       <div className={styles.workspaceBody}>
         {/* Keyed by workspace so a switch applies the new workspace's panel
@@ -2772,10 +2712,8 @@ const Workspace = () => {
 
               {details && activePanel === 'tasks' && (
                 <TaskList
-                  workspaceId={workspaceId}
                   tasks={tasks}
                   roster={details.assignedAgents}
-                  onChanged={() => loadDetails(false)}
                   onViewTask={openTaskTranscript}
                 />
               )}

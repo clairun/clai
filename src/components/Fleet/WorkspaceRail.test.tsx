@@ -104,6 +104,7 @@ describe('WorkspaceRail sections', () => {
       .map((el) => el.textContent);
     // Starred (Beta) first, then Recent in recency order (Alpha, Gamma).
     expect(titles).toEqual(['Beta', 'Alpha', 'Gamma']);
+    expect(within(screen.getByRole('button', { name: /Gamma/ })).queryByTitle('Needs attention')).toBeNull();
   });
 
   it('pins attention workspaces in a labeled section that outranks Starred', () => {
@@ -119,10 +120,9 @@ describe('WorkspaceRail sections', () => {
     const titles = screen
       .getAllByText(/Alpha|Beta|Gamma/)
       .map((el) => el.textContent);
-    // Attention: Beta (pending approvals) then Gamma (failed task), by
-    // recency. Starred Alpha follows. Gamma sits under attention even
-    // though starred — attention outranks the star.
-    expect(titles).toEqual(['Beta', 'Gamma', 'Alpha']);
+    // Beta has pending approvals; Gamma's failed task leaves it in Starred.
+    expect(titles).toEqual(['Beta', 'Alpha', 'Gamma']);
+    expect(within(screen.getByRole('button', { name: /Gamma/ })).queryByTitle('Needs attention')).toBeNull();
     expect(screen.queryByText('Recent')).toBeNull();
   });
 

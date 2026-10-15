@@ -29,7 +29,7 @@ describe('AgentAvatar', () => {
     expect(container.firstElementChild).toHaveAttribute('aria-label', 'Code Reviewer');
   });
 
-  it('draws a ring for idle/running/attention only; disabled just dims', () => {
+  it('draws a ring for idle/running only; disabled just dims', () => {
     const { container, rerender } = render(<AgentAvatar identity={reviewer()} />);
     const el = () => container.firstElementChild as HTMLElement;
     expect(el().dataset.activity).toBe('none');
@@ -39,9 +39,6 @@ describe('AgentAvatar', () => {
     rerender(<AgentAvatar identity={reviewer()} activity="running" />);
     expect(el().className).toMatch(/ring/);
     expect(el().className).toMatch(/running/);
-    rerender(<AgentAvatar identity={reviewer()} activity="attention" />);
-    expect(el().className).toMatch(/ring/);
-    expect(el().className).toMatch(/attention/);
     rerender(<AgentAvatar identity={reviewer()} activity="disabled" />);
     expect(el().className).toMatch(/disabled/);
     expect(el().className).not.toMatch(/ring/);
@@ -74,7 +71,7 @@ describe('AgentAvatar', () => {
   it('changes expression with activity but keeps the same body', () => {
     const { container, rerender } = render(<AgentAvatar identity={reviewer()} />);
     const neutral = container.innerHTML;
-    rerender(<AgentAvatar identity={reviewer()} activity="attention" />);
+    rerender(<AgentAvatar identity={reviewer()} activity="running" />);
     expect(container.innerHTML).not.toBe(neutral);
     // Same clip id ⇒ same seed drawn.
     const clip = (html: string) => /clipPath id="([^"]+)"/.exec(html)?.[1];

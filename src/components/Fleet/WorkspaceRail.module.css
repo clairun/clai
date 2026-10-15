@@ -330,7 +330,6 @@
 .statusDot_idle { background: var(--color-text-tertiary); }
 .statusDot_running { background: var(--color-accent-dark); }
 .statusDot_attention { background: var(--color-warning-dark); }
-.statusDot_critical { background: var(--color-critical); }
 
 .collapsedInitial {
   font-size: 12px;

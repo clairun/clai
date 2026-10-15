@@ -8,13 +8,12 @@
  */
 import type { ScheduleKind, WorkspaceListEntry } from '../generated/bindings';
 
-export type CardStatus = 'idle' | 'running' | 'attention' | 'critical';
+export type CardStatus = 'idle' | 'running' | 'attention';
 
 export const CARD_STATUS_LABEL: Record<CardStatus, string> = {
   idle: 'Idle',
   running: 'Running',
   attention: 'Needs attention',
-  critical: 'Failed task',
 };
 
 // Fleet card counts are i64 on the wire (ts-rs types them bigint) but
@@ -23,8 +22,7 @@ export const CARD_STATUS_LABEL: Record<CardStatus, string> = {
 export const num = (value: number | bigint | null | undefined): number => Number(value ?? 0);
 
 /**
- * Single-valued, priority-ordered card status. Critical (a failed task)
- * outranks attention (pending approval / blocked task), which outranks
+ * Single-valued, priority-ordered card status. Pending approval outranks
  * running, which outranks idle.
  */
 export const deriveCardStatus = (
@@ -32,8 +30,7 @@ export const deriveCardStatus = (
   isProcessing: boolean,
   hasPendingApprovals: boolean,
 ): CardStatus => {
-  if (num(ws.failedTaskCount) > 0) return 'critical';
-  if (hasPendingApprovals || num(ws.blockedTaskCount) > 0) return 'attention';
+  if (hasPendingApprovals) return 'attention';
   if (isProcessing) return 'running';
   return 'idle';
 };

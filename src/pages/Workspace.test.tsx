@@ -2,10 +2,9 @@ import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Outlet, Route, Routes, useLocation, useNavigate } from 'react-router';
+import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
-import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import styles from './Workspace.module.css';
 import useAssistantStore from '../assistant/sessionStore';
 import { useAssistantEvents } from '../assistant/useAssistantEvents';
@@ -73,7 +72,6 @@ const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
 const runWorkspaceNow = vi.mocked(workspaceClient.runWorkspaceNow);
 const setWorkspaceSchedulePaused = vi.mocked(workspaceClient.setWorkspaceSchedulePaused);
 const importWorkspaceFiles = vi.mocked(workspaceClient.importWorkspaceFiles);
-const getWorkspaceTask = vi.mocked(workspaceClient.getWorkspaceTask);
 const workspaceDeleteAgent = vi.mocked((await import('../api/client')).workspaceDeleteAgent);
 // Taken through `vi.mocked` on the real module, so the fixtures below are
 // checked against the command's actual return types: a page missing
@@ -559,15 +557,7 @@ describe('Workspace switch chrome', () => {
     expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
   });
 
-  it('shows singular failure attention with a non-attention task', async () => {
-    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
-      detailsFor(options, { tasks: [FAILED_TASK, { ...FAILED_TASK, id: 'other', status: 'completed' }] })
-    );
-    renderSwitchableWorkspace();
-    expect(await screen.findByText('1 task needs attention')).toBeInTheDocument();
-  });
-
-  it("keeps the previous workspace's counts and attention banner off the page", async () => {
+  it("keeps the previous workspace's counts off the page", async () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
       detailsFor(options, { tasks: [FAILED_TASK] })
     );
@@ -575,7 +565,6 @@ describe('Workspace switch chrome', () => {
     expect(await screen.findByRole('button', { name: /1 tasks/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /1 memories/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /7 artifacts/ })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Workspace attention' })).toBeInTheDocument();
 
     const releaseBeta = holdBetaDetails(beta);
     await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
@@ -584,7 +573,6 @@ describe('Workspace switch chrome', () => {
     expect(screen.getByRole('button', { name: /0 tasks/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /0 memories/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /0 artifacts/ })).toBeInTheDocument();
-    expect(screen.queryByRole('region', { name: 'Workspace attention' })).toBeNull();
 
     await releaseBeta();
   });
@@ -606,7 +594,6 @@ describe('Workspace switch chrome', () => {
 
     expect(screen.getByTitle('Click to rename')).toHaveTextContent('Beta');
     expect(screen.queryByText('Loading conversation…')).toBeNull();
-    expect(screen.queryByRole('region', { name: 'Workspace attention' })).toBeNull();
     expect(loadSessionMessagesPage).not.toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'sess-a' })
     );
@@ -1127,109 +1114,6 @@ const AssistantEvents = () => {
   return null;
 };
 
-describe('Workspace open task from toast or banner', () => {
-  const LocationProbe = () => {
-    const location = useLocation();
-    return <div data-testid="location">{location.pathname + location.search}</div>;
-  };
-
-  const renderWithToasts = (entry = '/workspace/a') =>
-    render(
-      <MemoryRouter initialEntries={[entry]}>
-        <AssistantEvents />
-        <WorkspaceTaskNotifications />
-        <LocationProbe />
-        <Routes>
-          <Route path="/workspace/:workspaceId" element={<Workspace />} />
-        </Routes>
-      </MemoryRouter>
-    );
-
-  const emitTaskUpdated = (task: WorkspaceTaskResponse) =>
-    act(() => {
-      for (const handler of eventHandlers.get('assistant://event') ?? []) {
-        handler({
-          payload: {
-            sessionId: 'sess-task-a',
-            runId: null,
-            workspaceId: task.workspaceId,
-            timestamp: 0,
-            event: { type: 'task_updated', payload: { task } },
-          },
-        });
-      }
-    });
-
-  const transcript = (title: string) => screen.queryByRole('region', { name: `Transcript for ${title}` });
-
-  beforeEach(() => {
-    eventHandlers.clear();
-    getWorkspaceTask.mockReset();
-    getWorkspaceTask.mockResolvedValue(null);
-  });
-
-  it('banner title opens task', async () => {
-    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
-      detailsFor(options, { tasks: [FAILED_TASK] })
-    );
-    renderWorkspace();
-
-    await userEvent.click(await screen.findByRole('button', { name: FAILED_TASK.title }));
-
-    expect(await screen.findByRole('region', { name: `Transcript for ${FAILED_TASK.title}` })).toBeInTheDocument();
-  });
-
-  it('toast Open task navigates with ?task= and opens once', async () => {
-    getWorkspaceDetails.mockImplementation(async (workspaceId, options) =>
-      workspaceId === 'b'
-        ? detailsFor(options, { workspaceId: 'b', title: 'Beta', session: sessionFor('b', 10n) })
-        : detailsFor(options, { tasks: [FAILED_TASK] })
-    );
-    renderWithToasts('/workspace/b');
-    await screen.findByText('Beta');
-
-    emitTaskUpdated({ ...FAILED_TASK, updatedAt: 2n });
-    await userEvent.click(
-      await screen.findByRole('button', { name: `Open task ${FAILED_TASK.title}` })
-    );
-
-    expect(await screen.findByRole('region', { name: `Transcript for ${FAILED_TASK.title}` })).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspace\/a$/));
-
-    // Closing it stays closed: the param that opened it is gone.
-    await userEvent.click(screen.getByRole('button', { name: 'Close transcript' }));
-    await act(async () => {});
-    expect(transcript(FAILED_TASK.title)).toBeNull();
-    expect(getWorkspaceTask).not.toHaveBeenCalled();
-  });
-
-  it('unknown task param shows not-found error', async () => {
-    renderWithToasts('/workspace/a?task=task-gone');
-
-    expect(await screen.findByText('Task not found.')).toBeInTheDocument();
-    expect(getWorkspaceTask).toHaveBeenCalledTimes(1);
-    expect(getWorkspaceTask).toHaveBeenCalledWith('a', 'task-gone');
-    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/workspace\/a$/));
-  });
-
-  it('tasks attention-state at first details load do not toast', async () => {
-    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
-      detailsFor(options, { tasks: [FAILED_TASK] })
-    );
-    renderWithToasts();
-
-    // The banner carries it; the first load is the baseline, so no toast.
-    expect(await screen.findByRole('button', { name: FAILED_TASK.title })).toBeInTheDocument();
-    // Re-announcing the same failure does not toast either.
-    emitTaskUpdated({ ...FAILED_TASK, updatedAt: 2n });
-    expect(screen.queryByRole('button', { name: /^Open task / })).toBeNull();
-
-    // A new failure after the baseline does.
-    emitTaskUpdated({ ...FAILED_TASK, cycleNo: 1n, updatedAt: 3n });
-    expect(await screen.findByRole('button', { name: /^Open task / })).toBeInTheDocument();
-  });
-});
-
 describe('Workspace task store', () => {
   const RUNNING: WorkspaceTaskResponse = {
     ...FAILED_TASK,
@@ -1376,41 +1260,5 @@ describe('Workspace nested task logs', () => {
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 
-  it('a ?task= link opens with nothing to go Back to', async () => {
-    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
-      detailsFor(options, { tasks: [PARENT, CHILD] })
-    );
-    seedLog('sess-parent', [childResult]);
-    const OpenParentLink = () => {
-      const navigate = useNavigate();
-      return (
-        <button type="button" onClick={() => navigate(`/workspace/a?task=${PARENT.id}`)}>
-          toast link
-        </button>
-      );
-    };
-    render(
-      <MemoryRouter initialEntries={['/workspace/a']}>
-        <OpenParentLink />
-        <Routes>
-          <Route path="/workspace/:workspaceId" element={<Workspace />} />
-        </Routes>
-      </MemoryRouter>
-    );
 
-    await userEvent.click(await screen.findByRole('button', { name: /2 tasks/ }));
-    await userEvent.click(
-      await screen.findByRole('button', { name: `Open the log of "${PARENT.title}"` })
-    );
-    const parentLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
-    await userEvent.click(within(parentLog).getByRole('button', { name: `Open task ${CHILD.title}` }));
-    await screen.findByRole('region', { name: `Transcript for ${CHILD.title}` });
-    expect(screen.getByRole('button', { name: 'Back' })).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole('button', { name: 'toast link' }));
-    expect(
-      await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` })
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
-  });
 });

@@ -11,7 +11,7 @@
  * "the main of this workspace" wherever it shows up.
  */
 import type { AgentAvatarRef, WorkspaceTaskResponse } from '../../generated/bindings';
-import { isTaskAttention, isTaskRunning } from '../../utils/taskDisplay';
+import { isTaskRunning } from '../../utils/taskDisplay';
 import {
   GENERATOR_VERSION,
   HUES,
@@ -117,15 +117,13 @@ export const freshNonce = (): string =>
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
-export type AgentActivity = 'idle' | 'running' | 'attention' | 'disabled' | 'none';
+export type AgentActivity = 'idle' | 'running' | 'disabled' | 'none';
 
 /** Map what an agent is doing to the expression the generator draws. */
 export const moodFor = (activity: AgentActivity | undefined): AvatarMood => {
   switch (activity) {
     case 'running':
       return 'running';
-    case 'attention':
-      return 'attention';
     case 'idle':
     case 'disabled':
       return 'idle';
@@ -164,23 +162,21 @@ export const agentActivity = (
 
 export type TaskActivitySource = Pick<
   WorkspaceTaskResponse,
-  'assignedToWorkspaceAgentId' | 'status' | 'attentionAcknowledgedAt'
+  'assignedToWorkspaceAgentId' | 'status'
 > & { runId?: string | null };
 
 /**
  * Which activity to draw for `agentId` given the tasks the details carry.
- * Running beats attention. The details hold the most recently updated
- * tasks, so the ring reflects recent activity, not the full history.
+ * The details hold the most recently updated tasks, so the ring reflects
+ * recent activity, not the full history.
  */
 export const activityFromTasks = (
   agentId: string,
   tasks: readonly TaskActivitySource[]
 ): Exclude<AgentActivity, 'disabled' | 'none'> => {
-  let activity: 'idle' | 'running' | 'attention' = 'idle';
   for (const task of tasks) {
     if (task.assignedToWorkspaceAgentId !== agentId) continue;
     if (isTaskRunning(task)) return 'running';
-    if (isTaskAttention(task)) activity = 'attention';
   }
-  return activity;
+  return 'idle';
 };

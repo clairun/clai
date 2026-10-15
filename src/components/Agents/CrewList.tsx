@@ -43,7 +43,7 @@ export const sortCrew = (agents: readonly WorkspaceAgentResponse[]): WorkspaceAg
   [...agents].sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
 
 export interface CrewStatus {
-  /** What the ring draws. Disabled beats everything, then running, then attention. */
+  /** What the ring draws. Disabled beats running. */
   activity: AgentActivity;
   /** One line about it, or `null` when there is nothing to say. */
   line: string | null;
@@ -66,7 +66,7 @@ export const crewStatus = (
     ).length;
     return { activity, line: running === 1 ? '1 task running' : `${running} tasks running` };
   }
-  return { activity, line: activity === 'attention' ? 'Needs your review' : null };
+  return { activity, line: null };
 };
 
 const CrewList = ({

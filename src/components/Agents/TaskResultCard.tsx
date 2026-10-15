@@ -8,7 +8,6 @@ import type { MessageSender } from '../AssistantChat/messageSender';
 import { clampCardText } from '../AssistantChat/toolDisplay';
 import { taskDisplayStatus } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
-import { cardActivity } from './TaskCard';
 import pills from './taskStatus.module.css';
 import styles from './TaskResultCard.module.css';
 
@@ -35,7 +34,7 @@ const TaskResultCard = ({ sender, body, failureReason, onOpen }: TaskResultCardP
       <AgentAvatar
         identity={agent.identity}
         size={30}
-        activity={agent.presence === 'disabled' ? 'disabled' : cardActivity(status)}
+        activity={agent.presence === 'disabled' ? 'disabled' : 'none'}
         className={styles.face}
       />
       <div className={styles.main}>

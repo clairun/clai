@@ -1,9 +1,8 @@
 /**
- * How tasks read on screen: status labels, "needs attention", relative
+ * How tasks read on screen: status labels and relative
  * times. Shared by the workspace page, the tasks drawer and the transcript
  * panel so the three never disagree on what a blocked task is called.
  */
-import type { WorkspaceTaskResponse } from '../generated/bindings';
 
 export type NumericTimestamp = number | bigint | null | undefined;
 
@@ -59,12 +58,6 @@ export const taskDisplayStatus = (task: {
   }
   return { key: task.status, label: taskStatusLabel(task.status) };
 };
-
-/** Unreviewed failures need attention. */
-export const isTaskAttention = (
-  task: Pick<WorkspaceTaskResponse, 'attentionAcknowledgedAt'> & { status: string }
-): boolean =>
-  task.status === 'failed' && !task.attentionAcknowledgedAt;
 
 /** Running with no run: its run ended and it waits for its subtasks. The wire omits `runId` then. */
 export const isTaskWaiting = (task: { status: string; runId?: string | null }): boolean =>

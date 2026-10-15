@@ -120,6 +120,18 @@ const confirmDelete = async (dialog: HTMLElement) => {
   await userEvent.click(within(dialog).getByRole('button', { name: 'Delete workspace' }));
 };
 
+describe('FleetLayout attention', () => {
+  it('does not count failed or blocked tasks as needing attention', async () => {
+    listWorkspaces.mockResolvedValue([
+      entry('a', 'Alpha', { failedTaskCount: 1n, blockedTaskCount: 1n, attentionTaskCount: 2n }),
+    ]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet();
+    await screen.findByText('Alpha');
+    expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('0 need attention');
+  });
+});
+
 describe('FleetLayout workspace deletion', () => {
   it('dismisses the delete dialog as soon as the delete lands, without waiting for the rail refresh', async () => {
     // Hold the post-delete refresh open, so the assertions below can only

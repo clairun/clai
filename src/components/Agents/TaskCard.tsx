@@ -14,7 +14,7 @@ import type { WorkspaceAgentResponse } from '../../generated/bindings';
 import type { TaskCallCard } from '../AssistantChat/toolDisplay';
 import { taskStatusLabel } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
-import { agentDisplayName, taskIdentity, type AgentActivity } from './agentIdentity';
+import { agentDisplayName, taskIdentity } from './agentIdentity';
 import pills from './taskStatus.module.css';
 import styles from './TaskCard.module.css';
 
@@ -25,24 +25,6 @@ export interface TaskCardProps {
   /** Omit to render the card inert — e.g. inside a task's own transcript. */
   onOpen?: (taskId: string) => void;
 }
-
-/**
- * The ring the face wears, from the status alone.
- *
- * Never the spinning `running` ring, however fresh the status looks: a card is
- * frozen at the moment of its call, and a hand-off is answered the instant the
- * row is stamped — almost always `queued` — so that ring would spin forever on
- * hand-offs made weeks ago, a claim about right now that the card cannot
- * support, at the cost of an endless animation per card. Live progress belongs
- * to the tasks drawer.
- *
- * A stop that is not a clean finish still earns the static attention ring.
- * `TaskList.taskActivity` can ask whether such a task was since reviewed; a
- * tool payload's acknowledgement is as frozen as its status, so here it stands
- * as the call saw it.
- */
-export const cardActivity = (status: string): AgentActivity =>
-  status === 'failed' || status === 'blocked' ? 'attention' : 'none';
 
 /** Assignee name from the crew; tasks whose agent has left keep a generic one. */
 const assigneeName = (
@@ -87,7 +69,6 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
       <AgentAvatar
         identity={identity}
         size={30}
-        activity={cardActivity(card.status)}
         label={name}
         className={styles.face}
       />

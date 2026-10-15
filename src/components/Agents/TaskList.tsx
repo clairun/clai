@@ -7,12 +7,10 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type React from 'react';
-import { acknowledgeWorkspaceTask } from '../../workspace/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import {
   formatRelativeTime,
   isTaskActive,
-  isTaskAttention,
   isTaskWaiting,
   taskDisplayStatus,
 } from '../../utils/taskDisplay';
@@ -23,11 +21,9 @@ import { identityFor, taskIdentity, type AgentActivity, type AgentIdentity } fro
 import styles from './TaskList.module.css';
 
 export interface TaskListProps {
-  workspaceId: string;
   tasks: readonly WorkspaceTaskResponse[];
   /** The crew, for faces and names; tasks from agents that left still resolve. */
   roster: readonly WorkspaceAgentResponse[];
-  onChanged: () => void | Promise<void>;
   onViewTask?: (task: WorkspaceTaskResponse) => void;
 }
 
@@ -41,21 +37,9 @@ const opensTheRow = (event: React.MouseEvent): boolean =>
   !(event.target as HTMLElement).closest('button, a, input, textarea') &&
   !window.getSelection()?.toString();
 
-const errorMessage = (error: unknown, fallback: string): string => {
-  if (typeof error === 'string') return error;
-  if (error instanceof Error && error.message) return error.message;
-  return fallback;
-};
-
 /** The ring a task row draws from its current state. */
 export const taskActivity = (task: WorkspaceTaskResponse): AgentActivity =>
-  isTaskAttention(task)
-    ? 'attention'
-    : isTaskWaiting(task)
-      ? 'idle'
-      : isTaskActive(task)
-        ? 'running'
-        : 'none';
+  isTaskWaiting(task) ? 'idle' : isTaskActive(task) ? 'running' : 'none';
 
 interface TaskRow {
   task: WorkspaceTaskResponse;
@@ -81,8 +65,6 @@ export interface FilterFace {
   agentId: string;
   name: string;
   identity: AgentIdentity;
-  /** Any unacknowledged problem on this agent's tasks. */
-  attention: boolean;
 }
 
 /** One face per agent that has tasks here, in first-seen order. */
@@ -93,26 +75,19 @@ export const filterFaces = (
   const faces = new Map<string, FilterFace>();
   for (const task of tasks) {
     const id = task.assignedToWorkspaceAgentId;
-    const existing = faces.get(id);
-    if (existing) {
-      existing.attention ||= isTaskAttention(task);
-      continue;
-    }
+    if (faces.has(id)) continue;
     const agent = roster.find((entry) => entry.id === id);
     const name = agent?.isDefault ? 'Main' : agent?.displayName || task.assignedAgentDisplayName;
     faces.set(id, {
       agentId: id,
       name,
       identity: taskIdentity(task, roster),
-      attention: isTaskAttention(task),
     });
   }
   return [...faces.values()];
 };
 
-const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskListProps) => {
-  const [busyTaskId, setBusyTaskId] = useState('');
-  const [error, setError] = useState('');
+const TaskList = ({ tasks, roster, onViewTask }: TaskListProps) => {
   const [selectedAgents, setSelectedAgents] = useState<ReadonlySet<string>>(() => new Set());
 
   const faces = useMemo(() => filterFaces(tasks, roster), [tasks, roster]);
@@ -151,23 +126,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
     });
   }, []);
 
-  const handleAcknowledge = useCallback(
-    async (taskId: string) => {
-      if (busyTaskId) return;
-      setBusyTaskId(taskId);
-      setError('');
-      try {
-        await acknowledgeWorkspaceTask(workspaceId, taskId);
-        await onChanged();
-      } catch (err) {
-        setError(errorMessage(err, 'Failed to acknowledge task.'));
-      } finally {
-        setBusyTaskId('');
-      }
-    },
-    [busyTaskId, onChanged, workspaceId]
-  );
-
   const nameOf = (agentId: string | null, fallback: string | null): string | null => {
     const agent = roster.find((entry) => entry.id === agentId);
     if (agent) return agent.isDefault ? 'Main' : agent.displayName;
@@ -193,7 +151,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                 <AgentAvatar
                   identity={face.identity}
                   size={26}
-                  activity={face.attention ? 'attention' : 'none'}
                 />
               </button>
             );
@@ -210,8 +167,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
         </div>
       )}
 
-      {error && <div className={styles.error}>{error}</div>}
-
       {visible.length > 0 ? (
         <ul className={styles.list}>
           {rows.map(({ task, depth, childCount }) => {
@@ -221,7 +176,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
               stopped && task.error
                 ? null
                 : task.error || task.resultSummary || task.instructions;
-            const needsAttention = isTaskAttention(task);
             const status = taskDisplayStatus(task);
             const creator = roster.find((entry) => entry.id === task.createdByWorkspaceAgentId);
             const creatorName = nameOf(task.createdByWorkspaceAgentId, task.createdByDisplayName);
@@ -240,8 +194,7 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                 className={`${styles.task} ${open ? styles.openable : ''}`}
                 style={depth ? { marginLeft: `${depth * 16}px` } : undefined}
                 // The row itself is the click target, so the text inside it
-                // stays selectable; "Mark reviewed" keeps its own click
-                // because `opensTheRow` hands a control its click back.
+                // stays selectable; row controls keep their own clicks.
                 onClick={
                   open
                     ? (event) => {
@@ -308,17 +261,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                   {detail && <p className={styles.summary}>{detail}</p>}
                   {stopped && task.error && (
                     <p className={styles.summary}>Interrupted by restart</p>
-                  )}
-                  {needsAttention && (
-                    <button
-                      type="button"
-                      className={styles.action}
-                      onClick={() => handleAcknowledge(task.id)}
-                      // One acknowledge at a time; a click on another row would be dropped silently.
-                      disabled={!!busyTaskId}
-                    >
-                      Mark reviewed
-                    </button>
                   )}
                 </div>
               </li>

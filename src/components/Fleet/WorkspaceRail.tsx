@@ -61,9 +61,7 @@ const hasAttention = (
   ws: WorkspaceListEntry,
   attentionCounts: Record<string, number>,
 ): boolean =>
-  (attentionCounts[ws.id] || 0) > 0 ||
-  num(ws.failedTaskCount) > 0 ||
-  num(ws.blockedTaskCount) > 0;
+  (attentionCounts[ws.id] || 0) > 0;
 
 type RailSection = {
   key: 'attention' | 'starred' | 'recent';
@@ -142,7 +140,7 @@ const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
  * every workspace grouped into explicit, labeled sections (Claude-style)
  * so ordering is never a mystery:
  *
- *   1. "Needs attention" — pending approvals, failed or blocked tasks.
+ *   1. "Needs attention" — pending approvals and path grants.
  *   2. "Starred" — user-pinned workspaces (star via hover icon or ⋯ menu).
  *   3. "Recent" — everything else, most-recently-updated first.
  *
@@ -318,7 +316,7 @@ const WorkspaceRail = ({
     const scheduleLabel = formatScheduleLabel(ws.scheduleKind);
     const isPaused = !!ws.schedulePaused;
     const isStarred = !!ws.starred;
-    const attentionCount = pending + num(ws.failedTaskCount) + num(ws.blockedTaskCount);
+    const attentionCount = pending;
     // A run completed since the user last opened this workspace.
     // Suppressed while selected — the open page is marking it seen.
     const isUnread = !!ws.unread && !isSelected;
