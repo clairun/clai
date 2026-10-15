@@ -3333,7 +3333,11 @@ fn system_prompt_text(
     run_context: &RunContext,
     trigger: &crate::assistant::types::RunTrigger,
 ) -> String {
-    let tool_defs = crate::assistant::tools::available_tools(run_context, &[]);
+    let tool_defs = crate::assistant::tools::available_tools(
+        run_context,
+        &[],
+        matches!(trigger, crate::assistant::types::RunTrigger::WorkspaceTask),
+    );
     provider_message_text(&build_system_prompt(
         run_context,
         &deps.workspace_id,

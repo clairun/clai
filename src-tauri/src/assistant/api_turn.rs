@@ -331,7 +331,14 @@ async fn start_api_turn(
             .list_tools_for_servers(&run_context.mcp_server_ids)
             .await
     };
-    let tool_defs = tools::available_tools(run_context, &external_tools);
+    let tool_defs = tools::available_tools(
+        run_context,
+        &external_tools,
+        matches!(
+            input.trigger,
+            crate::assistant::types::RunTrigger::WorkspaceTask
+        ),
+    );
 
     // Build execution context for tool calls
     // Run-scoped filesystem grants accepted via fs_request_grant stay visible

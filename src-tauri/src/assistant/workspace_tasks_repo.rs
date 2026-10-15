@@ -3,7 +3,7 @@
 
 use crate::assistant::repository::now_ms;
 use crate::assistant::signals;
-use crate::assistant::types::{AssistantMessage, AssistantRun, MessageOrigin};
+use crate::assistant::types::{AssistantMessage, AssistantRun};
 use crate::db::{enum_text, parse_enum_text, DbPool};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqliteConnection};
@@ -16,8 +16,8 @@ use ts_rs::TS;
 pub enum TaskStatus {
     Queued,
     Running,
-    InputRequired,
     Stopping,
+    #[serde(alias = "input_required")]
     Stopped,
     Completed,
     Failed,
@@ -78,8 +78,6 @@ pub struct WorkspaceTaskResponse {
     /// Set when a stop was requested for the current cycle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_requested_at: Option<i64>,
-    /// Who answered the current cycle's last `ask_user` question.
-    pub answered_by: Option<MessageOrigin>,
     pub created_at: i64,
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,8 +93,7 @@ pub struct WorkspaceTaskResponse {
 pub struct WorkspaceTaskSendResponse {
     pub task: WorkspaceTaskResponse,
     pub message: AssistantMessage,
-    /// It waits for the task's current run; `false` when it answered the
-    /// task's open question or started a new cycle.
+    /// It waits for the task's current run; `false` when a new cycle starts.
     pub queued: bool,
     /// The run that took it, when one was started or is active.
     pub run: Option<AssistantRun>,
@@ -122,7 +119,6 @@ pub(crate) struct WorkspaceTaskRow {
     pub(crate) depth: i64,
     pub(crate) cycle_no: i64,
     pub(crate) stop_requested_at: Option<i64>,
-    pub(crate) input_answered_by: Option<MessageOrigin>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
     pub(crate) completed_at: Option<i64>,
@@ -132,7 +128,7 @@ pub(crate) struct WorkspaceTaskRow {
 const TASK_COLUMNS: &str = "id, created_by_workspace_agent_id, assigned_to_workspace_agent_id, \
      assigned_agent_definition_id, title, instructions, status, failure_reason, result_summary, \
      error, session_id, run_id, parent_session_id, parent_run_id, parent_task_id, depth, \
-     cycle_no, stop_requested_at, input_answered_by_json, created_at, updated_at, completed_at, attention_acknowledged_at";
+     cycle_no, stop_requested_at, created_at, updated_at, completed_at, attention_acknowledged_at";
 
 impl WorkspaceTaskRow {
     fn from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<Self, String> {
@@ -158,13 +154,6 @@ impl WorkspaceTaskRow {
             depth: row.get("depth"),
             cycle_no: row.get("cycle_no"),
             stop_requested_at: row.get("stop_requested_at"),
-            input_answered_by: row
-                .get::<Option<String>, _>("input_answered_by_json")
-                .map(|json| {
-                    serde_json::from_str(&json)
-                        .map_err(|e| format!("Invalid task answered-by origin: {}", e))
-                })
-                .transpose()?,
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             completed_at: row.get("completed_at"),
@@ -212,7 +201,6 @@ impl WorkspaceTaskRow {
             depth: self.depth,
             cycle_no: self.cycle_no,
             stop_requested_at: self.stop_requested_at,
-            answered_by: self.input_answered_by,
             created_at: self.created_at,
             updated_at: self.updated_at,
             completed_at: self.completed_at,
@@ -381,7 +369,6 @@ pub(crate) async fn open_cycle(
             cycle_no = cycle_no + (status NOT IN ('queued', 'running') OR cycle_no = 0),
             failure_reason = NULL, result_summary = NULL, error = NULL, completed_at = NULL,
             stop_requested_at = NULL,
-            input_answered_by_json = CASE WHEN status = 'running' THEN input_answered_by_json END,
             updated_at = ?
         WHERE session_id = ?
           AND (status IN ('completed', 'failed')
@@ -420,11 +407,11 @@ pub(crate) async fn park_for_subtasks(
         WHERE id = ? AND run_id = ? AND status = 'running'
           AND (EXISTS (SELECT 1 FROM workspace_tasks AS child
                        WHERE child.parent_session_id = workspace_tasks.session_id
-                         AND child.status IN ('queued', 'running', 'input_required', 'stopping'))
+                         AND child.status IN ('queued', 'running', 'stopping'))
                OR EXISTS (SELECT 1 FROM session_signals AS s
                           WHERE s.target_session_id = workspace_tasks.session_id
                             AND s.status = 'pending'
-                            AND s.kind IN ('task_result', 'task_failed', 'task_input_required')))
+                            AND s.kind IN ('task_result', 'task_failed')))
         RETURNING {TASK_COLUMNS}
         "#
     ))
@@ -459,59 +446,6 @@ pub(crate) async fn mark_running(
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
 }
 
-/// `running → input_required` as the cycle of `run_id` asks a question; a
-/// task already waiting on an earlier question stays waiting. `None` when
-/// the cycle is not running (stopping, ended or superseded).
-pub(crate) async fn mark_input_required(
-    conn: &mut SqliteConnection,
-    task_id: &str,
-    run_id: &str,
-) -> Result<Option<WorkspaceTaskRow>, String> {
-    let row = sqlx::query(&format!(
-        r#"
-        UPDATE workspace_tasks
-        SET status = 'input_required', attention_acknowledged_at = NULL, updated_at = ?
-        WHERE id = ? AND run_id = ? AND status IN ('running', 'input_required')
-        RETURNING {TASK_COLUMNS}
-        "#
-    ))
-    .bind(now_ms())
-    .bind(task_id)
-    .bind(run_id)
-    .fetch_optional(conn)
-    .await
-    .map_err(|e| format!("Failed to mark workspace task input_required: {}", e))?;
-    row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
-}
-
-/// `input_required → running` once `answered_by` answered the question of
-/// the cycle of `run_id`. `None` when the task is no longer waiting.
-pub(crate) async fn record_answer(
-    pool: &DbPool,
-    task_id: &str,
-    run_id: &str,
-    answered_by: &MessageOrigin,
-) -> Result<Option<WorkspaceTaskRow>, String> {
-    let answered_by = serde_json::to_string(answered_by)
-        .map_err(|e| format!("Failed to serialize answer origin: {}", e))?;
-    let row = sqlx::query(&format!(
-        r#"
-        UPDATE workspace_tasks
-        SET status = 'running', input_answered_by_json = ?, updated_at = ?
-        WHERE id = ? AND run_id = ? AND status = 'input_required'
-        RETURNING {TASK_COLUMNS}
-        "#
-    ))
-    .bind(answered_by)
-    .bind(now_ms())
-    .bind(task_id)
-    .bind(run_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to record task answer: {}", e))?;
-    row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
-}
-
 /// The terminal state of one cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CycleOutcome {
@@ -540,7 +474,7 @@ pub(crate) async fn finish_cycle(
             error = CASE WHEN stop_requested_at IS NULL THEN ? END,
             result_summary = ?, attention_acknowledged_at = NULL, updated_at = ?, completed_at = ?
         WHERE id = ? AND run_id IS ?
-          AND status IN ('queued', 'running', 'input_required', 'stopping')
+          AND status IN ('queued', 'running', 'stopping')
         RETURNING {TASK_COLUMNS}
         "#
     ))
@@ -558,7 +492,7 @@ pub(crate) async fn finish_cycle(
     row.as_ref().map(WorkspaceTaskRow::from_sql).transpose()
 }
 
-/// `queued | running | input_required → stopping`, recording the request.
+/// `queued | running → stopping`, recording the request.
 /// Returns the task as it now is and whether this call changed it; a task
 /// already stopping or terminal is returned unchanged. `None` when the task
 /// does not exist.
@@ -571,7 +505,7 @@ pub(crate) async fn mark_stopping(
         r#"
         UPDATE workspace_tasks
         SET status = 'stopping', stop_requested_at = ?, updated_at = ?
-        WHERE id = ? AND status IN ('queued', 'running', 'input_required')
+        WHERE id = ? AND status IN ('queued', 'running')
         RETURNING {TASK_COLUMNS}
         "#
     ))
@@ -665,6 +599,13 @@ pub(crate) async fn stop_interrupted(
 mod tests {
     use super::*;
     use crate::db::test_support::{insert_task, workspace_pool};
+
+    #[test]
+    fn legacy_input_required_origin_status_decodes_as_stopped() {
+        let status: TaskStatus = serde_json::from_str("\"input_required\"").unwrap();
+        assert_eq!(status, TaskStatus::Stopped);
+        assert_eq!(serde_json::to_string(&status).unwrap(), "\"stopped\"");
+    }
 
     fn names(entries: &[(&str, &str)]) -> HashMap<String, String> {
         entries
@@ -857,14 +798,7 @@ mod tests {
             .expect("ack");
         };
 
-        acknowledge().await;
         let mut conn = pool.acquire().await.expect("connection");
-        let asked = mark_input_required(&mut conn, "task-1", "run-1")
-            .await
-            .expect("mark")
-            .expect("task is running");
-        assert_eq!(asked.attention_acknowledged_at, None);
-
         acknowledge().await;
         let outcome = CycleOutcome {
             status: TaskStatus::Failed,

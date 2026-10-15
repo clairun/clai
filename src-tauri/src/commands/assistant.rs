@@ -590,7 +590,6 @@ pub async fn assistant_submit_user_input(
             text: request.answer,
             selected_option_index: request.selected_option_index,
             selected_option_indexes: request.selected_option_indexes,
-            origin: crate::assistant::types::MessageOrigin::User,
         },
     )
 }

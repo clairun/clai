@@ -4,7 +4,6 @@ use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::repository;
 use crate::assistant::runtime::{self, LiveRunKey};
 use crate::assistant::signals::{self, NewEvent, SignalKind};
-use crate::assistant::tools::ask_user::{self, AskUserAnswer, AskUserParams};
 use crate::assistant::tools::ToolExecutionContext;
 use crate::assistant::types::{
     AgentRefSnapshot, AssistantMessage, AssistantRun, ContentPart, MessageOrigin, MessageRole,
@@ -554,8 +553,7 @@ fn cycle_outcome(
     }
 }
 
-/// Sends `text` to a task from `origin`: answers its open `ask_user`
-/// question when it has one, otherwise queues for its current run or starts
+/// Sends `text` to a task from `origin`: queues for its current run or starts
 /// a new cycle.
 pub(crate) async fn send_task_message(
     deps: &AssistantDeps,
@@ -574,14 +572,10 @@ pub(crate) async fn send_task_message(
             },
         );
     }
-    let (run_id, queued) = if delivery.answered {
-        (delivery.task.run_id.clone(), false)
-    } else {
-        match dispatcher::kick(deps, &session_id).await? {
-            Kick::Started { run, .. } => (Some(run.id), false),
-            Kick::Busy { run_id } => (Some(run_id), true),
-            Kick::Idle | Kick::Deferred => (None, true),
-        }
+    let (run_id, queued) = match dispatcher::kick(deps, &session_id).await? {
+        Kick::Started { run, .. } => (Some(run.id), false),
+        Kick::Busy { run_id } => (Some(run_id), true),
+        Kick::Idle | Kick::Deferred => (None, true),
     };
     let run = match run_id {
         Some(run_id) => repository::get_run(&deps.pool, &run_id).await?,
@@ -602,15 +596,11 @@ pub(crate) async fn send_task_message(
 
 #[derive(Debug)]
 pub(crate) struct TaskMessageDelivery {
-    /// The task as it was when the message was written.
-    pub(crate) task: WorkspaceTaskRow,
     pub(crate) message: AssistantMessage,
-    /// The message answered the task's open question and is consumed.
-    pub(crate) answered: bool,
 }
 
 /// The database half of [`send_task_message`]: writes the message and its
-/// signal, then hands it to a waiting `ask_user` if there is one.
+/// signal.
 pub(crate) async fn deliver_task_message(
     pool: &DbPool,
     task_id: &str,
@@ -657,139 +647,10 @@ pub(crate) async fn deliver_task_message(
     )
     .await?
     .ok_or_else(|| format!("invalid_input: task {task_id} has no session any more."))?;
-    // An answer is consumed before the waiting tool sees it, so the run's
-    // next request cannot also read it as pending input.
-    let answer_run = match (task.status, &task.run_id) {
-        (TaskStatus::InputRequired, Some(run_id)) => Some(run_id),
-        _ => None,
-    };
-    if let Some(run_id) = answer_run {
-        signals::consume_one(&mut tx, &session_id, run_id, &message.id).await?;
-    }
     tx.commit()
         .await
         .map_err(|e| format!("Failed to commit task message transaction: {}", e))?;
-
-    let answered = answer_run.is_some()
-        && ask_user::submit_answer_for_session(
-            &session_id,
-            AskUserAnswer {
-                text: text.to_string(),
-                selected_option_index: None,
-                selected_option_indexes: None,
-                origin,
-            },
-        )
-        .is_ok();
-    if answer_run.is_some() && !answered {
-        // The message is saved; failing here would invite a duplicate send.
-        if let Err(error) = signals::unconsume(pool, &message.id).await {
-            tracing::error!(task_id, error, "Failed to hand an unanswered message back");
-        }
-    }
-    Ok(TaskMessageDelivery {
-        task,
-        message,
-        answered,
-    })
-}
-
-/// A task's run asked `question`: the task waits for input and its parent
-/// gets the question as an automated event.
-pub(crate) async fn ask_parent(
-    deps: &AssistantDeps,
-    task: &WorkspaceTaskRow,
-    run_id: &str,
-    question: &str,
-    params: &AskUserParams,
-) {
-    let roster =
-        load_workspace_agent_rows(deps.app.state::<AppState>().inner(), &deps.workspace_id)
-            .unwrap_or_default();
-    match post_input_required(&deps.pool, &task.id, run_id, question, params, &roster).await {
-        Ok(Some((task, event))) => {
-            emit_task_updated(deps, task).await;
-            if let Some(message) = event {
-                announce_event(deps, message).await;
-            }
-        }
-        Ok(None) => {}
-        Err(error) => {
-            tracing::error!(task_id = %task.id, run_id, error, "Failed to post task question");
-        }
-    }
-}
-
-/// The database half of [`ask_parent`]. `None` when the cycle is no longer
-/// running; the event is `None` for a task with no parent.
-pub(crate) async fn post_input_required(
-    pool: &DbPool,
-    task_id: &str,
-    run_id: &str,
-    question: &str,
-    params: &AskUserParams,
-    roster: &[WorkspaceAgentRow],
-) -> Result<Option<(WorkspaceTaskRow, Option<AssistantMessage>)>, String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start task question transaction: {}", e))?;
-    let Some(task) = workspace_tasks_repo::mark_input_required(&mut tx, task_id, run_id).await?
-    else {
-        return Ok(None);
-    };
-    let event = match task.parent_session_id.as_deref() {
-        Some(parent_session_id) => {
-            signals::insert_event(
-                &mut tx,
-                NewEvent {
-                    session_id: parent_session_id,
-                    kind: SignalKind::TaskInputRequired,
-                    text: question_text(&task.id, question, params),
-                    origin: task_origin(&task, roster),
-                    delivery_key: None,
-                    connection_id: None,
-                },
-            )
-            .await?
-        }
-        None => None,
-    };
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit task question transaction: {}", e))?;
-    Ok(Some((task, event)))
-}
-
-fn question_text(task_id: &str, question: &str, params: &AskUserParams) -> String {
-    let mut text = format!("Question: {question}");
-    if let Some(context) = params.context.as_deref().filter(|c| !c.trim().is_empty()) {
-        text.push_str(&format!("\n\nContext: {}", context.trim()));
-    }
-    if let Some(options) = params.options.as_ref().filter(|o| !o.is_empty()) {
-        text.push_str("\n\nOptions:");
-        for option in options {
-            text.push_str(&format!("\n- {}", option.label));
-        }
-    }
-    text.push_str(&format!(
-        "\n\nAnswer with workspace_sendTaskMessage (taskId: {task_id})."
-    ));
-    text
-}
-
-/// `input_required → running` once the task's question was answered.
-pub(crate) async fn record_ask_answered(
-    deps: &AssistantDeps,
-    task_id: &str,
-    run_id: &str,
-    answered_by: &MessageOrigin,
-) {
-    match workspace_tasks_repo::record_answer(&deps.pool, task_id, run_id, answered_by).await {
-        Ok(Some(task)) => emit_task_updated(deps, task).await,
-        Ok(None) => {}
-        Err(error) => tracing::error!(task_id, run_id, error, "Failed to record task answer"),
-    }
+    Ok(TaskMessageDelivery { message })
 }
 
 /// Requests a stop of the task's current cycle and, unless the task had
@@ -1973,6 +1834,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_recovers_legacy_input_required_with_result() {
+        let (tmp, pool) = workspace_pool().await;
+        let parent = parent_session(&pool).await;
+        let session = assign(&pool, &parent, "task-1").await;
+        let (run, _) = open(&pool, &session).await;
+        sqlx::query("UPDATE workspace_tasks SET status = 'input_required' WHERE id = 'task-1'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        set_run_status(&pool, &run, RunStatus::Running).await;
+
+        let pool = restart(tmp.path()).await;
+        assert_eq!(task_row(&pool, "task-1").await.status, TaskStatus::Stopped);
+        let events = signals::list_open_content(&pool, &parent).await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0].message.origin,
+            MessageOrigin::Task {
+                status: TaskStatus::Stopped,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn restart_leaves_never_started_task_queued() {
         let (tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
@@ -2333,11 +2219,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // messages to tasks and input_required
+    // messages to tasks
     // -----------------------------------------------------------------
-
-    use crate::assistant::tools::ask_user::{AskUserOption, AskUserOutcome};
-    use tokio::sync::oneshot;
 
     fn parent_agent() -> MessageOrigin {
         MessageOrigin::Agent {
@@ -2377,40 +2260,6 @@ mod tests {
             .unwrap()
     }
 
-    /// What `ask_user` does in a task session: registers the question, then
-    /// posts it to the parent.
-    async fn ask(
-        pool: &DbPool,
-        task_id: &str,
-        run: &AssistantRun,
-    ) -> oneshot::Receiver<AskUserOutcome> {
-        let rx = ask_user::register_test_ask(&run.session_id);
-        post_input_required(pool, task_id, &run.id, "Which env?", &ask_params(), &[])
-            .await
-            .unwrap()
-            .expect("a running task can ask");
-        rx
-    }
-
-    fn ask_params() -> AskUserParams {
-        AskUserParams {
-            question: "Which env?".to_string(),
-            options: Some(vec![AskUserOption {
-                label: "staging".to_string(),
-                description: None,
-            }]),
-            multi_select: None,
-            context: None,
-        }
-    }
-
-    fn answer_of(mut rx: oneshot::Receiver<AskUserOutcome>) -> AskUserAnswer {
-        match rx.try_recv() {
-            Ok(AskUserOutcome::Answer(answer)) => answer,
-            other => panic!("expected an answer, got {other:?}"),
-        }
-    }
-
     #[tokio::test]
     async fn message_running_task_is_pending_signal() {
         let (_tmp, pool) = workspace_pool().await;
@@ -2419,7 +2268,6 @@ mod tests {
 
         let sent = send(&pool, "task-1", "also check the docs", parent_agent()).await;
 
-        assert!(!sent.answered);
         assert_eq!(signal_status(&pool, &sent).await, "pending");
         assert!(matches!(
             claim(&pool, WS, &session, |id| Some(connection(id))).await.unwrap(),
@@ -2491,126 +2339,6 @@ mod tests {
             panic!("new input resumes the task");
         };
         assert_eq!(message_ids.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn ask_user_in_task_emits_input_required_to_parent() {
-        let (_tmp, pool) = workspace_pool().await;
-        let parent = parent_session(&pool).await;
-        let (_session, run) = running(&pool, &parent, "task-1").await;
-
-        let (task, event) =
-            post_input_required(&pool, "task-1", &run.id, "Which env?", &ask_params(), &[])
-                .await
-                .unwrap()
-                .expect("a running task can ask");
-
-        assert_eq!(task.status, TaskStatus::InputRequired);
-        let event = event.expect("the parent gets the question");
-        assert_eq!(event.session_id, parent);
-        assert!(matches!(
-            &event.origin,
-            MessageOrigin::Task { task_id, cycle_no: 1, status: TaskStatus::InputRequired, .. }
-                if task_id == "task-1"
-        ));
-        let ContentPart::Text { text } = &event.content[0] else {
-            panic!("a text event");
-        };
-        assert!(text.contains("Which env?") && text.contains("- staging"));
-        assert!(text.contains("workspace_sendTaskMessage"));
-        assert_eq!(
-            signals_of(&pool, &parent).await,
-            [signal("task_input_required", "pending")]
-        );
-
-        // A stopping cycle asks nothing.
-        stop(&pool, "task-1").await;
-        assert!(
-            post_input_required(&pool, "task-1", &run.id, "Again?", &ask_params(), &[])
-                .await
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn parent_answer_resolves_pending_ask_and_sets_answered_by() {
-        let (_tmp, pool) = workspace_pool().await;
-        let parent = parent_session(&pool).await;
-        let (_session, run) = running(&pool, &parent, "task-1").await;
-        let rx = ask(&pool, "task-1", &run).await;
-
-        let sent = send(&pool, "task-1", "staging", parent_agent()).await;
-
-        assert!(sent.answered);
-        assert_eq!(signal_status(&pool, &sent).await, "consumed");
-        let answer = answer_of(rx);
-        assert_eq!(answer.text, "staging");
-        assert_eq!(answer.origin, parent_agent());
-
-        // What the waiting tool does with the answer.
-        let task = workspace_tasks_repo::record_answer(&pool, "task-1", &run.id, &answer.origin)
-            .await
-            .unwrap()
-            .expect("the task was waiting");
-        assert_eq!(task.status, TaskStatus::Running);
-        let response = serde_json::to_value(task.into_response("ws", &HashMap::new())).unwrap();
-        assert_eq!(response["answeredBy"]["kind"], "agent");
-        assert_eq!(
-            response["answeredBy"]["agent"]["workspaceAgentId"],
-            "wa-mgr"
-        );
-    }
-
-    #[tokio::test]
-    async fn human_composer_send_resolves_ask_with_user_origin() {
-        let (_tmp, pool) = workspace_pool().await;
-        let parent = parent_session(&pool).await;
-        let (session, run) = running(&pool, &parent, "task-1").await;
-        let rx = ask(&pool, "task-1", &run).await;
-
-        let sent = send(&pool, "task-1", "production", MessageOrigin::User).await;
-
-        assert!(sent.answered);
-        assert_eq!(sent.message.origin, MessageOrigin::User);
-        let answer = answer_of(rx);
-        assert_eq!(answer.origin, MessageOrigin::User);
-        assert_eq!(
-            signals_of(&pool, &session).await,
-            [
-                signal("agent_message", "claimed"),
-                signal("user_message", "consumed")
-            ]
-        );
-        let task = workspace_tasks_repo::record_answer(&pool, "task-1", &run.id, &answer.origin)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(task.input_answered_by, Some(MessageOrigin::User));
-    }
-
-    #[tokio::test]
-    async fn concurrent_answers_first_commit_wins_second_stays_content_signal() {
-        let (_tmp, pool) = workspace_pool().await;
-        let parent = parent_session(&pool).await;
-        let (session, run) = running(&pool, &parent, "task-1").await;
-        let rx = ask(&pool, "task-1", &run).await;
-
-        // Both senders saw the task waiting for input.
-        let first = send(&pool, "task-1", "from the parent", parent_agent()).await;
-        let second = send(&pool, "task-1", "from the human", MessageOrigin::User).await;
-
-        assert!(first.answered);
-        assert!(!second.answered);
-        assert_eq!(answer_of(rx).text, "from the parent");
-        assert_eq!(signal_status(&pool, &first).await, "consumed");
-        assert_eq!(signal_status(&pool, &second).await, "pending");
-        assert!(matches!(
-            claim(&pool, WS, &session, |id| Some(connection(id)))
-                .await
-                .unwrap(),
-            Kick::Busy { .. }
-        ));
     }
 
     // -----------------------------------------------------------------

@@ -16,6 +16,7 @@ use crate::config::ShellAccessMode;
 pub fn available_tools(
     context: &RunContext,
     external_tools: &[ToolDefinition],
+    is_task_session: bool,
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![];
 
@@ -25,7 +26,9 @@ pub fn available_tools(
         tools.push(workspace_get_task_result_def());
         tools.push(workspace_send_task_message_def());
         tools.push(workspace_stop_task_def());
-        tools.push(ask_user_def());
+        if !is_task_session {
+            tools.push(ask_user_def());
+        }
     }
 
     tools.push(history_query_def());
@@ -315,11 +318,27 @@ mod tests {
     }
 
     #[test]
+    fn task_sessions_do_not_offer_ask_user() {
+        let context = RunContext {
+            agent_enabled: true,
+            ..RunContext::default()
+        };
+        let names = |is_task| {
+            available_tools(&context, &[], is_task)
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(names(false).contains(&"ask_user".to_string()));
+        assert!(!names(true).contains(&"ask_user".to_string()));
+    }
+
+    #[test]
     fn workspace_tools_use_bash_instead_of_operational_fs_tools() {
         let mut context = RunContext::default();
 
         let names = |context: &RunContext| {
-            available_tools(context, &[])
+            available_tools(context, &[], false)
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>()
@@ -347,7 +366,7 @@ mod tests {
     fn web_tools_are_off_unless_granted() {
         let mut context = RunContext::default();
         let has_web = |context: &RunContext| {
-            let names: Vec<String> = available_tools(context, &[])
+            let names: Vec<String> = available_tools(context, &[], false)
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect();

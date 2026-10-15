@@ -25,8 +25,6 @@ pub enum SignalKind {
     TaskResult,
     /// A task this session assigned failed a cycle.
     TaskFailed,
-    /// A task this session assigned asked a question with `ask_user`.
-    TaskInputRequired,
 }
 
 /// A content signal and its message.
@@ -403,30 +401,6 @@ pub(crate) async fn consume_one(
     .await
     .map_err(|e| format!("Failed to consume session signal: {}", e))?;
     stamp_run(conn, message_id, run_id).await
-}
-
-/// Undoes [`consume_one`] for a message no run took after all.
-pub(crate) async fn unconsume(pool: &DbPool, message_id: &str) -> Result<(), String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to start signal release transaction: {}", e))?;
-    sqlx::query(
-        "UPDATE session_signals SET status = 'pending', consumed_run_id = NULL
-         WHERE message_id = ? AND status = 'consumed'",
-    )
-    .bind(message_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to release session signal: {}", e))?;
-    sqlx::query("UPDATE assistant_messages SET run_id = NULL WHERE id = ?")
-        .bind(message_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Failed to release message attribution: {}", e))?;
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit signal release transaction: {}", e))
 }
 
 /// Deletes a user message whose signal is still pending, with the signal.

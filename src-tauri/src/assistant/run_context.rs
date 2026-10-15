@@ -422,7 +422,7 @@ mod tests {
             .expect("assign other");
         let offers_assign = |agent_id: &str| {
             let run = resolve_run_context(&fx.state, WS, Some(agent_id)).expect("resolve");
-            crate::assistant::tools::registry::available_tools(&run, &[])
+            crate::assistant::tools::registry::available_tools(&run, &[], false)
                 .iter()
                 .any(|tool| tool.name == "workspace_assignTask")
         };

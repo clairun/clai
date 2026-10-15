@@ -288,7 +288,15 @@ impl ServerHandler for ClaiMcpService {
                     .list_tools_for_servers(&binding.run_context.mcp_server_ids)
                     .await
             };
-            let tool_defs = tools::available_tools(&binding.run_context, &external_tools);
+            let is_task_session = crate::assistant::workspace_tasks_repo::load_task_for_session(
+                &binding.pool,
+                &binding.session_id,
+            )
+            .await
+            .map_err(|error| McpError::internal_error(error, None))?
+            .is_some();
+            let tool_defs =
+                tools::available_tools(&binding.run_context, &external_tools, is_task_session);
             Ok(ListToolsResult {
                 meta: None,
                 tools: tool_defs.into_iter().map(tool_definition_to_mcp).collect(),
