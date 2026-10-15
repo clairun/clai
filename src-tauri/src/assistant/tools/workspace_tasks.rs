@@ -645,7 +645,7 @@ pub(crate) async fn deliver_task_message(
         )
     {
         return Err(
-            "invalid_input: This task has finished. Ask the agent that created it to resume it."
+            "invalid_input: This task is not accepting messages."
                 .to_string(),
         );
     }
@@ -2488,7 +2488,7 @@ mod tests {
         let error = deliver_task_message(&pool, "task-1", "from user", MessageOrigin::User)
             .await
             .unwrap_err();
-        assert!(error.contains("task has finished"), "{error}");
+        assert_eq!(error, "invalid_input: This task is not accepting messages.");
         assert_eq!(message_count(&pool).await, before);
 
         let sent = send(&pool, "task-1", "from agent", parent_agent()).await;
