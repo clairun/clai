@@ -13,7 +13,7 @@ import { useStableRoster } from '../components/Agents/useStableRoster';
 import { useOpenTask, type TaskView } from './useOpenTask';
 import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore';
 import * as assistantClient from '../assistant/client';
-import useAssistantStore from '../assistant/sessionStore';
+import useAssistantStore, { isRunActive } from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
@@ -1850,8 +1850,17 @@ const Workspace = () => {
           const hasUnloadedUpdate =
             nextDetails.session.updatedAt &&
             lastLoadedSessionUpdatedAtRef.current !== nextDetails.session.updatedAt;
+          // Re-reading mid-stream would drop the message being streamed, so a
+          // streaming session only hydrates once the server shows no active
+          // run — which also recovers from a missed terminal run event.
+          const streamingRuns =
+            hasUnloadedUpdate && existingSession?.isStreaming
+              ? await assistantClient.listRuns(workspaceId, nextDetails.session.id)
+              : null;
+          if (currentWorkspaceIdRef.current !== workspaceId) return;
           const shouldHydrateSession =
-            needsInitialHydration || (hasUnloadedUpdate && !existingSession?.isStreaming);
+            needsInitialHydration ||
+            (hasUnloadedUpdate && !streamingRuns?.some(isRunActive));
 
           if (shouldHydrateSession) {
             const [messagePage, runs] = await Promise.all([
@@ -1860,7 +1869,7 @@ const Workspace = () => {
                 sessionId: nextDetails.session.id,
                 limit: MESSAGE_PAGE_LIMIT,
               }),
-              assistantClient.listRuns(workspaceId, nextDetails.session.id),
+              streamingRuns ?? assistantClient.listRuns(workspaceId, nextDetails.session.id),
             ]);
             if (currentWorkspaceIdRef.current !== workspaceId) return;
 

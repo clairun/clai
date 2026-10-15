@@ -166,6 +166,9 @@ const DELIVERED_QUEUE_TOMBSTONE_LIMIT = 200;
 const TERMINAL_STATUSES = ['completed', 'completed_with_warnings', 'failed', 'cancelled'] as const;
 const ACTIVE_STATUSES = ['queued', 'running', 'waiting_for_tool'] as const;
 
+export const isRunActive = (run: AssistantRun): boolean =>
+  (ACTIVE_STATUSES as readonly string[]).includes(run.status);
+
 const useAssistantStore = create<AssistantStoreState>()(
   devtools(
     immer((set) => ({
@@ -439,6 +442,9 @@ const useAssistantStore = create<AssistantStoreState>()(
       ) =>
         set((state) => {
           const existing = state.sessions[sessionId];
+          // A snapshot with no active run ends any live run state, so a
+          // missed terminal event cannot leave the run timer ticking.
+          const hasActiveRun = runs.some(isRunActive);
           state.sessions[sessionId] = {
             ...createInitialSessionState(session),
             messages,
@@ -481,10 +487,10 @@ const useAssistantStore = create<AssistantStoreState>()(
             // (The streaming-text accumulator itself lives in the top-level
             // `streamingText` map, so a session replacement here cannot wipe
             // it by construction.)
-            isStreaming: existing?.isStreaming || false,
+            isStreaming: hasActiveRun && !!existing?.isStreaming,
             // Run start is FE-only live state the BE snapshot doesn't carry;
             // preserve it so a poll tick mid-run doesn't reset the elapsed timer.
-            runStartedAt: existing?.runStartedAt ?? null,
+            runStartedAt: hasActiveRun ? existing?.runStartedAt ?? null : null,
             // Same rationale for the pending ask_user request: it's
             // FE-only state that the BE snapshot doesn't carry, so a
             // poll tick landing while a question is open would unmount

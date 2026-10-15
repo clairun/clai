@@ -12,6 +12,7 @@ import { useTaskStore } from '../workspace/taskStore';
 import type {
   AssistantMessage,
   AssistantMessagePage,
+  AssistantRun,
   AssistantSession,
   WorkspaceDetails,
   WorkspaceAgentResponse,
@@ -125,6 +126,19 @@ const streamingAssistantMessage = (sessionId: string, id: string): AssistantMess
   createdAt: 2n,
   providerMetadata: null,
   origin: { kind: 'user' },
+});
+
+const runFor = (sessionId: string, status: AssistantRun['status']): AssistantRun => ({
+  id: 'run-1',
+  sessionId,
+  status,
+  trigger: 'user_message',
+  connectionId: 'conn',
+  protocolId: 'proto',
+  modelId: 'model',
+  startedAt: 1n,
+  completedAt: null,
+  error: null,
 });
 
 const messagePage = (messages: AssistantMessage[]): AssistantMessagePage => ({
@@ -458,14 +472,50 @@ describe('Workspace session hydration', () => {
     loadSessionMessagesPage.mockResolvedValue(
       messagePage([userMessage('sess-a', 'm-1', 'first question')])
     );
+    listRuns.mockResolvedValue([runFor('sess-a', 'running')]);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
     expect(loadSessionMessagesPage).toHaveBeenCalledTimes(1);
-    expect(listRuns).toHaveBeenCalledTimes(1);
+    expect(listRuns).toHaveBeenCalledTimes(2);
     expect(screen.getByText('half an answer so far')).toBeInTheDocument();
+  });
+
+  it('re-hydrates a streaming session whose run ended without a terminal event', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([userMessage('sess-a', 'm-1', 'first question')])
+    );
+    renderWorkspace();
+    expect(await screen.findByText('first question')).toBeInTheDocument();
+
+    act(() => {
+      useAssistantStore.getState().setRunStatus('sess-a', runFor('sess-a', 'running'));
+    });
+    expect(useAssistantStore.getState().sessions['sess-a']!.runStartedAt).not.toBeNull();
+
+    // The run finished but its run_completed event never reached the page.
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { session: sessionFor('a', 20n) })
+    );
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([
+        userMessage('sess-a', 'm-1', 'first question'),
+        userMessage('sess-a', 'm-2', 'the finished answer'),
+      ])
+    );
+    listRuns.mockResolvedValue([runFor('sess-a', 'completed')]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(await screen.findByText('the finished answer')).toBeInTheDocument();
+    const session = useAssistantStore.getState().sessions['sess-a']!;
+    expect(session.isStreaming).toBe(false);
+    expect(session.runStartedAt).toBeNull();
   });
 });
 

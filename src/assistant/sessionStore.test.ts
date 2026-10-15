@@ -108,11 +108,33 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     store.initSession(SESSION);
     store.appendDelta(SESSION.id, 'msg-1', 'Hello ');
     store.appendDelta(SESSION.id, 'msg-1', 'world');
-    store.loadSessionData(SESSION.id, SESSION, [], [], []);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'running')], []);
     expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe(
       'Hello world',
     );
     expect(useAssistantStore.getState().sessions[SESSION.id]!.isStreaming).toBe(true);
+  });
+
+  it('clears a stale streaming state when the snapshot shows every run terminal', () => {
+    // A missed run_completed event must not leave the run timer ticking.
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running'));
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'completed')], []);
+    const s = useAssistantStore.getState().sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(false);
+    expect(s.runStartedAt).toBeNull();
+  });
+
+  it('keeps the run timer across a snapshot that still shows the run active', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running'));
+    const startedAt = useAssistantStore.getState().sessions[SESSION.id]!.runStartedAt;
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'running')], []);
+    const s = useAssistantStore.getState().sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(true);
+    expect(s.runStartedAt).toBe(startedAt);
   });
 
   it('overwrites messages/runs/toolCalls with the snapshot payload', () => {
