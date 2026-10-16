@@ -136,6 +136,21 @@ pub(crate) async fn run_spawned_child(
         .map_err(|e| format!("Failed to collect stderr: {}", e))?
         .map_err(|e| format!("Failed to read stderr: {}", e))?;
 
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut stderr = truncate_string(
+        String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        output_limit,
+    );
+    // A signal death has no exit code; without this the caller sees only
+    // `exitCode: null` and empty output (e.g. /bin/sh aborting under seatbelt).
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        if !stderr.is_empty() && !stderr.ends_with('\n') {
+            stderr.push('\n');
+        }
+        stderr.push_str(&format!("process terminated by signal {signal}"));
+    }
+
     Ok(SandboxCommandOutput {
         cwd,
         exit_code: status.code(),
@@ -144,10 +159,7 @@ pub(crate) async fn run_spawned_child(
             String::from_utf8_lossy(&stdout_bytes).into_owned(),
             output_limit,
         ),
-        stderr: truncate_string(
-            String::from_utf8_lossy(&stderr_bytes).into_owned(),
-            output_limit,
-        ),
+        stderr,
     })
 }
 
@@ -324,5 +336,54 @@ mod tests {
         assert_eq!(out.stderr, "err");
         assert_eq!(out.exit_code, Some(7));
         assert!(!out.success);
+    }
+
+    /// A signal-killed child has no exit code; the signal must surface in
+    /// stderr instead of an empty, unexplained failure.
+    #[tokio::test]
+    async fn reports_signal_when_child_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg("kill -TERM $$");
+        prepare_stdio(&mut cmd);
+        let child = cmd.spawn().expect("spawn /bin/sh");
+
+        let out = run_spawned_child(
+            child,
+            dir.path().to_path_buf(),
+            5_000,
+            1_000,
+            "Test command",
+        )
+        .await
+        .expect("command should complete");
+
+        assert_eq!(out.exit_code, None);
+        assert!(!out.success);
+        assert_eq!(out.stderr, "process terminated by signal 15");
+    }
+
+    /// The signal line must survive stderr truncation: it is the only
+    /// explanation for a missing exit code.
+    #[tokio::test]
+    async fn signal_line_survives_stderr_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(
+            "i=0; while [ $i -lt 50 ]; do printf xxxxxxxxxx 1>&2; i=$((i+1)); done; kill -TERM $$",
+        );
+        prepare_stdio(&mut cmd);
+        let child = cmd.spawn().expect("spawn /bin/sh");
+
+        let out = run_spawned_child(child, dir.path().to_path_buf(), 5_000, 100, "Test command")
+            .await
+            .expect("command should complete");
+
+        assert!(out.stderr.contains("...[truncated]"), "{}", out.stderr);
+        assert!(
+            out.stderr.ends_with("process terminated by signal 15"),
+            "{}",
+            out.stderr
+        );
     }
 }
