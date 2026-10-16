@@ -816,14 +816,14 @@ async fn ensure_assistant_message_slot(
 ///   transcript sorts by `created_at`, so a bubble opened before the next
 ///   message arrives renders the reply ABOVE the question. Rotating on any
 ///   outstanding slot did exactly that.
-/// - It must be EARLY enough to be a turn boundary. Rotating mid-turn would
-///   reset the stream state under blocks that are still open — a `tool_use`
-///   block accumulates its arguments outside `parts` and would be lost —
-///   and would strand the interrupted turn's tail below the user's message
-///   instead of above it.
+/// - It must fall between API messages. The echo of absorbed input can
+///   arrive mid-turn, but only after the previous message's blocks have
+///   closed, so no block is open here. Tool calls may still be unresolved
+///   (a tool started in the old row finishes in the new one), so their
+///   tracking carries over.
 ///
-/// Resetting the stream state is part of the rotation: the parts just
-/// persisted must not be written a second time into the new row.
+/// Resetting the rest of the stream state is part of the rotation: the
+/// parts just persisted must not be written a second time into the new row.
 #[allow(clippy::too_many_arguments)]
 async fn rotate_assistant_bubble(
     deps: &AssistantDeps,
@@ -855,7 +855,11 @@ async fn rotate_assistant_bubble(
         conversation,
     )
     .await?;
-    *state = ClaudeStreamState::new();
+    let mut next = ClaudeStreamState::new();
+    next.persisted_tool_use_ids = std::mem::take(&mut state.persisted_tool_use_ids);
+    next.unresolved_tool_use_ids = std::mem::take(&mut state.unresolved_tool_use_ids);
+    next.pending_tool_results = std::mem::take(&mut state.pending_tool_results);
+    *state = next;
     Ok(())
 }
 
@@ -889,40 +893,77 @@ impl MidRunDelivery {
     };
 }
 
-/// Where the live Claude process stands on the input we injected, read
-/// from the stream. `--replay-user-messages` makes the CLI echo user input
-/// (`isReplay`) once it is taken into the conversation. That echo is the
-/// boundary: one echo may carry several delivered lines, and it may open a
-/// new turn or join the running one (input absorbed at a tool boundary or
-/// during compaction gets no turn and no `result` of its own), so counting
+/// Stdin arguments for a live Claude process. `--replay-user-messages`
+/// makes the CLI echo user input (`isReplay`) once it is taken into the
+/// conversation; mid-run replies are split at that echo.
+const CLAUDE_LIVE_INPUT_ARGS: [&str; 3] =
+    ["--input-format", "stream-json", "--replay-user-messages"];
+
+/// Mid-run input state for a live Claude process, driven by the stream.
+///
+/// The echo is the reply boundary: one echo may carry several delivered
+/// lines, and it may open a new turn or join the running one (input absorbed
+/// at a tool boundary gets no turn and no `result` of its own), so counting
 /// writes, turns, or results cannot find it.
+///
+/// Closing stdin does not depend on the echo. The CLI still answers input
+/// already written when stdin closes, so every `result` may close it except
+/// our own interrupt's wind-down of a turn whose input is unechoed — the
+/// turn answering that input follows. A missing echo can therefore cost a
+/// row split, never a hung run.
 #[derive(Default)]
-struct InjectedInput {
-    /// Delivered input the CLI has not echoed yet. Its reply has not begun,
-    /// so stdin stays open; any echo clears it, so no merge can strand it.
+struct ClaudeLiveInput {
+    /// A turn is in flight (first streamed event to its `result`), so a
+    /// delivery must interrupt it.
+    turn_active: bool,
+    /// The next error `result` is our interrupt winding the turn down.
+    awaiting_interrupt_result: bool,
+    /// The prompt has been echoed. Delivering earlier would let the
+    /// prompt's echo claim the injected input's boundary.
+    prompt_echoed: bool,
+    /// Delivered input the CLI has not echoed yet.
     unechoed: bool,
 }
 
-enum StreamBoundary {
-    /// Echoed injected input: the reply to it starts here, in a new row.
-    InjectedReplyStarts,
-    /// A turn ended with no injected input waiting for its echo.
-    Idle,
+#[derive(Default)]
+struct StreamStep {
+    /// Injected input was echoed: its reply starts here, in a new row.
+    rotate: bool,
+    /// This `result` is our interrupt's wind-down, not a failure.
+    interrupted_result: bool,
+    /// A turn ended: recheck the queue, then close stdin if nothing new.
+    may_close: bool,
 }
 
-impl InjectedInput {
-    fn delivered(&mut self) {
-        self.unechoed = true;
+impl ClaudeLiveInput {
+    fn ready_for_input(&self) -> bool {
+        self.prompt_echoed
     }
 
-    fn on_event(&mut self, value: &Value) -> Option<StreamBoundary> {
+    fn delivered(&mut self, delivery: &MidRunDelivery) {
+        self.awaiting_interrupt_result |= delivery.interrupted;
+        self.unechoed |= delivery.owes_turn;
+    }
+
+    fn on_event(&mut self, value: &Value) -> StreamStep {
+        let mut step = StreamStep::default();
         match value.get("type").and_then(Value::as_str) {
-            Some("user") if value.get("isReplay").and_then(Value::as_bool) == Some(true) => {
-                std::mem::take(&mut self.unechoed).then_some(StreamBoundary::InjectedReplyStarts)
+            Some("result") => {
+                self.turn_active = false;
+                step.interrupted_result = std::mem::take(&mut self.awaiting_interrupt_result)
+                    && is_interrupted_turn_result(value);
+                step.may_close = !(step.interrupted_result && self.unechoed);
             }
-            Some("result") if !self.unechoed => Some(StreamBoundary::Idle),
-            _ => None,
+            Some("system") | Some("assistant") | Some("stream_event") | Some("user") => {
+                self.turn_active = true;
+                if value.get("isReplay").and_then(Value::as_bool) == Some(true) {
+                    step.rotate = std::mem::take(&mut self.unechoed);
+                    self.prompt_echoed = true;
+                }
+            }
+            _ => {}
         }
+        step
     }
 }
 
@@ -1164,10 +1205,7 @@ async fn run_claude_turn(
         // stream-json input keeps stdin usable for the lifetime of the run,
         // so queued user messages can be interrupted-in mid-task (Mechanism
         // B) instead of waiting for a followup run.
-        command
-            .arg("--input-format")
-            .arg("stream-json")
-            .arg("--replay-user-messages");
+        command.args(CLAUDE_LIVE_INPUT_ARGS);
     }
     if is_new_session {
         command.arg("--session-id").arg(cli_session_id);
@@ -1259,15 +1297,7 @@ async fn run_claude_turn(
     let mut lines = BufReader::new(stdout).lines();
     let mut state = ClaudeStreamState::new();
     let mut result_error: Option<String> = None;
-    // Mid-run input state (only meaningful while `live_stdin` is Some).
-    // `turn_active` tracks whether a turn is in flight (first streamed event
-    // → its `result`) so delivery knows whether an interrupt is needed.
-    // `awaiting_interrupt_result` marks that the next error_during_execution
-    // result is OUR interrupt winding the turn down, not a failure.
-    // `injected` finds the reply boundary of input we injected.
-    let mut turn_active = false;
-    let mut awaiting_interrupt_result = false;
-    let mut injected = InjectedInput::default();
+    let mut live = ClaudeLiveInput::default();
     // The dispatcher wakes this run when input is pending for the session.
     // A wake that lands during a tool call waits in `midrun_pending` for the
     // tool's result: cutting a build, test run, or git operation half-way can
@@ -1281,7 +1311,7 @@ async fn run_claude_turn(
     let mut midrun_pending = false;
 
     loop {
-        if midrun_pending && !state.has_tool_call_in_flight() {
+        if midrun_pending && live.ready_for_input() && !state.has_tool_call_in_flight() {
             if let Some(stdin) = live_stdin.as_mut() {
                 midrun_pending = false;
                 let outcome = try_deliver_queued_to_claude(
@@ -1291,16 +1321,11 @@ async fn run_claude_turn(
                     run_id,
                     &connection.id,
                     stdin,
-                    turn_active,
+                    live.turn_active,
                     conversation,
                 )
                 .await;
-                if outcome.interrupted {
-                    awaiting_interrupt_result = true;
-                }
-                if outcome.owes_turn {
-                    injected.delivered();
-                }
+                live.delivered(&outcome);
             }
         }
         let update_due = state.update_throttle.due();
@@ -1345,16 +1370,8 @@ async fn run_claude_turn(
         });
         let value = emit_pending_on_err(value, deps, session, run_id, &mut state.update_throttle)?;
 
-        let event_type = value.get("type").and_then(Value::as_str);
-        match event_type {
-            Some("result") => turn_active = false,
-            Some("system") | Some("assistant") | Some("stream_event") | Some("user") => {
-                turn_active = true;
-            }
-            _ => {}
-        }
-        let boundary = injected.on_event(&value);
-        if matches!(boundary, Some(StreamBoundary::InjectedReplyStarts)) {
+        let step = live.on_event(&value);
+        if step.rotate {
             rotate_assistant_bubble(
                 deps,
                 session,
@@ -1367,7 +1384,6 @@ async fn run_claude_turn(
             )
             .await?;
         }
-        let suppress_interrupted = awaiting_interrupt_result && is_interrupted_turn_result(&value);
 
         let handled = handle_claude_event(
             deps,
@@ -1382,7 +1398,7 @@ async fn run_claude_turn(
         .await;
         emit_pending_on_err(handled, deps, session, run_id, &mut state.update_throttle)?;
 
-        if suppress_interrupted && result_error.take().is_some() {
+        if step.interrupted_result && result_error.take().is_some() {
             let subtype = value
                 .get("subtype")
                 .and_then(Value::as_str)
@@ -1394,10 +1410,7 @@ async fn run_claude_turn(
             );
         }
 
-        if event_type == Some("result") {
-            awaiting_interrupt_result = false;
-        }
-        if matches!(boundary, Some(StreamBoundary::Idle)) {
+        if step.may_close {
             if let Some(stdin) = live_stdin.as_mut() {
                 // End-of-turn race: a message may have been queued since the
                 // last delivery. Fold it in now instead of closing; if
@@ -1413,9 +1426,8 @@ async fn run_claude_turn(
                     conversation,
                 )
                 .await;
-                if outcome.owes_turn {
-                    injected.delivered();
-                } else {
+                live.delivered(&outcome);
+                if !outcome.owes_turn {
                     // Dropping stdin tells Claude no more input is coming; it
                     // still answers anything already written, then exits,
                     // ending the loop at EOF like the legacy path.
@@ -5863,94 +5875,114 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Mid-run injected-input boundaries, replayed from recorded streams
-    // (Claude Code 2.1.289, `--replay-user-messages`)
+    // Mid-run input boundaries. Event shapes follow the traces recorded
+    // from Claude Code 2.1.289 in reviews/claude-stream-traces.md.
     // -----------------------------------------------------------------
 
     enum Step {
         /// A stream-json line from the CLI.
         Cli(Value),
-        /// A queued user message written to the live process.
+        /// The user sends a message; it is delivered when the loop may.
         Send(&'static str),
     }
 
-    fn cli(value: Value) -> Step {
-        Step::Cli(value)
+    fn init() -> Step {
+        Step::Cli(serde_json::json!({ "type": "system", "subtype": "init" }))
     }
 
-    fn init() -> Step {
-        cli(serde_json::json!({ "type": "system", "subtype": "init" }))
+    fn system_status(fields: Value) -> Step {
+        let mut value = serde_json::json!({ "type": "system", "subtype": "status" });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        Step::Cli(value)
     }
 
     fn echo(texts: &[&str]) -> Step {
         let content: Vec<Value> = texts
             .iter()
-            .flat_map(|t| {
+            .flat_map(|text| {
                 [
-                    serde_json::json!({ "type": "text", "text": t }),
+                    serde_json::json!({ "type": "text", "text": text }),
                     serde_json::json!({ "type": "text", "text": "\n\n" }),
                 ]
             })
             .collect();
-        cli(serde_json::json!({
+        Step::Cli(serde_json::json!({
             "type": "user", "isReplay": true,
             "message": { "role": "user", "content": content },
         }))
     }
 
-    fn interrupted() -> Vec<Step> {
-        vec![
-            cli(serde_json::json!({
+    fn interrupted() -> [Step; 2] {
+        [
+            Step::Cli(serde_json::json!({
                 "type": "user",
-                "message": { "role": "user", "content": [{ "type": "text", "text": "[Request interrupted by user]" }] },
+                "message": { "role": "user", "content": [
+                    { "type": "text", "text": "[Request interrupted by user]" }
+                ] },
             })),
-            cli(
-                serde_json::json!({ "type": "result", "subtype": "error_during_execution", "is_error": true }),
-            ),
+            Step::Cli(serde_json::json!({
+                "type": "result", "subtype": "error_during_execution", "is_error": true,
+            })),
         ]
     }
 
     fn says(text: &str) -> Step {
-        cli(serde_json::json!({
+        Step::Cli(serde_json::json!({
             "type": "assistant",
             "message": { "content": [{ "type": "text", "text": text }] },
         }))
     }
 
     fn success() -> Step {
-        cli(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false }))
+        Step::Cli(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false }))
     }
 
-    /// Drive `InjectedInput` the way `run_claude_turn` does: deliveries mark
-    /// input, `InjectedReplyStarts` opens a new assistant row, `Idle` closes
-    /// stdin (the queue recheck finds nothing here). After stdin closes the
-    /// CLI drains what it was given and exits, so remaining steps still run
-    /// but no later send may happen. Returns the transcript in row-creation
-    /// order, panicking if the script ends with stdin open (a hung run).
-    fn replay_stream(steps: Vec<Step>) -> Vec<String> {
-        let mut injected = InjectedInput::default();
+    /// Feed a script through `ClaudeLiveInput` with the loop's wiring:
+    /// pending sends are delivered at the top of an iteration once
+    /// `ready_for_input`, through the real `build_midrun_payload`; `rotate`
+    /// opens a new assistant row; `may_close` closes stdin (the queue
+    /// recheck finds nothing). After the close the CLI still drains what it
+    /// was given, so later steps run but a later send stays queued.
+    /// Returns rows in creation order and anything left queued, and panics
+    /// if the script ends with stdin open — a hung run.
+    fn replay_stream(steps: Vec<Step>) -> (Vec<String>, Vec<&'static str>) {
+        let mut live = ClaudeLiveInput::default();
         let mut stdin_open = true;
+        let mut queued: Vec<&'static str> = Vec::new();
         let mut rows = vec![String::from("A:")];
         let mut current = 0;
         for step in steps {
+            if stdin_open && live.ready_for_input() && !queued.is_empty() {
+                let lines: String = queued
+                    .drain(..)
+                    .map(|text| claude_stream_json_user_message(text, &[]))
+                    .collect();
+                let payload = build_midrun_payload(lines, live.turn_active);
+                live.delivered(&MidRunDelivery {
+                    interrupted: payload.interrupted,
+                    owes_turn: payload.owes_turn,
+                });
+            }
             match step {
                 Step::Send(text) => {
-                    assert!(stdin_open, "sent {text:?} after stdin closed");
-                    injected.delivered();
                     rows.push(format!("U:{text}"));
+                    queued.push(text);
                 }
                 Step::Cli(value) => {
-                    match injected.on_event(&value) {
-                        Some(StreamBoundary::InjectedReplyStarts) => {
-                            rows.push(String::from("A:"));
-                            current = rows.len() - 1;
-                        }
-                        Some(StreamBoundary::Idle) => stdin_open = false,
-                        None => {}
+                    let step = live.on_event(&value);
+                    if step.rotate {
+                        rows.push(String::from("A:"));
+                        current = rows.len() - 1;
                     }
                     if value["type"] == "assistant" {
                         rows[current]
                             .push_str(value["message"]["content"][0]["text"].as_str().unwrap());
+                    }
+                    if step.may_close {
+                        stdin_open = false;
                     }
                 }
             }
@@ -5959,44 +5991,70 @@ mod tests {
             !stdin_open,
             "stdin still open at end of stream: the run never ends"
         );
-        rows
+        (rows, queued)
     }
 
-    /// The hang in session b884a31a: a message lands while the turn is
-    /// compacting, the CLI absorbs it into the running turn (as it does at a
-    /// tool boundary — no new `init`, no wind-down `result`), and one reply
-    /// and one `result` answer everything.
     #[test]
-    fn input_absorbed_during_compaction_ends_the_run_and_splits_the_reply() {
-        let rows = replay_stream(vec![
+    fn live_input_args_request_the_echo() {
+        assert!(CLAUDE_LIVE_INPUT_ARGS.contains(&"--replay-user-messages"));
+        assert!(CLAUDE_LIVE_INPUT_ARGS
+            .windows(2)
+            .any(|pair| pair == ["--input-format", "stream-json"]));
+    }
+
+    /// Recorded with `/compact`: our interrupt aborts the compaction and the
+    /// wind-down is a SUCCESS result, so it is not held; stdin closes there
+    /// and the CLI still echoes and answers the written line.
+    #[test]
+    fn input_during_compaction_ends_the_run_and_splits_the_reply() {
+        let (rows, queued) = replay_stream(vec![
             init(),
             echo(&["prompt"]),
-            says("working"),
+            system_status(serde_json::json!({ "status": "compacting" })),
             Step::Send("task result"),
-            cli(
-                serde_json::json!({ "type": "system", "subtype": "status", "status": "compacting" }),
-            ),
-            cli(serde_json::json!({ "type": "system", "subtype": "compact_boundary" })),
+            system_status(serde_json::json!({ "status": null, "compact_result": "failed" })),
+            init(),
+            says("Compaction canceled."),
+            success(),
+            init(),
             echo(&["task result"]),
             says("answer"),
             success(),
         ]);
-        assert_eq!(rows, ["A:working", "U:task result", "A:answer"]);
+        assert_eq!(
+            rows,
+            ["A:Compaction canceled.", "U:task result", "A:answer"]
+        );
+        assert!(queued.is_empty());
     }
 
-    /// Trace B2R: two lines in one write echo back as ONE merged message,
-    /// a third write interrupts the turn that just picked them up, and one
-    /// reply answers all three. Stdin closes at the interrupted wind-down;
-    /// the CLI still answers the buffered third message before exiting.
+    /// Recorded (trace TR, written without an interrupt): the CLI absorbs
+    /// the line into the running turn — no new `init`, no wind-down, one
+    /// `result` for everything. Here our interrupt yields no wind-down
+    /// either, as when it lands on a turn that cannot be cut.
+    #[test]
+    fn input_absorbed_into_the_running_turn_gets_its_own_row() {
+        let (rows, _) = replay_stream(vec![
+            init(),
+            echo(&["prompt"]),
+            says("running tool"),
+            Step::Send("also KIWI"),
+            echo(&["also KIWI"]),
+            says("FINISHED KIWI"),
+            success(),
+        ]);
+        assert_eq!(rows, ["A:running tool", "U:also KIWI", "A:FINISHED KIWI"]);
+    }
+
+    /// Recorded (trace B2R): two lines in one write echo back as ONE
+    /// message, a third write interrupts the turn that just took them, and
+    /// one reply answers all three.
     #[test]
     fn queued_lines_merge_into_one_echo_and_one_reply() {
         let mut steps = vec![init(), echo(&["prompt"]), says("one two")];
-        steps.push(Step::Send("APPLE"));
-        steps.push(Step::Send("BANANA"));
+        steps.extend([Step::Send("APPLE"), Step::Send("BANANA")]);
         steps.extend(interrupted());
-        steps.push(init());
-        steps.push(Step::Send("CHERRY"));
-        steps.push(echo(&["APPLE", "BANANA"]));
+        steps.extend([init(), Step::Send("CHERRY"), echo(&["APPLE", "BANANA"])]);
         steps.extend(interrupted());
         steps.extend([
             init(),
@@ -6004,7 +6062,7 @@ mod tests {
             says("APPLE BANANA CHERRY"),
             success(),
         ]);
-        let rows = replay_stream(steps);
+        let (rows, queued) = replay_stream(steps);
         assert_eq!(
             rows,
             [
@@ -6015,32 +6073,58 @@ mod tests {
                 "A:APPLE BANANA CHERRY"
             ]
         );
+        assert!(queued.is_empty());
     }
 
-    /// Trace CR: a second message interrupts the turn answering the first.
-    /// Each consumed message gets its own row, in order, and stdin stays
-    /// open across the injected turn until the last answer's `result`.
+    /// Recorded (trace C): a second message interrupts the turn answering
+    /// the first; stdin is held across both wind-downs, so it is delivered
+    /// live and each reply gets its own row.
     #[test]
     fn input_during_an_injected_turn_gets_its_own_row() {
-        let mut steps = vec![init(), echo(&["prompt"]), says("one")];
-        steps.push(Step::Send("first"));
+        let mut steps = vec![init(), echo(&["prompt"]), says("one"), Step::Send("first")];
         steps.extend(interrupted());
-        steps.extend([init(), echo(&["first"]), says("reply 1")]);
-        steps.push(Step::Send("second"));
+        steps.extend([
+            init(),
+            echo(&["first"]),
+            says("reply 1"),
+            Step::Send("second"),
+        ]);
         steps.extend(interrupted());
         steps.extend([init(), echo(&["second"]), says("reply 2"), success()]);
-        let rows = replay_stream(steps);
+        let (rows, queued) = replay_stream(steps);
         assert_eq!(
             rows,
             ["A:one", "U:first", "A:reply 1", "U:second", "A:reply 2"]
         );
+        assert!(queued.is_empty());
     }
 
-    /// Without injected input the first `result` ends the run, and the
-    /// prompt's own echo never opens a row.
+    /// Without echoes for injected input (an older CLI, or a path that does
+    /// not echo) the run still ends; only the row split is lost.
+    #[test]
+    fn a_missing_echo_cannot_hang_the_run() {
+        let mut steps = vec![init(), echo(&["prompt"]), says("one"), Step::Send("first")];
+        steps.extend(interrupted());
+        steps.extend([init(), says(" reply"), success()]);
+        let (rows, _) = replay_stream(steps);
+        assert_eq!(rows, ["A:one reply", "U:first"]);
+    }
+
+    /// A message sent before the prompt's echo waits for it, so the prompt's
+    /// echo cannot claim the injected input's boundary.
+    #[test]
+    fn delivery_waits_for_the_prompt_echo() {
+        let mut steps = vec![init(), Step::Send("early"), echo(&["prompt"]), says("one")];
+        steps.extend(interrupted());
+        steps.extend([init(), echo(&["early"]), says("reply"), success()]);
+        let (rows, queued) = replay_stream(steps);
+        assert_eq!(rows, ["A:one", "U:early", "A:reply"]);
+        assert!(queued.is_empty());
+    }
+
     #[test]
     fn plain_prompt_closes_at_its_result() {
-        let rows = replay_stream(vec![init(), echo(&["prompt"]), says("hi"), success()]);
+        let (rows, _) = replay_stream(vec![init(), echo(&["prompt"]), says("hi"), success()]);
         assert_eq!(rows, ["A:hi"]);
     }
 
