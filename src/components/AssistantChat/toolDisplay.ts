@@ -216,9 +216,8 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
  *
  * Frozen on purpose: a hand-off or poll card never follows the task's live
  * status. The tasks drawer is where "what is happening now" lives; the chat is
- * a log of what the agent saw when it looked. A stop or a message is an action
- * on the task rather than a look at it, so the chat shows those with the
- * task's live status instead.
+ * a log of what the agent saw when it looked. A stop or a message is drawn as
+ * the communication it was, with no status at all.
  */
 export interface TaskCallCard {
   /** Which call drew it: the hand-off, a look at how it is going, or an action on it. */
@@ -256,10 +255,6 @@ const stringField = (obj: Record<string, unknown>, key: string): string =>
 const CARD_TEXT_LIMIT = 300;
 export const clampCardText = (value: string): string =>
   value.length > CARD_TEXT_LIMIT ? `${value.slice(0, CARD_TEXT_LIMIT).trimEnd()}…` : value;
-
-/** A stop or a message: an action on the task rather than a look at it. */
-export const isTaskAction = (card: Pick<TaskCallCard, 'kind'>): boolean =>
-  card.kind === 'stop' || card.kind === 'message';
 
 const TASK_CARD_KINDS = new Map<string, TaskCallCard['kind']>([
   ['workspace_assignTask', 'assign'],

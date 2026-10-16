@@ -433,57 +433,121 @@ describe('ChatMessageList', () => {
       useTaskStore.setState({ tasks: {}, seeded: {} });
     });
 
-    const actionCalls = (tool: string, result: ToolInvocation['result']) => {
+    const crewMember = (id: string, displayName: string): WorkspaceAgentResponse => ({
+      id,
+      workspaceId: 'ws-1',
+      agentDefinitionId: `def-${id}`,
+      displayName,
+      enabled: true,
+      isDefault: id === 'wa-main',
+      agentName: null,
+      agentDescription: null,
+      providerConnectionIds: [],
+      skillIds: [],
+      selectedMcpServerIds: [],
+      execution: {},
+      avatar: null,
+      createdAt: 1n,
+      updatedAt: 1n,
+    });
+    const crew = [crewMember('wa-main', 'Manager'), crewMember('wa-review', 'Frontend Architect')];
+    const sender: AgentRefSnapshot = {
+      workspaceAgentId: 'wa-main',
+      agentDefinitionId: 'def-wa-main',
+      displayName: 'Manager',
+      isDefault: true,
+    };
+
+    const actionCalls = (tool: string, result: ToolInvocation['result'], message?: string) => {
       const calls = taskCalls([{ tool, result }]);
-      calls.toolCalls[0]!.params = { taskId: 'task-9' };
-      calls.toolCalls[0]!.hasFullInput = tool === 'workspace_sendTaskMessage';
+      // What the chat receives: the compact params of a send keep only its message.
+      calls.toolCalls[0]!.params = message === undefined ? { taskId: 'task-9' } : { message };
+      calls.toolCalls[0]!.hasFullInput = true;
       return calls;
     };
 
-    it('draws a stop as a task action with the live status, and opens the task', () => {
-      useTaskStore.getState().upsertTask(liveTask({ id: 'task-9', status: 'stopped' }));
-      const onOpenTask = vi.fn();
-      const { messages, toolCalls } = actionCalls(
-        'mcp__clai__workspace_stopTask',
-        taskPayload({ status: 'stopping', error: 'Earlier cycle failed.' })
-      );
+    const renderActions = (calls: ReturnType<typeof actionCalls>, onOpenTask?: (id: string) => void) =>
       render(
         <ChatMessageList workspaceId="ws-1"
-          messages={messages}
-          toolCalls={toolCalls}
-          taskRoster={[]}
+          messages={calls.messages}
+          toolCalls={calls.toolCalls}
+          taskRoster={crew}
+          owner={sender}
           onOpenTask={onOpenTask}
         />
       );
-      expect(screen.getByText('Stopped task ·')).toBeInTheDocument();
-      expect(screen.getByText('Stopped')).toBeInTheDocument();
-      expect(screen.queryByText('Stopping')).toBeNull();
-      expect(screen.queryByText('Review the branch end to end.')).toBeNull();
-      // Saved at call time, it could contradict the live pill.
-      expect(screen.queryByText('Earlier cycle failed.')).toBeNull();
-      expect(screen.queryByText(/workspace_stopTask/)).toBeNull();
-      expect(screen.queryByText('task-9')).toBeNull();
 
-      fireEvent.click(screen.getByRole('button', { name: /Round 3 review/ }));
+    /** The communication card: the element that holds the sender → recipient line. */
+    const actionCard = () => screen.getByText('→').closest('div')!;
+
+    /** Sender, then the arrow, then recipient — the Main signs as "Main". */
+    const expectRoute = (card: HTMLElement) => {
+      const text = card.textContent ?? '';
+      const at = ['Main', '→', 'Frontend Architect'].map((needle) => text.indexOf(needle));
+      expect(at.every((index) => index > -1), text).toBe(true);
+      expect(at).toEqual([...at].sort((a, b) => a - b));
+    };
+
+    const expectNoStatus = (card: HTMLElement) => {
+      for (const label of ['Queued', 'Running', 'Stopping', 'Stopped', 'Completed']) {
+        expect(within(card).queryByText(label)).toBeNull();
+      }
+    };
+
+    it('draws a stop as a request from the turn\'s agent to the assignee, without a status', () => {
+      // Even a live status that moved on must not reappear as a pill.
+      useTaskStore.getState().upsertTask(liveTask({ id: 'task-9', status: 'stopped' }));
+      const onOpenTask = vi.fn();
+      renderActions(
+        actionCalls(
+          'mcp__clai__workspace_stopTask',
+          taskPayload({ status: 'stopping', error: 'Earlier cycle failed.' })
+        ),
+        onOpenTask
+      );
+      const card = actionCard();
+      expectRoute(card);
+      expect(within(card).getByText('Requested to stop')).toBeInTheDocument();
+      expectNoStatus(card);
+      expect(screen.queryByText('Earlier cycle failed.')).toBeNull();
+      expect(screen.queryByText('Review the branch end to end.')).toBeNull();
+      expect(screen.queryByText(/workspace_stopTask/)).toBeNull();
+
+      fireEvent.click(within(card).getByRole('button', { name: 'Round 3 review' }));
       expect(onOpenTask).toHaveBeenCalledWith('task-9');
     });
 
-    it('draws a message as a task action whose text opens on demand', async () => {
-      fullInputs.set('tk-0', { taskId: 'task-9', message: 'Also check the migration.' });
-      const { messages, toolCalls } = actionCalls(
-        'workspace_sendTaskMessage',
-        taskPayload({ status: 'running', resultSummary: 'Previous cycle summary.' })
+    it('shows a message\'s text inside the card, sender → recipient, without a status', () => {
+      renderActions(
+        actionCalls(
+          'workspace_sendTaskMessage',
+          taskPayload({ status: 'completed', resultSummary: 'Previous cycle summary.' }),
+          'Also check the migration.'
+        )
       );
-      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
-      expect(screen.getByText('Messaged task ·')).toBeInTheDocument();
-      expect(screen.getByText('Round 3 review')).toBeInTheDocument();
-      expect(screen.getByText('Running')).toBeInTheDocument();
-      expect(screen.queryByText('workspace_sendTaskMessage')).toBeNull();
+      const card = actionCard();
+      expectRoute(card);
+      expect(within(card).getByText('Also check the migration.')).toBeInTheDocument();
+      expect(within(card).getByText('Round 3 review')).toBeInTheDocument();
+      expect(within(card).queryByText('Requested to stop')).toBeNull();
+      expectNoStatus(card);
       expect(screen.queryByText('Previous cycle summary.')).toBeNull();
+      expect(screen.queryByText('workspace_sendTaskMessage')).toBeNull();
+      // Not clipped: the preview is the whole message, nothing to fetch.
+      expect(screen.queryByRole('button', { name: /full message/ })).toBeNull();
+      expect(getToolCallInput).not.toHaveBeenCalled();
+    });
+
+    it('fetches the rest of a clipped message only on demand', async () => {
+      fullInputs.set('tk-0', { taskId: 'task-9', message: 'Also check the migration, then the seeds.' });
+      renderActions(
+        actionCalls('workspace_sendTaskMessage', taskPayload({ status: 'running' }), 'Also check the…')
+      );
+      expect(screen.getByText('Also check the…')).toBeInTheDocument();
       expect(getToolCallInput).not.toHaveBeenCalled();
 
-      fireEvent.click(screen.getByRole('button', { name: /Show message/ }));
-      expect(await screen.findByText('Also check the migration.')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Show full message' }));
+      expect(await screen.findByText('Also check the migration, then the seeds.')).toBeInTheDocument();
       expect(getToolCallInput).toHaveBeenCalledWith('ws-1', 'sess-1', 'tk-0');
     });
 
@@ -493,7 +557,7 @@ describe('ChatMessageList', () => {
       toolCalls[0]!.error = 'already_terminal: task task-9 already ended as completed; nothing to stop.';
       toolCalls[0]!.hasFullResult = false;
       render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
-      expect(screen.queryByText('Stopped task ·')).toBeNull();
+      expect(screen.queryByText('Requested to stop')).toBeNull();
       const row = screen.getByRole('button', { name: /Stop task/ });
       expect(within(row).getByText('error')).toBeInTheDocument();
       fireEvent.click(row);
@@ -506,11 +570,9 @@ describe('ChatMessageList', () => {
         task: null,
         queued: false,
         run: null,
-      });
-      // What the chat receives: the compact params keep only the message.
-      toolCalls[0]!.params = { message: 'Heads up: main is frozen.' };
+      }, 'Heads up: main is frozen.');
       render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
-      expect(screen.queryByText('Messaged task ·')).toBeNull();
+      expect(screen.queryByText('→')).toBeNull();
       const row = screen.getByRole('button', { name: /Message/ });
       expect(within(row).getByText('Heads up: main is frozen.')).toBeInTheDocument();
     });

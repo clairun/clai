@@ -1,16 +1,18 @@
 /**
  * A workspace task as the chat shows it: the assignee's face, what it was
  * asked to do, and how that call answered — instead of an opaque
- * workspace-task tool row. Clicking opens the task's own log.
+ * workspace-task tool row. Clicking opens the task's own log. A stop or a
+ * message is drawn by `TaskActionCard` instead.
  *
  * Every value describing the task comes from the `TaskCallCard` it is given;
  * only the assignee's face and name are read from the live crew, so a renamed
  * agent is not misattributed. The card never subscribes to the task itself:
  * whoever renders it decides whether `card.status` is frozen or live.
  */
-import { memo, useMemo } from 'react';
+import { memo, useMemo, type ReactNode } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
-import { isTaskAction, type TaskCallCard } from '../AssistantChat/toolDisplay';
+import type { TaskCallCard } from '../AssistantChat/toolDisplay';
+import type { SenderAgent } from '../AssistantChat/messageSender';
 import { taskStatusLabel } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import { agentDisplayName, taskIdentity } from './agentIdentity';
@@ -34,17 +36,7 @@ const assigneeName = (
   return agent ? agentDisplayName(agent) : 'Agent';
 };
 
-const lead: Record<TaskCallCard['kind'], string> = {
-  assign: 'Delegated to ',
-  poll: '',
-  stop: 'Stopped task · ',
-  message: 'Messaged task · ',
-};
-
 const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
-  // An action card's pill is live, so the call's saved summary or error
-  // could contradict it; the card shows neither.
-  const isAction = isTaskAction(card);
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
   const name = assigneeName(card, roster);
   const openable = !!onOpen;
@@ -61,7 +53,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
    * for `kind: 'assign'`), so the slim line below always has one to draw.
    */
   const pill =
-    card.kind === 'assign' ? null : (
+    card.kind !== 'poll' ? null : (
       <span className={`${pills.pill} ${pills[`pill_${card.status}`] || ''}`}>
         {taskStatusLabel(card.status)}
       </span>
@@ -84,13 +76,13 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
       <span className={styles.main}>
         <span className={styles.head}>
           <span className={styles.who}>
-            {lead[card.kind] && <span className={styles.lead}>{lead[card.kind]}</span>}
+            {card.kind === 'assign' && <span className={styles.lead}>Delegated to </span>}
             {name}
           </span>
           {pill}
         </span>
         <span className={styles.title}>{card.title}</span>
-        {isAction ? null : card.detail ? (
+        {card.detail ? (
           <span className={`${styles.detail} ${card.detailIsError ? styles.detailError : ''}`}>
             {card.detail}
           </span>
@@ -122,3 +114,61 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
 };
 
 export default memo(TaskCard);
+
+export interface TaskActionCardProps {
+  card: TaskCallCard;
+  /** The agent whose turn made the call; null when no workspace agent owns it. */
+  origin: SenderAgent | null;
+  roster: readonly WorkspaceAgentResponse[];
+  onOpen?: (taskId: string) => void;
+  /** A message's text, drawn as the body of the card. */
+  children?: ReactNode;
+}
+
+/**
+ * A stop or a message, drawn as what it is: one agent addressing another.
+ * The task is only context, so the card carries no status — the task's status
+ * describes the task, not what was sent to it.
+ */
+const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActionCardProps) => {
+  const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
+  const title = onOpen ? (
+    <button
+      type="button"
+      className={`${styles.taskLink} ${styles.taskLinkOpenable}`}
+      onClick={() => onOpen(card.taskId)}
+      title={`Open the log of "${card.title}"`}
+    >
+      {card.title}
+    </button>
+  ) : (
+    <span className={styles.taskLink}>{card.title}</span>
+  );
+
+  return (
+    <div className={`${styles.card} ${styles.action}`}>
+      <span className={styles.route}>
+        {origin && <AgentAvatar identity={origin.identity} size={18} />}
+        <span className={styles.who}>{origin ? origin.name : 'Clai'}</span>
+        <span className={styles.arrow} aria-hidden="true">→</span>
+        <span className="sr-only">to</span>
+        <AgentAvatar identity={identity} size={18} />
+        <span className={styles.who}>{assigneeName(card, roster)}</span>
+      </span>
+      {children && <div className={styles.bubble}>{children}</div>}
+      <span className={styles.context}>
+        {card.kind === 'stop' ? (
+          <>
+            <span className={styles.stopIcon} aria-hidden="true" />
+            <span>Requested to stop</span>
+          </>
+        ) : (
+          <span>Task</span>
+        )}
+        {title}
+      </span>
+    </div>
+  );
+};
+
+export const TaskActionCard = memo(TaskActionCardImpl);
