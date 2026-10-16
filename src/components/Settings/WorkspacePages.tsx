@@ -276,11 +276,11 @@ export const SchedulePage = ({
     return { ok: true, kind: { type: 'cron', expression, timezone } as ScheduleKind };
   }, [enabled, draft]);
 
-  const runCommand = useCallback(async (command: string, args: Record<string, unknown>, fallback: string) => {
+  const runCommand = useCallback(async (call: () => Promise<unknown>, fallback: string) => {
     setCommandBusy(true);
     setError(null);
     try {
-      await invoke(command, args);
+      await call();
       onDetailsRefresh?.();
     } catch (err) {
       setError(errText(err, fallback));
@@ -444,7 +444,7 @@ export const SchedulePage = ({
                       <button
                         type="button"
                         className={form.secondaryButton}
-                        onClick={() => runCommand('workspace_run_now', { workspaceId }, 'Failed to trigger run.')}
+                        onClick={() => runCommand(() => invoke('workspace_run_now', { workspaceId }), 'Failed to trigger run.')}
                         disabled={busy}
                       >
                         Run now
@@ -454,8 +454,7 @@ export const SchedulePage = ({
                       type="button"
                       className={form.secondaryButton}
                       onClick={() => runCommand(
-                        'workspace_set_schedule_paused',
-                        { workspaceId, paused: !paused },
+                        () => invoke('workspace_set_schedule_paused', { workspaceId, paused: !paused }),
                         'Failed to update pause state.'
                       )}
                       disabled={busy}
