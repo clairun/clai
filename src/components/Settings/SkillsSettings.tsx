@@ -276,7 +276,6 @@ const SkillsSettings = () => {
     <div className={styles.container}>
       <div className={styles.header}>
         <div className={styles.headerText}>
-          <h3 className={styles.title}>Skills</h3>
           <p className={styles.description}>
             Register skill repositories and assign discovered skills to agents.
           </p>

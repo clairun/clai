@@ -123,6 +123,25 @@ describe('AgentLibrarySettings', () => {
     expect(await screen.findByRole('button', { name: /^Reviewer/ })).toBeInTheDocument();
   });
 
+  it('shows a loading placeholder, not a blank pane, while the library is read', async () => {
+    api.listAgentDefinitions.mockReturnValue(new Promise(() => {}));
+    render(<AgentLibrarySettings />);
+    await waitFor(() => expect(api.listAgentDefinitions).toHaveBeenCalled());
+    expect(screen.getByLabelText('Loading agents')).toHaveAttribute('aria-busy', 'true');
+  });
+
+  it('offers Retry, and no empty gallery, when the first read fails', async () => {
+    api.listAgentDefinitions.mockRejectedValueOnce(new Error('library offline'));
+    render(<AgentLibrarySettings />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('library offline');
+    expect(screen.queryByText(/No agents yet/)).toBeNull();
+    expect(screen.queryByLabelText('Loading agents')).toBeNull();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('button', { name: /^Reviewer/ })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('shows the gallery, then one agent at a time, and comes back', async () => {
     render(<AgentLibrarySettings />);
     const card = await screen.findByRole('button', { name: /^Reviewer/ });

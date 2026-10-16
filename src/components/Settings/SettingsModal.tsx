@@ -115,40 +115,23 @@ interface SettingsModalProps {
   initialAgentDefinitionId?: string | null;
 }
 
-const SettingsModal = ({
-  isOpen,
+// Mounted only while open, and afresh for each tab or agent a caller asks
+// for, the way workspace settings is: the first frame is the requested tab.
+const SettingsModal = ({ isOpen, ...props }: SettingsModalProps) => (
+  isOpen ? <SettingsWindow key={`${props.initialTab}:${props.initialAgentDefinitionId ?? ''}`} {...props} /> : null
+);
+
+const SettingsWindow = ({
   onClose,
   initialTab = TABS.PROVIDER,
   initialProviderAction = null,
   initialAgentDefinitionId = null,
-}: SettingsModalProps) => {
+}: Omit<SettingsModalProps, 'isOpen'>) => {
   const [activeTab, setActiveTab] = useState<TabValue>(initialTab);
-
-  // Reset to `initialTab` whenever the modal transitions to open, or the
-  // requested tab changes while it is open. The caller (FleetLayout) renders
-  // this modal unconditionally and only toggles `isOpen`, so the instance
-  // stays mounted across open/close — returning `null` while closed does not
-  // unmount it, and `useState(initialTab)` runs only on first mount. We adjust
-  // state during render (React's documented "information from a previous
-  // render" pattern) rather than in an effect: it skips the extra commit an
-  // effect would cause and stays clear of react-hooks/set-state-in-effect.
-  //
-  // The agent deep link rides along for the same reason, and is consumed once
-  // per opening: the tabs are a `switch`, so leaving the Agents tab unmounts
-  // it and coming back mounts a fresh one. Without a link the tab switch can
-  // clear, that remount would reopen the editor the user just navigated away
-  // from, over the gallery they navigated to.
+  // Tabs are a `switch`, so coming back to Agents mounts a fresh library;
+  // the deep link is cleared on any tab change so that remount shows the
+  // gallery, not the editor the user navigated away from.
   const [deepLinkAgentId, setDeepLinkAgentId] = useState(initialAgentDefinitionId);
-  const [prevOpen, setPrevOpen] = useState(isOpen);
-  const [prevInitialTab, setPrevInitialTab] = useState(initialTab);
-  if (isOpen !== prevOpen || initialTab !== prevInitialTab) {
-    setPrevOpen(isOpen);
-    setPrevInitialTab(initialTab);
-    if (isOpen) {
-      setActiveTab(initialTab);
-      setDeepLinkAgentId(initialAgentDefinitionId);
-    }
-  }
 
   const selectTab = useCallback((tab: TabValue) => {
     setActiveTab(tab);
@@ -158,7 +141,7 @@ const SettingsModal = ({
   // Escape and the body-scroll lock, shared with every other open overlay:
   // this modal can sit over the workspace Settings modal, and a form modal can
   // sit over it.
-  useOverlayLayer(isOpen, onClose);
+  useOverlayLayer(true, onClose);
 
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) {
@@ -166,17 +149,11 @@ const SettingsModal = ({
     }
   }, [onClose]);
 
-  if (!isOpen) {
-    return null;
-  }
-
   const renderContent = () => {
     switch (activeTab) {
       case TABS.PROVIDER:
         return <AssistantProviderSettings initialAction={initialProviderAction} />;
       case TABS.AGENTS:
-        // The library consumes this id once per mount; `deepLinkAgentId` is
-        // what makes that "once per opening" rather than once per remount.
         return <AgentLibrarySettings initialAgentDefinitionId={deepLinkAgentId} />;
       case TABS.SKILLS:
         return <SkillsSettings />;
@@ -214,6 +191,8 @@ const SettingsModal = ({
                   type="button"
                   className={shell.navItem}
                   aria-current={tab === activeTab ? 'page' : undefined}
+                  // Focus starts inside the dialog, on the page it opened on.
+                  autoFocus={tab === initialTab}
                   onClick={() => selectTab(tab)}
                 >
                   <span className={shell.navIcon}><Icon /></span>

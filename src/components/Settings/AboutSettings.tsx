@@ -140,7 +140,7 @@ const AboutSettings = () => {
   return (
     <div className={styles.hero}>
       <img src="/icon.svg" alt="CLAI logo" className={styles.logo} />
-      <h2 className={styles.title}>CLAI</h2>
+      <h3 className={styles.title}>CLAI</h3>
       {version && <span className={styles.version}>v{version}</span>}
 
       <p className={styles.tagline}>

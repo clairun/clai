@@ -149,7 +149,7 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
   return (
     <div className={styles.editor} onKeyDown={handleKeyDown} tabIndex={-1}>
       <div className={styles.top}>
-        <nav className={styles.breadcrumb} aria-label="Breadcrumb">
+        <div className={styles.breadcrumb}>
           <button type="button" className={styles.back} onClick={onBack} disabled={saving}>
             ‹ Agents
           </button>
@@ -157,7 +157,7 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
             ›
           </span>
           <h3 className={styles.title}>{title}</h3>
-        </nav>
+        </div>
         <div className={styles.actions}>
           {dirty && !saving && <span className={styles.dirty}>Unsaved changes</span>}
           {definition && (

@@ -24,6 +24,7 @@ import { assistantClient } from '../../assistant';
 import AgentGallery from '../Agents/AgentGallery';
 import AgentEditor from './AgentEditor';
 import type { AgentFormDeps } from './AgentBehaviorForm';
+import form from './SettingsForm.module.css';
 import styles from './AgentLibrarySettings.module.css';
 
 const errText = (err: unknown, fallback: string): string =>
@@ -95,9 +96,8 @@ const AgentLibrarySettings = ({
   // — before that every id looks missing. An id the library does not have
   // lands on the editor view's own "no longer in the library" screen, which
   // names the problem; the gallery would just look like the link did nothing.
-  // Adjusted during render, the way SettingsModal re-syncs its tab: it skips
-  // the extra commit an effect would cost, and the gallery never paints on its
-  // way to the editor.
+  // Adjusted during render: it skips the extra commit an effect would cost,
+  // and the gallery never paints on its way to the editor.
   const [deepLinkDone, setDeepLinkDone] = useState(!initialAgentDefinitionId);
   if (!deepLinkDone && loaded && initialAgentDefinitionId) {
     setDeepLinkDone(true);
@@ -131,8 +131,14 @@ const AgentLibrarySettings = ({
         </div>
       )}
 
-      {/* Not before the first load answers: an empty gallery reads "No agents yet". */}
-      {view.kind === 'gallery' && (loaded || error !== null) && (
+      {/* Not before the library has been read: an empty gallery reads "No agents yet". */}
+      {view.kind === 'gallery' && !loaded && error === null && (
+        <div className={form.skeleton} aria-busy="true" aria-label="Loading agents">
+          <span /><span /><span />
+        </div>
+      )}
+
+      {view.kind === 'gallery' && loaded && (
         <AgentGallery
           definitions={definitions}
           // A failed reload leaves stale revisions: opening one would only end in a refused save.

@@ -162,21 +162,6 @@
   color: var(--color-text-tertiary);
 }
 
-.navAdd,
-.navPlaceholder {
-  width: 22px;
-  height: 22px;
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed var(--color-border-strong);
-  border-radius: 50%;
-  font-size: 14px;
-  line-height: 1;
-  color: var(--color-text-tertiary);
-}
-
 /* ── Main column ──────────────────────────────────────────────────── */
 
 .main {
@@ -243,8 +228,8 @@
   color: var(--color-text-primary);
 }
 
-/* The page area. Pages fill it; it scrolls only in the narrow-window
-   fallback, where two columns have collapsed into one. */
+/* The page area. Pages fill it; it scrolls when one is taller, as a form
+   is once its columns stack below 960px. */
 .body {
   flex: 1;
   min-height: 0;
