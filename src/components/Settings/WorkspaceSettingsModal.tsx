@@ -472,7 +472,7 @@ const SaveBar = ({ saving, error, leaving, onAnswer, onDiscard, onSave }: {
     ) : (
       <span className={styles.saveBarText} role={leaving ? 'alert' : undefined}>
         <span className={styles.saveBarDot} aria-hidden="true" />
-        {leaving ? 'Save your changes before leaving?' : 'Unsaved changes'}
+        <span className={styles.saveBarLabel}>{leaving ? 'Save your changes before leaving?' : 'Unsaved changes'}</span>
       </span>
     )}
     {/* Keyed so the question's buttons are new elements: reusing the

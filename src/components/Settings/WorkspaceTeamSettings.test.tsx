@@ -427,4 +427,16 @@ describe('TeamPolicySection', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('disk full');
     expect(onDirtyChange).toHaveBeenLastCalledWith(true);
   });
+  it('shows only the error when the policy fails to load, and refuses to save', async () => {
+    failCommand('workspace_team_policy');
+    const ref = createRef<SectionHandle>();
+    const onDirtyChange = vi.fn();
+    render(<TeamPolicySection ref={ref} workspaceId={WORKSPACE} onDirtyChange={onDirtyChange} />);
+
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Project context')).toBeNull();
+    expect((await submitPage(ref))?.ok).toBe(false);
+    expect(mockInvoke).not.toHaveBeenCalledWith('workspace_save_team_policy', expect.anything());
+    expect(onDirtyChange).not.toHaveBeenCalledWith(true);
+  });
 });

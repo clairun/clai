@@ -47,12 +47,10 @@ export const TeamPolicySection = ({
   const [context, setContext] = useState('');
   const [grants, setGrants] = useState<PathGrantPayload[]>([]);
   // What was last loaded or saved; the draft is dirty when it differs.
-  const [baseline, setBaseline] = useState({ context: '', grants: [] as PathGrantPayload[] });
-  const [loading, setLoading] = useState(true);
+  // Null until the policy loads: there is nothing to edit before that.
+  const [baseline, setBaseline] = useState<{ context: string; grants: PathGrantPayload[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // `loading` starts true and is only ever cleared here, so the effect never
-  // sets state synchronously on the way in.
   useEffect(() => {
     let cancelled = false;
     getWorkspaceTeamPolicy(workspaceId)
@@ -65,22 +63,21 @@ export const TeamPolicySection = ({
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [workspaceId]);
 
-  const isDirty = !loading
+  const isDirty = !!baseline
     && (context !== baseline.context || JSON.stringify(grants) !== JSON.stringify(baseline.grants));
   useReportDirty(isDirty, onDirtyChange);
 
   useImperativeHandle(ref, () => ({
     validate: () => ({ ok: true }),
     submit: async () => {
+      // Saving blanks over a policy that never loaded would erase it.
+      if (!baseline) return { ok: false, error: error || 'The team policy has not loaded.' };
       try {
         await saveWorkspaceTeamPolicy(workspaceId, context, grants);
         setBaseline({ context, grants });
@@ -94,7 +91,14 @@ export const TeamPolicySection = ({
     },
   }));
 
-  if (loading) return <PageSkeleton />;
+  if (!baseline) {
+    if (!error) return <PageSkeleton />;
+    return (
+      <div className={form.page}>
+        <p className={form.errorBanner} role="alert">{error}</p>
+      </div>
+    );
+  }
 
   return (
     <div className={form.page}>

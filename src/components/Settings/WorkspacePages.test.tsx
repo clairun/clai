@@ -111,4 +111,37 @@ describe('SchedulePage', () => {
     expect(onDetailsRefresh).toHaveBeenCalledTimes(1);
     expect(onDirtyChange).not.toHaveBeenCalledWith(true);
   });
+  it('keeps an unsaved edit when details are re-fetched with the same schedule', async () => {
+    const user = userEvent.setup();
+    const ref = createRef<SectionHandle>();
+    const onDirtyChange = vi.fn();
+    const onDetailsRefresh = vi.fn();
+    const saved = (extra: Partial<WorkspaceDetails> = {}) => ({
+      ...DETAILS,
+      scheduleEnabled: true,
+      scheduleKind: { type: 'cron', expression: '0 9 * * *', timezone: 'Europe/Madrid' },
+      ...extra,
+    }) as WorkspaceDetails;
+    const page = (details: WorkspaceDetails) => (
+      <SchedulePage ref={ref} workspaceId="ws-1" details={details} saving={false}
+        onDirtyChange={onDirtyChange} onDetailsRefresh={onDetailsRefresh} />
+    );
+    const { rerender } = render(page(saved()));
+
+    const input = screen.getByLabelText('Cron expression');
+    await user.clear(input);
+    await user.type(input, '0 10 * * *');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+
+    // The 5 s poll: same values, new object.
+    await act(async () => { rerender(page(saved())); });
+    expect(screen.getByLabelText('Cron expression')).toHaveValue('0 10 * * *');
+
+    // Pause refreshes details with only the paused flag changed.
+    await user.click(screen.getByRole('button', { name: 'Pause' }));
+    expect(onDetailsRefresh).toHaveBeenCalledTimes(1);
+    await act(async () => { rerender(page(saved({ schedulePaused: true }))); });
+    expect(screen.getByLabelText('Cron expression')).toHaveValue('0 10 * * *');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  });
 });

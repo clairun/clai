@@ -4,6 +4,10 @@
   gap: 16px;
 }
 
+.editor:focus {
+  outline: none;
+}
+
 .breadcrumb {
   display: flex;
   align-items: center;

@@ -132,15 +132,21 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
 
   const title = definition ? definition.name : 'New agent';
 
-  // Escape leaves a drill-in view of the form before it can reach the
-  // Settings modal, which closes on it. Stopping the React event stops the
-  // native one at the portal root, ahead of the modal's `document` listener.
+  // Escape clears a search field with text, then leaves a drill-in view of
+  // the form, before it can reach the Settings modal, which closes on it.
+  // Stopping the React event stops the native one at the portal root, ahead
+  // of the modal's `document` listener.
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape' && sectionRef.current?.back?.()) e.stopPropagation();
+    if (e.key !== 'Escape') return;
+    const target = e.target;
+    const clearsSearch = target instanceof HTMLInputElement && target.type === 'search' && !!target.value;
+    if (clearsSearch || sectionRef.current?.back?.()) e.stopPropagation();
   };
 
+  // tabIndex -1 keeps focus inside the editor after a click on blank space,
+  // so Escape still reaches the handler.
   return (
-    <div className={styles.editor} onKeyDown={handleKeyDown}>
+    <div className={styles.editor} onKeyDown={handleKeyDown} tabIndex={-1}>
       <nav className={styles.breadcrumb} aria-label="Breadcrumb">
         <button type="button" className={styles.back} onClick={onBack} disabled={saving}>
           ‹ Agents

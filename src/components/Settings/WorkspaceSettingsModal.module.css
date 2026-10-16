@@ -191,7 +191,7 @@
 
 .headerText {
   flex: 1;
-  min-width: 0;
+  min-width: 120px;
 }
 
 .title {
@@ -251,7 +251,8 @@
 /* Sits in the header row, so it appearing never moves the page and takes
    no page height while there is nothing to save. The title gives way to it. */
 .saveBar {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -264,7 +265,7 @@
 
 .saveBarAsking {
   background: var(--color-warning-bg);
-  border-top-color: var(--color-warning-border);
+  border-color: var(--color-warning-border);
 }
 
 .saveBarText,
@@ -279,6 +280,11 @@
 
 .saveBarText {
   color: var(--color-text-primary);
+}
+
+.saveBarLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .saveBarDot {

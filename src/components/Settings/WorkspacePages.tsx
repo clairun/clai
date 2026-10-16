@@ -209,11 +209,14 @@ export const SchedulePage = ({
     return () => { cancelled = true; };
   }, []);
 
+  // Keyed on the schedule's value, not its object: the workspace re-fetches
+  // details every 5 s, and a same-value refetch must not discard the draft.
+  const savedKind = JSON.stringify(details?.scheduleKind ?? null);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- resyncs the two-field draft when the saved schedule changes underneath.
     setEnabled(!!details?.scheduleEnabled);
-    setDraft(draftFrom(details?.scheduleKind));
-  }, [details?.scheduleEnabled, details?.scheduleKind]);
+    setDraft(draftFrom(JSON.parse(savedKind) as ScheduleKind | null));
+  }, [details?.scheduleEnabled, savedKind]);
 
   // Next fire times for the cron being typed, so it can be checked before Save.
   useEffect(() => {

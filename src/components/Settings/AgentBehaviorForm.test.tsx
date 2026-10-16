@@ -320,6 +320,16 @@ describe('AgentBehaviorForm', () => {
       expect(sentUpdate().selectedSkillIds).toEqual(['review']);
     });
 
+    it('Clear all on the overview keeps skill ids the library no longer lists', async () => {
+      api.workspaceGetAgent.mockResolvedValue({ ...REVIEWER, selectedSkillIds: ['review', 'gone-id'] });
+      const { ref } = renderForm({ agentId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+      await submit(ref);
+      expect(sentUpdate().selectedSkillIds).toEqual(['gone-id']);
+    });
+
     it('selects only what the filter shows', async () => {
       const { ref } = renderForm({ agentId: 'agent-1' });
       await screen.findByDisplayValue('Reviewer');
