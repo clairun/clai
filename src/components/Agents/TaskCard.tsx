@@ -133,21 +133,27 @@ export interface TaskActionCardProps {
  */
 const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActionCardProps) => {
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
-  const title = onOpen ? (
-    <button
-      type="button"
-      className={`${styles.taskLink} ${styles.taskLinkOpenable}`}
-      onClick={() => onOpen(card.taskId)}
-      title={`Open the log of "${card.title}"`}
-    >
-      {card.title}
-    </button>
-  ) : (
-    <span className={styles.taskLink}>{card.title}</span>
-  );
+  const tooltip = `Open the log of "${card.title}"`;
+  // A stop has nothing else to click, so the whole card opens the task. A
+  // message's text can hold links and its own button, which a card-wide
+  // button cannot contain, so there only the title opens it.
+  const wholeCard = card.kind === 'stop';
+  const title =
+    onOpen && !wholeCard ? (
+      <button
+        type="button"
+        className={`${styles.taskLink} ${styles.taskLinkOpenable}`}
+        onClick={() => onOpen(card.taskId)}
+        title={tooltip}
+      >
+        {card.title}
+      </button>
+    ) : (
+      <span className={styles.taskLink}>{card.title}</span>
+    );
 
-  return (
-    <div className={`${styles.card} ${styles.action}`}>
+  const body = (
+    <>
       <span className={styles.route}>
         {origin && <AgentAvatar identity={origin.identity} size={18} />}
         <span className={styles.who}>{origin ? origin.name : 'Clai'}</span>
@@ -168,7 +174,21 @@ const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActi
         )}
         {title}
       </span>
-    </div>
+    </>
+  );
+
+  if (!wholeCard || !onOpen) {
+    return <div className={`${styles.card} ${styles.action}`}>{body}</div>;
+  }
+  return (
+    <button
+      type="button"
+      className={`${styles.card} ${styles.action} ${styles.openable}`}
+      onClick={() => onOpen(card.taskId)}
+      title={tooltip}
+    >
+      {body}
+    </button>
   );
 };
 
