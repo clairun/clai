@@ -9,7 +9,7 @@
  * agent is not misattributed. The card never subscribes to the task itself:
  * its status is frozen as the call saw it.
  */
-import { memo, useMemo } from 'react';
+import { memo, useMemo, type ReactNode } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
 import type { TaskCallCard } from '../AssistantChat/toolDisplay';
 import type { SenderAgent } from '../AssistantChat/messageSender';
@@ -122,15 +122,16 @@ export interface TaskActionCardProps {
   origin: SenderAgent | null;
   roster: readonly WorkspaceAgentResponse[];
   onOpen?: (taskId: string) => void;
+  /** A message's text, drawn as the body of the card. */
+  children?: ReactNode;
 }
 
 /**
  * A stop or a message, drawn as what it is: one agent addressing another.
  * The task is only context, so the card carries no status — the task's status
- * describes the task, not what was sent to it. A message's text is written for
- * the agent and stays in the task's log.
+ * describes the task, not what was sent to it.
  */
-const TaskActionCardImpl = ({ card, origin, roster, onOpen }: TaskActionCardProps) => {
+const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActionCardProps) => {
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
   const title = onOpen ? (
     <button
@@ -155,6 +156,7 @@ const TaskActionCardImpl = ({ card, origin, roster, onOpen }: TaskActionCardProp
         <AgentAvatar identity={identity} size={18} />
         <span className={styles.who}>{assigneeName(card, roster)}</span>
       </span>
+      {children && <div className={styles.bubble}>{children}</div>}
       <span className={styles.context}>
         {card.kind === 'stop' ? (
           <>

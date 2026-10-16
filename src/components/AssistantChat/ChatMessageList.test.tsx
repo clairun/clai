@@ -519,7 +519,7 @@ describe('ChatMessageList', () => {
       expect(onOpenTask).toHaveBeenCalledWith('task-9');
     });
 
-    it('draws a message as sender → recipient, without its text or a status', () => {
+    it('shows a message\'s text inside the card, sender → recipient, without a status', () => {
       renderActions(
         actionCalls(
           'workspace_sendTaskMessage',
@@ -529,14 +529,28 @@ describe('ChatMessageList', () => {
       );
       const card = actionCard();
       expectRoute(card);
-      // The text is written for the agent; the task's log has it.
-      expect(screen.queryByText('Also check the migration.')).toBeNull();
+      expect(within(card).getByText('Also check the migration.')).toBeInTheDocument();
       expect(within(card).getByText('Round 3 review')).toBeInTheDocument();
       expect(within(card).queryByText('Requested to stop')).toBeNull();
       expectNoStatus(card);
       expect(screen.queryByText('Previous cycle summary.')).toBeNull();
       expect(screen.queryByText('workspace_sendTaskMessage')).toBeNull();
+      // Not clipped: the preview is the whole message, nothing to fetch.
+      expect(screen.queryByRole('button', { name: /full message/ })).toBeNull();
       expect(getToolCallInput).not.toHaveBeenCalled();
+    });
+
+    it('fetches the rest of a clipped message only on demand', async () => {
+      fullInputs.set('tk-0', { taskId: 'task-9', message: 'Also check the migration, then the seeds.' });
+      renderActions(
+        actionCalls('workspace_sendTaskMessage', taskPayload({ status: 'running' }), 'Also check the…')
+      );
+      expect(screen.getByText('Also check the…')).toBeInTheDocument();
+      expect(getToolCallInput).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Show full message' }));
+      expect(await screen.findByText('Also check the migration, then the seeds.')).toBeInTheDocument();
+      expect(getToolCallInput).toHaveBeenCalledWith('ws-1', 'sess-1', 'tk-0');
     });
 
     it('signs a stop in a text-and-tool turn with the owner, or Clai without one', () => {

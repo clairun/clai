@@ -112,7 +112,7 @@
   text-overflow: ellipsis;
 }
 
-/* A stop or a message: who addressed whom, about which task. */
+/* A stop or a message: who addressed whom, what was said, about which task. */
 .action {
   flex-direction: column;
   gap: 6px;
@@ -127,6 +127,17 @@
 
 .arrow {
   color: var(--color-text-tertiary);
+}
+
+.bubble {
+  width: 100%;
+  padding: 6px 10px;
+  border-left: 2px solid var(--color-primary-alpha-30);
+  background: var(--color-overlay-04);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
 }
 
 .context {
