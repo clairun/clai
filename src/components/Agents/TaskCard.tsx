@@ -10,7 +10,7 @@
  */
 import { memo, useMemo } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
-import type { TaskCallCard } from '../AssistantChat/toolDisplay';
+import { isTaskAction, type TaskCallCard } from '../AssistantChat/toolDisplay';
 import { taskStatusLabel } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import { agentDisplayName, taskIdentity } from './agentIdentity';
@@ -42,7 +42,9 @@ const lead: Record<TaskCallCard['kind'], string> = {
 };
 
 const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
-  const isAction = card.kind === 'stop' || card.kind === 'message';
+  // An action card's pill is live, so the call's saved summary or error
+  // could contradict it; the card shows neither.
+  const isAction = isTaskAction(card);
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
   const name = assigneeName(card, roster);
   const openable = !!onOpen;
@@ -88,12 +90,11 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
           {pill}
         </span>
         <span className={styles.title}>{card.title}</span>
-        {card.detail ? (
+        {isAction ? null : card.detail ? (
           <span className={`${styles.detail} ${card.detailIsError ? styles.detailError : ''}`}>
             {card.detail}
           </span>
         ) : (
-          !isAction &&
           card.instructions && <span className={styles.detail}>{card.instructions}</span>
         )}
       </span>

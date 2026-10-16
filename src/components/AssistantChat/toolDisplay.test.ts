@@ -27,6 +27,17 @@ describe('summarizeToolCall', () => {
     });
   });
 
+  it('labels the task tools that stay rows by what they did', () => {
+    expect(summarizeToolCall('workspace_stopTask', { taskId: 'task-1' })).toEqual({
+      verb: 'Stop task',
+      arg: 'task-1',
+    });
+    expect(summarizeToolCall('workspace_sendTaskMessage', { message: 'Heads up.' })).toEqual({
+      verb: 'Message',
+      arg: 'Heads up.',
+    });
+  });
+
   it('collapses multi-line commands onto one line', () => {
     expect(summarizeToolCall('bash_exec', { command: 'echo a\n  echo b' }).arg).toBe('echo a echo b');
   });

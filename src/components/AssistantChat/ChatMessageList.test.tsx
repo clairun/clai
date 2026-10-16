@@ -445,7 +445,7 @@ describe('ChatMessageList', () => {
       const onOpenTask = vi.fn();
       const { messages, toolCalls } = actionCalls(
         'mcp__clai__workspace_stopTask',
-        taskPayload({ status: 'stopping' })
+        taskPayload({ status: 'stopping', error: 'Earlier cycle failed.' })
       );
       render(
         <ChatMessageList workspaceId="ws-1"
@@ -459,6 +459,8 @@ describe('ChatMessageList', () => {
       expect(screen.getByText('Stopped')).toBeInTheDocument();
       expect(screen.queryByText('Stopping')).toBeNull();
       expect(screen.queryByText('Review the branch end to end.')).toBeNull();
+      // Saved at call time, it could contradict the live pill.
+      expect(screen.queryByText('Earlier cycle failed.')).toBeNull();
       expect(screen.queryByText(/workspace_stopTask/)).toBeNull();
       expect(screen.queryByText('task-9')).toBeNull();
 
@@ -470,13 +472,14 @@ describe('ChatMessageList', () => {
       fullInputs.set('tk-0', { taskId: 'task-9', message: 'Also check the migration.' });
       const { messages, toolCalls } = actionCalls(
         'workspace_sendTaskMessage',
-        taskPayload({ status: 'running' })
+        taskPayload({ status: 'running', resultSummary: 'Previous cycle summary.' })
       );
       render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
       expect(screen.getByText('Messaged task ·')).toBeInTheDocument();
       expect(screen.getByText('Round 3 review')).toBeInTheDocument();
       expect(screen.getByText('Running')).toBeInTheDocument();
       expect(screen.queryByText('workspace_sendTaskMessage')).toBeNull();
+      expect(screen.queryByText('Previous cycle summary.')).toBeNull();
       expect(getToolCallInput).not.toHaveBeenCalled();
 
       fireEvent.click(screen.getByRole('button', { name: /Show message/ }));
@@ -504,9 +507,12 @@ describe('ChatMessageList', () => {
         queued: false,
         run: null,
       });
+      // What the chat receives: the compact params keep only the message.
+      toolCalls[0]!.params = { message: 'Heads up: main is frozen.' };
       render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
       expect(screen.queryByText('Messaged task ·')).toBeNull();
-      expect(screen.getByRole('button', { name: /Message task/ })).toBeInTheDocument();
+      const row = screen.getByRole('button', { name: /Message/ });
+      expect(within(row).getByText('Heads up: main is frozen.')).toBeInTheDocument();
     });
   });
 

@@ -24,6 +24,7 @@ import {
   extractMcpText,
   guessLang,
   inlineTaskCard,
+  isTaskAction,
   summarizeToolCall,
   toPreviewText,
   type TaskCallCard,
@@ -1370,8 +1371,7 @@ const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
  */
 const ChatTaskCard = memo(({ card, call }: { card: TaskCallCard; call?: ToolInvocation }) => {
   const { workspaceId = '', roster, onOpenTask } = useTaskCardSurface();
-  const isAction = card.kind === 'stop' || card.kind === 'message';
-  const liveStatus = useTask(workspaceId, isAction ? card.taskId : null)?.status;
+  const liveStatus = useTask(workspaceId, isTaskAction(card) ? card.taskId : null)?.status;
   const shown = useMemo(
     () => (liveStatus && liveStatus !== card.status ? { ...card, status: liveStatus } : card),
     [card, liveStatus]

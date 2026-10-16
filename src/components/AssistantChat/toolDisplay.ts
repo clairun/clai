@@ -202,8 +202,9 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
       return { verb: 'Chart', arg: get('title') || get('path') };
     case 'workspace_stopTask':
       return { verb: 'Stop task', arg: get('taskId') };
+    // The chat's compact params keep only the message, not who it went to.
     case 'workspace_sendTaskMessage':
-      return { verb: 'Message task', arg: get('taskId') };
+      return { verb: 'Message', arg: get('message') };
     default:
       return { verb: name || 'tool', arg: firstScalarParam(obj) };
   }
@@ -255,6 +256,10 @@ const stringField = (obj: Record<string, unknown>, key: string): string =>
 const CARD_TEXT_LIMIT = 300;
 export const clampCardText = (value: string): string =>
   value.length > CARD_TEXT_LIMIT ? `${value.slice(0, CARD_TEXT_LIMIT).trimEnd()}…` : value;
+
+/** A stop or a message: an action on the task rather than a look at it. */
+export const isTaskAction = (card: Pick<TaskCallCard, 'kind'>): boolean =>
+  card.kind === 'stop' || card.kind === 'message';
 
 const TASK_CARD_KINDS = new Map<string, TaskCallCard['kind']>([
   ['workspace_assignTask', 'assign'],

@@ -69,7 +69,6 @@ fn compact_input(tool_name: &str, input: &Value) -> Value {
         "web_fetch" => "url",
         "ask_user" => "question",
         "create_vega_chart" => "title",
-        "workspace_stopTask" | "workspace_sendTaskMessage" => "taskId",
         _ => "",
     };
     let selected = object.get_key_value(preferred).or_else(|| {
@@ -308,7 +307,7 @@ mod tests {
         );
         invocation.params = json!({"message": "please also check X", "taskId": "t"});
         let displayed = tool_call(invocation);
-        assert_eq!(displayed.params, json!({"taskId": "t"}));
+        assert_eq!(displayed.params, json!({"message": "please also check X"}));
         assert!(displayed.has_full_input);
         assert_eq!(displayed.result.unwrap()["task"]["title"], "Title");
     }
