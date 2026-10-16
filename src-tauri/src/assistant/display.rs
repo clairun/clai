@@ -69,6 +69,7 @@ fn compact_input(tool_name: &str, input: &Value) -> Value {
         "web_fetch" => "url",
         "ask_user" => "question",
         "create_vega_chart" => "title",
+        "workspace_stopTask" | "workspace_sendTaskMessage" => "taskId",
         _ => "",
     };
     let selected = object.get_key_value(preferred).or_else(|| {
@@ -96,7 +97,10 @@ fn compact_result(tool_name: &str, result: &Value) -> Option<Value> {
             }
             Some(json!({"ok": true, "path": path}))
         }
-        "workspace_assignTask" | "workspace_getTaskResult" | "workspace_stopTask" => {
+        "workspace_assignTask"
+        | "workspace_getTaskResult"
+        | "workspace_stopTask"
+        | "workspace_sendTaskMessage" => {
             if object.get("ok") != Some(&Value::Bool(true)) {
                 return None;
             }
@@ -294,6 +298,19 @@ mod tests {
         let compact = task.result.unwrap();
         assert_eq!(compact["task"]["id"], "t");
         assert!(compact["task"].get("secret").is_none());
+    }
+
+    #[test]
+    fn task_message_keeps_its_task_and_target() {
+        let mut invocation = call(
+            "mcp__clai__workspace_sendTaskMessage",
+            json!({"ok": true, "queued": false, "task": {"id": "t", "title": "Title", "status": "running", "assignedToWorkspaceAgentId": "agent"}}),
+        );
+        invocation.params = json!({"message": "please also check X", "taskId": "t"});
+        let displayed = tool_call(invocation);
+        assert_eq!(displayed.params, json!({"taskId": "t"}));
+        assert!(displayed.has_full_input);
+        assert_eq!(displayed.result.unwrap()["task"]["title"], "Title");
     }
 
     #[test]

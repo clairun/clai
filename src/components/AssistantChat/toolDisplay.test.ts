@@ -330,6 +330,23 @@ describe('inlineTaskCard', () => {
       .toMatchObject({ taskId: 'task-1', kind: 'assign' });
   });
 
+  it('gives a stop and a message a full action card, even while the task runs', () => {
+    expect(inlineTaskCard('workspace_stopTask', task({ status: 'stopping' }), null, 'completed'))
+      .toMatchObject({ kind: 'stop', variant: 'full', taskId: 'task-1' });
+    expect(
+      inlineTaskCard('mcp__clai__workspace_sendTaskMessage', task({ status: 'running' }), null, 'completed')
+    ).toMatchObject({ kind: 'message', variant: 'full', taskId: 'task-1' });
+  });
+
+  it('keeps failed stops and messages to the workspace as plain rows', () => {
+    expect(
+      inlineTaskCard('workspace_stopTask', undefined, 'already_terminal: task task-1 already ended', 'failed')
+    ).toBeNull();
+    expect(
+      inlineTaskCard('workspace_sendTaskMessage', { ok: true, task: null, queued: false }, null, 'completed')
+    ).toBeNull();
+  });
+
   it('leaves the plain row in place for anything it cannot draw', () => {
     // Another tool.
     expect(inlineTaskCard('bash_exec', task(), null, 'completed')).toBeNull();

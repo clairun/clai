@@ -1,13 +1,12 @@
 /**
- * A delegated task as the chat shows it: the assignee's face, what it was
+ * A workspace task as the chat shows it: the assignee's face, what it was
  * asked to do, and how that call answered — instead of an opaque
- * `workspace_assignTask` row. Clicking opens the task's own log.
+ * workspace-task tool row. Clicking opens the task's own log.
  *
- * Every value describing the task comes from the `TaskCallCard` the tool call
- * returned, frozen at that moment; only the assignee's face and name are read
- * from the live crew, so a renamed agent is not misattributed. The card never
- * subscribes to the task and never re-reads it, so a running task does not
- * repaint the chat; the tasks drawer owns "what is happening now".
+ * Every value describing the task comes from the `TaskCallCard` it is given;
+ * only the assignee's face and name are read from the live crew, so a renamed
+ * agent is not misattributed. The card never subscribes to the task itself:
+ * whoever renders it decides whether `card.status` is frozen or live.
  */
 import { memo, useMemo } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
@@ -35,7 +34,15 @@ const assigneeName = (
   return agent ? agentDisplayName(agent) : 'Agent';
 };
 
+const lead: Record<TaskCallCard['kind'], string> = {
+  assign: 'Delegated to ',
+  poll: '',
+  stop: 'Stopped task · ',
+  message: 'Messaged task · ',
+};
+
 const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
+  const isAction = card.kind === 'stop' || card.kind === 'message';
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
   const name = assigneeName(card, roster);
   const openable = !!onOpen;
@@ -75,7 +82,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
       <span className={styles.main}>
         <span className={styles.head}>
           <span className={styles.who}>
-            {card.kind === 'assign' && <span className={styles.lead}>Delegated to </span>}
+            {lead[card.kind] && <span className={styles.lead}>{lead[card.kind]}</span>}
             {name}
           </span>
           {pill}
@@ -86,6 +93,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
             {card.detail}
           </span>
         ) : (
+          !isAction &&
           card.instructions && <span className={styles.detail}>{card.instructions}</span>
         )}
       </span>

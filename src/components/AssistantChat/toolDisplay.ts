@@ -200,27 +200,31 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
       return { verb: 'Ask', arg: get('question') };
     case 'create_vega_chart':
       return { verb: 'Chart', arg: get('title') || get('path') };
+    case 'workspace_stopTask':
+      return { verb: 'Stop task', arg: get('taskId') };
+    case 'workspace_sendTaskMessage':
+      return { verb: 'Message task', arg: get('taskId') };
     default:
       return { verb: name || 'tool', arg: firstScalarParam(obj) };
   }
 };
 
 /**
- * A workspace task, frozen exactly as `workspace_assignTask` /
- * `workspace_getTaskResult` answered. The chat draws it as a card instead of a
- * one-line row.
+ * A workspace task, frozen exactly as a workspace-task call answered. The chat
+ * draws it as a card instead of a one-line row.
  *
- * Frozen on purpose: the card never follows the task's live status. The tasks
- * drawer is where "what is happening now" lives; the chat is a log of what the
- * agent saw when it looked. That also keeps every card a pure function of its
- * tool call, so a details poll re-renders nothing here.
+ * Frozen on purpose: a hand-off or poll card never follows the task's live
+ * status. The tasks drawer is where "what is happening now" lives; the chat is
+ * a log of what the agent saw when it looked. A stop or a message is an action
+ * on the task rather than a look at it, so the chat shows those with the
+ * task's live status instead.
  */
 export interface TaskCallCard {
-  /** Which call drew it: the hand-off, or a look at how it is going. */
-  kind: 'assign' | 'poll';
+  /** Which call drew it: the hand-off, a look at how it is going, or an action on it. */
+  kind: 'assign' | 'poll' | 'stop' | 'message';
   /**
-   * `full` gets its own block outside the collapsing run: the hand-off and
-   * every terminal answer. `slim` is a one-liner that collapses with the other
+   * `full` gets its own block outside the collapsing run: the hand-off, a stop,
+   * a message, and every terminal answer. `slim` is a one-liner that collapses with the other
    * rows — a poll that found the task still queued or running, of which a
    * waiting agent produces many.
    */
@@ -252,6 +256,13 @@ const CARD_TEXT_LIMIT = 300;
 export const clampCardText = (value: string): string =>
   value.length > CARD_TEXT_LIMIT ? `${value.slice(0, CARD_TEXT_LIMIT).trimEnd()}…` : value;
 
+const TASK_CARD_KINDS = new Map<string, TaskCallCard['kind']>([
+  ['workspace_assignTask', 'assign'],
+  ['workspace_getTaskResult', 'poll'],
+  ['workspace_stopTask', 'stop'],
+  ['workspace_sendTaskMessage', 'message'],
+]);
+
 /**
  * The task card a completed workspace-task call should render, or null to keep
  * the plain row: another tool, still running, or a call that failed — a failed
@@ -267,8 +278,7 @@ export const inlineTaskCard = (
   callStatus: string,
 ): TaskCallCard | null => {
   const name = cleanToolName(toolName || '');
-  const kind =
-    name === 'workspace_assignTask' ? 'assign' : name === 'workspace_getTaskResult' ? 'poll' : null;
+  const kind = TASK_CARD_KINDS.get(name);
   if (!kind) return null;
   if (error || callStatus !== 'completed') return null;
 
@@ -290,7 +300,7 @@ export const inlineTaskCard = (
 
   return {
     kind,
-    variant: kind === 'assign' || !isTaskActive({ status }) ? 'full' : 'slim',
+    variant: kind !== 'poll' || !isTaskActive({ status }) ? 'full' : 'slim',
     taskId,
     title: clampCardText(title),
     instructions: clampCardText(stringField(task, 'instructions').trim()),

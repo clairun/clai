@@ -114,6 +114,34 @@ const msg = (
   ...over,
 });
 
+const liveTask = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse => ({
+  id: 'task-1',
+  workspaceId: 'ws-1',
+  createdByWorkspaceAgentId: 'wa-main',
+  createdByDisplayName: 'Manager',
+  assignedToWorkspaceAgentId: 'wa-rev',
+  assignedAgentDefinitionId: 'def-rev',
+  assignedAgentDisplayName: 'Reviewer',
+  title: 'Review PR #231',
+  instructions: 'review',
+  status: 'running',
+  resultSummary: null,
+  error: null,
+  sessionId: 'sess-rev',
+  runId: 'run-1',
+  createdAt: 0n,
+  updatedAt: 1n,
+  completedAt: null,
+  failureReason: null,
+  parentSessionId: null,
+  parentRunId: null,
+  parentTaskId: null,
+  depth: 0n,
+  cycleNo: 1n,
+  stopRequestedAt: null,
+  ...over,
+});
+
 describe('ChatMessageList', () => {
   beforeEach(() => {
     clearToolCallResultCache();
@@ -398,6 +426,88 @@ describe('ChatMessageList', () => {
     expect(at('Round 3 review')).toBeLessThan(at('Running'));
     expect(at('Running')).toBeLessThan(at('Found 3 issues.'));
     expect(at('Found 3 issues.')).toBeLessThan(at('Round 4 review'));
+  });
+
+  describe('task actions', () => {
+    beforeEach(() => {
+      useTaskStore.setState({ tasks: {}, seeded: {} });
+    });
+
+    const actionCalls = (tool: string, result: ToolInvocation['result']) => {
+      const calls = taskCalls([{ tool, result }]);
+      calls.toolCalls[0]!.params = { taskId: 'task-9' };
+      calls.toolCalls[0]!.hasFullInput = tool === 'workspace_sendTaskMessage';
+      return calls;
+    };
+
+    it('draws a stop as a task action with the live status, and opens the task', () => {
+      useTaskStore.getState().upsertTask(liveTask({ id: 'task-9', status: 'stopped' }));
+      const onOpenTask = vi.fn();
+      const { messages, toolCalls } = actionCalls(
+        'mcp__clai__workspace_stopTask',
+        taskPayload({ status: 'stopping' })
+      );
+      render(
+        <ChatMessageList workspaceId="ws-1"
+          messages={messages}
+          toolCalls={toolCalls}
+          taskRoster={[]}
+          onOpenTask={onOpenTask}
+        />
+      );
+      expect(screen.getByText('Stopped task ·')).toBeInTheDocument();
+      expect(screen.getByText('Stopped')).toBeInTheDocument();
+      expect(screen.queryByText('Stopping')).toBeNull();
+      expect(screen.queryByText('Review the branch end to end.')).toBeNull();
+      expect(screen.queryByText(/workspace_stopTask/)).toBeNull();
+      expect(screen.queryByText('task-9')).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: /Round 3 review/ }));
+      expect(onOpenTask).toHaveBeenCalledWith('task-9');
+    });
+
+    it('draws a message as a task action whose text opens on demand', async () => {
+      fullInputs.set('tk-0', { taskId: 'task-9', message: 'Also check the migration.' });
+      const { messages, toolCalls } = actionCalls(
+        'workspace_sendTaskMessage',
+        taskPayload({ status: 'running' })
+      );
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
+      expect(screen.getByText('Messaged task ·')).toBeInTheDocument();
+      expect(screen.getByText('Round 3 review')).toBeInTheDocument();
+      expect(screen.getByText('Running')).toBeInTheDocument();
+      expect(screen.queryByText('workspace_sendTaskMessage')).toBeNull();
+      expect(getToolCallInput).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: /Show message/ }));
+      expect(await screen.findByText('Also check the migration.')).toBeInTheDocument();
+      expect(getToolCallInput).toHaveBeenCalledWith('ws-1', 'sess-1', 'tk-0');
+    });
+
+    it('keeps a failed stop as a plain row that shows its error', () => {
+      const { messages, toolCalls } = actionCalls('workspace_stopTask', null);
+      toolCalls[0]!.status = 'failed';
+      toolCalls[0]!.error = 'already_terminal: task task-9 already ended as completed; nothing to stop.';
+      toolCalls[0]!.hasFullResult = false;
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
+      expect(screen.queryByText('Stopped task ·')).toBeNull();
+      const row = screen.getByRole('button', { name: /Stop task/ });
+      expect(within(row).getByText('error')).toBeInTheDocument();
+      fireEvent.click(row);
+      expect(screen.getByText(/already_terminal: task task-9 already ended/)).toBeInTheDocument();
+    });
+
+    it('keeps a message to the workspace as a plain row', () => {
+      const { messages, toolCalls } = actionCalls('workspace_sendTaskMessage', {
+        ok: true,
+        task: null,
+        queued: false,
+        run: null,
+      });
+      render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
+      expect(screen.queryByText('Messaged task ·')).toBeNull();
+      expect(screen.getByRole('button', { name: /Message task/ })).toBeInTheDocument();
+    });
   });
 
   it('renders a collapsed thinking block', () => {
@@ -1167,33 +1277,6 @@ describe('ChatMessageList', () => {
     });
 
     describe('task result cards', () => {
-      const liveTask = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse => ({
-        id: 'task-1',
-        workspaceId: 'ws-1',
-        createdByWorkspaceAgentId: 'wa-main',
-        createdByDisplayName: 'Manager',
-        assignedToWorkspaceAgentId: 'wa-rev',
-        assignedAgentDefinitionId: 'def-rev',
-        assignedAgentDisplayName: 'Reviewer',
-        title: 'Review PR #231',
-        instructions: 'review',
-        status: 'running',
-        resultSummary: null,
-        error: null,
-        sessionId: 'sess-rev',
-        runId: 'run-1',
-        createdAt: 0n,
-        updatedAt: 1n,
-        completedAt: null,
-        failureReason: null,
-        parentSessionId: null,
-        parentRunId: null,
-        parentTaskId: null,
-        depth: 0n,
-        cycleNo: 1n,
-        stopRequestedAt: null,
-        ...over,
-      });
       beforeEach(() => {
         useTaskStore.setState({ tasks: {}, seeded: {} });
       });

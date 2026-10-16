@@ -1337,7 +1337,7 @@ type ToolSegment =
   // `key` is the first call's id so a run keeps its expanded/collapsed
   // state as later calls append to it.
   | { kind: 'rows'; key: string; items: ToolItem[] }
-  | { kind: 'task'; key: string; card: TaskCallCard };
+  | { kind: 'task'; key: string; card: TaskCallCard; call?: ToolInvocation };
 
 const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
   const segments: ToolSegment[] = [];
@@ -1351,7 +1351,7 @@ const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
     const card = inlineTaskCard(tu.toolName, tu.result, tu.error, tu.status);
     if (card && card.variant === 'full') {
       flushRun();
-      segments.push({ kind: 'task', key: tu.toolCallId, card });
+      segments.push({ kind: 'task', key: tu.toolCallId, card, call: tu.call });
       continue;
     }
     run.push({ toolUse: tu, card });
@@ -1364,11 +1364,51 @@ const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
  * A task card wired to the page around the chat. Reading the crew and the
  * open-task handler from context here — rather than threading them as props —
  * keeps every memoized message and tool group untouched when they change.
+ *
+ * A stop or a message acts on the task, so its pill follows the task's live
+ * status; hand-offs and polls stay as the call saw them.
  */
-const ChatTaskCard = memo(({ card }: { card: TaskCallCard }) => {
-  const { roster, onOpenTask } = useTaskCardSurface();
-  return <TaskCard card={card} roster={roster} onOpen={onOpenTask} />;
+const ChatTaskCard = memo(({ card, call }: { card: TaskCallCard; call?: ToolInvocation }) => {
+  const { workspaceId = '', roster, onOpenTask } = useTaskCardSurface();
+  const isAction = card.kind === 'stop' || card.kind === 'message';
+  const liveStatus = useTask(workspaceId, isAction ? card.taskId : null)?.status;
+  const shown = useMemo(
+    () => (liveStatus && liveStatus !== card.status ? { ...card, status: liveStatus } : card),
+    [card, liveStatus]
+  );
+  return (
+    <>
+      <TaskCard card={shown} roster={roster} onOpen={onOpenTask} />
+      {card.kind === 'message' && call && <SentTaskMessage workspaceId={workspaceId} call={call} />}
+    </>
+  );
 });
+
+/** The text of a task message, fetched only when the user opens it. */
+const SentTaskMessage = ({ workspaceId, call }: { workspaceId: string; call: ToolInvocation }) => {
+  const [open, setOpen] = useState(false);
+  const input = useToolCallInput(workspaceId, call, open);
+  const fromInput = input.state === 'ready' ? asParamsObject(input.value)?.message : undefined;
+  const message = typeof fromInput === 'string' ? fromInput : '';
+  return (
+    <>
+      <button
+        type="button"
+        className={styles.toolShowEarlier}
+        onClick={() => setOpen((prev) => !prev)}
+        aria-expanded={open}
+      >
+        <span className={`${styles.toolRowChevron} ${open ? styles.expanded : ''}`}>▸</span>
+        {open ? 'Hide message' : 'Show message'}
+      </button>
+      {open && (
+        <div className={styles.toolContent}>
+          {renderDetailPending(input, 'message') ?? <MarkdownMessage content={message} />}
+        </div>
+      )}
+    </>
+  );
+};
 
 /**
  * ToolCallGroup — renders a turn's tool calls as compact one-line rows.
@@ -1387,7 +1427,7 @@ const ToolCallGroup = memo(({ workspaceId, toolUses }: { workspaceId: string; to
     <div className={styles.toolList}>
       {segments.map((seg) =>
         seg.kind === 'task' ? (
-          <ChatTaskCard key={seg.key} card={seg.card} />
+          <ChatTaskCard key={seg.key} card={seg.card} call={seg.call} />
         ) : (
           <CollapsibleToolRows key={seg.key} workspaceId={workspaceId} items={seg.items} />
         )
