@@ -169,6 +169,16 @@ const ACTIVE_STATUSES = ['queued', 'running', 'waiting_for_tool'] as const;
 export const isRunActive = (run: AssistantRun): boolean =>
   (ACTIVE_STATUSES as readonly string[]).includes(run.status);
 
+/** Clears the FE-only state of a session's live run once that run is over. */
+const endLiveRun = (state: AssistantStoreState, sessionId: string) => {
+  const s = state.sessions[sessionId];
+  if (!s) return;
+  s.isStreaming = false;
+  delete state.streamingText[sessionId];
+  s.runStartedAt = null;
+  s.pendingAskUser = null;
+};
+
 const useAssistantStore = create<AssistantStoreState>()(
   devtools(
     immer((set) => ({
@@ -386,10 +396,7 @@ const useAssistantStore = create<AssistantStoreState>()(
             s.runs.push(run);
           }
           if ((TERMINAL_STATUSES as readonly string[]).includes(run.status)) {
-            s.isStreaming = false;
-            delete state.streamingText[sessionId];
-            s.runStartedAt = null;
-            s.pendingAskUser = null;
+            endLiveRun(state, sessionId);
           } else if ((ACTIVE_STATUSES as readonly string[]).includes(run.status)) {
             s.isStreaming = true;
             // Stamp the start the first time this run is seen running, so the
@@ -442,13 +449,18 @@ const useAssistantStore = create<AssistantStoreState>()(
       ) =>
         set((state) => {
           const existing = state.sessions[sessionId];
-          // A snapshot with no active run ends any live run state, so a
-          // missed terminal event cannot leave the run timer ticking.
-          const hasActiveRun = runs.some(isRunActive);
+          // A snapshot with no active run ends the live run, so a missed
+          // terminal event cannot leave the run timer ticking. The snapshot
+          // may predate a run that started while it was in flight; it only
+          // ends the live run if it contains that run or a newer one.
+          const live = existing?.runs.find(isRunActive);
+          const snapshotCoversLive =
+            !live || runs.some((r) => r.id === live.id || r.startedAt > live.startedAt);
+          const endLive = snapshotCoversLive && !runs.some(isRunActive);
           state.sessions[sessionId] = {
             ...createInitialSessionState(session),
             messages,
-            runs,
+            runs: live && !snapshotCoversLive ? [...runs, live] : runs,
             toolCalls,
             // The live event-driven set wins once the session is hydrated.
             // A snapshot reflects the queue at fetch time and can be staler
@@ -487,10 +499,10 @@ const useAssistantStore = create<AssistantStoreState>()(
             // (The streaming-text accumulator itself lives in the top-level
             // `streamingText` map, so a session replacement here cannot wipe
             // it by construction.)
-            isStreaming: hasActiveRun && !!existing?.isStreaming,
+            isStreaming: !!existing?.isStreaming,
             // Run start is FE-only live state the BE snapshot doesn't carry;
             // preserve it so a poll tick mid-run doesn't reset the elapsed timer.
-            runStartedAt: hasActiveRun ? existing?.runStartedAt ?? null : null,
+            runStartedAt: existing?.runStartedAt ?? null,
             // Same rationale for the pending ask_user request: it's
             // FE-only state that the BE snapshot doesn't carry, so a
             // poll tick landing while a question is open would unmount
@@ -498,6 +510,7 @@ const useAssistantStore = create<AssistantStoreState>()(
             // textarea/options. Cleared on ask_user_resolved.
             pendingAskUser: existing?.pendingAskUser || null,
           };
+          if (endLive) endLiveRun(state, sessionId);
         }),
 
       removeSession: (sessionId) =>
