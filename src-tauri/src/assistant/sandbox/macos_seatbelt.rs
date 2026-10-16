@@ -225,6 +225,7 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
     let mut profile = String::from(
         "(version 1)\n\
          (deny default)\n\
+         (allow file-read-data (literal \"/\"))\n\
          (allow process*)\n\
          (allow signal (target same-sandbox))\n\
          (allow sysctl-read)\n",
@@ -575,6 +576,9 @@ mod tests {
         let workspace_path = escape_sbpl_string(&workspace.path().display().to_string());
 
         assert!(profile.contains("(deny default)"));
+        // macOS 26 /bin/sh reads `/` at startup and aborts without this.
+        assert!(profile.contains("(allow file-read-data (literal \"/\"))"));
+        assert!(!profile.contains("(subpath \"/\")"));
         assert!(profile.contains("(allow network*)"));
         assert!(profile.contains(&format!("(subpath \"{}\")", workspace_path)));
         assert!(
