@@ -36,12 +36,14 @@ vi.mock('./WorkspaceTeamSettings', async () => {
     ),
   };
 });
-// Same contract as the real form: no agentId means Save creates one.
+// Same contract as the real form: no agentId means Save creates one, and
+// "Open a source" enters an inner level that `back()` leaves.
 vi.mock('./AgentBehaviorForm', async () => {
-  const { useImperativeHandle } = await import('react');
+  const { useImperativeHandle, useState } = await import('react');
   const api = await import('../../api/client');
   return {
     AgentBehaviorForm: ({ ref, agentId, onDirtyChange }: PageStubProps & { agentId: string | null }) => {
+      const [inner, setInner] = useState(false);
       useImperativeHandle(ref, () => ({
         validate: () => ({ ok: true }),
         submit: async () => {
@@ -50,9 +52,15 @@ vi.mock('./AgentBehaviorForm', async () => {
           onDirtyChange?.(false);
           return { ok: true };
         },
+        back: () => {
+          if (!inner) return false;
+          setInner(false);
+          return true;
+        },
       }));
       return (
         <>
+          {inner ? <p>Inside a source</p> : <button type="button" onClick={() => setInner(true)}>Open a source</button>}
           <input type="search" aria-label="Search skills" defaultValue="rust" />
           <input aria-label="Agent name" onChange={() => onDirtyChange?.(true)} />
         </>
@@ -176,10 +184,7 @@ describe('WorkspaceSettingsModal under the global Settings modal', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(globalModalIsUp()).toBe(false);
 
-    // Back to the index first, then closed.
-    await user.keyboard('{Escape}');
-    expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /General/ })).toBeInTheDocument();
+    // Then the next Escape is this window's, and a clean page just closes.
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -222,7 +227,7 @@ const renderModal = (initialSelection?: { kind: 'general' | 'schedule' | 'team' 
       isOpen
       onClose={onClose}
       workspaceId="ws-1"
-      details={{ ...DETAILS, assignedAgents: [MAIN, CREW] } as unknown as WorkspaceDetails}
+      details={{ ...DETAILS, assignedAgents: [CREW, MAIN] } as unknown as WorkspaceDetails}
       initialSelection={initialSelection}
     />,
   );
@@ -230,7 +235,8 @@ const renderModal = (initialSelection?: { kind: 'general' | 'schedule' | 'team' 
 };
 
 const pageHeading = (name: string) => screen.getByRole('heading', { level: 2, name });
-const overlayOf = (heading: HTMLElement) => heading.closest('header')!.parentElement!.parentElement!;
+const nav = () => screen.getByRole('navigation', { name: 'Settings pages' });
+const navItem = (name: RegExp) => within(nav()).getByRole('button', { name });
 const saveBar = () => screen.queryByRole('region', { name: 'Unsaved changes' });
 
 describe('WorkspaceSettingsModal navigation and per-page save', () => {
@@ -239,26 +245,51 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     vi.mocked(invoke).mockClear();
   });
 
-  it('opens on the index, enters a page, and returns focus to its row', async () => {
+  it('opens on General with every page in the sidebar, Main first, and focus on the current item', () => {
+    renderModal();
+
+    expect(pageHeading('General')).toBeInTheDocument();
+    expect(within(nav()).getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'General', 'ScheduleOff', 'Team1 crew', 'Main', 'Reviewer', '+Add to crew',
+    ]);
+    expect(navItem(/^General/)).toHaveAttribute('aria-current', 'page');
+    expect(navItem(/^General/)).toHaveFocus();
+    expect(screen.getByRole('dialog', { name: 'Backend settings' })).toBeInTheDocument();
+  });
+
+  it('switches pages from the sidebar, keeping focus there, and moves with the arrow keys', async () => {
     const user = userEvent.setup();
     renderModal();
 
-    expect(screen.getByRole('button', { name: /Main.*3 skills · 1 MCP/ })).toBeInTheDocument();
-    const row = screen.getByRole('button', { name: /General/ });
-    await user.click(row);
-    expect(pageHeading('General')).toHaveFocus();
+    await user.click(navItem(/^Schedule/));
+    expect(pageHeading('Schedule')).toBeInTheDocument();
+    expect(navItem(/^Schedule/)).toHaveAttribute('aria-current', 'page');
+    expect(navItem(/^General/)).not.toHaveAttribute('aria-current');
+    expect(navItem(/^Schedule/)).toHaveFocus();
 
-    await user.click(screen.getByRole('button', { name: /Backend — Settings/ }));
-    expect(screen.getByRole('button', { name: /General/ })).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(navItem(/^Team/)).toHaveFocus();
+    await user.keyboard('{ArrowUp}{ArrowUp}{ArrowUp}');
+    expect(navItem(/^Add to crew/)).toHaveFocus();
   });
 
-  it('closes on Escape at the index but goes back one level inside a page', async () => {
+  it('closes on Escape from a page that has no inner level', async () => {
     const user = userEvent.setup();
     const { onClose } = renderModal({ kind: 'schedule' });
 
     await user.keyboard('{Escape}');
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a page leave its inner level on Escape before the window closes', async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderModal({ kind: 'agent', agentId: 'agent-main' });
+
+    await user.click(screen.getByRole('button', { name: 'Open a source' }));
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('Inside a source')).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /Schedule/ })).toHaveFocus();
 
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -271,47 +302,58 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     search.focus();
     await user.keyboard('{Escape}');
-    expect(pageHeading('Main')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
 
     await user.clear(search);
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument();
-    expect(onClose).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('shows the save bar only while the page has changes', async () => {
+  it('shows the save bar only while the page has changes, and Discard drops the draft', async () => {
     const user = userEvent.setup();
     renderModal({ kind: 'general' });
-    const title = screen.getByLabelText(/Title/);
 
     expect(saveBar()).not.toBeInTheDocument();
-    await user.type(title, ' API');
+    await user.type(screen.getByLabelText(/Title/), ' API');
     expect(saveBar()).toBeInTheDocument();
 
     await user.click(within(saveBar()!).getByRole('button', { name: 'Discard' }));
     expect(saveBar()).not.toBeInTheDocument();
     expect(screen.getByLabelText(/Title/)).toHaveValue('Backend');
+    expect(pageHeading('General')).toHaveFocus();
   });
 
-  it('asks before leaving a dirty page: Stay keeps it, Discard leaves without writing', async () => {
+  it('asks before leaving a dirty page from the sidebar: Stay keeps it, Discard goes', async () => {
+    const user = userEvent.setup();
+    renderModal({ kind: 'general' });
+    await user.type(screen.getByLabelText(/Title/), ' API');
+
+    await user.click(navItem(/^Schedule/));
+    expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stay' })).toHaveFocus();
+    await user.click(screen.getByRole('button', { name: 'Stay' }));
+    expect(pageHeading('General')).toBeInTheDocument();
+    expect(screen.getByLabelText(/Title/)).toHaveValue('Backend API');
+    // Focus goes back to what asked to leave, not to <body>.
+    expect(navItem(/^Schedule/)).toHaveFocus();
+
+    await user.click(navItem(/^Schedule/));
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(pageHeading('Schedule')).toBeInTheDocument();
+    expect(navItem(/^Schedule/)).toHaveFocus();
+    expect(setWorkspaceTitle).not.toHaveBeenCalled();
+  });
+
+  it('asks on Escape and × too; a second Escape answers Stay', async () => {
     const user = userEvent.setup();
     const { onClose } = renderModal({ kind: 'general' });
     await user.type(screen.getByLabelText(/Title/), ' API');
 
-    const back = screen.getByRole('button', { name: /Backend — Settings/ });
-    await user.click(back);
-    expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Stay' }));
-    expect(screen.getByLabelText(/Title/)).toHaveValue('Backend API');
-    // Focus goes back to what asked to leave, not to <body>.
-    expect(back).toHaveFocus();
-
-    // Escape also asks, and a second Escape answers Stay.
     await user.keyboard('{Escape}');
     expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
     await user.keyboard('{Escape}');
     expect(screen.queryByText(LEAVE_PROMPT)).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/Title/)).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole('button', { name: 'Close settings' }));
     await user.click(screen.getByRole('button', { name: 'Discard' }));
@@ -319,19 +361,19 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     expect(setWorkspaceTitle).not.toHaveBeenCalled();
   });
 
-  it('saves from the leave prompt, then leaves', async () => {
+  it('saves from the leave prompt, then goes where it was asked to', async () => {
     const user = userEvent.setup();
     renderModal({ kind: 'general' });
     await user.type(screen.getByLabelText(/Title/), ' API');
 
-    await user.click(screen.getByRole('button', { name: /Backend — Settings/ }));
+    await user.click(navItem(/^Team/));
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(setWorkspaceTitle).toHaveBeenCalledWith('ws-1', 'Backend API');
-    expect(screen.getByRole('button', { name: /General/ })).toBeInTheDocument();
+    expect(pageHeading('Team')).toBeInTheDocument();
   });
 
-  it('saves only the visible page', async () => {
+  it('saves only the visible page and puts focus on its title', async () => {
     const user = userEvent.setup();
     renderModal({ kind: 'general' });
     await user.type(screen.getByLabelText(/Title/), ' API');
@@ -340,7 +382,6 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     expect(setWorkspaceTitle).toHaveBeenCalledTimes(1);
     expect(invoke).not.toHaveBeenCalledWith('workspace_set_schedule', expect.anything());
-    // Still on the page after a save, with focus on it rather than <body>.
     expect(pageHeading('General')).toHaveFocus();
   });
 
@@ -360,7 +401,7 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     const { onClose } = renderModal({ kind: 'general' });
     await user.type(screen.getByLabelText(/Title/), ' API');
 
-    await user.click(overlayOf(pageHeading('General')));
+    await user.click(screen.getByRole('dialog').parentElement!);
 
     expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
@@ -392,7 +433,7 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     renderModal(selection);
     await user.type(screen.getByLabelText(field), 'x');
 
-    await user.keyboard('{Escape}');
+    await user.click(navItem(/^General/));
 
     expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
     expect(screen.getByLabelText(field)).toBeInTheDocument();
@@ -420,7 +461,8 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     };
     render(<Host />);
 
-    await user.click(screen.getByRole('button', { name: /Main — set up/ }));
+    await user.click(navItem(/^MainNot set up yet/));
+    expect(pageHeading('Set up the main agent')).toBeInTheDocument();
     await user.type(screen.getByLabelText('Agent name'), 'Main');
     await user.click(within(saveBar()!).getByRole('button', { name: 'Save' }));
     expect(workspaceCreateAgent).toHaveBeenCalledTimes(1);
@@ -433,10 +475,9 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     expect(workspaceCreateAgent).toHaveBeenCalledTimes(1);
     expect(workspaceUpdateAgent).toHaveBeenCalledWith({ agentId: 'agent-new' });
-
-    // Back lands on the new Main's row; the "set up" row is gone.
-    await user.click(screen.getByRole('button', { name: /Backend — Settings/ }));
-    expect(screen.getByRole('button', { name: /^Main/ })).toHaveFocus();
+    // The created Main is the current sidebar item; the set-up item is gone.
+    expect(navItem(/^Main$/)).toHaveAttribute('aria-current', 'page');
+    expect(within(nav()).queryByRole('button', { name: /Not set up yet/ })).toBeNull();
   });
 
   it('is already on the created Main while the refetch runs, so a second Save updates it', async () => {
@@ -454,7 +495,7 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
       />,
     );
 
-    await user.click(screen.getByRole('button', { name: /Main — set up/ }));
+    await user.click(navItem(/^MainNot set up yet/));
     await user.type(screen.getByLabelText('Agent name'), 'Main');
     await user.click(within(saveBar()!).getByRole('button', { name: 'Save' }));
     await user.type(screen.getByLabelText('Agent name'), ' edit');
@@ -465,14 +506,13 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     await act(async () => finishRefetch());
   });
 
-  it('keeps focus inside the modal when it opens on the index or the origin row is gone', async () => {
+  it('lands on General, with focus in the sidebar, when the crew member on screen is removed', async () => {
     const user = userEvent.setup();
-    renderModal();
-    expect(screen.getByRole('button', { name: /General/ })).toHaveFocus();
+    renderModal({ kind: 'agent', agentId: 'agent-crew' });
 
-    await user.click(screen.getByRole('button', { name: /Reviewer/ }));
     await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
 
-    expect(screen.getByRole('button', { name: /General/ })).toHaveFocus();
+    expect(pageHeading('General')).toBeInTheDocument();
+    expect(navItem(/^General/)).toHaveFocus();
   });
 });

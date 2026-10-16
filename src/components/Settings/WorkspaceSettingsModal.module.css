@@ -1,993 +1,305 @@
 /**
- * WorkspaceSettingsModal — a near-full-window overlay with a drill-down:
- * a root index of sections, then one page at a time with a breadcrumb and
- * a per-page save bar.
- *
- * Visual rules mirror AgentFormModal where applicable (palette, radii,
- * spacing) so the redesign doesn't feel like a different app.
+ * The workspace settings window: a fixed-size dialog with a sidebar of
+ * pages and the current page filling the rest. Pages lay themselves out
+ * inside `.body`; the window never grows with its content.
  */
 
 .overlay {
   position: fixed;
   inset: 0;
-  background: var(--color-overlay-60);
-  backdrop-filter: blur(4px);
   z-index: var(--z-portal-modal);
-  animation: fadeIn 0.15s ease;
-}
-
-.modal {
-  position: absolute;
-  inset: 16px;
-  background: var(--color-bg-primary, #FDFCFB);
-  border-radius: 12px;
-  box-shadow: var(--shadow-xl);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  animation: slideUp 0.2s ease;
-}
-
-@media (min-width: 1600px) {
-  .modal {
-    inset: 24px;
-  }
-}
-
-.header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--color-border-light);
-  flex-shrink: 0;
+  justify-content: center;
+  padding: 24px;
+  background: var(--color-overlay-60);
+  animation: fadeIn var(--transition-fast);
 }
 
-.title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--color-text-primary, #1a1a1a);
-  margin: 0;
-  min-width: 0;
+.window {
+  width: min(1200px, 100%);
+  height: min(800px, 100%);
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-primary);
+  box-shadow: var(--shadow-xl);
+  animation: rise var(--transition-base);
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────── */
+
+.sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 10px;
+  border-right: 1px solid var(--color-border-light);
+  background: var(--color-bg-secondary);
+}
+
+.sidebarTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 16px;
+}
+
+.sidebarWorkspace {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sidebarCaption {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.navGroup {
+  margin: 12px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.navList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.navList li {
+  margin: 0;
+}
+
+.navItem {
+  appearance: none;
+  position: relative;
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.navItem:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.navItem[aria-current="page"] {
+  background: var(--color-primary-alpha-10);
+  color: var(--color-text-primary);
+}
+
+/* The current page is marked by shape as well as tint. */
+.navItem[aria-current="page"]::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: var(--color-primary);
+}
+
+.navIcon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.navText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.navLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.navSummary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.navAdd,
+.navPlaceholder {
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 50%;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--color-text-tertiary);
+}
+
+/* ── Main column ──────────────────────────────────────────────────── */
+
+.main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 18px 16px 14px 24px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.headerText {
+  flex: 1;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text-primary);
 }
 
 .title:focus {
   outline: none;
 }
 
-.breadcrumb {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.crumbBack {
-  appearance: none;
-  background: none;
-  border: none;
-  padding: 2px 4px;
-  margin-left: -4px;
-  font-size: 13px;
-  font-family: inherit;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  border-radius: 4px;
+.subtitle {
+  margin: 2px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.crumbBack:hover:not(:disabled) {
-  color: var(--color-primary);
-  background: var(--color-bg-hover, transparent);
-}
-
-.crumbBack:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.crumbSeparator {
-  color: var(--color-border-medium);
+  font-size: 12px;
+  color: var(--color-text-tertiary);
 }
 
 .closeButton {
-  background: none;
-  border: none;
-  color: var(--color-text-tertiary);
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 6px;
-  display: flex;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.15s ease;
-}
-
-.closeButton:hover:not(:disabled) {
-  background: var(--color-bg-hover);
-  color: var(--color-text-secondary);
-}
-
-/* Root index: one row per section, using the width for a summary. */
-.index {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 20px max(24px, calc((100% - 880px) / 2));
-}
-
-.indexGroup {
-  margin-bottom: 24px;
-}
-
-.indexGroupTitle {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--color-text-tertiary);
-  margin: 0 12px 6px;
-}
-
-.indexRow {
-  appearance: none;
-  background: transparent;
   border: none;
-  border-bottom: 1px solid var(--color-border-light);
-  width: 100%;
-  text-align: left;
-  padding: 10px 12px;
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--color-text-primary);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  transition: background 120ms ease;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 
-.indexRow:hover,
-.indexRow:focus-visible {
+.closeButton:hover {
   background: var(--color-bg-hover);
+  color: var(--color-text-primary);
 }
 
-.indexRowLabel {
-  flex: 0 0 160px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.indexRowSummary {
-  flex: 1;
-  min-width: 0;
-  color: var(--color-text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.indexRowChevron {
-  color: var(--color-text-tertiary);
-  font-size: 16px;
-}
-
-/* One section filling the pane. The section's own `.sectionRoot` stays the
- * scroller (so the scrollbar sits at the pane edge) and its content keeps a
- * bounded reading column; the save bar sits below it, always in view. */
-.page {
+/* The page area. Pages fill it; it scrolls only in the narrow-window
+   fallback, where two columns have collapsed into one. */
+.body {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  animation: pageIn 180ms ease;
+  overflow-y: auto;
+  animation: fadeIn var(--transition-fast);
 }
 
-.page > .sectionRoot {
-  padding-inline: max(24px, calc((100% - 720px) / 2));
+/* Height reserved for the save bar, so it appearing never moves the page. */
+.footer {
+  flex-shrink: 0;
+  height: 56px;
+  box-sizing: border-box;
 }
 
 .saveBar {
+  height: 100%;
   display: flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
-  padding: 10px max(24px, calc((100% - 720px) / 2));
+  padding: 0 16px 0 24px;
   border-top: 1px solid var(--color-border-light);
-  background: var(--color-bg-secondary, #F6F4F0);
-  flex-shrink: 0;
+  background: var(--color-bg-secondary);
+  animation: fadeIn var(--transition-fast);
+}
+
+.saveBarAsking {
+  background: var(--color-warning-bg);
+  border-top-color: var(--color-warning-border);
 }
 
 .saveBarText,
 .saveBarError {
   flex: 1;
-  font-size: 12px;
-  text-align: left;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
 }
 
 .saveBarText {
-  color: var(--color-text-secondary);
-}
-
-.saveBarError {
-  color: var(--color-critical, #b91c1c);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .page {
-    animation: none;
-  }
-}
-
-@keyframes pageIn {
-  from { opacity: 0; transform: translateX(16px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-/* Each section's outer wrapper. Owns the scroll + padding so .actions can
- * be pushed to the bottom via margin-top: auto when section body is short
- * and sit naturally at the end of the scroll when it overflows. */
-.sectionRoot {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 20px 24px;
-  display: flex;
-  flex-direction: column;
-}
-
-.sectionTitle {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-  margin: 0 0 4px;
-}
-
-.sectionDescription {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  margin: 0 0 16px;
-  line-height: 1.4;
-}
-
-.field {
-  margin-bottom: 16px;
-}
-
-.label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  margin-bottom: 6px;
-}
-
-.required {
-  color: var(--color-critical);
-  margin-left: 2px;
-}
-
-/* A checkbox and its text as one row and one hit area. Deliberately not
-   `.label`: that is a block at weight 600, which leaves the box and its text
-   unaligned and makes a control read as a section heading. */
-.checkboxRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  font-size: 13px;
-  font-weight: 400;
-  color: var(--color-text-primary);
-  cursor: pointer;
-}
-
-.checkboxRow input[type="checkbox"] {
-  margin: 0;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-
-/* Two short lines that belong together — here, what this workspace owns
-   versus what the shared definition owns. */
-.splitNote {
-  margin: 0 0 16px;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--color-text-tertiary);
-}
-
-.splitNote p {
-  margin: 0 0 4px;
-}
-
-.splitNote p:last-child {
-  margin-bottom: 0;
-}
-
-/* One line of read-only metadata (an id, a revision) under a section title. */
-.metaRow {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: 0 0 12px;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-}
-
-.metaRow code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  background: var(--color-overlay-06, rgba(0, 0, 0, 0.04));
-  padding: 1px 6px;
-  border-radius: 4px;
-  overflow-wrap: anywhere;
-}
-
-/* An inline "go here instead" link inside body copy. Mirrors SkillPicker's
-   .linkButton so the two read as the same affordance. */
-.linkButton {
-  appearance: none;
-  background: transparent;
-  border: none;
-  padding: 0;
-  color: var(--color-primary);
-  font-size: inherit;
-  font-family: inherit;
-  cursor: pointer;
-}
-
-.linkButton:hover:not(:disabled) {
-  text-decoration: underline;
-}
-
-.linkButton:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.input,
-.textarea {
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--color-border-medium);
-  border-radius: 6px;
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-size: 13px;
-  font-family: inherit;
-  box-sizing: border-box;
-}
-
-.input:focus,
-.textarea:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-alpha-08);
-}
-
-.textarea {
-  resize: vertical;
-  min-height: 80px;
-  font-family: inherit;
-}
-
-.hint {
-  display: block;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-  margin-top: 6px;
-  line-height: 1.4;
-}
-
-/* A hint that contradicts the control above it — something outside this pane
-   is overriding it. Carries its own words, not just the colour. */
-.hintWarning {
-  display: block;
-  font-size: 11px;
-  color: var(--color-warning-dark, #b45309);
-  margin-top: 4px;
-  line-height: 1.4;
-}
-
-/* Inline click-to-copy chip for the workspace UUID. Looks like the old
-   <code> element it replaced, plus a hover/active affordance so users
-   discover it's interactive. */
-.copyableId {
-  appearance: none;
-  border: 1px solid transparent;
-  background: var(--color-overlay-06, rgba(0, 0, 0, 0.04));
-  color: inherit;
-  font: inherit;
-  padding: 1px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  vertical-align: baseline;
-  transition: background 120ms ease, border-color 120ms ease;
-}
-
-.copyableId code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  background: transparent;
-  padding: 0;
-}
-
-.copyableId:hover:not(:disabled) {
-  background: var(--color-overlay-12, rgba(0, 0, 0, 0.08));
-  border-color: var(--color-border-light);
-}
-
-.copyableId:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 1px;
-}
-
-.copyableId:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
-
-.copyableIdCopied {
-  background: var(--color-primary-alpha-08);
-  border-color: var(--color-primary-alpha-30);
-}
-
-.copyableIdBadge {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--color-primary);
-  text-transform: uppercase;
-}
-
-.errorBanner {
-  background: var(--color-critical-alpha-08, rgba(220, 38, 38, 0.12));
-  color: var(--color-critical, #b91c1c);
-  border: 1px solid var(--color-critical-alpha-30, rgba(220, 38, 38, 0.35));
-  padding: 10px 14px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 10px;
-  animation: errorBannerIn 200ms ease;
-}
-
-@keyframes errorBannerIn {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-  align-items: center;
-  padding-top: 14px;
-  border-top: 1px solid var(--color-border-light);
-  margin-top: auto;
-  flex-shrink: 0;
-}
-
-/* Left half of an actions row: the destructive button with the caption of
-   what it costs, held away from the affirmative action on the right. */
-.dangerZone {
-  margin-right: auto;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  max-width: 60%;
-}
-
-.primaryButton {
-  appearance: none;
-  background: var(--color-primary);
-  color: var(--color-text-on-primary);
-  border: 1px solid var(--color-primary);
-  padding: 7px 16px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  font-family: inherit;
-  cursor: pointer;
-  transition: opacity 120ms ease;
-}
-
-.primaryButton:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.primaryButton:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.secondaryButton {
-  appearance: none;
-  background: transparent;
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border-medium);
-  padding: 7px 14px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
-}
-
-.secondaryButton:hover:not(:disabled) {
-  background: var(--color-bg-hover);
   color: var(--color-text-primary);
 }
 
-.secondaryButton:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.dangerButton {
-  appearance: none;
-  background: transparent;
-  color: var(--color-critical, #b91c1c);
-  border: 1px solid var(--color-critical-alpha-30, rgba(220, 38, 38, 0.3));
-  padding: 7px 14px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background 120ms ease;
-}
-
-.dangerButton:hover:not(:disabled) {
-  background: var(--color-critical-alpha-08, rgba(220, 38, 38, 0.08));
-}
-
-.dangerButton:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.toggleRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 8px 0;
-}
-
-.toggleLabel {
-  font-size: 13px;
-  color: var(--color-text-primary);
-}
-
-.toggle {
-  position: relative;
-  display: inline-block;
-  width: 36px;
-  height: 20px;
-  flex-shrink: 0;
-}
-
-.toggleInput {
-  position: absolute;
-  opacity: 0;
-  width: 100%;
-  height: 100%;
-  cursor: pointer;
-  margin: 0;
-}
-
-.toggleTrack {
-  position: absolute;
-  inset: 0;
-  background: var(--color-border-medium);
-  border-radius: 999px;
-  transition: background 120ms ease;
-}
-
-.toggleThumb {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  background: var(--color-bg-elevated);
-  border-radius: 50%;
-  transition: transform 120ms ease;
-}
-
-.toggleOn .toggleTrack {
-  background: var(--color-primary);
-}
-
-.toggleOn .toggleThumb {
-  transform: translateX(16px);
-}
-
-.chipList {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  background: var(--color-primary-alpha-08);
-  color: var(--color-primary);
-  border-radius: var(--radius-full, 999px);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.chipRemove {
-  background: transparent;
-  border: none;
-  color: currentColor;
-  cursor: pointer;
-  padding: 0 2px;
-  font-size: 14px;
-  line-height: 1;
-  opacity: 0.6;
-}
-
-.chipRemove:hover {
-  opacity: 1;
-}
-
-.commandList {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
-  margin-bottom: 8px;
-  border: 1px solid var(--color-border-light);
-  border-radius: 6px;
-  padding: 6px;
-  background: var(--color-bg-primary);
-}
-
-.commandItem {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 6px 8px;
-  background: var(--color-bg-secondary);
-  border-radius: 5px;
-  font-size: 12px;
-}
-
-.commandPrefix {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-  color: var(--color-text-primary);
-}
-
-.listInputRow {
-  display: flex;
-  gap: 8px;
-}
-
-.listInputRow .input {
-  flex: 1;
-}
-
-.addButton {
-  appearance: none;
-  background: var(--color-bg-secondary);
-  color: var(--color-text-primary);
-  border: 1px solid var(--color-border-medium);
-  padding: 7px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-  cursor: pointer;
-  font-family: inherit;
-  flex-shrink: 0;
-}
-
-.addButton:hover:not(:disabled) {
-  background: var(--color-bg-hover);
-}
-
-.checkboxGroup {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 240px;
-  overflow-y: auto;
-  border: 1px solid var(--color-border-light);
-  border-radius: 6px;
-  padding: 8px;
-}
-
-.checkboxOption {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 4px 6px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.checkboxOption:hover {
-  background: var(--color-bg-hover);
-}
-
-.checkboxOption input[type="checkbox"] {
-  margin-top: 3px;
-}
-
-
-.grantList {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-
-.grantItem {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  background: var(--color-bg-secondary);
-  border-radius: 6px;
-  font-size: 12px;
-}
-
-.grantPath {
-  font-family: ui-monospace, monospace;
-  flex: 1;
-  word-break: break-all;
-}
-
-.grantAccess {
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.grantOrigin {
-  font-size: 10px;
-  padding: 2px 6px;
-  background: var(--color-overlay-06);
-  border-radius: 999px;
-  color: var(--color-text-tertiary);
-}
-
-.select {
-  padding: 7px 10px;
-  border: 1px solid var(--color-border-medium);
-  border-radius: 6px;
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-size: 13px;
-  font-family: inherit;
-}
-
-/* ── Schedule section — interval / cron editor ──────────────────── */
-
-/* Two-option segmented control for "Interval vs Cron". Less heavy
-   than a <select> for a binary choice and lets both options stay
-   visible. */
-.segmented {
-  display: inline-flex;
-  border: 1px solid var(--color-border-medium);
-  border-radius: 6px;
-  background: var(--color-bg-secondary);
-  padding: 2px;
-  gap: 2px;
-  width: fit-content;
-}
-
-.segmentedOption {
-  appearance: none;
-  background: transparent;
-  border: none;
-  color: var(--color-text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  padding: 5px 14px;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background var(--transition-fast), color var(--transition-fast);
-  font-family: inherit;
-}
-
-.segmentedOption:hover:not(:disabled):not(.segmentedOptionActive) {
-  color: var(--color-text-primary);
-}
-
-.segmentedOption:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.segmentedOptionActive {
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  box-shadow: 0 1px 2px var(--color-shadow, rgba(0, 0, 0, 0.06));
-}
-
-/* Subtle card wrapping the mode-specific schedule fields. Visually
-   groups expression+timezone+preview without being a heavy panel. */
-.scheduleCard {
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border-light);
-  border-radius: 8px;
-  padding: 14px 16px;
-  margin-bottom: 16px;
-}
-
-/* Monospace input for the cron expression — it IS code, so it should
-   read like one. Larger and a touch more padding than the default. */
-.cronInput {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--color-border-medium);
-  border-radius: 6px;
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-size: 14px;
-  font-family: var(--font-mono, ui-monospace, 'SF Mono', Menlo, Consolas, monospace);
-  letter-spacing: 0.02em;
-  box-sizing: border-box;
-}
-
-.cronInput:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-alpha-08);
-}
-
-/* Cron preset chip row — clickable pills that load an expression
-   into the input. Wraps on narrow widths. */
-.presetRow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.presetChip {
-  appearance: none;
-  background: var(--color-bg-primary);
-  border: 1px solid var(--color-border-medium);
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 5px 10px;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
-  font-family: inherit;
-  white-space: nowrap;
-}
-
-.presetChip:hover:not(:disabled) {
-  border-color: var(--color-primary-alpha-30);
-  color: var(--color-primary);
-}
-
-.presetChipActive {
-  background: var(--color-primary-alpha-08);
-  border-color: var(--color-primary-alpha-30);
-  color: var(--color-primary);
-}
-
-.presetChip:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* "Next 3 fire times" — styled list with absolute + relative time
-   per row. Replaces the unstyled <ul><li> bullets. */
-.previewList {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.previewItem {
-  /* Zero global.css's 0.5em <li> margin, which would add to the list gap. */
-  margin: 0;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 13px;
-  padding: 6px 10px;
-  background: var(--color-bg-primary);
-  border: 1px solid var(--color-border-light);
-  border-radius: 6px;
-}
-
-.previewAbsolute {
-  color: var(--color-text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
-.previewRelative {
-  color: var(--color-text-tertiary);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.previewEmpty {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  font-style: italic;
-}
-
-/* Status footer — status dot + label on the left, Pause/Resume on
-   the right. Replaces the toggleRow that was reused (and slightly
-   misfit) for the schedule status. */
-.statusBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 0 0;
-  border-top: 1px solid var(--color-border-light);
-  margin-top: 4px;
-}
-
-.statusBadge {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  color: var(--color-text-primary);
-  font-weight: 500;
-}
-
-.statusDot {
+.saveBarDot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  display: inline-block;
+  background: var(--color-warning);
 }
 
-.statusDotRunning {
-  background: var(--color-success, #16a34a);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success, #16a34a) 20%, transparent);
+.saveBarError {
+  color: var(--color-critical);
 }
 
-.statusDotPaused {
-  background: var(--color-warning, #d97706);
-}
-
-/* Inline timezone helper — shorter than a paragraph hint, leaves
-   room for the "use system tz" link affordance. */
-.tzHint {
-  display: block;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-  margin-top: 6px;
+@media (max-width: 760px) {
+  .window {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
 }
 
 @keyframes fadeIn {
@@ -995,7 +307,16 @@
   to { opacity: 1; }
 }
 
-@keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay,
+  .window,
+  .body,
+  .saveBar {
+    animation: none;
+  }
 }

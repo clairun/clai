@@ -213,7 +213,7 @@ describe('AssignmentSection editor', () => {
     render(
       <AssignmentSection ref={ref} workspaceId={WORKSPACE} agentId="assign-1" onDirtyChange={onDirtyChange} />
     );
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
     await user.clear(screen.getByLabelText('Context for this workspace'));
     await user.type(screen.getByLabelText('Context for this workspace'), 'Docs only');
@@ -251,7 +251,7 @@ describe('AssignmentSection editor', () => {
     render(
       <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
     );
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
     await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
 
@@ -270,7 +270,7 @@ describe('AssignmentSection editor', () => {
     render(
       <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
     );
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
     await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
 
@@ -288,9 +288,9 @@ describe('AssignmentSection editor', () => {
     render(
       <AssignmentSection ref={ref} workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
     );
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
-    await user.click(screen.getByRole('checkbox', { name: 'Enabled in this workspace' }));
+    await user.click(screen.getByRole('switch', { name: 'Enabled in this workspace' }));
     await submitPage(ref);
 
     expect(mockInvoke).toHaveBeenCalledWith('workspace_configure_assignment', {
@@ -305,7 +305,7 @@ describe('AssignmentSection editor', () => {
     const user = userEvent.setup();
     const opened = recordGlobalSettingsOpens();
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
     expect(screen.getByText('assign-1')).toBeInTheDocument();
 
@@ -323,7 +323,7 @@ describe('AssignmentSection editor', () => {
     const opened = recordGlobalSettingsOpens();
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
     await user.type(screen.getByLabelText('Context for this workspace'), ' and docs');
     await user.click(screen.getByRole('button', { name: 'Edit in Settings → Agents' }));
@@ -345,18 +345,18 @@ describe('AssignmentSection editor', () => {
       return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
     });
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
     expect(
       screen.getByText(/is disabled in the library, so it stays off here/)
     ).toBeInTheDocument();
     // The box is still usable: this pane owns its own switch either way.
-    expect(screen.getByRole('checkbox', { name: 'Enabled in this workspace' })).toBeEnabled();
+    expect(screen.getByRole('switch', { name: 'Enabled in this workspace' })).toBeEnabled();
   });
 
   it('says nothing about the library when the definition is live', async () => {
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
-    await screen.findByText('Reviewer');
+    await screen.findByText('assign-1');
 
     expect(screen.queryByText(/in the library, so it stays off here/)).toBeNull();
   });
@@ -370,17 +370,36 @@ describe('AssignmentSection editor', () => {
 
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
 
-    expect(await screen.findByText('Unavailable agent')).toBeInTheDocument();
+    expect(await screen.findByText(/points at a shared agent that no longer exists/)).toBeInTheDocument();
+    // No callable-id editor for a definition that is not there to explain it.
+    expect(screen.queryByText(/come from .* shared definition/)).toBeNull();
   });
 });
 
 describe('TeamPolicySection', () => {
+  it('edits the workspace-wide grants in the same draft as the context', async () => {
+    const user = userEvent.setup();
+    const ref = createRef<SectionHandle>();
+    render(<TeamPolicySection ref={ref} workspaceId={WORKSPACE} />);
+    await screen.findByLabelText('Project context');
+
+    await user.click(screen.getByRole('button', { name: 'Remove grant for /opt/tools' }));
+    await user.type(screen.getByRole('textbox', { name: 'New path for workspace path grants' }), '/srv/shared{Enter}');
+
+    expect(await submitPage(ref)).toEqual({ ok: true });
+    expect(mockInvoke).toHaveBeenCalledWith('workspace_save_team_policy', {
+      workspaceId: WORKSPACE,
+      context: 'House rules',
+      filesystemGrants: [{ path: '/srv/shared', access: 'read_only' }],
+    });
+  });
+
   it('saves the project context and the workspace-wide grants together', async () => {
     const user = userEvent.setup();
     const ref = createRef<SectionHandle>();
     const onDirtyChange = vi.fn();
     render(<TeamPolicySection ref={ref} workspaceId={WORKSPACE} onDirtyChange={onDirtyChange} />);
-    const context = await screen.findByLabelText('Instructions shared by every agent here');
+    const context = await screen.findByLabelText('Project context');
     expect(onDirtyChange).not.toHaveBeenCalledWith(true);
 
     await user.clear(context);
@@ -402,7 +421,7 @@ describe('TeamPolicySection', () => {
     const ref = createRef<SectionHandle>();
     const onDirtyChange = vi.fn();
     render(<TeamPolicySection ref={ref} workspaceId={WORKSPACE} onDirtyChange={onDirtyChange} />);
-    await user.type(await screen.findByLabelText('Instructions shared by every agent here'), ' too');
+    await user.type(await screen.findByLabelText('Project context'), ' too');
 
     expect(await submitPage(ref)).toEqual({ ok: false, error: expect.stringContaining('disk full') });
     expect(screen.getByRole('alert')).toHaveTextContent('disk full');
