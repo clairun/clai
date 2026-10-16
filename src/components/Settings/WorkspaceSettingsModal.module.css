@@ -183,8 +183,8 @@
 .header {
   flex-shrink: 0;
   display: flex;
-  align-items: flex-start;
-  gap: 16px;
+  align-items: center;
+  gap: 12px;
   padding: 18px 16px 14px 24px;
   border-bottom: 1px solid var(--color-border-light);
 }
@@ -248,20 +248,16 @@
   animation: fadeIn var(--transition-fast);
 }
 
-/* Height reserved for the save bar, so it appearing never moves the page. */
-.footer {
-  flex-shrink: 0;
-  height: 56px;
-  box-sizing: border-box;
-}
-
+/* Sits in the header row, so it appearing never moves the page and takes
+   no page height while there is nothing to save. The title gives way to it. */
 .saveBar {
-  height: 100%;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 16px 0 24px;
-  border-top: 1px solid var(--color-border-light);
+  padding: 3px 3px 3px 12px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
   background: var(--color-bg-secondary);
   animation: fadeIn var(--transition-fast);
 }
@@ -273,12 +269,12 @@
 
 .saveBarText,
 .saveBarError {
-  flex: 1;
   min-width: 0;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .saveBarText {
@@ -286,6 +282,7 @@
 }
 
 .saveBarDot {
+  flex-shrink: 0;
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -293,6 +290,10 @@
 }
 
 .saveBarError {
+  display: block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--color-critical);
 }
 

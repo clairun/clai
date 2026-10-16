@@ -1,9 +1,5 @@
 /* Skills, sources first: source rows on the overview, a tile grid per source. */
 
-.search {
-  flex-shrink: 0;
-}
-
 .sources {
   flex: 1;
   min-height: 0;

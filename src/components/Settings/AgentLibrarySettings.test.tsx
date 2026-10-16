@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useImperativeHandle } from 'react';
+import { useImperativeHandle, useState } from 'react';
 
 const api = vi.hoisted(() => ({
   getMcpServers: vi.fn(),
@@ -16,8 +16,9 @@ vi.mock('../../assistant', () => ({
 }));
 
 // The behaviour form has its own tests. Here it is a stub that submits a
-// fixed payload and reports a rejected save the way the real form does, so
-// what is under test is what the library adds around it.
+// fixed payload and reports a rejected save the way the real form does, and
+// has one drill-in view for `back()`, so what is under test is what the
+// library adds around it.
 const PAYLOAD = {
   workspaceId: '',
   name: 'Reviewer',
@@ -33,10 +34,16 @@ vi.mock('./AgentBehaviorForm', () => ({
     ref,
     saveBehavior,
   }: {
-    ref: React.Ref<{ validate: () => unknown; submit: () => Promise<unknown> }>;
+    ref: React.Ref<{ validate: () => unknown; submit: () => Promise<unknown>; back: () => boolean }>;
     saveBehavior: (payload: typeof PAYLOAD) => Promise<void>;
   }) => {
+    const [inner, setInner] = useState(false);
     useImperativeHandle(ref, () => ({
+      back: () => {
+        if (!inner) return false;
+        setInner(false);
+        return true;
+      },
       validate: () => ({ ok: true }),
       submit: async () => {
         try {
@@ -47,11 +54,19 @@ vi.mock('./AgentBehaviorForm', () => ({
         }
       },
     }));
-    return <div data-testid="behavior-form" />;
+    return (
+      <div data-testid="behavior-form">
+        {/* Like the real views, entering one moves focus into it. */}
+        {inner
+          ? <button type="button" autoFocus>Inner view</button>
+          : <button type="button" onClick={() => setInner(true)}>Open inner view</button>}
+      </div>
+    );
   },
 }));
 
 import AgentLibrarySettings from './AgentLibrarySettings';
+import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { candidatesOf } from '../Agents/AgentFacePicker';
 import { GENERATOR_VERSION, avatarRefFor, identityFor } from '../Agents/agentIdentity';
@@ -112,6 +127,25 @@ describe('AgentLibrarySettings', () => {
     await userEvent.click(screen.getByRole('button', { name: '‹ Agents' }));
     expect(screen.getByRole('button', { name: '+ Create agent' })).toBeInTheDocument();
     expect(screen.queryByTestId('behavior-form')).toBeNull();
+  });
+
+  it('Escape leaves an inner view of the form before it reaches the Settings modal', async () => {
+    const onModalEscape = vi.fn();
+    // Stands in for the Settings modal around the library, which closes on Escape.
+    const InModal = () => {
+      useOverlayLayer(true, onModalEscape);
+      return <AgentLibrarySettings />;
+    };
+    render(<InModal />);
+    await userEvent.click(await screen.findByRole('button', { name: /^Reviewer/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Open inner view' }));
+
+    await userEvent.keyboard('{Escape}');
+    expect(screen.getByRole('button', { name: 'Open inner view' })).toBeInTheDocument();
+    expect(onModalEscape).not.toHaveBeenCalled();
+
+    await userEvent.keyboard('{Escape}');
+    expect(onModalEscape).toHaveBeenCalledTimes(1);
   });
 
   it('creates with the first candidate face and lands on the new card', async () => {

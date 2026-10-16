@@ -4,7 +4,7 @@
  * behaviour form, then Save and Archive. The face choice lives here so it
  * starts over with every agent opened and can never be saved onto another.
  */
-import { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { saveAgentDefinition, type AgentDefinitionDetail } from '../../api/client';
 import AgentFacePicker, {
   chosenSeed,
@@ -132,8 +132,15 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
 
   const title = definition ? definition.name : 'New agent';
 
+  // Escape leaves a drill-in view of the form before it can reach the
+  // Settings modal, which closes on it. Stopping the React event stops the
+  // native one at the portal root, ahead of the modal's `document` listener.
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape' && sectionRef.current?.back?.()) e.stopPropagation();
+  };
+
   return (
-    <div className={styles.editor}>
+    <div className={styles.editor} onKeyDown={handleKeyDown}>
       <nav className={styles.breadcrumb} aria-label="Breadcrumb">
         <button type="button" className={styles.back} onClick={onBack} disabled={saving}>
           ‹ Agents
@@ -174,7 +181,6 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
         ref={sectionRef}
         workspaceId=""
         agentId={definition?.id ?? null}
-        details={null}
         initialAgent={initialAgent}
         saveBehavior={save}
         deps={deps}

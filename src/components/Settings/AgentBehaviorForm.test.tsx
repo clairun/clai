@@ -202,6 +202,27 @@ describe('AgentBehaviorForm', () => {
       expect(sentUpdate().providerConnectionIds).toEqual(['conn-b']);
     });
 
+    it('keeps a legacy connection list when saving any other edit', async () => {
+      api.workspaceGetAgent.mockResolvedValue({ ...REVIEWER, providerConnectionIds: ['conn-a', 'conn-b'] });
+      const { ref } = renderForm({ agentId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+
+      await userEvent.type(screen.getByLabelText('Instructions'), ' carefully');
+      await submit(ref);
+      expect(sentUpdate().providerConnectionIds).toEqual(['conn-a', 'conn-b']);
+    });
+
+    it('shows no warnings while the connections are still loading', async () => {
+      const { rerender, ref, onDirtyChange } = renderForm({ agentId: 'agent-1', deps: { ...DEPS, providerConnections: [], defaultExecution: undefined } });
+      await waitFor(() => expect(api.workspaceGetAgent).toHaveBeenCalled());
+      expect(screen.getByLabelText('Loading agent')).toBeInTheDocument();
+      expect(screen.queryByText(/gone or turned off/)).toBeNull();
+
+      rerender(<AgentBehaviorForm ref={ref} workspaceId="ws-1" agentId="agent-1" deps={DEPS} saving={false} onDirtyChange={onDirtyChange} />);
+      expect(await screen.findByDisplayValue('Reviewer')).toBeInTheDocument();
+      expect(model()).toHaveDisplayValue('Anthropic — sonnet');
+    });
+
     it('says when the saved connection is gone or turned off', async () => {
       api.workspaceGetAgent.mockResolvedValue({ ...REVIEWER, providerConnectionIds: ['conn-off'] });
       renderForm({ agentId: 'agent-1' });
@@ -240,7 +261,7 @@ describe('AgentBehaviorForm', () => {
 
   describe('skills', () => {
     it('lists sources first with their counts, and opens one to show only its skills', async () => {
-      const { ref } = renderForm({ agentId: 'agent-1' });
+      const { ref, onDirtyChange } = renderForm({ agentId: 'agent-1' });
       await screen.findByDisplayValue('Reviewer');
 
       expect(screen.getByText('1 of 3 selected')).toBeInTheDocument();
@@ -258,6 +279,10 @@ describe('AgentBehaviorForm', () => {
 
       await userEvent.click(within(grid).getByRole('checkbox', { name: 'pdf' }));
       expect(screen.getByText('1 of 2 selected')).toBeInTheDocument();
+      expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+      await userEvent.click(within(grid).getByRole('checkbox', { name: 'pdf' }));
+      expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+      await userEvent.click(within(grid).getByRole('checkbox', { name: 'pdf' }));
 
       await userEvent.click(screen.getByRole('button', { name: 'Back to Reviewer' }));
       // Back on the overview, on the row that was opened.
@@ -295,6 +320,18 @@ describe('AgentBehaviorForm', () => {
       expect(sentUpdate().selectedSkillIds).toEqual(['review']);
     });
 
+    it('selects only what the filter shows', async () => {
+      const { ref } = renderForm({ agentId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+      await userEvent.click(screen.getByRole('button', { name: /^anthropic-skills/ }));
+
+      await userEvent.type(screen.getByRole('searchbox', { name: 'Filter anthropic-skills' }), 'pdf');
+      await userEvent.click(screen.getByRole('button', { name: 'Select all' }));
+      expect(screen.getByText('1 of 2 selected')).toBeInTheDocument();
+      await submit(ref);
+      expect(sentUpdate().selectedSkillIds).toEqual(['review', 'pdf']);
+    });
+
     it('finds a skill across sources from the overview', async () => {
       renderForm({ agentId: 'agent-1' });
       await screen.findByDisplayValue('Reviewer');
@@ -320,7 +357,7 @@ describe('AgentBehaviorForm', () => {
 
   describe('local access', () => {
     it('summarizes on the overview and edits in its own view', async () => {
-      const { ref } = renderForm({ agentId: 'agent-1' });
+      const { ref, onDirtyChange } = renderForm({ agentId: 'agent-1' });
       await screen.findByDisplayValue('Reviewer');
       expect(screen.getByText('Shell restricted')).toBeInTheDocument();
       expect(screen.getByText('Web on')).toBeInTheDocument();
@@ -330,6 +367,11 @@ describe('AgentBehaviorForm', () => {
       expect(screen.getByText('/home/u')).toBeInTheDocument();
       expect(screen.getByText('Preset')).toBeInTheDocument();
       expect(screen.getByRole('list', { name: 'Allowed command prefixes' })).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
+      expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+      await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
+      expect(onDirtyChange).toHaveBeenLastCalledWith(false);
 
       await userEvent.type(screen.getByRole('textbox', { name: 'New path for path grants' }), '/srv/data');
       await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Access for the new path' }), 'read_write');

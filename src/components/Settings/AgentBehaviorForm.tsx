@@ -23,12 +23,11 @@ import type {
   ExecutionCapabilityConfig,
   FilesystemPathGrant,
   ProviderConnection,
-  WorkspaceDetails,
 } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
-import type { SectionHandle } from './sectionHandle';
+import { useReportDirty, type SectionHandle } from './sectionHandle';
 import McpServerSelect from './McpServerSelect';
-import { NoSkills, SkillSources, SkillSourceView, groupSkills } from './SkillPicker';
+import { NoSkills, SkillSearch, SkillSources, SkillSourceView, groupSkills } from './SkillPicker';
 import { AccessView, accessSummary, type AccessDraft } from './AgentAccess';
 import { Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
@@ -175,7 +174,6 @@ export const AgentBehaviorForm = ({
   ref: React.Ref<SectionHandle>;
   workspaceId: string;
   agentId: string | null;
-  details?: WorkspaceDetails | null;
   initialAgent?: AgentDetail;
   saveBehavior?: (payload: AgentBehaviorPayload) => Promise<void>;
   deps: AgentFormDeps;
@@ -195,6 +193,7 @@ export const AgentBehaviorForm = ({
   // dirty flag flips and is reported, whether or not the host re-renders.
   const [baseline, setBaseline] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'overview' });
+  const [skillQuery, setSkillQuery] = useState('');
 
   const isManager = agent?.isDefault === true;
   const canDelete = !saveBehavior && !isCreate && !isManager;
@@ -248,9 +247,7 @@ export const AgentBehaviorForm = ({
   }, [agent]);
 
   const isDirty = draft !== null && baseline !== null && serialize(draft) !== baseline;
-  const reportDirty = useRef(onDirtyChange);
-  useEffect(() => { reportDirty.current = onDirtyChange; });
-  useEffect(() => { reportDirty.current?.(isDirty); }, [isDirty]);
+  useReportDirty(isDirty, onDirtyChange);
 
   const patch = useCallback((change: Partial<Draft>) => {
     setDraft((current) => (current ? { ...current, ...change } : current));
@@ -360,7 +357,10 @@ export const AgentBehaviorForm = ({
     }
   }, [canDelete, agent, workspaceId, onDeleted]);
 
-  if (loading || (agent && !draft)) {
+  // Hosts load every dep at once, so settled defaults mean the connection,
+  // skill and server lists are in too: until then the overview would warn
+  // about a missing connection and empty lists that are only loading.
+  if (loading || deps.defaultExecution === undefined || (agent && !draft)) {
     return (
       <div className={form.page} aria-busy="true" aria-label="Loading agent">
         <div className={form.skeleton}><span /><span /><span /></div>
@@ -463,7 +463,7 @@ export const AgentBehaviorForm = ({
               : !currentUsable
                 ? 'This connection is gone or turned off. Pick another one.'
                 : extraConnections > 0
-                  ? `${extraConnections} more saved connection${extraConnections === 1 ? ' is' : 's are'} never used; picking here keeps only this one.`
+                  ? `${extraConnections} more saved connection${extraConnections === 1 ? ' is' : 's are'} never used; picking another replaces them all.`
                   : 'One connection, no automatic fallback.'}
           </p>
         </div>
@@ -533,16 +533,19 @@ export const AgentBehaviorForm = ({
             <header className={form.panelHeader}>
               <h3 className={form.panelTitle} id={`${ids}-skills`}>Skills</h3>
               <span className={form.panelMeta}>{selectedSkillCount} of {deps.skills.length} selected</span>
-              {selectedSkillCount > 0 && (
+              {groups.length > 0 && (
                 <span className={form.panelActions}>
-                  <button
-                    type="button"
-                    className={form.quietButton}
-                    onClick={() => patch({ skillIds: draft.skillIds.filter((id) => !deps.skills.some((s) => s.id === id)) })}
-                    disabled={busy}
-                  >
-                    Clear all
-                  </button>
+                  <SkillSearch value={skillQuery} onChange={setSkillQuery} disabled={busy} />
+                  {selectedSkillCount > 0 && (
+                    <button
+                      type="button"
+                      className={form.quietButton}
+                      onClick={() => patch({ skillIds: draft.skillIds.filter((id) => !deps.skills.some((s) => s.id === id)) })}
+                      disabled={busy}
+                    >
+                      Clear all
+                    </button>
+                  )}
                 </span>
               )}
             </header>
@@ -552,6 +555,7 @@ export const AgentBehaviorForm = ({
               ) : (
                 <SkillSources
                   groups={groups}
+                  query={skillQuery}
                   selectedIds={draft.skillIds}
                   onChange={(skillIds) => patch({ skillIds })}
                   onOpen={(key) => openView({ kind: 'source', key }, key)}

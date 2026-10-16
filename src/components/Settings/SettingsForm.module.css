@@ -106,11 +106,6 @@
   min-width: 0;
 }
 
-.fieldFill {
-  flex: 1;
-  min-height: 0;
-}
-
 .label {
   font-size: 12px;
   font-weight: 600;
@@ -186,21 +181,6 @@
 
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-.checkboxRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: fit-content;
-  font-size: 13px;
-  color: var(--color-text-primary);
-  cursor: pointer;
-}
-
-.checkboxRow input[type="checkbox"] {
-  margin: 0;
-  cursor: pointer;
 }
 
 /* Read-only metadata: an id, a path. */

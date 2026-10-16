@@ -24,7 +24,7 @@ describe('groupSkills', () => {
 describe('SkillSources', () => {
   it('opens the source a row stands for', async () => {
     const onOpen = vi.fn();
-    render(<SkillSources groups={groupSkills(SKILLS)} selectedIds={['pdf']} onChange={vi.fn()} onOpen={onOpen} />);
+    render(<SkillSources groups={groupSkills(SKILLS)} query="" selectedIds={['pdf']} onChange={vi.fn()} onOpen={onOpen} />);
 
     await userEvent.click(screen.getByRole('button', { name: 'clai-skills, 0 of 1 selected' }));
 
@@ -34,9 +34,8 @@ describe('SkillSources', () => {
 
   it('toggles a skill straight from the search results, matching descriptions too', async () => {
     const onChange = vi.fn();
-    render(<SkillSources groups={groupSkills(SKILLS)} selectedIds={['pdf']} onChange={onChange} onOpen={vi.fn()} />);
+    render(<SkillSources groups={groupSkills(SKILLS)} query="spread" selectedIds={['pdf']} onChange={onChange} onOpen={vi.fn()} />);
 
-    await userEvent.type(screen.getByRole('searchbox', { name: 'Search skills' }), 'spread');
     await userEvent.click(screen.getByRole('checkbox', { name: 'xlsx' }));
 
     expect(onChange).toHaveBeenCalledWith(['pdf', 'xlsx']);

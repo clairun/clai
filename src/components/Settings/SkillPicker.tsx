@@ -3,8 +3,8 @@
  * of it is selected; opening one shows only that source's skills as a
  * compact grid, with the description of the skill under the pointer or
  * focus in a fixed strip below, so even the largest source fits without
- * scrolling. A search on the overview finds a skill without knowing its
- * source.
+ * scrolling. A search (`SkillSearch`, in the host's panel header) finds a
+ * skill without knowing its source.
  *
  * Selection is an opaque set of ids: this says nothing about what selecting
  * a skill costs, which is the backend's business.
@@ -110,18 +110,34 @@ export const NoSkills = () => (
   </div>
 );
 
+export const SkillSearch = ({ value, onChange, disabled }: {
+  value: string;
+  onChange: (value: string) => void;
+  disabled?: boolean;
+}) => (
+  <input
+    type="search"
+    className={`${form.input} ${styles.filter}`}
+    value={value}
+    onChange={(e) => onChange(e.target.value)}
+    placeholder="Find a skill…"
+    aria-label="Search skills"
+    disabled={disabled}
+  />
+);
+
 /**
- * The overview: one row per source with its selected count, or, while a
- * search is typed, every matching skill across sources.
+ * The overview: one row per source with its selected count, or, while
+ * `query` is typed, every matching skill across sources.
  */
-export const SkillSources = ({ groups, selectedIds, onChange, onOpen, disabled }: {
+export const SkillSources = ({ groups, query, selectedIds, onChange, onOpen, disabled }: {
   groups: SkillGroup[];
+  query: string;
   selectedIds: string[];
   onChange: (next: string[]) => void;
   onOpen: (key: string) => void;
   disabled?: boolean;
 }) => {
-  const [query, setQuery] = useState('');
   const [focused, setFocused] = useState<SkillOption | null>(null);
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
   const trimmed = query.trim().toLowerCase();
@@ -134,15 +150,6 @@ export const SkillSources = ({ groups, selectedIds, onChange, onOpen, disabled }
 
   return (
     <>
-      <input
-        type="search"
-        className={`${form.input} ${styles.search}`}
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Find a skill in any source…"
-        aria-label="Search skills"
-        disabled={disabled}
-      />
       {!trimmed ? (
         <ul className={styles.sources} aria-label="Skill sources">
           {groups.map((group) => {
@@ -212,10 +219,12 @@ export const SkillSourceView = ({ group, selectedIds, onChange, disabled, headin
   const trimmed = filter.trim().toLowerCase();
   const shown = trimmed ? group.skills.filter((skill) => matches(skill, trimmed)) : group.skills;
   const count = group.skills.filter((skill) => selected.has(skill.id)).length;
-  const allOn = count === group.skills.length;
+  // Select all / Clear act on what the filter shows.
+  const shownOn = shown.filter((skill) => selected.has(skill.id)).length;
+  const allOn = shownOn === shown.length;
 
   const setAll = (on: boolean) => {
-    const ids = group.skills.map((skill) => skill.id);
+    const ids = shown.map((skill) => skill.id);
     if (on) onChange([...selectedIds, ...ids.filter((id) => !selected.has(id))]);
     else onChange(selectedIds.filter((id) => !ids.includes(id)));
   };
@@ -238,10 +247,10 @@ export const SkillSourceView = ({ group, selectedIds, onChange, disabled, headin
             aria-label={`Filter ${group.name}`}
             disabled={disabled}
           />
-          <button type="button" className={form.quietButton} onClick={() => setAll(!allOn)} disabled={disabled}>
+          <button type="button" className={form.quietButton} onClick={() => setAll(!allOn)} disabled={disabled || shown.length === 0}>
             {allOn ? 'Clear all' : 'Select all'}
           </button>
-          {count > 0 && !allOn && (
+          {shownOn > 0 && !allOn && (
             <button type="button" className={form.quietButton} onClick={() => setAll(false)} disabled={disabled}>
               Clear
             </button>

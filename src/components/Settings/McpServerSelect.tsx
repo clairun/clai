@@ -3,10 +3,13 @@
  * so the choice reads at a glance without opening it; the popover is a
  * plain checkbox list. Escape closes the popover only (it joins the
  * overlay stack), and focus goes back to the trigger.
+ *
+ * The popover renders right after its trigger, not in a portal: it stays
+ * inside the host dialog, and Tab order runs trigger → popover → the next
+ * control, so Shift+Tab reaches the trigger and Tab past the end closes it.
  */
 
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import ReactDOM from 'react-dom';
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import { openGlobalSettings } from '../../utils/globalSettings';
 import styles from './McpServerSelect.module.css';
@@ -110,6 +113,7 @@ const McpServerSelect = ({
         className={`${styles.trigger} ${open ? styles.triggerOpen : ''}`}
         onClick={() => (open ? close(false) : setOpen(true))}
         disabled={disabled || empty}
+        aria-haspopup="true"
         aria-expanded={open}
         aria-controls={open ? popoverId : undefined}
         aria-labelledby={`${labelId} ${popoverId}-value`}
@@ -123,7 +127,7 @@ const McpServerSelect = ({
         </svg>
       </button>
 
-      {open && ReactDOM.createPortal(
+      {open && (
         <div
           ref={popoverRef}
           id={popoverId}
@@ -175,8 +179,7 @@ const McpServerSelect = ({
               Manage servers…
             </button>
           </div>
-        </div>,
-        document.body
+        </div>
       )}
     </>
   );

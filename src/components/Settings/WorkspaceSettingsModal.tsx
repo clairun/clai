@@ -4,7 +4,8 @@
  * A settings window: a sidebar that always lists every page (General,
  * Schedule, Team; the Main and each crew member; Add to crew) and the
  * chosen page filling the rest. Pages are laid out for the window rather
- * than grown past it. Each page is a draft saved through the save bar;
+ * than grown past it. Each page is a draft saved through the save bar in
+ * its header, which takes no room while there is nothing to save;
  * leaving a page with unsaved changes asks first, whichever way you leave.
  */
 
@@ -340,7 +341,6 @@ const WorkspaceSettingsModal = ({
           <AgentBehaviorForm
             {...pageProps}
             agentId={sel.kind === 'agent' ? (sel.agentId ?? null) : null}
-            details={details}
             deps={deps}
             onDeleted={handleAgentRemoved}
           />
@@ -415,8 +415,18 @@ const WorkspaceSettingsModal = ({
           <header className={styles.header}>
             <div className={styles.headerText}>
               <h2 className={styles.title} ref={headingRef} tabIndex={-1}>{pageTitle(page)}</h2>
-              {subtitle && <p className={styles.subtitle}>{subtitle}</p>}
+              {subtitle && <p className={styles.subtitle} title={subtitle}>{subtitle}</p>}
             </div>
+            {(dirty || pendingLeave || saveError) && (
+              <SaveBar
+                saving={saving}
+                error={saveError}
+                leaving={!!pendingLeave}
+                onAnswer={answerLeave}
+                onDiscard={discardPage}
+                onSave={savePage}
+              />
+            )}
             <button type="button" className={styles.closeButton} onClick={handleClose} aria-label="Close settings">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <line x1="18" y1="6" x2="6" y2="18" />
@@ -428,19 +438,6 @@ const WorkspaceSettingsModal = ({
           <div className={styles.body} key={`${currentKey}:${pageVersion}`}>
             {renderPage(page)}
           </div>
-
-          <footer className={styles.footer}>
-            {(dirty || pendingLeave || saveError) && (
-              <SaveBar
-                saving={saving}
-                error={saveError}
-                leaving={!!pendingLeave}
-                onAnswer={answerLeave}
-                onDiscard={discardPage}
-                onSave={savePage}
-              />
-            )}
-          </footer>
         </div>
       </div>
     </div>,
@@ -471,7 +468,7 @@ const SaveBar = ({ saving, error, leaving, onAnswer, onDiscard, onSave }: {
 }) => (
   <div className={`${styles.saveBar} ${leaving ? styles.saveBarAsking : ''}`} role="region" aria-label="Unsaved changes">
     {error ? (
-      <span className={styles.saveBarError} role="alert">{error}</span>
+      <span className={styles.saveBarError} role="alert" title={error}>{error}</span>
     ) : (
       <span className={styles.saveBarText} role={leaving ? 'alert' : undefined}>
         <span className={styles.saveBarDot} aria-hidden="true" />

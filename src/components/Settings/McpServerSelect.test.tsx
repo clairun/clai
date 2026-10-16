@@ -29,6 +29,7 @@ const Host = ({ initial = ['gh'], onChange = vi.fn(), onModalEscape = vi.fn(), s
         onChange={(next) => { setIds(next); onChange(next); }}
         labelId="mcp-label"
       />
+      <button type="button">Next control</button>
     </>
   );
 };
@@ -75,6 +76,24 @@ describe('McpServerSelect', () => {
 
     expect(onChange).toHaveBeenLastCalledWith(['gone']);
     expect(screen.getByRole('button', { name: 'MCP servers None' })).toBeInTheDocument();
+  });
+
+  it('keeps Tab order trigger → popover → next control, closing once focus moves past it', async () => {
+    render(<Host />);
+    const trigger = screen.getByRole('button', { name: /^MCP servers/ });
+    await userEvent.click(trigger);
+    expect(screen.getByRole('checkbox', { name: 'github' })).toHaveFocus();
+
+    // Back past the header's Turn all off reaches the trigger, still open.
+    await userEvent.tab({ shift: true });
+    await userEvent.tab({ shift: true });
+    expect(trigger).toHaveFocus();
+    expect(screen.getByRole('group', { name: 'MCP servers' })).toBeInTheDocument();
+
+    screen.getByRole('button', { name: 'Manage servers…' }).focus();
+    await userEvent.tab();
+    expect(screen.getByRole('button', { name: 'Next control' })).toHaveFocus();
+    expect(screen.queryByRole('group', { name: 'MCP servers' })).toBeNull();
   });
 
   it('closes on a click outside', async () => {
