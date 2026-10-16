@@ -453,7 +453,12 @@ const useAssistantStore = create<AssistantStoreState>()(
           // terminal event cannot leave the run timer ticking. The snapshot
           // may predate a run that started while it was in flight; it only
           // ends the live run if it contains that run or a newer one.
-          const live = existing?.runs.find(isRunActive);
+          const live = existing?.runs
+            .filter(isRunActive)
+            .reduce<AssistantRun | undefined>(
+              (newest, r) => (newest && newest.startedAt >= r.startedAt ? newest : r),
+              undefined,
+            );
           const snapshotCoversLive =
             !live || runs.some((r) => r.id === live.id || r.startedAt > live.startedAt);
           const endLive = snapshotCoversLive && !runs.some(isRunActive);

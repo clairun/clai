@@ -163,6 +163,23 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     expect(s.pendingAskUser).toEqual(ASK_REQUEST);
   });
 
+  it('keeps the newest live run when an older one missed its end event', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running', 1));
+    store.setRunStatus(SESSION.id, run('run-2', 'running', 2));
+    store.appendDelta(SESSION.id, 'msg-2', 'Hi');
+    store.setAskUserPending(SESSION.id, ASK_REQUEST);
+    const startedAt = useAssistantStore.getState().sessions[SESSION.id]!.runStartedAt;
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'completed', 1)], []);
+    const state = useAssistantStore.getState();
+    const s = state.sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(true);
+    expect(s.runStartedAt).toBe(startedAt);
+    expect(state.streamingText[SESSION.id]!['msg-2']).toBe('Hi');
+    expect(s.pendingAskUser).toEqual(ASK_REQUEST);
+  });
+
   it('ends the live run when the snapshot holds a newer terminal run', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
