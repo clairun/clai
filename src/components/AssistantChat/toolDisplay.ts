@@ -237,10 +237,13 @@ export interface TaskCallCard {
   assignedAgentDefinitionId: string;
   /** The assignee's name when the call answered; '' if the payload had none. */
   assignedAgentDisplayName: string;
+  /** Why a failed task failed; '' if the payload had none. */
+  failureReason: string;
   /**
-   * The task's own error — a run failure the user may need to act on; '' if
-   * none. Instructions and result summaries are written for agents, so the
-   * card leaves them to the task's log.
+   * A failed task's own error — a run failure the user may need to act on; ''
+   * otherwise. Instructions, result summaries and a blocked worker's reply
+   * (which the backend also stores as the error) are written for agents, so
+   * the card leaves them to the task's log.
    */
   error: string;
 }
@@ -295,6 +298,7 @@ export const inlineTaskCard = (
   const status = stringField(task, 'status');
   const assignedToWorkspaceAgentId = stringField(task, 'assignedToWorkspaceAgentId');
   if (!taskId || !title || !status || !assignedToWorkspaceAgentId) return null;
+  const failureReason = stringField(task, 'failureReason');
 
   return {
     kind,
@@ -305,7 +309,10 @@ export const inlineTaskCard = (
     assignedToWorkspaceAgentId,
     assignedAgentDefinitionId: stringField(task, 'assignedAgentDefinitionId'),
     assignedAgentDisplayName: stringField(task, 'assignedAgentDisplayName'),
-    error: clampCardText(stringField(task, 'error').trim()),
+    failureReason,
+    error: status === 'failed' && failureReason !== 'blocked'
+      ? clampCardText(stringField(task, 'error').trim())
+      : '',
   };
 };
 

@@ -268,6 +268,7 @@ describe('inlineTaskCard', () => {
       assignedToWorkspaceAgentId: 'wa-7',
       assignedAgentDefinitionId: 'def-7',
       assignedAgentDisplayName: 'Reviewer',
+      failureReason: '',
       error: '',
     });
   });
@@ -323,6 +324,37 @@ describe('inlineTaskCard', () => {
     );
     expect(card).toMatchObject({ error: 'boom' });
     expect(JSON.stringify(card)).not.toContain('partial work');
+  });
+
+  it('never carries a summary into the error of a task that has none', () => {
+    const card = inlineTaskCard(
+      'workspace_getTaskResult',
+      task({ status: 'completed', resultSummary: 'All done, see notes.' }),
+      null,
+      'completed'
+    );
+    expect(card).toMatchObject({ error: '' });
+    expect(JSON.stringify(card)).not.toContain('All done');
+  });
+
+  it('drops a blocked worker\'s reply, which the backend also stores as the error', () => {
+    const reply = 'BLOCKED: need a grant for ~/.ssh';
+    const card = inlineTaskCard(
+      'workspace_getTaskResult',
+      task({ status: 'failed', failureReason: 'blocked', resultSummary: reply, error: reply }),
+      null,
+      'completed'
+    );
+    expect(card).toMatchObject({ status: 'failed', failureReason: 'blocked', error: '' });
+    expect(JSON.stringify(card)).not.toContain('BLOCKED');
+  });
+
+  it('shows the error only on a failed task', () => {
+    for (const status of ['completed', 'stopped']) {
+      expect(
+        inlineTaskCard('workspace_getTaskResult', task({ status, error: 'provider hiccup' }), null, 'completed')
+      ).toMatchObject({ error: '' });
+    }
   });
 
   it('unwraps the MCP envelope the bridged tools answer in', () => {

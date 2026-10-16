@@ -13,7 +13,7 @@ import { memo, useMemo } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
 import type { TaskCallCard } from '../AssistantChat/toolDisplay';
 import type { SenderAgent } from '../AssistantChat/messageSender';
-import { taskStatusLabel } from '../../utils/taskDisplay';
+import { taskDisplayStatus, taskStatusLabel } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import { agentDisplayName, taskIdentity } from './agentIdentity';
 import pills from './taskStatus.module.css';
@@ -51,11 +51,18 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
    *
    * Every delegation is a full card (`inlineTaskCard` forces `variant: 'full'`
    * for `kind: 'assign'`), so the slim line below always has one to draw.
+   *
+   * Only a failure goes through `taskDisplayStatus`, for its reason: the card
+   * has no `runId`, which that helper would read as waiting for subtasks.
    */
+  const status =
+    card.status === 'failed'
+      ? taskDisplayStatus({ status: card.status, failureReason: card.failureReason })
+      : { key: card.status, label: taskStatusLabel(card.status) };
   const pill =
     card.kind !== 'poll' ? null : (
-      <span className={`${pills.pill} ${pills[`pill_${card.status}`] || ''}`}>
-        {taskStatusLabel(card.status)}
+      <span className={`${pills.pill} ${pills[`pill_${status.key}`] || ''}`}>
+        {status.label}
       </span>
     );
 

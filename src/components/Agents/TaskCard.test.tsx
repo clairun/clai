@@ -34,6 +34,7 @@ const card = (over: Partial<TaskCallCard> = {}): TaskCallCard => ({
   assignedToWorkspaceAgentId: 'wa-review',
   assignedAgentDefinitionId: 'def-review',
   assignedAgentDisplayName: '',
+  failureReason: '',
   error: '',
   ...over,
 });
@@ -134,6 +135,14 @@ describe('TaskCard', () => {
     );
     expect(screen.getByText('Worker run record not found')).toBeInTheDocument();
     expect(screen.getByText('Failed')).toBeInTheDocument();
+  });
+
+  it('labels a blocked failure "Blocked"', () => {
+    render(
+      <TaskCard card={card({ kind: 'poll', status: 'failed', failureReason: 'blocked' })} roster={roster} />
+    );
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 
   it('keeps the whole card readable as the button name', () => {
