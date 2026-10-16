@@ -180,7 +180,6 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
         deps={deps}
         saving={saving}
         onDirtyChange={setDirty}
-        showHeading={false}
       />
 
       <div className={styles.actions}>

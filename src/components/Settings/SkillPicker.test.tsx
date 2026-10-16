@@ -1,121 +1,116 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-
-import SkillPicker, { type SkillOption } from './SkillPicker';
+import { createRef } from 'react';
+import { SkillSourceView, SkillSources, groupSkills, type SkillOption } from './SkillPicker';
 
 const SKILLS: SkillOption[] = [
-  { id: 'a/review', name: 'Code Review', description: 'Review a diff', sourceId: 'a', sourceName: 'Bundled' },
-  { id: 'a/ledger', name: 'Work Ledger', description: 'Track long tasks', sourceId: 'a', sourceName: 'Bundled' },
-  { id: 'b/deploy', name: 'Deploy', description: 'Ship to prod', sourceId: 'b', sourceName: 'Company' },
+  { id: 'xlsx', name: 'xlsx', description: 'Spreadsheets', sourceId: 'a', sourceName: 'anthropic-skills' },
+  { id: 'pdf', name: 'pdf', description: 'Read PDFs', sourceId: 'a', sourceName: 'anthropic-skills' },
+  { id: 'loose', name: 'loose' },
+  { id: 'review', name: 'code-review', description: 'Review a change', sourceId: 'c', sourceName: 'clai-skills' },
 ];
 
-/** Renders with selection held in a closure so onChange round-trips. */
-const setup = (initial: string[] = []) => {
+describe('groupSkills', () => {
+  it('groups by source, sorted by name, with source-less skills under Other', () => {
+    expect(groupSkills(SKILLS).map((g) => [g.name, g.skills.map((s) => s.id)])).toEqual([
+      ['anthropic-skills', ['pdf', 'xlsx']],
+      ['clai-skills', ['review']],
+      ['Other', ['loose']],
+    ]);
+  });
+});
+
+describe('SkillSources', () => {
+  it('opens the source a row stands for', async () => {
+    const onOpen = vi.fn();
+    render(<SkillSources groups={groupSkills(SKILLS)} selectedIds={['pdf']} onChange={vi.fn()} onOpen={onOpen} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'clai-skills, 0 of 1 selected' }));
+
+    expect(onOpen).toHaveBeenCalledWith('c');
+    expect(screen.getByRole('button', { name: 'anthropic-skills, 1 of 2 selected' })).toBeInTheDocument();
+  });
+
+  it('toggles a skill straight from the search results, matching descriptions too', async () => {
+    const onChange = vi.fn();
+    render(<SkillSources groups={groupSkills(SKILLS)} selectedIds={['pdf']} onChange={onChange} onOpen={vi.fn()} />);
+
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Search skills' }), 'spread');
+    await userEvent.click(screen.getByRole('checkbox', { name: 'xlsx' }));
+
+    expect(onChange).toHaveBeenCalledWith(['pdf', 'xlsx']);
+  });
+});
+
+const renderSource = (selectedIds: string[] = [], disabled = false) => {
   const onChange = vi.fn();
-  const view = render(
-    <SkillPicker skills={SKILLS} selectedIds={initial} onChange={onChange} />
+  const onBack = vi.fn();
+  const group = groupSkills(SKILLS)[0]!;
+  render(
+    <SkillSourceView
+      group={group}
+      selectedIds={selectedIds}
+      onChange={onChange}
+      onBack={onBack}
+      headingRef={createRef()}
+      context="Main"
+      disabled={disabled}
+    />
   );
-  return { onChange, view };
+  return { onChange, onBack };
 };
 
-describe('SkillPicker', () => {
-  it('groups skills under their source with a selected count', () => {
-    setup(['a/review']);
-    expect(screen.getByText('Bundled')).toBeInTheDocument();
-    expect(screen.getByText('Company')).toBeInTheDocument();
-    expect(screen.getByText('1/2')).toBeInTheDocument();
-    expect(screen.getByText('0/1')).toBeInTheDocument();
-    expect(screen.getByText('1 of 3 selected')).toBeInTheDocument();
+describe('SkillSourceView', () => {
+  it('marks selected tiles and keeps ids from other sources when toggling', async () => {
+    const { onChange } = renderSource(['review', 'pdf']);
+
+    expect(screen.getByRole('checkbox', { name: 'pdf' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'xlsx' })).not.toBeChecked();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'pdf' }));
+
+    expect(onChange).toHaveBeenCalledWith(['review']);
   });
 
-  it('filters by name and by description', async () => {
-    const user = userEvent.setup();
-    setup();
-    const search = screen.getByLabelText('Search skills');
+  it('clears only this source when part of it is selected', async () => {
+    const { onChange } = renderSource(['review', 'pdf']);
 
-    await user.type(search, 'ledger');
-    expect(screen.getByText('Work Ledger')).toBeInTheDocument();
-    expect(screen.queryByText('Code Review')).toBeNull();
-    expect(screen.queryByText('Company')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Clear' }));
 
-    await user.clear(search);
-    await user.type(search, 'ship to prod');
-    expect(screen.getByText('Deploy')).toBeInTheDocument();
-    expect(screen.queryByText('Work Ledger')).toBeNull();
+    expect(onChange).toHaveBeenCalledWith(['review']);
   });
 
-  it('reports no matches without hiding the search box', async () => {
-    const user = userEvent.setup();
-    setup();
-    await user.type(screen.getByLabelText('Search skills'), 'zzz');
-    expect(screen.getByText(/No skills match/)).toBeInTheDocument();
-    expect(screen.getByLabelText('Search skills')).toBeInTheDocument();
+  it('describes the skill under focus in the strip, since tiles show names only', async () => {
+    renderSource();
+    expect(screen.getByText(/Point at a skill/)).toBeInTheDocument();
+
+    act(() => screen.getByRole('checkbox', { name: 'xlsx' }).focus());
+
+    expect(screen.getByText('Spreadsheets')).toBeInTheDocument();
   });
 
-  it('selects every skill in a source in one action', async () => {
-    const user = userEvent.setup();
-    const { onChange } = setup();
-    const bundled = screen.getByText('Bundled').closest('section') as HTMLElement;
-    await user.click(within(bundled).getByRole('button', { name: 'Select all' }));
-    expect(onChange).toHaveBeenCalledWith(['a/review', 'a/ledger']);
+  it('filters within the source and says when nothing matches', async () => {
+    renderSource();
+
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Filter anthropic-skills' }), 'pdf');
+    expect(within(screen.getByRole('list', { name: 'Skills in anthropic-skills' })).getAllByRole('checkbox')).toHaveLength(1);
+
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Filter anthropic-skills' }), 'zzz');
+    expect(screen.getByRole('status')).toHaveTextContent('No skills in anthropic-skills match');
   });
 
-  it('clears a source without touching other sources', async () => {
-    const user = userEvent.setup();
-    const { onChange } = setup(['a/review', 'a/ledger', 'b/deploy']);
-    const bundled = screen.getByText('Bundled').closest('section') as HTMLElement;
-    await user.click(within(bundled).getByRole('button', { name: 'Clear' }));
-    expect(onChange).toHaveBeenCalledWith(['b/deploy']);
+  it('goes back through its crumb', async () => {
+    const { onBack } = renderSource();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Back to Main' }));
+
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 
-  it('toggles a single skill by checkbox', async () => {
-    const user = userEvent.setup();
-    const { onChange } = setup([]);
-    await user.click(screen.getByRole('checkbox', { name: /Deploy/ }));
-    expect(onChange).toHaveBeenCalledWith(['b/deploy']);
-  });
+  it('disables every selection control when disabled', () => {
+    renderSource([], true);
 
-  it('removes a selected skill from its chip', async () => {
-    const user = userEvent.setup();
-    const { onChange } = setup(['a/review', 'b/deploy']);
-    await user.click(screen.getByRole('button', { name: 'Remove Deploy' }));
-    expect(onChange).toHaveBeenCalledWith(['a/review']);
-  });
-
-  it('clears the whole selection', async () => {
-    const user = userEvent.setup();
-    const { onChange } = setup(['a/review', 'b/deploy']);
-    await user.click(screen.getByRole('button', { name: 'Clear all' }));
-    expect(onChange).toHaveBeenCalledWith([]);
-  });
-
-  it('collapses a source and hides only its skills', async () => {
-    const user = userEvent.setup();
-    setup();
-    await user.click(screen.getByRole('button', { expanded: true, name: /Bundled/ }));
-    expect(screen.queryByText('Code Review')).toBeNull();
-    expect(screen.getByText('Deploy')).toBeInTheDocument();
-  });
-
-  it('keeps groups open while a search is active', async () => {
-    const user = userEvent.setup();
-    setup();
-    await user.click(screen.getByRole('button', { expanded: true, name: /Bundled/ }));
-    expect(screen.queryByText('Code Review')).toBeNull();
-    await user.type(screen.getByLabelText('Search skills'), 'review');
-    expect(screen.getByText('Code Review')).toBeInTheDocument();
-  });
-
-  it('tells the user where skills come from when there are none', () => {
-    render(<SkillPicker skills={[]} selectedIds={[]} onChange={vi.fn()} />);
-    expect(screen.getByText(/Add a skill source in app settings/)).toBeInTheDocument();
-  });
-
-  it('disables every control when disabled', () => {
-    render(<SkillPicker skills={SKILLS} selectedIds={['a/review']} onChange={vi.fn()} disabled />);
-    expect(screen.getByLabelText('Search skills')).toBeDisabled();
-    expect(screen.getByRole('checkbox', { name: /Deploy/ })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Clear all' })).toBeDisabled();
+    for (const box of screen.getAllByRole('checkbox')) expect(box).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Select all' })).toBeDisabled();
   });
 });

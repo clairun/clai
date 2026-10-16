@@ -1,36 +1,38 @@
 /**
  * AgentBehaviorForm
  *
- * The one form that edits what an agent *is*: name, description, skills,
- * MCP servers, provider connections and local capabilities. Two hosts
- * render it — the Workspace Settings modal (this workspace's Main, saves
- * through the workspace commands) and the agent library
- * (shared definition, saves through `saveBehavior`). Both drive it through
- * the imperative `SectionHandle` so a global Save button can validate and
- * submit it without owning its state.
+ * The one form that edits what an agent *is*: instructions, the model it
+ * runs on, MCP servers, skills and local access. Two hosts render it — the
+ * workspace settings window (this workspace's Main) and the agent library
+ * (a shared definition, saved through `saveBehavior`). Both drive it through
+ * `SectionHandle`.
+ *
+ * Laid out as an overview that fits one screen, with two drill-in views for
+ * what does not: one skill source, and local access. `back()` on the handle
+ * leaves a drill-in view.
  */
 
-import React, { useState, useEffect, useCallback, useImperativeHandle, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   workspaceCreateAgent,
   workspaceDeleteAgent,
   workspaceGetAgent,
   workspaceUpdateAgent,
 } from '../../api/client';
-import SkillPicker from './SkillPicker';
 import type {
   ExecutionCapabilityConfig,
-  FilesystemPathAccess,
   FilesystemPathGrant,
-  GrantOrigin,
   ProviderConnection,
-  ShellAccessMode,
   WorkspaceDetails,
 } from '../../generated/bindings';
+import { openGlobalSettings } from '../../utils/globalSettings';
 import type { SectionHandle } from './sectionHandle';
-// Shares the modal's stylesheet on purpose: the form is rendered inside the
-// modal's content pane and must match its fields, toggles and chips exactly.
-import styles from './WorkspaceSettingsModal.module.css';
+import McpServerSelect from './McpServerSelect';
+import { NoSkills, SkillSources, SkillSourceView, groupSkills } from './SkillPicker';
+import { AccessView, accessSummary, type AccessDraft } from './AgentAccess';
+import { Switch } from './ListEditors';
+import form from './SettingsForm.module.css';
+import styles from './AgentBehaviorForm.module.css';
 
 interface NamedRef {
   id: string;
@@ -75,128 +77,89 @@ export interface AgentFormDeps {
   defaultExecution: Partial<ExecutionCapabilityConfig> | null | undefined;
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────────────
+type View = { kind: 'overview' } | { kind: 'source'; key: string } | { kind: 'access' };
 
-const defaultExecution = (): ExecutionCapabilityConfig => ({
-  sandbox: { network: 'enabled', sessionBus: 'allow' },
-  filesystem: { extraPaths: [] },
-  shell: {
-    mode: 'off',
-    allowedCommandPrefixes: [],
-    blockedCommandPrefixes: [
-      'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
-    ],
-  },
-  web: { enabled: false },
+// ── Helpers ─────────────────────────────────────────────────────────
+
+const DEFAULT_BLOCKED = ['rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot'];
+
+const clean = (items: string[] = []): string[] => items.map((item) => item.trim()).filter(Boolean);
+
+const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessDraft => ({
+  grants: (execution.filesystem?.extraPaths || [])
+    .map((grant: FilesystemPathGrant) => ({
+      path: grant.path?.trim() || '',
+      access: grant.access || 'read_only',
+      origin: grant.origin || null,
+    }))
+    .filter((grant) => grant.path),
+  shellMode: execution.shell?.mode || 'off',
+  allowed: clean(execution.shell?.allowedCommandPrefixes || []),
+  blocked: clean(execution.shell?.blockedCommandPrefixes || DEFAULT_BLOCKED),
+  web: execution.web?.enabled || false,
+  sessionBus: (execution.sandbox?.sessionBus || 'allow') === 'allow',
 });
 
-const normalizeItems = (items: string[] = []): string[] =>
-  items.map((item) => item.trim()).filter(Boolean);
+const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => ({
+  sandbox: { network: 'enabled', sessionBus: access.sessionBus ? 'allow' : 'deny' },
+  filesystem: { extraPaths: access.grants },
+  shell: {
+    mode: access.shellMode,
+    allowedCommandPrefixes: access.allowed,
+    blockedCommandPrefixes: access.blocked,
+  },
+  web: { enabled: access.web },
+});
 
-const addUniqueItem = (items: string[], value: string): string[] => {
-  const trimmed = value.trim();
-  if (!trimmed || items.includes(trimmed)) return items;
-  return [...items, trimmed];
-};
-
-const normalizePathGrants = (items: FilesystemPathGrant[] = []): FilesystemPathGrant[] =>
-  items
-    .map((item) => ({
-      path: item.path?.trim() || '',
-      access: item.access || 'read_only',
-      origin: item.origin || null,
-    }))
-    .filter((item) => item.path);
-
-const grantOriginLabel = (origin: GrantOrigin | null | undefined): string => {
-  if (!origin || origin.kind === 'manual') return 'Manual';
-  if (origin.kind === 'credentialsPreset') return 'Preset';
-  if (origin.kind === 'approval') {
-    const when = origin.grantedAtUnixMs
-      ? new Date(Number(origin.grantedAtUnixMs)).toLocaleDateString(undefined, {
-          year: 'numeric',
-          month: 'short',
-          day: 'numeric',
-        })
-      : null;
-    return when ? `Approved ${when}` : 'Approved';
-  }
-  return 'Manual';
-};
-
-const normalizeExecution = (execution: Partial<ExecutionCapabilityConfig> = {}): ExecutionCapabilityConfig => {
-  const d = defaultExecution();
-  return {
-    sandbox: {
-      network: execution.sandbox?.network || d.sandbox.network,
-      sessionBus: execution.sandbox?.sessionBus || d.sandbox.sessionBus,
-    },
-    filesystem: {
-      extraPaths: normalizePathGrants(execution.filesystem?.extraPaths || d.filesystem.extraPaths),
-    },
-    shell: {
-      mode: execution.shell?.mode || d.shell.mode,
-      allowedCommandPrefixes: normalizeItems(
-        execution.shell?.allowedCommandPrefixes || d.shell.allowedCommandPrefixes
-      ),
-      blockedCommandPrefixes: normalizeItems(execution.shell?.blockedCommandPrefixes || d.shell.blockedCommandPrefixes),
-    },
-    web: { enabled: execution.web?.enabled || false },
-  };
-};
-
-// Canonical JSON of the editable agent fields. Used to compare current
-// form state against the loaded baseline so the Save button can disable
-// itself when there are no pending changes. Pure function — pass already
-// normalized values (e.g., execution coming from normalizeExecution).
-interface AgentPayloadInput {
-  name?: string;
-  description?: string;
-  selectedSkillIds?: string[];
-  selectedMcpServerIds?: string[];
-  providerConnectionIds?: string[];
-  sessionBusAllowed?: boolean;
-  extraPathGrants?: FilesystemPathGrant[];
-  shellMode?: string;
-  allowedCommands?: string[];
-  blockedCommands?: string[];
-  webEnabled?: boolean;
-  enabled?: boolean;
+interface Draft {
+  name: string;
+  description: string;
+  skillIds: string[];
+  mcpIds: string[];
+  connectionIds: string[];
+  access: AccessDraft;
+  enabled: boolean;
 }
 
-const serializeAgentPayload = ({
-  name,
-  description,
-  selectedSkillIds,
-  selectedMcpServerIds,
-  providerConnectionIds,
-  sessionBusAllowed,
-  extraPathGrants,
-  shellMode,
-  allowedCommands,
-  blockedCommands,
-  webEnabled,
-  enabled,
-}: AgentPayloadInput): string => JSON.stringify({
-  name: (name || '').trim(),
-  description: (description || '').trim(),
-  selectedSkillIds: [...(selectedSkillIds || [])],
-  selectedMcpServerIds: [...(selectedMcpServerIds || [])],
-  providerConnectionIds: [...(providerConnectionIds || [])],
-  execution: {
-    sandbox: { sessionBus: sessionBusAllowed ? 'allow' : 'deny' },
-    filesystem: { extraPaths: extraPathGrants || [] },
-    shell: {
-      mode: shellMode,
-      allowedCommandPrefixes: allowedCommands || [],
-      blockedCommandPrefixes: blockedCommands || [],
-    },
-    web: { enabled: !!webEnabled },
-  },
-  enabled: !!enabled,
+const draftFrom = (agent: AgentDetail): Draft => ({
+  name: agent.name || '',
+  description: agent.description || '',
+  skillIds: agent.selectedSkillIds || [],
+  mcpIds: agent.selectedMcpServerIds || [],
+  connectionIds: agent.providerConnectionIds || [],
+  access: accessFrom(agent.execution),
+  enabled: agent.enabled !== false,
 });
+
+// Canonical form of the editable fields; dirty = differs from the baseline.
+const serialize = (draft: Draft): string => JSON.stringify({
+  ...draft,
+  name: draft.name.trim(),
+  description: draft.description.trim(),
+});
+
+const errText = (err: unknown, fallback: string): string =>
+  typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
+
+const connectionLabel = (connection: ProviderConnection): string =>
+  connection.modelId ? `${connection.name} — ${connection.modelId}` : connection.name;
+
+// Initial draft for a new agent. The backend's default execution carries the
+// `$HOME` read-only grant, so the user sees it before Save rather than having
+// it injected after; a failed fetch falls back to the local defaults.
+const blankAgent = (execution?: Partial<ExecutionCapabilityConfig>): AgentDetail => ({
+  id: '',
+  isDefault: false,
+  name: '',
+  description: '',
+  selectedSkillIds: [],
+  selectedMcpServerIds: [],
+  providerConnectionIds: [],
+  execution: execution || { shell: { mode: 'off', allowedCommandPrefixes: [], blockedCommandPrefixes: DEFAULT_BLOCKED } },
+  enabled: true,
+});
+
+// ── Form ────────────────────────────────────────────────────────────
 
 export const AgentBehaviorForm = ({
   ref,
@@ -204,79 +167,47 @@ export const AgentBehaviorForm = ({
   agentId,             // string for edit; null for create
   initialAgent,
   saveBehavior,
-  details: _details,   // unused; kept in signature for future use (e.g., showing peer agents)
   deps,
   saving,              // host save in flight — disables inputs
   onDirtyChange,
   onDeleted,
-  showHeading = true,
 }: {
   ref: React.Ref<SectionHandle>;
   workspaceId: string;
   agentId: string | null;
-  details: WorkspaceDetails | null;
+  details?: WorkspaceDetails | null;
   initialAgent?: AgentDetail;
   saveBehavior?: (payload: AgentBehaviorPayload) => Promise<void>;
   deps: AgentFormDeps;
   saving: boolean;
   onDirtyChange?: (isDirty: boolean) => void;
   onDeleted?: () => void;
-  /** False when the host draws its own title (the library editor does). */
-  showHeading?: boolean;
 }) => {
   const isCreate = !agentId;
-  // Both flows start in a loading state: edit waits on `workspaceGetAgent`,
-  // create waits on `deps.defaultExecution` so the form opens with the
-  // backend's `$HOME` RO grant pre-populated instead of an empty list.
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Local busy flag for the Delete imperative action. Save goes through
-  // the parent's `saving` prop.
   const [deleting, setDeleting] = useState(false);
   const busy = saving || deleting;
 
-  // Source-of-truth agent payload (loaded for edit, blank draft for create
-  // — populated once `deps.defaultExecution` arrives).
   const [agent, setAgent] = useState<AgentDetail | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  // State, not a ref: a new baseline after a save must re-render so the
+  // dirty flag flips and is reported, whether or not the host re-renders.
+  const [baseline, setBaseline] = useState<string | null>(null);
+  const [view, setView] = useState<View>({ kind: 'overview' });
+
   const isManager = agent?.isDefault === true;
   const canDelete = !saveBehavior && !isCreate && !isManager;
 
-  // Form state
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [selectedMcpServerIds, setSelectedMcpServerIds] = useState<string[]>([]);
-  const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
-  const [providerConnectionIds, setProviderConnectionIds] = useState<string[]>([]);
-  const [providerConnectionDraft, setProviderConnectionDraft] = useState('');
-  const [extraPathGrants, setExtraPathGrants] = useState<FilesystemPathGrant[]>([]);
-  const [extraPathDraft, setExtraPathDraft] = useState('');
-  const [extraPathAccess, setExtraPathAccess] = useState<FilesystemPathAccess>('read_only');
-  const [sessionBusAllowed, setSessionBusAllowed] = useState(true);
-  const [shellMode, setShellMode] = useState<ShellAccessMode>('off');
-  const [allowedCommands, setAllowedCommands] = useState<string[]>([]);
-  const [blockedCommands, setBlockedCommands] = useState(defaultExecution().shell.blockedCommandPrefixes);
-  const [allowedCommandDraft, setAllowedCommandDraft] = useState('');
-  const [blockedCommandDraft, setBlockedCommandDraft] = useState('');
-  const [webEnabled, setWebEnabled] = useState(false);
-  const [enabled, setEnabled] = useState(true);
-
-  // Track which agentId we last fetched, so the effect doesn't refetch on
-  // every re-render. setting key={agentId} on the parent already remounts
-  // but this is a belt-and-braces for future callers.
+  const viewHeading = useRef<HTMLHeadingElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // The overview control that opened the current view; focus returns to it.
+  const opener = useRef<string | null>(null);
   const lastFetchedId = useRef<string | null>(null);
+  const ids = useId();
 
-  // Baseline payload captured at load time. The Save button compares
-  // current form state against this to decide whether anything is pending.
-  // Updated after a successful save so Save re-disables until the user
-  // edits again. State, not a ref: writing the new baseline after a save
-  // must itself re-render the form so `isDirty` flips and is reported to
-  // the host, whether or not the host re-renders us for its own reasons.
-  const [baselinePayload, setBaselinePayload] = useState<string | null>(null);
-
-  // Load the agent for the edit flow.
   useEffect(() => {
-    if (!agentId) return undefined;
-    if (lastFetchedId.current === agentId) return undefined;
+    if (!agentId || lastFetchedId.current === agentId) return undefined;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -291,8 +222,7 @@ export const AgentBehaviorForm = ({
         setAgent(detail);
       })
       .catch((err) => {
-        if (cancelled) return;
-        setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to load agent.');
+        if (!cancelled) setError(errText(err, 'Failed to load agent.'));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -300,685 +230,361 @@ export const AgentBehaviorForm = ({
     return () => { cancelled = true; };
   }, [workspaceId, agentId, initialAgent]);
 
-  // Initialize the blank draft for create flow once the backend's
-  // default-execution fetch has resolved (success or failure). Doing this
-  // here — rather than in the useState initializer — means the form opens
-  // with `$HOME` RO already showing in the path-grants list, which the
-  // user can ×-remove before clicking Create. A failed fetch falls back
-  // to the local empty execution so the create flow still works.
+  // A create waits for the backend defaults (or their failure) before it
+  // shows anything, so the default grants are on screen from the start.
   useEffect(() => {
-    if (!isCreate) return;
-    if (agent) return;                              // already initialized
-    if (deps?.defaultExecution === undefined) return; // fetch still pending
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Bootstraps the create-flow draft from the resolved defaultExecution; the lint cannot model the fetch-pending guard (deps?.defaultExecution === undefined).
-    setAgent(blankAgentDraft(deps.defaultExecution || undefined));
+    if (!isCreate || agent || deps.defaultExecution === undefined) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- bootstraps the create draft once the defaults fetch has settled.
+    setAgent(blankAgent(deps.defaultExecution || undefined));
     setLoading(false);
-  }, [isCreate, agent, deps?.defaultExecution]);
+  }, [isCreate, agent, deps.defaultExecution]);
 
-  // Reset form fields whenever the source agent changes
   useEffect(() => {
     if (!agent) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resets all 15+ form fields when the source agent changes; the lint cannot model a multi-field prop→state mirror without causing cascading renders on every input.
-    setName(agent.name || '');
-    setDescription(agent.description || '');
-    setSelectedMcpServerIds(agent.selectedMcpServerIds || []);
-    setSelectedSkillIds(agent.selectedSkillIds || []);
-    setProviderConnectionIds(agent.providerConnectionIds || []);
-    setProviderConnectionDraft('');
-    const execution = normalizeExecution(agent.execution);
-    setExtraPathGrants(execution.filesystem.extraPaths);
-    setExtraPathDraft('');
-    setExtraPathAccess('read_only');
-    setSessionBusAllowed(execution.sandbox.sessionBus === 'allow');
-    setShellMode(execution.shell.mode);
-    setAllowedCommands(execution.shell.allowedCommandPrefixes);
-    setBlockedCommands(execution.shell.blockedCommandPrefixes);
-    setAllowedCommandDraft('');
-    setBlockedCommandDraft('');
-    setWebEnabled(execution.web.enabled);
-    setEnabled(agent.enabled !== false);
-
-    // Capture the baseline that matches the values we just loaded into
-    // form state. Built from the same normalized `execution` so the
-    // representation matches what `currentPayload` will produce.
-    setBaselinePayload(serializeAgentPayload({
-      name: agent.name,
-      description: agent.description,
-      selectedSkillIds: agent.selectedSkillIds,
-      selectedMcpServerIds: agent.selectedMcpServerIds,
-      providerConnectionIds: agent.providerConnectionIds,
-      sessionBusAllowed: execution.sandbox.sessionBus === 'allow',
-      extraPathGrants: execution.filesystem.extraPaths,
-      shellMode: execution.shell.mode,
-      allowedCommands: execution.shell.allowedCommandPrefixes,
-      blockedCommands: execution.shell.blockedCommandPrefixes,
-      webEnabled: execution.web.enabled,
-      enabled: agent.enabled !== false,
-    }));
+    const next = draftFrom(agent);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the draft and its baseline are rebuilt together whenever the source agent changes.
+    setDraft(next);
+    setBaseline(serialize(next));
   }, [agent]);
 
-  const enabledProviderConnections = useMemo(
-    () => (deps?.providerConnections || []).filter((c) => c.enabled),
-    [deps?.providerConnections]
+  const isDirty = draft !== null && baseline !== null && serialize(draft) !== baseline;
+  const reportDirty = useRef(onDirtyChange);
+  useEffect(() => { reportDirty.current = onDirtyChange; });
+  useEffect(() => { reportDirty.current?.(isDirty); }, [isDirty]);
+
+  const patch = useCallback((change: Partial<Draft>) => {
+    setDraft((current) => (current ? { ...current, ...change } : current));
+  }, []);
+
+  const groups = useMemo(() => groupSkills(deps.skills || []), [deps.skills]);
+  const enabledConnections = useMemo(
+    () => (deps.providerConnections || []).filter((c) => c.enabled),
+    [deps.providerConnections]
   );
 
-  const availableProviderConnections = useMemo(
-    () => enabledProviderConnections.filter((c) => !providerConnectionIds.includes(c.id)),
-    [enabledProviderConnections, providerConnectionIds]
-  );
+  const openView = useCallback((next: View, from: string) => {
+    opener.current = from;
+    setView(next);
+  }, []);
 
-  useEffect(() => {
-    if (providerConnectionDraft && availableProviderConnections.some((c) => c.id === providerConnectionDraft)) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Auto-selects the first available provider connection when the list changes; the lint cannot model a "keep current if still valid, otherwise default" derivation.
-    setProviderConnectionDraft(availableProviderConnections[0]?.id || '');
-  }, [availableProviderConnections, providerConnectionDraft]);
+  const backToOverview = useCallback(() => setView({ kind: 'overview' }), []);
 
-  // Canonical form payload, used to detect pending changes.
-  const currentPayload = useMemo(
-    () => serializeAgentPayload({
-      name,
-      description,
-      selectedSkillIds,
-      selectedMcpServerIds,
-      providerConnectionIds,
-      sessionBusAllowed,
-      extraPathGrants,
-      shellMode,
-      allowedCommands,
-      blockedCommands,
-      webEnabled,
-      enabled,
-    }),
-    [
-      name, description, selectedSkillIds, selectedMcpServerIds, providerConnectionIds,
-      sessionBusAllowed, extraPathGrants, shellMode, allowedCommands, blockedCommands,
-      webEnabled, enabled,
-    ]
-  );
-
-  // True when the form has changed from the loaded (or freshly created)
-  // baseline. Drives the Save button's enabled state.
-  const isDirty = baselinePayload !== null && baselinePayload !== currentPayload;
-
-  const handleAddAllowedCommand = () => {
-    const prefix = allowedCommandDraft.trim();
-    if (!prefix) return;
-    setAllowedCommands((s) => addUniqueItem(s, prefix));
-    setAllowedCommandDraft('');
-  };
-
-  const handleAddBlockedCommand = () => {
-    const prefix = blockedCommandDraft.trim();
-    if (!prefix) return;
-    setBlockedCommands((s) => addUniqueItem(s, prefix));
-    setBlockedCommandDraft('');
-  };
-
-  const handleAddPathGrant = () => {
-    const path = extraPathDraft.trim();
-    if (!path) return;
-    if (extraPathGrants.some((g) => g.path === path)) {
-      setExtraPathDraft('');
+  // Entering a view focuses its heading; returning focuses what opened it.
+  useLayoutEffect(() => {
+    if (view.kind !== 'overview') {
+      viewHeading.current?.focus();
       return;
     }
-    setExtraPathGrants((current) => [
-      ...current,
-      { path, access: extraPathAccess, origin: null },
-    ]);
-    setExtraPathDraft('');
-  };
+    const from = opener.current;
+    if (!from) return;
+    opener.current = null;
+    rootRef.current?.querySelector<HTMLElement>(`[data-opener="${from}"], [data-source="${from}"]`)?.focus();
+  }, [view]);
 
-  // Validation rules surfaced both as an imperative `validate()` and from
-  // inside `submit()`. Keeping them in one place avoids drift when we add
-  // a new rule.
-  const validateAgent = useCallback(() => {
-    const trimmedName = name.trim();
-    if (!isManager && !trimmedName) {
-      return { ok: false, error: 'Agent name is required.' };
-    }
-    if (trimmedName.length > 100) {
-      return { ok: false, error: 'Name must be 100 characters or less.' };
-    }
-    if (providerConnectionIds.length === 0) {
-      return { ok: false, error: 'Select at least one provider connection.' };
-    }
+  const validate = useCallback(() => {
+    if (!draft) return { ok: false, error: 'Nothing to save yet.' };
+    const name = draft.name.trim();
+    if (!isManager && !name) return { ok: false, error: 'Agent name is required.' };
+    if (name.length > 100) return { ok: false, error: 'Name must be 100 characters or less.' };
+    if (draft.connectionIds.length === 0) return { ok: false, error: 'Choose a model for this agent to run on.' };
     return { ok: true };
-  }, [name, isManager, providerConnectionIds]);
-
-  // Report dirty changes up to the host, which shows its save affordance.
-  const onDirtyChangeRef = useRef(onDirtyChange);
-  useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
-  useEffect(() => { onDirtyChangeRef.current?.(isDirty); }, [isDirty]);
+  }, [draft, isManager]);
 
   useImperativeHandle(ref, () => ({
     validate: () => {
-      const v = validateAgent();
-      if (!v.ok) setError(v.error ?? null);
-      else setError(null);
-      return v;
+      const verdict = validate();
+      setError(verdict.ok ? null : (verdict.error ?? null));
+      return verdict;
     },
     submit: async () => {
-      const v = validateAgent();
-      if (!v.ok) {
-        setError(v.error ?? null);
-        return v;
+      const verdict = validate();
+      if (!verdict.ok || !draft) {
+        setError(verdict.error ?? null);
+        return verdict;
       }
-      const trimmedName = name.trim();
-      const execution: ExecutionCapabilityConfig = {
-        sandbox: {
-          network: 'enabled',
-          sessionBus: sessionBusAllowed ? 'allow' : 'deny',
-        },
-        filesystem: { extraPaths: extraPathGrants },
-        shell: {
-          mode: shellMode,
-          allowedCommandPrefixes: allowedCommands,
-          blockedCommandPrefixes: blockedCommands,
-        },
-        web: { enabled: webEnabled },
+      const payload = {
+        name: draft.name.trim(),
+        description: draft.description.trim(),
+        selectedSkillIds: draft.skillIds,
+        selectedMcpServerIds: draft.mcpIds,
+        providerConnectionIds: draft.connectionIds,
+        execution: executionFrom(draft.access),
       };
       try {
         if (saveBehavior) {
-          await saveBehavior({ workspaceId, name: trimmedName, description: description.trim(), selectedSkillIds, selectedMcpServerIds, providerConnectionIds, execution, enabled });
-          setBaselinePayload(currentPayload);
+          await saveBehavior({ workspaceId, ...payload, enabled: draft.enabled });
         } else if (isCreate) {
-          const created = await workspaceCreateAgent({
-            workspaceId,
-            name: trimmedName,
-            description: description.trim(),
-            selectedSkillIds,
-            selectedMcpServerIds,
-            providerConnectionIds,
-            execution,
-            enabled,
-          });
+          const created = await workspaceCreateAgent({ workspaceId, ...payload, enabled: draft.enabled });
+          setBaseline(serialize(draft));
           // The host moves to the new agent's own page.
-          setBaselinePayload(currentPayload);
           return { ok: true, createdId: created.id };
         } else {
           await workspaceUpdateAgent({
             workspaceId,
             agentId: agent?.id || '',
-            name: isManager ? (agent?.name || 'Manager') : trimmedName,
-            description: description.trim(),
-            selectedSkillIds,
-            selectedMcpServerIds,
-            providerConnectionIds,
-            execution,
-            enabled: isManager ? true : enabled,
+            ...payload,
+            // The Main keeps its stored name and is always on. The baseline
+            // below is the form's own serialisation, so this never dirties it.
+            name: isManager ? (agent?.name || 'Manager') : payload.name,
+            enabled: isManager ? true : draft.enabled,
           });
-          // Mark form clean: the values we just persisted are now the
-          // baseline. isDirty flips false and reports up, which hides the
-          // host's unsaved-changes bar.
-          // The baseline is the *form's* serialisation, not the request's:
-          // for Main the request forces `enabled: true` and a fixed name
-          // while the form keeps the loaded values, and dirtiness is only
-          // ever form-vs-baseline, so the two may legitimately differ.
-          setBaselinePayload(currentPayload);
         }
+        setBaseline(serialize(draft));
         setError(null);
         return { ok: true };
       } catch (err) {
-        const message = typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to save agent.';
+        const message = errText(err, 'Failed to save agent.');
         setError(message);
         return { ok: false, error: message };
       }
+    },
+    back: () => {
+      if (view.kind === 'overview') return false;
+      backToOverview();
+      return true;
     },
   }));
 
   const handleDelete = useCallback(async () => {
     if (!canDelete || !agent?.id) return;
-    if (!window.confirm(`Delete agent "${agent?.name}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) return;
     setDeleting(true);
     setError(null);
     try {
       await workspaceDeleteAgent(workspaceId, agent.id);
       onDeleted?.();
     } catch (err) {
-      setError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to delete agent.');
+      setError(errText(err, 'Failed to delete agent.'));
     } finally {
       setDeleting(false);
     }
   }, [canDelete, agent, workspaceId, onDeleted]);
 
-  if (loading) {
-    return <div className={styles.sectionRoot}>Loading…</div>;
-  }
-
-  // The edit flow has nothing to edit if the fetch failed: showing the blank
-  // form here offered a Delete button `handleDelete` could only ignore.
-  if (!agent && !isCreate) {
+  if (loading || (agent && !draft)) {
     return (
-      <div className={styles.sectionRoot}>
-        <div className={styles.errorBanner} role="alert">
-          {error || 'Failed to load agent.'}
-        </div>
+      <div className={form.page} aria-busy="true" aria-label="Loading agent">
+        <div className={form.skeleton}><span /><span /><span /></div>
       </div>
     );
   }
 
-  return (
-    <div className={styles.sectionRoot}>
-      {showHeading && (
-        <>
-          {/* Only this workspace's own Main is edited here, so the heading
-              speaks for it: the settings modal routes every crew member to
-              AssignmentSection, and the shared library draws its own title. */}
-          <h3 className={styles.sectionTitle}>
-            {isCreate ? 'Set up the main agent' : 'Main agent'}
-          </h3>
-          <p className={styles.sectionDescription}>
-            {isCreate
-              ? "This workspace has no main agent yet. It runs whenever you send a message or the schedule fires; crew members are added from the shared agent library in the Agents drawer."
-              : "This workspace's main agent. It's always present and runs whenever you send a message or the schedule fires."}
-          </p>
-        </>
-      )}
+  // Nothing to edit if the fetch failed: no fields, no Delete to refuse.
+  if (!agent || !draft) {
+    return (
+      <div className={form.page}>
+        <p className={form.errorBanner} role="alert">{error || 'Failed to load agent.'}</p>
+      </div>
+    );
+  }
 
-      {/* Name (hidden for manager — its name is "Main" by convention) */}
-      {!isManager && (
-        <div className={styles.field}>
-          <label className={styles.label} htmlFor="agent-name">
-            Name <span className={styles.required}>*</span>
-          </label>
-          <input
-            id="agent-name"
-            type="text"
-            className={styles.input}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
+  const context = isManager ? 'Main' : (draft.name.trim() || 'Agent');
+  const errorBanner = error && <p className={form.errorBanner} role="alert">{error}</p>;
+
+  if (view.kind === 'source') {
+    const group = groups.find((g) => g.key === view.key);
+    if (group) {
+      return (
+        <div className={form.page} ref={rootRef}>
+          <SkillSourceView
+            group={group}
+            selectedIds={draft.skillIds}
+            onChange={(skillIds) => patch({ skillIds })}
             disabled={busy}
-            maxLength={100}
+            headingRef={viewHeading}
+            onBack={backToOverview}
+            context={context}
           />
+          {errorBanner}
         </div>
-      )}
+      );
+    }
+  }
 
-      <div className={styles.field}>
-        <label className={styles.label} htmlFor="agent-description">Description</label>
-        <textarea
-          id="agent-description"
-          className={styles.textarea}
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
+  if (view.kind === 'access') {
+    return (
+      <div className={form.page} ref={rootRef}>
+        <AccessView
+          draft={draft.access}
+          onChange={(change) => patch({ access: { ...draft.access, ...change } })}
           disabled={busy}
-          rows={5}
-          placeholder={isManager
-            ? 'Instructions for how the main agent behaves in this workspace…'
-            : 'What this sub-agent does and when the main agent should delegate to it…'}
+          headingRef={viewHeading}
+          onBack={backToOverview}
+          context={context}
         />
-        <span className={styles.hint}>
-          Markdown supported. Appended to the agent&apos;s system prompt at runtime.
-        </span>
+        {errorBanner}
       </div>
+    );
+  }
 
-      {/* Skills */}
-      <div className={styles.field}>
-        <label className={styles.label} id="agent-skills-label">Skills</label>
-        <div role="group" aria-labelledby="agent-skills-label">
-          <SkillPicker
-            skills={deps?.skills || []}
-            selectedIds={selectedSkillIds}
-            onChange={setSelectedSkillIds}
-            disabled={busy}
-          />
-        </div>
-      </div>
+  // ── Overview ──
+  const currentId = draft.connectionIds[0] ?? '';
+  const current = (deps.providerConnections || []).find((c) => c.id === currentId);
+  const currentUsable = !!current?.enabled;
+  const extraConnections = draft.connectionIds.length - 1;
+  const selectedSkillCount = draft.skillIds.filter((id) => deps.skills.some((s) => s.id === id)).length;
 
-      {/* MCP Servers */}
-      <div className={styles.field}>
-        <label className={styles.label}>MCP servers</label>
-        {(deps?.mcpServers || []).length === 0 ? (
-          <span className={styles.hint}>No MCP servers configured.</span>
-        ) : (
-          <div className={styles.checkboxGroup}>
-            {(deps?.mcpServers || []).map((server) => {
-              const checked = selectedMcpServerIds.includes(server.id);
-              return (
-                <label key={server.id} className={styles.checkboxOption}>
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setSelectedMcpServerIds((s) => [...s, server.id]);
-                      } else {
-                        setSelectedMcpServerIds((s) => s.filter((id) => id !== server.id));
-                      }
-                    }}
-                    disabled={busy}
-                  />
-                  <span>{server.name}</span>
-                </label>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Provider connections */}
-      <div className={styles.field}>
-        <label className={styles.label}>
-          Provider connections <span className={styles.required}>*</span>
-        </label>
-        <span className={styles.hint}>
-          The first enabled connection is the one this agent runs on. The others are kept but not used — there is no automatic fallback.
-        </span>
-        {providerConnectionIds.length > 0 && (
-          <div className={styles.chipList}>
-            {providerConnectionIds.map((id) => {
-              const conn = enabledProviderConnections.find((c) => c.id === id);
-              return (
-                <span key={id} className={styles.chip}>
-                  {conn?.name || id}
-                  <button
-                    type="button"
-                    className={styles.chipRemove}
-                    onClick={() => setProviderConnectionIds((s) => s.filter((x) => x !== id))}
-                    disabled={busy}
-                    aria-label={`Remove ${conn?.name || id}`}
-                  >
-                    ×
-                  </button>
-                </span>
-              );
-            })}
-          </div>
-        )}
-        {availableProviderConnections.length > 0 && (
-          <div className={styles.listInputRow}>
+  return (
+    <div className={form.page} ref={rootRef}>
+      <div className={styles.toolbar}>
+        <div className={`${form.field} ${styles.modelField}`}>
+          <label className={form.label} htmlFor={`${ids}-model`}>
+            Runs on <span className={form.required} aria-hidden="true">*</span>
+          </label>
+          {enabledConnections.length === 0 && !currentId ? (
+            <p className={form.hintWarning}>
+              No model connections yet.{' '}
+              <button type="button" className={form.linkButton} onClick={() => openGlobalSettings({ tab: 'provider', providerAction: 'new' })}>
+                Add one in Settings → Providers
+              </button>
+            </p>
+          ) : (
             <select
-              className={styles.select}
-              value={providerConnectionDraft}
-              onChange={(e) => setProviderConnectionDraft(e.target.value)}
+              id={`${ids}-model`}
+              className={`${form.select} ${!currentId || !currentUsable ? styles.selectWarn : ''}`}
+              value={currentId}
+              onChange={(e) => patch({ connectionIds: e.target.value ? [e.target.value] : [] })}
               disabled={busy}
+              aria-describedby={`${ids}-model-hint`}
             >
-              {availableProviderConnections.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
+              {!currentId && <option value="" disabled>Choose a model…</option>}
+              {currentId && !currentUsable && (
+                <option value={currentId} disabled>
+                  {current ? `${connectionLabel(current)} (disabled)` : 'Unavailable connection'}
+                </option>
+              )}
+              {enabledConnections.map((c) => (
+                <option key={c.id} value={c.id}>{connectionLabel(c)}</option>
               ))}
             </select>
-            <button
-              type="button"
-              className={styles.addButton}
-              onClick={() => {
-                if (!providerConnectionDraft) return;
-                setProviderConnectionIds((s) => addUniqueItem(s, providerConnectionDraft));
-              }}
-              disabled={!providerConnectionDraft || busy}
-            >
-              Add
-            </button>
+          )}
+          <p className={form.hint} id={`${ids}-model-hint`}>
+            {!currentId
+              ? 'Pick the connection this agent runs on.'
+              : !currentUsable
+                ? 'This connection is gone or turned off. Pick another one.'
+                : extraConnections > 0
+                  ? `${extraConnections} more saved connection${extraConnections === 1 ? ' is' : 's are'} never used; picking here keeps only this one.`
+                  : 'One connection, no automatic fallback.'}
+          </p>
+        </div>
+
+        <div className={`${form.field} ${styles.mcpField}`}>
+          <span className={form.label} id={`${ids}-mcp`}>MCP servers</span>
+          <McpServerSelect
+            servers={deps.mcpServers || []}
+            selectedIds={draft.mcpIds}
+            onChange={(mcpIds) => patch({ mcpIds })}
+            disabled={busy}
+            labelId={`${ids}-mcp`}
+          />
+          <p className={form.hint}>Tools the agent can call.</p>
+        </div>
+
+        {(!isManager && !isCreate) && (
+          <div className={styles.toolbarEnd}>
+            <Switch label="Enabled" checked={draft.enabled} onChange={(enabled) => patch({ enabled })} disabled={busy} />
+            {canDelete && (
+              <button type="button" className={form.dangerButton} onClick={handleDelete} disabled={busy}>
+                {deleting ? 'Deleting…' : 'Delete agent'}
+              </button>
+            )}
           </div>
         )}
       </div>
 
-      {/* Local capabilities */}
-      <h4 className={styles.sectionTitle} style={{ marginTop: 24 }}>Local capabilities</h4>
-      <p className={styles.sectionDescription}>
-        What this agent can do on your machine. Every new agent ships with <code>$HOME</code> read-only — remove it below if you want this agent fully isolated.
-      </p>
+      <div className={form.columns}>
+        <section className={`${form.panel} ${form.panelFill}`}>
+          <header className={form.panelHeader}>
+            <h3 className={form.panelTitle} id={`${ids}-instructions`}>Instructions</h3>
+            <span className={form.panelMeta}>Markdown · added to the system prompt</span>
+          </header>
+          <div className={form.panelBody}>
+            {!isManager && (
+              <div className={form.field}>
+                <label className={form.label} htmlFor={`${ids}-name`}>
+                  Name <span className={form.required} aria-hidden="true">*</span>
+                </label>
+                <input
+                  id={`${ids}-name`}
+                  type="text"
+                  className={form.input}
+                  value={draft.name}
+                  onChange={(e) => patch({ name: e.target.value })}
+                  disabled={busy}
+                  maxLength={100}
+                />
+              </div>
+            )}
+            <textarea
+              className={`${form.textarea} ${form.textareaFill}`}
+              aria-labelledby={`${ids}-instructions`}
+              value={draft.description}
+              onChange={(e) => patch({ description: e.target.value })}
+              disabled={busy}
+              placeholder={isManager
+                ? 'How the main agent should work in this workspace…'
+                : 'What this agent does, and when the main agent should hand it work…'}
+            />
+          </div>
+        </section>
 
-      <div className={styles.field}>
-        <label className={styles.label}>Additional path grants</label>
-        {extraPathGrants.length > 0 && (
-          <div className={styles.grantList}>
-            {extraPathGrants.map((grant) => (
-              <div key={grant.path} className={styles.grantItem}>
-                <span className={styles.grantPath}>{grant.path}</span>
-                <span className={styles.grantAccess}>{grant.access === 'read_write' ? 'RW' : 'RO'}</span>
-                <span className={styles.grantOrigin} title={grant.origin?.kind === 'approval' ? grant.origin.reason : undefined}>
-                  {grantOriginLabel(grant.origin)}
+        <div className={form.column}>
+          <section className={`${form.panel} ${form.panelFill}`}>
+            <header className={form.panelHeader}>
+              <h3 className={form.panelTitle} id={`${ids}-skills`}>Skills</h3>
+              <span className={form.panelMeta}>{selectedSkillCount} of {deps.skills.length} selected</span>
+              {selectedSkillCount > 0 && (
+                <span className={form.panelActions}>
+                  <button
+                    type="button"
+                    className={form.quietButton}
+                    onClick={() => patch({ skillIds: draft.skillIds.filter((id) => !deps.skills.some((s) => s.id === id)) })}
+                    disabled={busy}
+                  >
+                    Clear all
+                  </button>
                 </span>
+              )}
+            </header>
+            <div className={form.panelBody}>
+              {groups.length === 0 ? (
+                <NoSkills />
+              ) : (
+                <SkillSources
+                  groups={groups}
+                  selectedIds={draft.skillIds}
+                  onChange={(skillIds) => patch({ skillIds })}
+                  onOpen={(key) => openView({ kind: 'source', key }, key)}
+                  disabled={busy}
+                />
+              )}
+            </div>
+          </section>
+
+          <section className={form.panel}>
+            <header className={form.panelHeader}>
+              <h3 className={form.panelTitle} id={`${ids}-access`}>Local access</h3>
+              <span className={form.panelActions}>
                 <button
                   type="button"
-                  className={styles.chipRemove}
-                  onClick={() => setExtraPathGrants((s) => s.filter((g) => g.path !== grant.path))}
-                  disabled={busy}
-                  aria-label={`Remove grant for ${grant.path}`}
+                  className={form.quietButton}
+                  data-opener="access"
+                  onClick={() => openView({ kind: 'access' }, 'access')}
+                  aria-label="Edit local access"
                 >
-                  ×
+                  Edit ›
                 </button>
-              </div>
-            ))}
-          </div>
-        )}
-        <div className={styles.listInputRow}>
-          <input
-            type="text"
-            className={styles.input}
-            value={extraPathDraft}
-            onChange={(e) => setExtraPathDraft(e.target.value)}
-            placeholder="/home/user/project"
-            disabled={busy}
-            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddPathGrant(); } }}
-          />
-          <select
-            className={styles.select}
-            value={extraPathAccess}
-            onChange={(e) => setExtraPathAccess(e.target.value as FilesystemPathAccess)}
-            disabled={busy}
-          >
-            <option value="read_only">Read only</option>
-            <option value="read_write">Read &amp; write</option>
-          </select>
-          <button
-            type="button"
-            className={styles.addButton}
-            onClick={handleAddPathGrant}
-            disabled={!extraPathDraft.trim() || busy}
-          >
-            Add
-          </button>
-        </div>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.label} htmlFor="shell-mode">Shell access</label>
-        <select
-          id="shell-mode"
-          className={styles.select}
-          value={shellMode}
-          onChange={(e) => setShellMode(e.target.value as ShellAccessMode)}
-          disabled={busy}
-        >
-          <option value="off">Off</option>
-          <option value="restricted">Restricted (allow/block lists)</option>
-          <option value="full">Full</option>
-        </select>
-        <span className={styles.hint}>
-          Agents use the shell for local file operations, so Off leaves the agent with no way to read
-          or write files — charts and conversation history still work. Under Restricted, a command
-          outside the allowed list stops for your approval, so an allowed list with nothing that
-          writes leaves the agent able to read but not save.
-        </span>
-      </div>
-
-      {shellMode === 'restricted' && (
-        <>
-          <div className={styles.field}>
-            <label className={styles.label}>Allowed command prefixes</label>
-            {allowedCommands.length > 0 && (
-              <div className={styles.commandList}>
-                {allowedCommands.map((cmd) => (
-                  <div key={cmd} className={styles.commandItem}>
-                    <code className={styles.commandPrefix}>{cmd}</code>
-                    <button
-                      type="button"
-                      className={styles.chipRemove}
-                      onClick={() => setAllowedCommands((s) => s.filter((c) => c !== cmd))}
-                      disabled={busy}
-                      aria-label={`Remove ${cmd}`}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {allowedCommands.length === 0 && (
-              <span className={styles.hint}>No allowed prefixes configured.</span>
-            )}
-            <div className={styles.listInputRow}>
-              <input
-                type="text"
-                className={styles.input}
-                value={allowedCommandDraft}
-                onChange={(e) => setAllowedCommandDraft(e.target.value)}
-                placeholder="git status"
-                disabled={busy}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAddAllowedCommand();
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className={styles.addButton}
-                onClick={handleAddAllowedCommand}
-                disabled={!allowedCommandDraft.trim() || busy}
-              >
-                Add
-              </button>
-            </div>
-          </div>
-
-          <div className={styles.field}>
-            <label className={styles.label}>Blocked command prefixes</label>
-            {blockedCommands.length > 0 && (
-              <div className={styles.commandList}>
-                {blockedCommands.map((cmd) => (
-                  <div key={cmd} className={styles.commandItem}>
-                    <code className={styles.commandPrefix}>{cmd}</code>
-                    <button
-                      type="button"
-                      className={styles.chipRemove}
-                      onClick={() => setBlockedCommands((s) => s.filter((c) => c !== cmd))}
-                      disabled={busy}
-                      aria-label={`Remove ${cmd}`}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className={styles.listInputRow}>
-              <input
-                type="text"
-                className={styles.input}
-                value={blockedCommandDraft}
-                onChange={(e) => setBlockedCommandDraft(e.target.value)}
-                placeholder="rm -rf"
-                disabled={busy}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAddBlockedCommand();
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className={styles.addButton}
-                onClick={handleAddBlockedCommand}
-                disabled={!blockedCommandDraft.trim() || busy}
-              >
-                Add
-              </button>
-            </div>
-          </div>
-        </>
-      )}
-
-      <div className={styles.field}>
-        <label className={styles.toggleRow}>
-          <span className={styles.toggleLabel}>Web access (fetch, search)</span>
-          <span className={`${styles.toggle} ${webEnabled ? styles.toggleOn : ''}`}>
-            <input
-              type="checkbox"
-              className={styles.toggleInput}
-              checked={webEnabled}
-              onChange={(e) => setWebEnabled(e.target.checked)}
-              disabled={busy}
-            />
-            <span className={styles.toggleTrack}>
-              <span className={styles.toggleThumb} />
-            </span>
-          </span>
-        </label>
-      </div>
-
-      <div className={styles.field}>
-        <label className={styles.toggleRow}>
-          <span className={styles.toggleLabel}>Allow session D-Bus (libsecret / keyring)</span>
-          <span className={`${styles.toggle} ${sessionBusAllowed ? styles.toggleOn : ''}`}>
-            <input
-              type="checkbox"
-              className={styles.toggleInput}
-              checked={sessionBusAllowed}
-              onChange={(e) => setSessionBusAllowed(e.target.checked)}
-              disabled={busy}
-            />
-            <span className={styles.toggleTrack}>
-              <span className={styles.toggleThumb} />
-            </span>
-          </span>
-        </label>
-      </div>
-
-      {/* Enabled toggle (sub-agents only — manager is always enabled) */}
-      {!isManager && !isCreate && (
-        <div className={styles.field}>
-          <label className={styles.toggleRow}>
-            <span className={styles.toggleLabel}>Enabled</span>
-            <span className={`${styles.toggle} ${enabled ? styles.toggleOn : ''}`}>
-              <input
-                type="checkbox"
-                className={styles.toggleInput}
-                checked={enabled}
-                onChange={(e) => setEnabled(e.target.checked)}
-                disabled={busy}
-              />
-              <span className={styles.toggleTrack}>
-                <span className={styles.toggleThumb} />
               </span>
-            </span>
-          </label>
+            </header>
+            <div className={form.panelBody}>
+              <ul className={styles.summary}>
+                {accessSummary(draft.access).map((line) => <li key={line}>{line}</li>)}
+              </ul>
+            </div>
+          </section>
         </div>
-      )}
-
-      {error && <div className={styles.errorBanner}>{error}</div>}
-
-      {canDelete && (
-        <div className={styles.actions}>
-          <button
-            type="button"
-            className={styles.dangerButton}
-            onClick={handleDelete}
-            disabled={busy}
-          >
-            {deleting ? 'Deleting…' : 'Delete agent'}
-          </button>
-        </div>
-      )}
+      </div>
+      {errorBanner}
     </div>
   );
 };
-
-// Initial draft used by the "Add agent" form. The backend-provided
-// `defaultExecution` (carries the `$HOME` RO grant) is preferred so the
-// user sees the granted paths up front. Falls back to the local empty
-// execution if the fetch failed — better to show an empty list than to
-// block the whole create flow.
-const blankAgentDraft = (defaultExecutionFromBackend?: Partial<ExecutionCapabilityConfig>): AgentDetail => ({
-  id: '',
-  isDefault: false,
-  name: '',
-  description: '',
-  selectedSkillIds: [],
-  selectedMcpServerIds: [],
-  providerConnectionIds: [],
-  execution: defaultExecutionFromBackend || defaultExecution(),
-  enabled: true,
-});
