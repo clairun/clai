@@ -808,8 +808,8 @@ async fn ensure_assistant_message_slot(
 
 /// Seal the current assistant bubble and open a fresh one.
 ///
-/// Called from the `result` branch, and only for a delivery whose reply has
-/// not started yet. Two constraints pin it there:
+/// Called when the CLI echoes injected input, before the reply to it. Two
+/// constraints pin it there:
 ///
 /// - It must be LATE enough that the messages it separates already exist.
 ///   A user message row is stamped when the user *sends* it, and the
@@ -876,7 +876,7 @@ struct MidRunDelivery {
     /// its wind-down `result` is ours and not a failure.
     interrupted: bool,
     /// At least one stream-json user line actually reached the process, so
-    /// the CLI owes a turn for this write. False when every matching message
+    /// the CLI will echo and answer it. False when every matching message
     /// was empty (no text, no images): those are marked delivered so they
     /// stop retrying, but they say nothing, so no turn will answer them.
     owes_turn: bool,
@@ -889,111 +889,40 @@ impl MidRunDelivery {
     };
 }
 
-/// Slot accounting for mid-run injected turns (Mechanism B): how many
-/// delivery *writes* still owe a completed turn, and whether the original
-/// prompt turn has ended.
-///
-/// The invariant behind `turn_ended`: Claude Code emits exactly one `result`
-/// per turn, and turns run strictly in order — the original prompt turn
-/// first, then the turns answering what we injected. So the FIRST result
-/// always belongs to the original turn (which never held a slot), and every
-/// later result completes an injected turn and frees its slot. That holds
-/// even for the wind-down `result` of a turn we interrupted on purpose: the
-/// turn that got cut may itself be an injected one (a second queued message
-/// arriving while the first one's turn runs). An earlier version skipped the
-/// decrement for every interrupted wind-down, leaving the count one too high
-/// in that case — the run then waited forever for a turn that was never
-/// coming (stdin held open, no EOF: a zombie run with an eternal spinner).
-///
-/// One slot per contiguous run of injected input, not per message and not
-/// per write. The Messages API merges consecutive user messages into a
-/// single turn, and `try_deliver_queued_to_claude` appends user lines
-/// without waiting for a reply, so input that piles up before the CLI
-/// starts replying to it is answered by ONE turn — whether it arrived as
-/// one message, a batch of five in one `write_all`, or two deliveries moments
-/// apart. Only the first delivery in each such run takes a slot.
-///
-/// The run ends when a turn STARTS (`turn_started`), not when one ends.
-/// Once the CLI is replying, later input cannot merge into that reply and
-/// needs a turn of its own. Closing the run at the `result` instead let a
-/// message delivered during an injected turn fold into the slot that turn
-/// was about to free, dropping `pending` to zero with that message written
-/// but unanswered — stdin closed under it, and its reply (if any) landed
-/// in a bubble stamped before it.
-///
-/// Crediting per message stuck a real run (2026-08-02): 10 messages went
-/// out across 8 writes, one of them a batch of 3; 8 injected turns ran, the
-/// count stuck at 2, and since stdin is only dropped at `pending() == 0`
-/// the CLI never saw EOF — `running` for 86 minutes until the app was
-/// restarted. Crediting per write fixes the batch but still leaks whenever
-/// two deliveries land before the interrupted turn winds down.
-struct InjectedTurnLedger {
-    pending: usize,
-    original_turn_completed: bool,
-    /// Input has been delivered that no turn has started for yet, so the
-    /// turn it owes is already counted and further deliveries merge into
-    /// it. Doubles as the bubble-rotation signal — see
-    /// `awaiting_injected_reply`.
-    delivery_awaiting_turn: bool,
+/// Where the live Claude process stands on the input we injected, read
+/// from the stream. `--replay-user-messages` makes the CLI echo user input
+/// (`isReplay`) once it is taken into the conversation. That echo is the
+/// boundary: one echo may carry several delivered lines, and it may open a
+/// new turn or join the running one (input absorbed at a tool boundary or
+/// during compaction gets no turn and no `result` of its own), so counting
+/// writes, turns, or results cannot find it.
+#[derive(Default)]
+struct InjectedInput {
+    /// Delivered input the CLI has not echoed yet. Its reply has not begun,
+    /// so stdin stays open; any echo clears it, so no merge can strand it.
+    unechoed: bool,
 }
 
-impl InjectedTurnLedger {
-    fn new() -> Self {
-        Self {
-            pending: 0,
-            original_turn_completed: false,
-            delivery_awaiting_turn: false,
+enum StreamBoundary {
+    /// Echoed injected input: the reply to it starts here, in a new row.
+    InjectedReplyStarts,
+    /// A turn ended with no injected input waiting for its echo.
+    Idle,
+}
+
+impl InjectedInput {
+    fn delivered(&mut self) {
+        self.unechoed = true;
+    }
+
+    fn on_event(&mut self, value: &Value) -> Option<StreamBoundary> {
+        match value.get("type").and_then(Value::as_str) {
+            Some("user") if value.get("isReplay").and_then(Value::as_bool) == Some(true) => {
+                std::mem::take(&mut self.unechoed).then_some(StreamBoundary::InjectedReplyStarts)
+            }
+            Some("result") if !self.unechoed => Some(StreamBoundary::Idle),
+            _ => None,
         }
-    }
-
-    /// Record a delivery that put at least one user line into the live
-    /// process. Takes a slot only when no earlier delivery is still waiting
-    /// for its turn to start: anything appended before the CLI begins
-    /// replying merges into the same turn — see the type docs.
-    fn delivered_write(&mut self) {
-        if self.delivery_awaiting_turn {
-            return;
-        }
-        self.pending += 1;
-        self.delivery_awaiting_turn = true;
-    }
-
-    /// Record that the CLI has begun a turn. Input delivered from here on
-    /// cannot merge into it, so the next delivery takes its own slot.
-    fn turn_started(&mut self) {
-        self.delivery_awaiting_turn = false;
-    }
-
-    /// Record a `result` event ending the current turn (normally or via our
-    /// interrupt) and return how many injected turns are still owed.
-    ///
-    /// This does not end the delivery run — `turn_started` does. A message
-    /// delivered while a turn was winding down is answered by the turn that
-    /// follows, not by the one that just ended.
-    fn turn_ended(&mut self) -> usize {
-        if self.original_turn_completed {
-            self.pending = self.pending.saturating_sub(1);
-        }
-        self.original_turn_completed = true;
-        self.pending
-    }
-
-    /// Injected turns still owed; stdin must stay open while any remain.
-    fn pending(&self) -> usize {
-        self.pending
-    }
-
-    /// True when messages have been delivered whose reply has not started.
-    ///
-    /// The transcript uses this to decide when to rotate the assistant
-    /// bubble: the delivered messages sit above the bubble the reply will
-    /// fill, so the next `result` should close the interrupted turn's
-    /// bubble and open a fresh one. Rotating on any outstanding slot
-    /// instead — as this used to — opened bubbles at results where nothing
-    /// had been delivered, stamping them before the messages they went on
-    /// to answer and inverting the transcript.
-    fn awaiting_injected_reply(&self) -> bool {
-        self.delivery_awaiting_turn
     }
 }
 
@@ -1006,8 +935,8 @@ struct MidRunPayload {
 /// Assemble the stream-json bytes for one mid-run delivery.
 ///
 /// Nothing to say means nothing to interrupt for: cutting the in-flight turn
-/// to deliver silence would waste the turn and leave the ledger owed a
-/// `result` that is never coming. `user_lines` is empty exactly when every
+/// to deliver silence would waste the turn and wait for an echo that is
+/// never coming. `user_lines` is empty exactly when every
 /// matching queued message had no text and no images — those are still marked
 /// delivered by the caller so they are not redelivered on every wake.
 fn build_midrun_payload(user_lines: String, turn_active: bool) -> MidRunPayload {
@@ -1235,7 +1164,10 @@ async fn run_claude_turn(
         // stream-json input keeps stdin usable for the lifetime of the run,
         // so queued user messages can be interrupted-in mid-task (Mechanism
         // B) instead of waiting for a followup run.
-        command.arg("--input-format").arg("stream-json");
+        command
+            .arg("--input-format")
+            .arg("stream-json")
+            .arg("--replay-user-messages");
     }
     if is_new_session {
         command.arg("--session-id").arg(cli_session_id);
@@ -1332,11 +1264,10 @@ async fn run_claude_turn(
     // → its `result`) so delivery knows whether an interrupt is needed.
     // `awaiting_interrupt_result` marks that the next error_during_execution
     // result is OUR interrupt winding the turn down, not a failure.
-    // `injected_turns` tracks how many turns the CLI still owes for input
-    // we injected — stdin must stay open while any remain.
+    // `injected` finds the reply boundary of input we injected.
     let mut turn_active = false;
     let mut awaiting_interrupt_result = false;
-    let mut injected_turns = InjectedTurnLedger::new();
+    let mut injected = InjectedInput::default();
     // The dispatcher wakes this run when input is pending for the session.
     // A wake that lands during a tool call waits in `midrun_pending` for the
     // tool's result: cutting a build, test run, or git operation half-way can
@@ -1368,13 +1299,7 @@ async fn run_claude_turn(
                     awaiting_interrupt_result = true;
                 }
                 if outcome.owes_turn {
-                    // The bubble rotates at the next `result`, not here: the
-                    // turn we just cut is still winding down, and its tail
-                    // belongs in the bubble above the user's message rather
-                    // than below it. Resetting the stream state mid-turn
-                    // would also strand whatever the state machine is
-                    // holding for the blocks still open.
-                    injected_turns.delivered_write();
+                    injected.delivered();
                 }
             }
         }
@@ -1424,18 +1349,23 @@ async fn run_claude_turn(
         match event_type {
             Some("result") => turn_active = false,
             Some("system") | Some("assistant") | Some("stream_event") | Some("user") => {
-                if !turn_active {
-                    // A turn is starting. Whatever we delivered before this
-                    // point is what it answers; anything delivered from here
-                    // on needs a turn of its own. Note the wind-down of a
-                    // turn we interrupted raises no edge — it was already
-                    // active — so a delivery made during it still merges
-                    // into the turn that follows.
-                    injected_turns.turn_started();
-                }
                 turn_active = true;
             }
             _ => {}
+        }
+        let boundary = injected.on_event(&value);
+        if matches!(boundary, Some(StreamBoundary::InjectedReplyStarts)) {
+            rotate_assistant_bubble(
+                deps,
+                session,
+                run_id,
+                CliProviderRuntime::ClaudeCode.metadata_source(),
+                &mut assistant_message,
+                assistant_slot,
+                &mut state,
+                conversation,
+            )
+            .await?;
         }
         let suppress_interrupted = awaiting_interrupt_result && is_interrupted_turn_result(&value);
 
@@ -1466,59 +1396,29 @@ async fn run_claude_turn(
 
         if event_type == Some("result") {
             awaiting_interrupt_result = false;
-            // Every `result` ends exactly one turn, interrupted or not, and
-            // the ledger frees the slot that turn held (if any). The
-            // wind-down of a turn we cut on purpose is no exception: the
-            // turn that got cut may itself have been an injected one — see
-            // `InjectedTurnLedger::turn_ended` for the full story.
-            injected_turns.turn_ended();
-            if live_stdin.is_some() {
-                // End-of-run race: a message may have been queued since the
-                // last delivery. Fold it in as one more turn now instead of
-                // closing; if delivery declines, the followup run has it.
-                if injected_turns.pending() == 0 {
-                    if let Some(stdin) = live_stdin.as_mut() {
-                        let outcome = try_deliver_queued_to_claude(
-                            deps,
-                            workspace_root,
-                            session,
-                            run_id,
-                            &connection.id,
-                            stdin,
-                            false,
-                            conversation,
-                        )
-                        .await;
-                        if outcome.owes_turn {
-                            injected_turns.delivered_write();
-                        }
-                    }
-                }
-                if injected_turns.pending() > 0 {
-                    // Rotate only for a delivery whose reply is still to
-                    // come. Two consecutive assistant turns with no user
-                    // message between them belong in one bubble, and the
-                    // speculative rotation this used to do — on any result
-                    // with a slot outstanding — stamped bubbles before the
-                    // messages they went on to answer, inverting the
-                    // transcript.
-                    if injected_turns.awaiting_injected_reply() {
-                        rotate_assistant_bubble(
-                            deps,
-                            session,
-                            run_id,
-                            CliProviderRuntime::ClaudeCode.metadata_source(),
-                            &mut assistant_message,
-                            assistant_slot,
-                            &mut state,
-                            conversation,
-                        )
-                        .await?;
-                    }
+        }
+        if matches!(boundary, Some(StreamBoundary::Idle)) {
+            if let Some(stdin) = live_stdin.as_mut() {
+                // End-of-turn race: a message may have been queued since the
+                // last delivery. Fold it in now instead of closing; if
+                // delivery declines, the followup run has it.
+                let outcome = try_deliver_queued_to_claude(
+                    deps,
+                    workspace_root,
+                    session,
+                    run_id,
+                    &connection.id,
+                    stdin,
+                    false,
+                    conversation,
+                )
+                .await;
+                if outcome.owes_turn {
+                    injected.delivered();
                 } else {
-                    // Nothing pending: dropping stdin tells Claude no more
-                    // input is coming; it drains anything buffered and exits,
-                    // ending the loop at EOF exactly like the legacy path.
+                    // Dropping stdin tells Claude no more input is coming; it
+                    // still answers anything already written, then exits,
+                    // ending the loop at EOF like the legacy path.
                     live_stdin = None;
                 }
             }
@@ -5699,60 +5599,6 @@ mod tests {
     }
 
     #[test]
-    fn injected_turn_ledger_double_interrupt_frees_the_cut_turns_slot() {
-        // Regression: a second queued message interrupting the FIRST
-        // injected message's turn. The interrupted wind-down used to skip
-        // the decrement unconditionally, leaving the count one turn over —
-        // the run then held stdin open waiting for a result that was never
-        // coming (zombie run / eternal spinner, observed 2026-06-11).
-        let mut ledger = InjectedTurnLedger::new();
-
-        // Message #1 interrupts the original prompt turn.
-        ledger.delivered_write();
-        // Wind-down of the ORIGINAL turn: held no slot, nothing freed.
-        assert_eq!(ledger.turn_ended(), 1);
-
-        // Message #2 interrupts injected turn #1 while it is running.
-        ledger.turn_started();
-        ledger.delivered_write();
-        // Wind-down of injected turn #1: ITS slot must be freed.
-        assert_eq!(ledger.turn_ended(), 1);
-
-        // Injected turn #2 completes: all slots drained, stdin may close.
-        assert_eq!(ledger.turn_ended(), 0);
-    }
-
-    #[test]
-    fn injected_turn_ledger_single_interrupt() {
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write(); // interrupts the original turn
-        assert_eq!(ledger.turn_ended(), 1); // original wind-down: no slot
-        ledger.turn_started(); // the injected turn begins
-        assert_eq!(ledger.turn_ended(), 0); // injected turn done
-    }
-
-    #[test]
-    fn injected_turn_ledger_delivery_before_first_turn_event() {
-        // A poll tick can deliver before the original turn streams its
-        // first event (no interrupt sent, the turn looked idle). The
-        // original turn's own result must not consume that message's slot.
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write();
-        // The original turn's first event (`system` init) starts a turn.
-        ledger.turn_started();
-        assert_eq!(ledger.turn_ended(), 1); // original turn ends normally
-        ledger.turn_started(); // the injected turn begins
-        assert_eq!(ledger.turn_ended(), 0); // injected turn ends
-    }
-
-    #[test]
-    fn injected_turn_ledger_no_injections() {
-        let mut ledger = InjectedTurnLedger::new();
-        assert_eq!(ledger.pending(), 0);
-        assert_eq!(ledger.turn_ended(), 0); // original turn only
-    }
-
-    #[test]
     fn tool_in_flight_tracking_follows_tool_use_lifecycle() {
         let mut state = ClaudeStreamState::new();
         assert!(!state.has_tool_call_in_flight());
@@ -6016,143 +5862,185 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Mid-run injected-turn accounting
+    // Mid-run injected-input boundaries, replayed from recorded streams
+    // (Claude Code 2.1.289, `--replay-user-messages`)
     // -----------------------------------------------------------------
 
-    /// Three queued messages ride ONE `write_all` as three consecutive
-    /// stream-json user lines, and the API merges consecutive user messages
-    /// into one turn. The ledger must never see the message count — the
-    /// batch that stuck a real run owed three turns and got one.
-    #[test]
-    fn a_batch_of_messages_rides_one_write_and_owes_one_turn() {
-        let batch: String = ["first", "second", "third"]
+    enum Step {
+        /// A stream-json line from the CLI.
+        Cli(Value),
+        /// A queued user message written to the live process.
+        Send(&'static str),
+    }
+
+    fn cli(value: Value) -> Step {
+        Step::Cli(value)
+    }
+
+    fn init() -> Step {
+        cli(serde_json::json!({ "type": "system", "subtype": "init" }))
+    }
+
+    fn echo(texts: &[&str]) -> Step {
+        let content: Vec<Value> = texts
             .iter()
-            .map(|text| claude_stream_json_user_message(text, &[]))
+            .flat_map(|t| {
+                [
+                    serde_json::json!({ "type": "text", "text": t }),
+                    serde_json::json!({ "type": "text", "text": "\n\n" }),
+                ]
+            })
             .collect();
-        assert_eq!(batch.lines().count(), 3, "three user lines, one payload");
-
-        let out = build_midrun_payload(batch, true);
-        assert!(out.owes_turn);
-
-        // One write, therefore one slot, however many lines rode it.
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 1);
-
-        // The original turn winds down (our interrupt); its result never
-        // frees a slot because that turn never held one.
-        assert_eq!(ledger.turn_ended(), 1);
-        // Claude answers all three appended user messages in one turn.
-        assert_eq!(ledger.turn_ended(), 0, "stdin must be droppable");
+        cli(serde_json::json!({
+            "type": "user", "isReplay": true,
+            "message": { "role": "user", "content": content },
+        }))
     }
 
-    /// The bubble-rotation signal: rotate at the first `result` after a
-    /// delivery, and only then. Rotating on any outstanding slot opened
-    /// bubbles at results where nothing had been delivered, stamping them
-    /// `created_at` before the messages they went on to answer — which put
-    /// the reply ABOVE the question in the transcript.
-    #[test]
-    fn rotation_is_signalled_by_a_delivery_not_by_an_outstanding_slot() {
-        let mut ledger = InjectedTurnLedger::new();
-        assert!(!ledger.awaiting_injected_reply(), "nothing delivered yet");
-
-        ledger.delivered_write();
-        assert!(ledger.awaiting_injected_reply(), "reply still to come");
-
-        // The interrupted turn's result: the run loop rotates here, reading
-        // the signal before `turn_ended`. The signal is spent once the CLI
-        // actually starts the reply.
-        ledger.turn_ended();
-        assert!(ledger.awaiting_injected_reply(), "the reply has not begun");
-        ledger.turn_started();
-        assert!(!ledger.awaiting_injected_reply());
-
-        // A slot can stay outstanding with nothing newly delivered — that
-        // alone must NOT open a bubble, which is what inverted the
-        // transcript.
-        assert!(ledger.pending() > 0, "slot still owed");
-        assert!(
-            !ledger.awaiting_injected_reply(),
-            "an owed slot is not a reason to open a bubble"
-        );
+    fn interrupted() -> Vec<Step> {
+        vec![
+            cli(serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [{ "type": "text", "text": "[Request interrupted by user]" }] },
+            })),
+            cli(
+                serde_json::json!({ "type": "result", "subtype": "error_during_execution", "is_error": true }),
+            ),
+        ]
     }
 
-    /// Two poll ticks can both deliver before the interrupted turn winds
-    /// down — 1.2s apart is easily inside a wind-down, and the wind-down
-    /// raises no turn-start edge because the turn was already running.
-    /// Those user messages are appended with no reply between them, so the
-    /// CLI merges them into ONE turn. Crediting each write leaked a slot
-    /// and hung the run exactly like the per-message bug did.
-    #[test]
-    fn deliveries_before_a_turn_starts_share_one_turn() {
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write();
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 1, "both merge into one owed turn");
-
-        assert_eq!(ledger.turn_ended(), 1, "original wind-down frees nothing");
-        assert_eq!(ledger.turn_ended(), 0, "the merged reply frees the slot");
+    fn says(text: &str) -> Step {
+        cli(serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": text }] },
+        }))
     }
 
-    /// Once the CLI starts replying, later input cannot merge into that
-    /// reply and needs a turn of its own.
-    ///
-    /// Regression: this used to key off the `result` instead, so a message
-    /// delivered mid-turn folded into the slot that same turn was about to
-    /// free. `pending` hit zero with the message written but unanswered,
-    /// stdin closed under it, and no bubble rotated for it.
-    #[test]
-    fn a_delivery_after_a_turn_starts_takes_its_own_slot() {
-        let mut ledger = InjectedTurnLedger::new();
-
-        // The original prompt turn ends holding no slot.
-        assert_eq!(ledger.turn_ended(), 0);
-
-        // Delivered while idle — the end-of-run race path.
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 1);
-
-        // The CLI begins answering it.
-        ledger.turn_started();
-        assert!(!ledger.awaiting_injected_reply());
-
-        // A message arriving now interrupts that turn and needs its own.
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 2, "must not merge into the running turn");
-
-        assert_eq!(
-            ledger.turn_ended(),
-            1,
-            "the interrupted turn frees its slot"
-        );
-        ledger.turn_started();
-        assert_eq!(ledger.turn_ended(), 0, "then the reply to the new message");
+    fn success() -> Step {
+        cli(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false }))
     }
 
-    /// Replay of the run that hung on 2026-08-02: 10 messages delivered
-    /// across 8 writes (one a batch of 3), each write separated from the
-    /// next by the turn that answered it, plus the original prompt turn.
-    /// Per-message accounting left `pending` at 2 forever.
-    #[test]
-    fn observed_stuck_run_sequence_drains_to_zero() {
-        let mut ledger = InjectedTurnLedger::new();
-        let writes = 8;
-
-        // First write lands during the original turn, which ends without
-        // freeing a slot.
-        ledger.delivered_write();
-        let mut pending = ledger.turn_ended();
-        assert_eq!(pending, 1);
-
-        // Every later write is answered by its own turn.
-        for _ in 1..writes {
-            ledger.turn_started();
-            ledger.delivered_write();
-            assert_eq!(ledger.pending(), 2, "previous slot not yet freed");
-            pending = ledger.turn_ended();
+    /// Drive `InjectedInput` the way `run_claude_turn` does: deliveries mark
+    /// input, `InjectedReplyStarts` opens a new assistant row, `Idle` closes
+    /// stdin (the queue recheck finds nothing here). After stdin closes the
+    /// CLI drains what it was given and exits, so remaining steps still run
+    /// but no later send may happen. Returns the transcript in row-creation
+    /// order, panicking if the script ends with stdin open (a hung run).
+    fn replay_stream(steps: Vec<Step>) -> Vec<String> {
+        let mut injected = InjectedInput::default();
+        let mut stdin_open = true;
+        let mut rows = vec![String::from("A:")];
+        let mut current = 0;
+        for step in steps {
+            match step {
+                Step::Send(text) => {
+                    assert!(stdin_open, "sent {text:?} after stdin closed");
+                    injected.delivered();
+                    rows.push(format!("U:{text}"));
+                }
+                Step::Cli(value) => {
+                    match injected.on_event(&value) {
+                        Some(StreamBoundary::InjectedReplyStarts) => {
+                            rows.push(String::from("A:"));
+                            current = rows.len() - 1;
+                        }
+                        Some(StreamBoundary::Idle) => stdin_open = false,
+                        None => {}
+                    }
+                    if value["type"] == "assistant" {
+                        rows[current]
+                            .push_str(value["message"]["content"][0]["text"].as_str().unwrap());
+                    }
+                }
+            }
         }
-        assert_eq!(pending, 1, "the last write is still owed a turn");
-        assert_eq!(ledger.turn_ended(), 0, "and then it arrives");
+        assert!(
+            !stdin_open,
+            "stdin still open at end of stream: the run never ends"
+        );
+        rows
+    }
+
+    /// The hang in session b884a31a: a message lands while the turn is
+    /// compacting, the CLI absorbs it into the running turn (as it does at a
+    /// tool boundary — no new `init`, no wind-down `result`), and one reply
+    /// and one `result` answer everything.
+    #[test]
+    fn input_absorbed_during_compaction_ends_the_run_and_splits_the_reply() {
+        let rows = replay_stream(vec![
+            init(),
+            echo(&["prompt"]),
+            says("working"),
+            Step::Send("task result"),
+            cli(
+                serde_json::json!({ "type": "system", "subtype": "status", "status": "compacting" }),
+            ),
+            cli(serde_json::json!({ "type": "system", "subtype": "compact_boundary" })),
+            echo(&["task result"]),
+            says("answer"),
+            success(),
+        ]);
+        assert_eq!(rows, ["A:working", "U:task result", "A:answer"]);
+    }
+
+    /// Trace B2R: two lines in one write echo back as ONE merged message,
+    /// a third write interrupts the turn that just picked them up, and one
+    /// reply answers all three. Stdin closes at the interrupted wind-down;
+    /// the CLI still answers the buffered third message before exiting.
+    #[test]
+    fn queued_lines_merge_into_one_echo_and_one_reply() {
+        let mut steps = vec![init(), echo(&["prompt"]), says("one two")];
+        steps.push(Step::Send("APPLE"));
+        steps.push(Step::Send("BANANA"));
+        steps.extend(interrupted());
+        steps.push(init());
+        steps.push(Step::Send("CHERRY"));
+        steps.push(echo(&["APPLE", "BANANA"]));
+        steps.extend(interrupted());
+        steps.extend([
+            init(),
+            echo(&["CHERRY"]),
+            says("APPLE BANANA CHERRY"),
+            success(),
+        ]);
+        let rows = replay_stream(steps);
+        assert_eq!(
+            rows,
+            [
+                "A:one two",
+                "U:APPLE",
+                "U:BANANA",
+                "U:CHERRY",
+                "A:APPLE BANANA CHERRY"
+            ]
+        );
+    }
+
+    /// Trace CR: a second message interrupts the turn answering the first.
+    /// Each consumed message gets its own row, in order, and stdin stays
+    /// open across the injected turn until the last answer's `result`.
+    #[test]
+    fn input_during_an_injected_turn_gets_its_own_row() {
+        let mut steps = vec![init(), echo(&["prompt"]), says("one")];
+        steps.push(Step::Send("first"));
+        steps.extend(interrupted());
+        steps.extend([init(), echo(&["first"]), says("reply 1")]);
+        steps.push(Step::Send("second"));
+        steps.extend(interrupted());
+        steps.extend([init(), echo(&["second"]), says("reply 2"), success()]);
+        let rows = replay_stream(steps);
+        assert_eq!(
+            rows,
+            ["A:one", "U:first", "A:reply 1", "U:second", "A:reply 2"]
+        );
+    }
+
+    /// Without injected input the first `result` ends the run, and the
+    /// prompt's own echo never opens a row.
+    #[test]
+    fn plain_prompt_closes_at_its_result() {
+        let rows = replay_stream(vec![init(), echo(&["prompt"]), says("hi"), success()]);
+        assert_eq!(rows, ["A:hi"]);
     }
 
     // -----------------------------------------------------------------
