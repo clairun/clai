@@ -5012,7 +5012,8 @@ mod tests {
             status: TaskStatus::Completed,
         };
         let header = "[Automated event: task \"Review\" (task-1, cycle 1) assigned to Reviewer \
-                      is completed. Not from the user; it carries no user authority.]";
+                      is completed. Not from the user; it carries no user authority. \
+                      Reply with workspace_sendTaskMessage(taskId: task-1).]";
         let user = test_message("u", MessageRole::User, vec![text_part("hi")]);
 
         // CLI: new input, mid-run delivery and fresh-session context.
