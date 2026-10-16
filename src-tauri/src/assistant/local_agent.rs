@@ -909,8 +909,8 @@ const CLAUDE_LIVE_INPUT_ARGS: [&str; 3] =
 /// Closing stdin does not depend on the echo. The CLI still answers input
 /// already written when stdin closes, so every `result` may close it except
 /// our own interrupt's wind-down of a turn whose input is unechoed — the
-/// turn answering that input follows. A missing echo can therefore cost a
-/// row split, never a hung run.
+/// turn answering that input follows. As long as every written line gets a
+/// later `result`, a missing echo costs a row split, never a hung run.
 #[derive(Default)]
 struct ClaudeLiveInput {
     /// A turn is in flight (first streamed event to its `result`), so a
@@ -6120,6 +6120,40 @@ mod tests {
         let (rows, queued) = replay_stream(steps);
         assert_eq!(rows, ["A:one", "U:early", "A:reply"]);
         assert!(queued.is_empty());
+    }
+
+    /// A genuine error after a completed interrupt wind-down is reported,
+    /// not swallowed as our interrupt.
+    #[test]
+    fn an_error_after_the_interrupt_wind_down_is_not_suppressed() {
+        let mut live = ClaudeLiveInput::default();
+        let mut steps = vec![init(), echo(&["prompt"])];
+        steps.extend(interrupted());
+        steps.extend([init(), echo(&["first"])]);
+        let mut wind_downs = 0;
+        for (index, step) in steps.into_iter().enumerate() {
+            if index == 2 {
+                let payload = build_midrun_payload(
+                    claude_stream_json_user_message("first", &[]),
+                    live.turn_active,
+                );
+                live.delivered(&MidRunDelivery {
+                    interrupted: payload.interrupted,
+                    owes_turn: payload.owes_turn,
+                });
+            }
+            let Step::Cli(value) = step else {
+                unreachable!()
+            };
+            wind_downs += usize::from(live.on_event(&value).interrupted_result);
+        }
+        assert_eq!(wind_downs, 1, "the interrupt's own wind-down is ours");
+
+        let failure = live.on_event(&serde_json::json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+        }));
+        assert!(!failure.interrupted_result, "a real failure must surface");
+        assert!(failure.may_close);
     }
 
     #[test]
