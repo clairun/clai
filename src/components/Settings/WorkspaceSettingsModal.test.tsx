@@ -250,7 +250,8 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     expect(pageHeading('General')).toBeInTheDocument();
     expect(within(nav()).getAllByRole('button').map((b) => b.textContent)).toEqual([
-      'General', 'ScheduleOff', 'Team1 crew', 'Main', 'Reviewer', '+Add to crew',
+      // Agent rows keep a blank model line while no connection is known.
+      'General', 'ScheduleOff', 'Team1 crew', 'Main\u00a0', 'Reviewer\u00a0', '+Add to crew',
     ]);
     expect(navItem(/^General/)).toHaveAttribute('aria-current', 'page');
     expect(navItem(/^General/)).toHaveFocus();
@@ -514,5 +515,29 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     expect(pageHeading('General')).toBeInTheDocument();
     expect(navItem(/^General/)).toHaveFocus();
+  });
+});
+
+describe('WorkspaceSettingsModal reopening', () => {
+  it('never puts the page it was closed on in the DOM when reopened on another', async () => {
+    const props = { onClose: vi.fn(), workspaceId: 'ws-1', details: { ...DETAILS, assignedAgents: [MAIN] } as unknown as WorkspaceDetails };
+    const { rerender } = render(<WorkspaceSettingsModal {...props} isOpen initialSelection={{ kind: 'agent', agentId: MAIN.id }} />);
+    expect(screen.getByRole('button', { name: 'Open a source' })).toBeInTheDocument();
+    rerender(<WorkspaceSettingsModal {...props} isOpen={false} initialSelection={{ kind: 'agent', agentId: MAIN.id }} />);
+
+    // Mutation records keep every node that was put in the DOM, including
+    // one swapped out again before anyone looked: a page committed for a
+    // single frame still shows up here, as an added or a removed node.
+    const touched: Node[] = [];
+    const observer = new MutationObserver((records) => {
+      records.forEach((record) => touched.push(...record.addedNodes, ...record.removedNodes));
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    rerender(<WorkspaceSettingsModal {...props} isOpen initialSelection={{ kind: 'general' }} />);
+    await act(async () => {});
+    observer.disconnect();
+
+    expect(pageHeading('General')).toBeInTheDocument();
+    expect(touched.some((node) => node.textContent?.includes('Open a source'))).toBe(false);
   });
 });

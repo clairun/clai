@@ -112,6 +112,17 @@ describe('AgentLibrarySettings', () => {
     api.saveAgentDefinition.mockResolvedValue('def-1');
   });
 
+  it('says nothing about an empty library before the library has answered', async () => {
+    let answer: (defs: unknown[]) => void = () => {};
+    api.listAgentDefinitions.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    render(<AgentLibrarySettings />);
+    await waitFor(() => expect(api.listAgentDefinitions).toHaveBeenCalled());
+    expect(screen.queryByText(/No agents yet/)).toBeNull();
+
+    answer([REVIEWER]);
+    expect(await screen.findByRole('button', { name: /^Reviewer/ })).toBeInTheDocument();
+  });
+
   it('shows the gallery, then one agent at a time, and comes back', async () => {
     render(<AgentLibrarySettings />);
     const card = await screen.findByRole('button', { name: /^Reviewer/ });

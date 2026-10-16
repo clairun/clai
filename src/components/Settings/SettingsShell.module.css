@@ -251,7 +251,6 @@
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  animation: fadeIn var(--transition-fast);
 }
 
 @media (max-width: 760px) {
@@ -272,8 +271,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .overlay,
-  .window,
-  .body {
+  .window {
     animation: none;
   }
 }

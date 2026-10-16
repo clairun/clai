@@ -131,7 +131,8 @@ const AgentLibrarySettings = ({
         </div>
       )}
 
-      {view.kind === 'gallery' && (
+      {/* Not before the first load answers: an empty gallery reads "No agents yet". */}
+      {view.kind === 'gallery' && (loaded || error !== null) && (
         <AgentGallery
           definitions={definitions}
           // A failed reload leaves stale revisions: opening one would only end in a refused save.

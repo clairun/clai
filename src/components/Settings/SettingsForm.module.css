@@ -218,11 +218,20 @@
   font-size: 13px;
 }
 
-/* Loading placeholder for a page body: quiet bars, no spinner. */
+/* Loading placeholder for a page body: quiet bars, no spinner. It stays
+   invisible for the first 300 ms, so a page whose data is a local call away
+   goes straight from blank to content instead of flashing the bars. Reduced
+   motion shortens the fade, not the delay. */
 .skeleton {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  animation: skeletonAppear var(--transition-fast) 300ms backwards;
+}
+
+@keyframes skeletonAppear {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .skeleton span {

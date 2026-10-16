@@ -71,20 +71,22 @@ interface WorkspaceSettingsModalProps {
 
 type FocusTarget = 'heading' | 'nav';
 
-const WorkspaceSettingsModal = ({
-  isOpen,
+// Mounted only while open, and afresh for each page a caller asks for, so
+// the window's first frame is already the requested page. Keeping it mounted
+// and resetting the page in an effect painted the last page for a frame.
+// The key compares structurally: callers pass inline literals.
+const WorkspaceSettingsModal = ({ isOpen, ...props }: WorkspaceSettingsModalProps) => (
+  isOpen ? <SettingsWindow key={JSON.stringify(props.initialSelection ?? null)} {...props} /> : null
+);
+
+const SettingsWindow = ({
   onClose,
   workspaceId,
   details,
   initialSelection,
   onChanged,
-}: WorkspaceSettingsModalProps) => {
-  // Structural compare: callers pass inline literals with a fresh identity
-  // every render, which must not snap the window back to its first page.
-  const initialKey = JSON.stringify(initialSelection ?? null);
-  const initialPage = useMemo<Selection>(() => JSON.parse(initialKey) ?? GENERAL, [initialKey]);
-
-  const [page, setPage] = useState<Selection>(initialPage);
+}: Omit<WorkspaceSettingsModalProps, 'isOpen'>) => {
+  const [page, setPage] = useState<Selection>(initialSelection ?? GENERAL);
   // Bumped to remount the page: that is how Discard drops its draft.
   const [pageVersion, setPageVersion] = useState(0);
   const [dirty, setDirty] = useState(false);
@@ -104,8 +106,8 @@ const WorkspaceSettingsModal = ({
   const pageRef = useRef<SectionHandle>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const navRef = useRef<HTMLElement>(null);
-  // Where focus goes once the next page has rendered.
-  const focusNext = useRef<FocusTarget | null>(null);
+  // Where focus goes once the next page has rendered; the nav on opening.
+  const focusNext = useRef<FocusTarget | null>('nav');
   // What had focus when the leave question opened; Stay hands it back.
   const leaveFocus = useRef<HTMLElement | null>(null);
 
@@ -117,28 +119,20 @@ const WorkspaceSettingsModal = ({
     setPendingLeave(null);
   }, []);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- resets navigation and save state when the window opens or the caller asks for a different page.
-    showPage(initialPage, 'nav');
-    setSaving(false);
-  }, [isOpen, initialPage, showPage]);
-
   const focusNav = useCallback((key: string) => {
     const nav = navRef.current;
     (nav?.querySelector<HTMLElement>(`[data-nav="${key}"]`) ?? nav?.querySelector<HTMLElement>('[data-nav]'))?.focus();
   }, []);
 
   useEffect(() => {
-    if (!isOpen || !focusNext.current) return;
+    if (!focusNext.current) return;
     const target = focusNext.current;
     focusNext.current = null;
     if (target === 'heading') headingRef.current?.focus();
     else focusNav(pageKey(page));
-  }, [isOpen, page, pageVersion, focusNav]);
+  }, [page, pageVersion, focusNav]);
 
   useEffect(() => {
-    if (!isOpen) return undefined;
     let cancelled = false;
     (async () => {
       const [servers, skills, connections, defaults] = await Promise.allSettled([
@@ -156,7 +150,7 @@ const WorkspaceSettingsModal = ({
       });
     })();
     return () => { cancelled = true; };
-  }, [isOpen]);
+  }, []);
 
   // Saves the visible page and stays on it. Resolves true on success.
   const savePage = useCallback(async () => {
@@ -255,7 +249,7 @@ const WorkspaceSettingsModal = ({
     handleClose();
   }, [pendingLeave, saving, handleClose, stay]);
 
-  useOverlayLayer(isOpen, handleEscape);
+  useOverlayLayer(true, handleEscape);
 
   const handleOverlay = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) handleClose();
@@ -272,8 +266,6 @@ const WorkspaceSettingsModal = ({
     window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
     onChanged?.();
   }, [showPage, onChanged]);
-
-  if (!isOpen) return null;
 
   const modelName = (agent: WorkspaceAgentResponse): string => {
     const connection = deps.providerConnections.find((c) => c.id === agent.providerConnectionIds[0]);
@@ -405,7 +397,8 @@ const WorkspaceSettingsModal = ({
             {sortedAgents.map((agent) => navItem(
               { kind: 'agent', agentId: agent.id },
               agentLabel(agent),
-              modelName(agent),
+              // A blank line until the connections load, so the row does not grow then.
+              modelName(agent) || '\u00a0',
               <AgentAvatar identity={identityFor(agent)} size={22} activity={agent.enabled ? 'none' : 'disabled'} />,
             ))}
             {navItem({ kind: 'new-agent' }, 'Add to crew', '', <span className={styles.navAdd} aria-hidden="true">+</span>)}
