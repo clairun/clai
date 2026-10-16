@@ -150,6 +150,7 @@ async fn test_count_session_messages() {
         create_message(
             &pool,
             CreateMessageParams {
+                run_id: None,
                 session_id: session.id.clone(),
                 role: MessageRole::User,
                 content: vec![ContentPart::Text {
@@ -195,6 +196,7 @@ async fn test_create_and_list_messages() {
     let _msg1 = create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::User,
             content: vec![ContentPart::Text {
@@ -209,6 +211,7 @@ async fn test_create_and_list_messages() {
     let _msg2 = create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::Assistant,
             content: vec![ContentPart::Text {
@@ -239,6 +242,7 @@ async fn test_update_message_content() {
     let msg = create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::Assistant,
             content: vec![ContentPart::Text {
@@ -303,12 +307,12 @@ async fn test_user_message_queue_lifecycle() {
     .await
     .unwrap();
 
-    let pending = list_pending_queued_messages(&pool, &session.id)
+    let pending = crate::assistant::signals::list_open_content(&pool, &session.id)
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].message.id, queued.id);
-    assert_eq!(pending[0].connection_id, "conn-1");
+    assert_eq!(pending[0].connection_id.as_deref(), Some("conn-1"));
     assert_ne!(pending[0].message.id, unqueued.id);
 
     let run = create_run(
@@ -326,7 +330,7 @@ async fn test_user_message_queue_lifecycle() {
     .await
     .unwrap();
 
-    mark_queued_messages_delivered(
+    crate::assistant::signals::consume(
         &pool,
         &session.id,
         &run.id,
@@ -335,12 +339,14 @@ async fn test_user_message_queue_lifecycle() {
     .await
     .unwrap();
 
-    assert!(list_pending_queued_messages(&pool, &session.id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        crate::assistant::signals::list_open_content(&pool, &session.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
-    let delivered = list_delivered_queued_messages_for_run(&pool, &session.id, &run.id)
+    let delivered = crate::assistant::signals::list_content_for_run(&pool, &session.id, &run.id)
         .await
         .unwrap();
     assert_eq!(delivered.len(), 1);
@@ -683,6 +689,7 @@ async fn test_full_session_lifecycle() {
     create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: session.id.clone(),
             role: MessageRole::User,
             content: vec![ContentPart::Text {
@@ -740,10 +747,8 @@ async fn test_create_session_and_link_task_links_atomically() {
     // Insert a workspace_tasks row first (assignTask's order) without a session_id.
     insert_task(&pool, "task-1", "queued", None, None).await;
 
-    // The atomic helper should INSERT the session AND stamp session_id in one
-    // transaction, so find_manager_session never sees it unlinked.
     let session = create_session_and_link_task(
-        &pool,
+        &mut pool.acquire().await.unwrap(),
         SessionContext {
             automation_id: Some("manager".to_string()),
             ..sample_context()
@@ -907,6 +912,7 @@ async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
     create_message(
         &pool,
         CreateMessageParams {
+            run_id: None,
             session_id: sessions[0].id.clone(),
             role: MessageRole::Assistant,
             content: vec![ContentPart::ToolUse {

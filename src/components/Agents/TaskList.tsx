@@ -7,24 +7,23 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type React from 'react';
-import { acknowledgeWorkspaceTask } from '../../workspace/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import {
   formatRelativeTime,
   isTaskActive,
-  isTaskAttention,
-  taskStatusLabel,
+  isTaskWaiting,
+  taskDisplayStatus,
 } from '../../utils/taskDisplay';
+import { buildTaskTree, type TaskNode } from '../../utils/taskTree';
 import AgentAvatar from './AgentAvatar';
+import TaskStopButton from './TaskStopButton';
 import { identityFor, taskIdentity, type AgentActivity, type AgentIdentity } from './agentIdentity';
 import styles from './TaskList.module.css';
 
 export interface TaskListProps {
-  workspaceId: string;
   tasks: readonly WorkspaceTaskResponse[];
   /** The crew, for faces and names; tasks from agents that left still resolve. */
   roster: readonly WorkspaceAgentResponse[];
-  onChanged: () => void | Promise<void>;
   onViewTask?: (task: WorkspaceTaskResponse) => void;
 }
 
@@ -38,22 +37,34 @@ const opensTheRow = (event: React.MouseEvent): boolean =>
   !(event.target as HTMLElement).closest('button, a, input, textarea') &&
   !window.getSelection()?.toString();
 
-const errorMessage = (error: unknown, fallback: string): string => {
-  if (typeof error === 'string') return error;
-  if (error instanceof Error && error.message) return error.message;
-  return fallback;
-};
-
-/** The ring a task row draws: what the task is doing, not the agent overall. */
+/** The ring a task row draws from its current state. */
 export const taskActivity = (task: WorkspaceTaskResponse): AgentActivity =>
-  isTaskActive(task) ? 'running' : isTaskAttention(task) ? 'attention' : 'none';
+  isTaskWaiting(task) ? 'idle' : isTaskActive(task) ? 'running' : 'none';
+
+interface TaskRow {
+  task: WorkspaceTaskResponse;
+  depth: number;
+  childCount: number;
+}
+
+/** The tree as indented rows, skipping the subtasks of collapsed tasks. */
+const flattenTree = (
+  nodes: readonly TaskNode[],
+  collapsed: ReadonlySet<string>,
+  depth = 0,
+  rows: TaskRow[] = []
+): TaskRow[] => {
+  for (const node of nodes) {
+    rows.push({ task: node.task, depth, childCount: node.children.length });
+    if (!collapsed.has(node.task.id)) flattenTree(node.children, collapsed, depth + 1, rows);
+  }
+  return rows;
+};
 
 export interface FilterFace {
   agentId: string;
   name: string;
   identity: AgentIdentity;
-  /** Any unacknowledged problem on this agent's tasks. */
-  attention: boolean;
 }
 
 /** One face per agent that has tasks here, in first-seen order. */
@@ -64,26 +75,19 @@ export const filterFaces = (
   const faces = new Map<string, FilterFace>();
   for (const task of tasks) {
     const id = task.assignedToWorkspaceAgentId;
-    const existing = faces.get(id);
-    if (existing) {
-      existing.attention ||= isTaskAttention(task);
-      continue;
-    }
+    if (faces.has(id)) continue;
     const agent = roster.find((entry) => entry.id === id);
     const name = agent?.isDefault ? 'Main' : agent?.displayName || task.assignedAgentDisplayName;
     faces.set(id, {
       agentId: id,
       name,
       identity: taskIdentity(task, roster),
-      attention: isTaskAttention(task),
     });
   }
   return [...faces.values()];
 };
 
-const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskListProps) => {
-  const [busyTaskId, setBusyTaskId] = useState('');
-  const [error, setError] = useState('');
+const TaskList = ({ tasks, roster, onViewTask }: TaskListProps) => {
   const [selectedAgents, setSelectedAgents] = useState<ReadonlySet<string>>(() => new Set());
 
   const faces = useMemo(() => filterFaces(tasks, roster), [tasks, roster]);
@@ -95,6 +99,15 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
   );
   const visible =
     active.size === 0 ? tasks : tasks.filter((task) => active.has(task.assignedToWorkspaceAgentId));
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
+  const rows = useMemo(() => flattenTree(buildTaskTree(visible), collapsed), [visible, collapsed]);
+  const toggleCollapsed = (taskId: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
 
   // Forget a pick once its face has left the row; otherwise the filter would
   // spring back on its own the next time that agent gets a task.
@@ -112,23 +125,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
       return next;
     });
   }, []);
-
-  const handleAcknowledge = useCallback(
-    async (taskId: string) => {
-      if (busyTaskId) return;
-      setBusyTaskId(taskId);
-      setError('');
-      try {
-        await acknowledgeWorkspaceTask(workspaceId, taskId);
-        await onChanged();
-      } catch (err) {
-        setError(errorMessage(err, 'Failed to acknowledge task.'));
-      } finally {
-        setBusyTaskId('');
-      }
-    },
-    [busyTaskId, onChanged, workspaceId]
-  );
 
   const nameOf = (agentId: string | null, fallback: string | null): string | null => {
     const agent = roster.find((entry) => entry.id === agentId);
@@ -155,7 +151,6 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                 <AgentAvatar
                   identity={face.identity}
                   size={26}
-                  activity={face.attention ? 'attention' : 'none'}
                 />
               </button>
             );
@@ -172,13 +167,16 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
         </div>
       )}
 
-      {error && <div className={styles.error}>{error}</div>}
-
       {visible.length > 0 ? (
         <ul className={styles.list}>
-          {visible.map((task) => {
-            const detail = task.error || task.resultSummary || task.instructions;
-            const needsAttention = isTaskAttention(task);
+          {rows.map(({ task, depth, childCount }) => {
+            const stopped = task.status === 'stopped';
+            // A restart stops a task with an error; that is the whole story.
+            const detail =
+              stopped && task.error
+                ? null
+                : task.error || task.resultSummary || task.instructions;
+            const status = taskDisplayStatus(task);
             const creator = roster.find((entry) => entry.id === task.createdByWorkspaceAgentId);
             const creatorName = nameOf(task.createdByWorkspaceAgentId, task.createdByDisplayName);
             const assigneeName = nameOf(
@@ -194,9 +192,9 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
               <li
                 key={task.id}
                 className={`${styles.task} ${open ? styles.openable : ''}`}
+                style={depth ? { marginLeft: `${depth * 16}px` } : undefined}
                 // The row itself is the click target, so the text inside it
-                // stays selectable; "Mark reviewed" keeps its own click
-                // because `opensTheRow` hands a control its click back.
+                // stays selectable; row controls keep their own clicks.
                 onClick={
                   open
                     ? (event) => {
@@ -228,9 +226,15 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                 <div className={styles.taskMain}>
                   <div className={styles.titleRow}>
                     <span className={styles.title}>{task.title}</span>
-                    <span className={`${styles.status} ${styles[`status_${task.status}`] || ''}`}>
-                      {taskStatusLabel(task.status)}
+                    <span className={`${styles.status} ${styles[`status_${status.key}`] || ''}`}>
+                      {status.label}
                     </span>
+                    <TaskStopButton
+                      key={`${task.id}:${task.cycleNo}`}
+                      task={task}
+                      label={`Stop ${task.title}`}
+                      className={styles.rowStop}
+                    />
                   </div>
                   <div className={styles.meta}>
                     {creatorName && (
@@ -243,17 +247,20 @@ const TaskList = ({ workspaceId, tasks, roster, onChanged, onViewTask }: TaskLis
                     <span>{assigneeName}</span>
                     <span className={styles.metaTime}>{formatRelativeTime(task.updatedAt)}</span>
                   </div>
-                  {detail && <p className={styles.summary}>{detail}</p>}
-                  {needsAttention && (
+                  {childCount > 0 && (
                     <button
                       type="button"
-                      className={styles.action}
-                      onClick={() => handleAcknowledge(task.id)}
-                      // One acknowledge at a time; a click on another row would be dropped silently.
-                      disabled={!!busyTaskId}
+                      className={styles.subtasks}
+                      aria-expanded={!collapsed.has(task.id)}
+                      onClick={() => toggleCollapsed(task.id)}
                     >
-                      Mark reviewed
+                      <span aria-hidden="true">{collapsed.has(task.id) ? '▸ ' : '▾ '}</span>
+                      {childCount} subtask{childCount === 1 ? '' : 's'}
                     </button>
+                  )}
+                  {detail && <p className={styles.summary}>{detail}</p>}
+                  {stopped && task.error && (
+                    <p className={styles.summary}>Interrupted by restart</p>
                   )}
                 </div>
               </li>

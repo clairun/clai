@@ -30,10 +30,11 @@ use crate::assistant::run_lifecycle::{
     cancel_run, complete_run, fail_run, record_tool_call_result, record_tool_call_started,
     resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
+use crate::assistant::signals;
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{strip_local_mcp_qualifier, LOCAL_MCP_SERVER_NAME};
 use crate::assistant::turn_common::{
-    build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
+    build_trigger_message, discard_unanswered_run_input, provider_content, run_produced_no_content,
 };
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
@@ -156,10 +157,7 @@ fn claude_stream_json_user_message(text: &str, images: &[(String, String)]) -> S
             "source": { "type": "base64", "media_type": media_type, "data": data },
         }));
     }
-    // A user turn must never be empty; fall back to the (possibly empty) text.
-    if content.is_empty() {
-        content.push(serde_json::json!({ "type": "text", "text": text }));
-    }
+    content.push(serde_json::json!({ "type": "text", "text": "\n\n" }));
     let mut line = serde_json::json!({
         "type": "user",
         "message": { "role": "user", "content": content },
@@ -288,7 +286,7 @@ pub async fn run_session_turn(
             connection.protocol_id
         );
         fail_run(deps, &session, &run_id, &message).await?;
-        discard_if_unanswered(deps, &session, &run_id, &input, &None).await;
+        discard_if_unanswered(deps, &session, &run_id, &None).await;
         return Err(AssistantEngineError::Provider(
             crate::assistant::providers::types::ProviderError::RequestFailed(message),
         ));
@@ -411,8 +409,7 @@ pub async fn run_session_turn(
                         Err(error) => {
                             let message = error.message();
                             fail_run(deps, &session, &run_id, &message).await?;
-                            discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot)
-                                .await;
+                            discard_if_unanswered(deps, &session, &run_id, &assistant_slot).await;
                             return Err(AssistantEngineError::Provider(
                                 crate::assistant::providers::types::ProviderError::RequestFailed(
                                     message,
@@ -606,7 +603,7 @@ pub async fn run_session_turn(
                 );
             }
             fail_run(deps, &session, &run_id, &message).await?;
-            discard_if_unanswered(deps, &session, &run_id, &input, &assistant_slot).await;
+            discard_if_unanswered(deps, &session, &run_id, &assistant_slot).await;
             Err(AssistantEngineError::Provider(
                 crate::assistant::providers::types::ProviderError::RequestFailed(message),
             ))
@@ -629,8 +626,7 @@ async fn run_input_messages(
     if is_automation_trigger {
         return Ok(Vec::new());
     }
-    let queued =
-        repository::list_delivered_queued_messages_for_run(&deps.pool, &session.id, run_id).await?;
+    let queued = signals::list_content_for_run(&deps.pool, &session.id, run_id).await?;
     if !queued.is_empty() {
         return Ok(queued.into_iter().map(|queued| queued.message).collect());
     }
@@ -651,7 +647,6 @@ async fn discard_if_unanswered(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
-    input: &crate::assistant::engine::RunTurnInput,
     assistant_slot: &Option<AssistantMessage>,
 ) {
     let placeholder_id = match assistant_slot.as_ref() {
@@ -666,14 +661,7 @@ async fn discard_if_unanswered(
             _ => return,
         },
     };
-    discard_unanswered_run_input(
-        deps,
-        session,
-        run_id,
-        input.trigger_message_id.as_deref(),
-        placeholder_id,
-    )
-    .await;
+    discard_unanswered_run_input(deps, session, run_id, placeholder_id).await;
 }
 
 fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) -> bool {
@@ -803,6 +791,7 @@ async fn ensure_assistant_message_slot(
                     text: String::new(),
                 }],
                 provider_metadata: Some(serde_json::json!({ "source": metadata_source })),
+                run_id: Some(run_id.to_string()),
             },
         )
         .await?;
@@ -819,22 +808,22 @@ async fn ensure_assistant_message_slot(
 
 /// Seal the current assistant bubble and open a fresh one.
 ///
-/// Called from the `result` branch, and only for a delivery whose reply has
-/// not started yet. Two constraints pin it there:
+/// Called when the CLI echoes injected input, before the reply to it. Two
+/// constraints pin it there:
 ///
 /// - It must be LATE enough that the messages it separates already exist.
 ///   A user message row is stamped when the user *sends* it, and the
 ///   transcript sorts by `created_at`, so a bubble opened before the next
 ///   message arrives renders the reply ABOVE the question. Rotating on any
 ///   outstanding slot did exactly that.
-/// - It must be EARLY enough to be a turn boundary. Rotating mid-turn would
-///   reset the stream state under blocks that are still open — a `tool_use`
-///   block accumulates its arguments outside `parts` and would be lost —
-///   and would strand the interrupted turn's tail below the user's message
-///   instead of above it.
+/// - It must fall between API messages. The echo of absorbed input can
+///   arrive mid-turn, but only after the previous message's blocks have
+///   closed, so no block is open here. Tool calls may still be unresolved
+///   (a tool started in the old row finishes in the new one), so their
+///   tracking carries over.
 ///
-/// Resetting the stream state is part of the rotation: the parts just
-/// persisted must not be written a second time into the new row.
+/// Resetting the rest of the stream state is part of the rotation: the
+/// parts just persisted must not be written a second time into the new row.
 #[allow(clippy::too_many_arguments)]
 async fn rotate_assistant_bubble(
     deps: &AssistantDeps,
@@ -866,7 +855,11 @@ async fn rotate_assistant_bubble(
         conversation,
     )
     .await?;
-    *state = ClaudeStreamState::new();
+    let mut next = ClaudeStreamState::new();
+    next.persisted_tool_use_ids = std::mem::take(&mut state.persisted_tool_use_ids);
+    next.unresolved_tool_use_ids = std::mem::take(&mut state.unresolved_tool_use_ids);
+    next.pending_tool_results = std::mem::take(&mut state.pending_tool_results);
+    *state = next;
     Ok(())
 }
 
@@ -887,7 +880,7 @@ struct MidRunDelivery {
     /// its wind-down `result` is ours and not a failure.
     interrupted: bool,
     /// At least one stream-json user line actually reached the process, so
-    /// the CLI owes a turn for this write. False when every matching message
+    /// the CLI will echo and answer it. False when every matching message
     /// was empty (no text, no images): those are marked delivered so they
     /// stop retrying, but they say nothing, so no turn will answer them.
     owes_turn: bool,
@@ -900,111 +893,77 @@ impl MidRunDelivery {
     };
 }
 
-/// Slot accounting for mid-run injected turns (Mechanism B): how many
-/// delivery *writes* still owe a completed turn, and whether the original
-/// prompt turn has ended.
+/// Stdin arguments for a live Claude process. `--replay-user-messages`
+/// makes the CLI echo user input (`isReplay`) once it is taken into the
+/// conversation; mid-run replies are split at that echo.
+const CLAUDE_LIVE_INPUT_ARGS: [&str; 3] =
+    ["--input-format", "stream-json", "--replay-user-messages"];
+
+/// Mid-run input state for a live Claude process, driven by the stream.
 ///
-/// The invariant behind `turn_ended`: Claude Code emits exactly one `result`
-/// per turn, and turns run strictly in order — the original prompt turn
-/// first, then the turns answering what we injected. So the FIRST result
-/// always belongs to the original turn (which never held a slot), and every
-/// later result completes an injected turn and frees its slot. That holds
-/// even for the wind-down `result` of a turn we interrupted on purpose: the
-/// turn that got cut may itself be an injected one (a second queued message
-/// arriving while the first one's turn runs). An earlier version skipped the
-/// decrement for every interrupted wind-down, leaving the count one too high
-/// in that case — the run then waited forever for a turn that was never
-/// coming (stdin held open, no EOF: a zombie run with an eternal spinner).
+/// The echo is the reply boundary: one echo may carry several delivered
+/// lines, and it may open a new turn or join the running one (input absorbed
+/// at a tool boundary gets no turn and no `result` of its own), so counting
+/// writes, turns, or results cannot find it.
 ///
-/// One slot per contiguous run of injected input, not per message and not
-/// per write. The Messages API merges consecutive user messages into a
-/// single turn, and `try_deliver_queued_to_claude` appends user lines
-/// without waiting for a reply, so input that piles up before the CLI
-/// starts replying to it is answered by ONE turn — whether it arrived as
-/// one message, a batch of five in one `write_all`, or two poll ticks 1.2s
-/// apart. Only the first delivery in each such run takes a slot.
-///
-/// The run ends when a turn STARTS (`turn_started`), not when one ends.
-/// Once the CLI is replying, later input cannot merge into that reply and
-/// needs a turn of its own. Closing the run at the `result` instead let a
-/// message delivered during an injected turn fold into the slot that turn
-/// was about to free, dropping `pending` to zero with that message written
-/// but unanswered — stdin closed under it, and its reply (if any) landed
-/// in a bubble stamped before it.
-///
-/// Crediting per message stuck a real run (2026-08-02): 10 messages went
-/// out across 8 writes, one of them a batch of 3; 8 injected turns ran, the
-/// count stuck at 2, and since stdin is only dropped at `pending() == 0`
-/// the CLI never saw EOF — `running` for 86 minutes until the app was
-/// restarted. Crediting per write fixes the batch but still leaks whenever
-/// two poll ticks deliver before the interrupted turn winds down.
-struct InjectedTurnLedger {
-    pending: usize,
-    original_turn_completed: bool,
-    /// Input has been delivered that no turn has started for yet, so the
-    /// turn it owes is already counted and further deliveries merge into
-    /// it. Doubles as the bubble-rotation signal — see
-    /// `awaiting_injected_reply`.
-    delivery_awaiting_turn: bool,
+/// Closing stdin does not depend on the echo. The CLI still answers input
+/// already written when stdin closes, so every `result` may close it except
+/// our own interrupt's wind-down of a turn whose input is unechoed — the
+/// turn answering that input follows. As long as every written line gets a
+/// later `result`, a missing echo costs a row split, never a hung run.
+#[derive(Default)]
+struct ClaudeLiveInput {
+    /// A turn is in flight (first streamed event to its `result`), so a
+    /// delivery must interrupt it.
+    turn_active: bool,
+    /// The next error `result` is our interrupt winding the turn down.
+    awaiting_interrupt_result: bool,
+    /// The prompt has been echoed. Delivering earlier would let the
+    /// prompt's echo claim the injected input's boundary.
+    prompt_echoed: bool,
+    /// Delivered input the CLI has not echoed yet.
+    unechoed: bool,
 }
 
-impl InjectedTurnLedger {
-    fn new() -> Self {
-        Self {
-            pending: 0,
-            original_turn_completed: false,
-            delivery_awaiting_turn: false,
+#[derive(Default)]
+struct StreamStep {
+    /// Injected input was echoed: its reply starts here, in a new row.
+    rotate: bool,
+    /// This `result` is our interrupt's wind-down, not a failure.
+    interrupted_result: bool,
+    /// A turn ended: recheck the queue, then close stdin if nothing new.
+    may_close: bool,
+}
+
+impl ClaudeLiveInput {
+    fn ready_for_input(&self) -> bool {
+        self.prompt_echoed
+    }
+
+    fn delivered(&mut self, delivery: &MidRunDelivery) {
+        self.awaiting_interrupt_result |= delivery.interrupted;
+        self.unechoed |= delivery.owes_turn;
+    }
+
+    fn on_event(&mut self, value: &Value) -> StreamStep {
+        let mut step = StreamStep::default();
+        match value.get("type").and_then(Value::as_str) {
+            Some("result") => {
+                self.turn_active = false;
+                step.interrupted_result = std::mem::take(&mut self.awaiting_interrupt_result)
+                    && is_interrupted_turn_result(value);
+                step.may_close = !(step.interrupted_result && self.unechoed);
+            }
+            Some("system") | Some("assistant") | Some("stream_event") | Some("user") => {
+                self.turn_active = true;
+                if value.get("isReplay").and_then(Value::as_bool) == Some(true) {
+                    step.rotate = std::mem::take(&mut self.unechoed);
+                    self.prompt_echoed = true;
+                }
+            }
+            _ => {}
         }
-    }
-
-    /// Record a delivery that put at least one user line into the live
-    /// process. Takes a slot only when no earlier delivery is still waiting
-    /// for its turn to start: anything appended before the CLI begins
-    /// replying merges into the same turn — see the type docs.
-    fn delivered_write(&mut self) {
-        if self.delivery_awaiting_turn {
-            return;
-        }
-        self.pending += 1;
-        self.delivery_awaiting_turn = true;
-    }
-
-    /// Record that the CLI has begun a turn. Input delivered from here on
-    /// cannot merge into it, so the next delivery takes its own slot.
-    fn turn_started(&mut self) {
-        self.delivery_awaiting_turn = false;
-    }
-
-    /// Record a `result` event ending the current turn (normally or via our
-    /// interrupt) and return how many injected turns are still owed.
-    ///
-    /// This does not end the delivery run — `turn_started` does. A message
-    /// delivered while a turn was winding down is answered by the turn that
-    /// follows, not by the one that just ended.
-    fn turn_ended(&mut self) -> usize {
-        if self.original_turn_completed {
-            self.pending = self.pending.saturating_sub(1);
-        }
-        self.original_turn_completed = true;
-        self.pending
-    }
-
-    /// Injected turns still owed; stdin must stay open while any remain.
-    fn pending(&self) -> usize {
-        self.pending
-    }
-
-    /// True when messages have been delivered whose reply has not started.
-    ///
-    /// The transcript uses this to decide when to rotate the assistant
-    /// bubble: the delivered messages sit above the bubble the reply will
-    /// fill, so the next `result` should close the interrupted turn's
-    /// bubble and open a fresh one. Rotating on any outstanding slot
-    /// instead — as this used to — opened bubbles at results where nothing
-    /// had been delivered, stamping them before the messages they went on
-    /// to answer and inverting the transcript.
-    fn awaiting_injected_reply(&self) -> bool {
-        self.delivery_awaiting_turn
+        step
     }
 }
 
@@ -1017,10 +976,10 @@ struct MidRunPayload {
 /// Assemble the stream-json bytes for one mid-run delivery.
 ///
 /// Nothing to say means nothing to interrupt for: cutting the in-flight turn
-/// to deliver silence would waste the turn and leave the ledger owed a
-/// `result` that is never coming. `user_lines` is empty exactly when every
+/// to deliver silence would waste the turn and wait for an echo that is
+/// never coming. `user_lines` is empty exactly when every
 /// matching queued message had no text and no images — those are still marked
-/// delivered by the caller so they stop retrying on every poll tick.
+/// delivered by the caller so they are not redelivered on every wake.
 fn build_midrun_payload(user_lines: String, turn_active: bool) -> MidRunPayload {
     let owes_turn = !user_lines.is_empty();
     let interrupted = turn_active && owes_turn;
@@ -1067,7 +1026,7 @@ async fn try_deliver_queued_to_claude(
         return MidRunDelivery::NONE;
     }
 
-    let pending = match repository::list_pending_queued_messages(&deps.pool, &session.id).await {
+    let pending = match signals::list_open_content(&deps.pool, &session.id).await {
         Ok(pending) => pending,
         Err(error) => {
             tracing::warn!(run_id, %error, "Mid-run delivery: queue read failed");
@@ -1079,7 +1038,12 @@ async fn try_deliver_queued_to_claude(
     // run on that provider, not to this process.
     let matching: Vec<_> = pending
         .into_iter()
-        .filter(|queued| queued.connection_id == connection_id)
+        .filter(|queued| {
+            queued
+                .connection_id
+                .as_deref()
+                .is_none_or(|id| id == connection_id)
+        })
         .collect();
     if matching.is_empty() {
         return MidRunDelivery::NONE;
@@ -1098,7 +1062,7 @@ async fn try_deliver_queued_to_claude(
             user_lines.push_str(&claude_stream_json_user_message(&text, &images));
         }
         // Empty messages are still marked delivered below — leaving them
-        // pending would retry forever on every poll tick.
+        // pending would redeliver them on every wake.
         message_ids.push(queued.message.id.clone());
     }
 
@@ -1117,10 +1081,7 @@ async fn try_deliver_queued_to_claude(
         let _ = stdin.flush().await;
     }
 
-    if let Err(error) =
-        repository::mark_queued_messages_delivered(&deps.pool, &session.id, run_id, &message_ids)
-            .await
-    {
+    if let Err(error) = signals::consume(&deps.pool, &session.id, run_id, &message_ids).await {
         tracing::warn!(
             run_id, %error,
             "Mid-run delivery: messages reached the live process but marking delivered failed; the followup run may re-deliver them"
@@ -1244,7 +1205,7 @@ async fn run_claude_turn(
         // stream-json input keeps stdin usable for the lifetime of the run,
         // so queued user messages can be interrupted-in mid-task (Mechanism
         // B) instead of waiting for a followup run.
-        command.arg("--input-format").arg("stream-json");
+        command.args(CLAUDE_LIVE_INPUT_ARGS);
     }
     if is_new_session {
         command.arg("--session-id").arg(cli_session_id);
@@ -1336,20 +1297,37 @@ async fn run_claude_turn(
     let mut lines = BufReader::new(stdout).lines();
     let mut state = ClaudeStreamState::new();
     let mut result_error: Option<String> = None;
-    // Mid-run input state (only meaningful while `live_stdin` is Some).
-    // `turn_active` tracks whether a turn is in flight (first streamed event
-    // → its `result`) so delivery knows whether an interrupt is needed.
-    // `awaiting_interrupt_result` marks that the next error_during_execution
-    // result is OUR interrupt winding the turn down, not a failure.
-    // `injected_turns` tracks how many turns the CLI still owes for input
-    // we injected — stdin must stay open while any remain.
-    let mut turn_active = false;
-    let mut awaiting_interrupt_result = false;
-    let mut injected_turns = InjectedTurnLedger::new();
-    let mut queue_poll = tokio::time::interval(std::time::Duration::from_millis(1200));
-    queue_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut live = ClaudeLiveInput::default();
+    // The dispatcher wakes this run when input is pending for the session.
+    // A wake that lands during a tool call waits in `midrun_pending` for the
+    // tool's result: cutting a build, test run, or git operation half-way can
+    // corrupt work-in-progress, and the signal table keeps the input safe
+    // meanwhile.
+    let midrun = crate::assistant::runtime::midrun(
+        &crate::assistant::runtime::LiveRunKey::new(&deps.workspace_id, &session.id),
+        run_id,
+    )
+    .unwrap_or_default();
+    let mut midrun_pending = false;
 
     loop {
+        if midrun_pending && live.ready_for_input() && !state.has_tool_call_in_flight() {
+            if let Some(stdin) = live_stdin.as_mut() {
+                midrun_pending = false;
+                let outcome = try_deliver_queued_to_claude(
+                    deps,
+                    workspace_root,
+                    session,
+                    run_id,
+                    &connection.id,
+                    stdin,
+                    live.turn_active,
+                    conversation,
+                )
+                .await;
+                live.delivered(&outcome);
+            }
+        }
         let update_due = state.update_throttle.due();
         let line = tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -1366,42 +1344,8 @@ async fn run_claude_turn(
                 emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
                 return Err(LocalAgentRunError::Cancelled);
             }
-            _ = queue_poll.tick(), if live_stdin.is_some() => {
-                // Never interrupt while a tool call is executing — cutting a
-                // build, test run, or git operation half-way can corrupt
-                // work-in-progress. The message waits for the tool's result
-                // (the next clean cut point); the queue keeps it safe
-                // meanwhile, and the followup run remains the fallback if
-                // this run ends first.
-                if state.has_tool_call_in_flight() {
-                    continue;
-                }
-                let Some(stdin) = live_stdin.as_mut() else {
-                    continue;
-                };
-                let outcome = try_deliver_queued_to_claude(
-                    deps,
-                    workspace_root,
-                    session,
-                    run_id,
-                    &connection.id,
-                    stdin,
-                    turn_active,
-                    conversation,
-                )
-                .await;
-                if outcome.interrupted {
-                    awaiting_interrupt_result = true;
-                }
-                if outcome.owes_turn {
-                    // The bubble rotates at the next `result`, not here: the
-                    // turn we just cut is still winding down, and its tail
-                    // belongs in the bubble above the user's message rather
-                    // than below it. Resetting the stream state mid-turn
-                    // would also strand whatever the state machine is
-                    // holding for the blocks still open.
-                    injected_turns.delivered_write();
-                }
+            _ = midrun.notified(), if live_stdin.is_some() => {
+                midrun_pending = true;
                 continue;
             }
             _ = sleep_until_due(update_due) => {
@@ -1426,24 +1370,20 @@ async fn run_claude_turn(
         });
         let value = emit_pending_on_err(value, deps, session, run_id, &mut state.update_throttle)?;
 
-        let event_type = value.get("type").and_then(Value::as_str);
-        match event_type {
-            Some("result") => turn_active = false,
-            Some("system") | Some("assistant") | Some("stream_event") | Some("user") => {
-                if !turn_active {
-                    // A turn is starting. Whatever we delivered before this
-                    // point is what it answers; anything delivered from here
-                    // on needs a turn of its own. Note the wind-down of a
-                    // turn we interrupted raises no edge — it was already
-                    // active — so a delivery made during it still merges
-                    // into the turn that follows.
-                    injected_turns.turn_started();
-                }
-                turn_active = true;
-            }
-            _ => {}
+        let step = live.on_event(&value);
+        if step.rotate {
+            rotate_assistant_bubble(
+                deps,
+                session,
+                run_id,
+                CliProviderRuntime::ClaudeCode.metadata_source(),
+                &mut assistant_message,
+                assistant_slot,
+                &mut state,
+                conversation,
+            )
+            .await?;
         }
-        let suppress_interrupted = awaiting_interrupt_result && is_interrupted_turn_result(&value);
 
         let handled = handle_claude_event(
             deps,
@@ -1458,7 +1398,7 @@ async fn run_claude_turn(
         .await;
         emit_pending_on_err(handled, deps, session, run_id, &mut state.update_throttle)?;
 
-        if suppress_interrupted && result_error.take().is_some() {
+        if step.interrupted_result && result_error.take().is_some() {
             let subtype = value
                 .get("subtype")
                 .and_then(Value::as_str)
@@ -1470,61 +1410,27 @@ async fn run_claude_turn(
             );
         }
 
-        if event_type == Some("result") {
-            awaiting_interrupt_result = false;
-            // Every `result` ends exactly one turn, interrupted or not, and
-            // the ledger frees the slot that turn held (if any). The
-            // wind-down of a turn we cut on purpose is no exception: the
-            // turn that got cut may itself have been an injected one — see
-            // `InjectedTurnLedger::turn_ended` for the full story.
-            injected_turns.turn_ended();
-            if live_stdin.is_some() {
-                // End-of-run race: a message may have been queued since the
-                // last poll tick. Fold it in as one more turn now instead of
-                // closing; if delivery declines, the followup run has it.
-                if injected_turns.pending() == 0 {
-                    if let Some(stdin) = live_stdin.as_mut() {
-                        let outcome = try_deliver_queued_to_claude(
-                            deps,
-                            workspace_root,
-                            session,
-                            run_id,
-                            &connection.id,
-                            stdin,
-                            false,
-                            conversation,
-                        )
-                        .await;
-                        if outcome.owes_turn {
-                            injected_turns.delivered_write();
-                        }
-                    }
-                }
-                if injected_turns.pending() > 0 {
-                    // Rotate only for a delivery whose reply is still to
-                    // come. Two consecutive assistant turns with no user
-                    // message between them belong in one bubble, and the
-                    // speculative rotation this used to do — on any result
-                    // with a slot outstanding — stamped bubbles before the
-                    // messages they went on to answer, inverting the
-                    // transcript.
-                    if injected_turns.awaiting_injected_reply() {
-                        rotate_assistant_bubble(
-                            deps,
-                            session,
-                            run_id,
-                            CliProviderRuntime::ClaudeCode.metadata_source(),
-                            &mut assistant_message,
-                            assistant_slot,
-                            &mut state,
-                            conversation,
-                        )
-                        .await?;
-                    }
-                } else {
-                    // Nothing pending: dropping stdin tells Claude no more
-                    // input is coming; it drains anything buffered and exits,
-                    // ending the loop at EOF exactly like the legacy path.
+        if step.may_close {
+            if let Some(stdin) = live_stdin.as_mut() {
+                // End-of-turn race: a message may have been queued since the
+                // last delivery. Fold it in now instead of closing; if
+                // delivery declines, the followup run has it.
+                let outcome = try_deliver_queued_to_claude(
+                    deps,
+                    workspace_root,
+                    session,
+                    run_id,
+                    &connection.id,
+                    stdin,
+                    false,
+                    conversation,
+                )
+                .await;
+                live.delivered(&outcome);
+                if !outcome.owes_turn {
+                    // Dropping stdin tells Claude no more input is coming; it
+                    // still answers anything already written, then exits,
+                    // ending the loop at EOF like the legacy path.
                     live_stdin = None;
                 }
             }
@@ -2319,14 +2225,19 @@ async fn build_codex_steer(
     if crate::assistant::tools::ask_user::session_has_pending_ask(&session.id) {
         return None;
     }
-    let pending = repository::list_pending_queued_messages(&deps.pool, &session.id)
+    let pending = signals::list_open_content(&deps.pool, &session.id)
         .await
         .ok()?;
     let mut input = Vec::new();
     let mut messages = Vec::new();
     let mut total_chars = 0usize;
     for queued in pending {
-        if queued.connection_id != connection_id || inflight.contains(&queued.message.id) {
+        if queued
+            .connection_id
+            .as_deref()
+            .is_some_and(|id| id != connection_id)
+            || inflight.contains(&queued.message.id)
+        {
             continue;
         }
         if queued
@@ -2446,9 +2357,7 @@ async fn resolve_codex_steer_response(
         );
         return false;
     }
-    match repository::mark_queued_messages_delivered(&deps.pool, &session.id, run_id, &message_ids)
-        .await
-    {
+    match signals::consume(&deps.pool, &session.id, run_id, &message_ids).await {
         Ok(()) => {
             let _ = deps.emit(
                 session,
@@ -3033,6 +2942,7 @@ async fn prepare_prompt(
                     provider_metadata: Some(serde_json::json!({
                         "source": format!("{}-trigger", metadata_source),
                     })),
+                    run_id: Some(run_id.to_string()),
                 },
             )
             .await?;
@@ -3075,7 +2985,7 @@ async fn fresh_cli_session_context_prompt_from_current_queue(
     conversation: &mut RunConversation,
     prompt: String,
 ) -> Result<String, String> {
-    let pending = repository::list_pending_queued_messages(pool, session_id).await?;
+    let pending = signals::list_open_content(pool, session_id).await?;
     conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
     Ok(with_fresh_cli_session_context_prompt(conversation, prompt))
 }
@@ -3217,8 +3127,7 @@ fn render_cli_fresh_context(messages: &[AssistantMessage]) -> String {
 }
 
 fn render_cli_context_message(message: &AssistantMessage) -> Option<String> {
-    let text = message
-        .content
+    let text = provider_content(message)
         .iter()
         .filter_map(cli_context_part_text)
         .filter(|text| !text.trim().is_empty())
@@ -3320,8 +3229,7 @@ fn queued_messages_prompt(messages: &[AssistantMessage]) -> String {
     }
 
     let mut prompt =
-        "The user sent these additional messages while you were working. Respond to them in order:"
-            .to_string();
+        "These messages arrived while you were working. Respond to them in order:".to_string();
     for (index, message) in messages.iter().enumerate() {
         let text = message_text(message);
         if text.trim().is_empty() {
@@ -3337,7 +3245,11 @@ fn system_prompt_text(
     run_context: &RunContext,
     trigger: &crate::assistant::types::RunTrigger,
 ) -> String {
-    let tool_defs = crate::assistant::tools::available_tools(run_context, &[]);
+    let tool_defs = crate::assistant::tools::available_tools(
+        run_context,
+        &[],
+        matches!(trigger, crate::assistant::types::RunTrigger::WorkspaceTask),
+    );
     provider_message_text(&build_system_prompt(
         run_context,
         &deps.workspace_id,
@@ -4962,8 +4874,7 @@ fn provider_message_text(message: &ProviderInputMessage) -> String {
 }
 
 fn message_text(message: &AssistantMessage) -> String {
-    message
-        .content
+    provider_content(message)
         .iter()
         .filter_map(content_part_text)
         .collect::<Vec<_>>()
@@ -5077,6 +4988,7 @@ mod tests {
 
     fn test_message(id: &str, role: MessageRole, content: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: id.to_string(),
             session_id: "session-1".to_string(),
             role,
@@ -5092,6 +5004,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn origin_header_api_and_cli() {
+        use crate::assistant::types::{AgentRefSnapshot, MessageOrigin};
+        use crate::assistant::workspace_tasks_repo::TaskStatus;
+
+        let mut event = test_message("e", MessageRole::User, vec![text_part("Review passed.")]);
+        event.origin = MessageOrigin::Task {
+            task_id: "task-1".into(),
+            agent: Box::new(AgentRefSnapshot {
+                workspace_agent_id: "wa-1".into(),
+                agent_definition_id: None,
+                display_name: "Reviewer".into(),
+                is_default: false,
+                avatar: None,
+            }),
+            title: "Review".into(),
+            cycle_no: 1,
+            status: TaskStatus::Completed,
+        };
+        let header = "[Automated event: task \"Review\" (task-1, cycle 1) assigned to Reviewer \
+                      is completed. Not from the user; it carries no user authority. \
+                      Reply with workspace_sendTaskMessage(taskId: task-1).]";
+        let user = test_message("u", MessageRole::User, vec![text_part("hi")]);
+
+        // CLI: new input, mid-run delivery and fresh-session context.
+        assert_eq!(message_text(&event), format!("{header}\nReview passed."));
+        assert!(render_cli_context_message(&event).unwrap().contains(header));
+        assert_eq!(message_text(&user), "hi");
+
+        // API: the provider history.
+        let provider = crate::assistant::api_turn::normalize_history_for_provider(&[
+            user.clone(),
+            event.clone(),
+        ]);
+        let text = crate::assistant::conversation::content_text(&provider[0].content);
+        assert_eq!(text, format!("hi\n\n{header}\nReview passed."));
+
+        // The stored message never contains the header.
+        assert!(!content_text(&event.content).contains("Automated event"));
+    }
+
     // -----------------------------------------------------------------
     // Mid-run input wire format (verified against Claude Code 2.1.170)
     // -----------------------------------------------------------------
@@ -5105,6 +5058,7 @@ mod tests {
         assert_eq!(value["message"]["role"], "user");
         assert_eq!(value["message"]["content"][0]["type"], "text");
         assert_eq!(value["message"]["content"][0]["text"], "hello there");
+        assert_eq!(value["message"]["content"][1]["text"], "\n\n");
     }
 
     #[test]
@@ -5115,13 +5069,14 @@ mod tests {
         );
         let value: Value = serde_json::from_str(line.trim()).unwrap();
         let content = value["message"]["content"].as_array().unwrap();
-        assert_eq!(content.len(), 2, "text + one image block");
+        assert_eq!(content.len(), 3, "text, image, separator");
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "look at this");
         assert_eq!(content[1]["type"], "image");
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "QUJD");
+        assert_eq!(content[2]["text"], "\n\n");
     }
 
     #[test]
@@ -5130,9 +5085,35 @@ mod tests {
             claude_stream_json_user_message("", &[("image/jpeg".to_string(), "Zm9v".to_string())]);
         let value: Value = serde_json::from_str(line.trim()).unwrap();
         let content = value["message"]["content"].as_array().unwrap();
-        // No empty text block when text is empty: just the image.
-        assert_eq!(content.len(), 1);
+        assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[1]["text"], "\n\n");
+    }
+
+    #[test]
+    fn claude_stream_json_separates_event_human_event() {
+        let messages = [
+            "[Automated event: task result]\nDone.",
+            "Please inspect it.",
+            "[Automated event: task update]\nRunning.",
+        ];
+        let batch: String = messages
+            .iter()
+            .map(|text| claude_stream_json_user_message(text, &[]))
+            .collect();
+        let projected: Vec<String> = batch
+            .lines()
+            .map(|line| {
+                let value: Value = serde_json::from_str(line).unwrap();
+                value["message"]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|part| part["text"].as_str().unwrap())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(projected, messages.map(|text| format!("{text}\n\n")));
     }
 
     #[test]
@@ -5344,7 +5325,7 @@ mod tests {
         summary.session_id = session.id.clone();
         conversation.apply_compaction(1, summary);
 
-        repository::update_pending_queued_message(
+        signals::edit_pending_user_message(
             &pool,
             &session.id,
             &edited.id,
@@ -5352,7 +5333,7 @@ mod tests {
         )
         .await
         .unwrap();
-        repository::delete_pending_queued_message(&pool, &session.id, &deleted.id)
+        signals::delete_pending_user_message(&pool, &session.id, &deleted.id)
             .await
             .unwrap();
 
@@ -5415,7 +5396,7 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec!["a", "b"]);
-        assert_eq!(queued_messages_prompt(&run_input), "The user sent these additional messages while you were working. Respond to them in order:\n\nMessage 1:\nfirst");
+        assert_eq!(queued_messages_prompt(&run_input), "These messages arrived while you were working. Respond to them in order:\n\nMessage 1:\nfirst");
     }
 
     #[test]
@@ -5628,60 +5609,6 @@ mod tests {
             Some("turn input is invalid")
         );
         assert!(app_server_turn_start_error(&accepted).is_none());
-    }
-
-    #[test]
-    fn injected_turn_ledger_double_interrupt_frees_the_cut_turns_slot() {
-        // Regression: a second queued message interrupting the FIRST
-        // injected message's turn. The interrupted wind-down used to skip
-        // the decrement unconditionally, leaving the count one turn over —
-        // the run then held stdin open waiting for a result that was never
-        // coming (zombie run / eternal spinner, observed 2026-06-11).
-        let mut ledger = InjectedTurnLedger::new();
-
-        // Message #1 interrupts the original prompt turn.
-        ledger.delivered_write();
-        // Wind-down of the ORIGINAL turn: held no slot, nothing freed.
-        assert_eq!(ledger.turn_ended(), 1);
-
-        // Message #2 interrupts injected turn #1 while it is running.
-        ledger.turn_started();
-        ledger.delivered_write();
-        // Wind-down of injected turn #1: ITS slot must be freed.
-        assert_eq!(ledger.turn_ended(), 1);
-
-        // Injected turn #2 completes: all slots drained, stdin may close.
-        assert_eq!(ledger.turn_ended(), 0);
-    }
-
-    #[test]
-    fn injected_turn_ledger_single_interrupt() {
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write(); // interrupts the original turn
-        assert_eq!(ledger.turn_ended(), 1); // original wind-down: no slot
-        ledger.turn_started(); // the injected turn begins
-        assert_eq!(ledger.turn_ended(), 0); // injected turn done
-    }
-
-    #[test]
-    fn injected_turn_ledger_delivery_before_first_turn_event() {
-        // A poll tick can deliver before the original turn streams its
-        // first event (no interrupt sent, the turn looked idle). The
-        // original turn's own result must not consume that message's slot.
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write();
-        // The original turn's first event (`system` init) starts a turn.
-        ledger.turn_started();
-        assert_eq!(ledger.turn_ended(), 1); // original turn ends normally
-        ledger.turn_started(); // the injected turn begins
-        assert_eq!(ledger.turn_ended(), 0); // injected turn ends
-    }
-
-    #[test]
-    fn injected_turn_ledger_no_injections() {
-        let mut ledger = InjectedTurnLedger::new();
-        assert_eq!(ledger.pending(), 0);
-        assert_eq!(ledger.turn_ended(), 0); // original turn only
     }
 
     #[test]
@@ -5948,143 +5875,291 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Mid-run injected-turn accounting
+    // Mid-run input boundaries. Event shapes follow the traces recorded
+    // from Claude Code 2.1.289 in reviews/claude-stream-traces.md.
     // -----------------------------------------------------------------
 
-    /// Three queued messages ride ONE `write_all` as three consecutive
-    /// stream-json user lines, and the API merges consecutive user messages
-    /// into one turn. The ledger must never see the message count — the
-    /// batch that stuck a real run owed three turns and got one.
-    #[test]
-    fn a_batch_of_messages_rides_one_write_and_owes_one_turn() {
-        let batch: String = ["first", "second", "third"]
+    enum Step {
+        /// A stream-json line from the CLI.
+        Cli(Value),
+        /// The user sends a message; it is delivered when the loop may.
+        Send(&'static str),
+    }
+
+    fn init() -> Step {
+        Step::Cli(serde_json::json!({ "type": "system", "subtype": "init" }))
+    }
+
+    fn system_status(fields: Value) -> Step {
+        let mut value = serde_json::json!({ "type": "system", "subtype": "status" });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        Step::Cli(value)
+    }
+
+    fn echo(texts: &[&str]) -> Step {
+        let content: Vec<Value> = texts
             .iter()
-            .map(|text| claude_stream_json_user_message(text, &[]))
+            .flat_map(|text| {
+                [
+                    serde_json::json!({ "type": "text", "text": text }),
+                    serde_json::json!({ "type": "text", "text": "\n\n" }),
+                ]
+            })
             .collect();
-        assert_eq!(batch.lines().count(), 3, "three user lines, one payload");
-
-        let out = build_midrun_payload(batch, true);
-        assert!(out.owes_turn);
-
-        // One write, therefore one slot, however many lines rode it.
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 1);
-
-        // The original turn winds down (our interrupt); its result never
-        // frees a slot because that turn never held one.
-        assert_eq!(ledger.turn_ended(), 1);
-        // Claude answers all three appended user messages in one turn.
-        assert_eq!(ledger.turn_ended(), 0, "stdin must be droppable");
+        Step::Cli(serde_json::json!({
+            "type": "user", "isReplay": true,
+            "message": { "role": "user", "content": content },
+        }))
     }
 
-    /// The bubble-rotation signal: rotate at the first `result` after a
-    /// delivery, and only then. Rotating on any outstanding slot opened
-    /// bubbles at results where nothing had been delivered, stamping them
-    /// `created_at` before the messages they went on to answer — which put
-    /// the reply ABOVE the question in the transcript.
-    #[test]
-    fn rotation_is_signalled_by_a_delivery_not_by_an_outstanding_slot() {
-        let mut ledger = InjectedTurnLedger::new();
-        assert!(!ledger.awaiting_injected_reply(), "nothing delivered yet");
-
-        ledger.delivered_write();
-        assert!(ledger.awaiting_injected_reply(), "reply still to come");
-
-        // The interrupted turn's result: the run loop rotates here, reading
-        // the signal before `turn_ended`. The signal is spent once the CLI
-        // actually starts the reply.
-        ledger.turn_ended();
-        assert!(ledger.awaiting_injected_reply(), "the reply has not begun");
-        ledger.turn_started();
-        assert!(!ledger.awaiting_injected_reply());
-
-        // A slot can stay outstanding with nothing newly delivered — that
-        // alone must NOT open a bubble, which is what inverted the
-        // transcript.
-        assert!(ledger.pending() > 0, "slot still owed");
-        assert!(
-            !ledger.awaiting_injected_reply(),
-            "an owed slot is not a reason to open a bubble"
-        );
+    fn interrupted() -> [Step; 2] {
+        [
+            Step::Cli(serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [
+                    { "type": "text", "text": "[Request interrupted by user]" }
+                ] },
+            })),
+            Step::Cli(serde_json::json!({
+                "type": "result", "subtype": "error_during_execution", "is_error": true,
+            })),
+        ]
     }
 
-    /// Two poll ticks can both deliver before the interrupted turn winds
-    /// down — 1.2s apart is easily inside a wind-down, and the wind-down
-    /// raises no turn-start edge because the turn was already running.
-    /// Those user messages are appended with no reply between them, so the
-    /// CLI merges them into ONE turn. Crediting each write leaked a slot
-    /// and hung the run exactly like the per-message bug did.
-    #[test]
-    fn deliveries_before_a_turn_starts_share_one_turn() {
-        let mut ledger = InjectedTurnLedger::new();
-        ledger.delivered_write();
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 1, "both merge into one owed turn");
-
-        assert_eq!(ledger.turn_ended(), 1, "original wind-down frees nothing");
-        assert_eq!(ledger.turn_ended(), 0, "the merged reply frees the slot");
+    fn says(text: &str) -> Step {
+        Step::Cli(serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": text }] },
+        }))
     }
 
-    /// Once the CLI starts replying, later input cannot merge into that
-    /// reply and needs a turn of its own.
-    ///
-    /// Regression: this used to key off the `result` instead, so a message
-    /// delivered mid-turn folded into the slot that same turn was about to
-    /// free. `pending` hit zero with the message written but unanswered,
-    /// stdin closed under it, and no bubble rotated for it.
-    #[test]
-    fn a_delivery_after_a_turn_starts_takes_its_own_slot() {
-        let mut ledger = InjectedTurnLedger::new();
-
-        // The original prompt turn ends holding no slot.
-        assert_eq!(ledger.turn_ended(), 0);
-
-        // Delivered while idle — the end-of-run race path.
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 1);
-
-        // The CLI begins answering it.
-        ledger.turn_started();
-        assert!(!ledger.awaiting_injected_reply());
-
-        // A message arriving now interrupts that turn and needs its own.
-        ledger.delivered_write();
-        assert_eq!(ledger.pending(), 2, "must not merge into the running turn");
-
-        assert_eq!(
-            ledger.turn_ended(),
-            1,
-            "the interrupted turn frees its slot"
-        );
-        ledger.turn_started();
-        assert_eq!(ledger.turn_ended(), 0, "then the reply to the new message");
+    fn success() -> Step {
+        Step::Cli(serde_json::json!({ "type": "result", "subtype": "success", "is_error": false }))
     }
 
-    /// Replay of the run that hung on 2026-08-02: 10 messages delivered
-    /// across 8 writes (one a batch of 3), each write separated from the
-    /// next by the turn that answered it, plus the original prompt turn.
-    /// Per-message accounting left `pending` at 2 forever.
-    #[test]
-    fn observed_stuck_run_sequence_drains_to_zero() {
-        let mut ledger = InjectedTurnLedger::new();
-        let writes = 8;
-
-        // First write lands during the original turn, which ends without
-        // freeing a slot.
-        ledger.delivered_write();
-        let mut pending = ledger.turn_ended();
-        assert_eq!(pending, 1);
-
-        // Every later write is answered by its own turn.
-        for _ in 1..writes {
-            ledger.turn_started();
-            ledger.delivered_write();
-            assert_eq!(ledger.pending(), 2, "previous slot not yet freed");
-            pending = ledger.turn_ended();
+    /// Feed a script through `ClaudeLiveInput` with the loop's wiring:
+    /// pending sends are delivered at the top of an iteration once
+    /// `ready_for_input`, through the real `build_midrun_payload`; `rotate`
+    /// opens a new assistant row; `may_close` closes stdin (the queue
+    /// recheck finds nothing). After the close the CLI still drains what it
+    /// was given, so later steps run but a later send stays queued.
+    /// Returns rows in creation order and anything left queued, and panics
+    /// if the script ends with stdin open — a hung run.
+    fn replay_stream(steps: Vec<Step>) -> (Vec<String>, Vec<&'static str>) {
+        let mut live = ClaudeLiveInput::default();
+        let mut stdin_open = true;
+        let mut queued: Vec<&'static str> = Vec::new();
+        let mut rows = vec![String::from("A:")];
+        let mut current = 0;
+        for step in steps {
+            if stdin_open && live.ready_for_input() && !queued.is_empty() {
+                let lines: String = queued
+                    .drain(..)
+                    .map(|text| claude_stream_json_user_message(text, &[]))
+                    .collect();
+                let payload = build_midrun_payload(lines, live.turn_active);
+                live.delivered(&MidRunDelivery {
+                    interrupted: payload.interrupted,
+                    owes_turn: payload.owes_turn,
+                });
+            }
+            match step {
+                Step::Send(text) => {
+                    rows.push(format!("U:{text}"));
+                    queued.push(text);
+                }
+                Step::Cli(value) => {
+                    let step = live.on_event(&value);
+                    if step.rotate {
+                        rows.push(String::from("A:"));
+                        current = rows.len() - 1;
+                    }
+                    if value["type"] == "assistant" {
+                        rows[current]
+                            .push_str(value["message"]["content"][0]["text"].as_str().unwrap());
+                    }
+                    if step.may_close {
+                        stdin_open = false;
+                    }
+                }
+            }
         }
-        assert_eq!(pending, 1, "the last write is still owed a turn");
-        assert_eq!(ledger.turn_ended(), 0, "and then it arrives");
+        assert!(
+            !stdin_open,
+            "stdin still open at end of stream: the run never ends"
+        );
+        (rows, queued)
+    }
+
+    #[test]
+    fn live_input_args_request_the_echo() {
+        assert!(CLAUDE_LIVE_INPUT_ARGS.contains(&"--replay-user-messages"));
+        assert!(CLAUDE_LIVE_INPUT_ARGS
+            .windows(2)
+            .any(|pair| pair == ["--input-format", "stream-json"]));
+    }
+
+    /// Recorded with `/compact`: our interrupt aborts the compaction and the
+    /// wind-down is a SUCCESS result, so it is not held; stdin closes there
+    /// and the CLI still echoes and answers the written line.
+    #[test]
+    fn input_during_compaction_ends_the_run_and_splits_the_reply() {
+        let (rows, queued) = replay_stream(vec![
+            init(),
+            echo(&["prompt"]),
+            system_status(serde_json::json!({ "status": "compacting" })),
+            Step::Send("task result"),
+            system_status(serde_json::json!({ "status": null, "compact_result": "failed" })),
+            init(),
+            says("Compaction canceled."),
+            success(),
+            init(),
+            echo(&["task result"]),
+            says("answer"),
+            success(),
+        ]);
+        assert_eq!(
+            rows,
+            ["A:Compaction canceled.", "U:task result", "A:answer"]
+        );
+        assert!(queued.is_empty());
+    }
+
+    /// Recorded (trace TR, written without an interrupt): the CLI absorbs
+    /// the line into the running turn — no new `init`, no wind-down, one
+    /// `result` for everything. Here our interrupt yields no wind-down
+    /// either, as when it lands on a turn that cannot be cut.
+    #[test]
+    fn input_absorbed_into_the_running_turn_gets_its_own_row() {
+        let (rows, _) = replay_stream(vec![
+            init(),
+            echo(&["prompt"]),
+            says("running tool"),
+            Step::Send("also KIWI"),
+            echo(&["also KIWI"]),
+            says("FINISHED KIWI"),
+            success(),
+        ]);
+        assert_eq!(rows, ["A:running tool", "U:also KIWI", "A:FINISHED KIWI"]);
+    }
+
+    /// Recorded (trace B2R): two lines in one write echo back as ONE
+    /// message, a third write interrupts the turn that just took them, and
+    /// one reply answers all three.
+    #[test]
+    fn queued_lines_merge_into_one_echo_and_one_reply() {
+        let mut steps = vec![init(), echo(&["prompt"]), says("one two")];
+        steps.extend([Step::Send("APPLE"), Step::Send("BANANA")]);
+        steps.extend(interrupted());
+        steps.extend([init(), Step::Send("CHERRY"), echo(&["APPLE", "BANANA"])]);
+        steps.extend(interrupted());
+        steps.extend([
+            init(),
+            echo(&["CHERRY"]),
+            says("APPLE BANANA CHERRY"),
+            success(),
+        ]);
+        let (rows, queued) = replay_stream(steps);
+        assert_eq!(
+            rows,
+            [
+                "A:one two",
+                "U:APPLE",
+                "U:BANANA",
+                "U:CHERRY",
+                "A:APPLE BANANA CHERRY"
+            ]
+        );
+        assert!(queued.is_empty());
+    }
+
+    /// Recorded (trace C): a second message interrupts the turn answering
+    /// the first; stdin is held across both wind-downs, so it is delivered
+    /// live and each reply gets its own row.
+    #[test]
+    fn input_during_an_injected_turn_gets_its_own_row() {
+        let mut steps = vec![init(), echo(&["prompt"]), says("one"), Step::Send("first")];
+        steps.extend(interrupted());
+        steps.extend([
+            init(),
+            echo(&["first"]),
+            says("reply 1"),
+            Step::Send("second"),
+        ]);
+        steps.extend(interrupted());
+        steps.extend([init(), echo(&["second"]), says("reply 2"), success()]);
+        let (rows, queued) = replay_stream(steps);
+        assert_eq!(
+            rows,
+            ["A:one", "U:first", "A:reply 1", "U:second", "A:reply 2"]
+        );
+        assert!(queued.is_empty());
+    }
+
+    /// Without echoes for injected input (an older CLI, or a path that does
+    /// not echo) the run still ends; only the row split is lost.
+    #[test]
+    fn a_missing_echo_cannot_hang_the_run() {
+        let mut steps = vec![init(), echo(&["prompt"]), says("one"), Step::Send("first")];
+        steps.extend(interrupted());
+        steps.extend([init(), says(" reply"), success()]);
+        let (rows, _) = replay_stream(steps);
+        assert_eq!(rows, ["A:one reply", "U:first"]);
+    }
+
+    /// A message sent before the prompt's echo waits for it, so the prompt's
+    /// echo cannot claim the injected input's boundary.
+    #[test]
+    fn delivery_waits_for_the_prompt_echo() {
+        let mut steps = vec![init(), Step::Send("early"), echo(&["prompt"]), says("one")];
+        steps.extend(interrupted());
+        steps.extend([init(), echo(&["early"]), says("reply"), success()]);
+        let (rows, queued) = replay_stream(steps);
+        assert_eq!(rows, ["A:one", "U:early", "A:reply"]);
+        assert!(queued.is_empty());
+    }
+
+    /// A genuine error after a completed interrupt wind-down is reported,
+    /// not swallowed as our interrupt.
+    #[test]
+    fn an_error_after_the_interrupt_wind_down_is_not_suppressed() {
+        let mut live = ClaudeLiveInput::default();
+        let mut steps = vec![init(), echo(&["prompt"])];
+        steps.extend(interrupted());
+        steps.extend([init(), echo(&["first"])]);
+        let mut wind_downs = 0;
+        for (index, step) in steps.into_iter().enumerate() {
+            if index == 2 {
+                let payload = build_midrun_payload(
+                    claude_stream_json_user_message("first", &[]),
+                    live.turn_active,
+                );
+                live.delivered(&MidRunDelivery {
+                    interrupted: payload.interrupted,
+                    owes_turn: payload.owes_turn,
+                });
+            }
+            let Step::Cli(value) = step else {
+                unreachable!()
+            };
+            wind_downs += usize::from(live.on_event(&value).interrupted_result);
+        }
+        assert_eq!(wind_downs, 1, "the interrupt's own wind-down is ours");
+
+        let failure = live.on_event(&serde_json::json!({
+            "type": "result", "subtype": "error_during_execution", "is_error": true,
+        }));
+        assert!(!failure.interrupted_result, "a real failure must surface");
+        assert!(failure.may_close);
+    }
+
+    #[test]
+    fn plain_prompt_closes_at_its_result() {
+        let (rows, _) = replay_stream(vec![init(), echo(&["prompt"]), says("hi"), success()]);
+        assert_eq!(rows, ["A:hi"]);
     }
 
     // -----------------------------------------------------------------

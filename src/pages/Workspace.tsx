@@ -11,10 +11,12 @@ import TaskList from '../components/Agents/TaskList';
 import AgentFacepile from '../components/Agents/AgentFacepile';
 import { useStableRoster } from '../components/Agents/useStableRoster';
 import { useOpenTask, type TaskView } from './useOpenTask';
+import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore';
 import * as assistantClient from '../assistant/client';
-import useAssistantStore from '../assistant/sessionStore';
+import useAssistantStore, { isRunActive } from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
+import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
 import { mainIdentity } from '../components/Agents/agentIdentity';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
@@ -47,8 +49,7 @@ import { takePendingForkPrompt } from '../utils/workspaceUiEvents';
 import {
   formatRelativeTime,
   isTaskActive,
-  isTaskAttention,
-  taskStatusLabel,
+  isTaskRunning,
   toNumber,
   type NumericTimestamp,
 } from '../utils/taskDisplay';
@@ -100,6 +101,8 @@ type WorkspaceUiState = {
   activePanel: ActivePanel;
   previewEntry: PreviewEntry | null;
   viewingTask: WorkspaceTaskResponse | null;
+  // The logs a nested task was opened from, oldest first, for Back.
+  previousTasks: readonly WorkspaceTaskResponse[];
   // The Agents drawer's inline "Add to crew" picker; the drawer header carries
   // the toggle, so the flag lives with the drawer, not inside the list.
   crewPickerOpen: boolean;
@@ -116,6 +119,7 @@ const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
   activePanel: null,
   previewEntry: null,
   viewingTask: null,
+  previousTasks: EMPTY_TASKS,
   crewPickerOpen: false,
 };
 type SettingsSelection = { kind: 'general' } | { kind: 'agent'; agentId: string };
@@ -1047,33 +1051,6 @@ const ArtifactsList = ({
   );
 };
 
-const WorkspaceAttentionBanner = ({ tasks }: { tasks: WorkspaceTaskResponse[] }) => {
-  const attentionTasks = (tasks || []).filter(isTaskAttention);
-
-  if (attentionTasks.length === 0) {
-    return null;
-  }
-
-  const primary = attentionTasks[0]!;
-  const statusLabel = taskStatusLabel(primary.status);
-  const detail = primary.error || primary.resultSummary || primary.instructions;
-
-  return (
-    <section className={styles.attentionBanner} aria-label="Workspace attention">
-      <div className={styles.attentionBannerHeader}>
-        <span className={styles.attentionBannerTitle}>
-          {attentionTasks.length} task{attentionTasks.length === 1 ? '' : 's'} need attention
-        </span>
-        <span className={`${styles.taskStatus} ${styles[`taskStatus_${primary.status}`] || ''}`}>
-          {statusLabel}
-        </span>
-      </div>
-      <div className={styles.attentionBannerTask}>{primary.title}</div>
-      {detail && <p className={styles.attentionBannerDetail}>{detail}</p>}
-    </section>
-  );
-};
-
 /**
  * Compact workspace header with breadcrumb navigation, status, and inline metrics.
  */
@@ -1128,10 +1105,8 @@ const WorkspaceHeader = ({
   const schedulePillText = formatSchedulePill(details);
   const scheduleEnabled = !!details?.scheduleEnabled;
   const schedulePaused = !!details?.schedulePaused;
-  // Active = a scheduled task is running, or any non-terminal task is in
-  // flight on this workspace. Matches Fleet's "isProcessing" check so the
-  // Run-now button correctly disables while a run is mid-flight.
-  const hasRunningTask = (details?.tasks || []).some(isTaskActive);
+  // Running or queued tasks disable Run-now; tasks waiting for subtasks do not.
+  const hasRunningTask = (details?.tasks || []).some(isTaskRunning);
   // Manager is invisible to the user — exclude it from the headline count so
   // the chip and the drawer (which already filters !isDefault) agree.
   // Count includes the main (default) agent — the manager is now a
@@ -1470,6 +1445,7 @@ const ChatFirstLayout = ({
     (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
   );
   const cardRef = useRef<HTMLDivElement | null>(null);
+  const owner = useMemo(() => resolveSessionOwner(taskRoster), [taskRoster]);
 
   // Publish the conversation card's viewport geometry as document-level
   // CSS vars so the fixed input bar (TerminalEmulator) can align itself
@@ -1545,6 +1521,7 @@ const ChatFirstLayout = ({
             onLoadOlderMessages={onLoadOlderMessages}
             taskRoster={taskRoster}
             onOpenTask={onOpenTask}
+            owner={owner}
           />
           <AskUserPanel sessionId={sessionId} />
           <InlineApprovalCard workspaceId={workspaceId} />
@@ -1648,7 +1625,7 @@ const Workspace = () => {
   //   - viewingTask:  task object — task transcript log
   // Only one slide-out may be open at a time; opening one clears the other.
   const [uiByWorkspace, setUiByWorkspace] = useState<Record<string, WorkspaceUiState>>({});
-  const { activePanel, previewEntry, viewingTask, crewPickerOpen } =
+  const { activePanel, previewEntry, viewingTask, previousTasks, crewPickerOpen } =
     uiByWorkspace[workspaceId] ?? EMPTY_WORKSPACE_UI;
 
   const patchWorkspaceUi = useCallback(
@@ -1675,6 +1652,7 @@ const Workspace = () => {
             activePanel: next,
             previewEntry: next === 'memories' || next === 'artifacts' ? current.previewEntry : null,
             viewingTask: next === 'tasks' ? current.viewingTask : null,
+            previousTasks: next === 'tasks' ? current.previousTasks : EMPTY_TASKS,
             crewPickerOpen: next === 'agents' ? current.crewPickerOpen : false,
           },
         };
@@ -1692,7 +1670,7 @@ const Workspace = () => {
 
   const openTaskTranscript = useCallback(
     (task: WorkspaceTaskResponse) => {
-      patchWorkspaceUi({ previewEntry: null, viewingTask: task });
+      patchWorkspaceUi({ previewEntry: null, viewingTask: task, previousTasks: EMPTY_TASKS });
     },
     [patchWorkspaceUi]
   );
@@ -1702,7 +1680,7 @@ const Workspace = () => {
     [patchWorkspaceUi]
   );
   const closeTaskTranscript = useCallback(
-    () => patchWorkspaceUi({ viewingTask: null }),
+    () => patchWorkspaceUi({ viewingTask: null, previousTasks: EMPTY_TASKS }),
     [patchWorkspaceUi]
   );
 
@@ -1859,6 +1837,7 @@ const Workspace = () => {
       try {
         const nextDetails = await getWorkspaceDetails(workspaceId, DETAILS_WITH_FILES);
         if (currentWorkspaceIdRef.current !== workspaceId) return;
+        useTaskStore.getState().seedTasks(workspaceId, nextDetails.tasks);
         setDetails(nextDetails);
         setError('');
 
@@ -1871,8 +1850,17 @@ const Workspace = () => {
           const hasUnloadedUpdate =
             nextDetails.session.updatedAt &&
             lastLoadedSessionUpdatedAtRef.current !== nextDetails.session.updatedAt;
+          // Re-reading mid-stream would drop the message being streamed, so a
+          // streaming session only hydrates once the server shows no active
+          // run — which also recovers from a missed terminal run event.
+          const streamingRuns =
+            hasUnloadedUpdate && existingSession?.isStreaming
+              ? await assistantClient.listRuns(workspaceId, nextDetails.session.id)
+              : null;
+          if (currentWorkspaceIdRef.current !== workspaceId) return;
           const shouldHydrateSession =
-            needsInitialHydration || (hasUnloadedUpdate && !existingSession?.isStreaming);
+            needsInitialHydration ||
+            (hasUnloadedUpdate && !streamingRuns?.some(isRunActive));
 
           if (shouldHydrateSession) {
             const [messagePage, runs] = await Promise.all([
@@ -1881,7 +1869,7 @@ const Workspace = () => {
                 sessionId: nextDetails.session.id,
                 limit: MESSAGE_PAGE_LIMIT,
               }),
-              assistantClient.listRuns(workspaceId, nextDetails.session.id),
+              streamingRuns ?? assistantClient.listRuns(workspaceId, nextDetails.session.id),
             ]);
             if (currentWorkspaceIdRef.current !== workspaceId) return;
 
@@ -2069,13 +2057,11 @@ const Workspace = () => {
   }, [loadDetails]);
 
   const memories = useMemo(() => details?.memories || [], [details?.memories]);
-  // `viewingTask` is a snapshot from when the panel opened; follow the polled
-  // copy so status and session stay live. A task fetched by id may not be listed yet.
-  const liveViewingTask = useMemo(
-    () =>
-      viewingTask ? (details?.tasks?.find((t) => t.id === viewingTask.id) ?? viewingTask) : null,
-    [viewingTask, details?.tasks]
-  );
+  // `viewingTask` is a snapshot from when the panel opened; follow the store's
+  // copy (polls and `task_updated`) so status and session stay live. The
+  // snapshot covers a task the store has not seen yet.
+  const storedViewingTask = useTask(workspaceId, viewingTask?.id);
+  const liveViewingTask = viewingTask ? (storedViewingTask ?? viewingTask) : null;
   const artifactCount = Number(details?.artifactCount ?? 0);
   const artifactCountCapped = details?.artifactCountCapped ?? false;
 
@@ -2228,7 +2214,13 @@ const Workspace = () => {
     };
   }, [loadDetails, details, setError, workspaceId]);
 
-  const tasks = details?.tasks || [];
+  // The details' window and order, each task at its newest known copy.
+  const storedTasks = useWorkspaceTasks(workspaceId);
+  const detailsTasks = details?.tasks;
+  const tasks = useMemo(
+    () => (detailsTasks || EMPTY_TASKS).map((task) => storedTasks?.[task.id] ?? task),
+    [detailsTasks, storedTasks]
+  );
 
   // The chat's delegated-task cards are frozen at the moment of their tool
   // call — the tasks drawer owns what is happening now. So the chat gets no
@@ -2261,12 +2253,36 @@ const Workspace = () => {
     },
     [workspaceId]
   );
+  const handleTaskNotFound = useCallback(() => setError('Task not found.'), [setError]);
   const openTaskById = useOpenTask({
     workspaceId,
     loadedTasks,
     showTasksPanel,
     updateViewingTask,
+    onNotFound: handleTaskNotFound,
   });
+  // From the chat: nothing to go Back to.
+  const openTask = useCallback(
+    (taskId: string) => {
+      patchWorkspaceUi({ previousTasks: EMPTY_TASKS });
+      openTaskById(taskId);
+    },
+    [openTaskById, patchWorkspaceUi]
+  );
+  // From inside a task's log: Back returns to it.
+  const openNestedTask = useCallback(
+    (taskId: string) => {
+      if (viewingTask) patchWorkspaceUi({ previousTasks: [...previousTasks, viewingTask] });
+      openTaskById(taskId);
+    },
+    [openTaskById, patchWorkspaceUi, previousTasks, viewingTask]
+  );
+  const backToPreviousTask = useCallback(() => {
+    const previous = previousTasks[previousTasks.length - 1];
+    if (previous) {
+      patchWorkspaceUi({ viewingTask: previous, previousTasks: previousTasks.slice(0, -1) });
+    }
+  }, [patchWorkspaceUi, previousTasks]);
   // The manager session's currently-in-flight run, if any. Drives the
   // header Stop button + hides Run-now while a run is mid-stream.
   // `details.runs` holds only the newest run and the newest non-terminal
@@ -2431,7 +2447,6 @@ const Workspace = () => {
 
       {error && <div className={styles.errorBanner}>{error}</div>}
 
-      <WorkspaceAttentionBanner tasks={tasks} />
 
       <div className={styles.workspaceBody}>
         {/* Keyed by workspace so a switch applies the new workspace's panel
@@ -2463,7 +2478,7 @@ const Workspace = () => {
             isLoadingOlderMessages={isLoadingOlderMessages}
             onLoadOlderMessages={handleLoadOlderMessages}
             taskRoster={chatRoster}
-            onOpenTask={openTaskById}
+            onOpenTask={openTask}
           />
         </div>
 
@@ -2484,6 +2499,8 @@ const Workspace = () => {
             task={liveViewingTask}
             roster={chatRoster}
             onClose={closeTaskTranscript}
+            onOpenTask={openNestedTask}
+            onBack={previousTasks.length > 0 ? backToPreviousTask : undefined}
           />
         )}
 
@@ -2704,10 +2721,8 @@ const Workspace = () => {
 
               {details && activePanel === 'tasks' && (
                 <TaskList
-                  workspaceId={workspaceId}
                   tasks={tasks}
                   roster={details.assignedAgents}
-                  onChanged={() => loadDetails(false)}
                   onViewTask={openTaskTranscript}
                 />
               )}

@@ -12,9 +12,10 @@ const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
  * every agent face and every task card four times a minute for nothing.
  *
  * This returns the same reference until something a face actually depends on
- * changes — identity, Main-ness, name, avatar seed and generator. Anything an
- * avatar starts reading must be added to the key, which is why the key is
- * built here, once, instead of at each call site.
+ * changes — identity, Main-ness, enabled (a disabled face is dimmed), name,
+ * avatar seed and generator. Anything an avatar starts reading must be added
+ * to the key, which is why the key is built here, once, instead of at each
+ * call site.
  */
 const rosterKey = (agents: readonly WorkspaceAgentResponse[] | null | undefined): string =>
   (agents || [])
@@ -22,6 +23,7 @@ const rosterKey = (agents: readonly WorkspaceAgentResponse[] | null | undefined)
       [
         agent.id,
         agent.isDefault ? '1' : '0',
+        agent.enabled ? '1' : '0',
         agent.displayName,
         agent.avatar?.seed ?? '',
         agent.avatar?.generatorVersion ?? '',

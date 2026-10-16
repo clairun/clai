@@ -17,10 +17,11 @@ use crate::assistant::run_lifecycle::{
     cancel_run, complete_run, fail_run, record_tool_call_result, record_tool_call_started,
     resolve_run_id, MissingToolCall, ToolCallOutcome,
 };
+use crate::assistant::signals;
 use crate::assistant::system_prompt::build_system_prompt;
 use crate::assistant::tools::{self, ToolExecutionContext};
 use crate::assistant::turn_common::{
-    build_trigger_message, discard_unanswered_run_input, run_produced_no_content,
+    build_trigger_message, discard_unanswered_run_input, provider_content, run_produced_no_content,
 };
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, CompletionRequest, ContentPart,
@@ -87,7 +88,7 @@ pub async fn run_session_turn(
                         continue;
                     }
                 }
-                return fail_opening_api_stream(deps, &input, &session, &run_id, &state, e).await;
+                return fail_opening_api_stream(deps, &session, &run_id, &state, e).await;
             }
         };
 
@@ -120,7 +121,6 @@ pub async fn run_session_turn(
             StreamExit::ProviderReported { message } => {
                 fail_terminal_api_stream(
                     deps,
-                    &input,
                     &session,
                     &run_id,
                     &state,
@@ -133,7 +133,6 @@ pub async fn run_session_turn(
             StreamExit::StreamFailed { message } => {
                 let message = fail_terminal_api_stream(
                     deps,
-                    &input,
                     &session,
                     &run_id,
                     &state,
@@ -201,7 +200,6 @@ async fn consume_and_finalize_api_stream(
 
 async fn fail_opening_api_stream(
     deps: &AssistantDeps,
-    input: &RunTurnInput,
     session: &AssistantSession,
     run_id: &str,
     state: &ApiTurnState,
@@ -212,21 +210,13 @@ async fn fail_opening_api_stream(
         failure_message_with_compaction_context(&provider_message, &state.compaction_attempt);
     fail_run(deps, session, run_id, &failure).await?;
     if state.iteration == 0 {
-        discard_unanswered_run_input(
-            deps,
-            session,
-            run_id,
-            input.trigger_message_id.as_deref(),
-            None,
-        )
-        .await;
+        discard_unanswered_run_input(deps, session, run_id, None).await;
     }
     Err(provider_error_with_compaction_context(error, &provider_message, failure).into())
 }
 
 async fn fail_terminal_api_stream(
     deps: &AssistantDeps,
-    input: &RunTurnInput,
     session: &AssistantSession,
     run_id: &str,
     state: &ApiTurnState,
@@ -237,14 +227,7 @@ async fn fail_terminal_api_stream(
         failure_message_with_compaction_context(provider_message, &state.compaction_attempt);
     fail_run(deps, session, run_id, &message).await?;
     if state.iteration == 0 && assistant_message.1 {
-        discard_unanswered_run_input(
-            deps,
-            session,
-            run_id,
-            input.trigger_message_id.as_deref(),
-            Some(assistant_message.0),
-        )
-        .await;
+        discard_unanswered_run_input(deps, session, run_id, Some(assistant_message.0)).await;
     }
     Ok(message)
 }
@@ -256,7 +239,7 @@ async fn accept_api_stream(
     queued_message_ids_in_request: &[String],
     state: &mut ApiTurnState,
 ) -> Result<AssistantMessage, AssistantEngineError> {
-    if let Err(e) = repository::mark_queued_messages_delivered(
+    if let Err(e) = signals::consume(
         &deps.pool,
         &session.id,
         run_id,
@@ -294,6 +277,7 @@ async fn accept_api_stream(
                     text: String::new(),
                 }],
                 provider_metadata: None,
+                run_id: Some(run_id.to_string()),
             },
         )
         .await?;
@@ -347,7 +331,14 @@ async fn start_api_turn(
             .list_tools_for_servers(&run_context.mcp_server_ids)
             .await
     };
-    let tool_defs = tools::available_tools(run_context, &external_tools);
+    let tool_defs = tools::available_tools(
+        run_context,
+        &external_tools,
+        matches!(
+            input.trigger,
+            crate::assistant::types::RunTrigger::WorkspaceTask
+        ),
+    );
 
     // Build execution context for tool calls
     // Run-scoped filesystem grants accepted via fs_request_grant stay visible
@@ -396,6 +387,7 @@ async fn start_api_turn(
                     role: trigger_content.role.clone(),
                     content: trigger_content.content.clone(),
                     provider_metadata: None,
+                    run_id: Some(run_id.clone()),
                 },
             )
             .await?;
@@ -437,7 +429,7 @@ async fn prepare_api_request(
     // consecutive same-role messages. The DB stays the source of truth;
     // this only shapes what the provider sees so a mid-stream hangup or
     // stacked user typing can't poison subsequent runs.
-    let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+    let pending = signals::list_open_content(&deps.pool, &session.id).await?;
     state
         .conversation
         .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
@@ -478,7 +470,7 @@ async fn prepare_api_request(
             }
         }
         // Summarization may have waited while the user edited or deleted queued input.
-        let pending = repository::list_pending_queued_messages(&deps.pool, &session.id).await?;
+        let pending = signals::list_open_content(&deps.pool, &session.id).await?;
         state
             .conversation
             .refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
@@ -795,6 +787,7 @@ mod tests {
             .create_message(
                 &pool,
                 CreateMessageParams {
+                    run_id: None,
                     session_id: session.id.clone(),
                     role: MessageRole::Assistant,
                     content: vec![text("")],
@@ -836,6 +829,7 @@ mod tests {
             .create_message(
                 &pool,
                 CreateMessageParams {
+                    run_id: None,
                     session_id: session.id.clone(),
                     role: MessageRole::Assistant,
                     content: vec![text("")],
@@ -880,6 +874,7 @@ mod tests {
             .create_message(
                 &pool,
                 CreateMessageParams {
+                    run_id: None,
                     session_id: session.id.clone(),
                     role: MessageRole::Tool,
                     content: vec![ContentPart::ToolResult {
@@ -1102,6 +1097,7 @@ mod tests {
 
     fn user_message(text: &str) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-user-{}", text.len()),
             session_id: "session".to_string(),
             role: MessageRole::User,
@@ -1121,6 +1117,7 @@ mod tests {
 
     fn assistant_message_with_content(content: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-assistant-{}", content.len()),
             session_id: "session".to_string(),
             role: MessageRole::Assistant,
@@ -1132,6 +1129,7 @@ mod tests {
 
     fn tool_message(tool_call_id: &str) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-tool-{}", tool_call_id),
             session_id: "session".to_string(),
             role: MessageRole::Tool,
@@ -1374,6 +1372,7 @@ mod tests {
 
     fn system_message(text: &str) -> AssistantMessage {
         AssistantMessage {
+            origin: Default::default(),
             id: format!("msg-system-{}", text.len()),
             session_id: "session".to_string(),
             role: MessageRole::System,
@@ -1506,6 +1505,7 @@ mod tests {
         // Tool row with no ToolResult content (only stray text) — must be
         // dropped because we can't anchor it to an assistant tool_call_id.
         let bogus_tool = AssistantMessage {
+            origin: Default::default(),
             id: "msg-tool-bogus".to_string(),
             session_id: "session".to_string(),
             role: MessageRole::Tool,
@@ -2039,7 +2039,9 @@ fn strip_unsupported_images(messages: Vec<ProviderInputMessage>) -> Vec<Provider
     clippy::too_many_lines,
     reason = "lint debt: 123 lines against a 100-line budget; split it, do not raise the budget"
 )]
-fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<ProviderInputMessage> {
+pub(crate) fn normalize_history_for_provider(
+    messages: &[AssistantMessage],
+) -> Vec<ProviderInputMessage> {
     let mut out: Vec<ProviderInputMessage> = Vec::new();
 
     for msg in messages {
@@ -2134,15 +2136,16 @@ fn normalize_history_for_provider(messages: &[AssistantMessage]) -> Vec<Provider
                 }
             }
             MessageRole::User => {
+                let content = provider_content(msg);
                 if let Some(last) = out.last_mut() {
                     if last.role == MessageRole::User {
-                        append_text_with_separator(&mut last.content, &msg.content);
+                        append_text_with_separator(&mut last.content, &content);
                         continue;
                     }
                 }
                 out.push(ProviderInputMessage {
                     role: MessageRole::User,
-                    content: msg.content.clone(),
+                    content,
                 });
             }
             MessageRole::System => {

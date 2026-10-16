@@ -2,25 +2,33 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::assistant::run_context::RunContext;
+use crate::assistant::signals::AGENT_SENDS_PER_HOUR;
 use crate::assistant::tools::ask_user::AskUserParams;
 use crate::assistant::tools::workspace_tasks::{
     AssignWorkspaceTaskParams, GetWorkspaceTaskResultParams, ListWorkspaceAgentsParams,
+    SendWorkspaceTaskMessageParams, StopWorkspaceTaskParams, MAX_TASK_MESSAGE_CHARS,
 };
 use crate::assistant::types::ToolDefinition;
+use crate::assistant::workspace_tasks_repo::MAX_TASK_DEPTH;
 use crate::config::ShellAccessMode;
 
 /// Returns all tool definitions available to a run.
 pub fn available_tools(
     context: &RunContext,
     external_tools: &[ToolDefinition],
+    is_task_session: bool,
 ) -> Vec<ToolDefinition> {
     let mut tools = vec![];
 
-    if is_workspace_manager_context(context) {
+    if context.agent_enabled {
         tools.push(workspace_list_agents_def());
         tools.push(workspace_assign_task_def());
         tools.push(workspace_get_task_result_def());
-        tools.push(ask_user_def());
+        tools.push(workspace_send_task_message_def());
+        tools.push(workspace_stop_task_def());
+        if !is_task_session {
+            tools.push(ask_user_def());
+        }
     }
 
     tools.push(history_query_def());
@@ -98,6 +106,8 @@ fn all_builtin_defs() -> Vec<ToolDefinition> {
         workspace_list_agents_def(),
         workspace_assign_task_def(),
         workspace_get_task_result_def(),
+        workspace_send_task_message_def(),
+        workspace_stop_task_def(),
         ask_user_def(),
         fs_request_grant_def(),
         bash_exec_def(),
@@ -118,14 +128,32 @@ fn workspace_list_agents_def() -> ToolDefinition {
 fn workspace_assign_task_def() -> ToolDefinition {
     tool::<AssignWorkspaceTaskParams>(
         "workspace_assignTask",
-        "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs asynchronously in its own session; multiple tasks may run at once, even for the same agent. Returns immediately with a task ID to poll via workspace_getTaskResult. The assigning manager remains responsible for polling every task it spawned to a terminal status before sending a final response. The worker does not see this conversation, so instructions must be self-contained.",
+        &format!(
+            "Assign a bounded task to an agent assigned to this workspace — including yourself, to run work in parallel. The task runs in its own session; multiple tasks may run at once, even for the same agent. This returns immediately with the queued task. Do not poll: the result arrives later as an automated event in this session and wakes you, so you can end your turn. A worker that answers `BLOCKED:` ends as `failed` with `failureReason: 'blocked'`; a `failed` event carries `failureReason` and `error`. The worker does not see this conversation, so instructions must be self-contained. A task can report more than once; a later cycle sends another result. Delegation is limited: {MAX_TASK_DEPTH} levels of nesting, {AGENT_SENDS_PER_HOUR} assignments and task messages per hour.",
+        ),
     )
 }
 
 fn workspace_get_task_result_def() -> ToolDefinition {
     tool::<GetWorkspaceTaskResultParams>(
         "workspace_getTaskResult",
-        "Read the current status and result of a workspace-local task by task ID. The response includes sessionId/runId when available; use them with history_query to inspect a running subagent's transcript and tool calls when progress is unclear.",
+        "Read a task's current state and latest result. Inspection only; you do not need to poll. `status` is one of queued, running, stopping, stopped, completed, failed; `failed` carries `failureReason` (blocked = the worker needed something it could not get, error = run error, restart, connection_unavailable) and `error` text. The response includes sessionId/runId when available; use them with history_query to inspect a running worker's transcript.",
+    )
+}
+
+fn workspace_send_task_message_def() -> ToolDefinition {
+    tool::<SendWorkspaceTaskMessageParams>(
+        "workspace_sendTaskMessage",
+        &format!(
+            "Send a message to any task in this workspace by taskId, or to its canonical manager with taskId `workspace`. Any task can message any task. The send does not wait for a reply. A running task receives the message in its current run or queues it; a finished task resumes in a new cycle. A task can report more than once; a later cycle sends another result. Returns the target and whether delivery queued. Messages are at most {MAX_TASK_MESSAGE_CHARS} characters.",
+        ),
+    )
+}
+
+fn workspace_stop_task_def() -> ToolDefinition {
+    tool::<StopWorkspaceTaskParams>(
+        "workspace_stopTask",
+        "Request cancellation of a task's current run and its unfinished subtasks. The task becomes `stopping`, then `stopped` once its run winds down; a stopped task's result still arrives as an automated event. Stopping a task that already ended fails with `already_terminal`.",
     )
 }
 
@@ -237,17 +265,6 @@ fn web_fetch_def() -> ToolDefinition {
     }
 }
 
-fn is_workspace_manager_context(context: &RunContext) -> bool {
-    let Some(automation_id) = context.automation_id.as_deref() else {
-        return false;
-    };
-
-    context
-        .workspace_agents
-        .iter()
-        .any(|agent| agent.is_default && agent.id == automation_id)
-}
-
 /// Build a ToolDefinition from a schemars-annotated param type.
 ///
 /// Subschemas are inlined (no `$defs`/`$ref` indirection) — weaker
@@ -301,11 +318,27 @@ mod tests {
     }
 
     #[test]
+    fn task_sessions_do_not_offer_ask_user() {
+        let context = RunContext {
+            agent_enabled: true,
+            ..RunContext::default()
+        };
+        let names = |is_task| {
+            available_tools(&context, &[], is_task)
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>()
+        };
+        assert!(names(false).contains(&"ask_user".to_string()));
+        assert!(!names(true).contains(&"ask_user".to_string()));
+    }
+
+    #[test]
     fn workspace_tools_use_bash_instead_of_operational_fs_tools() {
         let mut context = RunContext::default();
 
         let names = |context: &RunContext| {
-            available_tools(context, &[])
+            available_tools(context, &[], false)
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>()
@@ -333,7 +366,7 @@ mod tests {
     fn web_tools_are_off_unless_granted() {
         let mut context = RunContext::default();
         let has_web = |context: &RunContext| {
-            let names: Vec<String> = available_tools(context, &[])
+            let names: Vec<String> = available_tools(context, &[], false)
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect();

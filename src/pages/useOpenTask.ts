@@ -1,6 +1,7 @@
 import { useCallback, useRef } from 'react';
 import type { WorkspaceTaskResponse } from '../generated/bindings';
 import { getWorkspaceTask } from '../workspace/client';
+import { useTaskStore } from '../workspace/taskStore';
 
 /** What the open-a-task rule needs to see before it may change anything. */
 export interface TaskView {
@@ -22,6 +23,8 @@ export interface UseOpenTaskOptions {
   updateViewingTask: (
     update: (current: TaskView) => { viewingTask: WorkspaceTaskResponse | null } | null
   ) => void;
+  /** The task is gone from the database. */
+  onNotFound?: () => void;
   /** Seam for tests; production always fetches through the workspace client. */
   fetchTask?: typeof getWorkspaceTask;
 }
@@ -42,6 +45,7 @@ export const useOpenTask = ({
   loadedTasks,
   showTasksPanel,
   updateViewingTask,
+  onNotFound,
   fetchTask = getWorkspaceTask,
 }: UseOpenTaskOptions) => {
   // Which click is the current one; a fetch that is not it has been overtaken.
@@ -61,7 +65,11 @@ export const useOpenTask = ({
           if (requestId !== requestRef.current) return;
           // Null means the task is gone from the database, not merely old; the
           // drawer's list is then the honest answer to the click.
-          if (!task) return;
+          if (!task) {
+            onNotFound?.();
+            return;
+          }
+          useTaskStore.getState().upsertTask(task);
           updateViewingTask((current) =>
             current.activePanel === 'tasks' && current.viewingTask === null
               ? { viewingTask: task }
@@ -72,6 +80,6 @@ export const useOpenTask = ({
           console.error('[Workspace] Failed to load the task a chat card names:', err);
         });
     },
-    [fetchTask, loadedTasks, showTasksPanel, updateViewingTask, workspaceId]
+    [fetchTask, loadedTasks, onNotFound, showTasksPanel, updateViewingTask, workspaceId]
   );
 };

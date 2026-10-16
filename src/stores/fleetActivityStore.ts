@@ -16,15 +16,23 @@
 
 import { create } from 'zustand';
 
+/** Placeholder run id Fleet shows between "Run now" and the real run's events. */
+export const optimisticRunNowId = (workspaceId: string): string => `optimistic-runnow:${workspaceId}`;
+
 interface FleetActivityState {
   /** workspaceId -> in-flight run ids. */
   activeRunsByWorkspace: Record<string, string[]>;
+  /** Workspaces whose manual "Run now" was skipped because the session was busy. */
+  runNowSkipped: string[];
   markRunStarted: (workspaceId: string, runId: string) => void;
   markRunEnded: (workspaceId: string, runId: string) => void;
+  markRunNowSkipped: (workspaceId: string) => void;
+  dismissRunNowSkipped: (workspaceId: string) => void;
 }
 
-export const useFleetActivityStore = create<FleetActivityState>()((set) => ({
+export const useFleetActivityStore = create<FleetActivityState>()((set, get) => ({
   activeRunsByWorkspace: {},
+  runNowSkipped: [],
 
   markRunStarted: (workspaceId, runId) =>
     set((state) => {
@@ -51,4 +59,16 @@ export const useFleetActivityStore = create<FleetActivityState>()((set) => ({
       }
       return { activeRunsByWorkspace: map };
     }),
+
+  markRunNowSkipped: (workspaceId) => {
+    get().markRunEnded(workspaceId, optimisticRunNowId(workspaceId));
+    set((state) => ({
+      runNowSkipped: [workspaceId, ...state.runNowSkipped.filter((id) => id !== workspaceId)],
+    }));
+  },
+
+  dismissRunNowSkipped: (workspaceId) =>
+    set((state) => ({
+      runNowSkipped: state.runNowSkipped.filter((id) => id !== workspaceId),
+    })),
 }));

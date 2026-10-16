@@ -7,7 +7,6 @@
  *   idle      hairline in the agent's own hue
  *   running   accent-green arc that rotates (keyframes defined in this file:
  *             CSS Modules scope @keyframes per file, see scripts/check-css-animations.mjs)
- *   attention amber, static
  *   disabled  no ring, face dimmed and desaturated
  */
 .avatar {
@@ -50,10 +49,6 @@
   );
   mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px));
   animation: agentAvatarSpin 1.4s linear infinite;
-}
-
-.attention::before {
-  border-color: var(--color-warning, #f5a524);
 }
 
 .disabled {

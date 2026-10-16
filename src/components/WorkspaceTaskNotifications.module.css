@@ -22,6 +22,10 @@
   box-shadow: var(--shadow-lg);
 }
 
+.toastNeutral {
+  border-color: var(--color-border-medium);
+}
+
 .toastHeader {
   display: flex;
   align-items: center;
@@ -51,12 +55,6 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.status_failed {
-  background: var(--color-critical-bg);
-  color: var(--color-critical-dark);
-  border-color: var(--color-critical-border);
 }
 
 .body {

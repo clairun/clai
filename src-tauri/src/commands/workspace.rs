@@ -368,6 +368,14 @@ pub struct WorkspaceTaskActionRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskMessageRequest {
+    pub workspace_id: String,
+    pub task_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceForkRequest {
     pub workspace_id: String,
     #[serde(default)]
@@ -1347,7 +1355,7 @@ async fn workspace_details(
     // Cheap single-table query, so it rides along even on lightweight polls —
     // the "Queued" chips stay accurate without the file walk.
     let queued_message_ids = if let Some(session) = &session {
-        repository::list_pending_queued_message_ids(&workspace_pool, &session.id).await?
+        crate::assistant::signals::list_open_message_ids(&workspace_pool, &session.id).await?
     } else {
         Vec::new()
     };
@@ -2562,36 +2570,6 @@ pub async fn workspace_list_agents(
 // it is edited in place — a shared teammate cannot become one workspace's Main
 // without dragging its other workspaces along.
 
-#[tauri::command]
-pub async fn workspace_acknowledge_task(
-    request: WorkspaceTaskActionRequest,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
-    let pool = state.workspace_db(&workspace_id).await?;
-    let now = now_millis();
-    let result = sqlx::query(
-        r#"
-        UPDATE workspace_tasks
-        SET attention_acknowledged_at = ?,
-            updated_at = ?
-        WHERE id = ?
-        "#,
-    )
-    .bind(now)
-    .bind(now)
-    .bind(&request.task_id)
-    .execute(&pool)
-    .await
-    .map_err(|e| format!("Failed to acknowledge workspace task: {}", e))?;
-
-    if result.rows_affected() == 0 {
-        return Err(format!("Workspace task not found: {}", request.task_id));
-    }
-
-    Ok(())
-}
-
 /// Fetch a single task by id. The details payload's task list is capped, so a
 /// workspace with hundreds of tasks can still be asked for an older one by id.
 /// A task that no longer exists is `Ok(None)`, not an error: the caller is a
@@ -2610,6 +2588,53 @@ pub async fn workspace_task_by_id(
         .map(|task| task.into_response(&workspace_id, &agent_names)))
 }
 
+/// Stop a task's current cycle. Returns the task as it now is: `stopping`
+/// until its run winds down, `stopped` at once when no run was active, and
+/// unchanged — not an error — when it already ended.
+#[tauri::command]
+pub async fn workspace_stop_task(
+    request: WorkspaceTaskActionRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceTaskResponse, String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
+    let pool = state.workspace_db(&workspace_id).await?;
+    let deps = crate::assistant::engine::AssistantDeps {
+        workspace_id: workspace_id.clone(),
+        pool,
+        app,
+    };
+    let task = crate::assistant::tools::workspace_tasks::stop_task(&deps, &request.task_id)
+        .await?
+        .into_task();
+    let agent_names = workspace_agent_display_names(state.inner(), &workspace_id);
+    Ok(task.into_response(&workspace_id, &agent_names))
+}
+
+/// Send the user's message to a task: queue for its current run or resume
+/// it as a new cycle.
+#[tauri::command]
+pub async fn workspace_send_task_message(
+    request: WorkspaceTaskMessageRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::assistant::workspace_tasks_repo::WorkspaceTaskSendResponse, String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(request.workspace_id))?;
+    let pool = state.workspace_db(&workspace_id).await?;
+    let deps = crate::assistant::engine::AssistantDeps {
+        workspace_id,
+        pool,
+        app,
+    };
+    crate::assistant::tools::workspace_tasks::send_task_message(
+        &deps,
+        &request.task_id,
+        &request.message,
+        crate::assistant::types::MessageOrigin::User,
+    )
+    .await
+}
+
 // =============================================================================
 // Workspace CRUD — create, list, delete general workspaces
 // =============================================================================
@@ -2626,19 +2651,6 @@ pub struct WorkspaceListEntry {
     pub enabled: bool,
     pub message_count: i64,
     pub running_task_count: i64,
-    pub blocked_task_count: i64,
-    pub failed_task_count: i64,
-    pub attention_task_count: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_summary: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_attention_task_updated_at: Option<i64>,
     // Periodic-workspace surface — copied from the workspace's default
     // manager agent so a card can render its cadence pill without a
     // separate details fetch. NOT a sort key: the rail orders purely by
@@ -2667,24 +2679,6 @@ pub struct WorkspaceListEntry {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Default)]
-struct WorkspaceTaskAttentionSummary {
-    running_task_count: i64,
-    blocked_task_count: i64,
-    failed_task_count: i64,
-    latest_attention_task_id: Option<String>,
-    latest_attention_task_title: Option<String>,
-    latest_attention_task_status: Option<String>,
-    latest_attention_task_summary: Option<String>,
-    latest_attention_task_updated_at: Option<i64>,
-}
-
-impl WorkspaceTaskAttentionSummary {
-    fn attention_task_count(&self) -> i64 {
-        self.blocked_task_count + self.failed_task_count
-    }
-}
-
 /// Create a new general workspace with a UUID and filesystem root.
 ///
 /// Per the workspace-local-agents refactor, every new workspace gets an
@@ -2711,7 +2705,7 @@ pub async fn workspace_create(
     // can start chatting / scheduling without a detour to Settings.
     config.attach_default_provider(&app_config(state.inner())?.provider_connections, now);
     workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
-    let workspace_pool = crate::db::init_workspace_db(&root).await?;
+    let workspace_pool = crate::db::init_workspace_db(&root, &[]).await?;
     state
         .workspace_index
         .write()
@@ -2854,7 +2848,7 @@ pub async fn workspace_fork(
         .map_err(|e| format!("Failed to create workspace directory: {}", e))?;
 
     workspace_config::save(&root, &forked).map_err(|e| e.to_string())?;
-    let workspace_pool = crate::db::init_workspace_db(&root).await?;
+    let workspace_pool = crate::db::init_workspace_db(&root, &[]).await?;
     copy_workspace_durable_files(&source_root, &root)?;
     workspace_config::save(&root, &forked).map_err(|e| e.to_string())?;
     write_fork_marker(
@@ -2918,7 +2912,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         // cost five full read+parse cycles per workspace on every 5s poll.
         let message_count =
             count_session_messages(&workspace_pool, &locator.default_agent_id).await;
-        let task_attention = workspace_task_attention_summary(&workspace_pool, &id).await?;
+        let running_task_count = running_task_count(&workspace_pool).await?;
         let schedule = locator.schedule;
         let next_run_in_seconds = schedule
             .wants_countdown()
@@ -2932,15 +2926,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             agent_id: None,
             enabled: true,
             message_count,
-            running_task_count: task_attention.running_task_count,
-            blocked_task_count: task_attention.blocked_task_count,
-            failed_task_count: task_attention.failed_task_count,
-            attention_task_count: task_attention.attention_task_count(),
-            latest_attention_task_id: task_attention.latest_attention_task_id,
-            latest_attention_task_title: task_attention.latest_attention_task_title,
-            latest_attention_task_status: task_attention.latest_attention_task_status,
-            latest_attention_task_summary: task_attention.latest_attention_task_summary,
-            latest_attention_task_updated_at: task_attention.latest_attention_task_updated_at,
+            running_task_count,
             schedule_enabled: schedule.enabled,
             schedule_paused: schedule.paused,
             schedule_kind: schedule.kind,
@@ -3370,8 +3356,13 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
         .ok_or_else(|| format!("Workspace {} not found.", workspace_id))?;
     // Dropping the index's pool handle does not close its connections, and
     // Windows refuses to delete an open `data.sqlite`. `close` waits until
-    // every connection's worker thread has released the file.
+    // every connection's worker thread has released the file — except that
+    // sqlx 0.8 returns early when a connection is still checked out while
+    // idle ones are closed, so also wait for the pool to drain.
     workspace_pool.close().await;
+    while workspace_pool.size() > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
@@ -3501,61 +3492,13 @@ pub async fn workspace_set_starred(
     Ok(())
 }
 
-async fn workspace_task_attention_summary(
-    pool: &DbPool,
-    _workspace_id: &str,
-) -> Result<WorkspaceTaskAttentionSummary, String> {
-    let counts: (i64, i64, i64) = sqlx::query_as(
-        r#"
-        SELECT
-            COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'blocked' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN status = 'failed' AND attention_acknowledged_at IS NULL THEN 1 ELSE 0 END), 0)
-        FROM workspace_tasks
-        "#,
+async fn running_task_count(pool: &DbPool) -> Result<i64, String> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM workspace_tasks WHERE status = 'running' AND run_id IS NOT NULL",
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| format!("Failed to count workspace task attention: {}", e))?;
-
-    #[allow(clippy::type_complexity)]
-    let latest: Option<(String, String, String, Option<String>, Option<String>, i64)> =
-        sqlx::query_as(
-            r#"
-            SELECT id, title, status, result_summary, error, updated_at
-            FROM workspace_tasks
-            WHERE status IN ('blocked', 'failed')
-                AND attention_acknowledged_at IS NULL
-            ORDER BY
-                CASE status
-                    WHEN 'blocked' THEN 0
-                    WHEN 'failed' THEN 1
-                    ELSE 2
-                END,
-                updated_at DESC
-            LIMIT 1
-            "#,
-        )
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| format!("Failed to load latest workspace attention task: {}", e))?;
-
-    let mut summary = WorkspaceTaskAttentionSummary {
-        running_task_count: counts.0,
-        blocked_task_count: counts.1,
-        failed_task_count: counts.2,
-        ..Default::default()
-    };
-
-    if let Some((id, title, status, result_summary, error, updated_at)) = latest {
-        summary.latest_attention_task_id = Some(id);
-        summary.latest_attention_task_title = Some(title);
-        summary.latest_attention_task_status = Some(status);
-        summary.latest_attention_task_summary = error.or(result_summary);
-        summary.latest_attention_task_updated_at = Some(updated_at);
-    }
-
-    Ok(summary)
+    .map_err(|e| format!("Failed to count running workspace tasks: {}", e))
 }
 
 /// Count messages on the same canonical session used by the workspace view.
@@ -5259,6 +5202,7 @@ mod tests {
 
         // An open connection would keep `data.sqlite` locked on Windows.
         assert!(pool.is_closed());
+        assert_eq!(pool.size(), 0);
         assert!(!root.exists());
         let scheduler = state.scheduler.lock().await;
         assert_eq!(scheduler.instance_count(), 0);

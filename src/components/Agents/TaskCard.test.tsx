@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import TaskCard, { cardActivity } from './TaskCard';
+import TaskCard from './TaskCard';
 import type { TaskCallCard } from '../AssistantChat/toolDisplay';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
 
@@ -34,6 +34,7 @@ const card = (over: Partial<TaskCallCard> = {}): TaskCallCard => ({
   status: 'queued',
   assignedToWorkspaceAgentId: 'wa-review',
   assignedAgentDefinitionId: 'def-review',
+  assignedAgentDisplayName: '',
   detail: '',
   detailIsError: false,
   ...over,
@@ -87,6 +88,11 @@ describe('TaskCard', () => {
     expect(screen.getByText('Round 3 review')).toBeInTheDocument();
   });
 
+  it('names an agent that has left the crew as the call saw it', () => {
+    render(<TaskCard card={card({ assignedAgentDisplayName: 'Old Reviewer' })} roster={[]} />);
+    expect(screen.getByText('Old Reviewer')).toBeInTheDocument();
+  });
+
   it('leads a poll with its answer rather than the instructions', () => {
     render(
       <TaskCard
@@ -135,20 +141,6 @@ describe('TaskCard', () => {
     expect(screen.queryByText('Review the branch end to end.')).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /Round 3 review/ }));
     expect(onOpen).toHaveBeenCalledWith('task-1');
-  });
-
-  it('never spins a card that cannot know it is still running', () => {
-    // An assignment is always captured as `queued`, and the card is frozen
-    // there forever: a spinning ring would claim, on every hand-off ever made,
-    // that the task is working right now.
-    expect(cardActivity('queued')).toBe('none');
-    expect(cardActivity('running')).toBe('none');
-    expect(cardActivity('completed')).toBe('none');
-    // A stop that is not a clean finish keeps the static attention ring: the
-    // payload's acknowledgement is as frozen as its status.
-    expect(cardActivity('failed')).toBe('attention');
-    expect(cardActivity('blocked')).toBe('attention');
-    expect(cardActivity('who-knows')).toBe('none');
   });
 
   it('draws no spinning ring on a queued hand-off', () => {

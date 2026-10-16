@@ -320,6 +320,7 @@ pub(crate) async fn record_tool_call_result(
                     completed_at,
                 }],
                 provider_metadata: tool_result_metadata(metadata_source),
+                run_id: Some(run_id.to_string()),
             },
         )
         .await?;

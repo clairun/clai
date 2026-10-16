@@ -1,15 +1,18 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
 import styles from './Workspace.module.css';
 import useAssistantStore from '../assistant/sessionStore';
+import { useAssistantEvents } from '../assistant/useAssistantEvents';
+import { useTaskStore } from '../workspace/taskStore';
 import type {
   AssistantMessage,
   AssistantMessagePage,
+  AssistantRun,
   AssistantSession,
   WorkspaceDetails,
   WorkspaceAgentResponse,
@@ -23,8 +26,16 @@ import type {
 // subscribe to Tauri events on mount. Without a window bridge those
 // subscriptions reject; stub the boundary so the page can render its
 // conversation under jsdom.
+// Handlers are kept per event name so a test can emit an `assistant://event`.
+type EventHandler = (event: { payload: unknown }) => void;
+const eventHandlers = vi.hoisted(() => new Map<string, Set<EventHandler>>());
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async () => () => {}),
+  listen: vi.fn(async (name: string, handler: EventHandler) => {
+    const handlers = eventHandlers.get(name) ?? new Set<EventHandler>();
+    handlers.add(handler);
+    eventHandlers.set(name, handlers);
+    return () => handlers.delete(handler);
+  }),
 }));
 
 vi.mock('../workspace/client', async (importOriginal) => ({
@@ -37,6 +48,7 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   runWorkspaceNow: vi.fn(async () => {}),
   setWorkspaceSchedulePaused: vi.fn(async () => {}),
   importWorkspaceFiles: vi.fn(async () => []),
+  getWorkspaceTask: vi.fn(async () => null),
 }));
 
 vi.mock('../api/client', async (importOriginal) => ({
@@ -99,6 +111,7 @@ const userMessage = (sessionId: string, id: string, text: string): AssistantMess
   content: [{ type: 'text', text }],
   createdAt: 1n,
   providerMetadata: null,
+  origin: { kind: 'user' },
 });
 
 // An assistant turn whose text has not been persisted yet: the backend
@@ -112,6 +125,20 @@ const streamingAssistantMessage = (sessionId: string, id: string): AssistantMess
   content: [],
   createdAt: 2n,
   providerMetadata: null,
+  origin: { kind: 'user' },
+});
+
+const runFor = (sessionId: string, status: AssistantRun['status']): AssistantRun => ({
+  id: 'run-1',
+  sessionId,
+  status,
+  trigger: 'user_message',
+  connectionId: 'conn',
+  protocolId: 'proto',
+  modelId: 'model',
+  startedAt: 1n,
+  completedAt: null,
+  error: null,
 });
 
 const messagePage = (messages: AssistantMessage[]): AssistantMessagePage => ({
@@ -245,11 +272,17 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   resultSummary: null,
   error: 'Alpha broke',
   sessionId: null,
-  runId: null,
+  runId: 'run-1',
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: 1n,
-  attentionAcknowledgedAt: null,
+  failureReason: null,
+  parentSessionId: null,
+  parentRunId: null,
+  parentTaskId: null,
+  depth: 0n,
+  cycleNo: 0n,
+  stopRequestedAt: null,
 };
 
 const renderWorkspace = () =>
@@ -267,6 +300,7 @@ beforeEach(() => {
   // hydrates that same session id — a leftover accumulator would render a
   // phantom assistant turn in an unrelated test.
   useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingText: {} });
+  useTaskStore.setState({ tasks: {}, seeded: {} });
   getWorkspaceDetails.mockImplementation(async (_workspaceId, options) => detailsFor(options));
   getOrCreateWorkspaceSession.mockResolvedValue({
     session: sessionFor('a', 10n),
@@ -437,14 +471,50 @@ describe('Workspace session hydration', () => {
     loadSessionMessagesPage.mockResolvedValue(
       messagePage([userMessage('sess-a', 'm-1', 'first question')])
     );
+    listRuns.mockResolvedValue([runFor('sess-a', 'running')]);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
 
     expect(loadSessionMessagesPage).toHaveBeenCalledTimes(1);
-    expect(listRuns).toHaveBeenCalledTimes(1);
+    expect(listRuns).toHaveBeenCalledTimes(2);
     expect(screen.getByText('half an answer so far')).toBeInTheDocument();
+  });
+
+  it('re-hydrates a streaming session whose run ended without a terminal event', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([userMessage('sess-a', 'm-1', 'first question')])
+    );
+    renderWorkspace();
+    expect(await screen.findByText('first question')).toBeInTheDocument();
+
+    act(() => {
+      useAssistantStore.getState().setRunStatus('sess-a', runFor('sess-a', 'running'));
+    });
+    expect(useAssistantStore.getState().sessions['sess-a']!.runStartedAt).not.toBeNull();
+
+    // The run finished but its run_completed event never reached the page.
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { session: sessionFor('a', 20n) })
+    );
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([
+        userMessage('sess-a', 'm-1', 'first question'),
+        userMessage('sess-a', 'm-2', 'the finished answer'),
+      ])
+    );
+    listRuns.mockResolvedValue([runFor('sess-a', 'completed')]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(await screen.findByText('the finished answer')).toBeInTheDocument();
+    const session = useAssistantStore.getState().sessions['sess-a']!;
+    expect(session.isStreaming).toBe(false);
+    expect(session.runStartedAt).toBeNull();
   });
 });
 
@@ -536,7 +606,7 @@ describe('Workspace switch chrome', () => {
     expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
   });
 
-  it("keeps the previous workspace's counts and attention banner off the page", async () => {
+  it("keeps the previous workspace's counts off the page", async () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
       detailsFor(options, { tasks: [FAILED_TASK] })
     );
@@ -544,7 +614,6 @@ describe('Workspace switch chrome', () => {
     expect(await screen.findByRole('button', { name: /1 tasks/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /1 memories/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /7 artifacts/ })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Workspace attention' })).toBeInTheDocument();
 
     const releaseBeta = holdBetaDetails(beta);
     await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
@@ -553,7 +622,6 @@ describe('Workspace switch chrome', () => {
     expect(screen.getByRole('button', { name: /0 tasks/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /0 memories/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /0 artifacts/ })).toBeInTheDocument();
-    expect(screen.queryByRole('region', { name: 'Workspace attention' })).toBeNull();
 
     await releaseBeta();
   });
@@ -575,7 +643,6 @@ describe('Workspace switch chrome', () => {
 
     expect(screen.getByTitle('Click to rename')).toHaveTextContent('Beta');
     expect(screen.queryByText('Loading conversation…')).toBeNull();
-    expect(screen.queryByRole('region', { name: 'Workspace attention' })).toBeNull();
     expect(loadSessionMessagesPage).not.toHaveBeenCalledWith(
       expect.objectContaining({ sessionId: 'sess-a' })
     );
@@ -684,6 +751,22 @@ describe('Workspace switch with a call in flight', () => {
       betaRun.resolve();
       betaPause.resolve();
     });
+  });
+
+  it('keeps Run now enabled while a task only waits for its subtasks', async () => {
+    const task = { ...FAILED_TASK, status: 'running' as const, completedAt: null, error: null };
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { scheduleEnabled: true, tasks: [{ ...task, runId: null }] })
+    );
+    const { unmount } = renderWorkspace();
+    expect(await screen.findByRole('button', { name: 'Run now' })).toBeEnabled();
+    unmount();
+
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { scheduleEnabled: true, tasks: [task] })
+    );
+    renderWorkspace();
+    expect(await screen.findByRole('button', { name: 'Run now' })).toBeDisabled();
   });
 
   it('still shows a pending Run now and Pause on returning to their workspace', async () => {
@@ -1073,4 +1156,158 @@ describe('Workspace task transcript', () => {
     await waitFor(() => expect(panel).toHaveTextContent('Completed'));
     expect(panel).not.toHaveTextContent('Running');
   });
+});
+
+const AssistantEvents = () => {
+  useAssistantEvents();
+  return null;
+};
+
+describe('Workspace task store', () => {
+  const RUNNING: WorkspaceTaskResponse = {
+    ...FAILED_TASK,
+    status: 'running',
+    error: null,
+    completedAt: null,
+    sessionId: 'sess-task-a',
+  };
+
+  beforeEach(() => eventHandlers.clear());
+
+  it('open panel status follows event without poll', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [RUNNING] })
+    );
+    render(
+      <MemoryRouter initialEntries={['/workspace/a']}>
+        <AssistantEvents />
+        <Routes>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /1 tasks/ }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open the log of "${RUNNING.title}"` })
+    );
+    const panel = await screen.findByRole('region', { name: `Transcript for ${RUNNING.title}` });
+    expect(panel).toHaveTextContent('Running');
+    const polls = getWorkspaceDetails.mock.calls.length;
+
+    act(() => {
+      for (const handler of eventHandlers.get('assistant://event') ?? []) {
+        handler({
+          payload: {
+            sessionId: 'sess-task-a',
+            runId: null,
+            workspaceId: 'a',
+            timestamp: 0,
+            event: {
+              type: 'task_updated',
+              payload: { task: { ...RUNNING, status: 'completed', updatedAt: 2n } },
+            },
+          },
+        });
+      }
+    });
+
+    expect(panel).toHaveTextContent('Completed');
+    expect(getWorkspaceDetails.mock.calls.length).toBe(polls);
+  });
+
+  it('first details load shows restart-stopped task without event', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [{ ...RUNNING, status: 'stopped' }] })
+    );
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /1 tasks/ }));
+    expect(await screen.findByText('Stopped')).toBeInTheDocument();
+    expect(useTaskStore.getState().tasks.a?.[RUNNING.id]?.status).toBe('stopped');
+  });
+});
+
+describe('Workspace nested task logs', () => {
+  const PARENT: WorkspaceTaskResponse = {
+    ...FAILED_TASK,
+    id: 'task-parent',
+    title: 'Review PR',
+    status: 'running',
+    error: null,
+    sessionId: 'sess-parent',
+  };
+  const CHILD: WorkspaceTaskResponse = {
+    ...PARENT,
+    id: 'task-child',
+    title: 'Fix parse',
+    status: 'completed',
+    sessionId: 'sess-child',
+    parentTaskId: PARENT.id,
+    depth: 1n,
+  };
+  const childResult: AssistantMessage = {
+    id: 'result-1',
+    sessionId: 'sess-parent',
+    role: 'user',
+    content: [{ type: 'text', text: 'parse() fixed' }],
+    createdAt: 1n,
+    providerMetadata: null,
+    origin: {
+      kind: 'task',
+      taskId: CHILD.id,
+      agent: { workspaceAgentId: 'wa-1', displayName: 'Helper', isDefault: false },
+      title: CHILD.title,
+      cycleNo: 1n,
+      status: 'completed',
+    },
+  };
+  const seedLog = (sessionId: string, messages: AssistantMessage[]) =>
+    useAssistantStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [sessionId]: { messages, toolCalls: [], isStreaming: false, runStartedAt: null },
+      },
+    }) as never);
+
+  it('nested card in task log opens child and back returns', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [PARENT, CHILD] })
+    );
+    seedLog('sess-parent', [childResult]);
+    seedLog('sess-child', [
+      {
+        id: 'child-1',
+        sessionId: 'sess-child',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'child log' }],
+        createdAt: 1n,
+        providerMetadata: null,
+        origin: { kind: 'user' },
+      },
+    ]);
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /2 tasks/ }));
+    await userEvent.click(
+      await screen.findByRole('button', { name: `Open the log of "${PARENT.title}"` })
+    );
+    const parentLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+
+    await userEvent.click(within(parentLog).getByRole('button', { name: `Open task ${CHILD.title}` }));
+    const childLog = await screen.findByRole('region', { name: `Transcript for ${CHILD.title}` });
+    expect(childLog).toHaveTextContent('child log');
+    expect(
+      within(childLog).getByRole('navigation', { name: 'Task ancestry' })
+    ).toHaveTextContent(PARENT.title);
+
+    await userEvent.click(within(childLog).getByRole('button', { name: 'Back' }));
+    expect(
+      await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` })
+    ).toHaveTextContent('parse() fixed');
+    expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+  });
+
+
 });

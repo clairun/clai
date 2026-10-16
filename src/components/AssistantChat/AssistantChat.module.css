@@ -1156,3 +1156,19 @@
 .imageLightboxClose:hover {
   background: rgba(255, 255, 255, 0.24);
 }
+
+.senderSuffix {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* A message from another agent (or an unknown origin): neutral surface, the
+   sender's identity hue on the left edge. Never the user's accent. */
+.inboxMessage {
+  padding: 14px 16px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-left: 3px solid var(--sender-hue, var(--color-border-light));
+  border-radius: var(--radius-md);
+  contain: layout paint style;
+}

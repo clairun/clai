@@ -116,7 +116,6 @@ describe('freshNonce', () => {
 describe('moodFor', () => {
   it('maps activity to expression', () => {
     expect(moodFor('running')).toBe('running');
-    expect(moodFor('attention')).toBe('attention');
     expect(moodFor('idle')).toBe('idle');
     expect(moodFor('disabled')).toBe('idle');
     expect(moodFor('none')).toBe('neutral');
@@ -165,10 +164,11 @@ describe('taskIdentity', () => {
 });
 
 describe('activityFromTasks', () => {
-  const task = (over: Partial<Parameters<typeof activityFromTasks>[1][number]>) => ({
+  type Source = Parameters<typeof activityFromTasks>[1][number];
+  const task = (over: Partial<Source>): Source => ({
     assignedToWorkspaceAgentId: 'wa-1',
     status: 'completed',
-    attentionAcknowledgedAt: null,
+    runId: 'run-1',
     ...over,
   });
 
@@ -179,23 +179,20 @@ describe('activityFromTasks', () => {
     ).toBe('idle');
   });
 
-  it('runs when any task is queued or running, even with attention pending elsewhere', () => {
+  it('runs when any task is queued or running', () => {
     expect(
-      activityFromTasks('wa-1', [task({ status: 'blocked' }), task({ status: 'queued' })])
+      activityFromTasks('wa-1', [task({ status: 'failed' }), task({ status: 'queued' })])
     ).toBe('running');
-    // Order must not matter: running wins even when attention was seen first.
     expect(
-      activityFromTasks('wa-1', [task({ status: 'queued' }), task({ status: 'blocked' })])
+      activityFromTasks('wa-1', [task({ status: 'queued' }), task({ status: 'failed' })])
     ).toBe('running');
     expect(
       activityFromTasks('wa-1', [task({ status: 'running' }), task({ status: 'failed' })])
     ).toBe('running');
   });
 
-  it('asks for attention on an unacknowledged blocked or failed task only', () => {
-    expect(activityFromTasks('wa-1', [task({ status: 'failed' })])).toBe('attention');
-    expect(
-      activityFromTasks('wa-1', [task({ status: 'blocked', attentionAcknowledgedAt: 5n })])
-    ).toBe('idle');
+  it('a task waiting for its subtasks is idle, not running', () => {
+    expect(activityFromTasks('wa-1', [task({ status: 'running', runId: null })])).toBe('idle');
+    expect(activityFromTasks('wa-1', [task({ status: 'running', runId: undefined })])).toBe('idle');
   });
 });

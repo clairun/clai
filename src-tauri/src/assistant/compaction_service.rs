@@ -11,7 +11,7 @@ use crate::db::DbPool;
 /// Load a conversation with queued rows marked pending before any compaction cut.
 pub async fn load_with_pending(pool: &DbPool, session_id: &str) -> Result<RunConversation, String> {
     let mut conversation = RunConversation::load(pool, session_id).await?;
-    let pending = repository::list_pending_queued_messages(pool, session_id).await?;
+    let pending = crate::assistant::signals::list_open_content(pool, session_id).await?;
     conversation.refresh_pending(pending.into_iter().map(|queued| queued.message).collect());
     Ok(conversation)
 }
@@ -43,7 +43,7 @@ pub async fn commit_compaction(
             strategy: strategy.clone(),
             source_from_message_id: Some(source_from_message_id.clone()),
             source_to_message_id: Some(source_to_message_id.clone()),
-            created_run_id,
+            created_run_id: created_run_id.clone(),
             protocol_id,
             model_id,
             input_message_count,
@@ -65,6 +65,7 @@ pub async fn commit_compaction(
                 "sourceToMessageId": source_to_message_id,
                 "createdAt": chrono::Utc::now().timestamp_millis(),
             })),
+            run_id: created_run_id,
         },
     )
     .await?;

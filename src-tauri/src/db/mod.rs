@@ -18,27 +18,57 @@
 //! workspace and calls `init_workspace_db`, and the lazy-open path goes
 //! through the same function. Both apply pending migrations.
 
+use crate::assistant::workspace_agents::WorkspaceAgentRow;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Pool, Sqlite};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 /// SQLite connection pool, the only persistent storage handle outside
 /// the OS keyring and `.clai/config.json` files.
 pub type DbPool = Pool<Sqlite>;
 
+/// Per database file: serializes opens and records whether this process
+/// already ran recovery on it.
+type OpenGate = Arc<tokio::sync::Mutex<bool>>;
+
+static OPEN_GATES: OnceLock<Mutex<HashMap<PathBuf, OpenGate>>> = OnceLock::new();
+
+fn open_gate(db_path: &Path) -> OpenGate {
+    OPEN_GATES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(db_path.to_path_buf())
+        .or_default()
+        .clone()
+}
+
 /// Open (creating if missing) a workspace's `data.sqlite`, apply any
 /// pending migrations, then run recovery sweeps so the UI never shows
 /// orphaned `running` rows from a previous crashed app process.
-pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> {
+///
+/// Opens of the same file are serialized, and recovery runs only on the
+/// first open in this process: the eager startup fan-out and a lazy open can
+/// both open a workspace, and a second sweep would fail runs and tasks this
+/// process already has in flight. `roster` names the agents in the result
+/// events recovery posts.
+pub(crate) async fn init_workspace_db(
+    workspace_root: &Path,
+    roster: &[WorkspaceAgentRow],
+) -> Result<DbPool, String> {
     let db_path = crate::config::workspace_config::data_path(workspace_root);
     let parent = db_path
         .parent()
         .ok_or_else(|| "Could not determine workspace DB directory".to_string())?;
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("Failed to create workspace DB directory: {}", e))?;
+    let gate = open_gate(&db_path);
+    let mut recovered = gate.lock().await;
 
     // Connection options applied to *every* pooled connection (sqlx runs
     // them on connect), unlike a one-off `pool.execute(PRAGMA …)` which only
@@ -77,74 +107,13 @@ pub async fn init_workspace_db(workspace_root: &Path) -> Result<DbPool, String> 
         .await
         .map_err(|e| format!("Workspace DB migration failed: {}", e))?;
 
-    sweep_orphaned_task_state(&pool).await?;
-    crate::assistant::repository::recover_stale_runs(&pool).await?;
+    if !*recovered {
+        crate::assistant::tools::workspace_tasks::recover_interrupted_tasks(&pool, roster).await?;
+        crate::assistant::repository::recover_stale_runs(&pool).await?;
+        *recovered = true;
+    }
 
     Ok(pool)
-}
-
-/// Startup recovery: mark `workspace_tasks` rows stuck in a non-terminal
-/// state (`queued` or `running`) as `failed`. They are orphans from a
-/// previous app process that died, was killed by a rebuild, or otherwise
-/// didn't finalize. Without this, the rows pile up as forever-"RUNNING" or
-/// forever-"QUEUED" in the UI, and a manager agent polling
-/// `workspace_getTaskResult` never sees a terminal status, so it waits on a
-/// task nothing can ever resolve: the run and the agent session that owned
-/// the task are gone with the previous process.
-///
-/// `queued` is a real orphan state, not just a transient one. A task row is
-/// inserted as `queued` before its provider connection, session, message and
-/// run rows exist (`assistant::tools::workspace_tasks::assign_task`), and it
-/// only flips to `running` inside the spawned task; quitting anywhere in that
-/// window strands it. There is no dispatcher that picks `queued` rows back up
-/// after a restart, so failing them is the only honest outcome.
-///
-/// Runs on every workspace-DB open, and a workspace is USUALLY opened once per
-/// process (pools are cached in the workspace index), but that is not
-/// guaranteed: `AppState::workspace_db` inits outside the index lock, so during
-/// the startup window the eager fan-out and a lazy open can both open the same
-/// workspace and both sweep. A task created in between would be failed while
-/// live. The exposure is the same one `recover_stale_runs` (called on the next
-/// line, and strictly wider — it fails `assistant_runs` too) already carries, so
-/// do not build on an at-most-once assumption here; fix the double open if it
-/// ever matters.
-///
-/// `assistant_runs` and `assistant_tool_calls` are NOT touched here —
-/// `crate::assistant::repository::recover_stale_runs` already handles those
-/// at workspace-DB open.
-pub async fn sweep_orphaned_task_state(pool: &DbPool) -> Result<(), String> {
-    let now = chrono::Utc::now().timestamp_millis();
-
-    // SQLite evaluates every SET expression against the row's ORIGINAL
-    // values, so the CASE still sees the pre-sweep status.
-    let tasks = sqlx::query(
-        r#"
-        UPDATE workspace_tasks
-        SET status = 'failed',
-            error = COALESCE(
-                error,
-                CASE status
-                    WHEN 'queued' THEN 'task never started: the app restarted before it was dispatched'
-                    ELSE 'task interrupted by app restart'
-                END
-            ),
-            updated_at = ?,
-            completed_at = ?
-        WHERE status IN ('queued', 'running')
-        "#,
-    )
-    .bind(now)
-    .bind(now)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("Failed to sweep orphaned workspace_tasks: {}", e))?;
-    if tasks.rows_affected() > 0 {
-        tracing::info!(
-            "Marked {} workspace_tasks as failed (orphaned 'queued'/'running' state from previous app session)",
-            tasks.rows_affected()
-        );
-    }
-    Ok(())
 }
 
 /// A unit enum stored in a TEXT column: the bare string serde gives it
@@ -203,10 +172,10 @@ mod tests {
     #[tokio::test]
     async fn workspace_init_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let _pool = init_workspace_db(tmp.path()).await.unwrap();
+        let _pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
         // Second open of the same workspace must succeed and not double-
         // apply migrations. sqlx::migrate! tracks via _sqlx_migrations.
-        let _pool = init_workspace_db(tmp.path()).await.unwrap();
+        let _pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
     }
 
     #[tokio::test]
@@ -329,10 +298,121 @@ mod tests {
         );
     }
 
-    /// `20261014000000_drop_dead_columns` keeps answered tasks out of the
-    /// attention count and leaves the rows it rewrites loadable.
+    /// `20261016001000_message_origin_task_lineage` marks the creator's
+    /// instruction — the first user row of a task session — and nothing else.
     #[tokio::test]
-    async fn dead_columns_drop_keeps_answered_tasks_acknowledged() {
+    async fn backfill_marks_first_instruction_only() {
+        let pool = pool_migrated_before(20261016001000).await;
+        for session in ["task-session", "manager-session"] {
+            sqlx::query(
+                "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+                 VALUES (?, '{}', 1, 1)",
+            )
+            .bind(session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO workspace_tasks
+                 (id, created_by_workspace_agent_id, assigned_to_workspace_agent_id,
+                  assigned_agent_definition_id, title, instructions, status, session_id,
+                  created_at, updated_at)
+             VALUES ('t', 'wa-mgr', 'wa-1', 'def-1', 'T', 'I', 'completed', 'task-session', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, session, role, created_at) in [
+            ("instruction", "task-session", "user", 1),
+            ("reply", "task-session", "assistant", 2),
+            ("follow-up", "task-session", "user", 3),
+            ("manager-user", "manager-session", "user", 1),
+        ] {
+            sqlx::query(
+                "INSERT INTO assistant_messages (id, session_id, role, content_json, created_at)
+                 VALUES (?, ?, ?, '[]', ?)",
+            )
+            .bind(id)
+            .bind(session)
+            .bind(role)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let origins: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, origin_json FROM assistant_messages ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let user = r#"{"kind":"user"}"#;
+        for (id, origin) in &origins {
+            if id == "instruction" {
+                let origin: crate::assistant::types::MessageOrigin =
+                    serde_json::from_str(origin).unwrap();
+                let crate::assistant::types::MessageOrigin::Agent { agent, .. } = origin else {
+                    panic!("the instruction must be marked as the creator's: {origin:?}");
+                };
+                assert_eq!(agent.workspace_agent_id, "wa-mgr");
+                assert_eq!(agent.display_name, "wa-mgr");
+                assert!(!agent.is_default);
+            } else {
+                assert_eq!(origin, user, "{id} must stay a user row");
+            }
+        }
+    }
+
+    /// The same migration folds `blocked` into `failed{blocked}`, fails tasks
+    /// left in flight by the old code, and gives every failed row a reason.
+    #[tokio::test]
+    async fn migration_backfills_blocked_rows_and_labels_restart_failures() {
+        let pool = pool_migrated_before(20261016001000).await;
+        for (id, status, error) in [
+            ("blocked", "blocked", Some("BLOCKED: need a key")),
+            ("restart", "failed", Some("task interrupted by app restart")),
+            (
+                "never-ran",
+                "failed",
+                Some("task never started: the app restarted before it was dispatched"),
+            ),
+            ("error", "failed", Some("provider exploded")),
+            ("done", "completed", None),
+            ("in-flight-queued", "queued", None),
+            ("in-flight-running", "running", None),
+        ] {
+            insert_task(&pool, id, status, None, error).await;
+        }
+
+        run_all_migrations(&pool).await;
+
+        let rows: Vec<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT id, status, failure_reason FROM workspace_tasks ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let expected = [
+            ("blocked", "failed", Some("blocked")),
+            ("done", "completed", None),
+            ("error", "failed", Some("error")),
+            ("in-flight-queued", "failed", Some("restart")),
+            ("in-flight-running", "failed", Some("restart")),
+            ("never-ran", "failed", Some("restart")),
+            ("restart", "failed", Some("restart")),
+        ];
+        let rows: Vec<(&str, &str, Option<&str>)> = rows
+            .iter()
+            .map(|(id, status, reason)| (id.as_str(), status.as_str(), reason.as_deref()))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    /// `20261014000000_drop_dead_columns` leaves the rows it rewrites loadable.
+    #[tokio::test]
+    async fn dead_columns_drop_keeps_rows_loadable() {
         use crate::assistant::repository;
 
         let pool = pool_migrated_before(20261014000000).await;
@@ -353,42 +433,28 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        for (id, status, acknowledged_at) in [
-            ("answered", "blocked", None),
-            ("acknowledged", "failed", Some(7_i64)),
-        ] {
-            sqlx::query(
-                "INSERT INTO workspace_tasks
-                     (id, assigned_to_workspace_agent_id, assigned_agent_definition_id, title,
-                      instructions, status, result_summary, result_json, created_at, updated_at,
-                      attention_acknowledged_at, user_response, user_response_at)
-                 VALUES (?, 'wa', 'def', 't', 'i', ?, 'done', '{\"summary\":\"done\"}', 1, 1,
-                         ?, 'yes', 5)",
-            )
-            .bind(id)
-            .bind(status)
-            .bind(acknowledged_at)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
+        sqlx::query(
+            "INSERT INTO workspace_tasks
+                 (id, assigned_to_workspace_agent_id, assigned_agent_definition_id, title,
+                  instructions, status, result_summary, result_json, created_at, updated_at,
+                  user_response, user_response_at)
+             VALUES ('answered', 'wa', 'def', 't', 'i', 'blocked', 'done',
+                     '{\"summary\":\"done\"}', 1, 1, 'yes', 5)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         run_all_migrations(&pool).await;
 
-        let acknowledged: Vec<(String, Option<i64>)> =
-            sqlx::query_as("SELECT id, attention_acknowledged_at FROM workspace_tasks ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            acknowledged,
-            [
-                ("acknowledged".to_string(), Some(7)),
-                ("answered".to_string(), Some(5)),
-            ]
-        );
         assert!(repository::get_session(&pool, "s").await.unwrap().is_some());
         assert!(repository::get_run(&pool, "r").await.unwrap().is_some());
+        assert!(
+            crate::assistant::workspace_tasks_repo::load_task(&pool, "answered")
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// `20261015000000_plain_enum_columns` unquotes JSON-string enums, leaves
@@ -460,9 +526,10 @@ mod tests {
             (run.status, run.trigger),
             (RunStatus::Running, RunTrigger::Scheduled)
         );
-        assert!(repository::session_has_active_run(&pool, "s")
+        assert!(repository::active_run_id(&pool, "s")
             .await
-            .unwrap());
+            .unwrap()
+            .is_some());
         let tool_call = repository::get_tool_call_for_session(&pool, "s", "t1")
             .await
             .unwrap()
@@ -525,169 +592,22 @@ mod tests {
         assert_eq!(compaction_foreign_keys().await, original_foreign_keys);
     }
 
-    #[tokio::test]
-    async fn sweep_marks_running_rows_as_failed() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "running", None, None).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let row: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, error, completed_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.1.as_deref(), Some("task interrupted by app restart"));
-        assert!(row.2.is_some(), "completed_at must be stamped");
-    }
-
-    #[tokio::test]
-    async fn sweep_preserves_existing_error_via_coalesce() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "running", None, Some("custom failure reason")).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let error: Option<String> =
-            sqlx::query_scalar("SELECT error FROM workspace_tasks WHERE id = 't1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(error.as_deref(), Some("custom failure reason"));
-    }
-
-    /// A task row is inserted as `queued` before its session and run exist and
-    /// only flips to `running` inside the spawned task, so quitting in that
-    /// window leaves a `queued` orphan nothing will ever dispatch.
-    #[tokio::test]
-    async fn sweep_marks_queued_rows_as_failed_with_a_never_started_reason() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "queued", None, None).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let row: (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT status, error, completed_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(
-            row.1.as_deref(),
-            Some("task never started: the app restarted before it was dispatched")
-        );
-        assert!(row.2.is_some(), "completed_at must be stamped");
-    }
-
-    /// The reason is per-row: the CASE in the UPDATE must read each row's
-    /// pre-sweep status, not the `'failed'` it is being set to.
-    #[tokio::test]
-    async fn sweep_reasons_are_per_row() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "a-queued", "queued", None, None).await;
-        insert_task(&pool, "b-running", "running", None, None).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let rows: Vec<(String, String, Option<String>)> =
-            sqlx::query_as("SELECT id, status, error FROM workspace_tasks ORDER BY id")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].1, "failed");
-        assert_eq!(
-            rows[0].2.as_deref(),
-            Some("task never started: the app restarted before it was dispatched")
-        );
-        assert_eq!(rows[1].1, "failed");
-        assert_eq!(
-            rows[1].2.as_deref(),
-            Some("task interrupted by app restart")
-        );
-    }
-
-    #[tokio::test]
-    async fn sweep_leaves_completed_failed_and_blocked_rows_untouched() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "done", "completed", None, None).await;
-        insert_task(&pool, "fail", "failed", None, Some("original error")).await;
-        insert_task(&pool, "stuck", "blocked", None, Some("needs a decision")).await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let rows: Vec<(String, String, Option<String>, Option<i64>)> = sqlx::query_as(
-            "SELECT id, status, error, completed_at FROM workspace_tasks ORDER BY id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].1, "completed");
-        assert_eq!(rows[1].1, "failed");
-        assert_eq!(rows[1].2.as_deref(), Some("original error"));
-        assert_eq!(rows[2].1, "blocked");
-        assert_eq!(rows[2].2.as_deref(), Some("needs a decision"));
-        assert!(
-            rows[2].3.is_none(),
-            "a blocked task awaiting the user must not be completed by the sweep"
-        );
-    }
-
-    /// A reason the task already recorded wins over the sweep's generic one,
-    /// on the `queued` arm as well as the `running` one: COALESCE is evaluated
-    /// before the CASE arm it guards.
-    #[tokio::test]
-    async fn sweep_preserves_an_existing_error_on_queued_rows_too() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(
-            &pool,
-            "t1",
-            "queued",
-            None,
-            Some("no active provider connection"),
-        )
-        .await;
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let row: (String, Option<String>) =
-            sqlx::query_as("SELECT status, error FROM workspace_tasks WHERE id = 't1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(row.0, "failed");
-        assert_eq!(row.1.as_deref(), Some("no active provider connection"));
-    }
-
-    /// The sweep is idempotent: a row it already failed no longer matches the
-    /// WHERE clause, so a second pass must not re-stamp
-    /// `updated_at`/`completed_at` or overwrite the reason it wrote.
-    #[tokio::test]
-    async fn a_second_sweep_changes_nothing() {
-        let (_tmp, pool) = workspace_pool().await;
-        insert_task(&pool, "t1", "queued", None, None).await;
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let before: (String, Option<String>, Option<i64>, i64) = sqlx::query_as(
-            "SELECT status, error, completed_at, updated_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-        sweep_orphaned_task_state(&pool).await.unwrap();
-
-        let after: (String, Option<String>, Option<i64>, i64) = sqlx::query_as(
-            "SELECT status, error, completed_at, updated_at FROM workspace_tasks WHERE id = 't1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(before, after);
+    /// A workspace DB as a previous process left it: migrated, never
+    /// recovered by this one.
+    async fn previous_process_db(root: &Path) -> DbPool {
+        let db_path = crate::config::workspace_config::data_path(root);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        run_all_migrations(&pool).await;
+        pool
     }
 
     /// `init_workspace_db` must run the sweep itself: the eager startup fan-out
@@ -695,17 +615,174 @@ mod tests {
     #[tokio::test]
     async fn workspace_init_sweeps_orphaned_task_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let pool = init_workspace_db(tmp.path()).await.unwrap();
+        let pool = previous_process_db(tmp.path()).await;
         insert_task(&pool, "t1", "queued", None, None).await;
         insert_task(&pool, "t2", "running", None, None).await;
-        drop(pool);
+        sqlx::query("UPDATE workspace_tasks SET run_id = 'run-2' WHERE id = 't2'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
 
-        let pool = init_workspace_db(tmp.path()).await.unwrap();
+        let pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
         let statuses: Vec<String> =
             sqlx::query_scalar("SELECT status FROM workspace_tasks ORDER BY id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(statuses, vec!["failed".to_string(), "failed".to_string()]);
+        // Queued with no session: never dispatchable. Running: interrupted.
+        assert_eq!(statuses, vec!["failed".to_string(), "stopped".to_string()]);
+    }
+
+    /// Without the gate, concurrent opens of a fresh file race each other's
+    /// migrations.
+    #[tokio::test]
+    async fn init_gate_serializes_concurrent_opens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut opens = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let root = tmp.path().to_path_buf();
+            opens.spawn(async move { init_workspace_db(&root, &[]).await });
+        }
+        while let Some(opened) = opens.join_next().await {
+            opened.unwrap().expect("every concurrent open must succeed");
+        }
+    }
+
+    /// The eager startup open and a lazy open of the same workspace: the
+    /// second must not fail the run and task the first one's process owns.
+    #[tokio::test]
+    async fn startup_open_does_not_sweep_live_run() {
+        use crate::assistant::repository::{self, CreateRunParams};
+        use crate::assistant::types::{RunStatus, RunTrigger, SessionContext};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = init_workspace_db(tmp.path(), &[]).await.unwrap();
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        let run = repository::create_run(
+            &pool,
+            CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Running,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "c".into(),
+                protocol_id: "openai".into(),
+                model_id: "m".into(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        insert_task(&pool, "t1", "running", Some(&session.id), None).await;
+
+        let second = init_workspace_db(tmp.path(), &[]).await.unwrap();
+
+        let stored = repository::get_run(&second, &run.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, RunStatus::Running);
+        let status: String = sqlx::query_scalar("SELECT status FROM workspace_tasks")
+            .fetch_one(&second)
+            .await
+            .unwrap();
+        assert_eq!(status, "running");
+    }
+
+    #[tokio::test]
+    async fn migrated_queue_rows_become_user_message_signals() {
+        let pool = pool_migrated_before(20261016000000).await;
+        for statement in [
+            "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+             VALUES ('s', '{}', 1, 1)",
+            "INSERT INTO assistant_messages (id, session_id, role, content_json, created_at)
+             VALUES ('m1', 's', 'user', '[]', 1), ('m2', 's', 'user', '[]', 2)",
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id, started_at)
+             VALUES ('r', 's', 'completed', 'user_message', 'c', 'openai', 'm', 1)",
+            "INSERT INTO assistant_message_queue
+                 (message_id, session_id, connection_id, status, queued_at, delivered_run_id, delivered_at)
+             VALUES ('m1', 's', 'c1', 'pending', 5, NULL, NULL),
+                    ('m2', 's', 'c2', 'delivered', 6, 'r', 9)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let signals: Vec<String> = sqlx::query_scalar(
+            "SELECT id || ' ' || target_session_id || ' ' || kind || ' '
+                    || message_id || ' ' || connection_id || ' ' || status || ' '
+                    || COALESCE(consumed_run_id, '-') || ' ' || created_at
+             FROM session_signals ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            signals,
+            [
+                "q:m1 s user_message m1 c1 pending - 5",
+                "q:m2 s user_message m2 c2 consumed r 6",
+            ]
+        );
+        let queue_left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'assistant_message_queue'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(queue_left, 0);
+    }
+
+    /// The migration closes all but the newest active run of a session so
+    /// the one-active-run index can be created.
+    #[tokio::test]
+    async fn session_signals_migration_keeps_only_the_newest_active_run() {
+        let pool = pool_migrated_before(20261016000000).await;
+        for statement in [
+            "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+             VALUES ('s', '{}', 1, 1)",
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id, started_at)
+             VALUES ('old', 's', 'running', 'user_message', 'c', 'openai', 'm', 1),
+                    ('new', 's', 'queued', 'user_message', 'c', 'openai', 'm', 2)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let runs: Vec<(String, String, Option<i64>)> =
+            sqlx::query_as("SELECT id, status, completed_at FROM assistant_runs ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            runs,
+            vec![
+                ("new".to_string(), "queued".to_string(), None),
+                ("old".to_string(), "failed".to_string(), Some(1)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn active_run_index_matches_active_run_statuses() {
+        let (_tmp, pool) = workspace_pool().await;
+        let sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_assistant_runs_one_active_per_session'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let predicate = sql
+            .split_once("WHERE status IN ")
+            .map(|(_, statuses)| statuses.trim())
+            .expect("the index is partial on run status");
+        assert_eq!(predicate, crate::assistant::repository::ACTIVE_RUN_STATUSES);
     }
 }

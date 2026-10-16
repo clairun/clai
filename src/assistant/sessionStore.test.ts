@@ -8,8 +8,8 @@ const SESSION = { id: 'sess-1' } as unknown as AssistantSession;
 
 const msg = (id: string): AssistantMessage =>
   ({ id, content: [] }) as unknown as AssistantMessage;
-const run = (id: string, status: string): AssistantRun =>
-  ({ id, status }) as unknown as AssistantRun;
+const run = (id: string, status: string, startedAt = 0): AssistantRun =>
+  ({ id, status, startedAt }) as unknown as AssistantRun;
 
 const ASK_REQUEST = {
   pendingId: 'pending-abc',
@@ -96,8 +96,9 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
   it('preserves pendingAskUser across a snapshot refresh', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'waiting_for_tool'));
     store.setAskUserPending(SESSION.id, ASK_REQUEST);
-    store.loadSessionData(SESSION.id, SESSION, [], [], []);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'waiting_for_tool')], []);
     expect(useAssistantStore.getState().sessions[SESSION.id]!.pendingAskUser).toEqual(
       ASK_REQUEST,
     );
@@ -108,11 +109,83 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     store.initSession(SESSION);
     store.appendDelta(SESSION.id, 'msg-1', 'Hello ');
     store.appendDelta(SESSION.id, 'msg-1', 'world');
-    store.loadSessionData(SESSION.id, SESSION, [], [], []);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'running')], []);
     expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe(
       'Hello world',
     );
     expect(useAssistantStore.getState().sessions[SESSION.id]!.isStreaming).toBe(true);
+  });
+
+  it('clears a stale streaming state when the snapshot shows every run terminal', () => {
+    // A missed run_completed event must not leave the run timer ticking.
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running'));
+    store.appendDelta(SESSION.id, 'msg-1', 'Hello');
+    store.setAskUserPending(SESSION.id, ASK_REQUEST);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'completed')], []);
+    const state = useAssistantStore.getState();
+    const s = state.sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(false);
+    expect(s.runStartedAt).toBeNull();
+    expect(s.pendingAskUser).toBeNull();
+    expect(state.streamingText[SESSION.id]).toBeUndefined();
+  });
+
+  it.each(['running', 'waiting_for_tool', 'queued'])(
+    'keeps the run timer across a snapshot that still shows the run %s',
+    (status) => {
+      const store = useAssistantStore.getState();
+      store.initSession(SESSION);
+      store.setRunStatus(SESSION.id, run('run-1', 'running'));
+      const startedAt = useAssistantStore.getState().sessions[SESSION.id]!.runStartedAt;
+      store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', status)], []);
+      const s = useAssistantStore.getState().sessions[SESSION.id]!;
+      expect(s.isStreaming).toBe(true);
+      expect(s.runStartedAt).toBe(startedAt);
+    },
+  );
+
+  it('keeps a run that started after the snapshot was fetched', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-2', 'running', 2));
+    store.appendDelta(SESSION.id, 'msg-2', 'Hi');
+    store.setAskUserPending(SESSION.id, ASK_REQUEST);
+    const startedAt = useAssistantStore.getState().sessions[SESSION.id]!.runStartedAt;
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'completed', 1)], []);
+    const state = useAssistantStore.getState();
+    const s = state.sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(true);
+    expect(s.runStartedAt).toBe(startedAt);
+    expect(s.runs.map((r) => r.id)).toEqual(['run-1', 'run-2']);
+    expect(state.streamingText[SESSION.id]!['msg-2']).toBe('Hi');
+    expect(s.pendingAskUser).toEqual(ASK_REQUEST);
+  });
+
+  it('keeps the newest live run when an older one missed its end event', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running', 1));
+    store.setRunStatus(SESSION.id, run('run-2', 'running', 2));
+    store.appendDelta(SESSION.id, 'msg-2', 'Hi');
+    store.setAskUserPending(SESSION.id, ASK_REQUEST);
+    const startedAt = useAssistantStore.getState().sessions[SESSION.id]!.runStartedAt;
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'completed', 1)], []);
+    const state = useAssistantStore.getState();
+    const s = state.sessions[SESSION.id]!;
+    expect(s.isStreaming).toBe(true);
+    expect(s.runStartedAt).toBe(startedAt);
+    expect(state.streamingText[SESSION.id]!['msg-2']).toBe('Hi');
+    expect(s.pendingAskUser).toEqual(ASK_REQUEST);
+  });
+
+  it('ends the live run when the snapshot holds a newer terminal run', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running', 1));
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-2', 'completed', 2)], []);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.isStreaming).toBe(false);
   });
 
   it('overwrites messages/runs/toolCalls with the snapshot payload', () => {

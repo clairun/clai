@@ -20,7 +20,7 @@ const MOOD_SEED = 'mood-100';
 const LID_SEED = 'mood-4';
 // wedges + none / flat: the two faces idle legitimately leaves unchanged.
 const STOIC_SEEDS = ['mood-22', 'mood-31'];
-const MOODS: AvatarMood[] = ['neutral', 'running', 'attention', 'idle'];
+const MOODS: AvatarMood[] = ['neutral', 'running', 'idle'];
 
 describe('agentAvatar', () => {
   it('is deterministic: same seed and options give the same SVG', () => {
@@ -134,17 +134,13 @@ describe('agentAvatar', () => {
       // Marker + body path prefix is identical unless the marker glows while running.
       const neutralBody = bodyOf(rendered[0]!);
       expect(bodyOf(rendered[2]!)).toBe(neutralBody);
-      expect(bodyOf(rendered[3]!)).toBe(neutralBody);
-      // Attention always differs: the mouth becomes an "o" and any eye kind but
-      // wedges widens; wedges still get the "o".
-      expect(rendered[2]).not.toBe(rendered[0]);
       // Idle drops lids on every eye kind except wedges and flattens any mouth
       // except none/flat — so wedges + none/flat is legitimately unchanged.
       const { eyes, mouth } = avatarParts(seed);
       if (eyes !== 'wedges' || (mouth !== 'none' && mouth !== 'flat')) {
-        expect(rendered[3]).not.toBe(rendered[0]);
+        expect(rendered[2]).not.toBe(rendered[0]);
       } else {
-        expect(rendered[3]).toBe(rendered[0]);
+        expect(rendered[2]).toBe(rendered[0]);
         unchangedByIdle += 1;
       }
     }

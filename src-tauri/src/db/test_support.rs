@@ -9,6 +9,7 @@
 //! against a database production never had.
 
 use crate::db::{init_workspace_db, DbPool};
+use std::path::Path;
 use tempfile::TempDir;
 
 /// Opens a fresh workspace database in a tempdir and returns it with the
@@ -18,16 +19,27 @@ use tempfile::TempDir;
 /// deletes the directory — and the SQLite file inside it — when dropped.
 ///
 /// The pool comes back **post-recovery**: `init_workspace_db` runs
-/// `sweep_orphaned_task_state` and `recover_stale_runs` at open time. That is
-/// harmless on the empty database a test starts from, but do not re-open the
-/// same path with fixture data in flight — the second open would fail every
-/// `queued`/`running` row the test just seeded.
+/// `recover_interrupted_tasks` and `recover_stale_runs` on the first open of
+/// a path in this process. Re-opening it does not recover again; use
+/// [`restart`] to open it as a new process would.
 pub(crate) async fn workspace_pool() -> (TempDir, DbPool) {
     let tmp = tempfile::tempdir().expect("failed to create tempdir for test workspace");
-    let pool = init_workspace_db(tmp.path())
+    let pool = init_workspace_db(tmp.path(), &[])
         .await
         .expect("failed to initialise test workspace DB");
     (tmp, pool)
+}
+
+/// Opens the workspace at `root` as the next process would, through
+/// [`init_workspace_db`]: recovery runs again.
+pub(crate) async fn restart(root: &Path) -> DbPool {
+    let db_path = crate::config::workspace_config::data_path(root);
+    if let Some(gates) = super::OPEN_GATES.get() {
+        gates.lock().unwrap().remove(&db_path);
+    }
+    init_workspace_db(root, &[])
+        .await
+        .expect("failed to reopen test workspace DB")
 }
 
 /// Inserts a `workspace_tasks` row, filling every NOT NULL column the real

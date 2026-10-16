@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { listAgentDefinitions, type AgentDefinitionDetail } from '../../api/client';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
-import { isTaskActive } from '../../utils/taskDisplay';
+import { isTaskRunning } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import AgentCardPicker from './AgentCardPicker';
 import { agentActivity, identityFor, type AgentActivity } from './agentIdentity';
@@ -43,7 +43,7 @@ export const sortCrew = (agents: readonly WorkspaceAgentResponse[]): WorkspaceAg
   [...agents].sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
 
 export interface CrewStatus {
-  /** What the ring draws. Disabled beats everything, then running, then attention. */
+  /** What the ring draws. Disabled beats running. */
   activity: AgentActivity;
   /** One line about it, or `null` when there is nothing to say. */
   line: string | null;
@@ -62,11 +62,11 @@ export const crewStatus = (
   if (activity === 'disabled') return { activity, line: 'Disabled in this workspace' };
   if (activity === 'running') {
     const running = tasks.filter(
-      (task) => task.assignedToWorkspaceAgentId === agent.id && isTaskActive(task)
+      (task) => task.assignedToWorkspaceAgentId === agent.id && isTaskRunning(task)
     ).length;
     return { activity, line: running === 1 ? '1 task running' : `${running} tasks running` };
   }
-  return { activity, line: activity === 'attention' ? 'Needs your review' : null };
+  return { activity, line: null };
 };
 
 const CrewList = ({

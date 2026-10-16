@@ -2,10 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-const api = vi.hoisted(() => ({ acknowledgeWorkspaceTask: vi.fn() }));
+const api = vi.hoisted(() => ({ stopWorkspaceTask: vi.fn() }));
 vi.mock('../../workspace/client', () => api);
 
 import TaskList, { filterFaces, taskActivity } from './TaskList';
+import { useTaskStore } from '../../workspace/taskStore';
 import AgentAvatar from './AgentAvatar';
 import { identityFor, mainIdentity, taskIdentity, type AgentActivity } from './agentIdentity';
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
@@ -44,11 +45,17 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   resultSummary: null,
   error: null,
   sessionId: null,
-  runId: null,
+  runId: 'run-1',
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,
-  attentionAcknowledgedAt: null,
+  failureReason: null,
+  parentSessionId: null,
+  parentRunId: null,
+  parentTaskId: null,
+  depth: 0n,
+  cycleNo: 0n,
+  stopRequestedAt: null,
   ...over,
 });
 
@@ -70,7 +77,8 @@ const REVIEW_TASK = task({
 const WRITE_TASK = task({
   id: 't-write',
   title: 'Write notes',
-  status: 'blocked',
+  status: 'failed',
+  failureReason: 'blocked',
   assignedToWorkspaceAgentId: 'wa-gone',
   assignedAgentDefinitionId: 'def-gone',
   assignedAgentDisplayName: 'Writer (gone)',
@@ -92,26 +100,23 @@ const svgOf = (
     <AgentAvatar identity={identity} size={size} activity={activity} />
   ).container.querySelector('span')?.innerHTML;
 
-beforeEach(() => {
-  api.acknowledgeWorkspaceTask.mockReset().mockResolvedValue(undefined);
-});
-
 describe('task rules', () => {
   it('rings a row by the task state, not the agent', () => {
     expect(taskActivity(task({ status: 'queued' }))).toBe('running');
-    expect(taskActivity(task({ status: 'failed' }))).toBe('attention');
-    expect(taskActivity(task({ status: 'failed', attentionAcknowledgedAt: 2n }))).toBe('none');
+    expect(taskActivity(task({ status: 'running' }))).toBe('running');
+    expect(taskActivity(task({ status: 'running', runId: null }))).toBe('idle');
+    expect(taskActivity(task({ status: 'failed' }))).toBe('none');
     expect(taskActivity(task({ status: 'completed' }))).toBe('none');
   });
 
-  it('builds one filter face per assignee, roster names first, attention folded in', () => {
+  it('builds one filter face per assignee, roster names first', () => {
     const faces = filterFaces(
       [REVIEW_TASK, WRITE_TASK, task({ id: 't3', status: 'failed' })],
       ROSTER
     );
-    expect(faces.map((face) => [face.agentId, face.name, face.attention])).toEqual([
-      ['wa-review', 'Reviewer', true],
-      ['wa-gone', 'Writer (gone)', true],
+    expect(faces.map((face) => [face.agentId, face.name])).toEqual([
+      ['wa-review', 'Reviewer'],
+      ['wa-gone', 'Writer (gone)'],
     ]);
     expect(faces[0]?.identity.seed).toBe('picked');
     expect(faces[1]?.identity.seed).toBe('def-gone');
@@ -119,7 +124,7 @@ describe('task rules', () => {
 });
 
 describe('TaskList', () => {
-  const props = { workspaceId: 'ws-1', roster: ROSTER, onChanged: vi.fn() };
+  const props = { roster: ROSTER };
 
   it('leads each task with the assignee face and writes creator → assignee', () => {
     render(<TaskList {...props} tasks={[REVIEW_TASK, USER_TASK]} />);
@@ -144,8 +149,8 @@ describe('TaskList', () => {
   it('keeps the face of an agent that left the crew', () => {
     render(<TaskList {...props} tasks={[WRITE_TASK]} />);
     const row = screen.getByRole('listitem');
-    expect(row.querySelector('[data-activity="attention"]')?.innerHTML).toBe(
-      svgOf(taskIdentity(WRITE_TASK, []), 28, 'attention')
+    expect(row.querySelector('[data-activity="none"]')?.innerHTML).toBe(
+      svgOf(taskIdentity(WRITE_TASK, []), 28)
     );
     expect(within(row).getByText('Writer (gone)')).toBeInTheDocument();
   });
@@ -190,40 +195,6 @@ describe('TaskList', () => {
     expect(screen.getByText('No delegated tasks yet.')).toBeInTheDocument();
   });
 
-  it('disables every Mark reviewed while one acknowledge is in flight', async () => {
-    const user = userEvent.setup();
-    let release: () => void = () => {};
-    api.acknowledgeWorkspaceTask.mockImplementation(
-      () => new Promise<void>((resolve) => (release = resolve))
-    );
-    const second = task({ id: 't-fail', title: 'Failed one', status: 'failed' });
-    render(<TaskList {...props} tasks={[WRITE_TASK, second]} />);
-
-    const [first, other] = screen.getAllByRole('button', { name: 'Mark reviewed' }) as [
-      HTMLElement,
-      HTMLElement,
-    ];
-    await user.click(first);
-    expect(first).toBeDisabled();
-    // A click here would otherwise be dropped silently by the busy guard.
-    expect(other).toBeDisabled();
-    release();
-    await waitFor(() => expect(other).toBeEnabled());
-  });
-
-  it('acknowledges a blocked task once and reloads', async () => {
-    const user = userEvent.setup();
-    const onChanged = vi.fn();
-    render(<TaskList {...props} onChanged={onChanged} tasks={[REVIEW_TASK, WRITE_TASK]} />);
-
-    await user.click(screen.getByRole('button', { name: 'Mark reviewed' }));
-    await waitFor(() =>
-      expect(api.acknowledgeWorkspaceTask).toHaveBeenCalledWith('ws-1', 't-write')
-    );
-    expect(api.acknowledgeWorkspaceTask).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
-  });
-
   it('opens the log from the row itself, only where there is one to open', async () => {
     const user = userEvent.setup();
     const onViewTask = vi.fn();
@@ -243,24 +214,6 @@ describe('TaskList', () => {
   it('leaves the row inert when nobody is listening for the log', () => {
     render(<TaskList {...props} tasks={[REVIEW_TASK]} />);
     expect(screen.queryByRole('button', { name: /Open the log/ })).toBeNull();
-  });
-
-  it('does not open the row behind a Mark reviewed that is disabled', async () => {
-    const user = userEvent.setup();
-    const onViewTask = vi.fn();
-    api.acknowledgeWorkspaceTask.mockImplementation(() => new Promise<void>(() => {}));
-    const first = task({ id: 't-a', title: 'First', status: 'failed', sessionId: 'sess-a' });
-    const second = task({ id: 't-b', title: 'Second', status: 'failed', sessionId: 'sess-b' });
-    render(<TaskList {...props} onViewTask={onViewTask} tasks={[first, second]} />);
-
-    const [one, two] = screen.getAllByRole('listitem') as [HTMLElement, HTMLElement];
-    await user.click(within(one).getByRole('button', { name: 'Mark reviewed' }));
-    const blocked = within(two).getByRole('button', { name: 'Mark reviewed' });
-    expect(blocked).toBeDisabled();
-
-    // A suppressed click on a disabled control is not a click on the row.
-    await user.click(blocked);
-    expect(onViewTask).not.toHaveBeenCalled();
   });
 
   it('opens the log from a click on the row itself, text included', async () => {
@@ -298,21 +251,174 @@ describe('TaskList', () => {
     expect(onViewTask).toHaveBeenCalledWith(failed);
   });
 
-  it('acknowledges from a row that opens, without also opening it', async () => {
-    const user = userEvent.setup();
-    const onViewTask = vi.fn();
-    const both = task({ id: 't-both', title: 'Failed one', status: 'failed', sessionId: 'sess-2' });
-    render(<TaskList {...props} onViewTask={onViewTask} tasks={[both]} />);
+});
 
-    const row = screen.getByRole('listitem');
-    expect(
-      within(row).getByRole('button', { name: 'Open the log of "Failed one"' })
-    ).toBeInTheDocument();
-    await user.click(within(row).getByRole('button', { name: 'Mark reviewed' }));
-    await waitFor(() =>
-      expect(api.acknowledgeWorkspaceTask).toHaveBeenCalledWith('ws-1', 't-both')
+describe('task status display', () => {
+  const props = { roster: ROSTER };
+
+  it('failed+blocked shows Blocked pill', () => {
+    render(<TaskList {...props} tasks={[WRITE_TASK]} />);
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
+    expect(screen.queryByText('Failed')).toBeNull();
+  });
+
+  it('failed+restart reads Failed · interrupted', () => {
+    render(
+      <TaskList
+        {...props}
+        tasks={[task({ id: 't-r', status: 'failed', failureReason: 'restart' })]}
+      />
     );
-    // The row's own action must not catch the acknowledge click.
-    expect(onViewTask).not.toHaveBeenCalled();
+    expect(screen.getByText('Failed · interrupted')).toBeInTheDocument();
+  });
+
+  it('running with no run reads Waiting for subtasks and can still be stopped', () => {
+    render(
+      <TaskList
+        {...props}
+        tasks={[task({ id: 't-w', title: 'Parent', status: 'running', runId: null })]}
+      />
+    );
+    expect(screen.getByText('Waiting for subtasks')).toBeInTheDocument();
+    expect(screen.queryByText('Running')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Stop Parent' })).toBeEnabled();
+  });
+});
+
+describe('task tree', () => {
+  it('nests subtasks under their parent and collapses them', async () => {
+    const parent = task({ id: 't-p', title: 'Parent' });
+    const child = task({ id: 't-c', title: 'Child', parentTaskId: 't-p' });
+    render(
+      <TaskList roster={ROSTER} tasks={[child, parent]} />
+    );
+    const titles = () => screen.getAllByText(/^(Parent|Child)$/).map((el) => el.textContent);
+    expect(titles()).toEqual(['Parent', 'Child']);
+
+    const toggle = screen.getByRole('button', { name: '1 subtask' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(titles()).toEqual(['Parent']);
+  });
+});
+
+describe('task stop', () => {
+  const props = { roster: ROSTER };
+  beforeEach(() => {
+    api.stopWorkspaceTask.mockReset();
+    useTaskStore.setState({ tasks: {}, seeded: {} });
+  });
+
+  it('stop visible for queued/running', () => {
+    const statuses = [
+      'queued',
+      'running',
+      'completed',
+      'failed',
+      'stopped',
+    ] as const;
+    render(
+      <TaskList
+        {...props}
+        tasks={statuses.map((status) => task({ id: status, title: status, status }))}
+      />
+    );
+    const stops = screen
+      .getAllByRole('button', { name: /^Stop / })
+      .map((b) => b.getAttribute('aria-label'));
+    expect(stops).toEqual(['Stop queued', 'Stop running']);
+  });
+
+  it('stop disables while stopping and survives reload via status', async () => {
+    const running = task({ id: 't-s', title: 'Review', status: 'running' });
+    const stopping = {
+      ...running,
+      status: 'stopping' as const,
+      updatedAt: 2n,
+      stopRequestedAt: 2n,
+    };
+    let resolve: (t: WorkspaceTaskResponse) => void = () => {};
+    api.stopWorkspaceTask.mockReturnValue(new Promise((r) => (resolve = r)));
+    const { unmount } = render(<TaskList {...props} tasks={[running]} />);
+    const stop = screen.getByRole('button', { name: 'Stop Review' });
+    await userEvent.click(stop);
+    expect(api.stopWorkspaceTask).toHaveBeenCalledWith('ws-1', 't-s');
+    expect(stop).toBeDisabled();
+    resolve(stopping);
+    await waitFor(() =>
+      expect(useTaskStore.getState().tasks['ws-1']?.['t-s']?.status).toBe('stopping')
+    );
+    unmount();
+
+    // A fresh mount has no click latch; the durable status alone disables it.
+    render(<TaskList {...props} tasks={[stopping]} />);
+    expect(screen.getByText('Stopping…')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Stop Review' })).toBeDisabled();
+  });
+
+  it('stopped rows name a restart and leave the resume hint to the composer', () => {
+    render(
+      <TaskList
+        {...props}
+        tasks={[
+          task({ id: 'a', status: 'stopped' }),
+          task({ id: 'b', status: 'stopped', error: 'task interrupted by app restart' }),
+        ]}
+      />
+    );
+    expect(screen.getByText('Interrupted by restart')).toBeInTheDocument();
+    expect(screen.queryByText(/send a message to resume/i)).toBeNull();
+    expect(screen.queryByText('task interrupted by app restart')).toBeNull();
+  });
+
+  it('stop is enabled again once a stopped task resumes', async () => {
+    const running = task({ id: 't-s', title: 'Review', status: 'running' });
+    api.stopWorkspaceTask.mockResolvedValue({ ...running, status: 'stopping', updatedAt: 2n });
+    const { rerender } = render(<TaskList {...props} tasks={[running]} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Stop Review' }));
+    await waitFor(() =>
+      expect(useTaskStore.getState().tasks['ws-1']?.['t-s']?.status).toBe('stopping')
+    );
+    rerender(<TaskList {...props} tasks={[{ ...running, status: 'stopping', updatedAt: 2n }]} />);
+    expect(screen.getByRole('button', { name: 'Stop Review' })).toBeDisabled();
+    rerender(<TaskList {...props} tasks={[{ ...running, status: 'stopped', updatedAt: 3n }]} />);
+    rerender(
+      <TaskList
+        {...props}
+        tasks={[{ ...running, cycleNo: 2n, status: 'running', updatedAt: 4n }]}
+      />
+    );
+    expect(screen.getByRole('button', { name: 'Stop Review' })).toBeEnabled();
+  });
+
+  it('already_terminal shows no error', async () => {
+    const running = task({ id: 't-d', title: 'Done', status: 'running' });
+    api.stopWorkspaceTask.mockResolvedValue({ ...running, status: 'completed', updatedAt: 2n });
+    render(<TaskList {...props} tasks={[running]} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Stop Done' }));
+    await waitFor(() =>
+      expect(useTaskStore.getState().tasks['ws-1']?.['t-d']?.status).toBe('completed')
+    );
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('a rejected stop re-enables the button and shows the error', async () => {
+    api.stopWorkspaceTask.mockRejectedValue('task not found');
+    render(<TaskList {...props} tasks={[task({ id: 't-x', title: 'Gone', status: 'running' })]} />);
+    const stop = screen.getByRole('button', { name: 'Stop Gone' });
+    await userEvent.click(stop);
+    expect(await screen.findByRole('alert')).toHaveTextContent('task not found');
+    expect(stop).toBeEnabled();
+  });
+
+  it('a stop error does not outlive its cycle', async () => {
+    const running = task({ id: 't-x', title: 'Gone', status: 'running' });
+    api.stopWorkspaceTask.mockRejectedValue('transport closed');
+    const { rerender } = render(<TaskList {...props} tasks={[running]} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Stop Gone' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('transport closed');
+    rerender(<TaskList {...props} tasks={[{ ...running, cycleNo: 2n, updatedAt: 2n }]} />);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

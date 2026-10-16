@@ -47,11 +47,17 @@ const task = (over: Partial<WorkspaceTaskResponse>): WorkspaceTaskResponse => ({
   resultSummary: null,
   error: null,
   sessionId: null,
-  runId: null,
+  runId: 'run-1',
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,
-  attentionAcknowledgedAt: null,
+  failureReason: null,
+  parentSessionId: null,
+  parentRunId: null,
+  parentTaskId: null,
+  depth: 0n,
+  cycleNo: 0n,
+  stopRequestedAt: null,
   ...over,
 });
 
@@ -128,10 +134,10 @@ describe('crew rules', () => {
     ]);
   });
 
-  it('derives ring and line from the tasks, with disabled winning and running before attention', () => {
+  it('derives ring and line from the tasks, with disabled winning', () => {
     expect(crewStatus(REVIEWER, [])).toEqual({ activity: 'idle', line: null });
     expect(
-      crewStatus(REVIEWER, [task({ status: 'blocked' }), task({ id: 't2', status: 'queued' })])
+      crewStatus(REVIEWER, [task({ status: 'failed', failureReason: 'blocked' }), task({ id: 't2', status: 'queued' })])
     ).toEqual({
       activity: 'running',
       line: '1 task running',
@@ -140,8 +146,8 @@ describe('crew rules', () => {
       crewStatus(REVIEWER, [task({ status: 'running' }), task({ id: 't2', status: 'queued' })]).line
     ).toBe('2 tasks running');
     expect(crewStatus(REVIEWER, [task({ status: 'failed' })])).toEqual({
-      activity: 'attention',
-      line: 'Needs your review',
+      activity: 'idle',
+      line: null,
     });
     expect(crewStatus({ ...REVIEWER, enabled: false }, [task({ status: 'running' })])).toEqual({
       activity: 'disabled',
@@ -149,10 +155,7 @@ describe('crew rules', () => {
     });
   });
 
-  it('stops asking for review once the task was acknowledged, or belongs to someone else', () => {
-    expect(
-      crewStatus(REVIEWER, [task({ status: 'blocked', attentionAcknowledgedAt: 3n })]).line
-    ).toBeNull();
+  it('ignores tasks assigned to someone else', () => {
     expect(
       crewStatus(REVIEWER, [task({ assignedToWorkspaceAgentId: 'wa-other', status: 'running' })])
     ).toEqual({

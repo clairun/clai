@@ -143,22 +143,22 @@
   background: var(--color-bg-primary);
 }
 
-.sep {
-  color: var(--color-text-tertiary);
-}
-
-.sessionId {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-}
-
 .transcript {
   flex: 1;
   min-height: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.chips {
+  flex-shrink: 0;
+  display: flex;
+  padding: 6px 12px;
+}
+
+.chips:empty {
+  display: none;
 }
 
 .empty {

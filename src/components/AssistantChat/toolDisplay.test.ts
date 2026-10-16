@@ -27,6 +27,17 @@ describe('summarizeToolCall', () => {
     });
   });
 
+  it('labels the task tools that stay rows by what they did', () => {
+    expect(summarizeToolCall('workspace_stopTask', { taskId: 'task-1' })).toEqual({
+      verb: 'Stop task',
+      arg: 'task-1',
+    });
+    expect(summarizeToolCall('workspace_sendTaskMessage', { message: 'Heads up.' })).toEqual({
+      verb: 'Message',
+      arg: 'Heads up.',
+    });
+  });
+
   it('collapses multi-line commands onto one line', () => {
     expect(summarizeToolCall('bash_exec', { command: 'echo a\n  echo b' }).arg).toBe('echo a echo b');
   });
@@ -237,6 +248,7 @@ describe('inlineTaskCard', () => {
       workspaceId: 'ws-1',
       assignedToWorkspaceAgentId: 'wa-7',
       assignedAgentDefinitionId: 'def-7',
+      assignedAgentDisplayName: 'Reviewer',
       title: 'Round 3 review',
       instructions: '  Review the branch end to end.  ',
       status: 'queued',
@@ -256,6 +268,7 @@ describe('inlineTaskCard', () => {
       status: 'queued',
       assignedToWorkspaceAgentId: 'wa-7',
       assignedAgentDefinitionId: 'def-7',
+      assignedAgentDisplayName: 'Reviewer',
       detail: '',
       detailIsError: false,
     });
@@ -328,6 +341,23 @@ describe('inlineTaskCard', () => {
     const envelope = { content: [{ type: 'text', text: JSON.stringify(task()) }] };
     expect(inlineTaskCard('mcp__clai__workspace_assignTask', envelope, null, 'completed'))
       .toMatchObject({ taskId: 'task-1', kind: 'assign' });
+  });
+
+  it('gives a stop and a message a full action card, even while the task runs', () => {
+    expect(inlineTaskCard('workspace_stopTask', task({ status: 'stopping' }), null, 'completed'))
+      .toMatchObject({ kind: 'stop', variant: 'full', taskId: 'task-1' });
+    expect(
+      inlineTaskCard('mcp__clai__workspace_sendTaskMessage', task({ status: 'running' }), null, 'completed')
+    ).toMatchObject({ kind: 'message', variant: 'full', taskId: 'task-1' });
+  });
+
+  it('keeps failed stops and messages to the workspace as plain rows', () => {
+    expect(
+      inlineTaskCard('workspace_stopTask', undefined, 'already_terminal: task task-1 already ended', 'failed')
+    ).toBeNull();
+    expect(
+      inlineTaskCard('workspace_sendTaskMessage', { ok: true, task: null, queued: false }, null, 'completed')
+    ).toBeNull();
   });
 
   it('leaves the plain row in place for anything it cannot draw', () => {

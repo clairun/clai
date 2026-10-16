@@ -1,7 +1,7 @@
 /**
  * A few overlapping faces standing in for "N agents" — the header chip. The
  * Main comes first, then whoever is working, so the faces that matter are
- * the ones that fit. Rings only for running/attention: an idle hairline on
+ * the ones that fit. Rings only for running: an idle hairline on
  * every face would turn the chip into a row of targets.
  */
 import type { WorkspaceAgentResponse, WorkspaceTaskResponse } from '../../generated/bindings';
@@ -20,7 +20,6 @@ export interface AgentFacepileProps {
 
 const RANK: Record<AgentActivity, number> = {
   running: 0,
-  attention: 1,
   idle: 2,
   none: 2,
   disabled: 3,
@@ -50,7 +49,7 @@ const AgentFacepile = ({ agents, tasks, max = 4, size = 18 }: AgentFacepileProps
           identity={identityFor(agent)}
           size={size}
           // Quiet unless something is happening.
-          activity={activity === 'running' || activity === 'attention' ? activity : 'none'}
+          activity={activity === 'running' ? activity : 'none'}
           className={styles.face}
         />
       ))}

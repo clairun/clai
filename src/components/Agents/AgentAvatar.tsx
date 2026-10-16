@@ -31,7 +31,7 @@ export interface AgentAvatarProps {
   className?: string;
 }
 
-const RINGED: ReadonlySet<AgentActivity> = new Set(['idle', 'running', 'attention']);
+const RINGED: ReadonlySet<AgentActivity> = new Set(['idle', 'running']);
 
 /**
  * An agent's face. A pure function of identity + theme + activity. Callers
@@ -64,7 +64,6 @@ const AgentAvatar = ({
     styles.avatar,
     ringed ? styles.ring : '',
     ringed && activity === 'running' ? styles.running : '',
-    ringed && activity === 'attention' ? styles.attention : '',
     activity === 'disabled' ? styles.disabled : '',
     className ?? '',
   ]

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../assistant';
 import type {
   AssistantMessage,
@@ -7,16 +7,28 @@ import type {
   WorkspaceTaskResponse,
 } from '../generated/bindings';
 import ChatMessageList from './AssistantChat/ChatMessageList';
+import ChatComposer from './AssistantChat/ChatComposer';
+import { resolveAgent, resolveSessionOwner } from './AssistantChat/messageSender';
 import AgentAvatar from './Agents/AgentAvatar';
-import { taskIdentity, type AgentActivity } from './Agents/agentIdentity';
-import { isTaskActive, isTaskAttention, taskStatusLabel } from '../utils/taskDisplay';
+import TaskBreadcrumb from './Agents/TaskBreadcrumb';
+import StopChip from './Agents/StopChip';
+import TaskStopButton from './Agents/TaskStopButton';
+import { taskActivity } from './Agents/TaskList';
+import { taskIdentity } from './Agents/agentIdentity';
+import { taskDisplayStatus } from '../utils/taskDisplay';
+import { sendWorkspaceTaskMessage } from '../workspace/client';
+import { useTaskStore } from '../workspace/taskStore';
 import styles from './WorkspaceTaskTranscriptPanel.module.css';
 
 const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+const EMPTY_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
 const MESSAGE_PAGE_LIMIT = 100;
+
+const errorText = (err: unknown): string =>
+  typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to send message.';
 
 interface WorkspaceTaskTranscriptPanelProps {
   workspaceId: string;
@@ -24,6 +36,10 @@ interface WorkspaceTaskTranscriptPanelProps {
   /** The crew, so the header shows the assignee's face; empty is fine. */
   roster?: readonly WorkspaceAgentResponse[];
   onClose: () => void;
+  /** Open another task's log from this one: a card in it, or an ancestor. */
+  onOpenTask?: (taskId: string) => void;
+  /** Return to the log this one was opened from; omit when there is none. */
+  onBack?: () => void;
 }
 
 export default function WorkspaceTaskTranscriptPanel({
@@ -32,6 +48,8 @@ export default function WorkspaceTaskTranscriptPanel({
   // A constant, not a fresh `[]` per render: the cards below memoize on it.
   roster = EMPTY_ROSTER,
   onClose,
+  onOpenTask,
+  onBack,
 }: WorkspaceTaskTranscriptPanelProps) {
   const sessionId = task?.sessionId || null;
   const sessionState = useAssistantStore((state) =>
@@ -39,6 +57,41 @@ export default function WorkspaceTaskTranscriptPanel({
   );
   const streamingText = useAssistantStore(
     (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
+  );
+  // Keyed on the assignee, not the task: the poll hands a new task object
+  // every 5s, and a new owner would repaint the whole transcript.
+  const assignedToWorkspaceAgentId = task?.assignedToWorkspaceAgentId ?? '';
+  const assignedAgentDefinitionId = task?.assignedAgentDefinitionId ?? '';
+  const assignedAgentDisplayName = task?.assignedAgentDisplayName ?? '';
+  const owner = useMemo(
+    () =>
+      resolveSessionOwner(roster, {
+        assignedToWorkspaceAgentId,
+        assignedAgentDefinitionId,
+        assignedAgentDisplayName,
+      }),
+    [roster, assignedToWorkspaceAgentId, assignedAgentDefinitionId, assignedAgentDisplayName]
+  );
+  const upsertTask = useTaskStore((state) => state.upsertTask);
+  const taskId = task?.id ?? '';
+  const handleSend = useCallback(
+    async (text: string): Promise<{ error?: string }> => {
+      try {
+        const res = await sendWorkspaceTaskMessage(workspaceId, taskId, text);
+        const store = useAssistantStore.getState();
+        store.addMessage(res.message.sessionId, res.message);
+        // A queued message waits for a run; `queued_messages_delivered` clears
+        // the chip.
+        if (res.queued) {
+          store.markMessageQueued(res.message.sessionId, res.message.id);
+        }
+        upsertTask(res.task);
+        return {};
+      } catch (err) {
+        return { error: errorText(err) };
+      }
+    },
+    [workspaceId, taskId, upsertTask]
   );
   const [bootstrapError, setBootstrapError] = useState('');
   const [bootstrapping, setBootstrapping] = useState(false);
@@ -110,18 +163,13 @@ export default function WorkspaceTaskTranscriptPanel({
 
   if (!task) return null;
 
-  const statusLabel = taskStatusLabel(task.status);
-  const statusClass = styles[`status_${task.status}`] || '';
-  // The header face carries the task's state, so the transcript below doesn't
-  // have to: its running footer is deliberately off (see `runningIdentity`).
-  const headerActivity: AgentActivity = isTaskActive(task)
-    ? 'running'
-    : isTaskAttention(task)
-      ? 'attention'
-      : 'none';
+  const { key: statusKey, label: statusLabel } = taskDisplayStatus(task);
+  const agentName = owner ? resolveAgent(owner, roster).name : task.assignedAgentDisplayName;
+  const statusClass = styles[`status_${statusKey}`] || '';
 
   const messages = sessionState?.messages || EMPTY_MESSAGES;
   const toolCalls = sessionState?.toolCalls || EMPTY_TOOL_CALLS;
+  const queuedMessageIds = sessionState?.queuedMessageIds || EMPTY_IDS;
   const isStreaming = !!sessionState?.isStreaming;
   const hasOlderMessages = !!sessionState?.hasOlderMessages;
   const isLoadingOlderMessages = !!sessionState?.isLoadingOlderMessages;
@@ -166,15 +214,31 @@ export default function WorkspaceTaskTranscriptPanel({
     >
       <div className={styles.header}>
         <div className={styles.headerLeft}>
+          {onBack && (
+            <button
+              type="button"
+              className={styles.closeButton}
+              onClick={onBack}
+              aria-label="Back"
+              title="Back"
+            >
+              ←
+            </button>
+          )}
           <AgentAvatar
             identity={taskIdentity(task, roster)}
             size={20}
-            activity={headerActivity}
+            activity={taskActivity(task)}
             label={task.assignedAgentDisplayName}
           />
           <span className={styles.title} title={task.title}>{task.title}</span>
           <span className={`${styles.statusPill} ${statusClass}`}>{statusLabel}</span>
         </div>
+        <TaskStopButton
+          key={`${task.id}:${task.cycleNo}`}
+          task={task}
+          label={`Stop task ${task.title}`}
+        />
         <button
           type="button"
           className={styles.closeButton}
@@ -187,19 +251,9 @@ export default function WorkspaceTaskTranscriptPanel({
       </div>
 
       <div className={styles.body}>
-        {(task.assignedAgentDisplayName || sessionId) && (
+        {task.parentTaskId && onOpenTask && (
           <div className={styles.bodyMeta}>
-            {task.assignedAgentDisplayName && (
-              <span>{task.assignedAgentDisplayName}</span>
-            )}
-            {sessionId && (
-              <>
-                {task.assignedAgentDisplayName && <span className={styles.sep}>·</span>}
-                <span className={styles.sessionId} title={sessionId}>
-                  session {sessionId.slice(0, 8)}
-                </span>
-              </>
-            )}
+            <TaskBreadcrumb task={task} onOpenTask={onOpenTask} />
           </div>
         )}
         {!sessionId && (
@@ -233,19 +287,30 @@ export default function WorkspaceTaskTranscriptPanel({
               // this agent running, and the store only knows `isStreaming` /
               // `runStartedAt` for runs it saw start live — a transcript
               // opened mid-run showed nothing at all, which read as a bug.
-              userLabel="Main agent"
               hasOlderMessages={hasOlderMessages}
               isLoadingOlderMessages={isLoadingOlderMessages}
               onLoadOlderMessages={handleLoadOlderMessages}
               // A sub-agent can delegate further; its task cards get faces
-              // from the same crew. No open handler: this panel already is a
-              // task's log, and swapping the task under the reader would lose
-              // their place.
+              // from the same crew and open the child's log, with Back.
               taskRoster={roster}
+              onOpenTask={onOpenTask}
+              owner={owner}
+              queuedMessageIds={queuedMessageIds}
             />
           </div>
         )}
+        <div className={styles.chips}>
+          <StopChip status={task.status} />
+        </div>
       </div>
+      <ChatComposer
+        // Remount per task so a draft never carries over to another task.
+        key={task.id}
+        placeholder={`Message ${agentName}…`}
+        disabled={!sessionId}
+        ariaLabel={`Message ${agentName} about ${task.title}`}
+        onSend={handleSend}
+      />
     </aside>
   );
 }

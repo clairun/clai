@@ -58,7 +58,7 @@ pub use workspace_index::WorkspaceIndex;
 /// module's name signals intent at the use site.
 #[doc(hidden)]
 pub mod runtime {
-    pub use crate::assistant::runtime::{cancel_run, register_run};
+    pub use crate::assistant::runtime::{cancel_run, register_run, LiveRunKey};
 }
 
 /// Shared application state accessible from all commands.
@@ -251,7 +251,9 @@ impl AppState {
         let root = self
             .workspace_root(workspace_id)
             .ok_or_else(|| format!("Workspace {} not found", workspace_id))?;
-        let pool = db::init_workspace_db(&root).await?;
+        let roster = assistant::workspace_agents::load_workspace_agent_rows(self, workspace_id)
+            .unwrap_or_default();
+        let pool = db::init_workspace_db(&root, &roster).await?;
         self.workspace_index
             .write()
             .map_err(|e| format!("Workspace index lock error: {}", e))?
@@ -407,6 +409,7 @@ pub fn run() {
                     if let Err(e) = initialize_workspace_storage(&state).await {
                         tracing::warn!("Failed to initialize workspace storage: {}", e);
                     }
+                    resume_open_workspaces(&app_handle, state.inner());
                     agents::init::populate_scheduler_from_workspace_agents(
                         &post_db_scheduler,
                         state.inner(),
@@ -508,8 +511,9 @@ pub fn run() {
             commands::workspace::workspace_update_session_mcp,
             commands::workspace::workspace_set_provider,
             commands::workspace::workspace_list_agents,
-            commands::workspace::workspace_acknowledge_task,
             commands::workspace::workspace_task_by_id,
+            commands::workspace::workspace_stop_task,
+            commands::workspace::workspace_send_task_message,
             commands::workspace::workspace_create,
             commands::workspace::workspace_fork,
             commands::workspace::workspace_list,
@@ -593,7 +597,7 @@ async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Res
         config::workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(root.join(".clai").join("memory").join("journal"))
             .map_err(|e| format!("Failed to prepare default workspace: {}", e))?;
-        let pool = db::init_workspace_db(&root).await?;
+        let pool = db::init_workspace_db(&root, &[]).await?;
         let mut index = state
             .workspace_index
             .write()
@@ -612,10 +616,12 @@ async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Res
     const MAX_WORKSPACE_DB_INIT_CONCURRENCY: usize = 8;
     let mut pending = tokio::task::JoinSet::new();
     for locator in locators {
+        let roster = assistant::workspace_agents::load_workspace_agent_rows(state, &locator.id)
+            .unwrap_or_default();
         pending.spawn(async move {
             let id = locator.id;
             let root_path = locator.root_path;
-            let result = db::init_workspace_db(&root_path).await;
+            let result = db::init_workspace_db(&root_path, &roster).await;
             (id, root_path, result)
         });
 
@@ -631,6 +637,25 @@ async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Res
         attach_workspace_db_result(state, joined)?;
     }
     Ok(())
+}
+
+/// Re-dispatches what restart recovery left pending in every open workspace.
+/// Workspaces opened later are new, or resume on their next kick.
+fn resume_open_workspaces(app: &tauri::AppHandle, state: &AppState) {
+    let Ok(index) = state.workspace_index.read() else {
+        return;
+    };
+    for locator in index.locators_sorted() {
+        let Some(pool) = index.pool(&locator.id) else {
+            continue;
+        };
+        let deps = assistant::engine::AssistantDeps {
+            workspace_id: locator.id,
+            pool,
+            app: app.clone(),
+        };
+        tauri::async_runtime::spawn(assistant::dispatcher::resume_workspace(deps));
+    }
 }
 
 fn attach_workspace_db_result(

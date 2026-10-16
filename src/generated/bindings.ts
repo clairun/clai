@@ -12,6 +12,11 @@ export type AddSkillSourceRequest = { name: string, kind: string | null, path: s
  */
 export type AgentAvatarRef = { seed: string, generatorVersion: number, };
 
+/**
+ * An agent as it was when the message was written; never regenerated.
+ */
+export type AgentRefSnapshot = { workspaceAgentId: string, agentDefinitionId?: string | null, displayName: string, isDefault: boolean, avatar?: AgentAvatarRef | null, };
+
 export type AppUpdateAvailableEvent = { update: AppUpdateInfo, };
 
 export type AppUpdateCheckResult = { support: AppUpdateSupportStatus, lastCheck: AppUpdateLastCheck, };
@@ -59,7 +64,7 @@ export type AssistantEventEnvelope = { sessionId: string, runId: string | null,
  */
 workspaceId: string, timestamp: bigint, event: AssistantUiEvent, };
 
-export type AssistantMessage = { id: string, sessionId: string, role: MessageRole, content: Array<ContentPart>, createdAt: bigint, providerMetadata: JsonValue | null, };
+export type AssistantMessage = { id: string, sessionId: string, role: MessageRole, content: Array<ContentPart>, createdAt: bigint, providerMetadata: JsonValue | null, origin: MessageOrigin, };
 
 export type AssistantMessageCursor = { sessionId: string, createdAt: bigint, messageId: string, };
 
@@ -79,7 +84,7 @@ export type AssistantUiEvent = { "type": "session_created", "payload": { session
 /**
  * When true the user may pick any number of options.
  */
-multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } };
+multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } } | { "type": "task_updated", "payload": { task: WorkspaceTaskResponse, } } | { "type": "run_skipped", "payload": { reason: RunSkipReason, activeRunId: string | null, } };
 
 export type AttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
@@ -116,6 +121,11 @@ providerId: string | null, apiKey: string | null, authMode: AuthMode | null, bas
 export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
 
 export type ExecutionSandboxConfig = { network: SandboxNetworkConfig, sessionBus: SandboxSessionBusConfig, };
+
+/**
+ * Why a `failed` task failed; set exactly when the status is `failed`.
+ */
+export type FailureReason = "blocked" | "error" | "restart" | "connection_unavailable";
 
 export type FilesystemCapabilityConfig = { 
 /**
@@ -215,6 +225,12 @@ env: Array<McpEnvVar>, } | { "type": "http", url: string,
 headers: Array<McpEnvVar>, };
 
 export type McpServerTransportResponse = { "type": "stdio", command: string, args: Array<string>, env: Array<McpEnvVarResponse>, } | { "type": "http", url: string, headers: Array<McpEnvVarResponse>, };
+
+/**
+ * Who wrote a message. Everything a person typed, and every row a run
+ * writes, is `User`; agent and task origins mark automated events.
+ */
+export type MessageOrigin = { "kind": "user" } | { "kind": "agent", agent: AgentRefSnapshot, sessionId?: string | null, runId?: string | null, replyAddress?: string | null, } | { "kind": "task", taskId: string, agent: AgentRefSnapshot, title: string, cycleNo: bigint, status: TaskStatus, };
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
 
@@ -363,9 +379,11 @@ providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: strin
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
+export type RunSkipReason = "session_busy";
+
 export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" | "completed_with_warnings" | "failed" | "cancelled";
 
-export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task";
+export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task" | "signal_wake";
 
 export type SandboxNetworkConfig = "enabled" | "disabled";
 
@@ -499,6 +517,8 @@ terminals: Array<SystemAppEntry>,
  * resolvable — shown as "System default (gedit)" in the dropdown.
  */
 systemEditorName: string | null, };
+
+export type TaskStatus = "queued" | "running" | "stopping" | "stopped" | "completed" | "failed";
 
 export type TestResult = { success: boolean, error: string | null, };
 
@@ -653,7 +673,7 @@ export type WorkspaceFileContent = { path: string, viewer: string, content: stri
 
 export type WorkspaceFileEntry = { path: string, relativePath: string, name: string, viewer: string, size: bigint | null, updatedAt: bigint | null, preview: string | null, };
 
-export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, runningTaskCount: bigint, blockedTaskCount: bigint, failedTaskCount: bigint, attentionTaskCount: bigint, latestAttentionTaskId: string | null, latestAttentionTaskTitle: string | null, latestAttentionTaskStatus: string | null, latestAttentionTaskSummary: string | null, latestAttentionTaskUpdatedAt: bigint | null, scheduleEnabled: boolean, schedulePaused: boolean, 
+export type WorkspaceListEntry = { id: string, kind: string, title: string, agentId: string | null, enabled: boolean, messageCount: bigint, runningTaskCount: bigint, scheduleEnabled: boolean, schedulePaused: boolean, 
 /**
  * Schedule mode (interval vs cron). Empty when the workspace is
  * not scheduled. The Fleet card reads this to render the cadence
@@ -674,4 +694,21 @@ starred: boolean, updatedAt: bigint, };
 
 export type WorkspaceSessionBinding = { session: AssistantSession, providerConnectionId: string | null, };
 
-export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: string, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, attentionAcknowledgedAt: bigint | null, };
+export type WorkspaceTaskResponse = { id: string, workspaceId: string, createdByWorkspaceAgentId: string | null, createdByDisplayName: string | null, assignedToWorkspaceAgentId: string, assignedAgentDefinitionId: string, assignedAgentDisplayName: string, title: string, instructions: string, status: TaskStatus, failureReason: FailureReason | null, resultSummary: string | null, error: string | null, sessionId: string | null, runId: string | null, parentSessionId: string | null, parentRunId: string | null, parentTaskId: string | null, depth: bigint, cycleNo: bigint, 
+/**
+ * Set when a stop was requested for the current cycle.
+ */
+stopRequestedAt: bigint | null, createdAt: bigint, updatedAt: bigint, completedAt: bigint | null, };
+
+/**
+ * What a message sent to a task did.
+ */
+export type WorkspaceTaskSendResponse = { task: WorkspaceTaskResponse, message: AssistantMessage, 
+/**
+ * It waits for the task's current run; `false` when a new cycle starts.
+ */
+queued: boolean, 
+/**
+ * The run that took it, when one was started or is active.
+ */
+run: AssistantRun | null, };

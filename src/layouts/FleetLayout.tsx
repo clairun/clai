@@ -21,7 +21,7 @@ import { OPEN_GLOBAL_SETTINGS_EVENT, type OpenGlobalSettingsDetail } from '../ut
 import ConfirmDialog from '../components/ConfirmDialog';
 import ProgressDialog from '../components/ProgressDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
-import { useFleetActivityStore } from '../stores/fleetActivityStore';
+import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { errText, num } from '../fleet/workspaceStatus';
 import { onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
@@ -213,10 +213,7 @@ const FleetLayout = () => {
       running: workspaces.filter(
         (w) => num(w.runningTaskCount) > 0 || (activeRunsByWorkspace[w.id] || 0) > 0,
       ).length,
-      attention: workspaces.filter(
-        (w) =>
-          num(w.attentionTaskCount) > 0 || (pendingPermissionCounts[w.id] || 0) > 0,
-      ).length,
+      attention: workspaces.filter((w) => (pendingPermissionCounts[w.id] || 0) > 0).length,
     }),
     [workspaces, activeRunsByWorkspace, pendingPermissionCounts],
   );
@@ -352,7 +349,7 @@ const FleetLayout = () => {
         await runWorkspaceNow(id);
         setError('');
         const fleet = useFleetActivityStore.getState();
-        const optimisticId = `optimistic-runnow:${id}`;
+        const optimisticId = optimisticRunNowId(id);
         fleet.markRunStarted(id, optimisticId);
         setTimeout(() => fleet.markRunEnded(id, optimisticId), OPTIMISTIC_RUN_TTL_MS);
       } catch (err) {

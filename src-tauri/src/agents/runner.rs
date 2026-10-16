@@ -39,11 +39,14 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 use crate::agents::{SchedulerState, SharedScheduler};
+use crate::assistant::dispatcher;
 use crate::assistant::engine::{self, AssistantDeps, RunTurnInput};
-use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::events::{emit_event, AssistantUiEvent, RunSkipReason};
 use crate::assistant::repository::{self, CreateRunParams};
 use crate::assistant::runtime;
-use crate::assistant::types::{ProviderConnection, RunStatus, RunTrigger};
+use crate::assistant::types::{
+    AssistantRun, AssistantSession, ProviderConnection, RunStatus, RunTrigger,
+};
 use crate::config::{workspace_config, AgentConfig};
 use crate::db::DbPool;
 use crate::AppState;
@@ -231,10 +234,6 @@ async fn release_slot_on_error(
     clippy::cognitive_complexity,
     reason = "lint debt: cognitive complexity 85 against a budget of 25"
 )]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 113 lines against a 100-line budget; split it, do not raise the budget"
-)]
 async fn run_claimed_instance(
     app_handle: &AppHandle,
     scheduler: &SharedScheduler,
@@ -281,47 +280,45 @@ async fn run_claimed_instance(
 
     tracing::debug!(agent_name = %agent_config.name, "Got agent config");
 
-    // Don't start a scheduled run while this workspace's canonical manager
-    // session is already busy. The scheduler's one-at-a-time guard only
-    // covers scheduler-started runs; an interactive turn the user kicked
-    // off from the chat UI runs *outside* the scheduler and shares the same
-    // session. Without this check a due tick would start a second,
-    // concurrent run on that session — surfacing as two live conversations
-    // in the workspace. Defer instead: release the instance back to
-    // ready-now (without consuming the schedule) so a later tick fires once
-    // the workspace is idle.
-    if let Some(existing) = repository::find_manager_session(&workspace_pool, &agent_config.id)
-        .await
-        .map_err(RunnerError::AssistantPersistence)?
-    {
-        let busy = repository::session_has_active_run(&workspace_pool, &existing.id)
-            .await
-            .map_err(RunnerError::AssistantPersistence)?;
-        if busy {
-            tracing::info!(
-                instance_id = %instance_id,
-                session_id = %existing.id,
-                "Workspace session is busy with an active run; deferring scheduled tick"
-            );
-            let mut sched = scheduler.lock().await;
-            sched.defer_running_instance(instance_id);
-            return Ok(());
-        }
-    }
-
     let connection = resolve_agent_connection(state.inner(), &agent_config)?;
 
     let session =
         ensure_workspace_manager_session(app_handle, &workspace_pool, &agent_config).await?;
 
-    let result = run_scheduled_agent(
-        app_handle,
-        &agent_config.workspace_id,
+    let manual = scheduler
+        .lock()
+        .await
+        .get_instance(instance_id)
+        .is_some_and(|instance| instance.manual_run_pending);
+    let run = start_tick_run(
         &workspace_pool,
         &session,
         &connection,
+        TickContext {
+            instance_id,
+            agent_id: &agent_id,
+            manual,
+        },
+        |event| {
+            let _ = emit_event(app_handle, &workspace_id, &session, None, event);
+        },
     )
-    .await;
+    .await?;
+    let ran = run.is_some();
+    let result = match run {
+        Some(run) => {
+            run_scheduled_agent(
+                app_handle,
+                &agent_config.workspace_id,
+                &workspace_pool,
+                &session,
+                &connection,
+                run,
+            )
+            .await
+        }
+        None => Ok(()),
+    };
 
     // Mark agent complete
     let success = match &result {
@@ -334,7 +331,38 @@ async fn run_claimed_instance(
             false
         }
     };
+    let next_run_at_unix_ms = complete_tick(scheduler, instance_id, success, &agent_config).await;
 
+    // Persist the new next-run wall-clock time (so an app restart
+    // resumes the schedule instead of firing immediately) and, when the
+    // tick ran, the run-completion stamp (so the workspace rail can flag the
+    // result as unread until the user opens the workspace). Best-effort: a
+    // write failure here only loses the restart-survival guarantee
+    // for this one workspace until the next successful tick.
+    if let Err(e) = persist_workspace_run_completion(
+        state.inner(),
+        &agent_config.workspace_id,
+        next_run_at_unix_ms,
+        ran,
+    ) {
+        tracing::warn!(
+            workspace_id = %agent_config.workspace_id,
+            error = %e,
+            "Failed to persist run completion to workspace config"
+        );
+    }
+
+    Ok(())
+}
+
+/// Releases the scheduler slot and schedules the next fire. Returns the next
+/// fire time, `None` when the schedule cannot compute one.
+async fn complete_tick(
+    scheduler: &SharedScheduler,
+    instance_id: &str,
+    success: bool,
+    agent_config: &AgentConfig,
+) -> Option<i64> {
     // Compute the next wall-clock fire time from the workspace's
     // schedule kind. For Interval mode this is `now + N min`; for Cron
     // this is the next cron fire in the user's timezone. Errors are
@@ -356,61 +384,96 @@ async fn run_claimed_instance(
             None
         }
     };
-    {
-        let mut sched = scheduler.lock().await;
-        // When we can't compute a next time, pass `i64::MAX` so the
-        // scheduler parks the instance indefinitely. The user has to
-        // fix the schedule via the UI before it ticks again.
-        sched.complete_agent(
-            instance_id,
-            success,
-            next_run_at_unix_ms.unwrap_or(i64::MAX),
-        );
+    let mut sched = scheduler.lock().await;
+    // When we can't compute a next time, pass `i64::MAX` so the
+    // scheduler parks the instance indefinitely. The user has to
+    // fix the schedule via the UI before it ticks again.
+    sched.complete_agent(
+        instance_id,
+        success,
+        next_run_at_unix_ms.unwrap_or(i64::MAX),
+    );
 
-        // Log next run time
-        if let Some(instance) = sched.get_instance(instance_id) {
-            let seconds_until_next = instance.seconds_until_next_run();
-            tracing::info!(
-                instance_id = %instance_id,
-                seconds_until_next,
-                minutes_until_next = seconds_until_next / 60,
-                "Scheduled next agent run"
-            );
+    // Log next run time
+    if let Some(instance) = sched.get_instance(instance_id) {
+        let seconds_until_next = instance.seconds_until_next_run();
+        tracing::info!(
+            instance_id = %instance_id,
+            seconds_until_next,
+            minutes_until_next = seconds_until_next / 60,
+            "Scheduled next agent run"
+        );
+    }
+    next_run_at_unix_ms
+}
+
+/// Which scheduler tick [`start_tick_run`] is starting.
+struct TickContext<'a> {
+    instance_id: &'a str,
+    agent_id: &'a str,
+    /// A user-requested "Run now" rather than a scheduled fire.
+    manual: bool,
+}
+
+/// Creates the tick's run, or skips the tick when the session already has an
+/// active run: a busy tick is dropped, never queued or deferred, and the
+/// schedule advances as usual. A skipped manual run is reported through
+/// `emit` because a user is waiting on it.
+async fn start_tick_run(
+    pool: &DbPool,
+    session: &AssistantSession,
+    connection: &ProviderConnection,
+    tick: TickContext<'_>,
+    emit: impl FnOnce(AssistantUiEvent),
+) -> Result<Option<AssistantRun>, RunnerError> {
+    let run = repository::create_run_if_idle(
+        pool,
+        CreateRunParams {
+            session_id: session.id.clone(),
+            status: RunStatus::Queued,
+            trigger: RunTrigger::Scheduled,
+            connection_id: connection.id.clone(),
+            protocol_id: connection.protocol_id.clone(),
+            model_id: connection.model_id.clone(),
+            error: None,
+        },
+    )
+    .await
+    .map_err(RunnerError::AssistantPersistence)?;
+    if run.is_none() {
+        let active_run_id = repository::active_run_id(pool, &session.id)
+            .await
+            .map_err(RunnerError::AssistantPersistence)?;
+        tracing::info!(
+            instance_id = tick.instance_id,
+            agent_id = tick.agent_id,
+            session_id = %session.id,
+            manual = tick.manual,
+            "session has an active run; skipping tick"
+        );
+        if tick.manual {
+            emit(AssistantUiEvent::RunSkipped {
+                reason: RunSkipReason::SessionBusy,
+                active_run_id,
+            });
         }
     }
-
-    // Persist the new next-run wall-clock time (so an app restart
-    // resumes the schedule instead of firing immediately) and the
-    // run-completion stamp (so the workspace rail can flag the result
-    // as unread until the user opens the workspace). Best-effort: a
-    // write failure here only loses the restart-survival guarantee
-    // for this one workspace until the next successful tick.
-    if let Err(e) = persist_workspace_run_completion(
-        state.inner(),
-        &agent_config.workspace_id,
-        next_run_at_unix_ms,
-    ) {
-        tracing::warn!(
-            workspace_id = %agent_config.workspace_id,
-            error = %e,
-            "Failed to persist run completion to workspace config"
-        );
-    }
-
-    Ok(())
+    Ok(run)
 }
 
 /// Persist a run's completion to the workspace config: the new
 /// `schedule.next_run_at_unix_ms` anchor (`None` parks the schedule) and
-/// `last_run_completed_at`, which the workspace rail compares against
-/// `last_opened_at` to show the "unread" indicator. Refreshes the
-/// in-memory workspace index so subsequent loads see both. Failed runs
-/// stamp completion too — a failure the user hasn't seen is exactly the
-/// kind of activity the unread marker exists for.
+/// `last_run_completed_at` when the tick `ran`, which the workspace rail
+/// compares against `last_opened_at` to show the "unread" indicator; a
+/// skipped tick produced nothing to read. Refreshes the in-memory workspace
+/// index so subsequent loads see both. Failed runs stamp completion too — a
+/// failure the user hasn't seen is exactly the kind of activity the unread
+/// marker exists for.
 pub(crate) fn persist_workspace_run_completion(
     state: &AppState,
     workspace_id: &str,
     next_run_at_unix_ms: Option<i64>,
+    ran: bool,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
     // Atomic RMW: `workspace_mark_opened` fires from the FE the moment a
@@ -420,7 +483,9 @@ pub(crate) fn persist_workspace_run_completion(
     // re-fired on every app restart).
     state.update_workspace_config(workspace_id, |config| {
         config.schedule.next_run_at_unix_ms = next_run_at_unix_ms;
-        config.last_run_completed_at = now;
+        if ran {
+            config.last_run_completed_at = now;
+        }
         config.updated_at = now;
         Ok(())
     })?;
@@ -524,8 +589,9 @@ async fn run_scheduled_agent(
     app_handle: &AppHandle,
     workspace_id: &str,
     pool: &DbPool,
-    session: &crate::assistant::types::AssistantSession,
+    session: &AssistantSession,
     connection: &ProviderConnection,
+    run: AssistantRun,
 ) -> Result<(), RunnerError> {
     let deps = AssistantDeps {
         workspace_id: workspace_id.to_string(),
@@ -541,25 +607,10 @@ async fn run_scheduled_agent(
         "Starting scheduled assistant run"
     );
 
-    let run = repository::create_run(
-        pool,
-        CreateRunParams {
-            session_id: session.id.clone(),
-            status: RunStatus::Queued,
-            trigger: RunTrigger::Scheduled,
-            connection_id: connection.id.clone(),
-            protocol_id: connection.protocol_id.clone(),
-            model_id: connection.model_id.clone(),
-            error: None,
-        },
-    )
-    .await
-    .map_err(RunnerError::AssistantPersistence)?;
-
-    // Register the cancel token under the DB run.id (the same key the
-    // chat and workspace-task paths use) so `assistant_cancel_run(workspace_id, run.id)`
-    // can find it.
-    let run_registration = runtime::register_run(&run.id);
+    // Registered like every other run, so `assistant_cancel_run(workspace_id,
+    // run.id)` and mid-run delivery reach it.
+    let run_registration =
+        runtime::register_run(runtime::LiveRunKey::new(workspace_id, &session.id), &run.id);
     let cancel_token = run_registration.token();
     let input = RunTurnInput {
         session_id: session.id.clone(),
@@ -567,21 +618,11 @@ async fn run_scheduled_agent(
         trigger: RunTrigger::Scheduled,
         connection_id: connection.id.clone(),
         cancel_token,
-        trigger_message_id: None,
     };
     let result = engine::run_session_turn(&deps, input).await;
     drop(run_registration);
 
-    if let Err(error) =
-        crate::commands::assistant::start_queued_followup_if_idle(deps.clone(), session.id.clone())
-            .await
-    {
-        tracing::error!(
-            session_id = %session.id,
-            error = %error,
-            "Failed to start queued assistant follow-up after scheduled run"
-        );
-    }
+    dispatcher::kick_logged(&deps, &session.id).await;
 
     result.map_err(|error| {
         tracing::warn!(
@@ -716,5 +757,177 @@ mod tests {
                 .expect("scheduled agent resolves");
         assert_eq!(agent.workspace_id, "ws-ok");
         assert!(agent.schedule_enabled);
+    }
+
+    mod busy_tick {
+        use super::*;
+        use crate::agents::scheduler::Scheduler;
+        use crate::agents::AgentDefinition;
+        use crate::assistant::types::{AuthMode, SessionContext};
+        use crate::config::workspace_config::ScheduleKind;
+        use crate::db::test_support::workspace_pool;
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        fn connection() -> ProviderConnection {
+            ProviderConnection {
+                id: "conn".into(),
+                name: "conn".into(),
+                protocol_id: "openai".into(),
+                provider_id: "openai".into(),
+                auth_mode: AuthMode::DeveloperApiKey,
+                base_url: None,
+                secret_ref: String::new(),
+                model_id: "model".into(),
+                account_label: None,
+                enabled: true,
+                created_at: 0,
+                updated_at: 0,
+            }
+        }
+
+        /// A claimed tick of a manager session that already has an active run.
+        async fn busy_tick(
+            manual: bool,
+        ) -> (
+            tempfile::TempDir,
+            DbPool,
+            AssistantSession,
+            AssistantRun,
+            SharedScheduler,
+            String,
+        ) {
+            let (tmp, pool) = workspace_pool().await;
+            let session = repository::create_session(&pool, SessionContext::default())
+                .await
+                .unwrap();
+            let active = repository::create_run(
+                &pool,
+                CreateRunParams {
+                    session_id: session.id.clone(),
+                    status: RunStatus::Running,
+                    trigger: RunTrigger::SignalWake,
+                    connection_id: "conn".into(),
+                    protocol_id: "openai".into(),
+                    model_id: "model".into(),
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+            let mut scheduler = Scheduler::new();
+            scheduler.register_definition(AgentDefinition::new("agent", "Agent"));
+            let instance_id = scheduler.create_instance("agent").unwrap();
+            if manual {
+                scheduler.set_instance_enabled(&instance_id, false);
+                assert!(scheduler.force_ready("agent"));
+            }
+            assert_eq!(scheduler.next_ready(), Some(instance_id.clone()));
+            (
+                tmp,
+                pool,
+                session,
+                active,
+                Arc::new(Mutex::new(scheduler)),
+                instance_id,
+            )
+        }
+
+        struct Skipped {
+            _tmp: tempfile::TempDir,
+            pool: DbPool,
+            active: AssistantRun,
+            scheduler: SharedScheduler,
+            instance_id: String,
+            events: Vec<AssistantUiEvent>,
+        }
+
+        /// Runs a busy tick through the runner's start and completion steps.
+        async fn skip(manual: bool) -> Skipped {
+            let (tmp, pool, session, active, scheduler, instance_id) = busy_tick(manual).await;
+            let mut events = Vec::new();
+            let run = start_tick_run(
+                &pool,
+                &session,
+                &connection(),
+                TickContext {
+                    instance_id: &instance_id,
+                    agent_id: "agent",
+                    manual,
+                },
+                |event| events.push(event),
+            )
+            .await
+            .unwrap();
+            assert!(run.is_none(), "a busy session must not get a second run");
+
+            let mut agent = AgentConfig::new(
+                "Agent".into(),
+                String::new(),
+                ScheduleKind::Interval {
+                    interval_minutes: 30,
+                },
+            );
+            agent.workspace_id = "ws".into();
+            let before = chrono::Utc::now().timestamp_millis();
+            let next = complete_tick(&scheduler, &instance_id, true, &agent)
+                .await
+                .unwrap();
+            assert!(
+                next > before,
+                "the schedule must advance past the skipped tick"
+            );
+            Skipped {
+                _tmp: tmp,
+                pool,
+                active,
+                scheduler,
+                instance_id,
+                events,
+            }
+        }
+
+        async fn counts(pool: &DbPool) -> (i64, i64) {
+            sqlx::query_as(
+                "SELECT (SELECT COUNT(*) FROM assistant_runs), (SELECT COUNT(*) FROM session_signals)",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn scheduled_tick_skipped_when_session_run_active() {
+            let tick = skip(false).await;
+
+            assert_eq!(counts(&tick.pool).await, (1, 0), "no second run, no signal");
+            assert!(tick.events.is_empty(), "a scheduled skip emits nothing");
+            let sched = tick.scheduler.lock().await;
+            assert!(!sched.is_running());
+            let instance = sched.get_instance(&tick.instance_id).unwrap();
+            assert!(instance.seconds_until_next_run() > 0);
+        }
+
+        #[tokio::test]
+        async fn manual_run_now_on_busy_session_skips_clears_flag_and_emits_run_skipped() {
+            let tick = skip(true).await;
+
+            assert_eq!(counts(&tick.pool).await, (1, 0), "no second run, no signal");
+            assert!(matches!(
+                tick.events.as_slice(),
+                [AssistantUiEvent::RunSkipped {
+                    reason: RunSkipReason::SessionBusy,
+                    active_run_id: Some(id),
+                }] if *id == tick.active.id
+            ));
+            let sched = tick.scheduler.lock().await;
+            assert!(!sched.is_running());
+            assert!(
+                !sched
+                    .get_instance(&tick.instance_id)
+                    .unwrap()
+                    .manual_run_pending
+            );
+        }
     }
 }

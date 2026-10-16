@@ -1,9 +1,8 @@
 /**
- * How tasks read on screen: status labels, "needs attention", relative
+ * How tasks read on screen: status labels and relative
  * times. Shared by the workspace page, the tasks drawer and the transcript
  * panel so the three never disagree on what a blocked task is called.
  */
-import type { WorkspaceTaskResponse } from '../generated/bindings';
 
 export type NumericTimestamp = number | bigint | null | undefined;
 
@@ -26,18 +25,51 @@ export const formatRelativeTime = (timestamp: NumericTimestamp): string => {
 export const TASK_STATUS_LABEL: Record<string, string> = {
   queued: 'Queued',
   running: 'Running',
+  stopping: 'Stopping…',
+  stopped: 'Stopped',
   completed: 'Completed',
   failed: 'Failed',
+  // Tool results recorded before `blocked` became a failure reason.
   blocked: 'Blocked',
 };
 
 export const taskStatusLabel = (status: string): string => TASK_STATUS_LABEL[status] || status;
 
-/** A task the user has not yet looked at after it stopped on a problem. */
-export const isTaskAttention = (
-  task: Pick<WorkspaceTaskResponse, 'status' | 'attentionAcknowledgedAt'>
-): boolean =>
-  (task.status === 'blocked' || task.status === 'failed') && !task.attentionAcknowledgedAt;
+const FAILED_LABEL: Record<string, string> = {
+  restart: 'Failed · interrupted',
+  connection_unavailable: 'Failed · no connection',
+};
 
-export const isTaskActive = (task: Pick<WorkspaceTaskResponse, 'status'>): boolean =>
+/**
+ * How a live task's status reads: `key` picks the pill style, `label` its
+ * text. A blocked task is a failure with reason `blocked`, shown as its own pill.
+ */
+export const taskDisplayStatus = (task: {
+  status: string;
+  failureReason?: string | null;
+  runId?: string | null;
+}): { key: string; label: string } => {
+  if (isTaskWaiting(task)) return { key: 'queued', label: 'Waiting for subtasks' };
+  if (task.status === 'failed' && task.failureReason === 'blocked') {
+    return { key: 'blocked', label: 'Blocked' };
+  }
+  if (task.status === 'failed') {
+    return { key: 'failed', label: FAILED_LABEL[task.failureReason ?? ''] ?? 'Failed' };
+  }
+  return { key: task.status, label: taskStatusLabel(task.status) };
+};
+
+/** Running with no run: its run ended and it waits for its subtasks. The wire omits `runId` then. */
+export const isTaskWaiting = (task: { status: string; runId?: string | null }): boolean =>
+  task.status === 'running' && task.runId == null;
+
+/** A task the agent is working on or about to; subtasks wait instead. */
+export const isTaskRunning = (task: { status: string; runId?: string | null }): boolean =>
+  task.status === 'queued' || (task.status === 'running' && !isTaskWaiting(task));
+
+/** A task with an open cycle: running, queued, or waiting for subtasks. */
+export const isTaskActive = (task: { status: string }): boolean =>
   task.status === 'running' || task.status === 'queued';
+
+/** A task whose current cycle can still be stopped. */
+export const canStopTask = (task: { status: string }): boolean => isTaskActive(task);

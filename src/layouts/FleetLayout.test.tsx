@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 
 vi.mock('../workspace/client', () => ({
@@ -25,8 +26,10 @@ vi.mock('../hooks/useFleetActivity', () => ({
   useFleetActivity: () => ({}),
 }));
 
+const permissionAttention = vi.hoisted(() => ({ counts: {} as Record<string, number> }));
+
 vi.mock('../hooks/usePermissionAttention', () => ({
-  usePermissionAttention: () => ({}),
+  usePermissionAttention: () => permissionAttention.counts,
 }));
 
 vi.mock('../components/AppUpdateBadge', () => ({
@@ -72,14 +75,6 @@ const entry = (
   enabled: true,
   messageCount: 0n,
   runningTaskCount: 0n,
-  blockedTaskCount: 0n,
-  failedTaskCount: 0n,
-  attentionTaskCount: 0n,
-  latestAttentionTaskId: null,
-  latestAttentionTaskTitle: null,
-  latestAttentionTaskStatus: null,
-  latestAttentionTaskSummary: null,
-  latestAttentionTaskUpdatedAt: null,
   scheduleEnabled: false,
   schedulePaused: false,
   scheduleKind: null,
@@ -118,6 +113,21 @@ const openDeleteDialog = async (title = 'Alpha') => {
 const confirmDelete = async (dialog: HTMLElement) => {
   await userEvent.click(within(dialog).getByRole('button', { name: 'Delete workspace' }));
 };
+
+describe('FleetLayout attention', () => {
+  it('counts a workspace with a pending approval as needing attention', async () => {
+    permissionAttention.counts = { a: 1 };
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    try {
+      renderFleet();
+      await screen.findByText('Alpha');
+      expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('1 need attention');
+    } finally {
+      permissionAttention.counts = {};
+    }
+  });
+});
 
 describe('FleetLayout workspace deletion', () => {
   it('dismisses the delete dialog as soon as the delete lands, without waiting for the rail refresh', async () => {
@@ -302,5 +312,21 @@ describe('FleetLayout workspace settings', () => {
     for (const call of getWorkspaceDetails.mock.calls) {
       expect(call).toEqual(['a', METADATA_ONLY]);
     }
+  });
+});
+
+describe('FleetLayout run now', () => {
+  it('run now other error keeps failure message', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha', { scheduleEnabled: true })]);
+    getSchedulerPaused.mockResolvedValue(false);
+    vi.mocked(workspaceClient.runWorkspaceNow).mockRejectedValue({ code: 'unknown' });
+
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'Run now' }));
+
+    expect(await screen.findByText('Failed to start run.')).toBeInTheDocument();
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual([]);
+    expect(useFleetActivityStore.getState().activeRunsByWorkspace).toEqual({});
   });
 });

@@ -95,7 +95,7 @@ pub struct AskUserAnswer {
 // (mid-run input delivery) can check whether a session is currently blocked
 // on a human answer without threading new state through the tool router.
 #[derive(Debug)]
-enum AskUserOutcome {
+pub(crate) enum AskUserOutcome {
     Answer(AskUserAnswer),
     Superseded,
 }
@@ -239,6 +239,8 @@ pub async fn execute(
     let session = repository::get_session(&deps.pool, &context.session_id)
         .await?
         .ok_or_else(|| format!("Session not found: {}", context.session_id))?;
+    // Read before the question is registered: an error after that point
+    // would drop the guard and cancel the run.
 
     // Supersede any orphaned ask for this session (the model re-asking
     // after a CLI transport drop lost the original call). The frontend
@@ -303,7 +305,6 @@ pub async fn execute(
         }
     };
     guard.disarm();
-
     let _ = deps.emit(
         &session,
         Some(context.run_id.as_str()),

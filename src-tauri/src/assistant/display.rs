@@ -69,6 +69,7 @@ fn compact_input(tool_name: &str, input: &Value) -> Value {
         "web_fetch" => "url",
         "ask_user" => "question",
         "create_vega_chart" => "title",
+        "workspace_sendTaskMessage" => "message",
         _ => "",
     };
     let selected = object.get_key_value(preferred).or_else(|| {
@@ -96,7 +97,10 @@ fn compact_result(tool_name: &str, result: &Value) -> Option<Value> {
             }
             Some(json!({"ok": true, "path": path}))
         }
-        "workspace_assignTask" | "workspace_getTaskResult" => {
+        "workspace_assignTask"
+        | "workspace_getTaskResult"
+        | "workspace_stopTask"
+        | "workspace_sendTaskMessage" => {
             if object.get("ok") != Some(&Value::Bool(true)) {
                 return None;
             }
@@ -108,6 +112,7 @@ fn compact_result(tool_name: &str, result: &Value) -> Option<Value> {
                 "status",
                 "assignedToWorkspaceAgentId",
                 "assignedAgentDefinitionId",
+                "assignedAgentDisplayName",
             ] {
                 if let Some(value) = task.get(field).and_then(Value::as_str) {
                     compact.insert(field.to_string(), Value::String(value.to_string()));
@@ -297,9 +302,27 @@ mod tests {
     }
 
     #[test]
+    fn task_message_keeps_its_task_and_target() {
+        let mut invocation = call(
+            "mcp__clai__workspace_sendTaskMessage",
+            json!({"ok": true, "queued": false, "task": {"id": "t", "title": "Title", "status": "running", "assignedToWorkspaceAgentId": "agent", "assignedAgentDisplayName": "Reviewer"}}),
+        );
+        // `attempt` sorts before `message`: without the preferred key the row would show it.
+        invocation.params =
+            json!({"attempt": "2", "message": "please also check X", "taskId": "t"});
+        let displayed = tool_call(invocation);
+        assert_eq!(displayed.params, json!({"message": "please also check X"}));
+        assert!(displayed.has_full_input);
+        let result = displayed.result.unwrap();
+        assert_eq!(result["task"]["title"], "Title");
+        assert_eq!(result["task"]["assignedAgentDisplayName"], "Reviewer");
+    }
+
+    #[test]
     fn tool_message_payload_is_removed_from_live_event() {
         use crate::assistant::types::MessageRole;
         let message = AssistantMessage {
+            origin: Default::default(),
             id: "m".into(),
             session_id: "s".into(),
             role: MessageRole::Tool,
@@ -327,6 +350,7 @@ mod tests {
         let large = "payload".repeat(10_000);
         let full = json!({"path": "report.md", "content": large});
         let message = AssistantMessage {
+            origin: Default::default(),
             id: "m".into(),
             session_id: "s".into(),
             role: MessageRole::Assistant,
@@ -414,6 +438,7 @@ mod tests {
         let full = json!({"path": "report.md", "content": "private"});
         let displayed = page(AssistantMessagePage {
             messages: vec![AssistantMessage {
+                origin: Default::default(),
                 id: "m".into(),
                 session_id: "s".into(),
                 role: MessageRole::Assistant,

@@ -27,6 +27,7 @@ const running = (agentId: string): WorkspaceTaskResponse =>
     id: `t-${agentId}`,
     assignedToWorkspaceAgentId: agentId,
     status: 'running',
+    runId: 'run-1',
   }) as WorkspaceTaskResponse;
 
 describe('facepileOrder', () => {
@@ -66,24 +67,6 @@ describe('AgentFacepile', () => {
       'none',
     ]);
     expect(screen.getByText('+2')).toBeInTheDocument();
-  });
-
-  it('rings an agent whose task needs review, so the chip says so without opening the drawer', () => {
-    const blocked = {
-      id: 't-b',
-      assignedToWorkspaceAgentId: 'b',
-      status: 'blocked',
-      attentionAcknowledgedAt: null,
-    } as WorkspaceTaskResponse;
-    const { container } = render(
-      <AgentFacepile agents={[agent('a'), agent('b')]} tasks={[blocked]} />
-    );
-    expect(
-      Array.from(container.querySelectorAll('[data-activity]')).map((f) =>
-        f.getAttribute('data-activity')
-      )
-      // Working faces sort ahead of idle ones, so the ringed face comes first.
-    ).toEqual(['attention', 'none']);
   });
 
   it('draws no "+N" when everyone fits', () => {

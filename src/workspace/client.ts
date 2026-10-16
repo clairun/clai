@@ -17,6 +17,7 @@ import type {
   WorkspaceDetailsOptions,
   WorkspaceSessionBinding,
   WorkspaceTaskResponse,
+  WorkspaceTaskSendResponse,
 } from '../generated/bindings';
 
 export async function getWorkspaceDetails(
@@ -217,9 +218,30 @@ export async function getWorkspaceTask(
   });
 }
 
-export async function acknowledgeWorkspaceTask(workspaceId: string, taskId: string): Promise<void> {
-  return invoke('workspace_acknowledge_task', {
+/**
+ * Stop a task's current cycle. Resolves with the task as it now is:
+ * `stopping` until its run winds down, `stopped` when no run was active, and
+ * unchanged (not an error) when it had already ended.
+ */
+export async function stopWorkspaceTask(
+  workspaceId: string,
+  taskId: string
+): Promise<WorkspaceTaskResponse> {
+  return invoke('workspace_stop_task', {
     request: { workspaceId, taskId },
+  });
+}
+
+/**
+ * Send the user's text to a task; queue for its current run or start a new cycle.
+ */
+export async function sendWorkspaceTaskMessage(
+  workspaceId: string,
+  taskId: string,
+  message: string
+): Promise<WorkspaceTaskSendResponse> {
+  return invoke('workspace_send_task_message', {
+    request: { workspaceId, taskId, message },
   });
 }
 

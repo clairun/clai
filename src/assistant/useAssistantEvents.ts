@@ -12,6 +12,7 @@ import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import useAssistantStore from './sessionStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
+import { useTaskStore } from '../workspace/taskStore';
 import type { AssistantEventEnvelope, AssistantUiEvent } from '../generated/bindings';
 
 const ASSISTANT_EVENT_NAME = 'assistant://event';
@@ -107,6 +108,15 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
 
     case 'ask_user_resolved':
       store.clearAskUserPending(sessionId, event.payload.pending_id);
+      break;
+
+    case 'task_updated':
+      useTaskStore.getState().upsertTask(event.payload.task);
+      break;
+
+    case 'run_skipped':
+      // Only a manual "Run now" on a busy session emits this.
+      useFleetActivityStore.getState().markRunNowSkipped(envelope.workspaceId);
       break;
 
     default: {

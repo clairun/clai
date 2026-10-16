@@ -47,7 +47,11 @@ pub async fn execute_tool(
             "Global agent tools are no longer available. Use workspace-local task delegation instead."
                 .to_string(),
         ),
-        "workspace_listAgents" | "workspace_assignTask" | "workspace_getTaskResult" => {
+        "workspace_listAgents"
+        | "workspace_assignTask"
+        | "workspace_getTaskResult"
+        | "workspace_sendTaskMessage"
+        | "workspace_stopTask" => {
             workspace_tasks::execute(deps, context, name_for_dispatch, params).await
         }
         "ask_user" => ask_user::execute(deps, context, params).await,
