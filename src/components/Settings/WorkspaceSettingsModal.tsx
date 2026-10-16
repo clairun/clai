@@ -1,10 +1,11 @@
 /**
  * WorkspaceSettingsModal
  *
- * Unified Workspace Settings surface: sidebar nav on the left
- * (Workspace: General, Schedule; Agents: Main, sub-agents, + Add agent),
- * content pane on the right. Replaces the previous gear-icon ->
- * AgentFormModal(mode=workspace) leaky abstraction.
+ * Near-full-window overlay with a drill-down: the root lists the sections
+ * (Workspace: General, Schedule, Team; Agents: one row per agent, + Add to
+ * crew) and entering one gives it the whole pane. Each page saves on its
+ * own through the sticky bar; leaving a page with unsaved changes asks
+ * first. Escape goes back one level and closes only at the root.
  */
 
 import React, { useState, useEffect, useCallback, useImperativeHandle, useMemo, useRef } from 'react';
@@ -17,7 +18,7 @@ import IntervalSelect from './IntervalSelect';
 import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
 import { AgentBehaviorForm, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
-import type { ScheduleKind, WorkspaceDetails } from '../../generated/bindings';
+import type { ScheduleKind, WorkspaceAgentResponse, WorkspaceDetails } from '../../generated/bindings';
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
@@ -28,9 +29,9 @@ import styles from './WorkspaceSettingsModal.module.css';
 // AgentBehaviorForm.tsx; only the modal's own navigation state is here.
 // ──────────────────────────────────────────────────────────────────────────
 
-type SectionKind = 'general' | 'schedule' | 'team' | 'agent' | 'new-main' | 'new-agent';
+type PageKind = 'general' | 'schedule' | 'team' | 'agent' | 'new-main' | 'new-agent';
 interface Selection {
-  kind: SectionKind;
+  kind: PageKind;
   agentId?: string | null;
 }
 
@@ -38,18 +39,28 @@ type ScheduleKindDraft =
   | { type: 'interval'; intervalMinutes: number }
   | { type: 'cron'; expression: string; timezone: string };
 
-// Stable string identifier per sidebar selection. Used as a key for the
-// `visited`/`dirty` maps and the section-ref registry so the modal can
-// address each section without ad-hoc string formatting at every callsite.
-const selectionKey = (sel: Selection | null | undefined): string => {
-  if (!sel) return 'general';
-  if (sel.kind === 'agent') return `agent:${sel.agentId}`;
-  return sel.kind;
-};
+// Identifies a root row, so focus can return to it after going back.
+const pageKey = (sel: Selection): string => (
+  sel.kind === 'agent' ? `agent:${sel.agentId}` : sel.kind
+);
 
-const parseSelectionKey = (key: string): Selection => {
-  if (key.startsWith('agent:')) return { kind: 'agent', agentId: key.slice('agent:'.length) };
-  return { kind: key as SectionKind };
+const agentLabel = (agent: WorkspaceAgentResponse): string => (
+  agent.isDefault ? 'Main' : (agent.displayName || agent.agentName || 'Untitled')
+);
+
+const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+const scheduleSummary = (details: WorkspaceDetails | null): string => {
+  if (!details?.scheduleEnabled) return 'Off';
+  const kind = details.scheduleKind;
+  let when = 'On';
+  if (kind?.type === 'cron') {
+    when = `cron ${kind.expression}`;
+  } else if (kind?.type === 'interval') {
+    const mins = kind.intervalMinutes;
+    when = mins % 60 === 0 ? `every ${mins / 60} h` : `every ${mins} min`;
+  }
+  return details.schedulePaused ? `${when} · paused` : when;
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -61,6 +72,7 @@ interface WorkspaceSettingsModalProps {
   onClose: () => void;
   workspaceId: string;
   details: WorkspaceDetails | null;
+  /** Page to open on; the root index when omitted. */
   initialSelection?: Selection | null;
   onChanged?: () => void;
 }
@@ -78,16 +90,24 @@ const WorkspaceSettingsModal = ({
   onChanged,
 }: WorkspaceSettingsModalProps) => {
   // Structural compare via a stringified key — parents commonly pass
-  // inline literals like `{ kind: 'general' }`, which have fresh JS
+  // inline literals like `{ kind: 'agent', agentId }`, which have fresh JS
   // identity every render. A pure reference dep would snap the modal
-  // back to the initial section on every parent re-render.
-  const initialSelectionKey = JSON.stringify(initialSelection || { kind: 'general' });
-  const initialSel = useMemo(
+  // back to the initial page on every parent re-render.
+  const initialSelectionKey = JSON.stringify(initialSelection ?? null);
+  const initialPage = useMemo<Selection | null>(
     () => JSON.parse(initialSelectionKey),
     [initialSelectionKey],
   );
 
-  const [selection, setSelection] = useState<Selection>(initialSel);
+  // null = the root index.
+  const [page, setPage] = useState<Selection | null>(initialPage);
+  // Bumped to remount the page: that is how Discard drops its draft.
+  const [pageVersion, setPageVersion] = useState(0);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // Set while the unsaved-changes prompt is up: where to go once answered.
+  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
   const [deps, setDeps] = useState<AgentFormDeps>({
     mcpServers: [],
     skills: [],
@@ -101,86 +121,45 @@ const WorkspaceSettingsModal = ({
     defaultExecution: undefined,
   });
 
-  // Sections the user has navigated to during this modal lifetime. Once a
-  // section is mounted it stays mounted (just hidden via CSS when
-  // inactive) so its draft state survives tab switches — that's the whole
-  // point of the global Save: you can edit in General, jump to Schedule,
-  // change a cron expression, hit Save once, and both persist.
-  const [visited, setVisited] = useState<Set<string>>(() => new Set([selectionKey(initialSel)]));
+  // Only the visible page is ever driven through its handle.
+  const pageRef = useRef<SectionHandle>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const indexRef = useRef<HTMLDivElement>(null);
+  // The root row the current page was entered from; focus returns to it.
+  const originRow = useRef<string | null>(null);
 
-  // Per-section dirty flags reported up via onDirtyChange. Drives the
-  // global Save button's enabled state and the sidebar dot indicators.
-  const [dirty, setDirty] = useState<Record<string, boolean>>({});
-
-  // Coordination state for the global save flow.
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<{ key: string; message: string } | null>(null);
-
-  // Imperative refs for each mounted section. Section components expose
-  // `{ validate, submit }` via useImperativeHandle and the modal invokes
-  // them in two phases (validate-all-first, then submit-all).
-  const sectionRefs = useRef<Map<string, SectionHandle>>(new Map());
-
-  // Per-section dirty callback factory. Memoized per key so each section
-  // gets a stable callback identity across renders — otherwise a fresh
-  // arrow on every render would retrigger the section's useEffect.
-  const dirtyCallbacks = useRef<Map<string, (isDirty: boolean) => void>>(new Map());
-
-  // Same idea for the callback refs that populate `sectionRefs`. Caching
-  // avoids re-running the section's useImperativeHandle bookkeeping on
-  // every modal re-render.
-  const sectionRefCallbacks = useRef<Map<string, (node: SectionHandle | null) => void>>(new Map());
-
-  const updateDirty = useCallback((key: string, isDirtyNow: boolean) => {
-    setDirty((prev) => {
-      const next = Boolean(isDirtyNow);
-      if (Boolean(prev[key]) === next) return prev;
-      return { ...prev, [key]: next };
-    });
+  const showPage = useCallback((next: Selection | null) => {
+    setPage(next);
+    setDirty(false);
+    setSaveError(null);
+    setPendingLeave(null);
   }, []);
 
-  const getDirtyCallback = useCallback((key: string) => {
-    if (!dirtyCallbacks.current.has(key)) {
-      dirtyCallbacks.current.set(key, (isDirtyNow: boolean) => updateDirty(key, isDirtyNow));
-    }
-    return dirtyCallbacks.current.get(key);
-  }, [updateDirty]);
-
-  const setSectionRef = useCallback((key: string) => {
-    if (!sectionRefCallbacks.current.has(key)) {
-      sectionRefCallbacks.current.set(key, (node: SectionHandle | null) => {
-        if (node) sectionRefs.current.set(key, node);
-        else sectionRefs.current.delete(key);
-      });
-    }
-    return sectionRefCallbacks.current.get(key)!;
-  }, []);
-
-  const navigateTo = useCallback((sel: Selection) => {
-    setSelection(sel);
-    setVisited((prev) => {
-      const key = selectionKey(sel);
-      if (prev.has(key)) return prev;
-      const next = new Set(prev);
-      next.add(key);
-      return next;
-    });
-  }, []);
+  const openPage = useCallback((sel: Selection) => {
+    originRow.current = pageKey(sel);
+    showPage(sel);
+  }, [showPage]);
 
   // Fresh state when the modal re-opens (or when the caller hands a
   // meaningfully different initialSelection).
   useEffect(() => {
     if (!isOpen) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resets selection/visited/dirty/saving state when the modal re-opens or the caller's initial selection changes; the lint cannot model the 5-field derived draft keyed on props, not on rendered state.
-    setSelection(initialSel);
-    setVisited(new Set([selectionKey(initialSel)]));
-    setDirty({});
+    originRow.current = initialPage ? pageKey(initialPage) : null;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Resets navigation and save state when the modal re-opens or the caller's initial page changes; the state is keyed on props, not on rendered state.
+    showPage(initialPage);
     setSaving(false);
-    setSaveError(null);
-    sectionRefs.current = new Map();
-    dirtyCallbacks.current = new Map();
-    sectionRefCallbacks.current = new Map();
-  }, [isOpen, initialSel]);
+  }, [isOpen, initialPage, showPage]);
+
+  // Focus follows navigation: the page heading on entry, the originating
+  // row on the way back.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (page) {
+      headingRef.current?.focus();
+    } else if (originRow.current) {
+      indexRef.current?.querySelector<HTMLElement>(`[data-row="${originRow.current}"]`)?.focus();
+    }
+  }, [isOpen, page]);
 
   // Load static dependencies once per open.
   useEffect(() => {
@@ -204,72 +183,73 @@ const WorkspaceSettingsModal = ({
     return () => { cancelled = true; };
   }, [isOpen]);
 
-  const anyDirty = useMemo(() => Object.values(dirty).some(Boolean), [dirty]);
-
-  // Save flow: validate every dirty section first (atomic gate), then
-  // submit them in order. First failure aborts the rest with their drafts
-  // intact. On full success we refresh the parent's details and close.
-  const handleSave = useCallback(async () => {
-    if (saving) return;
-    const dirtyKeys = Object.keys(dirty).filter((k) => dirty[k]);
-    if (dirtyKeys.length === 0) return;
-
+  // Saves the visible page and stays on it. Resolves true on success.
+  const savePage = useCallback(async () => {
+    const handle = pageRef.current;
+    if (!handle || saving) return false;
+    const checked = handle.validate();
+    if (!checked.ok) {
+      setSaveError(checked.error ?? 'Validation failed.');
+      return false;
+    }
     setSaveError(null);
-
-    // Phase 1 — validate everything. Don't write anything yet, so a
-    // failure in one section can't leave a partially-saved workspace.
-    for (const key of dirtyKeys) {
-      const api = sectionRefs.current.get(key);
-      const v = api?.validate?.();
-      if (v && !v.ok) {
-        setSaveError({ key, message: v.error ?? 'Validation failed.' });
-        navigateTo(parseSelectionKey(key));
-        return;
-      }
-    }
-
-    // Phase 2 — submit. We still bail on the first failure so the user
-    // can fix the offending section before retrying, but the drafts for
-    // anything not-yet-saved are preserved (sections own their own state).
     setSaving(true);
-    for (const key of dirtyKeys) {
-      const api = sectionRefs.current.get(key);
-      if (!api?.submit) continue;
-      try {
-        const result = await api.submit();
-        if (!result?.ok) {
-          setSaveError({ key, message: result?.error || 'Save failed.' });
-          navigateTo(parseSelectionKey(key));
-          setSaving(false);
-          return;
-        }
-      } catch (err) {
-        setSaveError({ key, message: err instanceof Error ? err.message : String(err) });
-        navigateTo(parseSelectionKey(key));
-        setSaving(false);
-        return;
+    try {
+      const result = await handle.submit();
+      if (!result.ok) {
+        setSaveError(result.error || 'Save failed.');
+        return false;
       }
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+      return false;
+    } finally {
+      setSaving(false);
     }
-
-    setSaving(false);
     window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
     await Promise.resolve(onChanged?.());
-    onClose();
-  }, [saving, dirty, navigateTo, onChanged, onClose]);
+    return true;
+  }, [saving, onChanged]);
 
-  const handleClose = useCallback(() => {
+  const discardPage = useCallback(() => {
+    setPageVersion((v) => v + 1);
+    setDirty(false);
+    setSaveError(null);
+  }, []);
+
+  const leave = useCallback((go: () => void) => {
     if (saving) return;
-    if (anyDirty) {
-      if (!window.confirm('You have unsaved changes. Close without saving?')) return;
-    }
-    onClose();
-  }, [saving, anyDirty, onClose]);
+    if (dirty) setPendingLeave(() => go);
+    else go();
+  }, [saving, dirty]);
 
-  // Escape closes this modal only while nothing is stacked over it: the global
-  // Settings modal opens on top of this one and takes the key first. The
-  // body-scroll lock is shared for the same reason — it must outlive the
-  // modal that closes first.
-  useOverlayLayer(isOpen, handleClose);
+  const goBack = useCallback(() => leave(() => showPage(null)), [leave, showPage]);
+  const handleClose = useCallback(() => leave(onClose), [leave, onClose]);
+
+  const answerLeave = useCallback(async (answer: 'stay' | 'discard' | 'save') => {
+    const go = pendingLeave;
+    setPendingLeave(null);
+    if (!go || answer === 'stay') return;
+    if (answer === 'save' && !(await savePage())) return;
+    go();
+  }, [pendingLeave, savePage]);
+
+  // Escape: answer "Stay" to an open prompt, let a search field clear
+  // itself first, then back one level, closing only at the root. It only
+  // reaches this modal while nothing is stacked over it: the global
+  // Settings modal opens on top of this one and takes the key first.
+  const handleEscape = useCallback(() => {
+    if (pendingLeave) {
+      setPendingLeave(null);
+      return;
+    }
+    const focused = document.activeElement;
+    if (focused instanceof HTMLInputElement && focused.type === 'search' && focused.value) return;
+    if (page) goBack();
+    else handleClose();
+  }, [pendingLeave, page, goBack, handleClose]);
+
+  useOverlayLayer(isOpen, handleEscape);
 
   const handleOverlay = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) handleClose();
@@ -283,57 +263,65 @@ const WorkspaceSettingsModal = ({
     [...agents].sort((a, b) => (a.isDefault === b.isDefault ? 0 : a.isDefault ? -1 : 1))
   ), [agents]);
 
-  const handleAgentDeleted = useCallback((agentId: string) => {
-    const key = `agent:${agentId}`;
-    setDirty((prev) => {
-      if (!(key in prev)) return prev;
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
-    setVisited((prev) => {
-      if (!prev.has(key)) return prev;
-      const next = new Set(prev);
-      next.delete(key);
-      return next;
-    });
-    sectionRefs.current.delete(key);
-    dirtyCallbacks.current.delete(key);
-    navigateTo({ kind: 'general' });
+  // The agent is gone, so there is nothing to keep or ask about.
+  const handleAgentRemoved = useCallback(() => {
+    originRow.current = null;
+    showPage(null);
     window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
     onChanged?.();
-  }, [navigateTo, onChanged]);
+  }, [showPage, onChanged]);
 
   if (!isOpen) return null;
 
-  const activeKey = selectionKey(selection);
+  const agentSummary = (agent: WorkspaceAgentResponse): string => {
+    const provider = deps.providerConnections.find((c) => c.id === agent.providerConnectionIds[0]);
+    return [
+      plural(agent.skillIds.length, 'skill'),
+      `${agent.selectedMcpServerIds.length} MCP`,
+      provider?.name,
+      agent.enabled ? null : 'disabled',
+    ].filter(Boolean).join(' · ');
+  };
 
-  const renderSection = (sel: Selection) => {
+  const pageTitle = (sel: Selection): string => {
+    switch (sel.kind) {
+      case 'general': return 'General';
+      case 'schedule': return 'Schedule';
+      case 'team': return 'Team';
+      case 'new-main': return 'Main — set up';
+      case 'new-agent': return 'Add to crew';
+      case 'agent': {
+        const agent = agents.find((a) => a.id === sel.agentId);
+        return agent ? agentLabel(agent) : 'Agent';
+      }
+    }
+  };
+
+  const renderPage = (sel: Selection) => {
     if (sel.kind === 'general') {
       return (
         <GeneralSection
-          ref={setSectionRef('general')}
+          ref={pageRef}
           workspaceId={workspaceId}
           details={details}
           saving={saving}
-          onDirtyChange={getDirtyCallback('general')}
+          onDirtyChange={setDirty}
         />
       );
     }
     if (sel.kind === 'schedule') {
       return (
         <ScheduleSection
-          ref={setSectionRef('schedule')}
+          ref={pageRef}
           workspaceId={workspaceId}
           details={details}
           saving={saving}
-          onDirtyChange={getDirtyCallback('schedule')}
+          onDirtyChange={setDirty}
           onDetailsRefresh={onChanged}
         />
       );
     }
     if (sel.kind === 'agent') {
-      const key = `agent:${sel.agentId}`;
       // Only the Main is edited here. A teammate's behavior belongs to its
       // shared definition, so its row opens the local-overlay editor instead.
       if (sel.agentId !== details?.defaultWorkspaceAgentId) {
@@ -342,24 +330,21 @@ const WorkspaceSettingsModal = ({
             workspaceId={workspaceId}
             agentId={sel.agentId ?? undefined}
             onChanged={onChanged}
-            onUnassigned={(removed) => {
-              handleAgentDeleted(removed);
-              navigateTo({ kind: 'team' });
-            }}
+            onUnassigned={handleAgentRemoved}
           />
         );
       }
 
       return (
         <AgentBehaviorForm
-          ref={setSectionRef(key)}
+          ref={pageRef}
           workspaceId={workspaceId}
           agentId={sel.agentId ?? null}
           details={details}
           deps={deps}
           saving={saving}
-          onDirtyChange={getDirtyCallback(key)}
-          onDeleted={() => handleAgentDeleted(sel.agentId ?? '')}
+          onDirtyChange={setDirty}
+          onDeleted={handleAgentRemoved}
         />
       );
     }
@@ -369,13 +354,13 @@ const WorkspaceSettingsModal = ({
     if (sel.kind === 'new-main') {
       return (
         <AgentBehaviorForm
-          ref={setSectionRef('new-main')}
+          ref={pageRef}
           workspaceId={workspaceId}
           agentId={null}
           details={details}
           deps={deps}
           saving={saving}
-          onDirtyChange={getDirtyCallback('new-main')}
+          onDirtyChange={setDirty}
         />
       );
     }
@@ -388,13 +373,61 @@ const WorkspaceSettingsModal = ({
     return null;
   };
 
+  const workspaceTitle = `${details?.title || 'Workspace'} — Settings`;
+  const crewCount = agents.filter((a) => !a.isDefault).length;
+
+  const index = (
+    <div className={styles.index} ref={indexRef} onKeyDown={moveRowFocus}>
+      <section className={styles.indexGroup} aria-label="Workspace">
+        <h3 className={styles.indexGroupTitle}>Workspace</h3>
+        <IndexRow rowKey="general" label="General" summary={details?.rootPath ?? ''} onOpen={() => openPage({ kind: 'general' })} />
+        <IndexRow rowKey="schedule" label="Schedule" summary={scheduleSummary(details)} onOpen={() => openPage({ kind: 'schedule' })} />
+        <IndexRow rowKey="team" label="Team" summary={crewCount ? `${crewCount} crew` : 'No crew'} onOpen={() => openPage({ kind: 'team' })} />
+      </section>
+
+      <section className={styles.indexGroup} aria-label="Agents">
+        <h3 className={styles.indexGroupTitle}>Agents</h3>
+        {!details?.defaultWorkspaceAgentId && (
+          <IndexRow rowKey="new-main" label="Main — set up" summary="No main agent yet" onOpen={() => openPage({ kind: 'new-main' })} />
+        )}
+        {sortedAgents.map((agent) => (
+          <IndexRow
+            key={agent.id}
+            rowKey={pageKey({ kind: 'agent', agentId: agent.id })}
+            label={agentLabel(agent)}
+            summary={agentSummary(agent)}
+            icon={(
+              <AgentAvatar
+                identity={identityFor(agent)}
+                size={20}
+                activity={agent.enabled ? 'none' : 'disabled'}
+              />
+            )}
+            onOpen={() => openPage({ kind: 'agent', agentId: agent.id })}
+          />
+        ))}
+        <IndexRow rowKey="new-agent" label="+ Add to crew" summary="" onOpen={() => openPage({ kind: 'new-agent' })} />
+      </section>
+    </div>
+  );
+
   return ReactDOM.createPortal(
     <div className={styles.overlay} onClick={handleOverlay}>
       <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
         <header className={styles.header}>
-          <h2 className={styles.title}>
-            {details?.title || 'Workspace'} — Settings
-          </h2>
+          {page ? (
+            <nav className={styles.breadcrumb} aria-label="Breadcrumb">
+              <button type="button" className={styles.crumbBack} onClick={goBack} disabled={saving}>
+                ‹ {workspaceTitle}
+              </button>
+              <span className={styles.crumbSeparator} aria-hidden="true">›</span>
+              <h2 className={styles.title} ref={headingRef} tabIndex={-1}>
+                {pageTitle(page)}
+              </h2>
+            </nav>
+          ) : (
+            <h2 className={styles.title}>{workspaceTitle}</h2>
+          )}
           <button
             type="button"
             className={styles.closeButton}
@@ -408,119 +441,95 @@ const WorkspaceSettingsModal = ({
           </button>
         </header>
 
-        <div className={styles.body}>
-          <aside className={styles.sidebar} aria-label="Settings sections">
-            <div className={styles.sidebarGroup}>
-              <h3 className={styles.sidebarGroupTitle}>Workspace</h3>
-              <NavItem
-                active={selection.kind === 'general'}
-                dirty={!!dirty.general}
-                onClick={() => navigateTo({ kind: 'general' })}
-              >
-                General
-              </NavItem>
-              <NavItem
-                active={selection.kind === 'schedule'}
-                dirty={!!dirty.schedule}
-                onClick={() => navigateTo({ kind: 'schedule' })}
-              >
-                Schedule
-              </NavItem>
-              <NavItem
-                active={selection.kind === 'team'}
-                dirty={!!dirty.team}
-                onClick={() => navigateTo({ kind: 'team' })}
-              >
-                Team
-              </NavItem>
-            </div>
-
-            <div className={styles.sidebarGroup}>
-              <h3 className={styles.sidebarGroupTitle}>Agents</h3>
-              {!details?.defaultWorkspaceAgentId && (
-                <NavItem
-                  active={selection.kind === 'new-main'}
-                  dirty={!!dirty['new-main']}
-                  onClick={() => navigateTo({ kind: 'new-main' })}
-                >
-                  Main — set up
-                </NavItem>
-              )}
-              {sortedAgents.map((agent) => (
-                <NavItem
-                  key={agent.id}
-                  active={selection.kind === 'agent' && selection.agentId === agent.id}
-                  dirty={!!dirty[`agent:${agent.id}`]}
-                  onClick={() => navigateTo({ kind: 'agent', agentId: agent.id })}
-                >
-                  <AgentAvatar
-                    identity={identityFor(agent)}
-                    size={16}
-                    activity={agent.enabled ? 'none' : 'disabled'}
-                    className={styles.navItemAvatar}
-                  />
-                  {agent.isDefault ? 'Main' : (agent.displayName || agent.agentName || 'Untitled')}
-                </NavItem>
-              ))}
-              <NavItem
-                className={styles.navItemAddNew}
-                active={selection.kind === 'new-agent'}
-                dirty={!!dirty['new-agent']}
-                onClick={() => navigateTo({ kind: 'new-agent' })}
-              >
-                + Add to crew
-              </NavItem>
-            </div>
-          </aside>
-
-          <main className={styles.contentArea}>
-            {/* eslint-disable-next-line react-hooks/refs -- `visited` is a `useState<Set<string>>` (declared above) rendered as a list of section keys. The rule's identifier classifier misidentifies the `Array.from(visited)` property access as a ref read; it is a plain state read and is safe. */}
-            {Array.from(visited).map((key) => {
-              const sel = parseSelectionKey(key);
-              const isActive = key === activeKey;
-              return (
-                <div
-                  key={key}
-                  className={`${styles.content} ${isActive ? '' : styles.contentHidden}`}
-                  aria-hidden={!isActive}
-                >
-                  {renderSection(sel)}
-                </div>
-              );
-            })}
-          </main>
-        </div>
-
-        <footer className={styles.footer}>
-          {saveError && (
-            <div className={styles.footerError} role="alert">
-              {saveError.message}
-            </div>
-          )}
-          <button
-            type="button"
-            className={styles.primaryButton}
-            onClick={handleSave}
-            disabled={saving || !anyDirty}
-          >
-            {saving ? 'Saving…' : 'Save'}
-          </button>
-        </footer>
+        {page ? (
+          <div className={styles.page} key={`${pageKey(page)}:${pageVersion}`}>
+            {renderPage(page)}
+            {(dirty || pendingLeave || saveError) && (
+              <SaveBar
+                saving={saving}
+                error={saveError}
+                leaving={!!pendingLeave}
+                onAnswer={answerLeave}
+                onDiscard={discardPage}
+                onSave={savePage}
+              />
+            )}
+          </div>
+        ) : index}
       </div>
     </div>,
     document.body
   );
 };
 
-const NavItem = ({ active, dirty, onClick, children, className }: { active: boolean; dirty: boolean; onClick: () => void; children: React.ReactNode; className?: string }) => (
-  <button
-    type="button"
-    className={`${styles.navItem} ${active ? styles.navItemActive : ''} ${className || ''}`}
-    onClick={onClick}
-  >
-    <span className={styles.navItemLabel}>{children}</span>
-    {dirty && <span className={styles.navItemDirtyDot} title="Unsaved changes" aria-hidden="true" />}
+// ↑/↓ between root rows; Tab still works as usual.
+const moveRowFocus = (e: React.KeyboardEvent<HTMLDivElement>) => {
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  const rows = Array.from(e.currentTarget.querySelectorAll<HTMLElement>('[data-row]'));
+  const at = rows.indexOf(document.activeElement as HTMLElement);
+  if (at < 0) return;
+  e.preventDefault();
+  const step = e.key === 'ArrowDown' ? 1 : rows.length - 1;
+  rows[(at + step) % rows.length]?.focus();
+};
+
+const IndexRow = ({ rowKey, label, summary, icon, onOpen }: {
+  rowKey: string;
+  label: string;
+  summary: string;
+  icon?: React.ReactNode;
+  onOpen: () => void;
+}) => (
+  <button type="button" data-row={rowKey} className={styles.indexRow} onClick={onOpen}>
+    {icon}
+    <span className={styles.indexRowLabel}>{label}</span>
+    <span className={styles.indexRowSummary}>{summary}</span>
+    <span className={styles.indexRowChevron} aria-hidden="true">›</span>
   </button>
+);
+
+// Shown at the foot of a page only while there is something to say: unsaved
+// changes, a failed save, or the question asked when leaving a dirty page.
+const SaveBar = ({ saving, error, leaving, onAnswer, onDiscard, onSave }: {
+  saving: boolean;
+  error: string | null;
+  leaving: boolean;
+  onAnswer: (answer: 'stay' | 'discard' | 'save') => void;
+  onDiscard: () => void;
+  onSave: () => void;
+}) => (
+  <div className={styles.saveBar} role="region" aria-label="Unsaved changes">
+    {error ? (
+      <span className={styles.saveBarError} role="alert">{error}</span>
+    ) : (
+      <span className={styles.saveBarText} role={leaving ? 'alert' : undefined}>
+        {leaving ? 'Save your changes before leaving?' : 'Unsaved changes'}
+      </span>
+    )}
+    {leaving ? (
+      <>
+        {/* Focused so Enter is the harmless answer. */}
+        <button type="button" className={styles.secondaryButton} onClick={() => onAnswer('stay')} autoFocus>
+          Stay
+        </button>
+        <button type="button" className={styles.secondaryButton} onClick={() => onAnswer('discard')}>
+          Discard
+        </button>
+        <button type="button" className={styles.primaryButton} onClick={() => onAnswer('save')} disabled={saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </>
+    ) : (
+      <>
+        <button type="button" className={styles.secondaryButton} onClick={onDiscard} disabled={saving}>
+          Discard
+        </button>
+        <button type="button" className={styles.primaryButton} onClick={onSave} disabled={saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </>
+    )}
+  </div>
 );
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -721,7 +730,7 @@ const ScheduleSection = ({
     initialScheduleKindFromDetails(details?.scheduleKind)
   );
   // Local busy flag for the imperative-only actions (Pause/Resume, Run
-  // now). Save goes through the modal's global flow, so we don't track
+  // now). Save goes through the modal's save bar, so we don't track
   // its busy state here — the parent's `saving` prop handles the input
   // disables for save.
   const [localBusy, setLocalBusy] = useState(false);
@@ -1122,9 +1131,5 @@ const ScheduleSection = ({
     </div>
   );
 };
-
-// ──────────────────────────────────────────────────────────────────────────
-// Agent section (manager + sub-agent + new)
-// ──────────────────────────────────────────────────────────────────────────
 
 export default WorkspaceSettingsModal;

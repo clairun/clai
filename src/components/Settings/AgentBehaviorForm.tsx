@@ -206,7 +206,7 @@ export const AgentBehaviorForm = ({
   saveBehavior,
   details: _details,   // unused; kept in signature for future use (e.g., showing peer agents)
   deps,
-  saving,              // global save in flight — disables inputs
+  saving,              // host save in flight — disables inputs
   onDirtyChange,
   onDeleted,
   showHeading = true,
@@ -226,8 +226,8 @@ export const AgentBehaviorForm = ({
 }) => {
   const isCreate = !agentId;
   // Set once the create flow has succeeded. Only the submit path looks at
-  // it: if a sibling section fails and the modal stays open, a further
-  // edit + Save must update the agent just made, not create a second one.
+  // it: the page stays open after a save, so a further edit + Save must
+  // update the agent just made, not create a second one.
   // Everything rendered still follows `isCreate`, because `agent` is still
   // the blank draft — not the created agent.
   const [createdAgentId, setCreatedAgentId] = useState<string | null>(null);
@@ -451,8 +451,7 @@ export const AgentBehaviorForm = ({
     return { ok: true };
   }, [name, isManager, providerConnectionIds]);
 
-  // Report dirty changes up to the modal so the global Save button and
-  // the sidebar dot indicators reflect current state.
+  // Report dirty changes up to the host, which shows its save affordance.
   const onDirtyChangeRef = useRef(onDirtyChange);
   useEffect(() => { onDirtyChangeRef.current = onDirtyChange; });
   useEffect(() => { onDirtyChangeRef.current?.(isDirty); }, [isDirty]);
@@ -499,9 +498,8 @@ export const AgentBehaviorForm = ({
             execution,
             enabled,
           });
-          // Clean, and now editing: if another section fails afterwards the
-          // modal stays open, and the next Save must neither re-create the
-          // agent nor create a second one after further edits.
+          // Clean, and now editing: the page stays open, and the next Save
+          // must neither re-create the agent nor create a second one.
           setCreatedAgentId(created.id);
           setBaselinePayload(currentPayload);
         } else {
@@ -517,8 +515,8 @@ export const AgentBehaviorForm = ({
             enabled: isManager ? true : enabled,
           });
           // Mark form clean: the values we just persisted are now the
-          // baseline. isDirty flips false and reports up so the sidebar
-          // dot clears even though the modal will close on full success.
+          // baseline. isDirty flips false and reports up, which hides the
+          // host's unsaved-changes bar.
           // The baseline is the *form's* serialisation, not the request's:
           // for Main the request forces `enabled: true` and a fixed name
           // while the form keeps the loaded values, and dirtiness is only

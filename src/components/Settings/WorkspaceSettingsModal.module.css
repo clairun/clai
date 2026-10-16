@@ -1,9 +1,10 @@
 /**
- * WorkspaceSettingsModal — sidebar nav (workspace + agents) + content pane.
+ * WorkspaceSettingsModal — a near-full-window overlay with a drill-down:
+ * a root index of sections, then one page at a time with a breadcrumb and
+ * a per-page save bar.
  *
  * Visual rules mirror AgentFormModal where applicable (palette, radii,
- * spacing) so the redesign doesn't feel like a different app. The shell
- * is wider to host the two-pane layout.
+ * spacing) so the redesign doesn't feel like a different app.
  */
 
 .overlay {
@@ -12,29 +13,32 @@
   background: var(--color-overlay-60);
   backdrop-filter: blur(4px);
   z-index: var(--z-portal-modal);
-  display: flex;
-  align-items: center;
-  justify-content: center;
   animation: fadeIn 0.15s ease;
 }
 
 .modal {
+  position: absolute;
+  inset: 16px;
   background: var(--color-bg-primary, #FDFCFB);
   border-radius: 12px;
   box-shadow: var(--shadow-xl);
-  width: 1040px;
-  max-width: 95vw;
-  height: 88vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   animation: slideUp 0.2s ease;
 }
 
+@media (min-width: 1600px) {
+  .modal {
+    inset: 24px;
+  }
+}
+
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--color-border-light);
   flex-shrink: 0;
@@ -45,6 +49,49 @@
   font-weight: 600;
   color: var(--color-text-primary, #1a1a1a);
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title:focus {
+  outline: none;
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.crumbBack {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  margin-left: -4px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.crumbBack:hover:not(:disabled) {
+  color: var(--color-primary);
+  background: var(--color-bg-hover, transparent);
+}
+
+.crumbBack:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.crumbSeparator {
+  color: var(--color-border-medium);
 }
 
 .closeButton {
@@ -57,6 +104,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   transition: all 0.15s ease;
 }
 
@@ -65,138 +113,122 @@
   color: var(--color-text-secondary);
 }
 
-.body {
-  display: flex;
+/* Root index: one row per section, using the width for a summary. */
+.index {
   flex: 1;
   min-height: 0;
-}
-
-.sidebar {
-  width: 220px;
-  flex-shrink: 0;
-  border-right: 1px solid var(--color-border-light);
-  padding: 12px 8px;
   overflow-y: auto;
-  background: var(--color-bg-secondary, #F6F4F0);
+  padding: 20px max(24px, calc((100% - 880px) / 2));
 }
 
-.sidebarGroup {
-  margin-bottom: 16px;
+.indexGroup {
+  margin-bottom: 24px;
 }
 
-.sidebarGroupTitle {
+.indexGroupTitle {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-text-tertiary);
-  margin: 0 8px 6px;
+  margin: 0 12px 6px;
 }
 
-.navItem {
+.indexRow {
   appearance: none;
   background: transparent;
   border: none;
+  border-bottom: 1px solid var(--color-border-light);
   width: 100%;
   text-align: left;
-  padding: 6px 10px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
+  padding: 10px 12px;
   font-family: inherit;
-  color: var(--color-text-secondary);
+  font-size: 13px;
+  color: var(--color-text-primary);
   cursor: pointer;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 2px;
-  transition: background 120ms ease, color 120ms ease;
+  gap: 10px;
+  transition: background 120ms ease;
 }
 
-.navItemLabel {
-  flex: 1;
-  min-width: 0;
+.indexRow:hover,
+.indexRow:focus-visible {
+  background: var(--color-bg-hover);
+}
+
+.indexRowLabel {
+  flex: 0 0 160px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.navItemAvatar {
-  margin-right: 8px;
-}
-
-.navItemDirtyDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-primary);
-  flex-shrink: 0;
-  box-shadow: 0 0 0 2px var(--color-bg-secondary);
-}
-
-.navItem:hover {
-  background: var(--color-bg-hover);
-  color: var(--color-text-primary);
-}
-
-.navItemActive {
-  background: var(--color-primary-alpha-08);
-  color: var(--color-primary);
-  font-weight: 600;
-}
-
-.navItemAddNew {
-  font-style: italic;
+.indexRowSummary {
+  flex: 1;
+  min-width: 0;
   color: var(--color-text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.navItemAddNew:hover {
-  font-style: normal;
+.indexRowChevron {
+  color: var(--color-text-tertiary);
+  font-size: 16px;
 }
 
-/* Outer wrapper for the right-hand panes. We "sticky-mount" every section
- * the user has visited, so their draft state survives tab switches and a
- * single global Save commits everything. Inactive panes are hidden via
- * `.contentHidden` (display: none) so they take no layout space. */
-.contentArea {
+/* One section filling the pane. The section's own `.sectionRoot` stays the
+ * scroller (so the scrollbar sits at the pane edge) and its content keeps a
+ * bounded reading column; the save bar sits below it, always in view. */
+.page {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  overflow: hidden;
+  animation: pageIn 180ms ease;
 }
 
-.content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  overflow: hidden;
+.page > .sectionRoot {
+  padding-inline: max(24px, calc((100% - 720px) / 2));
 }
 
-.contentHidden {
-  display: none;
-}
-
-/* Modal footer — global Save button. Replaces the per-section Save
- * buttons so changes across sections commit atomically. */
-.footer {
+.saveBar {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 12px;
-  padding: 12px 20px;
+  gap: 8px;
+  padding: 10px max(24px, calc((100% - 720px) / 2));
   border-top: 1px solid var(--color-border-light);
   background: var(--color-bg-secondary, #F6F4F0);
   flex-shrink: 0;
 }
 
-.footerError {
+.saveBarText,
+.saveBarError {
   flex: 1;
   font-size: 12px;
-  color: var(--color-critical, #b91c1c);
   text-align: left;
+}
+
+.saveBarText {
+  color: var(--color-text-secondary);
+}
+
+.saveBarError {
+  color: var(--color-critical, #b91c1c);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page {
+    animation: none;
+  }
+}
+
+@keyframes pageIn {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
 }
 
 /* Each section's outer wrapper. Owns the scroll + padding so .actions can

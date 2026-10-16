@@ -1,7 +1,6 @@
 /**
- * Contract every Workspace Settings section exposes to the modal shell.
- * The modal validates all dirty sections first (atomic gate) and only then
- * submits them, so both steps are separate imperative calls.
+ * Contract a Workspace Settings page exposes to the modal shell, which
+ * saves the visible page: `validate` first, then `submit`.
  */
 
 export interface SectionResult {
