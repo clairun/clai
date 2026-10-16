@@ -54,7 +54,6 @@ const ApplicationsSettings = () => {
 
   return (
     <div className={styles.section}>
-      <h3 className={styles.heading}>Applications</h3>
       <p className={styles.subtle}>
         Used by the “open in…” actions on workspace artifacts. Detected from the apps installed on
         this system.

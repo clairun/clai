@@ -55,7 +55,7 @@ describe('provider overlays over the Settings modal', () => {
     // The picker goes; the Settings modal it was opened from stays.
     expect(screen.queryByRole('heading', { name: 'Choose a provider' })).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
 
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);

@@ -18,7 +18,6 @@ const AppearanceSettings = () => {
 
   return (
     <div className={styles.section}>
-      <h3 className={styles.heading}>Appearance</h3>
       <p className={styles.subtle}>Choose how clai looks. Applies instantly.</p>
       <div className={styles.options} role="radiogroup" aria-label="Theme">
         {OPTIONS.map((option) => (

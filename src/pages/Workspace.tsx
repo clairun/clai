@@ -1718,9 +1718,7 @@ const Workspace = () => {
   //    modal opens to: gear icon -> General, drawer Edit -> agent:<id>.
   //    Adding to the crew happens in the drawer itself (CrewList). ───────
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsSelection, setSettingsSelection] = useState<SettingsSelection>({
-    kind: 'general',
-  });
+  const [settingsSelection, setSettingsSelection] = useState<SettingsSelection | null>(null);
   const [agentBusy, setAgentBusy] = useByWorkspace(workspaceId, '');
   const [agentError, setAgentError] = useByWorkspace(workspaceId, '');
   const [artifactAddMenu, setArtifactAddMenu] = useState<{
@@ -1916,7 +1914,7 @@ const Workspace = () => {
   // ── Workspace Settings modal openers ───────────────────────────────────
   const openSettings = useCallback(
     (selection?: SettingsSelection | null) => {
-      setSettingsSelection(selection || { kind: 'general' });
+      setSettingsSelection(selection ?? null);
       setSettingsOpen(true);
       setAgentError('');
     },

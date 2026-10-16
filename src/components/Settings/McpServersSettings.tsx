@@ -364,7 +364,6 @@ const McpServersSettings = () => {
     <div className={styles.container}>
       <div className={styles.header}>
         <div className={styles.headerText}>
-          <h3 className={styles.title}>MCP Servers</h3>
           <p className={styles.description}>
             Register local or remote MCP servers once, then assign them explicitly to the agents that should be allowed to use them.
           </p>

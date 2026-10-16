@@ -113,6 +113,13 @@ describe('AboutSettings updates panel', () => {
     mockInvoke.mockReset();
   });
 
+  it('ranks its heading under the Settings window title', async () => {
+    respond(unavailableStatus);
+    render(<AboutSettings />);
+    await waitFor(() => expect(screen.getByText('v26.7.12-dev')).toBeTruthy());
+    expect(screen.getByRole('heading', { name: 'CLAI' }).tagName).toBe('H3');
+  });
+
   it('renders no Updates panel at all when the build can neither update nor check', async () => {
     respond(unavailableStatus);
     render(<AboutSettings />);

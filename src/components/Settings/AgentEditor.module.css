@@ -1,10 +1,26 @@
+/* Fills the Settings pane; never shrinks below its content, so the pane
+   scrolls instead when the window is too short. */
 .editor {
+  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
+.editor:focus {
+  outline: none;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+
 .breadcrumb {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -38,29 +54,41 @@
   color: var(--color-border-medium);
 }
 
-.crumbCurrent {
-  color: var(--color-text-secondary);
+.title {
+  min-width: 0;
+  margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.headerText {
-  min-width: 0;
-}
-
-.title {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--color-text-primary);
-  margin: 0 0 6px 0;
+}
+
+/* The face picker, with what saving affects beside it. */
+.identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 24px;
 }
 
 .description {
+  flex: 1;
+  min-width: 0;
+  max-width: 420px;
+  margin: 18px 0 0;
   font-size: 13px;
   color: var(--color-text-secondary);
-  margin: 0;
   line-height: 1.5;
+}
+
+/* The behaviour form takes the rest of the pane, which already pads it. */
+.form {
+  --settings-page-padding: 0;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .errorBanner {
@@ -73,10 +101,10 @@
 }
 
 .actions {
+  flex-shrink: 0;
   display: flex;
   gap: 8px;
   align-items: center;
-  margin-top: 4px;
 }
 
 .primary,

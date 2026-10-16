@@ -1,0 +1,27 @@
+/* Crew member page: identity line, the shared/local note, the danger row. */
+
+.identity {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.enabled {
+  min-width: 240px;
+}
+
+.shared {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--color-text-tertiary);
+}
+
+.danger {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

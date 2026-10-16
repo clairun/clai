@@ -12,14 +12,12 @@
   right: 0;
   bottom: 0;
   background: var(--color-overlay-60);
-  backdrop-filter: blur(4px);
   /* Opens from a pane inside SettingsModal (here and in
      AssistantProviderSettings, which borrows this overlay). */
   z-index: var(--z-portal-modal-form);
   display: flex;
   align-items: center;
   justify-content: center;
-  animation: fadeIn 0.15s ease;
 }
 
 /* Modal */
@@ -38,7 +36,6 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: slideUp 0.2s ease;
 }
 
 /* Header */
@@ -603,22 +600,6 @@
   100% { transform: rotate(360deg); }
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes slideUp {
-  from {
-    opacity: 0;
-    transform: translateY(20px) scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
 /* Toggle Switch */
 .toggleRow {
   display: flex;
@@ -758,7 +739,6 @@
   flex-direction: column;
   gap: 20px;
 }
-
 
 .envRows {
   display: flex;

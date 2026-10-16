@@ -551,7 +551,6 @@ const FleetLayout = () => {
         onClose={handleSettingsClose}
         workspaceId={settingsState.workspaceId || ''}
         details={settingsState.details}
-        initialSelection={{ kind: 'general' }}
         onChanged={handleSettingsChanged}
       />
 

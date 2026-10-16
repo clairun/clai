@@ -2,7 +2,6 @@
   position: fixed;
   inset: 0;
   background: var(--color-border-medium);
-  backdrop-filter: blur(8px);
   z-index: var(--z-portal-modal);
   display: flex;
   align-items: center;

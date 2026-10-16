@@ -8,7 +8,7 @@
  * under, and the paths it may touch in this workspace.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useImperativeHandle, useState } from 'react';
 import {
   configureWorkspaceAssignment,
   getWorkspaceTeamPolicy,
@@ -21,210 +21,154 @@ import {
 } from '../../api/client';
 import AgentCardPicker from '../Agents/AgentCardPicker';
 import { openGlobalSettings } from '../../utils/globalSettings';
-import styles from './WorkspaceSettingsModal.module.css';
+import { useReportDirty, type SectionHandle } from './sectionHandle';
+import { PathGrantEditor, Switch } from './ListEditors';
+import form from './SettingsForm.module.css';
+import styles from './WorkspaceTeamSettings.module.css';
 
-/** Editable list of path grants, shared by the assignment and policy forms. */
-export const PathGrantList = ({
-  grants,
-  onChange,
-  disabled,
-  placeholder = '/home/user/project',
-}: {
-  grants: PathGrantPayload[];
-  onChange: (next: PathGrantPayload[]) => void;
-  disabled?: boolean;
-  placeholder?: string;
-}) => {
-  const [draft, setDraft] = useState('');
-  const [access, setAccess] = useState('read_only');
-
-  const add = () => {
-    const path = draft.trim();
-    if (!path || grants.some((grant) => grant.path === path)) {
-      setDraft('');
-      return;
-    }
-    onChange([...grants, { path, access }]);
-    setDraft('');
-  };
-
-  return (
-    <>
-      {grants.length > 0 && (
-        <div className={styles.grantList}>
-          {grants.map((grant) => (
-            <div key={grant.path} className={styles.grantItem}>
-              <span className={styles.grantPath}>{grant.path}</span>
-              <span className={styles.grantAccess}>
-                {grant.access === 'read_write' ? 'RW' : 'RO'}
-              </span>
-              <button
-                type="button"
-                className={styles.chipRemove}
-                onClick={() => onChange(grants.filter((item) => item.path !== grant.path))}
-                disabled={disabled}
-                aria-label={`Remove grant for ${grant.path}`}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className={styles.listInputRow}>
-        <input
-          type="text"
-          className={styles.input}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={placeholder}
-          disabled={disabled}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              add();
-            }
-          }}
-        />
-        <select
-          className={styles.select}
-          value={access}
-          onChange={(e) => setAccess(e.target.value)}
-          disabled={disabled}
-        >
-          <option value="read_only">Read only</option>
-          <option value="read_write">Read &amp; write</option>
-        </select>
-        <button type="button" className={styles.addButton} onClick={add} disabled={disabled || !draft.trim()}>
-          Add
-        </button>
-      </div>
-    </>
-  );
-};
+interface PageProps {
+  /** The modal shell saves the page through this handle. */
+  ref?: React.Ref<SectionHandle>;
+  /** True while the shell is saving this page. */
+  saving?: boolean;
+  onDirtyChange?: (isDirty: boolean) => void;
+}
 
 /**
  * Project context and the access every agent in this workspace receives.
  * Both apply on the next turn, like every other configuration edit.
  */
 export const TeamPolicySection = ({
+  ref,
   workspaceId,
-  onChanged,
-}: {
-  workspaceId: string;
-  onChanged?: () => void;
-}) => {
+  saving = false,
+  onDirtyChange,
+}: PageProps & { workspaceId: string }) => {
   const [context, setContext] = useState('');
   const [grants, setGrants] = useState<PathGrantPayload[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  // What was last loaded or saved; the draft is dirty when it differs.
+  // Null until the policy loads: there is nothing to edit before that.
+  const [baseline, setBaseline] = useState<{ context: string; grants: PathGrantPayload[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
 
-  // `loading` starts true and is only ever cleared here, so the effect never
-  // sets state synchronously on the way in.
   useEffect(() => {
     let cancelled = false;
     getWorkspaceTeamPolicy(workspaceId)
       .then((policy) => {
         if (cancelled) return;
-        setContext(policy.context || '');
-        setGrants(policy.filesystemGrants || []);
+        const loaded = { context: policy.context || '', grants: policy.filesystemGrants || [] };
+        setContext(loaded.context);
+        setGrants(loaded.grants);
+        setBaseline(loaded);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [workspaceId]);
 
-  const save = useCallback(async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await saveWorkspaceTeamPolicy(workspaceId, context, grants);
-      setSaved(true);
-      onChanged?.();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  }, [workspaceId, context, grants, onChanged]);
+  const isDirty = !!baseline
+    && (context !== baseline.context || JSON.stringify(grants) !== JSON.stringify(baseline.grants));
+  useReportDirty(isDirty, onDirtyChange);
 
-  if (loading) return <div className={styles.sectionRoot}>Loading…</div>;
+  useImperativeHandle(ref, () => ({
+    validate: () => ({ ok: true }),
+    submit: async () => {
+      // Saving blanks over a policy that never loaded would erase it.
+      if (!baseline) return { ok: false, error: error || 'The team policy has not loaded.' };
+      try {
+        await saveWorkspaceTeamPolicy(workspaceId, context, grants);
+        setBaseline({ context, grants });
+        setError(null);
+        return { ok: true };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+        return { ok: false, error: message };
+      }
+    },
+  }));
+
+  if (!baseline) {
+    if (!error) return <PageSkeleton />;
+    return (
+      <div className={form.page}>
+        <p className={form.errorBanner} role="alert">{error}</p>
+      </div>
+    );
+  }
 
   return (
-    <div className={styles.sectionRoot}>
-      <h4 className={styles.sectionTitle}>Project context</h4>
-      <p className={styles.sectionDescription}>
-        Added to the instructions of every agent working in this workspace — the Main and each
-        crew member. Use it for what is true of the project, not of any one agent.
-      </p>
-      <div className={styles.field}>
-        <label className={styles.label} htmlFor="workspace-context">
-          Instructions shared by every agent here
-        </label>
-        <textarea
-          id="workspace-context"
-          className={styles.textarea}
-          value={context}
-          onChange={(e) => {
-            setContext(e.target.value);
-            setSaved(false);
-          }}
-          rows={6}
-          placeholder="What this workspace is for, where the code lives, house rules…"
-          disabled={saving}
-        />
+    <div className={form.page}>
+      <div className={form.columns}>
+        <section className={`${form.panel} ${form.panelFill}`}>
+          <header className={form.panelHeader}>
+            <h3 className={form.panelTitle} id="team-context-title">Project context</h3>
+            <span className={form.panelMeta}>Added to every agent&apos;s instructions here</span>
+          </header>
+          <div className={form.panelBody}>
+            <p className={form.lede}>
+              What is true of the project rather than of one agent. The Main and every crew member get it.
+            </p>
+            <textarea
+              id="workspace-context"
+              className={`${form.textarea} ${form.textareaFill}`}
+              value={context}
+              onChange={(e) => setContext(e.target.value)}
+              aria-labelledby="team-context-title"
+              placeholder="What this workspace is for, where the code lives, house rules…"
+              disabled={saving}
+            />
+          </div>
+        </section>
+
+        <section className={`${form.panel} ${form.panelFill}`}>
+          <header className={form.panelHeader}>
+            <h3 className={form.panelTitle} id="team-grants-title">Workspace path grants</h3>
+            <span className={form.panelMeta}>{grants.length ? `${grants.length} granted` : 'None'}</span>
+          </header>
+          <div className={form.panelBody}>
+            <p className={form.lede}>
+              Every agent here gets these on top of its own. Access approved during a run is saved on the
+              agent that asked for it, not here.
+            </p>
+            <PathGrantEditor
+              grants={grants}
+              onChange={setGrants}
+              make={(path, access) => ({ path, access })}
+              disabled={saving}
+              label="Workspace path grants"
+            />
+          </div>
+        </section>
       </div>
 
-      <h4 className={styles.sectionTitle} style={{ marginTop: 24 }}>
-        Workspace path grants
-      </h4>
-      <p className={styles.sectionDescription}>
-        Granted to every agent here, on top of its own. Access approved in a run is saved on the
-        agent that asked for it, not here.
-      </p>
-      <div className={styles.field}>
-        <PathGrantList
-          grants={grants}
-          onChange={(next) => {
-            setGrants(next);
-            setSaved(false);
-          }}
-          disabled={saving}
-        />
-      </div>
-
-      {error && (
-        <div className={styles.errorBanner} role="alert">
-          {error}
-        </div>
-      )}
-      <div className={styles.actions}>
-        <button type="button" className={styles.primaryButton} onClick={save} disabled={saving}>
-          {saving ? 'Saving…' : saved ? 'Saved' : 'Save team settings'}
-        </button>
-      </div>
+      {error && <p className={form.errorBanner} role="alert">{error}</p>}
     </div>
   );
 };
+
+const PageSkeleton = () => (
+  <div className={form.page} aria-busy="true" aria-label="Loading">
+    <div className={form.skeleton}><span /><span /><span /></div>
+  </div>
+);
 
 /**
  * Either the editor for one crew member (`agentId` given), or the picker that
  * adds one from the shared library.
  */
 export const AssignmentSection = ({
+  ref,
   workspaceId,
   agentId,
+  saving = false,
+  onDirtyChange,
   onChanged,
   onUnassigned,
-}: {
+}: PageProps & {
   workspaceId: string;
   agentId?: string;
   onChanged?: () => void;
@@ -281,6 +225,14 @@ export const AssignmentSection = ({
 
   const assignment = assignments.find((item) => item.id === agentId);
   const definition = definitions.find((item) => item.id === assignment?.agentDefinitionId);
+  const inert = busy || saving;
+
+  const isDirty = !!assignment && (
+    enabled !== assignment.enabled
+    || context !== (assignment.context || '')
+    || JSON.stringify(grants) !== JSON.stringify(assignment.filesystemGrants || [])
+  );
+  useReportDirty(isDirty, onDirtyChange);
 
   // The picker assigns on its own and stays busy until this resolves, so the
   // roster it filters on is the new one before another card can be clicked.
@@ -289,25 +241,25 @@ export const AssignmentSection = ({
     onChanged?.();
   }, [refresh, onChanged]);
 
-  const handleSave = useCallback(async () => {
-    if (!assignment) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await configureWorkspaceAssignment(workspaceId, {
-        ...assignment,
-        enabled,
-        context,
-        filesystemGrants: grants,
-      });
-      await refresh();
-      onChanged?.();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [workspaceId, assignment, enabled, context, grants, refresh, onChanged]);
+  // The picker has no draft: its assign is immediate and offers its own Undo.
+  useImperativeHandle(ref, () => ({
+    validate: () => ({ ok: true }),
+    submit: async () => {
+      if (!assignment) return { ok: true };
+      const next = { ...assignment, enabled, context, filesystemGrants: grants };
+      try {
+        await configureWorkspaceAssignment(workspaceId, next);
+        // The saved row is the new baseline, so the page reads clean.
+        setAssignments((rows) => rows.map((row) => (row.id === next.id ? next : row)));
+        setError(null);
+        return { ok: true };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+        return { ok: false, error: message };
+      }
+    },
+  }));
 
   const handleUnassign = useCallback(async () => {
     if (!agentId) return;
@@ -356,28 +308,23 @@ export const AssignmentSection = ({
         ? null
         : 'disabled';
 
-  if (loading) return <div className={styles.sectionRoot}>Loading…</div>;
+  if (loading) return <PageSkeleton />;
 
   // Picker: every definition the library offers that this workspace has not
   // already assigned. Assigning the same one twice would produce two local ids
   // with identical behavior and no way to tell them apart.
   if (!agentId) {
     return (
-      <div className={styles.sectionRoot}>
-        <h4 className={styles.sectionTitle}>Add to crew</h4>
-        {error && (
-          <div className={styles.errorBanner} role="alert">
-            {error}
-          </div>
-        )}
+      <div className={form.page}>
+        {error && <p className={form.errorBanner} role="alert">{error}</p>}
         <AgentCardPicker
           workspaceId={workspaceId}
           definitions={definitions}
           assignedDefinitionIds={assignments.map((item) => item.agentDefinitionId)}
           onChanged={handleCrewChanged}
           // The global Settings modal stacks above this one (see the
-          // --z-portal-* scale), so the library opens on top and this modal is
-          // waiting underneath when it closes.
+          // --z-portal-* scale), so the library opens on top and this window
+          // is waiting underneath when it closes.
           onCreateAgent={() => openGlobalSettings({ tab: 'agents' })}
           disabled={busy}
         />
@@ -387,116 +334,107 @@ export const AssignmentSection = ({
 
   if (!assignment) {
     return (
-      <div className={styles.sectionRoot}>
-        <div className={styles.errorBanner}>This agent is no longer on the crew.</div>
+      <div className={form.page}>
+        <p className={form.errorBanner} role="alert">This agent is no longer on the crew.</p>
       </div>
     );
   }
 
+  const name = definition?.name || 'Unavailable agent';
+
   return (
-    <div className={styles.sectionRoot}>
-      <h4 className={styles.sectionTitle}>{definition?.name || 'Unavailable agent'}</h4>
-      <p className={styles.metaRow}>
-        <span>Callable id</span>
-        <code>{assignment.id}</code>
-      </p>
-      {definition ? (
-        <div className={styles.splitNote}>
-          <p>
-            <strong>Set here</strong>: whether {definition.name} is on in this workspace, the
-            context it works under, and the paths it may touch — the three things below.
-          </p>
-          <p>
-            <strong>Shared everywhere</strong>: instructions, skills, providers, MCP and shell
-            policy. Those belong to the agent&apos;s definition, and an edit there reaches every
-            workspace using it, from its next turn. A definition that is disabled or archived
-            there stays off in every workspace, including this one.{' '}
-            <button type="button" className={styles.linkButton} onClick={handleOpenDefinition}>
-              Edit in Settings → Agents
-            </button>
-          </p>
+    <div className={form.page}>
+      <div className={styles.identity}>
+        <p className={form.metaRow}>
+          <span>Callable id</span>
+          <code className={form.code}>{assignment.id}</code>
+        </p>
+        <div className={styles.enabled}>
+          <Switch
+            label="Enabled in this workspace"
+            checked={enabled}
+            onChange={setEnabled}
+            disabled={inert}
+          />
         </div>
+      </div>
+
+      {definition ? (
+        <p className={styles.shared}>
+          Instructions, skills, model, MCP and shell come from {name}&apos;s shared definition, and an
+          edit there reaches every workspace using it.{' '}
+          <button type="button" className={form.linkButton} onClick={handleOpenDefinition}>
+            Edit in Settings → Agents
+          </button>
+        </p>
       ) : (
-        <p className={styles.sectionDescription}>
-          This assignment points at a shared agent that no longer exists. Re-create it in Settings
-          → Agents, or remove it from the crew.
+        <p className={form.hintWarning}>
+          This assignment points at a shared agent that no longer exists. Re-create it in Settings →
+          Agents, or remove it from the crew.
+        </p>
+      )}
+      {libraryHold && (
+        <p className={form.hintWarning} role="note">
+          {name} is {libraryHold} in the library, so it stays off here whatever this switch says.
+          Change that on the shared definition.
+        </p>
+      )}
+      {!enabled && (
+        <p className={form.hint}>
+          Off parks it: it keeps its seat, context and grants, and it is still listed to other agents
+          (though <code className={form.code}>workspace_listAgents</code> skips it by default). Tasks
+          delegated to it are refused.
         </p>
       )}
 
-      <div className={styles.field}>
-        <label className={styles.checkboxRow}>
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-            disabled={busy}
-          />
-          <span>Enabled in this workspace</span>
-        </label>
-        <span className={styles.hint}>
-          Off parks it here: it keeps its seat on the crew with the context and grants below, and
-          it still appears in the roster other agents are given, though{' '}
-          <code>workspace_listAgents</code> skips it by default. Any task delegated to it is
-          refused, and delegation is the only thing that runs it. Reversible at any time.
-        </span>
-        {libraryHold && (
-          <span className={styles.hintWarning}>
-            {definition?.name} is {libraryHold} in the library, so it stays off here whatever this
-            box says — change that on the shared definition.
-          </span>
-        )}
+      <div className={form.columns}>
+        <section className={`${form.panel} ${form.panelFill}`}>
+          <header className={form.panelHeader}>
+            <h3 className={form.panelTitle} id="assignment-context-title">Context for this workspace</h3>
+            <span className={form.panelMeta}>Added to its shared instructions, here only</span>
+          </header>
+          <div className={form.panelBody}>
+            <textarea
+              id="assignment-context"
+              className={`${form.textarea} ${form.textareaFill}`}
+              value={context}
+              onChange={(e) => setContext(e.target.value)}
+              aria-labelledby="assignment-context-title"
+              placeholder="What this agent should know about its job here."
+              disabled={inert}
+            />
+          </div>
+        </section>
+
+        <section className={`${form.panel} ${form.panelFill}`}>
+          <header className={form.panelHeader}>
+            <h3 className={form.panelTitle} id="assignment-grants-title">Path grants in this workspace</h3>
+          </header>
+          <div className={form.panelBody}>
+            <p className={form.lede}>
+              Local to this workspace. Paths approved during a run land here too, so approving access in
+              one project never widens it in another.
+            </p>
+            <PathGrantEditor
+              grants={grants}
+              onChange={setGrants}
+              make={(path, access) => ({ path, access })}
+              disabled={inert}
+              label="Path grants in this workspace"
+            />
+          </div>
+        </section>
       </div>
 
-      <div className={styles.field}>
-        <label className={styles.label} htmlFor="assignment-context">
-          Context for this workspace
-        </label>
-        <textarea
-          id="assignment-context"
-          className={styles.textarea}
-          value={context}
-          onChange={(e) => setContext(e.target.value)}
-          rows={5}
-          placeholder="What this agent should know about its job here."
-          disabled={busy}
-        />
-        <span className={styles.hint}>
-          Added to the shared instructions, in this workspace only.
-        </span>
-      </div>
+      {error && <p className={form.errorBanner} role="alert">{error}</p>}
 
-      <div className={styles.field}>
-        <label className={styles.label}>Path grants in this workspace</label>
-        <PathGrantList grants={grants} onChange={setGrants} disabled={busy} />
-        <span className={styles.hint}>
-          Local to this workspace. Paths approved during a run are saved here too, so approving
-          access in one project never widens it in another.
-        </span>
-      </div>
-
-      {error && (
-        <div className={styles.errorBanner} role="alert">
-          {error}
-        </div>
-      )}
-      <div className={styles.actions}>
-        <div className={styles.dangerZone}>
-          <button
-            type="button"
-            className={styles.dangerButton}
-            onClick={handleUnassign}
-            disabled={busy}
-          >
-            Remove from crew
-          </button>
-          <span className={styles.hint}>
-            Deletes the context and grants above and retires the callable id. Uncheck Enabled
-            instead to park it.
-          </span>
-        </div>
-        <button type="button" className={styles.primaryButton} onClick={handleSave} disabled={busy}>
-          {busy ? 'Saving…' : 'Save'}
+      <div className={styles.danger}>
+        <button type="button" className={form.dangerButton} onClick={handleUnassign} disabled={inert}>
+          Remove from crew
         </button>
+        <span className={form.hint}>
+          Deletes the context and grants above and retires the callable id. Switch it off instead to park it.
+        </span>
       </div>
     </div>
   );

@@ -3,12 +3,12 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 
-// Only the Agents tab is under test; the other panes are heavy modules this
-// shell merely switches between.
+// The Agents tab is a stub that shows its deep link, and Appearance is real
+// (it calls nothing); the other panes are heavy modules this shell merely
+// switches between.
 vi.mock('./AssistantProviderSettings', () => ({ default: () => <div /> }));
 vi.mock('./McpServersSettings', () => ({ default: () => <div /> }));
 vi.mock('./SkillsSettings', () => ({ default: () => <div /> }));
-vi.mock('./AppearanceSettings', () => ({ default: () => <div /> }));
 vi.mock('./ApplicationsSettings', () => ({ default: () => <div /> }));
 vi.mock('./AboutSettings', () => ({ default: () => <div /> }));
 vi.mock('./AgentLibrarySettings', () => ({
@@ -26,11 +26,13 @@ vi.mock('./AgentLibrarySettings', () => ({
 
 import SettingsModal, { TABS } from './SettingsModal';
 
-const modal = (props: { isOpen: boolean; initialAgentDefinitionId?: string | null }) => (
+type Tab = (typeof TABS)[keyof typeof TABS];
+
+const modal = (props: { isOpen: boolean; initialAgentDefinitionId?: string | null; initialTab?: Tab }) => (
   <SettingsModal
     isOpen={props.isOpen}
     onClose={vi.fn()}
-    initialTab={TABS.AGENTS}
+    initialTab={props.initialTab ?? TABS.AGENTS}
     initialAgentDefinitionId={props.initialAgentDefinitionId}
   />
 );
@@ -42,8 +44,7 @@ describe('SettingsModal agent deep link', () => {
   });
 
   // Every deep link comes from a control this modal's overlay covers, so the
-  // next one can only arrive after a close. Reopening re-arms the id; no
-  // remount key needed to force the library to read it.
+  // next one can only arrive after a close, which unmounts the window.
   it('lands a later deep link on a different agent once it has been closed', () => {
     const { rerender } = render(modal({ isOpen: true, initialAgentDefinitionId: 'def-1' }));
     expect(screen.getByTestId('library')).toHaveTextContent('def-1');
@@ -71,5 +72,28 @@ describe('SettingsModal agent deep link', () => {
   it('opens the plain gallery when no agent was named', () => {
     render(modal({ isOpen: true }));
     expect(screen.getByTestId('library')).toHaveTextContent('gallery');
+  });
+});
+
+describe('SettingsModal window', () => {
+  it('reopens on the tab asked for, not the one it was closed on', () => {
+    const { rerender } = render(modal({ isOpen: true, initialTab: TABS.AGENTS }));
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Agents');
+
+    rerender(modal({ isOpen: false, initialTab: TABS.AGENTS }));
+    rerender(modal({ isOpen: true, initialTab: TABS.APPEARANCE }));
+    expect(screen.getByRole('heading', { level: 2 })).toHaveTextContent('Appearance');
+    expect(screen.getByRole('button', { name: 'Appearance' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByTestId('library')).toBeNull();
+  });
+
+  it('moves focus into the dialog, onto the page it opened on', () => {
+    render(modal({ isOpen: true, initialTab: TABS.APPEARANCE }));
+    expect(screen.getByRole('button', { name: 'Appearance' })).toHaveFocus();
+  });
+
+  it('names the page once: in the window header, not again in the page', () => {
+    render(modal({ isOpen: true, initialTab: TABS.APPEARANCE }));
+    expect(screen.getAllByRole('heading', { name: 'Appearance' })).toHaveLength(1);
   });
 });

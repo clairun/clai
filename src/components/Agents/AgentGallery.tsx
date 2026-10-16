@@ -71,7 +71,6 @@ const AgentGallery = ({
     <div className={styles.gallery}>
       <div className={styles.header}>
         <div className={styles.headerText}>
-          <h3 className={styles.title}>Agents</h3>
           <p className={styles.description}>
             Agents you can put on any workspace's crew. Edits reach every workspace on its next
             turn.

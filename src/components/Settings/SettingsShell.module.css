@@ -1,0 +1,243 @@
+/**
+ * The settings window shared by workspace settings and the app Settings: a
+ * fixed-size dialog with a sidebar of pages and the current page filling the
+ * rest. Pages lay themselves out inside `.body`; the window never grows with
+ * its content.
+ */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-portal-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--color-overlay-60);
+}
+
+/* The app Settings opens over workspace settings, from a crew member's link. */
+.overlayNested {
+  z-index: var(--z-portal-modal-nested);
+}
+
+.window {
+  width: min(1200px, 100%);
+  height: min(800px, 100%);
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-primary);
+  box-shadow: var(--shadow-xl);
+}
+
+/* ── Sidebar ──────────────────────────────────────────────────────── */
+
+.sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 10px;
+  border-right: 1px solid var(--color-border-light);
+  background: var(--color-bg-secondary);
+}
+
+.sidebarTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 16px;
+}
+
+.sidebarHeading {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.sidebarCaption {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.navGroup {
+  margin: 12px 8px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.navList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.navList li {
+  margin: 0;
+}
+
+.navItem {
+  appearance: none;
+  position: relative;
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.navItem:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.navItem[aria-current="page"] {
+  background: var(--color-primary-alpha-10);
+  color: var(--color-text-primary);
+}
+
+/* The current page is marked by shape as well as tint. */
+.navItem[aria-current="page"]::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: var(--color-primary);
+}
+
+.navIcon {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.navText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.navLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.navSummary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* ── Main column ──────────────────────────────────────────────────── */
+
+.main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px 16px 14px 24px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.headerText {
+  flex: 1;
+  min-width: 120px;
+}
+
+.title {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.title:focus {
+  outline: none;
+}
+
+.subtitle {
+  margin: 2px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.closeButton {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.closeButton:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+/* The page area. Pages fill it; it scrolls when one is taller, as a form
+   is once its columns stack below 960px. */
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+@media (max-width: 760px) {
+  .window {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+}

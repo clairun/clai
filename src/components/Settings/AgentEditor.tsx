@@ -1,10 +1,11 @@
 /**
  * One shared agent, open for editing — or a blank one being created. Replaces
- * the gallery in the same pane: breadcrumb back to Agents, the face row, the
- * behaviour form, then Save and Archive. The face choice lives here so it
+ * the gallery in the same pane: breadcrumb back to Agents with Save and
+ * Archive on the same row, the face row, then the behaviour form filling the
+ * rest of the pane. The face choice lives here so it
  * starts over with every agent opened and can never be saved onto another.
  */
-import { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { saveAgentDefinition, type AgentDefinitionDetail } from '../../api/client';
 import AgentFacePicker, {
   chosenSeed,
@@ -132,20 +133,62 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
 
   const title = definition ? definition.name : 'New agent';
 
-  return (
-    <div className={styles.editor}>
-      <nav className={styles.breadcrumb} aria-label="Breadcrumb">
-        <button type="button" className={styles.back} onClick={onBack} disabled={saving}>
-          ‹ Agents
-        </button>
-        <span className={styles.crumbSeparator} aria-hidden="true">
-          ›
-        </span>
-        <span className={styles.crumbCurrent}>{title}</span>
-      </nav>
+  // Escape clears a search field with text, then leaves a drill-in view of
+  // the form, before it can reach the Settings modal, which closes on it.
+  // Stopping the React event stops the native one at the portal root, ahead
+  // of the modal's `document` listener.
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Escape') return;
+    const target = e.target;
+    const clearsSearch = target instanceof HTMLInputElement && target.type === 'search' && !!target.value;
+    if (clearsSearch || sectionRef.current?.back?.()) e.stopPropagation();
+  };
 
-      <div className={styles.headerText}>
-        <h3 className={styles.title}>{title}</h3>
+  // tabIndex -1 keeps focus inside the editor after a click on blank space,
+  // so Escape still reaches the handler.
+  return (
+    <div className={styles.editor} onKeyDown={handleKeyDown} tabIndex={-1}>
+      <div className={styles.top}>
+        <div className={styles.breadcrumb}>
+          <button type="button" className={styles.back} onClick={onBack} disabled={saving}>
+            ‹ Agents
+          </button>
+          <span className={styles.crumbSeparator} aria-hidden="true">
+            ›
+          </span>
+          <h3 className={styles.title}>{title}</h3>
+        </div>
+        <div className={styles.actions}>
+          {dirty && !saving && <span className={styles.dirty}>Unsaved changes</span>}
+          {definition && (
+            <button
+              type="button"
+              className={styles.secondary}
+              onClick={handleArchiveToggle}
+              disabled={saving}
+            >
+              {definition.archived ? 'Restore' : 'Archive'}
+            </button>
+          )}
+          <button type="button" className={styles.primary} onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving…' : definition ? 'Save agent' : 'Create agent'}
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className={styles.errorBanner} role="alert">
+          {error}
+        </div>
+      )}
+
+      <div className={styles.identity}>
+        <AgentFacePicker
+          current={currentIdentity}
+          choice={face}
+          onChange={setFace}
+          disabled={saving}
+        />
         <p className={styles.description}>
           {definition
             ? definition.assignedWorkspaces.length > 0
@@ -157,47 +200,17 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
         </p>
       </div>
 
-      {error && (
-        <div className={styles.errorBanner} role="alert">
-          {error}
-        </div>
-      )}
-
-      <AgentFacePicker
-        current={currentIdentity}
-        choice={face}
-        onChange={setFace}
-        disabled={saving}
-      />
-
-      <AgentBehaviorForm
-        ref={sectionRef}
-        workspaceId=""
-        agentId={definition?.id ?? null}
-        details={null}
-        initialAgent={initialAgent}
-        saveBehavior={save}
-        deps={deps}
-        saving={saving}
-        onDirtyChange={setDirty}
-        showHeading={false}
-      />
-
-      <div className={styles.actions}>
-        <button type="button" className={styles.primary} onClick={handleSave} disabled={saving}>
-          {saving ? 'Saving…' : definition ? 'Save agent' : 'Create agent'}
-        </button>
-        {definition && (
-          <button
-            type="button"
-            className={styles.secondary}
-            onClick={handleArchiveToggle}
-            disabled={saving}
-          >
-            {definition.archived ? 'Restore' : 'Archive'}
-          </button>
-        )}
-        {dirty && !saving && <span className={styles.dirty}>Unsaved changes</span>}
+      <div className={styles.form}>
+        <AgentBehaviorForm
+          ref={sectionRef}
+          workspaceId=""
+          agentId={definition?.id ?? null}
+          initialAgent={initialAgent}
+          saveBehavior={save}
+          deps={deps}
+          saving={saving}
+          onDirtyChange={setDirty}
+        />
       </div>
     </div>
   );
