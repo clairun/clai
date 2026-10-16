@@ -34,6 +34,7 @@ const card = (over: Partial<TaskCallCard> = {}): TaskCallCard => ({
   status: 'queued',
   assignedToWorkspaceAgentId: 'wa-review',
   assignedAgentDefinitionId: 'def-review',
+  assignedAgentDisplayName: '',
   detail: '',
   detailIsError: false,
   ...over,
@@ -85,6 +86,11 @@ describe('TaskCard', () => {
     render(<TaskCard card={card()} roster={[]} />);
     expect(screen.getByText('Agent')).toBeInTheDocument();
     expect(screen.getByText('Round 3 review')).toBeInTheDocument();
+  });
+
+  it('names an agent that has left the crew as the call saw it', () => {
+    render(<TaskCard card={card({ assignedAgentDisplayName: 'Old Reviewer' })} roster={[]} />);
+    expect(screen.getByText('Old Reviewer')).toBeInTheDocument();
   });
 
   it('leads a poll with its answer rather than the instructions', () => {

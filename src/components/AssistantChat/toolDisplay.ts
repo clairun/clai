@@ -237,6 +237,8 @@ export interface TaskCallCard {
   status: string;
   assignedToWorkspaceAgentId: string;
   assignedAgentDefinitionId: string;
+  /** The assignee's name when the call answered; '' if the payload had none. */
+  assignedAgentDisplayName: string;
   /** The task's own error, else its result summary; '' while it has neither. */
   detail: string;
   /** `detail` is the task's error rather than its summary. */
@@ -307,6 +309,7 @@ export const inlineTaskCard = (
     status,
     assignedToWorkspaceAgentId,
     assignedAgentDefinitionId: stringField(task, 'assignedAgentDefinitionId'),
+    assignedAgentDisplayName: stringField(task, 'assignedAgentDisplayName'),
     detail: clampCardText(detail),
     detailIsError: !!taskError,
   };

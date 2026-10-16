@@ -69,6 +69,7 @@ fn compact_input(tool_name: &str, input: &Value) -> Value {
         "web_fetch" => "url",
         "ask_user" => "question",
         "create_vega_chart" => "title",
+        "workspace_sendTaskMessage" => "message",
         _ => "",
     };
     let selected = object.get_key_value(preferred).or_else(|| {
@@ -111,6 +112,7 @@ fn compact_result(tool_name: &str, result: &Value) -> Option<Value> {
                 "status",
                 "assignedToWorkspaceAgentId",
                 "assignedAgentDefinitionId",
+                "assignedAgentDisplayName",
             ] {
                 if let Some(value) = task.get(field).and_then(Value::as_str) {
                     compact.insert(field.to_string(), Value::String(value.to_string()));
@@ -303,13 +305,17 @@ mod tests {
     fn task_message_keeps_its_task_and_target() {
         let mut invocation = call(
             "mcp__clai__workspace_sendTaskMessage",
-            json!({"ok": true, "queued": false, "task": {"id": "t", "title": "Title", "status": "running", "assignedToWorkspaceAgentId": "agent"}}),
+            json!({"ok": true, "queued": false, "task": {"id": "t", "title": "Title", "status": "running", "assignedToWorkspaceAgentId": "agent", "assignedAgentDisplayName": "Reviewer"}}),
         );
-        invocation.params = json!({"message": "please also check X", "taskId": "t"});
+        // `attempt` sorts before `message`: without the preferred key the row would show it.
+        invocation.params =
+            json!({"attempt": "2", "message": "please also check X", "taskId": "t"});
         let displayed = tool_call(invocation);
         assert_eq!(displayed.params, json!({"message": "please also check X"}));
         assert!(displayed.has_full_input);
-        assert_eq!(displayed.result.unwrap()["task"]["title"], "Title");
+        let result = displayed.result.unwrap();
+        assert_eq!(result["task"]["title"], "Title");
+        assert_eq!(result["task"]["assignedAgentDisplayName"], "Reviewer");
     }
 
     #[test]

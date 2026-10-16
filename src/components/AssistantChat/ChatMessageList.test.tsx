@@ -551,6 +551,22 @@ describe('ChatMessageList', () => {
       expect(getToolCallInput).toHaveBeenCalledWith('ws-1', 'sess-1', 'tk-0');
     });
 
+    it('signs a stop in a text-and-tool turn with the owner, or Clai without one', () => {
+      const calls = actionCalls('workspace_stopTask', taskPayload({ status: 'stopping' }));
+      // A turn with prose renders through the message block, not the merged tool group.
+      calls.messages[0]!.content.unshift({ type: 'text', text: 'Stopping the review.' });
+      const props = { workspaceId: 'ws-1', messages: calls.messages, toolCalls: calls.toolCalls, taskRoster: crew };
+      const { rerender } = render(<ChatMessageList {...props} owner={sender} />);
+      expect(screen.getByText('Stopping the review.')).toBeInTheDocument();
+      expectRoute(actionCard());
+
+      rerender(<ChatMessageList {...props} />);
+      const text = actionCard().textContent ?? '';
+      expect(text.indexOf('Clai')).toBeGreaterThan(-1);
+      expect(text.indexOf('Clai')).toBeLessThan(text.indexOf('Frontend Architect'));
+      expect(text).not.toContain('Main');
+    });
+
     it('keeps a failed stop as a plain row that shows its error', () => {
       const { messages, toolCalls } = actionCalls('workspace_stopTask', null);
       toolCalls[0]!.status = 'failed';

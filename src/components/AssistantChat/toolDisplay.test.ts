@@ -248,6 +248,7 @@ describe('inlineTaskCard', () => {
       workspaceId: 'ws-1',
       assignedToWorkspaceAgentId: 'wa-7',
       assignedAgentDefinitionId: 'def-7',
+      assignedAgentDisplayName: 'Reviewer',
       title: 'Round 3 review',
       instructions: '  Review the branch end to end.  ',
       status: 'queued',
@@ -267,6 +268,7 @@ describe('inlineTaskCard', () => {
       status: 'queued',
       assignedToWorkspaceAgentId: 'wa-7',
       assignedAgentDefinitionId: 'def-7',
+      assignedAgentDisplayName: 'Reviewer',
       detail: '',
       detailIsError: false,
     });

@@ -7,7 +7,7 @@
  * Every value describing the task comes from the `TaskCallCard` it is given;
  * only the assignee's face and name are read from the live crew, so a renamed
  * agent is not misattributed. The card never subscribes to the task itself:
- * whoever renders it decides whether `card.status` is frozen or live.
+ * its status is frozen as the call saw it.
  */
 import { memo, useMemo, type ReactNode } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
@@ -27,13 +27,13 @@ export interface TaskCardProps {
   onOpen?: (taskId: string) => void;
 }
 
-/** Assignee name from the crew; tasks whose agent has left keep a generic one. */
+/** Assignee name from the crew; one that has left keeps the name the call saw. */
 const assigneeName = (
   card: TaskCallCard,
   roster: readonly WorkspaceAgentResponse[]
 ): string => {
   const agent = roster.find((entry) => entry.id === card.assignedToWorkspaceAgentId);
-  return agent ? agentDisplayName(agent) : 'Agent';
+  return agent ? agentDisplayName(agent) : card.assignedAgentDisplayName || 'Agent';
 };
 
 const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
