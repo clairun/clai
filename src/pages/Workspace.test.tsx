@@ -1303,9 +1303,10 @@ describe('Workspace nested task logs', () => {
     ).toHaveTextContent(PARENT.title);
 
     await userEvent.click(within(childLog).getByRole('button', { name: 'Back' }));
+    const returnedLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
     expect(
-      await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` })
-    ).toHaveTextContent('parse() fixed');
+      within(returnedLog).getByRole('button', { name: `Open task ${CHILD.title}` })
+    ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 
