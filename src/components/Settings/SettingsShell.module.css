@@ -14,7 +14,6 @@
   justify-content: center;
   padding: 24px;
   background: var(--color-overlay-60);
-  animation: fadeIn var(--transition-fast);
 }
 
 /* The app Settings opens over workspace settings, from a crew member's link. */
@@ -32,7 +31,6 @@
   border-radius: var(--radius-lg);
   background: var(--color-bg-primary);
   box-shadow: var(--shadow-xl);
-  animation: rise var(--transition-base);
 }
 
 /* ── Sidebar ──────────────────────────────────────────────────────── */
@@ -241,22 +239,5 @@
 @media (max-width: 760px) {
   .window {
     grid-template-columns: 180px minmax(0, 1fr);
-  }
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes rise {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .overlay,
-  .window {
-    animation: none;
   }
 }

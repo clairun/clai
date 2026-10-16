@@ -7,16 +7,6 @@
   justify-content: center;
   /* Above the floating terminal card (z-index 100). */
   z-index: 200;
-  animation: backdropFadeIn 120ms ease-out;
-}
-
-@keyframes backdropFadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
 }
 
 .modal {
@@ -29,18 +19,6 @@
   background: var(--color-bg-elevated);
   box-shadow: var(--shadow-card);
   overflow: hidden;
-  animation: modalSlideIn 140ms ease-out;
-}
-
-@keyframes modalSlideIn {
-  from {
-    transform: translateY(6px);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
 }
 
 .header {
