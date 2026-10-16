@@ -883,7 +883,7 @@ const MessageBlock = memo(({ message, ...props }: MessageBlockProps) => {
   if (message.role !== 'user') return null;
   const sender = props.sender ?? { kind: 'user' };
   if (sender.kind === 'user') return <UserMessageBlock message={message} {...props} />;
-  if (sender.kind === 'task') return <TaskResultBlock message={message} sender={sender} />;
+  if (sender.kind === 'task') return <TaskResultBlock sender={sender} />;
   return (
     <InboxMessageBlock
       message={message}
@@ -1064,20 +1064,13 @@ const AssistantMessageBlock = ({
   );
 };
 
-const TaskResultBlock = ({
-  message,
-  sender,
-}: {
-  message: AssistantMessage;
-  sender: Extract<MessageSender, { kind: 'task' }>;
-}) => {
+const TaskResultBlock = ({ sender }: { sender: Extract<MessageSender, { kind: 'task' }> }) => {
   const { workspaceId = '', onOpenTask } = useTaskCardSurface();
   const liveTask = useTask(workspaceId, sender.taskId);
   const sameCycle = liveTask && Number(liveTask.cycleNo) === sender.cycleNo;
   return (
     <TaskResultCard
       sender={sender}
-      body={getTextContent(message)}
       failureReason={sameCycle ? liveTask.failureReason : null}
       onOpen={onOpenTask}
     />
@@ -1337,7 +1330,7 @@ type ToolSegment =
   // `key` is the first call's id so a run keeps its expanded/collapsed
   // state as later calls append to it.
   | { kind: 'rows'; key: string; items: ToolItem[] }
-  | { kind: 'task'; key: string; card: TaskCallCard; call?: ToolInvocation };
+  | { kind: 'task'; key: string; card: TaskCallCard };
 
 const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
   const segments: ToolSegment[] = [];
@@ -1351,7 +1344,7 @@ const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
     const card = inlineTaskCard(tu.toolName, tu.result, tu.error, tu.status);
     if (card && card.variant === 'full') {
       flushRun();
-      segments.push({ kind: 'task', key: tu.toolCallId, card, call: tu.call });
+      segments.push({ kind: 'task', key: tu.toolCallId, card });
       continue;
     }
     run.push({ toolUse: tu, card });
@@ -1365,58 +1358,13 @@ const splitAtRichRows = (toolUses: EnrichedToolUse[]): ToolSegment[] => {
  * open-task handler from context here — rather than threading them as props —
  * keeps every memoized message and tool group untouched when they change.
  */
-const ChatTaskCard = memo(
-  ({ card, call, origin = null }: { card: TaskCallCard; call?: ToolInvocation; origin?: SenderAgent | null }) => {
-    const { workspaceId = '', roster, onOpenTask } = useTaskCardSurface();
-    if (card.kind === 'assign' || card.kind === 'poll') {
-      return <TaskCard card={card} roster={roster} onOpen={onOpenTask} />;
-    }
-    const preview = card.kind === 'message' ? asParamsObject(call?.params)?.message : undefined;
-    return (
-      <TaskActionCard card={card} origin={origin} roster={roster} onOpen={onOpenTask}>
-        {call && typeof preview === 'string' && preview && (
-          <SentTaskMessage workspaceId={workspaceId} call={call} preview={preview} />
-        )}
-      </TaskActionCard>
-    );
+const ChatTaskCard = memo(({ card, origin = null }: { card: TaskCallCard; origin?: SenderAgent | null }) => {
+  const { roster, onOpenTask } = useTaskCardSurface();
+  if (card.kind === 'assign' || card.kind === 'poll') {
+    return <TaskCard card={card} roster={roster} onOpen={onOpenTask} />;
   }
-);
-
-/**
- * A task message's text. The chat's params carry it clipped to 300 characters
- * and marked with a trailing `…` (see `compact_input` in display.rs); only a
- * clipped one fetches the rest, on demand.
- */
-const SentTaskMessage = ({
-  workspaceId,
-  call,
-  preview,
-}: {
-  workspaceId: string;
-  call: ToolInvocation;
-  preview: string;
-}) => {
-  const [open, setOpen] = useState(false);
-  const clipped = preview.endsWith('…');
-  const input = useToolCallInput(workspaceId, call, open && clipped);
-  const fromInput = input.state === 'ready' ? asParamsObject(input.value)?.message : undefined;
-  const full = open && typeof fromInput === 'string' ? fromInput : preview;
-  return (
-    <>
-      {(open && renderDetailPending(input, 'message')) || <MarkdownMessage content={full} />}
-      {clipped && (
-        <button
-          type="button"
-          className={styles.toolShowEarlier}
-          onClick={() => setOpen((prev) => !prev)}
-          aria-expanded={open}
-        >
-          {open ? 'Show less' : 'Show full message'}
-        </button>
-      )}
-    </>
-  );
-};
+  return <TaskActionCard card={card} origin={origin} roster={roster} onOpen={onOpenTask} />;
+});
 
 interface ToolCallGroupProps {
   workspaceId: string;
@@ -1442,7 +1390,7 @@ const ToolCallGroup = memo(({ workspaceId, toolUses, owner }: ToolCallGroupProps
     <div className={styles.toolList}>
       {segments.map((seg) =>
         seg.kind === 'task' ? (
-          <ChatTaskCard key={seg.key} card={seg.card} call={seg.call} origin={owner} />
+          <ChatTaskCard key={seg.key} card={seg.card} origin={owner} />
         ) : (
           <CollapsibleToolRows key={seg.key} workspaceId={workspaceId} items={seg.items} />
         )

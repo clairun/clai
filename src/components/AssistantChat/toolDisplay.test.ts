@@ -264,13 +264,11 @@ describe('inlineTaskCard', () => {
       variant: 'full',
       taskId: 'task-1',
       title: 'Round 3 review',
-      instructions: 'Review the branch end to end.',
       status: 'queued',
       assignedToWorkspaceAgentId: 'wa-7',
       assignedAgentDefinitionId: 'def-7',
       assignedAgentDisplayName: 'Reviewer',
-      detail: '',
-      detailIsError: false,
+      error: '',
     });
   });
 
@@ -288,17 +286,16 @@ describe('inlineTaskCard', () => {
     const long = 'x'.repeat(400);
     const card = inlineTaskCard(
       'workspace_getTaskResult',
-      task({ status: 'completed', instructions: long, resultSummary: long, title: long }),
+      task({ status: 'failed', error: long, title: long }),
       null,
       'completed'
     );
-    expect(card?.instructions).toHaveLength(301);
-    expect(card?.instructions.endsWith('…')).toBe(true);
-    expect(card?.detail).toHaveLength(301);
+    expect(card?.error).toHaveLength(301);
     expect(card?.title).toHaveLength(301);
+    expect(card?.title.endsWith('…')).toBe(true);
     // Anything that already fits is left exactly as it came.
     const short = inlineTaskCard('workspace_assignTask', task(), null, 'completed');
-    expect(short?.instructions).toBe('Review the branch end to end.');
+    expect(short?.title).toBe('Round 3 review');
   });
 
   it('gives a hand-off a full card whatever status it was stamped with', () => {
@@ -317,24 +314,15 @@ describe('inlineTaskCard', () => {
     }
   });
 
-  it('prefers the task error over its summary, and says which it is', () => {
+  it('carries the task error but never its summary, which is written for the agent', () => {
     const card = inlineTaskCard(
       'workspace_getTaskResult',
       task({ status: 'failed', resultSummary: 'partial work', error: '  boom  ' }),
       null,
       'completed'
     );
-    expect(card).toMatchObject({ detail: 'boom', detailIsError: true });
-  });
-
-  it('shows the summary when the task carries no error', () => {
-    const card = inlineTaskCard(
-      'workspace_getTaskResult',
-      task({ status: 'completed', resultSummary: 'Found 3 issues.' }),
-      null,
-      'completed'
-    );
-    expect(card).toMatchObject({ detail: 'Found 3 issues.', detailIsError: false });
+    expect(card).toMatchObject({ error: 'boom' });
+    expect(JSON.stringify(card)).not.toContain('partial work');
   });
 
   it('unwraps the MCP envelope the bridged tools answer in', () => {

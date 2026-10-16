@@ -231,26 +231,25 @@ export interface TaskCallCard {
   variant: 'full' | 'slim';
   taskId: string;
   title: string;
-  /** What the task was asked to do; '' if the payload carried no instructions. */
-  instructions: string;
   /** Task status at the moment of the call, not now. */
   status: string;
   assignedToWorkspaceAgentId: string;
   assignedAgentDefinitionId: string;
   /** The assignee's name when the call answered; '' if the payload had none. */
   assignedAgentDisplayName: string;
-  /** The task's own error, else its result summary; '' while it has neither. */
-  detail: string;
-  /** `detail` is the task's error rather than its summary. */
-  detailIsError: boolean;
+  /**
+   * The task's own error — a run failure the user may need to act on; '' if
+   * none. Instructions and result summaries are written for agents, so the
+   * card leaves them to the task's log.
+   */
+  error: string;
 }
 
 const stringField = (obj: Record<string, unknown>, key: string): string =>
   typeof obj[key] === 'string' ? obj[key] : '';
 
 /**
- * A card shows three clamped lines, but the text behind them is unbounded: a
- * task's instructions are a whole brief and its summary is a whole report.
+ * A card shows three clamped lines, but the text behind them is unbounded.
  * Cutting at the source keeps the DOM — and the button's spoken name — the
  * size of what is actually shown.
  */
@@ -297,21 +296,16 @@ export const inlineTaskCard = (
   const assignedToWorkspaceAgentId = stringField(task, 'assignedToWorkspaceAgentId');
   if (!taskId || !title || !status || !assignedToWorkspaceAgentId) return null;
 
-  const taskError = stringField(task, 'error').trim();
-  const detail = taskError || stringField(task, 'resultSummary').trim();
-
   return {
     kind,
     variant: kind !== 'poll' || !isTaskActive({ status }) ? 'full' : 'slim',
     taskId,
     title: clampCardText(title),
-    instructions: clampCardText(stringField(task, 'instructions').trim()),
     status,
     assignedToWorkspaceAgentId,
     assignedAgentDefinitionId: stringField(task, 'assignedAgentDefinitionId'),
     assignedAgentDisplayName: stringField(task, 'assignedAgentDisplayName'),
-    detail: clampCardText(detail),
-    detailIsError: !!taskError,
+    error: clampCardText(stringField(task, 'error').trim()),
   };
 };
 

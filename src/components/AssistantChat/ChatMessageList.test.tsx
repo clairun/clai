@@ -397,7 +397,9 @@ describe('ChatMessageList', () => {
     expect(screen.getAllByText('Running')).toHaveLength(4);
     // The hand-off and the answer are cards of their own, outside the run.
     expect(screen.getByText('Delegated to')).toBeInTheDocument();
-    expect(screen.getByText('Found 3 issues.')).toBeInTheDocument();
+    expect(screen.getByText('Completed')).toBeInTheDocument();
+    // The summary is written for the agent; the card leaves it to the task log.
+    expect(screen.queryByText('Found 3 issues.')).toBeNull();
   });
 
   it('keeps every card in the order its call was made', () => {
@@ -424,8 +426,8 @@ describe('ChatMessageList', () => {
     };
     // hand-off → the slim poll in its run → the answer → the next hand-off.
     expect(at('Round 3 review')).toBeLessThan(at('Running'));
-    expect(at('Running')).toBeLessThan(at('Found 3 issues.'));
-    expect(at('Found 3 issues.')).toBeLessThan(at('Round 4 review'));
+    expect(at('Running')).toBeLessThan(at('Completed'));
+    expect(at('Completed')).toBeLessThan(at('Round 4 review'));
   });
 
   describe('task actions', () => {
@@ -517,7 +519,7 @@ describe('ChatMessageList', () => {
       expect(onOpenTask).toHaveBeenCalledWith('task-9');
     });
 
-    it('shows a message\'s text inside the card, sender → recipient, without a status', () => {
+    it('draws a message as sender → recipient, without its text or a status', () => {
       renderActions(
         actionCalls(
           'workspace_sendTaskMessage',
@@ -527,28 +529,14 @@ describe('ChatMessageList', () => {
       );
       const card = actionCard();
       expectRoute(card);
-      expect(within(card).getByText('Also check the migration.')).toBeInTheDocument();
+      // The text is written for the agent; the task's log has it.
+      expect(screen.queryByText('Also check the migration.')).toBeNull();
       expect(within(card).getByText('Round 3 review')).toBeInTheDocument();
       expect(within(card).queryByText('Requested to stop')).toBeNull();
       expectNoStatus(card);
       expect(screen.queryByText('Previous cycle summary.')).toBeNull();
       expect(screen.queryByText('workspace_sendTaskMessage')).toBeNull();
-      // Not clipped: the preview is the whole message, nothing to fetch.
-      expect(screen.queryByRole('button', { name: /full message/ })).toBeNull();
       expect(getToolCallInput).not.toHaveBeenCalled();
-    });
-
-    it('fetches the rest of a clipped message only on demand', async () => {
-      fullInputs.set('tk-0', { taskId: 'task-9', message: 'Also check the migration, then the seeds.' });
-      renderActions(
-        actionCalls('workspace_sendTaskMessage', taskPayload({ status: 'running' }), 'Also check the…')
-      );
-      expect(screen.getByText('Also check the…')).toBeInTheDocument();
-      expect(getToolCallInput).not.toHaveBeenCalled();
-
-      fireEvent.click(screen.getByRole('button', { name: 'Show full message' }));
-      expect(await screen.findByText('Also check the migration, then the seeds.')).toBeInTheDocument();
-      expect(getToolCallInput).toHaveBeenCalledWith('ws-1', 'sess-1', 'tk-0');
     });
 
     it('signs a stop in a text-and-tool turn with the owner, or Clai without one', () => {
@@ -1278,9 +1266,11 @@ describe('ChatMessageList', () => {
     });
 
     it('task origin renders result card, never user style', () => {
-      const { container } = list([fromTask('t1', 'Found 2 issues')]);
+      const { container } = list([fromTask('t1', '**Verdict:** `production_quality`')]);
       const card = screen.getByRole('article', { name: 'Result from Reviewer: Review PR #231' });
-      expect(within(card).getByText('Found 2 issues')).toBeInTheDocument();
+      // The result text is written for the agent; the task's log has it.
+      expect(within(card).queryByText(/Verdict/)).toBeNull();
+      expect(within(card).queryByRole('button', { name: /full result/ })).toBeNull();
       expect(within(card).getByText('Completed')).toBeInTheDocument();
       expect(screen.queryByText('You')).toBeNull();
       expect(within(card).queryByRole('button', { name: /Open task/ })).toBeNull();
@@ -1336,17 +1326,6 @@ describe('ChatMessageList', () => {
       list([fromAgent('a1', 'old note', { ...reviewer, displayName: 'Old Name' })]);
       expect(screen.getByText('Reviewer')).toBeInTheDocument();
       expect(screen.queryByText('Old Name')).toBeNull();
-    });
-
-    it('result card clamps and expands with aria-expanded', () => {
-      const long = `${'a'.repeat(320)} TAIL`;
-      list([fromTask('t1', long)]);
-      expect(screen.queryByText(/TAIL/)).toBeNull();
-      const toggle = screen.getByRole('button', { name: 'Show full result' });
-      expect(toggle).toHaveAttribute('aria-expanded', 'false');
-      fireEvent.click(toggle);
-      expect(screen.getByText(/TAIL/)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
     });
 
     it('inbox row has no edit/delete or delivery chip', () => {

@@ -1,6 +1,6 @@
 /**
- * A workspace task as the chat shows it: the assignee's face, what it was
- * asked to do, and how that call answered — instead of an opaque
+ * A workspace task as the chat shows it: the assignee's face, its title, and
+ * how that call answered — instead of an opaque
  * workspace-task tool row. Clicking opens the task's own log. A stop or a
  * message is drawn by `TaskActionCard` instead.
  *
@@ -9,7 +9,7 @@
  * agent is not misattributed. The card never subscribes to the task itself:
  * its status is frozen as the call saw it.
  */
-import { memo, useMemo, type ReactNode } from 'react';
+import { memo, useMemo } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
 import type { TaskCallCard } from '../AssistantChat/toolDisplay';
 import type { SenderAgent } from '../AssistantChat/messageSender';
@@ -82,13 +82,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
           {pill}
         </span>
         <span className={styles.title}>{card.title}</span>
-        {card.detail ? (
-          <span className={`${styles.detail} ${card.detailIsError ? styles.detailError : ''}`}>
-            {card.detail}
-          </span>
-        ) : (
-          card.instructions && <span className={styles.detail}>{card.instructions}</span>
-        )}
+        {card.error && <span className={styles.error}>{card.error}</span>}
       </span>
     </>
   );
@@ -104,7 +98,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
       className={className}
       onClick={() => onOpen(card.taskId)}
       // No aria-label: it would replace the card's own text — assignee, title,
-      // summary, and a poll's status — with a shorter sentence. The tooltip
+      // error, and a poll's status — with a shorter sentence. The tooltip
       // says what the click does; the content says what it is about.
       title={`Open the log of "${card.title}"`}
     >
@@ -121,16 +115,15 @@ export interface TaskActionCardProps {
   origin: SenderAgent | null;
   roster: readonly WorkspaceAgentResponse[];
   onOpen?: (taskId: string) => void;
-  /** A message's text, drawn as the body of the card. */
-  children?: ReactNode;
 }
 
 /**
  * A stop or a message, drawn as what it is: one agent addressing another.
  * The task is only context, so the card carries no status — the task's status
- * describes the task, not what was sent to it.
+ * describes the task, not what was sent to it. A message's text is written for
+ * the agent and stays in the task's log.
  */
-const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActionCardProps) => {
+const TaskActionCardImpl = ({ card, origin, roster, onOpen }: TaskActionCardProps) => {
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
   const title = onOpen ? (
     <button
@@ -155,7 +148,6 @@ const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActi
         <AgentAvatar identity={identity} size={18} />
         <span className={styles.who}>{assigneeName(card, roster)}</span>
       </span>
-      {children && <div className={styles.bubble}>{children}</div>}
       <span className={styles.context}>
         {card.kind === 'stop' ? (
           <>
