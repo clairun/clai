@@ -142,7 +142,7 @@ const renderStack = () => {
 
 const LEAVE_PROMPT = 'Save your changes before leaving?';
 
-const globalModalIsUp = () => screen.queryByRole('heading', { name: 'Settings' }) !== null;
+const globalModalIsUp = () => screen.queryByRole('dialog', { name: 'Settings' }) !== null;
 
 describe('WorkspaceSettingsModal under the global Settings modal', () => {
   it('stays open when a deep link opens the global modal over it', async () => {

@@ -14,6 +14,7 @@ import AppearanceSettings from './AppearanceSettings';
 import ApplicationsSettings from './ApplicationsSettings';
 import AboutSettings from './AboutSettings';
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
+import shell from './SettingsShell.module.css';
 import styles from './SettingsModal.module.css';
 
 /**
@@ -78,16 +79,6 @@ const AboutIcon = () => (
   </svg>
 );
 
-/**
- * Close icon
- */
-const CloseIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <line x1="18" y1="6" x2="6" y2="18" />
-    <line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
-
 // App-level settings. The Agents tab owns shared teammate definitions; a
 // workspace's own Main agent is edited in that workspace's settings.
 const TABS = {
@@ -101,6 +92,16 @@ const TABS = {
 } as const;
 
 type TabValue = (typeof TABS)[keyof typeof TABS];
+
+const NAV: { tab: TabValue; label: string; Icon: () => React.JSX.Element }[] = [
+  { tab: TABS.PROVIDER, label: 'AI Provider', Icon: ProviderIcon },
+  { tab: TABS.AGENTS, label: 'Agents', Icon: AgentsIcon },
+  { tab: TABS.SKILLS, label: 'Skills', Icon: SkillsIcon },
+  { tab: TABS.MCP_SERVERS, label: 'MCP Servers', Icon: PlugIcon },
+  { tab: TABS.APPLICATIONS, label: 'Applications', Icon: AppsIcon },
+  { tab: TABS.APPEARANCE, label: 'Appearance', Icon: AppearanceIcon },
+  { tab: TABS.ABOUT, label: 'About', Icon: AboutIcon },
+];
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -193,73 +194,53 @@ const SettingsModal = ({
   };
 
   return ReactDOM.createPortal(
-    <div className={styles.overlay} onClick={handleOverlayClick}>
-      <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div className={styles.header}>
-          <h2 className={styles.title}>Settings</h2>
-          <button className={styles.closeButton} onClick={onClose} title="Close">
-            <CloseIcon />
-          </button>
-        </div>
+    <div className={`${shell.overlay} ${shell.overlayNested}`} onClick={handleOverlayClick}>
+      <div
+        className={shell.window}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <nav className={shell.sidebar} aria-label="Settings pages">
+          <div className={shell.sidebarTitle}>
+            <span className={shell.sidebarHeading}>Settings</span>
+            <span className={shell.sidebarCaption}>App settings</span>
+          </div>
+          <ul className={shell.navList}>
+            {NAV.map(({ tab, label, Icon }) => (
+              <li key={tab}>
+                <button
+                  type="button"
+                  className={shell.navItem}
+                  aria-current={tab === activeTab ? 'page' : undefined}
+                  onClick={() => selectTab(tab)}
+                >
+                  <span className={shell.navIcon}><Icon /></span>
+                  <span className={shell.navText}>
+                    <span className={shell.navLabel}>{label}</span>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </nav>
 
-        <div className={styles.body}>
-          {/* Sidebar */}
-          <nav className={styles.sidebar}>
-            <button
-              className={`${styles.navItem} ${activeTab === TABS.PROVIDER ? styles.active : ''}`}
-              onClick={() => selectTab(TABS.PROVIDER)}
-            >
-              <ProviderIcon />
-              <span>AI Provider</span>
+        <div className={shell.main}>
+          <header className={shell.header}>
+            <div className={shell.headerText}>
+              <h2 className={shell.title}>{NAV.find((item) => item.tab === activeTab)?.label}</h2>
+            </div>
+            <button type="button" className={shell.closeButton} onClick={onClose} aria-label="Close settings">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
             </button>
-            <button
-              className={`${styles.navItem} ${activeTab === TABS.AGENTS ? styles.active : ''}`}
-              onClick={() => selectTab(TABS.AGENTS)}
-            >
-              <AgentsIcon />
-              <span>Agents</span>
-            </button>
-            <button
-              className={`${styles.navItem} ${activeTab === TABS.SKILLS ? styles.active : ''}`}
-              onClick={() => selectTab(TABS.SKILLS)}
-            >
-              <SkillsIcon />
-              <span>Skills</span>
-            </button>
-            <button
-              className={`${styles.navItem} ${activeTab === TABS.MCP_SERVERS ? styles.active : ''}`}
-              onClick={() => selectTab(TABS.MCP_SERVERS)}
-            >
-              <PlugIcon />
-              <span>MCP Servers</span>
-            </button>
-            <button
-              className={`${styles.navItem} ${activeTab === TABS.APPLICATIONS ? styles.active : ''}`}
-              onClick={() => selectTab(TABS.APPLICATIONS)}
-            >
-              <AppsIcon />
-              <span>Applications</span>
-            </button>
-            <button
-              className={`${styles.navItem} ${activeTab === TABS.APPEARANCE ? styles.active : ''}`}
-              onClick={() => selectTab(TABS.APPEARANCE)}
-            >
-              <AppearanceIcon />
-              <span>Appearance</span>
-            </button>
-            <button
-              className={`${styles.navItem} ${activeTab === TABS.ABOUT ? styles.active : ''}`}
-              onClick={() => selectTab(TABS.ABOUT)}
-            >
-              <AboutIcon />
-              <span>About</span>
-            </button>
-          </nav>
+          </header>
 
-          {/* Content */}
-          <div className={styles.content}>
-            {renderContent()}
+          <div className={shell.body}>
+            <div className={styles.pane}>{renderContent()}</div>
           </div>
         </div>
       </div>

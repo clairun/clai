@@ -22,6 +22,7 @@ import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
 import form from './SettingsForm.module.css';
+import shell from './SettingsShell.module.css';
 import styles from './WorkspaceSettingsModal.module.css';
 
 type PageKind = 'general' | 'schedule' | 'team' | 'agent' | 'new-main' | 'new-agent';
@@ -361,14 +362,14 @@ const WorkspaceSettingsModal = ({
         <button
           type="button"
           data-nav={key}
-          className={styles.navItem}
+          className={shell.navItem}
           aria-current={key === currentKey ? 'page' : undefined}
           onClick={() => navigate(sel)}
         >
-          {icon && <span className={styles.navIcon}>{icon}</span>}
-          <span className={styles.navText}>
-            <span className={styles.navLabel}>{label}</span>
-            {summary && <span className={styles.navSummary}>{summary}</span>}
+          {icon && <span className={shell.navIcon}>{icon}</span>}
+          <span className={shell.navText}>
+            <span className={shell.navLabel}>{label}</span>
+            {summary && <span className={shell.navSummary}>{summary}</span>}
           </span>
         </button>
       </li>
@@ -376,29 +377,29 @@ const WorkspaceSettingsModal = ({
   };
 
   return ReactDOM.createPortal(
-    <div className={styles.overlay} onClick={handleOverlay}>
+    <div className={shell.overlay} onClick={handleOverlay}>
       <div
-        className={styles.window}
+        className={shell.window}
         role="dialog"
         aria-modal="true"
         aria-label={`${workspaceTitle} settings`}
         onClick={(e) => e.stopPropagation()}
       >
-        <nav className={styles.sidebar} aria-label="Settings pages" ref={navRef} onKeyDown={moveNavFocus}>
-          <div className={styles.sidebarTitle}>
-            <span className={styles.sidebarWorkspace} title={workspaceTitle}>{workspaceTitle}</span>
-            <span className={styles.sidebarCaption}>Workspace settings</span>
+        <nav className={shell.sidebar} aria-label="Settings pages" ref={navRef} onKeyDown={moveNavFocus}>
+          <div className={shell.sidebarTitle}>
+            <span className={shell.sidebarHeading} title={workspaceTitle}>{workspaceTitle}</span>
+            <span className={shell.sidebarCaption}>Workspace settings</span>
           </div>
 
-          <div className={styles.navGroup} id="nav-workspace">Workspace</div>
-          <ul className={styles.navList} aria-labelledby="nav-workspace">
+          <div className={shell.navGroup} id="nav-workspace">Workspace</div>
+          <ul className={shell.navList} aria-labelledby="nav-workspace">
             {navItem(GENERAL, 'General', '')}
             {navItem({ kind: 'schedule' }, 'Schedule', scheduleSummary(details))}
             {navItem({ kind: 'team' }, 'Team', crewCount ? `${crewCount} crew` : 'No crew yet')}
           </ul>
 
-          <div className={styles.navGroup} id="nav-agents">Agents</div>
-          <ul className={styles.navList} aria-labelledby="nav-agents">
+          <div className={shell.navGroup} id="nav-agents">Agents</div>
+          <ul className={shell.navList} aria-labelledby="nav-agents">
             {!details?.defaultWorkspaceAgentId
               && navItem({ kind: 'new-main' }, 'Main', 'Not set up yet', <span className={styles.navPlaceholder} aria-hidden="true" />)}
             {sortedAgents.map((agent) => navItem(
@@ -411,11 +412,11 @@ const WorkspaceSettingsModal = ({
           </ul>
         </nav>
 
-        <div className={styles.main}>
-          <header className={styles.header}>
-            <div className={styles.headerText}>
-              <h2 className={styles.title} ref={headingRef} tabIndex={-1}>{pageTitle(page)}</h2>
-              {subtitle && <p className={styles.subtitle} title={subtitle}>{subtitle}</p>}
+        <div className={shell.main}>
+          <header className={shell.header}>
+            <div className={shell.headerText}>
+              <h2 className={shell.title} ref={headingRef} tabIndex={-1}>{pageTitle(page)}</h2>
+              {subtitle && <p className={shell.subtitle} title={subtitle}>{subtitle}</p>}
             </div>
             {(dirty || pendingLeave || saveError) && (
               <SaveBar
@@ -427,7 +428,7 @@ const WorkspaceSettingsModal = ({
                 onSave={savePage}
               />
             )}
-            <button type="button" className={styles.closeButton} onClick={handleClose} aria-label="Close settings">
+            <button type="button" className={shell.closeButton} onClick={handleClose} aria-label="Close settings">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />
@@ -435,7 +436,7 @@ const WorkspaceSettingsModal = ({
             </button>
           </header>
 
-          <div className={styles.body} key={`${currentKey}:${pageVersion}`}>
+          <div className={shell.body} key={`${currentKey}:${pageVersion}`}>
             {renderPage(page)}
           </div>
         </div>

@@ -1,7 +1,8 @@
 /**
  * One shared agent, open for editing — or a blank one being created. Replaces
- * the gallery in the same pane: breadcrumb back to Agents, the face row, the
- * behaviour form, then Save and Archive. The face choice lives here so it
+ * the gallery in the same pane: breadcrumb back to Agents with Save and
+ * Archive on the same row, the face row, then the behaviour form filling the
+ * rest of the pane. The face choice lives here so it
  * starts over with every agent opened and can never be saved onto another.
  */
 import React, { useCallback, useMemo, useRef, useState } from 'react';
@@ -147,18 +148,47 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
   // so Escape still reaches the handler.
   return (
     <div className={styles.editor} onKeyDown={handleKeyDown} tabIndex={-1}>
-      <nav className={styles.breadcrumb} aria-label="Breadcrumb">
-        <button type="button" className={styles.back} onClick={onBack} disabled={saving}>
-          ‹ Agents
-        </button>
-        <span className={styles.crumbSeparator} aria-hidden="true">
-          ›
-        </span>
-        <span className={styles.crumbCurrent}>{title}</span>
-      </nav>
+      <div className={styles.top}>
+        <nav className={styles.breadcrumb} aria-label="Breadcrumb">
+          <button type="button" className={styles.back} onClick={onBack} disabled={saving}>
+            ‹ Agents
+          </button>
+          <span className={styles.crumbSeparator} aria-hidden="true">
+            ›
+          </span>
+          <h3 className={styles.title}>{title}</h3>
+        </nav>
+        <div className={styles.actions}>
+          {dirty && !saving && <span className={styles.dirty}>Unsaved changes</span>}
+          {definition && (
+            <button
+              type="button"
+              className={styles.secondary}
+              onClick={handleArchiveToggle}
+              disabled={saving}
+            >
+              {definition.archived ? 'Restore' : 'Archive'}
+            </button>
+          )}
+          <button type="button" className={styles.primary} onClick={handleSave} disabled={saving}>
+            {saving ? 'Saving…' : definition ? 'Save agent' : 'Create agent'}
+          </button>
+        </div>
+      </div>
 
-      <div className={styles.headerText}>
-        <h3 className={styles.title}>{title}</h3>
+      {error && (
+        <div className={styles.errorBanner} role="alert">
+          {error}
+        </div>
+      )}
+
+      <div className={styles.identity}>
+        <AgentFacePicker
+          current={currentIdentity}
+          choice={face}
+          onChange={setFace}
+          disabled={saving}
+        />
         <p className={styles.description}>
           {definition
             ? definition.assignedWorkspaces.length > 0
@@ -170,45 +200,17 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
         </p>
       </div>
 
-      {error && (
-        <div className={styles.errorBanner} role="alert">
-          {error}
-        </div>
-      )}
-
-      <AgentFacePicker
-        current={currentIdentity}
-        choice={face}
-        onChange={setFace}
-        disabled={saving}
-      />
-
-      <AgentBehaviorForm
-        ref={sectionRef}
-        workspaceId=""
-        agentId={definition?.id ?? null}
-        initialAgent={initialAgent}
-        saveBehavior={save}
-        deps={deps}
-        saving={saving}
-        onDirtyChange={setDirty}
-      />
-
-      <div className={styles.actions}>
-        <button type="button" className={styles.primary} onClick={handleSave} disabled={saving}>
-          {saving ? 'Saving…' : definition ? 'Save agent' : 'Create agent'}
-        </button>
-        {definition && (
-          <button
-            type="button"
-            className={styles.secondary}
-            onClick={handleArchiveToggle}
-            disabled={saving}
-          >
-            {definition.archived ? 'Restore' : 'Archive'}
-          </button>
-        )}
-        {dirty && !saving && <span className={styles.dirty}>Unsaved changes</span>}
+      <div className={styles.form}>
+        <AgentBehaviorForm
+          ref={sectionRef}
+          workspaceId=""
+          agentId={definition?.id ?? null}
+          initialAgent={initialAgent}
+          saveBehavior={save}
+          deps={deps}
+          saving={saving}
+          onDirtyChange={setDirty}
+        />
       </div>
     </div>
   );
