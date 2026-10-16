@@ -392,9 +392,9 @@ describe('ChatMessageList', () => {
     ]);
     render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} taskRoster={[]} />);
 
-    // Six identical "still running" lines collapse down to the last four.
-    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
-    expect(screen.getAllByText('Running')).toHaveLength(4);
+    // Six identical "still running" lines collapse down to the last two.
+    expect(screen.getByText('Show 4 earlier calls')).toBeInTheDocument();
+    expect(screen.getAllByText('Running')).toHaveLength(2);
     // The hand-off and the answer are cards of their own, outside the run.
     expect(screen.getByText('Delegated to')).toBeInTheDocument();
     expect(screen.getByText('Completed')).toBeInTheDocument();
@@ -662,22 +662,43 @@ describe('ChatMessageList', () => {
   };
 
   it('renders each tool as its own one-line row when under the cap', () => {
-    const { messages, toolCalls } = toolGroup(3);
+    const { messages, toolCalls } = toolGroup(2);
     render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
     expect(screen.getByText('tool_0')).toBeInTheDocument();
-    expect(screen.getByText('tool_2')).toBeInTheDocument();
+    expect(screen.getByText('tool_1')).toBeInTheDocument();
     expect(screen.queryByText(/earlier/)).toBeNull();
   });
 
-  it('caps a large tool group at 4 rows behind a "show earlier" toggle', () => {
+  it('caps a large tool group at 2 rows behind a "show earlier" toggle', () => {
     const { messages, toolCalls } = toolGroup(6);
     render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
-    // 6 - 4 = 2 hidden behind the toggle; only the last 4 render.
-    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
-    expect(screen.queryByText('tool_0')).toBeNull();
-    expect(screen.queryByText('tool_1')).toBeNull();
-    expect(screen.getByText('tool_2')).toBeInTheDocument();
+    // 6 - 2 = 4 hidden behind the toggle; only the last 2 render.
+    expect(screen.getByText('Show 4 earlier calls')).toBeInTheDocument();
+    expect(screen.queryByText('tool_3')).toBeNull();
+    expect(screen.getByText('tool_4')).toBeInTheDocument();
     expect(screen.getByText('tool_5')).toBeInTheDocument();
+  });
+
+  it('collapses a 3-call run to its last 2, keeping the running call and the toggle state', () => {
+    const { messages, toolCalls } = toolGroup(3);
+    toolCalls[2] = { ...toolCalls[2]!, status: 'running', result: null, completedAt: null };
+    const { rerender } = render(
+      <ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />
+    );
+    expect(screen.getByText('Show 1 earlier call')).toBeInTheDocument();
+    expect(screen.queryByText('tool_0')).toBeNull();
+    expect(screen.getByText('tool_1')).toBeInTheDocument();
+    expect(screen.getByText('running…')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Show 1 earlier call'));
+    expect(screen.getByText('tool_0')).toBeInTheDocument();
+
+    // A new call arriving keeps the run expanded.
+    const more = toolGroup(4);
+    rerender(<ChatMessageList workspaceId="ws-1" messages={more.messages} toolCalls={more.toolCalls} />);
+    expect(screen.getByText('Hide earlier calls')).toBeInTheDocument();
+    expect(screen.getByText('tool_0')).toBeInTheDocument();
+    expect(screen.getByText('tool_3')).toBeInTheDocument();
   });
 
   it('collapses a chart row with the plain rows around it', () => {
@@ -692,9 +713,9 @@ describe('ChatMessageList', () => {
       result: { ok: true, path: 'charts/q3-revenue.vl.json' },
     };
     render(<ChatMessageList workspaceId="ws-1" messages={messages} toolCalls={toolCalls} />);
-    expect(screen.getByText('Show 2 earlier calls')).toBeInTheDocument();
+    expect(screen.getByText('Show 4 earlier calls')).toBeInTheDocument();
     expect(screen.queryByText('Q3 Revenue')).toBeNull();
-    fireEvent.click(screen.getByText('Show 2 earlier calls'));
+    fireEvent.click(screen.getByText('Show 4 earlier calls'));
     expect(screen.getByRole('button', { name: /Q3 Revenue/ })).toHaveAttribute('aria-expanded', 'false');
   });
 

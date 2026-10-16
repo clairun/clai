@@ -51,7 +51,7 @@ import { useToolCallInput, useToolCallResult } from '../../assistant/toolCallRes
 // Tools beyond this count collapse behind a "show N earlier" toggle so a turn
 // that fires dozens of tools stays scannable; the most-recent MAX_VISIBLE rows
 // stay on screen.
-const MAX_VISIBLE_TOOLS = 4;
+const MAX_VISIBLE_TOOLS = 2;
 
 // Narrowed ContentPart variants — `Extract` pulls the specific shape out
 // of the generated discriminated union so `.text` / `.tool_name` etc.
