@@ -27,7 +27,6 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,
-  attentionAcknowledgedAt: null,
   ...over,
 });
 

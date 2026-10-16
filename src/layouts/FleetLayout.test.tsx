@@ -75,14 +75,6 @@ const entry = (
   enabled: true,
   messageCount: 0n,
   runningTaskCount: 0n,
-  blockedTaskCount: 0n,
-  failedTaskCount: 0n,
-  attentionTaskCount: 0n,
-  latestAttentionTaskId: null,
-  latestAttentionTaskTitle: null,
-  latestAttentionTaskStatus: null,
-  latestAttentionTaskSummary: null,
-  latestAttentionTaskUpdatedAt: null,
   scheduleEnabled: false,
   schedulePaused: false,
   scheduleKind: null,
@@ -123,16 +115,6 @@ const confirmDelete = async (dialog: HTMLElement) => {
 };
 
 describe('FleetLayout attention', () => {
-  it('does not count failed or blocked tasks as needing attention', async () => {
-    listWorkspaces.mockResolvedValue([
-      entry('a', 'Alpha', { failedTaskCount: 1n, blockedTaskCount: 1n, attentionTaskCount: 2n }),
-    ]);
-    getSchedulerPaused.mockResolvedValue(false);
-    renderFleet();
-    await screen.findByText('Alpha');
-    expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('0 need attention');
-  });
-
   it('counts a workspace with a pending approval as needing attention', async () => {
     permissionAttention.counts = { a: 1 };
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);

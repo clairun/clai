@@ -20,14 +20,6 @@ const entry = (
   enabled: true,
   messageCount: 0n,
   runningTaskCount: 0n,
-  blockedTaskCount: 0n,
-  failedTaskCount: 0n,
-  attentionTaskCount: 0n,
-  latestAttentionTaskId: null,
-  latestAttentionTaskTitle: null,
-  latestAttentionTaskStatus: null,
-  latestAttentionTaskSummary: null,
-  latestAttentionTaskUpdatedAt: null,
   scheduleEnabled: false,
   schedulePaused: false,
   scheduleKind: null,
@@ -111,7 +103,7 @@ describe('WorkspaceRail sections', () => {
       [
         entry('a', 'Alpha', { updatedAt: 3n, starred: true }),
         entry('b', 'Beta', { updatedAt: 2n }),
-        entry('c', 'Gamma', { updatedAt: 1n, failedTaskCount: 1n, starred: true }),
+        entry('c', 'Gamma', { updatedAt: 1n, starred: true }),
       ],
       { attentionCounts: { b: 2 } },
     );
@@ -119,7 +111,7 @@ describe('WorkspaceRail sections', () => {
     const titles = screen
       .getAllByText(/Alpha|Beta|Gamma/)
       .map((el) => el.textContent);
-    // Beta has pending approvals; Gamma's failed task leaves it in Starred.
+    // Beta has pending approvals, so it outranks the starred Alpha and Gamma.
     expect(titles).toEqual(['Beta', 'Alpha', 'Gamma']);
     expect(within(screen.getByRole('button', { name: /Gamma/ })).queryByTitle('Needs attention')).toBeNull();
     expect(screen.queryByText('Recent')).toBeNull();

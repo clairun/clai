@@ -65,7 +65,6 @@ const task = (over: Partial<WorkspaceTaskResponse> = {}): WorkspaceTaskResponse 
   createdAt: 0n,
   updatedAt: 0n,
   completedAt: null,
-  attentionAcknowledgedAt: null,
   failureReason: null,
   parentSessionId: null,
   parentRunId: null,

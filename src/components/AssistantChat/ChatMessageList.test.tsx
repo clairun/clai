@@ -1185,7 +1185,6 @@ describe('ChatMessageList', () => {
         createdAt: 0n,
         updatedAt: 1n,
         completedAt: null,
-        attentionAcknowledgedAt: null,
         failureReason: null,
         parentSessionId: null,
         parentRunId: null,

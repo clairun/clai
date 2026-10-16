@@ -22,7 +22,6 @@ const task = (id: string): WorkspaceTaskResponse => ({
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: null,
-  attentionAcknowledgedAt: null,
   failureReason: null,
   parentSessionId: null,
   parentRunId: null,

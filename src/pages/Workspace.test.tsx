@@ -276,7 +276,6 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   createdAt: 1n,
   updatedAt: 1n,
   completedAt: 1n,
-  attentionAcknowledgedAt: null,
   failureReason: null,
   parentSessionId: null,
   parentRunId: null,
